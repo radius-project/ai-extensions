@@ -29,6 +29,79 @@ interface FederatedCredential {
   subject: string;
 }
 
+const AZURE_PROPAGATION_ATTEMPTS = 3;
+const MAX_RETRY_DELAY_MS = 10_000;
+
+export function isRetryableAzureReadFailure(stderr?: string): boolean {
+  const detail = stderr || "";
+  if (
+    /(?:HTTP\s*(?:401|403)|AuthorizationFailed|InvalidAuthenticationToken|Authentication_Unauthorized|Authorization_RequestDenied|Insufficient privileges)/i.test(
+      detail
+    )
+  ) {
+    return false;
+  }
+  return /(?:HTTP\s*(?:429|5\d\d)|TooManyRequests|ECONNRESET|ECONNABORTED|ETIMEDOUT|EAI_AGAIN|temporarily unavailable|service unavailable|gateway time-?out)/i.test(
+    detail
+  );
+}
+
+export function azureRetryDelayMs(
+  stderr: string | undefined,
+  fallbackMs: number,
+  nowMs = Date.now()
+): number | null {
+  const value = /Retry-After\s*:\s*([^\r\n]+)/i.exec(stderr || "")?.[1]?.trim();
+  if (!value) return Math.min(fallbackMs, MAX_RETRY_DELAY_MS);
+  const seconds = Number(value);
+  const requested =
+    Number.isFinite(seconds) && seconds >= 0 ?
+      seconds * 1000
+    : Date.parse(value) - nowMs;
+  const delay = Math.max(
+    0,
+    Number.isFinite(requested) ? requested : fallbackMs
+  );
+  return delay > MAX_RETRY_DELAY_MS ? null : delay;
+}
+
+function parseFederatedCredentialInventory(stdout: string): {
+  subjects: string[];
+  nameToSubject: Map<string, string>;
+} | null {
+  try {
+    const parsed: unknown = JSON.parse(stdout || "[]");
+    if (!Array.isArray(parsed)) return null;
+    const credentials: FederatedCredential[] = [];
+    for (const value of parsed) {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return null;
+      }
+      const entry = value as { name?: unknown; subject?: unknown };
+      if (
+        typeof entry.name !== "string" ||
+        !entry.name.trim() ||
+        typeof entry.subject !== "string" ||
+        !entry.subject.trim()
+      ) {
+        return null;
+      }
+      credentials.push({
+        name: entry.name.trim(),
+        subject: entry.subject.trim()
+      });
+    }
+    return {
+      subjects: credentials.map((credential) => credential.subject),
+      nameToSubject: new Map(
+        credentials.map((credential) => [credential.name, credential.subject])
+      )
+    };
+  } catch {
+    return null;
+  }
+}
+
 function isRollbackPending(operation: { providerRecovery?: unknown }): boolean {
   const recovery = operation.providerRecovery;
   return (
@@ -180,7 +253,7 @@ async function createFederatedCredentials({
   "workflow" | "dependencies" | "oidc" | "oidcSuffix" | "clientId" | "appName"
 >): Promise<boolean> {
   const { steps, runAz, fail, stopBoundary, checkpoint } = workflow;
-  const listResult = await runAz([
+  const listArgs = [
     "ad",
     "app",
     "federated-credential",
@@ -191,26 +264,46 @@ async function createFederatedCredentials({
     "[].{name:name,subject:subject}",
     "-o",
     "json"
-  ]);
-  let existingSubjects: string[] = [];
-  let existingNameToSubject = new Map<string, string>();
-  if (listResult.code === 0) {
-    try {
-      const parsed = JSON.parse(listResult.stdout || "[]");
-      if (Array.isArray(parsed)) {
-        existingSubjects = parsed
-          .map((credential) => credential && credential.subject)
-          .filter(Boolean);
-        existingNameToSubject = new Map(
-          parsed
-            .filter((credential) => credential && credential.name)
-            .map((credential) => [credential.name, credential.subject])
-        );
-      }
-    } catch {
-      // Legacy behavior attempts every credential when the advisory list fails.
+  ];
+  let listResult: AzureAutoSetupCommandResult | null = null;
+  for (let attempt = 0; attempt < AZURE_PROPAGATION_ATTEMPTS; attempt++) {
+    listResult = await runAz(listArgs);
+    if (listResult.code === 0 || listResult.code === "0") break;
+    const detail = listResult.stderr || listResult.stdout;
+    if (
+      !isRetryableAzureReadFailure(detail) ||
+      attempt + 1 >= AZURE_PROPAGATION_ATTEMPTS
+    ) {
+      break;
     }
+    const delay = azureRetryDelayMs(detail, 2000 * (attempt + 1));
+    if (delay === null) break;
+    await dependencies.sleep(delay);
   }
+  if (!listResult || (listResult.code !== 0 && listResult.code !== "0")) {
+    await fail(
+      400,
+      "Could not read the App Registration federated credentials: " +
+        (listResult?.stderr ||
+          listResult?.stdout ||
+          "Azure CLI request failed."),
+      "federated-credential-list-failed",
+      { steps, clientId, appName, azError: listResult?.stderr || "" }
+    );
+    return false;
+  }
+  const inventory = parseFederatedCredentialInventory(listResult.stdout);
+  if (!inventory) {
+    await fail(
+      400,
+      "Microsoft Entra returned an invalid federated credential list.",
+      "federated-credential-list-malformed",
+      { steps, clientId, appName }
+    );
+    return false;
+  }
+  const existingSubjects = inventory.subjects;
+  const existingNameToSubject = inventory.nameToSubject;
 
   const mutableCredentialName = findLegacyMutableCredentialName(
     oidc,
@@ -493,7 +586,7 @@ async function resolveServicePrincipalObjectId(
   sleep: AzureAutoSetupCredentialInput["dependencies"]["sleep"]
 ): Promise<{ objectId: string; error: string }> {
   let lastError = "";
-  for (let attempt = 0; attempt < 6; attempt++) {
+  for (let attempt = 0; attempt < AZURE_PROPAGATION_ATTEMPTS; attempt++) {
     const result = await runAz([
       "ad",
       "sp",
@@ -508,7 +601,17 @@ async function resolveServicePrincipalObjectId(
     const objectId = (result.stdout || "").trim();
     if (result.code === 0 && objectId) return { objectId, error: "" };
     lastError = result.stderr || result.stdout || "";
-    if (attempt < 5) await sleep(2000 * (attempt + 1));
+    if (
+      !isReplicationLagError(lastError) &&
+      !isRetryableAzureReadFailure(lastError)
+    ) {
+      break;
+    }
+    if (attempt + 1 < AZURE_PROPAGATION_ATTEMPTS) {
+      const delay = azureRetryDelayMs(lastError, 2000 * (attempt + 1));
+      if (delay === null) break;
+      await sleep(delay);
+    }
   }
   return { objectId: "", error: lastError };
 }
@@ -533,7 +636,7 @@ async function assignRole(
   const mutationKind = "azure_role_assignment.create";
   const mutationTarget =
     input.assignmentId || `${input.objectId}:${input.role}:${input.scope}`;
-  for (let attempt = 0; attempt < 6; attempt++) {
+  for (let attempt = 0; attempt < AZURE_PROPAGATION_ATTEMPTS; attempt++) {
     const attemptNumber = attempt + 1;
     // Only a forward attempt is stoppable. A journaled attempt that reaches here
     // to be reconciled is a read, and stopping before it would strand the
@@ -684,8 +787,14 @@ async function assignRole(
     if (last.stderr.includes("already exists")) {
       return { ok: true, created: false, stderr: "" };
     }
-    if (!isReplicationLagError(last.stderr)) break;
-    if (attempt < 5) {
+    const failureDetail = last.stderr || last.stdout;
+    if (
+      !isReplicationLagError(failureDetail) &&
+      !isRetryableAzureReadFailure(failureDetail)
+    ) {
+      break;
+    }
+    if (attempt + 1 < AZURE_PROPAGATION_ATTEMPTS) {
       if (
         !(await stopBoundary(
           `before-role-assignment-backoff:${input.role}:attempt-${attemptNumber}`
@@ -693,7 +802,9 @@ async function assignRole(
       ) {
         return { ok: false, stopped: true, created: false, stderr: "" };
       }
-      await sleep(2000 * attemptNumber);
+      const delay = azureRetryDelayMs(failureDetail, 2000 * attemptNumber);
+      if (delay === null) break;
+      await sleep(delay);
     }
   }
   return { ok: false, created: false, stderr: last.stderr };

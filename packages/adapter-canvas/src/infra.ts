@@ -86,14 +86,186 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function assertValidWorkflowYaml(workflow: string, context: string): void {
+type GeneratedWorkflowArtifact = "verify" | "dispatcher" | "provider";
+
+const UNSAFE_AUTOMATIC_TRIGGERS = new Set([
+  "push",
+  "pull_request",
+  "pull_request_target",
+  "workflow_run",
+  "schedule"
+]);
+
+function isMapping(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function own(mapping: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(mapping, key);
+}
+
+function containsAwsWorkflowReference(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsAwsWorkflowReference);
+  if (!isMapping(value)) return false;
+  return Object.entries(value).some(
+    ([key, child]) =>
+      (key === "uses" &&
+        typeof child === "string" &&
+        /(?:run-rad-commands|delete)-aws\.yml/u.test(child)) ||
+      containsAwsWorkflowReference(child)
+  );
+}
+
+function containsWorkflowReference(value: unknown, fileName: string): boolean {
+  if (Array.isArray(value)) {
+    return value.some((child) => containsWorkflowReference(child, fileName));
+  }
+  if (!isMapping(value)) return false;
+  return Object.entries(value).some(
+    ([key, child]) =>
+      (key === "uses" && child === `./.github/workflows/${fileName}`) ||
+      containsWorkflowReference(child, fileName)
+  );
+}
+
+function assertTrustedGeneratedWorkflow(
+  workflow: string,
+  artifact: GeneratedWorkflowArtifact,
+  context: string,
+  expectedProviderWorkflow?: string
+): void {
+  let parsed: unknown;
   try {
-    parseYaml(workflow);
+    parsed = parseYaml(workflow);
   } catch (error) {
     throw new Error(
       `Generated ${context} is invalid YAML: ${errorMessage(error)}`,
       { cause: error }
     );
+  }
+
+  const fail = (reason: string): never => {
+    throw new Error(`Generated ${context} failed trust validation: ${reason}`);
+  };
+  const requireMapping = (
+    value: unknown,
+    reason: string
+  ): Record<string, unknown> => (isMapping(value) ? value : fail(reason));
+  const document = requireMapping(
+    parsed,
+    "the document root must be a mapping."
+  );
+  if (/(?<!\$)\{\{[^{}]+\}\}/u.test(workflow)) {
+    fail("an unresolved {{...}} template placeholder remains.");
+  }
+
+  const triggers = requireMapping(
+    document.on,
+    "`on` must be a trigger mapping."
+  );
+  const triggerNames = Object.keys(triggers);
+  const unsafeTrigger = triggerNames.find((trigger) =>
+    UNSAFE_AUTOMATIC_TRIGGERS.has(trigger)
+  );
+  if (unsafeTrigger) {
+    fail(`unsafe automatic trigger \`${unsafeTrigger}\` is not allowed.`);
+  }
+
+  const jobs = requireMapping(document.jobs, "`jobs` must be a mapping.");
+  if (Object.keys(jobs).length === 0) {
+    fail("`jobs` must be a non-empty mapping.");
+  }
+
+  if (artifact === "provider") {
+    if (triggerNames.length !== 1 || triggerNames[0] !== "workflow_call") {
+      fail("the reusable `workflow_call` trigger must be the only trigger.");
+    }
+    const workflowCall = requireMapping(
+      triggers.workflow_call,
+      "`on.workflow_call` must be a mapping."
+    );
+    const inputs = requireMapping(
+      workflowCall.inputs,
+      "`on.workflow_call.inputs` must be a mapping."
+    );
+    if (!own(inputs, "environment") || !isMapping(inputs.environment)) {
+      fail("workflow call input `environment` is required.");
+    }
+    return;
+  }
+
+  if (triggerNames.length !== 1 || triggerNames[0] !== "workflow_dispatch") {
+    fail("the workflow must be triggered only by `workflow_dispatch`.");
+  }
+
+  if (artifact === "dispatcher") {
+    const dispatch = requireMapping(
+      triggers.workflow_dispatch,
+      "`on.workflow_dispatch` must be a mapping."
+    );
+    const inputs = requireMapping(
+      dispatch.inputs,
+      "`on.workflow_dispatch.inputs` must be a mapping."
+    );
+    if (!own(inputs, "environment") || !isMapping(inputs.environment)) {
+      fail("workflow dispatch input `environment` is required.");
+    }
+    if (
+      Object.keys(jobs).some((job) => job.toLowerCase() === "aws") ||
+      containsAwsWorkflowReference(jobs)
+    ) {
+      fail("the dispatcher must not contain an AWS job or workflow reference.");
+    }
+    if (
+      !expectedProviderWorkflow ||
+      !containsWorkflowReference(jobs, expectedProviderWorkflow)
+    ) {
+      fail(
+        `the dispatcher must invoke \`./.github/workflows/${expectedProviderWorkflow || "<provider>"}\`.`
+      );
+    }
+    return;
+  }
+
+  const dispatch = requireMapping(
+    triggers.workflow_dispatch,
+    "`on.workflow_dispatch` must be a mapping."
+  );
+  const inputs = requireMapping(
+    dispatch.inputs,
+    "`on.workflow_dispatch.inputs` must be a mapping."
+  );
+  for (const input of ["environment", VERIFY_OPERATION_INPUT]) {
+    if (!own(inputs, input) || !isMapping(inputs[input])) {
+      fail(`workflow dispatch input \`${input}\` is required.`);
+    }
+  }
+  const runName = document["run-name"];
+  if (
+    typeof runName !== "string" ||
+    !runName.includes("${{ inputs.environment }}") ||
+    !runName.includes(`\${{ inputs.${VERIFY_OPERATION_INPUT} }}`)
+  ) {
+    fail(
+      "the marker-bearing `run-name` must include the environment and Radius operation inputs."
+    );
+  }
+  const hasTrustedGhcrProbe = Object.values(jobs).some(
+    (job) =>
+      isMapping(job) &&
+      Array.isArray(job.steps) &&
+      job.steps.some(
+        (step) =>
+          isMapping(step) &&
+          step.name === "Verify GHCR package push permission" &&
+          isMapping(step.env) &&
+          step.env.GHCR_TOKEN === "${{ secrets.GITHUB_TOKEN }}" &&
+          typeof step.run === "string" &&
+          step.run.includes("/blobs/uploads/")
+      )
+  );
+  if (!hasTrustedGhcrProbe) {
+    fail("the trusted non-mutating GHCR push-permission probe is required.");
   }
 }
 
@@ -157,7 +329,11 @@ export async function generateVerifyWorkflow(
       coreGenerateVerifyWorkflow(env, platform, upstream)
     )
   );
-  assertValidWorkflowYaml(workflow, `verify workflow "${fileName}"`);
+  assertTrustedGeneratedWorkflow(
+    workflow,
+    "verify",
+    `verify workflow "${fileName}"`
+  );
   return workflow;
 }
 
@@ -296,7 +472,12 @@ export async function generateDeployWorkflow(
     );
   }
   for (const [file, workflow] of Object.entries(generated)) {
-    assertValidWorkflowYaml(workflow, `deploy workflow "${file}"`);
+    assertTrustedGeneratedWorkflow(
+      workflow,
+      file === DEPLOY_DISPATCHER_FILE ? "dispatcher" : "provider",
+      `deploy workflow "${file}"`,
+      file === DEPLOY_DISPATCHER_FILE ? DEPLOY_AZURE_FILE : undefined
+    );
   }
   return generated;
 }
@@ -332,7 +513,12 @@ export async function generateDeleteWorkflow(
     );
   }
   for (const [file, workflow] of Object.entries(generated)) {
-    assertValidWorkflowYaml(workflow, `delete workflow "${file}"`);
+    assertTrustedGeneratedWorkflow(
+      workflow,
+      file === DELETE_APP_DISPATCHER_FILE ? "dispatcher" : "provider",
+      `delete workflow "${file}"`,
+      file === DELETE_APP_DISPATCHER_FILE ? DELETE_AZURE_FILE : undefined
+    );
   }
   return generated;
 }

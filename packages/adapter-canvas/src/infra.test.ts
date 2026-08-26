@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 interface RecordedCommit {
   path: string;
@@ -33,17 +33,17 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
     // template without it would 422, and the operation marker is inserted into
     // that same inputs block.
     "verify-azure.yml":
-      "name: verify\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    uses: radius-project/radius/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
+      "name: verify\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/radius/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
     "verify-aws.yml":
-      "name: verify\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    uses: radius-project/radius/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
+      "name: verify\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/radius/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
     "run-rad-commands.yml":
-      "name: deploy\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n",
+      "name: deploy\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\n  workflow_run:\n    workflows: [verify]\n    types: [completed]\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/run-rad-commands-azure.yml\n  aws:\n    uses: ./.github/workflows/run-rad-commands-aws.yml\n",
     "run-rad-commands-azure.yml":
-      "name: deploy-azure\nenv:\n  APP_FILE: '{{APP_FILE}}'\njobs:\n  a:\n    uses: radius-project/radius/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}\n",
+      "name: deploy-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\nenv:\n  APP_FILE: '{{APP_FILE}}'\njobs:\n  a:\n    uses: radius-project/radius/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}\n",
     "delete-application.yml":
-      "name: delete\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n",
+      "name: delete\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/delete-azure.yml\n  aws:\n    uses: ./.github/workflows/delete-aws.yml\n",
     "delete-azure.yml":
-      "name: delete-azure\njobs:\n  a:\n    uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
+      "name: delete-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\njobs:\n  a:\n    uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
   };
   return {
     BASE_UPSTREAM,
@@ -54,6 +54,17 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
       upstream: { ...BASE_UPSTREAM }
     }
   };
+});
+
+let templateFetchTime = Date.now();
+
+function expireTemplateCache(): void {
+  templateFetchTime += 61_000;
+  vi.spyOn(Date, "now").mockReturnValue(templateFetchTime);
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 vi.mock("./gh.js", () => ({
@@ -172,6 +183,7 @@ const STALE_AWS_VERIFY =
 describe("generated workflow YAML validation", () => {
   beforeEach(() => {
     h.upstream = { ...BASE_UPSTREAM };
+    expireTemplateCache();
   });
 
   it.each([
@@ -203,6 +215,213 @@ describe("generated workflow YAML validation", () => {
       );
     }
   );
+
+  it("rejects a parseable workflow whose document root is not a mapping", async () => {
+    h.upstream["run-rad-commands-azure.yml"] =
+      "- name: deploy-azure\n- name: another item\n";
+
+    await expect(
+      generateDeployWorkflow("prod", ".radius/app.bicep")
+    ).rejects.toThrow(
+      /deploy workflow "run-rad-commands-azure\.yml".*document root must be a mapping/u
+    );
+  });
+
+  it("rejects a workflow with no jobs", async () => {
+    h.upstream["delete-azure.yml"] =
+      "name: delete-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\njobs: {}\n";
+
+    await expect(generateDeleteWorkflow("prod")).rejects.toThrow(
+      /`jobs` must be a non-empty mapping/u
+    );
+  });
+
+  it.each([
+    "push",
+    "pull_request",
+    "pull_request_target",
+    "workflow_run",
+    "schedule"
+  ])("rejects the unsafe automatic `%s` trigger", async (trigger) => {
+    h.upstream["verify-azure.yml"] = BASE_UPSTREAM["verify-azure.yml"].replace(
+      "  workflow_dispatch:",
+      `  ${trigger}:\n  workflow_dispatch:`
+    );
+
+    await expect(generateVerifyWorkflow("prod", "azure")).rejects.toThrow(
+      `unsafe automatic trigger \`${trigger}\` is not allowed`
+    );
+  });
+
+  it("rejects unresolved placeholders not recognized by the core renderer", async () => {
+    h.upstream["delete-azure.yml"] += 'x-upstream: "{{future_token}}"\n';
+
+    await expect(generateDeleteWorkflow("prod")).rejects.toThrow(
+      /unresolved \{\{\.\.\.\}\} template placeholder remains/u
+    );
+  });
+
+  it("rejects a verify workflow missing its environment dispatch input", async () => {
+    h.upstream["verify-azure.yml"] = BASE_UPSTREAM["verify-azure.yml"].replace(
+      "      environment:",
+      "      renamed_environment:"
+    );
+
+    await expect(generateVerifyWorkflow("prod", "azure")).rejects.toThrow(
+      /workflow dispatch input `environment` is required/u
+    );
+  });
+
+  it("rejects verification-step drift that bypasses the trusted GHCR rewrite", async () => {
+    h.upstream["verify-azure.yml"] = BASE_UPSTREAM["verify-azure.yml"].replace(
+      "Verify GHCR package push permission",
+      "Check GHCR package push permission"
+    );
+
+    await expect(generateVerifyWorkflow("prod", "azure")).rejects.toThrow(
+      /trusted non-mutating GHCR push-permission probe is required/u
+    );
+  });
+
+  it("rejects a provider workflow missing its reusable workflow contract", async () => {
+    h.upstream["run-rad-commands-azure.yml"] = BASE_UPSTREAM[
+      "run-rad-commands-azure.yml"
+    ].replace("  workflow_call:", "  workflow_dispatch:");
+
+    await expect(
+      generateDeployWorkflow("prod", ".radius/app.bicep")
+    ).rejects.toThrow(
+      /reusable `workflow_call` trigger must be the only trigger/u
+    );
+  });
+
+  it("rejects a dispatcher missing its environment input", async () => {
+    h.upstream["delete-application.yml"] = BASE_UPSTREAM[
+      "delete-application.yml"
+    ].replace("      environment:", "      renamed_environment:");
+
+    await expect(generateDeleteWorkflow("prod")).rejects.toThrow(
+      /workflow dispatch input `environment` is required/u
+    );
+  });
+
+  it("rejects a provider workflow missing its environment input", async () => {
+    h.upstream["delete-azure.yml"] = BASE_UPSTREAM["delete-azure.yml"].replace(
+      "      environment:",
+      "      renamed_environment:"
+    );
+
+    await expect(generateDeleteWorkflow("prod")).rejects.toThrow(
+      /workflow call input `environment` is required/u
+    );
+  });
+
+  it("rejects an unsafe direct trigger on a reusable provider workflow", async () => {
+    h.upstream["delete-azure.yml"] = BASE_UPSTREAM["delete-azure.yml"].replace(
+      "  workflow_call:",
+      "  push:\n  workflow_call:"
+    );
+
+    await expect(generateDeleteWorkflow("prod")).rejects.toThrow(
+      /unsafe automatic trigger `push` is not allowed/u
+    );
+  });
+
+  it("requires dispatchers to remain workflow-dispatch-only", async () => {
+    h.upstream["delete-application.yml"] = BASE_UPSTREAM[
+      "delete-application.yml"
+    ].replace(
+      "  workflow_dispatch:",
+      "  repository_dispatch:\n  workflow_dispatch:"
+    );
+
+    await expect(generateDeleteWorkflow("prod")).rejects.toThrow(
+      /must be triggered only by `workflow_dispatch`/u
+    );
+  });
+
+  it("rejects dispatcher drift that leaves an AWS job or reference", async () => {
+    h.upstream["delete-application.yml"] = BASE_UPSTREAM[
+      "delete-application.yml"
+    ].replace("  aws:", "  AWS:");
+
+    await expect(generateDeleteWorkflow("prod")).rejects.toThrow(
+      /must not contain an AWS job or workflow reference/u
+    );
+  });
+
+  it("rejects dispatcher drift that hides an AWS reference under another job name", async () => {
+    h.upstream["delete-application.yml"] = BASE_UPSTREAM[
+      "delete-application.yml"
+    ].replace("  aws:", "  cloud:");
+
+    await expect(generateDeleteWorkflow("prod")).rejects.toThrow(
+      /must not contain an AWS job or workflow reference/u
+    );
+  });
+
+  it("rejects dispatcher drift that removes the Azure provider reference", async () => {
+    h.upstream["run-rad-commands.yml"] = BASE_UPSTREAM[
+      "run-rad-commands.yml"
+    ].replace(
+      "./.github/workflows/run-rad-commands-azure.yml",
+      "./.github/workflows/run-rad-commands-renamed.yml"
+    );
+
+    await expect(
+      generateDeployWorkflow("prod", ".radius/app.bicep")
+    ).rejects.toThrow(
+      /dispatcher must invoke `\.\/\.github\/workflows\/run-rad-commands-azure\.yml`/u
+    );
+  });
+
+  it("accepts dispatchers whose unsafe structures were already removed", async () => {
+    h.upstream["run-rad-commands.yml"] = `name: deploy
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        default: "{{ENV}}"
+jobs:
+  detect:
+    run: echo hi
+  azure:
+    uses: ./.github/workflows/run-rad-commands-azure.yml
+`;
+
+    await expect(
+      generateDeployWorkflow("prod", ".radius/app.bicep")
+    ).resolves.toHaveProperty("run-rad-commands.yml");
+  });
+
+  it("accepts unrelated upstream metadata, permissions, env, comments, and steps", async () => {
+    h.upstream["verify-azure.yml"] = `# upstream comment
+x-upstream-metadata: retained
+permissions:
+  contents: read
+env:
+  UPSTREAM_FLAG: enabled
+${BASE_UPSTREAM["verify-azure.yml"]}
+      - name: Unrelated upstream step
+        run: echo retained
+`;
+    h.upstream["run-rad-commands-azure.yml"] =
+      `# provider comment\npermissions:\n  contents: read\n` +
+      BASE_UPSTREAM["run-rad-commands-azure.yml"];
+    h.upstream["delete-azure.yml"] =
+      `# provider comment\nenv:\n  UPSTREAM_FLAG: enabled\n` +
+      BASE_UPSTREAM["delete-azure.yml"];
+
+    await expect(generateVerifyWorkflow("prod", "azure")).resolves.toContain(
+      "x-upstream-metadata: retained"
+    );
+    await expect(
+      generateDeployWorkflow("prod", ".radius/app.bicep")
+    ).resolves.toHaveProperty("run-rad-commands-azure.yml");
+    await expect(generateDeleteWorkflow("prod")).resolves.toHaveProperty(
+      "delete-azure.yml"
+    );
+  });
 });
 
 describe("GHCR verification probe", () => {
@@ -226,6 +445,7 @@ describe("syncRepoWorkflows", () => {
     h.commits = [];
     h.failCommits = false;
     h.upstream = { ...BASE_UPSTREAM };
+    expireTemplateCache();
   });
 
   it("no-ops when there are no managed environments", async () => {

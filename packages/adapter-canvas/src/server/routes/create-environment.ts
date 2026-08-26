@@ -474,7 +474,15 @@ export async function handleCreateEnvironment(
       dependencies,
       {
         targetRepo,
-        envName
+        envName,
+        ...(provider === "azure" ?
+          {
+            mutationRecovery: {
+              operation,
+              persist: () => dependencies.persistOperations()
+            }
+          }
+        : {})
       },
       selectedExecutor
     );
