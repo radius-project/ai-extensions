@@ -121,6 +121,41 @@ async function card(name: string): Promise<HTMLElement> {
 }
 
 describe("graph view in a real browser", () => {
+  it("renders changed diff states with distinct fills and borders", async () => {
+    const style = document.createElement("style");
+    style.textContent = SHELL_STYLE_CSS;
+    document.head.appendChild(style);
+    disposers.push(() => style.remove());
+
+    mount({
+      diffMode: true,
+      resources: [
+        { id: "added", name: "added", diffStatus: "added" },
+        { id: "removed", name: "removed", diffStatus: "removed" },
+        { id: "modified", name: "modified", diffStatus: "modified" },
+        { id: "unchanged", name: "unchanged", diffStatus: "unchanged" }
+      ]
+    });
+
+    const styles = await Promise.all(
+      ["added", "removed", "modified", "unchanged"].map(async (name) =>
+        getComputedStyle(await card(name))
+      )
+    );
+    const changed = styles.slice(0, 3);
+
+    expect(
+      new Set(changed.map(({ backgroundColor }) => backgroundColor))
+    ).toHaveLength(3);
+    expect(new Set(changed.map(({ borderColor }) => borderColor))).toHaveLength(
+      3
+    );
+    for (const changedStyle of changed) {
+      expect(changedStyle.backgroundColor).not.toBe(styles[3].backgroundColor);
+      expect(changedStyle.borderColor).not.toBe(styles[3].borderColor);
+    }
+  });
+
   it("renders a card per resource with the real libraries", async () => {
     mount();
 

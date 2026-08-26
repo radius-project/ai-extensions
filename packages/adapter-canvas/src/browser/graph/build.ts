@@ -211,16 +211,25 @@ export function nodeColors(
   settings: GraphSettings,
   resource: GraphResource
 ): NodeColors {
-  // Diff mode keeps the same theme-aware card surface as the modeled graph.
-  // Only the border colour encodes diff status.
+  // Diff cards use paired theme-aware fills and borders so changed resources
+  // remain distinguishable without relying on a narrow border alone.
   if (settings.diffMode && resource.diffStatus) {
     switch (resource.diffStatus) {
       case "added":
-        return { bg: "var(--rad-node-bg)", border: "var(--rad-success)" };
+        return {
+          bg: "var(--rad-diff-added-bg)",
+          border: "var(--rad-diff-added)"
+        };
       case "removed":
-        return { bg: "var(--rad-node-bg)", border: "var(--rad-danger)" };
+        return {
+          bg: "var(--rad-diff-removed-bg)",
+          border: "var(--rad-diff-removed)"
+        };
       case "modified":
-        return { bg: "var(--rad-node-bg)", border: "var(--rad-warning)" };
+        return {
+          bg: "var(--rad-diff-modified-bg)",
+          border: "var(--rad-diff-modified)"
+        };
       default:
         return { bg: "var(--rad-node-bg)", border: "var(--rad-node-border)" };
     }
@@ -308,16 +317,16 @@ export function buildGraph(
   // status (e.g. output-resource edges) fall back to the endpoints' own
   // statuses.
   function diffStroke(source: string, target: string, status: string): string {
-    if (status === "removed") return "var(--rad-danger)";
-    if (status === "added") return "var(--rad-success)";
+    if (status === "removed") return "var(--rad-diff-removed)";
+    if (status === "added") return "var(--rad-diff-added)";
     if (status === "unchanged") return "var(--rad-edge-muted)";
     const sourceStatus = diffStatusById[source] || "";
     const targetStatus = diffStatusById[target] || "";
     if (sourceStatus === "removed" || targetStatus === "removed") {
-      return "var(--rad-danger)";
+      return "var(--rad-diff-removed)";
     }
     if (sourceStatus === "added" || targetStatus === "added") {
-      return "var(--rad-success)";
+      return "var(--rad-diff-added)";
     }
     return "var(--rad-edge-muted)";
   }

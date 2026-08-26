@@ -171,18 +171,20 @@ describe("options", () => {
 });
 
 describe("node colours", () => {
-  it("colours only the border by diff status and keeps the host surface", () => {
+  it("gives each changed diff status a matching tinted fill and stronger border", () => {
     const diff = settings({ diffMode: true });
     expect(nodeColors(diff, { diffStatus: "added" })).toEqual({
-      bg: "var(--rad-node-bg)",
-      border: "var(--rad-success)"
+      bg: "var(--rad-diff-added-bg)",
+      border: "var(--rad-diff-added)"
     });
-    expect(nodeColors(diff, { diffStatus: "removed" }).border).toBe(
-      "var(--rad-danger)"
-    );
-    expect(nodeColors(diff, { diffStatus: "modified" }).border).toBe(
-      "var(--rad-warning)"
-    );
+    expect(nodeColors(diff, { diffStatus: "removed" })).toEqual({
+      bg: "var(--rad-diff-removed-bg)",
+      border: "var(--rad-diff-removed)"
+    });
+    expect(nodeColors(diff, { diffStatus: "modified" })).toEqual({
+      bg: "var(--rad-diff-modified-bg)",
+      border: "var(--rad-diff-modified)"
+    });
     expect(nodeColors(diff, { diffStatus: "unchanged" }).border).toBe(
       "var(--rad-node-border)"
     );
@@ -492,8 +494,8 @@ describe("diff graph", () => {
     const built = buildGraph(settings(base), resources);
     const stroke = (id: string) =>
       built.edges.find((edge) => edge.id === id)?.style.stroke;
-    expect(stroke("a-->b")).toBe("var(--rad-success)");
-    expect(stroke("a-->c")).toBe("var(--rad-danger)");
+    expect(stroke("a-->b")).toBe("var(--rad-diff-added)");
+    expect(stroke("a-->c")).toBe("var(--rad-diff-removed)");
     expect(stroke("a-->d")).toBe("var(--rad-edge-muted)");
   });
 
@@ -511,8 +513,8 @@ describe("diff graph", () => {
     ]);
     const stroke = (id: string) =>
       built.edges.find((edge) => edge.id === id)?.style.stroke;
-    expect(stroke("a-->b")).toBe("var(--rad-success)");
-    expect(stroke("c-->b")).toBe("var(--rad-danger)");
+    expect(stroke("a-->b")).toBe("var(--rad-diff-added)");
+    expect(stroke("c-->b")).toBe("var(--rad-diff-removed)");
     expect(stroke("d-->b")).toBe("var(--rad-edge-muted)");
   });
 

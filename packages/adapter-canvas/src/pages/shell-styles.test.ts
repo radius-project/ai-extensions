@@ -50,6 +50,25 @@ function statusToken(name: string): { hostToken: string; portion: number } {
   return { hostToken: declaration[1], portion: Number(declaration[3]) / 100 };
 }
 
+function diffToken(name: string): {
+  hostToken: string;
+  borderPortion: number;
+  fillPortion: number;
+} {
+  const border = new RegExp(
+    `--rad-diff-${name}: color-mix\\(in srgb, var\\((--[a-z-]+), (#[0-9a-f]{6})\\) (\\d+)%, var\\(--rad-text\\)\\);`
+  ).exec(SHELL_STYLE_CSS);
+  const fill = new RegExp(
+    `--rad-diff-${name}-bg: color-mix\\(in srgb, var\\(--rad-diff-${name}\\) (\\d+)%, var\\(--rad-surface\\)\\);`
+  ).exec(SHELL_STYLE_CSS);
+  if (!border || !fill) throw new Error(`--rad-diff-${name} is incomplete`);
+  return {
+    hostToken: border[1],
+    borderPortion: Number(border[3]) / 100,
+    fillPortion: Number(fill[1]) / 100
+  };
+}
+
 // The host owns theme selection and injects the palette. The dark-canvas case
 // that motivated this (issue #214) is a host that keeps its *light* status
 // colors in a dark canvas, so both host palettes are checked against both
@@ -149,6 +168,52 @@ describe("status color tokens", () => {
     // canvas, or its own label disappears.
     expect(SHELL_STYLE_CSS).toContain("--rad-warning-solid: #9a6700;");
     expect(SHELL_STYLE_CSS).toContain("--rad-success-solid: #1a7f37;");
+  });
+
+  describe("diff color tokens", () => {
+    const diffStatuses = [
+      ["added", "success"],
+      ["modified", "warning"],
+      ["removed", "danger"]
+    ] as const;
+    const cases = diffStatuses.flatMap(([diffStatus, status]) =>
+      Object.entries(palettes).flatMap(([canvas, palette]) =>
+        Object.entries(hostStatusColors).map(
+          ([host, colors]) =>
+            [diffStatus, status, canvas, host, palette, colors[status]] as const
+        )
+      )
+    );
+
+    it.each(cases)(
+      "%s stays distinct and readable on a %s canvas with the host's %s",
+      (diffStatus, _status, _canvas, _host, palette, hostColor) => {
+        const { borderPortion, fillPortion } = diffToken(diffStatus);
+        const border = mix(
+          parseHex(hostColor),
+          parseHex(palette.text),
+          borderPortion
+        );
+        const fill = mix(border, parseHex(palette.bg), fillPortion);
+
+        expect(contrast(border, parseHex(palette.bg))).toBeGreaterThanOrEqual(
+          3
+        );
+        expect(contrast(fill, parseHex(palette.bg))).toBeGreaterThanOrEqual(
+          1.25
+        );
+        expect(contrast(parseHex(palette.text), fill)).toBeGreaterThanOrEqual(
+          4.5
+        );
+      }
+    );
+
+    it.each(diffStatuses)(
+      "%s reads the host's %s token",
+      (diffStatus, status) => {
+        expect(diffToken(diffStatus).hostToken).toBe(`--text-color-${status}`);
+      }
+    );
   });
 
   it.each(statuses)("%s tints a background from the same token", (status) => {
