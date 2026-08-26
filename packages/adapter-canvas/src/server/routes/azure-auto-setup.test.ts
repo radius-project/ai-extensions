@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildRadiusAppProvenanceTags } from "../../azure-oidc.js";
+import { createOperation, prepareProviderMutation } from "../../operations.js";
 import { createRequestContext } from "../request-context.js";
 import { ENTRA_APP_RETENTION_NOTICE } from "./azure-auto-setup-application.js";
 import {
@@ -100,14 +101,17 @@ function orchestrationHarness(
     isStale?: (operation: AzureAutoSetupOperation) => boolean;
     identity?: AzureAutoSetupDependencies["external"]["getGitHubIdentity"];
     repoAccess?: string;
+    preflightRepoAdmin?: AzureAutoSetupDependencies["external"]["preflightRepoAdmin"];
     packageAccess?: Awaited<
       ReturnType<
         AzureAutoSetupDependencies["external"]["preflightGhcrPackageWriteAccess"]
       >
     >;
+    preflightGhcrPackageWriteAccess?: AzureAutoSetupDependencies["external"]["preflightGhcrPackageWriteAccess"];
     runGitHubJson?: AzureAutoSetupDependencies["external"]["runGitHubJson"];
     runAz?: AzureAutoSetupDependencies["external"]["runAz"];
     ensureServicePrincipal?: AzureAutoSetupDependencies["ensureServicePrincipal"];
+    honorStopBoundary?: AzureAutoSetupDependencies["honorStopBoundary"];
     hasWarnings?: boolean;
     persist?: () => Promise<void>;
     addLegacyStep?: AzureAutoSetupDependencies["operations"]["addLegacyStep"];
@@ -195,9 +199,11 @@ function orchestrationHarness(
         (async () => {
           return null;
         }),
-      preflightRepoAdmin: async () => options.repoAccess ?? "",
-      preflightGhcrPackageWriteAccess: async () =>
-        options.packageAccess ?? { ok: true },
+      preflightRepoAdmin:
+        options.preflightRepoAdmin ?? (async () => options.repoAccess ?? ""),
+      preflightGhcrPackageWriteAccess:
+        options.preflightGhcrPackageWriteAccess ??
+        (async () => options.packageAccess ?? { ok: true }),
       runGitHubJson:
         options.runGitHubJson ??
         (async (path) => {
@@ -239,6 +245,12 @@ function orchestrationHarness(
       await input.persist();
       return true;
     },
+    honorStopBoundary:
+      options.honorStopBoundary ??
+      (async ({ boundary }) => {
+        events.push(`stop:${boundary}`);
+        return true;
+      }),
     finalizeSetupFailure: async (_operation, input) => {
       failures.push(input);
       return {
@@ -395,6 +407,44 @@ describe("POST /api/azure-auto-setup admission and validation (SU-08)", () => {
     expect(await response.json()).toMatchObject({
       code: "operation-continuation-mismatch"
     });
+  });
+
+  it("skips unrelated write preflights while reconciling a provider mutation", async () => {
+    const operation = createOperation({
+      operationId: "op-reconcile",
+      provider: "azure",
+      repo: "octo/app",
+      environment: "dev"
+    }) as AzureAutoSetupOperation;
+    operation.currentStage = "authorize_identity";
+    prepareProviderMutation(operation, {
+      kind: "azure_application.create",
+      target: "octo/app:dev"
+    });
+    const preflightRepoAdmin = vi.fn(async () => {
+      throw new Error("repository preflight must not run");
+    });
+    const preflightGhcrPackageWriteAccess = vi.fn(async () => {
+      throw new Error("GHCR preflight must not run");
+    });
+    const harness = orchestrationHarness({
+      operation,
+      getOperation: () => operation,
+      preflightRepoAdmin,
+      preflightGhcrPackageWriteAccess,
+      runAz: async () => {
+        throw new Error("recovery path reached");
+      }
+    });
+
+    const response = await invoke(
+      JSON.stringify({ ...VALID_SETUP, operationId: operation.operationId }),
+      harness.dependencies
+    );
+
+    expect(response.status).toBe(400);
+    expect(preflightRepoAdmin).not.toHaveBeenCalled();
+    expect(preflightGhcrPackageWriteAccess).not.toHaveBeenCalled();
   });
 
   it("reports the conflicting operation without persisting a new record", async () => {
@@ -977,6 +1027,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         throw new Error(`unscripted az call: ${line}`);
       }
     });
+
     const response = await invoke(
       JSON.stringify(VALID_SETUP),
       test.dependencies
@@ -990,6 +1041,137 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     });
     expect(test.events).toContain("require-input");
     expect(test.failures).toEqual([]);
+  });
+
+  it("honors a pending Stop after persisting input instead of showing a prompt", async () => {
+    const boundaries: string[] = [];
+    const test = orchestrationHarness({
+      honorStopBoundary: async ({ boundary }) => {
+        boundaries.push(boundary);
+        return boundary !== "input_prompt";
+      },
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("account set ")) {
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (line === "account show --output json") {
+          return {
+            code: 0,
+            stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+            stderr: ""
+          };
+        }
+        if (line.startsWith("ad app list ")) {
+          return {
+            code: 0,
+            stdout: JSON.stringify([
+              { appId: APP_ID, displayName: "One" },
+              {
+                appId: "55555555-5555-5555-5555-555555555555",
+                displayName: "Two"
+              }
+            ]),
+            stderr: ""
+          };
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return { code: 0, stdout: USER_ID, stderr: "" };
+        }
+        if (line.startsWith("ad app owner list ")) {
+          return { code: 0, stdout: USER_ID, stderr: "" };
+        }
+        if (line.includes("federated-credential list")) {
+          return { code: 1, stdout: "", stderr: "unavailable" };
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    const response = await invoke(
+      JSON.stringify(VALID_SETUP),
+      test.dependencies
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      cancelled: true,
+      code: "operation-stopped",
+      boundary: "input_prompt",
+      operationId: "op-route"
+    });
+    expect(test.events).toContain("require-input");
+    expect(test.events).toContain("persist");
+    expect(boundaries).toContain("input_prompt");
+    expect(test.failures).toEqual([]);
+  });
+
+  it("honors Stop before changing the process-wide Azure subscription", async () => {
+    const test = orchestrationHarness({
+      honorStopBoundary: async ({ boundary }) =>
+        boundary !== "before-azure-subscription-selection",
+      runAz: async (args) => {
+        throw new Error(`unexpected az call: ${args.join(" ")}`);
+      }
+    });
+
+    const response = await invoke(
+      JSON.stringify({ ...VALID_SETUP, clientId: APP_ID }),
+      test.dependencies
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      code: "operation-stopped",
+      boundary: "before-azure-subscription-selection"
+    });
+  });
+
+  it("answers the internal request when Stop wins after an Azure mutation", async () => {
+    const boundaries: string[] = [];
+    const test = orchestrationHarness({
+      honorStopBoundary: async ({ boundary }) => {
+        boundaries.push(boundary);
+        return boundary !== "after-app-registration-create";
+      },
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("account set ")) {
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (line === "account show --output json") {
+          return {
+            code: 0,
+            stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+            stderr: ""
+          };
+        }
+        if (line.startsWith("ad app list ")) {
+          return { code: 0, stdout: "[]", stderr: "" };
+        }
+        if (line.startsWith("ad app create ")) {
+          return { code: 0, stdout: APP_ID, stderr: "" };
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    const response = await invoke(
+      JSON.stringify({ ...VALID_SETUP, createNew: true, clientId: "" }),
+      test.dependencies
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      cancelled: true,
+      code: "operation-stopped",
+      boundary: "after-app-registration-create",
+      operationId: "op-route"
+    });
+    expect(boundaries).toContain("after-app-registration-create");
+    expect(
+      test.events.some((event) => event.startsWith("az:ad app owner add "))
+    ).toBe(false);
   });
 
   it("preserves side-effect order and returns the credential result", async () => {
