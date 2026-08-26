@@ -77,6 +77,7 @@ describe("Azure auto-setup dependency composition", () => {
       body: { code: "setup-failed" }
     }));
     const persistMutationCheckpoint = vi.fn(async () => true);
+    const honorStopBoundary = vi.fn(async () => true);
     const sleep = vi.fn(async () => {});
 
     const composed = composeAzureAutoSetupDependencies({
@@ -89,6 +90,7 @@ describe("Azure auto-setup dependency composition", () => {
       ensureServicePrincipal,
       finalizeSetupFailure,
       persistMutationCheckpoint,
+      honorStopBoundary,
       sleep,
       stageAuthorizeIdentity: "authorize_identity"
     });
@@ -104,6 +106,7 @@ describe("Azure auto-setup dependency composition", () => {
     expect(composed.ensureServicePrincipal).toBe(ensureServicePrincipal);
     expect(composed.finalizeSetupFailure).toBe(finalizeSetupFailure);
     expect(composed.persistMutationCheckpoint).toBe(persistMutationCheckpoint);
+    expect(composed.honorStopBoundary).toBe(honorStopBoundary);
     expect(composed.sleep).toBe(sleep);
     expect(composed.stageAuthorizeIdentity).toBe("authorize_identity");
   });
