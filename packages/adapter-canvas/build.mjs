@@ -221,25 +221,23 @@ function installToLocal() {
     const noticesTmp = `${noticesTo}.tmp-${process.pid}`;
     copyFileSync(noticesFrom, noticesTmp);
     renameSync(noticesTmp, noticesTo);
-    // Copy the whole scripts directory rather than naming files one at a time,
-    // so a script added later is installed without touching this list. The
-    // skill resolves <loaded-skill-base> by probing this directory, so a script
-    // missing here resolves to a path that does not exist.
-    const scriptsFrom = join(distDir, "skills", "radius-app-bicep", "scripts");
-    if (existsSync(scriptsFrom)) {
-      const scriptsTo = join(
-        installDir,
-        "skills",
-        "radius-app-bicep",
-        "scripts"
-      );
-      mkdirSync(scriptsTo, { recursive: true });
-      for (const entry of readdirSync(scriptsFrom)) {
-        const to = join(scriptsTo, entry);
-        const tmp = `${to}.tmp-${process.pid}`;
-        copyFileSync(join(scriptsFrom, entry), tmp);
-        renameSync(tmp, to);
-      }
+    // Copy the whole skills tree rather than naming files one at a time, so a
+    // skill, reference, or script added later is installed without touching
+    // this list. SKILL.md and its references are the instructions the agent
+    // actually follows, so installing only the scripts leaves a dev install
+    // running stale guidance against a fresh bundle. The skill also resolves
+    // <loaded-skill-base> by probing for its scripts, so a file missing here
+    // resolves to a path that does not exist.
+    const skillsFrom = join(distDir, "skills");
+    if (existsSync(skillsFrom)) {
+      const skillsTo = join(installDir, "skills");
+      // Replace rather than merge, so a file deleted upstream does not linger
+      // in the install and keep being read.
+      rmSync(skillsTo, { recursive: true, force: true });
+      const tmp = `${skillsTo}.tmp-${process.pid}`;
+      rmSync(tmp, { recursive: true, force: true });
+      cpSync(skillsFrom, tmp, { recursive: true });
+      renameSync(tmp, skillsTo);
     }
     // The plugin manifest carries the version recorded in each origin record.
     // Without it a dev install resolves no version and the generator-drift

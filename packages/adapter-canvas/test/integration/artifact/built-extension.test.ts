@@ -1,10 +1,12 @@
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
   type Dirent
 } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -445,6 +447,42 @@ describe("P0-C built Radius extension artifact", () => {
       expect(
         readFileSync(join(installDir, "THIRD-PARTY-NOTICES.txt"), "utf8")
       ).toBe(readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8"));
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it("installs every skill file, not just the scripts", () => {
+    const installDir = mkdtempSync(join(tmpdir(), "radius-canvas-install-"));
+    const installPath = join(installDir, "extension.mjs");
+    try {
+      // Seed a file that no longer exists upstream. A merging copy would leave
+      // it behind for the agent to read.
+      const staleDir = join(installDir, "skills", "radius-app-graph");
+      mkdirSync(staleDir, { recursive: true });
+      writeFileSync(join(staleDir, "REMOVED.md"), "stale", "utf8");
+
+      execFileSync(process.execPath, ["build.mjs", "--install"], {
+        cwd: join(REPO_ROOT, "packages", "adapter-canvas"),
+        env: { ...process.env, RADIUS_CANVAS_INSTALL_PATH: installPath },
+        stdio: "pipe"
+      });
+
+      // SKILL.md and its references are the instructions the agent follows, so
+      // an install that refreshes only the bundle runs stale guidance against a
+      // fresh extension.
+      const skillsRoot = join(DIST, "skills");
+      const skillFiles = filesUnder(skillsRoot);
+      expect(skillFiles.some((path) => path.endsWith("SKILL.md"))).toBe(true);
+      for (const source of skillFiles) {
+        const relative = source.slice(skillsRoot.length + 1);
+        const installed = join(installDir, "skills", relative);
+        expect(existsSync(installed)).toBe(true);
+        expect(readFileSync(installed, "utf8")).toBe(
+          readFileSync(source, "utf8")
+        );
+      }
+      expect(existsSync(join(staleDir, "REMOVED.md"))).toBe(false);
     } finally {
       rmSync(installDir, { recursive: true, force: true });
     }
