@@ -26,7 +26,6 @@ Start with the status table. Use the phase sections for the work still to come. 
 | 7     | Complete    | Add reviewed screenshots and scheduled reliability checks                                    | —                                                                                                                                                                                                                                                                |
 | 8     | Not started | Test installation and panel lifecycle in a supported Copilot host before release             | —                                                                                                                                                                                                                                                                |
 
-
 ## Rules for every change
 
 - Add focused tests with the production change. Manual checks do not replace automated tests.
