@@ -7,6 +7,7 @@ import {
   KEEPALIVE_INTERVAL_MS,
   KEEPALIVE_ACTIVE_WINDOW_MS
 } from "./create-radius-extension.js";
+import { sourceEditorInstanceId } from "./canvas-lifecycle.js";
 import {
   createFakeDependencies,
   createFakeSession
@@ -619,10 +620,37 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     expect(session.rpc.canvas.open).toHaveBeenCalledWith(
       expect.objectContaining({
         canvasId: "editor",
-        instanceId: "radius-source",
+        instanceId: sourceEditorInstanceId("src/index.ts"),
         input: expect.objectContaining({ path: "src/index.ts" })
       })
     );
+  });
+
+  it("opens each source file under its own editor handle so a second node does not just refocus the first file", async () => {
+    const { ext, deps, capturedHostCallbacks } = setup();
+    const session = createFakeSession();
+    ext.attachSession(session);
+    (
+      deps.workspace.workspaceFileExists as ReturnType<typeof vi.fn>
+    ).mockResolvedValue(true);
+
+    for (const path of ["src/api.ts", "src/worker.ts"]) {
+      await capturedHostCallbacks.openSourceHandler!({
+        path,
+        line: 0,
+        instanceId: "radius-panel",
+        state: { workspacePath: "/ws" }
+      });
+    }
+
+    const open = session.rpc.canvas.open as ReturnType<typeof vi.fn>;
+    expect(open).toHaveBeenCalledTimes(2);
+    const [first, second] = open.mock.calls.map(
+      (call) => call[0] as { instanceId: string; input: { path: string } }
+    );
+    expect(first.input.path).toBe("src/api.ts");
+    expect(second.input.path).toBe("src/worker.ts");
+    expect(second.instanceId).not.toBe(first.instanceId);
   });
 
   it("throws (and logs) instead of opening a file that is not on the worktree", async () => {
