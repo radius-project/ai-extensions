@@ -645,6 +645,99 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     );
   });
 
+  it("opens each source path in its own editor canvas through the real composed callback", async () => {
+    const harness = await createRuntimeSdkHarness();
+    const openSource = harness.capturedHostCallbacks.openSourceHandler;
+    if (!openSource)
+      throw new Error("runtime registered no open-source handler");
+
+    await openSource({
+      path: "src/web.ts",
+      line: 4,
+      instanceId: "radius-panel",
+      state: { workspacePath: "/workspace" }
+    });
+    await openSource({
+      path: "src/worker.ts",
+      line: 9,
+      instanceId: "radius-panel",
+      state: { workspacePath: "/workspace" }
+    });
+
+    const editorOpens = vi
+      .mocked(harness.session.rpc.canvas.open)
+      .mock.calls.map(([input]) => input)
+      .filter((input) => input.canvasId === "editor");
+    expect(editorOpens).toHaveLength(2);
+    // Two files must land on two handles: re-using one would make the host
+    // focus the panel already showing the first file.
+    expect(new Set(editorOpens.map((input) => input.instanceId)).size).toBe(2);
+    expect(harness.session.rpc.canvas.open).toHaveBeenCalledWith(
+      expect.objectContaining({
+        canvasId: "editor",
+        input: expect.objectContaining({
+          scope: "repo",
+          path: "src/worker.ts",
+          createIfMissing: false
+        })
+      })
+    );
+
+    // The same file re-uses its own handle rather than opening a third panel.
+    await openSource({
+      path: "src/web.ts",
+      line: 40,
+      instanceId: "radius-panel",
+      state: { workspacePath: "/workspace" }
+    });
+    expect(
+      vi
+        .mocked(harness.session.rpc.canvas.open)
+        .mock.calls.map(([input]) => input)
+        .filter((input) => input.canvasId === "editor")[2].instanceId
+    ).toBe(editorOpens[0].instanceId);
+  });
+
+  it("refuses an out-of-workspace path and a file missing from the worktree without opening a canvas", async () => {
+    const harness = await createRuntimeSdkHarness();
+    const openSource = harness.capturedHostCallbacks.openSourceHandler;
+    if (!openSource)
+      throw new Error("runtime registered no open-source handler");
+
+    await expect(
+      openSource({
+        path: "../outside.ts",
+        line: 1,
+        instanceId: "radius-panel",
+        state: { workspacePath: "/workspace" }
+      })
+    ).rejects.toThrow(/invalid path/);
+
+    // No workspace at all must fail closed rather than open an empty editor.
+    await expect(
+      openSource({ path: "src/web.ts", line: 1, instanceId: "radius-panel" })
+    ).rejects.toThrow(/not on this worktree/);
+
+    vi.mocked(harness.deps.workspace.workspaceFileExists).mockResolvedValueOnce(
+      false
+    );
+    await expect(
+      openSource({
+        path: "src/gone.ts",
+        line: 1,
+        instanceId: "radius-panel",
+        state: { workspacePath: "/workspace" }
+      })
+    ).rejects.toThrow(/not on this worktree/);
+
+    expect(
+      vi
+        .mocked(harness.session.rpc.canvas.open)
+        .mock.calls.filter(([input]) => input.canvasId === "editor")
+    ).toHaveLength(0);
+    expect(harness.session.log).toHaveBeenCalled();
+  });
+
   it("denies a graph open against a stale workspace model and allows it once refreshed", async () => {
     const model =
       "resource app 'Radius.Core/applications@2025-08-01-preview' = {}";

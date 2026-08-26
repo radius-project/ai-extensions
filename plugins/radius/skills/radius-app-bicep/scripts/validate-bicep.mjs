@@ -396,6 +396,21 @@ const packagingBasenamePatterns = [
   /^values\.ya?ml$/u
 ];
 
+// Decodes each path segment on its own so one malformed escape sequence degrades
+// to that segment's raw text instead of discarding the whole pathname.
+function decodePathname(pathname) {
+  return pathname
+    .split("/")
+    .map((segment) => {
+      try {
+        return decodeURIComponent(segment);
+      } catch {
+        return segment;
+      }
+    })
+    .join("/");
+}
+
 // Reduces either authored form -- a repo-relative worktree path or a GitHub blob
 // URL -- to the file's basename, so one list covers both.
 function sourceLocationBasename(codeReference) {
@@ -405,7 +420,12 @@ function sourceLocationBasename(codeReference) {
   let location = codeReference.replace(/#L[1-9]\d*$/u, "");
   if (/^https:\/\//iu.test(location)) {
     try {
-      location = new URL(location).pathname;
+      const { pathname } = new URL(location);
+      // `pathname` stays percent-encoded, and the host resolves the escapes, so
+      // "Docker%66ile" would otherwise slip past a literal basename comparison.
+      // A malformed escape falls back to the raw pathname rather than giving up,
+      // so a bad sequence elsewhere in the path cannot reopen the bypass.
+      location = decodePathname(pathname);
     } catch {
       return "";
     }

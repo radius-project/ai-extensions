@@ -636,7 +636,10 @@ test.each([
   "deploy/chart.yaml",
   "deploy/values.yaml",
   "services/api/dockerfile#L3",
-  "https://github.com/acme/app/blob/main/services/api/Dockerfile"
+  "https://github.com/acme/app/blob/main/services/api/Dockerfile",
+  "https://github.com/acme/app/blob/main/Docker%66ile",
+  "https://github.com/acme/app/blob/main/services/api/docker-compose%2Eyml",
+  "https://github.com/acme/app/blob/main/bad%ZZdir/Dockerfile"
 ])(
   "rejects a packaging file as a container source reference: %s",
   (codeReference) => {
