@@ -1371,9 +1371,14 @@ test.describe("Radius Canvas in Chromium", () => {
     const overlay = page.locator("#radius-reconnect-overlay");
     const initialNavigations = navigations;
     const focusForPing = async (): Promise<void> => {
-      const before = completedPings;
+      const pingFinished = page.waitForEvent("requestfinished", (request) =>
+        request.url().includes("/api/ping")
+      );
       await page.evaluate("window.dispatchEvent(new Event('focus'))");
-      await expect.poll(() => completedPings).toBe(before + 1);
+      await pingFinished;
+      await page.evaluate(
+        () => new Promise<void>((resolve) => queueMicrotask(resolve))
+      );
     };
 
     pingStatus = 503;
