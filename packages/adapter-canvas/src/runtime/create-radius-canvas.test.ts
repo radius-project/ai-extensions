@@ -1,7 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { APP_ORIGIN_REPO_PATH, serializeAppOrigin } from "@radius-project/core";
 import { RadProcessError } from "@radius-project/adapter-shared";
-import { hashAppBicep } from "../app-bicep-hash.js";
 import { createRadiusCanvas } from "./create-radius-canvas.js";
 import {
   createFakeDependencies,
@@ -696,618 +694,9 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
   });
 });
 
-// RU-16: missing-bicep handoff dedupe + nonblocking behavior.
-describe("RU-16: missing app.bicep handoff on open()", () => {
-  it("hands off to the agent exactly once for the same repo+branch, and again for a different target", async () => {
-    const { canvas, deps } = setup();
-    const session = deps.session.get();
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "acme/widgets",
-        branch: "main"
-      })
-    );
-    expect(session.send).toHaveBeenCalledTimes(1);
-
-    // Re-opening the SAME target does not re-send.
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "acme/widgets",
-        branch: "main"
-      })
-    );
-    expect(session.send).toHaveBeenCalledTimes(1);
-
-    // A different branch is a different target: sends again.
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "acme/widgets",
-        branch: "other"
-      })
-    );
-    expect(session.send).toHaveBeenCalledTimes(2);
-  });
-
-  it("does not hand off when app.bicep already exists on the branch", async () => {
-    const { canvas, deps } = setup({
-      bicepByRepoBranch: { "remote:acme/widgets@main": "resource db {}" }
-    });
-    const session = deps.session.get();
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "acme/widgets",
-        branch: "main"
-      })
-    );
-    expect(session.send).not.toHaveBeenCalled();
-  });
-
-  it("hands off when checking app.bicep fails", async () => {
-    const { canvas, deps } = setup();
-    const session = deps.session.get();
-    (
-      deps.core.fetchBicepFromRepo as ReturnType<typeof vi.fn>
-    ).mockRejectedValue(new Error("contents unavailable"));
-
-    await expect(
-      canvas.open(
-        ctx("radius-panel", {
-          page: "graph",
-          repo: "other/repo",
-          branch: "main"
-        })
-      )
-    ).resolves.toMatchObject({ title: "Radius" });
-
-    expect(session.send).toHaveBeenCalledOnce();
-  });
-
-  it("stays silent when the branch has no Dockerfile for the skill to build from", async () => {
-    const remoteTreeByRepoBranch: Record<string, string[]> = {
-      "other/repo@main": ["README.md", "src/index.ts"]
-    };
-    const { canvas, deps, servers } = setup({
-      remoteTreeByRepoBranch
-    });
-    const session = deps.session.get();
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "other/repo",
-        branch: "main"
-      })
-    );
-
-    // The skill would refuse this repository outright and say so only in the
-    // conversation, so handing off would leave the view waiting forever.
-    expect(session.send).not.toHaveBeenCalled();
-    expect(
-      servers.get("radius-panel")?.state.appBicepHandoffKey
-    ).toBeUndefined();
-
-    remoteTreeByRepoBranch["other/repo@main"] = ["Dockerfile"];
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "other/repo",
-        branch: "main"
-      })
-    );
-
-    expect(session.send).toHaveBeenCalledOnce();
-  });
-
-  it("hands off when the branch has a Dockerfile", async () => {
-    const { canvas, deps } = setup({
-      remoteTreeByRepoBranch: {
-        "other/repo@main": ["README.md", "services/api/Dockerfile"]
-      }
-    });
-    const session = deps.session.get();
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "other/repo",
-        branch: "main"
-      })
-    );
-
-    expect(session.send).toHaveBeenCalledTimes(1);
-  });
-
-  it("hands off a diff when only one branch would be refused", async () => {
-    const { canvas, deps } = setup({
-      remoteTreeByRepoBranch: {
-        "other/repo@main": ["README.md"],
-        "other/repo@feature": ["Dockerfile"]
-      }
-    });
-    const session = deps.session.get();
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph-diff",
-        repo: "other/repo",
-        baseBranch: "main",
-        headBranch: "feature"
-      })
-    );
-
-    expect(session.send).toHaveBeenCalledTimes(1);
-  });
-
-  it("hands off when the branch tree cannot be read", async () => {
-    const { canvas, deps } = setup();
-    const session = deps.session.get();
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "other/repo",
-        branch: "main"
-      })
-    );
-
-    // An unreadable tree resolves empty, which is not evidence of absence.
-    expect(session.send).toHaveBeenCalledTimes(1);
-  });
-
-  it("hands off when listing the branch tree throws", async () => {
-    const { canvas, deps } = setup();
-    const session = deps.session.get();
-    (deps.github.treePaths as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new Error("tree unavailable")
-    );
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "other/repo",
-        branch: "main"
-      })
-    );
-
-    expect(session.send).toHaveBeenCalledTimes(1);
-  });
-
-  it("stays silent for the workspace branch when the worktree has no Dockerfile", async () => {
-    const { canvas, deps } = setup({
-      workspaceTreeByRepoBranch: {
-        "acme/widgets@main": ["README.md", "src/index.ts"]
-      }
-    });
-    const session = deps.session.get();
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "acme/widgets",
-        branch: "main"
-      })
-    );
-
-    expect(session.send).not.toHaveBeenCalled();
-    expect(deps.github.treePaths).not.toHaveBeenCalled();
-  });
-
-  it("never blocks or fails canvas open when session.send throws", async () => {
-    const { canvas, deps } = setup();
-    const session = deps.session.get();
-    (session.send as ReturnType<typeof vi.fn>).mockRejectedValue(
-      new Error("host unavailable")
-    );
-    await expect(
-      canvas.open(
-        ctx("radius-panel", {
-          page: "graph",
-          repo: "acme/widgets",
-          branch: "main"
-        })
-      )
-    ).resolves.toMatchObject({ title: "Radius" });
-  });
-
-  it("asks the user before regenerating a hand-edited stale workspace model", async () => {
-    const model = "resource db {}";
-    const { canvas, deps } = setup({
-      bicepByRepoBranch: { "workspace:acme/widgets@main": `${model}\n// edit` },
-      filesByRepoBranch: {
-        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
-          serializeAppOrigin({
-            generatedAt: "2026-08-11T05:32:32.000Z",
-            sourceCommit: "a".repeat(40),
-            skillVersion: "0.1.0-test",
-            appBicepHash: hashAppBicep(model)
-          })
-      },
-      headCommits: { "workspace:/workspace": "b".repeat(40) },
-      sourceChangedSince: true
-    });
-    const session = deps.session.get();
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "acme/widgets",
-        branch: "main"
-      })
-    );
-
-    expect(session.send).toHaveBeenCalledTimes(1);
-    const message = (session.send as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as { prompt: string; displayPrompt: string };
-    expect(message.prompt).toContain("edited after it was generated");
-    expect(message.prompt).toContain("would be lost");
-    expect(message.displayPrompt).toContain("acme/widgets");
-  });
-
-  // A missing record says nothing about who wrote the model, so the question
-  // that decides the overwrite is whether git can give it back. An untracked or
-  // already modified file exists nowhere else, so replacing it is theirs to
-  // approve even though nothing proves they edited it.
-  it("asks before replacing a model with no record that git cannot restore", async () => {
-    const { canvas, deps } = setup({
-      bicepByRepoBranch: { "workspace:acme/widgets@main": "resource db {}" },
-      modelRecoverable: false
-    });
-    const session = deps.session.get();
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "acme/widgets",
-        branch: "main"
-      })
-    );
-
-    expect(session.send).toHaveBeenCalledTimes(1);
-    const message = (session.send as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as { prompt: string };
-    expect(message.prompt).toContain("exists nowhere else");
-    expect(message.prompt).toContain("would be lost");
-  });
-
-  // `unrecorded` has two outcomes now, and only one of them is safe. The dedupe
-  // key has to carry which one it was, or a model that starts committed and
-  // clean caches the silent verdict and keeps it after the file stops being
-  // recoverable, which is the overwrite the guard exists to prevent.
-  it("asks when a recoverable model with no record becomes unrecoverable", async () => {
-    const { canvas, deps } = setup({
-      bicepByRepoBranch: { "workspace:acme/widgets@main": "resource db {}" }
-    });
-    const session = deps.session.get();
-    const open = () =>
-      canvas.open(
-        ctx("radius-panel", {
-          page: "graph",
-          repo: "acme/widgets",
-          branch: "main"
-        })
-      );
-
-    await open();
-    expect(session.send).toHaveBeenCalledTimes(1);
-    expect(
-      (session.send as ReturnType<typeof vi.fn>).mock.calls[0][0].prompt
-    ).not.toContain("would be lost");
-
-    // The user edits the model, or a gitignore rule starts matching it.
-    deps.appModel.workspaceModelRecoverable = (async () => false) as never;
-
-    await open();
-    expect(session.send).toHaveBeenCalledTimes(2);
-    expect(
-      (session.send as ReturnType<typeof vi.fn>).mock.calls[1][0].prompt
-    ).toContain("would be lost");
-  });
-
-  // A hand edit is permanent and the user cannot accept it, so raising it while
-  // the model is otherwise current would ask the same question every session.
-  it("says nothing about a hand edit that needs no regeneration", async () => {
-    const model = "resource db {}";
-    const { canvas, deps } = setup({
-      bicepByRepoBranch: { "workspace:acme/widgets@main": `${model}\n// edit` },
-      filesByRepoBranch: {
-        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
-          serializeAppOrigin({
-            generatedAt: "2026-08-11T05:32:32.000Z",
-            sourceCommit: "a".repeat(40),
-            skillVersion: "0.1.0-test",
-            appBicepHash: hashAppBicep(model)
-          })
-      },
-      headCommits: { "workspace:/workspace": "a".repeat(40) },
-      sourceChangedSince: false
-    });
-    const session = deps.session.get();
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "acme/widgets",
-        branch: "main"
-      })
-    );
-
-    expect(session.send).not.toHaveBeenCalled();
-  });
-
-  // Every model written before origin records existed has no record, so asking
-  // about them would put a question in front of the entire installed base for
-  // something no one edited. These are refreshed like any other stale model.
-  it("does not ask about a workspace model that has no origin record", async () => {
-    const { canvas, deps } = setup({
-      bicepByRepoBranch: { "workspace:acme/widgets@main": "resource db {}" }
-    });
-    const session = deps.session.get();
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "acme/widgets",
-        branch: "main"
-      })
-    );
-
-    expect(session.send).toHaveBeenCalledTimes(1);
-    const message = (session.send as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as { prompt: string };
-    expect(message.prompt).toContain("needs to be regenerated");
-    expect(message.prompt).not.toContain("would be lost");
-  });
-
-  // The pre-tool-use hook denies an agent-driven open before the canvas ever
-  // renders a stale model, but a reload or a user-opened panel never passes
-  // through that hook. Without this the model would render with no signal.
-  it("asks for a refresh when a stale workspace model reaches open() anyway", async () => {
-    const model = "resource db {}";
-    const { canvas, deps } = setup({
-      bicepByRepoBranch: { "workspace:acme/widgets@main": model },
-      filesByRepoBranch: {
-        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
-          serializeAppOrigin({
-            generatedAt: "2026-08-11T05:32:32.000Z",
-            sourceCommit: "a".repeat(40),
-            skillVersion: "0.1.0-test",
-            appBicepHash: hashAppBicep(model)
-          })
-      },
-      headCommits: { "workspace:/workspace": "b".repeat(40) },
-      sourceChangedSince: true
-    });
-    const session = deps.session.get();
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "acme/widgets",
-        branch: "main"
-      })
-    );
-
-    expect(session.send).toHaveBeenCalledTimes(1);
-    const message = (session.send as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as { prompt: string; displayPrompt: string };
-    expect(message.prompt).toContain("needs to be regenerated");
-    expect(message.prompt).toContain("radius_generate_app");
-    expect(message.displayPrompt).toContain(
-      "Regenerating the application model"
-    );
-  });
-
-  it("only notes drift on a branch the skill is not allowed to rewrite", async () => {
-    const { canvas, deps } = setup({
-      bicepByRepoBranch: { "remote:other/repo@release": "resource db {}" }
-    });
-    const session = deps.session.get();
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "other/repo",
-        branch: "release"
-      })
-    );
-
-    expect(session.send).not.toHaveBeenCalled();
-    expect(session.log).toHaveBeenCalledWith(
-      expect.stringContaining("may be out of date")
-    );
-  });
-
-  // A branch we do not have checked out always looks source-changed, because
-  // committing the app model is itself a commit past the one it recorded.
-  // Saying so on every such branch forever is noise, not signal.
-  it("does not claim a branch it cannot diff is out of date", async () => {
-    const model = "resource db {}";
-    const { canvas, deps } = setup({
-      bicepByRepoBranch: { "remote:other/repo@release": model },
-      filesByRepoBranch: {
-        [`remote:other/repo@release:${APP_ORIGIN_REPO_PATH}`]:
-          serializeAppOrigin({
-            generatedAt: "2026-08-11T05:32:32.000Z",
-            sourceCommit: "a".repeat(40),
-            skillVersion: "0.1.0-test",
-            appBicepHash: hashAppBicep(model)
-          })
-      },
-      headCommits: { "other/repo@release": "b".repeat(40) }
-    });
-    const session = deps.session.get();
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "other/repo",
-        branch: "release"
-      })
-    );
-
-    expect(session.log).not.toHaveBeenCalled();
-    expect(session.send).not.toHaveBeenCalled();
-  });
-
-  it("still reports a skill change on a branch it cannot diff", async () => {
-    const model = "resource db {}";
-    const { canvas, deps } = setup({
-      generatorVersion: "0.2.0",
-      bicepByRepoBranch: { "remote:other/repo@release": model },
-      filesByRepoBranch: {
-        [`remote:other/repo@release:${APP_ORIGIN_REPO_PATH}`]:
-          serializeAppOrigin({
-            generatedAt: "2026-08-11T05:32:32.000Z",
-            sourceCommit: "a".repeat(40),
-            skillVersion: "0.1.0-test",
-            appBicepHash: hashAppBicep(model)
-          })
-      },
-      headCommits: { "other/repo@release": "a".repeat(40) }
-    });
-    const session = deps.session.get();
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "other/repo",
-        branch: "release"
-      })
-    );
-
-    expect(session.log).toHaveBeenCalledWith(
-      expect.stringContaining("may be out of date")
-    );
-  });
-
-  it("stays silent when the workspace model is current", async () => {
-    const model = "resource db {}";
-    const { canvas, deps } = setup({
-      bicepByRepoBranch: { "workspace:acme/widgets@main": model },
-      filesByRepoBranch: {
-        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
-          serializeAppOrigin({
-            generatedAt: "2026-08-11T05:32:32.000Z",
-            sourceCommit: "a".repeat(40),
-            skillVersion: "0.1.0-test",
-            appBicepHash: hashAppBicep(model)
-          })
-      },
-      headCommits: { "workspace:/workspace": "a".repeat(40) }
-    });
-    const session = deps.session.get();
-
-    await canvas.open(
-      ctx("radius-panel", {
-        page: "graph",
-        repo: "acme/widgets",
-        branch: "main"
-      })
-    );
-
-    expect(session.send).not.toHaveBeenCalled();
-    expect(session.log).not.toHaveBeenCalled();
-  });
-
-  it("never blocks canvas open when session.log throws", async () => {
-    const { canvas, deps } = setup({
-      bicepByRepoBranch: { "remote:other/repo@release": "resource db {}" }
-    });
-    const session = deps.session.get();
-    (session.log as ReturnType<typeof vi.fn>).mockImplementation(() => {
-      throw new Error("host unavailable");
-    });
-
-    await expect(
-      canvas.open(
-        ctx("radius-panel", {
-          page: "graph",
-          repo: "other/repo",
-          branch: "release"
-        })
-      )
-    ).resolves.toMatchObject({ title: "Radius" });
-  });
-
-  // The dedupe key has to describe the message, not just the target. A model
-  // can go from stale to hand-edited between two opens, and the second is the
-  // more serious of the two: it is the one that needs the user's agreement.
-  it("speaks again when the same target develops a different problem", async () => {
-    const model = "resource db {}";
-    const { canvas, deps } = setup({
-      bicepByRepoBranch: { "workspace:acme/widgets@main": model },
-      filesByRepoBranch: {
-        [`workspace:acme/widgets@main:${APP_ORIGIN_REPO_PATH}`]:
-          serializeAppOrigin({
-            generatedAt: "2026-08-11T05:32:32.000Z",
-            sourceCommit: "a".repeat(40),
-            skillVersion: "0.1.0-test",
-            appBicepHash: hashAppBicep(model)
-          })
-      },
-      headCommits: { "workspace:/workspace": "b".repeat(40) },
-      sourceChangedSince: true
-    });
-    const session = deps.session.get();
-    const open = () =>
-      canvas.open(
-        ctx("radius-panel", {
-          page: "graph",
-          repo: "acme/widgets",
-          branch: "main"
-        })
-      );
-
-    await open();
-    expect(session.send).toHaveBeenCalledTimes(1);
-    expect(
-      (session.send as ReturnType<typeof vi.fn>).mock.calls[0][0].prompt
-    ).toContain("needs to be regenerated");
-
-    // The user edits the model by hand between opens.
-    deps.workspace.fetchWorkspaceBicep = (async () =>
-      `${model}\n// hand edit`) as never;
-
-    await open();
-    expect(session.send).toHaveBeenCalledTimes(2);
-    expect(
-      (session.send as ReturnType<typeof vi.fn>).mock.calls[1][0].prompt
-    ).toContain("edited after it was generated");
-  });
-
-  it("stays quiet when the same problem is seen again", async () => {
-    const { canvas, deps } = setup({
-      bicepByRepoBranch: { "workspace:acme/widgets@main": "resource db {}" }
-    });
-    const session = deps.session.get();
-    const open = () =>
-      canvas.open(
-        ctx("radius-panel", {
-          page: "graph",
-          repo: "acme/widgets",
-          branch: "main"
-        })
-      );
-
-    await open();
-    await open();
-
-    expect(session.send).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not hand off on non-graph pages", async () => {
-    const { canvas, deps } = setup();
-    const session = deps.session.get();
-    await canvas.open(
-      ctx("radius-panel", { page: "environment", repo: "acme/widgets" })
-    );
-    expect(session.send).not.toHaveBeenCalled();
-  });
-});
+// RU-16 moved: opening the canvas no longer inspects the application model.
+// runtime/app-model-handoff.test.ts owns that behavior now, and the graph
+// HTTP routes are what invoke it.
 
 // RU-17: same-instance reuse vs. distinct instances.
 describe("RU-17: canvas instance reuse", () => {
@@ -1321,12 +710,23 @@ describe("RU-17: canvas instance reuse", () => {
     expect(second!.page).toBe("planned");
   });
 
-  it("creates distinct entries for distinct instanceIds", async () => {
+  it("rejects a second Radius instance while the existing panel is live", async () => {
     const { canvas, deps } = setup();
     await canvas.open(ctx("panel-a", { page: "graph" }));
-    await canvas.open(ctx("panel-b", { page: "graph" }));
-    expect(deps.servers.get("panel-a")).not.toBe(deps.servers.get("panel-b"));
-    expect(deps.servers.size).toBe(2);
+    await expect(
+      canvas.open(ctx("panel-b", { page: "graph" }))
+    ).rejects.toThrow(/panel-a is already open/);
+    expect(deps.servers.has("panel-a")).toBe(true);
+    expect(deps.servers.has("panel-b")).toBe(false);
+  });
+
+  it("allows a new instance after the authoritative panel closes", async () => {
+    const { canvas, deps } = setup();
+    await canvas.open(ctx("panel-a", { page: "graph" }));
+    await canvas.onClose(ctx("panel-a"));
+
+    await canvas.open(ctx("panel-b", { page: "planned" }));
+    expect(deps.servers.has("panel-b")).toBe(true);
   });
 });
 
@@ -1347,13 +747,11 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     expect(closeSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("closing one instance does not affect another", async () => {
+  it("ignores a close notification for a different instance", async () => {
     const { canvas, deps } = setup();
     await canvas.open(ctx("panel-a", { page: "graph" }));
-    await canvas.open(ctx("panel-b", { page: "graph" }));
-    await canvas.onClose(ctx("panel-a"));
-    expect(deps.servers.has("panel-a")).toBe(false);
-    expect(deps.servers.has("panel-b")).toBe(true);
+    await canvas.onClose(ctx("panel-b"));
+    expect(deps.servers.has("panel-a")).toBe(true);
   });
 
   it("defers close until the last server-owned environment task settles", async () => {
@@ -1408,13 +806,12 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
     expect(deps.servers.get("radius-panel")).toBe(entry);
   });
 
-  it("does not defer one instance for another instance's active work", async () => {
+  it("does not defer the live instance for stale work attributed to another id", async () => {
     const { canvas, deps } = setup();
     vi.mocked(deps.operations.hasActiveEnvironmentTasks).mockImplementation(
       (instanceId) => instanceId === "panel-b"
     );
     await canvas.open(ctx("panel-a", { page: "environment" }));
-    await canvas.open(ctx("panel-b", { page: "environment" }));
     const panelA = deps.servers.get("panel-a")!;
     const closeSpy = panelA.server.close as unknown as ReturnType<typeof vi.fn>;
 
@@ -1422,7 +819,6 @@ describe("RU-18: onClose closes the underlying server exactly once", () => {
 
     expect(closeSpy).toHaveBeenCalledTimes(1);
     expect(deps.operations.onEnvironmentTasksSettled).not.toHaveBeenCalled();
-    expect(deps.servers.has("panel-b")).toBe(true);
   });
 
   it("force-closes a deferred server after the supported operation lifetime", async () => {

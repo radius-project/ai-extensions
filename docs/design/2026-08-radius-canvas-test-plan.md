@@ -26,7 +26,6 @@ Start with the status table. Use the phase sections for the work still to come. 
 | 7     | Complete    | Add reviewed screenshots and scheduled reliability checks                                    | —                                                                                                                                                                                                                                                                |
 | 8     | Not started | Test installation and panel lifecycle in a supported Copilot host before release             | —                                                                                                                                                                                                                                                                |
 
-
 ## Rules for every change
 
 - Add focused tests with the production change. Manual checks do not replace automated tests.
@@ -232,7 +231,7 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 | LC-02 | Every valid page input opens the matching page                                                                               |
 | LC-03 | Invalid canvas input is rejected before provider dispatch                                                                    |
 | LC-04 | The same `instanceId` reuses its server/port and preserves domain state                                                      |
-| LC-05 | Different instance IDs isolate transient server/UI state                                                                     |
+| LC-05 | A second instance ID is redirected to the session's one live panel rather than opening another                               |
 | LC-06 | Reopen/focus preserve the supplied page                                                                                      |
 | LC-07 | Provider rehydrate/open are idempotent                                                                                       |
 | LC-08 | `onClose` removes the instance and closes its server                                                                         |
@@ -240,7 +239,7 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 | LC-10 | Session-repository graph/planned views use the current worktree branch, never `main`                                         |
 | LC-11 | A different repository/branch uses committed remote `.radius/app.bicep`                                                      |
 | LC-12 | Graph diff compares explicit committed base/head branches                                                                    |
-| LC-13 | Missing model triggers handoff once per repository/branch context                                                            |
+| LC-13 | Missing or stale model triggers handoff once per repository/branch *condition*; a changed condition reports again            |
 | LC-14 | Heartbeat detects interruption and recovers the same page                                                                    |
 | LC-15 | External errors are surfaced; no success-shaped fallback is returned                                                         |
 | LC-16 | Deploy repair handoff preserves attempt identity across tool calls                                                           |
@@ -311,8 +310,8 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 | RU-13 | Default/all pages, active graph view, stable title/URL                                                    |
 | RU-14 | Worktree branch, different-repository fallback, explicit branch                                           |
 | RU-15 | Graph/planned model resolution and explicit diff preload                                                  |
-| RU-16 | Missing-model handoff de-duplicates by repository/branch and never blocks open                            |
-| RU-17 | Same-instance reuse and different-instance isolation                                                      |
+| RU-16 | Missing-model handoff de-duplicates by repository/branch condition and never blocks open                  |
+| RU-17 | Same-instance reuse; a later instance ID is redirected to the first claim, and release restores it        |
 | RU-18 | Close one instance; shutdown closes all exactly once                                                      |
 | RU-19 | Additional context, permission/session callbacks, host keepalive, failures                                |
 | RU-20 | Production joins once with factory result; factory tests never join                                       |
