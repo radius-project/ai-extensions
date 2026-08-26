@@ -261,6 +261,20 @@ export function isWorkspaceSelection(
   );
 }
 
+// The branch this workspace has checked out for `repo`, or "" when there is no
+// worktree for it. A page that renders one branch can ask isWorkspaceSelection
+// directly; the graph diff renders two branches at once and only the checked-out
+// one has on-disk files, so it needs the name itself to decide per node. Empty
+// is fail-closed in the same way: an unknown workspace branch never matches a
+// node's branch, so the node keeps its remote link.
+export function workspaceBranchForRepo(
+  state: CanvasState | null | undefined,
+  repo: string | null | undefined
+): string {
+  if (!state?.workspacePath || !repoMatches(state, repo)) return "";
+  return state.workspaceBranch || "";
+}
+
 export function defaultBranchForState(
   state: CanvasState | null | undefined
 ): string {

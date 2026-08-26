@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { reloadCanvasInstance } from "./canvas-lifecycle.js";
+import {
+  reloadCanvasInstance,
+  SOURCE_EDITOR_INSTANCE_PREFIX,
+  sourceEditorInstanceId
+} from "./canvas-lifecycle.js";
 
 const context = {
   extensionId: "plugin:radius",
@@ -55,5 +59,54 @@ describe("reloadCanvasInstance", () => {
     await expect(
       reloadCanvasInstance(session, context)
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("sourceEditorInstanceId", () => {
+  it("gives two different source files two different editor handles", () => {
+    // The defect this guards: a shared handle makes the host focus the panel
+    // already showing the first file instead of opening the second one.
+    expect(sourceEditorInstanceId("src/app.ts")).not.toBe(
+      sourceEditorInstanceId("src/worker.ts")
+    );
+  });
+
+  it("returns the same handle for the same file so re-clicking a node reuses its panel", () => {
+    expect(sourceEditorInstanceId("src/app.ts")).toBe(
+      sourceEditorInstanceId("src/app.ts")
+    );
+  });
+
+  it("keeps the path readable in the handle behind the shared prefix", () => {
+    const id = sourceEditorInstanceId("services/api/Dockerfile");
+    expect(id.startsWith(`${SOURCE_EDITOR_INSTANCE_PREFIX}-`)).toBe(true);
+    expect(id).toContain("services-api-dockerfile");
+  });
+
+  it("separates paths that slug identically", () => {
+    // Both slug to "src-a-b", so only the digest keeps them apart.
+    expect(sourceEditorInstanceId("src/a.b")).not.toBe(
+      sourceEditorInstanceId("src/a_b")
+    );
+  });
+
+  it("separates long paths that share a slug prefix past the cutoff", () => {
+    const shared = `deep/${"nested/".repeat(12)}`;
+    expect(sourceEditorInstanceId(`${shared}first.ts`)).not.toBe(
+      sourceEditorInstanceId(`${shared}second.ts`)
+    );
+  });
+
+  it("emits a usable handle with no trailing separator for a path with no slug characters", () => {
+    const id = sourceEditorInstanceId("///");
+    expect(id.startsWith(`${SOURCE_EDITOR_INSTANCE_PREFIX}-`)).toBe(true);
+    expect(id).not.toMatch(/--|-$/);
+  });
+
+  it("trims a separator left at the slug cutoff", () => {
+    // The 60-char slug window ends exactly on the separator before "ts".
+    const id = sourceEditorInstanceId(`${"a".repeat(60)}/ts`);
+    expect(id).not.toContain("--");
+    expect(id).toContain(`-${"a".repeat(60)}-`);
   });
 });
