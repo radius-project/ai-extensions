@@ -23,10 +23,6 @@ import type { GraphResource } from "../graph/model.js";
 import type { GraphController } from "../graph/surface.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import { readPageState } from "./state.js";
-import {
-  GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
-  GRAPH_APP_BICEP_TIMEOUT_MS
-} from "../../graph-progress-contract.js";
 
 const ENTRY_KEY = "graph-page";
 export const GRAPH_PAGE_STATE_ID = "radius-graph-page-state";
@@ -37,11 +33,6 @@ export const GRAPH_PROGRESS_MS = 800;
 // carries the diagnostic; this only explains the disabled control.
 export const GRAPH_PLAN_BLOCKED_TITLE =
   "Plan Deployment is unavailable until the application model compiles.";
-// How long the page waits for Copilot to author .radius/app.bicep before it
-// gives up. Nothing reports back when the modeling skill finishes or refuses —
-// the page only learns by asking again — so an unbounded retry would spin
-// forever on a repository the skill cannot model at all.
-export { GRAPH_APP_BICEP_TIMEOUT_MESSAGE, GRAPH_APP_BICEP_TIMEOUT_MS };
 
 interface GraphPageState {
   repo: string;
@@ -114,15 +105,13 @@ export function initializeGraphPage(
   if (!entry) return NOOP_TEARDOWN;
   let hasLoadedGraph = page.loaded;
   let generation = 0;
+  let branchSelectionGeneration = 0;
   let requestActive = false;
   let retry: ScopeTimer | null = null;
   let progress: ScopeTimer | null = null;
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
   let progressView: GraphProgressView | null = null;
-  // When the current wait for Copilot to author .radius/app.bicep began, or
-  // null when the page is not waiting on one.
-  let appBicepWaitStartedAtMs: number | null = null;
   let renderedOptions: GraphOptions | null = null;
   // Whether the selected branch's model has compiled. It starts pending even
   // for a server-rendered graph, because that page immediately re-requests the
@@ -206,7 +195,6 @@ export function initializeGraphPage(
     requestAbort?.abort();
     requestAbort = null;
     requestActive = false;
-    appBicepWaitStartedAtMs = null;
     if (retry !== null) entry.cancel(retry);
     retry = null;
     stopProgress();
@@ -319,11 +307,16 @@ export function initializeGraphPage(
       wrapper.innerHTML = '<div id="graph-container"></div>';
     }
     setLoading("graph-container");
-    showStatus(
-      context,
-      "Checking the selected branch for .radius/app.bicep…",
-      "info"
-    );
+    // Automatic retries continue the same wait. Keep its status text stable
+    // instead of flashing "Checking…" before every response restores the
+    // generating message.
+    if (!options.continuing) {
+      showStatus(
+        context,
+        "Checking the selected branch for .radius/app.bicep…",
+        "info"
+      );
+    }
     startProgress(
       requestGeneration,
       "Checking the selected branch for .radius/app.bicep…",
@@ -333,7 +326,11 @@ export function initializeGraphPage(
       .fetch("/api/load-graph", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: page.repo, branch }),
+        body: JSON.stringify({
+          repo: page.repo,
+          branch,
+          restartWait: options.continuing !== true
+        }),
         signal: requestAbort?.signal
       })
       .then((response) => response.json())
@@ -353,23 +350,11 @@ export function initializeGraphPage(
           hasLoadedGraph = true;
           return;
         }
-        if (readBoolean(payload, "reload")) {
-          stopProgress();
-          showStatus(context, "Application graph ready.", "info");
-          context.nav.reload();
-          return;
-        }
         // The work continues off-page while Copilot authors the model, so the
-        // panel keeps running rather than being torn down and rebuilt.
+        // panel keeps running rather than being torn down and rebuilt. The
+        // server owns how long that wait may last and drops `needsAppBicep`
+        // when it expires, which lands the answer on the error path below.
         if (readBoolean(payload, "needsAppBicep")) {
-          const now = context.clock.now();
-          if (appBicepWaitStartedAtMs === null) appBicepWaitStartedAtMs = now;
-          if (now - appBicepWaitStartedAtMs >= GRAPH_APP_BICEP_TIMEOUT_MS) {
-            appBicepWaitStartedAtMs = null;
-            stopProgress();
-            showFailure(GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
-            return;
-          }
           showStatus(
             context,
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…",
@@ -381,7 +366,6 @@ export function initializeGraphPage(
           });
           return;
         }
-        appBicepWaitStartedAtMs = null;
         if (readBoolean(payload, "stale")) {
           showStatus(
             context,
@@ -402,11 +386,14 @@ export function initializeGraphPage(
             syncPrimaryButton();
           }
           showFailure(error);
+        } else {
+          showFailure(
+            "The application graph response did not include any resources."
+          );
         }
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
-        appBicepWaitStartedAtMs = null;
         const message = "Failed to generate the application graph.";
         stopProgress();
         context.logger.error("Radius graph request failed.", error);
@@ -422,6 +409,7 @@ export function initializeGraphPage(
 
   if (branchSelect) {
     entry.on(branchSelect, "change", () => {
+      branchSelectionGeneration++;
       stopRequest();
       modelState = "pending";
       syncPrimaryButton();
@@ -443,72 +431,108 @@ export function initializeGraphPage(
       localSource: page.localSource
     };
     renderOrUpdate(page.resources, graphOptions);
-    const refreshGeneration = ++generation;
-    requestAbort = context.net.createAbort();
-    void context.net
-      .fetch("/api/load-graph", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          repo: page.repo,
-          branch: page.branch,
-          refresh: true
-        }),
-        signal: requestAbort?.signal
-      })
-      .then((response) => response.json())
-      .then((payload) => {
-        if (refreshGeneration !== generation) return;
-        if (isRecord(payload) && Array.isArray(payload.resources)) {
-          modelState = "ready";
-          syncPrimaryButton();
-          renderOrUpdate(parseGraphResources(payload.resources), {
-            ...graphOptions,
-            localSource: sourceProvenance(payload)
-          });
-        } else if (readBoolean(payload, "needsAppBicep")) {
-          showStatus(
-            context,
-            "Copilot is rebuilding the application graph from .radius/app.bicep with the Radius app-bicep skill.",
-            "info"
-          );
-        } else {
-          const error = readString(payload, "error");
-          if (error) {
-            if (readBoolean(payload, "modelingFailed")) {
-              modelState = "failed";
-              syncPrimaryButton();
-              showFailure(error);
-            } else {
+    // Refreshing a preloaded graph keeps the rendered nodes on screen, so the
+    // retrying paths below re-enter this request rather than `load`, which
+    // blanks the container before it fetches. Only the first request restarts
+    // the server-side wait; the polls that continue it must not, or the wait
+    // would never age out.
+    const refreshLoadedGraph = (
+      options: { readonly continuing?: boolean } = {}
+    ): void => {
+      const refreshGeneration = ++generation;
+      requestAbort = context.net.createAbort();
+      void context.net
+        .fetch("/api/load-graph", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            repo: page.repo,
+            branch: page.branch,
+            refresh: true,
+            restartWait: options.continuing !== true
+          }),
+          signal: requestAbort?.signal
+        })
+        .then((response) => response.json())
+        .then((payload) => {
+          if (refreshGeneration !== generation) return;
+          if (isRecord(payload) && Array.isArray(payload.resources)) {
+            modelState = "ready";
+            syncPrimaryButton();
+            stopProgress();
+            showStatus(context, "Application graph ready.", "info");
+            renderOrUpdate(parseGraphResources(payload.resources), {
+              ...graphOptions,
+              localSource: sourceProvenance(payload)
+            });
+          } else if (readBoolean(payload, "needsAppBicep")) {
+            // A preloaded graph refresh can discover that the model disappeared
+            // just like the initial load can. The server owns how long that wait
+            // may last and drops `needsAppBicep` when it expires, which lands the
+            // answer on the error path below.
+            showStatus(
+              context,
+              "Copilot is rebuilding the application graph from .radius/app.bicep with the Radius app-bicep skill.",
+              "info"
+            );
+            retry = entry.after(GRAPH_RETRY_MS, () => {
+              retry = null;
+              refreshLoadedGraph({ continuing: true });
+            });
+          } else if (readBoolean(payload, "stale")) {
+            showStatus(
+              context,
+              "A newer graph request replaced this one. Retrying…",
+              "info"
+            );
+            retry = entry.after(GRAPH_STALE_RETRY_MS, () => {
+              retry = null;
+              refreshLoadedGraph({ continuing: true });
+            });
+          } else {
+            const error = readString(payload, "error");
+            if (error) {
+              if (readBoolean(payload, "modelingFailed")) {
+                modelState = "failed";
+                syncPrimaryButton();
+              }
               showStatus(
                 context,
                 `Unable to refresh the application graph: ${error}`,
                 "error"
               );
+            } else {
+              showStatus(
+                context,
+                "Unable to refresh the application graph: the response did not include any resources.",
+                "error"
+              );
             }
           }
-        }
-      })
-      .catch((error: unknown) => {
-        if (!entry.active || refreshGeneration !== generation) return;
-        context.logger.error("Radius graph refresh failed.", error);
-        showStatus(
-          context,
-          "Unable to refresh the application graph.",
-          "error"
-        );
-      })
-      .then(() => {
-        if (refreshGeneration === generation) requestAbort = null;
-      });
+        })
+        .catch((error: unknown) => {
+          if (!entry.active || refreshGeneration !== generation) return;
+          context.logger.error("Radius graph refresh failed.", error);
+          showStatus(
+            context,
+            "Unable to refresh the application graph.",
+            "error"
+          );
+        })
+        .then(() => {
+          if (refreshGeneration === generation) requestAbort = null;
+        });
+    };
+    refreshLoadedGraph();
   }
   void populateApplications(context, page.repo, "graph-app");
+  const branchListingGeneration = branchSelectionGeneration;
   void populateBranches(
     context,
     ["graph-branch"],
     page.repo,
     [page.branch],
-    () => entry.active
+    () => entry.active && branchSelectionGeneration === branchListingGeneration
   )
     .then(() => {
       if (!entry.active || hasLoadedGraph || !branchSelect?.value) return;
@@ -516,6 +540,12 @@ export function initializeGraphPage(
       load();
     })
     .catch((error: unknown) => {
+      if (
+        !entry.active ||
+        branchSelectionGeneration !== branchListingGeneration
+      ) {
+        return;
+      }
       context.logger.error("Radius could not load graph branches.", error);
       showStatus(context, "Unable to load branches.", "error");
     });
