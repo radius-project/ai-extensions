@@ -783,7 +783,9 @@ describe("runRadAppGraph artifact completion", () => {
     }
     fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
     fs.writeFileSync(MANAGED_BICEP_PATH, "bicep");
-    fs.chmodSync(MANAGED_BICEP_PATH, 0o755);
+    if (process.platform !== "win32") {
+      fs.chmodSync(MANAGED_BICEP_PATH, 0o755);
+    }
     prevBinary = process.env.RADIUS_RAD_BINARY;
     process.env.RADIUS_RAD_BINARY = bin;
   });
@@ -800,28 +802,30 @@ describe("runRadAppGraph artifact completion", () => {
     if (bicepBackup) {
       fs.mkdirSync(path.dirname(MANAGED_BICEP_PATH), { recursive: true });
       fs.writeFileSync(MANAGED_BICEP_PATH, bicepBackup);
-      if (bicepMode !== null) fs.chmodSync(MANAGED_BICEP_PATH, bicepMode);
+      if (bicepMode !== null && process.platform !== "win32") {
+        fs.chmodSync(MANAGED_BICEP_PATH, bicepMode);
+      }
     }
   });
 
-  it.runIf(process.platform === "win32")(
-    "accepts a valid graph after a successful exit without waiting for a lingering pipe",
-    async () => {
-      const bicepFile = path.join(binDir, "app.bicep");
-      fs.writeFileSync(
-        bicepFile,
-        "resource app 'Radius.Core/applications@2023-10-01-preview' = {}"
-      );
-      const started = Date.now();
-      await expect(
-        runRadAppGraph(bicepFile, { radPath: bin })
-      ).resolves.toEqual({
-        resources: []
-      });
-      expect(Date.now() - started).toBeLessThan(1500);
-    },
-    10000
-  );
+  it("accepts a valid graph after a successful exit without waiting for a lingering pipe", async () => {
+    const bicepFile = path.join(binDir, "app.bicep");
+    fs.writeFileSync(
+      bicepFile,
+      "resource app 'Radius.Core/applications@2023-10-01-preview' = {}"
+    );
+    await expect(
+      runRadAppGraph(bicepFile, {
+        radPath: bin,
+        timeout: 4000,
+        processPlatform: "win32",
+        artifactPollIntervalMs: 10,
+        exitCloseGraceMs: 60_000
+      })
+    ).resolves.toEqual({
+      resources: []
+    });
+  }, 10000);
 
   it("preserves a non-zero exit and diagnostics written after a valid artifact", async () => {
     process.env.FAKE_RAD_SCENARIO = "failure";

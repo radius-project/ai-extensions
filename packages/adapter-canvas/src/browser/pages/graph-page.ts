@@ -114,6 +114,7 @@ export function initializeGraphPage(
   if (!entry) return NOOP_TEARDOWN;
   let hasLoadedGraph = page.loaded;
   let generation = 0;
+  let branchSelectionGeneration = 0;
   let requestActive = false;
   let retry: ScopeTimer | null = null;
   let progress: ScopeTimer | null = null;
@@ -298,19 +299,24 @@ export function initializeGraphPage(
       });
   };
 
-  const waitForAppBicep = (message: string): void => {
+  const waitForAppBicep = (
+    message: string,
+    continueWaiting: () => void = () => load({ continuing: true }),
+    timeoutFailure: () => void = () =>
+      showFailure(GRAPH_APP_BICEP_TIMEOUT_MESSAGE)
+  ): void => {
     const now = context.clock.now();
     if (appBicepWaitStartedAtMs === null) appBicepWaitStartedAtMs = now;
     if (now - appBicepWaitStartedAtMs >= GRAPH_APP_BICEP_TIMEOUT_MS) {
       appBicepWaitStartedAtMs = null;
       stopProgress();
-      showFailure(GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
+      timeoutFailure();
       return;
     }
     showStatus(context, message, "info");
     retry = entry.after(GRAPH_RETRY_MS, () => {
       retry = null;
-      load({ continuing: true });
+      continueWaiting();
     });
   };
 
@@ -422,6 +428,7 @@ export function initializeGraphPage(
 
   if (branchSelect) {
     entry.on(branchSelect, "change", () => {
+      branchSelectionGeneration++;
       stopRequest();
       modelState = "pending";
       syncPrimaryButton();
@@ -443,79 +450,98 @@ export function initializeGraphPage(
       localSource: page.localSource
     };
     renderOrUpdate(page.resources, graphOptions);
-    const refreshGeneration = ++generation;
-    requestAbort = context.net.createAbort();
-    void context.net
-      .fetch("/api/load-graph", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          repo: page.repo,
-          branch: page.branch,
-          refresh: true
-        }),
-        signal: requestAbort?.signal
-      })
-      .then((response) => response.json())
-      .then((payload) => {
-        if (refreshGeneration !== generation) return;
-        if (isRecord(payload) && Array.isArray(payload.resources)) {
-          modelState = "ready";
-          syncPrimaryButton();
-          renderOrUpdate(parseGraphResources(payload.resources), {
-            ...graphOptions,
-            localSource: sourceProvenance(payload)
-          });
-        } else if (readBoolean(payload, "needsAppBicep")) {
-          startProgress(
-            refreshGeneration,
-            "Checking the selected branch for .radius/app.bicep…"
-          );
-          waitForAppBicep(
-            "Copilot is rebuilding the application graph from .radius/app.bicep with the Radius app-bicep skill."
-          );
-        } else {
-          const error = readString(payload, "error");
-          if (error) {
-            if (readBoolean(payload, "modelingFailed")) {
-              modelState = "failed";
-              syncPrimaryButton();
-              showFailure(error);
-            } else {
+    const refreshLoadedGraph = (): void => {
+      const refreshGeneration = ++generation;
+      requestAbort = context.net.createAbort();
+      void context.net
+        .fetch("/api/load-graph", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            repo: page.repo,
+            branch: page.branch,
+            refresh: true
+          }),
+          signal: requestAbort?.signal
+        })
+        .then((response) => response.json())
+        .then((payload) => {
+          if (refreshGeneration !== generation) return;
+          if (isRecord(payload) && Array.isArray(payload.resources)) {
+            appBicepWaitStartedAtMs = null;
+            modelState = "ready";
+            syncPrimaryButton();
+            stopProgress();
+            showStatus(context, "Application graph ready.", "info");
+            renderOrUpdate(parseGraphResources(payload.resources), {
+              ...graphOptions,
+              localSource: sourceProvenance(payload)
+            });
+          } else if (readBoolean(payload, "needsAppBicep")) {
+            waitForAppBicep(
+              "Copilot is rebuilding the application graph from .radius/app.bicep with the Radius app-bicep skill.",
+              refreshLoadedGraph,
+              () =>
+                showStatus(
+                  context,
+                  `Unable to refresh the application graph: ${GRAPH_APP_BICEP_TIMEOUT_MESSAGE}`,
+                  "error"
+                )
+            );
+          } else if (readBoolean(payload, "stale")) {
+            showStatus(
+              context,
+              "A newer graph request replaced this one. Retrying…",
+              "info"
+            );
+            retry = entry.after(GRAPH_STALE_RETRY_MS, () => {
+              retry = null;
+              refreshLoadedGraph();
+            });
+          } else {
+            const error = readString(payload, "error");
+            if (error) {
+              if (readBoolean(payload, "modelingFailed")) {
+                modelState = "failed";
+                syncPrimaryButton();
+              }
               showStatus(
                 context,
                 `Unable to refresh the application graph: ${error}`,
                 "error"
               );
+            } else {
+              showStatus(
+                context,
+                "Unable to refresh the application graph: the response did not include any resources.",
+                "error"
+              );
             }
-          } else {
-            showFailure(
-              "The application graph response did not include any resources."
-            );
           }
-        }
-      })
-      .catch((error: unknown) => {
-        if (!entry.active || refreshGeneration !== generation) return;
-        context.logger.error("Radius graph refresh failed.", error);
-        showStatus(
-          context,
-          "Unable to refresh the application graph.",
-          "error"
-        );
-      })
-      .then(() => {
-        if (refreshGeneration === generation) requestAbort = null;
-      });
+        })
+        .catch((error: unknown) => {
+          if (!entry.active || refreshGeneration !== generation) return;
+          context.logger.error("Radius graph refresh failed.", error);
+          showStatus(
+            context,
+            "Unable to refresh the application graph.",
+            "error"
+          );
+        })
+        .then(() => {
+          if (refreshGeneration === generation) requestAbort = null;
+        });
+    };
+    refreshLoadedGraph();
   }
   void populateApplications(context, page.repo, "graph-app");
-  const branchListingGeneration = generation;
+  const branchListingGeneration = branchSelectionGeneration;
   void populateBranches(
     context,
     ["graph-branch"],
     page.repo,
     [page.branch],
-    () => entry.active && generation === branchListingGeneration
+    () => entry.active && branchSelectionGeneration === branchListingGeneration
   )
     .then(() => {
       if (!entry.active || hasLoadedGraph || !branchSelect?.value) return;
@@ -523,7 +549,12 @@ export function initializeGraphPage(
       load();
     })
     .catch((error: unknown) => {
-      if (!entry.active || generation !== branchListingGeneration) return;
+      if (
+        !entry.active ||
+        branchSelectionGeneration !== branchListingGeneration
+      ) {
+        return;
+      }
       context.logger.error("Radius could not load graph branches.", error);
       showStatus(context, "Unable to load branches.", "error");
     });

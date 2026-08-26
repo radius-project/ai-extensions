@@ -29,26 +29,29 @@ const SUBTITLE_STYLE =
 const LINK_STYLE =
   "color:var(--rad-link); text-decoration:none; font-weight:500; display:flex; align-items:center; gap:6px; font-size:13px;";
 
-// A link row: monochrome glyph + blue label, with the target URL shown as a
-// muted subtitle beneath.
+// Every external row built here, including source, app-definition, portal, and
+// cloud-output links, carries delegated metadata so the Canvas host opens it.
+// The target URL is optionally shown as a muted subtitle beneath.
 export function linkRow(
   iconSvg: string,
   label: string,
   href: string,
   showUrl: boolean
 ): string {
-  const safeHref = safeExternalUrl(href) || "#";
-  const external =
-    safeHref === "#" ? "" : (
-      ` data-external-url="${escapeBrowserHtml(safeHref)}"`
+  const safeHref = safeExternalUrl(href);
+  if (!safeHref) {
+    return (
+      '<div style="padding:6px 4px;">' +
+      `<span aria-disabled="true" style="${LINK_STYLE}">${iconSvg}<span>${escapeBrowserHtml(label)}</span></span></div>`
     );
+  }
   const sub =
     showUrl ?
       `<div style="${SUBTITLE_STYLE}">${escapeBrowserHtml(safeHref)}</div>`
     : "";
   return (
     '<div style="padding:6px 4px;">' +
-    `<a href="${escapeBrowserHtml(safeHref)}"${external} target="_blank" rel="noopener noreferrer" style="${LINK_STYLE}">` +
+    `<a href="${escapeBrowserHtml(safeHref)}" data-external-url="${escapeBrowserHtml(safeHref)}" target="_blank" rel="noopener noreferrer" style="${LINK_STYLE}">` +
     iconSvg +
     `<span>${escapeBrowserHtml(label)}</span></a>${sub}</div>`
   );
@@ -340,9 +343,9 @@ export function createDetailsPanel(
     context.focus.focus(restore);
   }
 
-  // Delegate clicks from the node cards. The card body opens the panel; the
-  // in-card source anchor and the panel's own links are native anchors that
-  // handle their own clicks. Clicking the empty pane closes the panel.
+  // Delegate clicks from the node cards. Every validated external row is routed
+  // through the Canvas host; local source rows open the editor canvas. Clicking
+  // the empty pane closes the panel.
   const onClick = (event: {
     target?: unknown;
     preventDefault(): void;
@@ -368,6 +371,8 @@ export function createDetailsPanel(
     const externalEl = find("[data-external-url]");
     if (externalEl !== null && externalEl !== undefined) {
       event.preventDefault();
+      // linkRow emits this attribute only for a validated URL. Validate again
+      // because a caller or browser extension can still mutate the DOM.
       const url = safeExternalUrl(
         (externalEl as DomElement).getAttribute("data-external-url") ?? ""
       );

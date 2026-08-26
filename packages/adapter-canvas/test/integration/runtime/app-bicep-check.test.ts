@@ -15,6 +15,10 @@ import {
   isRepeatedFailure,
   parseRepairState
 } from "@radius-project/core/modeling";
+import {
+  githubSourceReferenceUrl,
+  srcPathFromRef
+} from "../../../src/browser/graph/model.js";
 
 const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -446,6 +450,28 @@ test("fails when a non-application Radius resource has no durable source referen
   assert.doesNotMatch(result.stderr, /app\.properties\.codeReference/u);
 });
 
+test("explains how to update a custom type missing source-reference support", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    queue: {
+      type: "Radius.Resources/queues@2025-08-01-preview",
+      properties: { properties: {} }
+    }
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /add the optional codeReference string property/u
+  );
+  assert.match(result.stderr, /republish custom-types\.tgz/u);
+});
+
 test.each([
   "/src/app.ts",
   "src\\app.ts",
@@ -476,6 +502,14 @@ test.each([
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /repo-relative worktree path/u);
+  if (codeReference === "src\\app.ts" || codeReference === "/src/app.ts") {
+    // Authoring rejects platform-specific separators, while rendering keeps
+    // legacy separators and a legacy leading slash readable in persisted graphs.
+    assert.equal(srcPathFromRef(codeReference), "src/app.ts");
+  } else {
+    assert.equal(githubSourceReferenceUrl(codeReference), "");
+    assert.equal(srcPathFromRef(codeReference), "");
+  }
 });
 
 test.each([
@@ -498,6 +532,9 @@ test.each([
 
   assert.equal(result.status, 0);
   assert.equal(result.stderr, "");
+  assert.ok(
+    githubSourceReferenceUrl(codeReference) || srcPathFromRef(codeReference)
+  );
 });
 
 test("resolves a top-level source-reference parameter default", () => {
@@ -617,6 +654,33 @@ test("fails and surfaces a Bicep warning even when Bicep exits successfully", ()
     result.stderr,
     /app\.bicep:12: warning use-secure-value-for-secure-inputs: Property 'password' expects a secure value\./u
   );
+});
+
+test("adds custom-type repair guidance to a codeReference BCP037 diagnostic", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(
+      directory,
+      sarif([
+        {
+          ruleId: "BCP037",
+          message: {
+            text: 'The property "codeReference" is not allowed on objects of type "properties".'
+          },
+          level: "error"
+        }
+      ]),
+      1
+    )
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /add the optional codeReference string property/u
+  );
+  assert.match(result.stderr, /republish custom-types\.tgz/u);
 });
 
 test("surfaces informational diagnostics without failing", () => {

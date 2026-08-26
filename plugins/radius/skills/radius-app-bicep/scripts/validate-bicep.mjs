@@ -253,7 +253,13 @@ function printDiagnostic(result) {
     typeof result.message?.text === "string" && result.message.text ?
       result.message.text
     : "Bicep reported a diagnostic.";
-  report(`${location ? `${location}: ` : ""}${level}${rule}: ${text}`);
+  const customTypeHint =
+    result.ruleId === "BCP037" && /\bcodeReference\b/u.test(text) ?
+      " For a Radius.Resources custom type, add the optional codeReference string property to custom-types.yaml and republish custom-types.tgz before compiling again."
+    : "";
+  report(
+    `${location ? `${location}: ` : ""}${level}${rule}: ${text}${customTypeHint}`
+  );
 }
 
 function isFailure(result) {
@@ -423,9 +429,13 @@ function checkSourceCodeReferences(
     }
 
     const rawCodeReference = resource?.properties?.properties?.codeReference;
+    const customTypeHint =
+      resource.type.startsWith("Radius.Resources/") ?
+        " If this custom type predates the source-reference contract, add the optional codeReference string property to custom-types.yaml and republish custom-types.tgz."
+      : "";
     if (typeof rawCodeReference !== "string" || !rawCodeReference.trim()) {
       report(
-        `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: every non-application Radius resource must store its verified worktree path or GitHub branch/file URL in app.bicep.`
+        `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: every non-application Radius resource must store its verified worktree path or GitHub branch/file URL in app.bicep.${customTypeHint}`
       );
       failed = true;
       continue;
@@ -472,8 +482,11 @@ function checkSourceCodeReferences(
           codeReference.includes("\\") ||
           !sourceLocationPattern.test(codeReference)))
     ) {
+      // An unresolved compiled ARM expression begins with "[". It is not a
+      // durable path and would render as a dead source link, so reject it along
+      // with malformed literal values.
       report(
-        `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: ${JSON.stringify(rawCodeReference)} must resolve to a repo-relative worktree path using forward slashes or an exact https://github.com/<owner>/<repo>/blob/<branch>/<file> URL, optionally followed by #L<line>.`
+        `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: ${JSON.stringify(rawCodeReference)} must resolve to a repo-relative worktree path using forward slashes or an exact https://github.com/<owner>/<repo>/blob/<branch>/<file> URL, optionally followed by #L<line>.${customTypeHint}`
       );
       failed = true;
     }

@@ -55,7 +55,7 @@ export function applicationGraphToResources(
     Array.isArray(appGraph) ? appGraph
     : appGraph && Array.isArray(appGraph.resources) ? appGraph.resources
     : [];
-  const definitionLines = findResourceDefinitionLines(definitionContent, true);
+  const definitionLines = findResourceDefinitionLines(definitionContent);
 
   const resources: any[] = [];
   for (const r of raw) {
@@ -124,8 +124,7 @@ export function applicationGraphToResources(
  * declaration without coupling the graph model to a Bicep parser.
  */
 export function findResourceDefinitionLines(
-  content: string,
-  includeTypedNames = false
+  content: string
 ): Map<string, number> {
   const result = new Map<string, number>();
   if (!content) return result;
@@ -168,7 +167,7 @@ export function findResourceDefinitionLines(
       if (nameMatch && !result.has(nameMatch[1])) {
         result.set(nameMatch[1], lineNumber);
       }
-      if (nameMatch && includeTypedNames) {
+      if (nameMatch) {
         const typedKey = definitionKey(declaration.type, nameMatch[1]);
         if (!result.has(typedKey)) result.set(typedKey, lineNumber);
       }

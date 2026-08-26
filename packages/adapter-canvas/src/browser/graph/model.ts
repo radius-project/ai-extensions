@@ -549,11 +549,16 @@ function codeReferenceParts(codeRef: string): {
   if (
     codeRef !== codeRef.trim() ||
     /[\u0000-\u001f\u007f]/.test(codeRef) ||
+    // Compiled ARM expressions are not paths. They must be resolved by model
+    // validation before graph rendering rather than becoming dead source links.
     codeRef.startsWith("[")
   ) {
     return { path: "", line: 0 };
   }
   const lineMatch = /#L([1-9][0-9]*)$/.exec(codeRef);
+  if (codeRef.includes("#") && lineMatch === null) {
+    return { path: "", line: 0 };
+  }
   const rawPath = codeRef.replace(/#L[1-9][0-9]*$/, "").replace(/\\/g, "/");
   const segments = rawPath.split("/").filter((segment) => segment !== "");
   if (
@@ -617,10 +622,10 @@ export function githubSourceReferenceUrl(codeRef: string): string {
 // fall back to the repo tree so the link resolves to a real page instead of a
 // dead affordance. Empty only when neither an exact URL nor repo context exists.
 //
-// The single-backslash regex converts a Windows-generated codeReference to a
-// POSIX path so the link resolves. Unlike the legacy template-literal source
-// (which had to double-escape as /\\\\/g), this is real compiled code, so the
-// regex is written directly as one that matches a single backslash.
+// Validation requires newly authored metadata to use repo-relative POSIX paths.
+// Normalize legacy Windows references here so older stored graphs remain
+// navigable; unlike the legacy template-literal source (which had to
+// double-escape as /\\\\/g), this regex directly matches one backslash.
 export function buildSourceUrl(
   repoUrl: string,
   branch: string,

@@ -2,7 +2,7 @@
 
 Each graph node can carry a **source-code reference** that points at the place in the code where that resource is defined, created, or initialized. It is either a repo-relative worktree path or an exact GitHub branch/file URL, optionally with a `#L<line>` anchor. The canvas turns it into a clickable node link, so a reviewer can jump from a box in the application graph straight to, say, the file that opens the MySQL connection.
 
-Radius treats this as optional metadata that a developer would normally hand-add. Because the app model here is generated rather than hand-crafted, this skill is responsible for finding that location and attaching it to the resource.
+Radius's reusable schemas treat this as optional metadata that a developer may hand-add. Generated app models use a stricter completeness contract: this skill must attach one durable reference to every non-application resource so source navigation survives graph regeneration.
 
 ## Where the reference lives
 
@@ -27,28 +27,32 @@ Prefer the real usage/initialization site over a barrel/re-export file (`index.j
 
 For each resource missing a reference, work the branch the graph is being built for:
 
-1. **Categorize the resource** from its `type` (case-insensitive substring):
-   `mysql`, `postgres`/`pgsql`, `redis`/`cache`, `mongo`, `rabbit`/`queue`/`messaging`, `neo4j`, `secret`, `container`/`compute`.
+1. **Categorize the resource** from its `type` (case-insensitive substring): `mysql`, `postgres`/`pgsql`, `redis`/`cache`, `mongo`, `rabbit`/`queue`/`messaging`, `kafka`/`event`, `neo4j`, `secret`, `containerImage`, `container`/`compute`, `storage`/`volume`, `route`/`ingress`, `model`/`search`, or `custom`.
 2. **Match a file by name** using the category's file-name patterns (below). Take the first match that is not skipped.
 3. **Pinpoint the line** by scanning the matched file for the category's initialization/content patterns; append `#L<line>` at the first match (1-based).
 4. **Content fallback** — if no filename matched, scan a bounded set of source files (skip barrels last) for the initialization pattern and link `path#L<line>` at the first hit.
 5. **Container special case** — prefer a `Dockerfile` in the directory that matches the service name; otherwise the service entrypoint file.
-6. **Last resort** — a `docker-compose.*` file that declares the service/store is an acceptable file-level link when no source init site exists.
+6. **Declarative resources** — for storage, routes, AI endpoints, recipe-backed custom types, and other resources without a runtime constructor, use the checked-in manifest, migration, schema, configuration, or application wiring that requires the resource.
+7. **Last resort** — use a `docker-compose.*` declaration when it exists; otherwise use the resource's own declaration line in `.radius/app.bicep`. The generated Bicep declaration is the authoritative definition site when the application has no separate initialization file.
 
 Keep the search bounded (don't fetch the whole repo): a few dozen candidate files and a small fetch budget are enough. Cache file contents you fetch.
 
 ### File-name patterns by category
 
-| Category  | Filename cues (basename, any dir depth)                                                                                                    |
-|-----------|--------------------------------------------------------------------------------------------------------------------------------------------|
-| mysql     | `db`,`database`,`persistence`,`connection`,`datastore`,`mysql`; `config/database`; `models/{index,db}`; `prisma/schema.prisma`; `knexfile` |
-| postgres  | `db`,`database`,`persistence`,`connection`,`datastore`,`postgres`,`pg`; `config/database`; `prisma/schema.prisma`; `knexfile`              |
-| redis     | `redis`,`cache`,`session`; `config/{redis,cache}`                                                                                          |
-| mongo     | `db`,`database`,`mongo`,`mongoose`; `models/{index,db}`                                                                                    |
-| rabbitmq  | `queue`,`messaging`,`rabbitmq`,`amqp`,`broker`,`event(s)`                                                                                  |
-| neo4j     | `db`,`database`,`neo4j`,`graph`                                                                                                            |
-| container | `Dockerfile`; `server`,`app`,`main`,`index` (incl. under `src/`)                                                                           |
-| secret    | `secret(s)`,`credential(s)`,`auth`,`env`; `config/{secrets,credentials}`; `.env`(`.example`/`.sample`)                                     |
+| Category        | Filename cues (basename, any dir depth)                                                                                                    |
+|-----------------|--------------------------------------------------------------------------------------------------------------------------------------------|
+| mysql           | `db`,`database`,`persistence`,`connection`,`datastore`,`mysql`; `config/database`; `models/{index,db}`; `prisma/schema.prisma`; `knexfile` |
+| postgres        | `db`,`database`,`persistence`,`connection`,`datastore`,`postgres`,`pg`; `config/database`; `prisma/schema.prisma`; `knexfile`              |
+| redis           | `redis`,`cache`,`session`; `config/{redis,cache}`                                                                                          |
+| mongo           | `db`,`database`,`mongo`,`mongoose`; `models/{index,db}`                                                                                    |
+| rabbitmq/kafka  | `queue`,`messaging`,`rabbitmq`,`amqp`,`kafka`,`broker`,`event(s)`                                                                          |
+| neo4j           | `db`,`database`,`neo4j`,`graph`                                                                                                            |
+| image/container | `Dockerfile`; `server`,`app`,`main`,`index` (incl. under `src/`)                                                                           |
+| storage/volume  | `storage`,`volume`,`uploads`,`assets`,`data`; `docker-compose.*`; deployment manifests                                                     |
+| route/ingress   | `route(s)`,`ingress`,`gateway`,`proxy`; framework route configuration; deployment manifests                                                |
+| AI              | `ai`,`model`,`search`,`embedding`; client/configuration modules                                                                            |
+| secret          | `secret(s)`,`credential(s)`,`auth`,`env`; `config/{secrets,credentials}`; `.env`(`.example`/`.sample`)                                     |
+| custom          | The manifest, configuration, or application integration that motivates the custom backing service                                          |
 
 Source extensions considered for content scans: `.js .ts .mjs .cjs .jsx .tsx .py .go .java .rb`.
 
@@ -61,8 +65,12 @@ Source extensions considered for content scans: `.js .ts .mjs .cjs .jsx .tsx .py
 | redis     | `createClient`, `new Redis`, `Redis(`, `redis.connect`, `ioredis`               |
 | mongo     | `mongoose.connect`, `MongoClient`, `mongo.connect`, `new Mongo`                 |
 | rabbitmq  | `amqp.connect`, `createChannel`, `RabbitMQ`, `pika.`                            |
+| kafka     | `Kafka(`, `producer(`, `consumer(`, `subscribe(`, `publish(`                    |
 | neo4j     | `neo4j.driver`, `GraphDatabase`, `new Driver`                                   |
 | container | `listen(`, `createServer`, `app.listen`, `http.ListenAndServe`, `Flask(`        |
+| storage   | `upload`, `blob`, `bucket`, `volume`, `mount`, `readFile`, `writeFile`          |
+| route     | `route`, `ingress`, `gateway`, `proxy`, `host`, `path`                          |
+| AI        | `model`, `embedding`, `search`, `completion`, `inference`                       |
 | secret    | `getSecret`, `SECRET_`, `process.env`, `os.environ`                             |
 
 ### Always skip
@@ -72,9 +80,9 @@ Source extensions considered for content scans: `.js .ts .mjs .cjs .jsx .tsx .py
 
 ## Output format
 
-- For a source file in the selected current worktree, author a **repo-relative path** with forward slashes, optionally `#L<line>`: `src/db/mysql.js#L14`, `services/api/Dockerfile`. This keeps editor-canvas navigation available for uncommitted and local-only work.
+- For a source file in the selected current worktree, author a **repo-relative path** with forward slashes, optionally `#L<line>`: `src/db/mysql.js#L14`, `services/api/Dockerfile`. Although the reusable Radius base schema describes `codeReference` as a source URI, the generated-model contract intentionally permits this local form so the editor canvas can open uncommitted and local-only files that have no truthful remote URL.
 - For a source file resolved from a committed GitHub branch rather than the current worktree, author the exact `https://github.com/<owner>/<repo>/blob/<branch>/<path>[#L<line>]` URL. The URL must name the branch and file that were actually inspected. Never create such a URL for an uncommitted or unpushed file.
-- If nothing credible is found, stop and report that the generated model is incomplete rather than linking a wrong/test file or publishing without the durable reference.
+- If no separate application file is credible, link the resource declaration in `.radius/app.bicep`; never link a wrong/test file or publish without the durable reference.
 
 ## Verify
 

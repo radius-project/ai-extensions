@@ -218,8 +218,9 @@ export function graphTriggerTargets(
 //
 // Preserve an explicit ordinary-graph branch. The shared workspace-selection
 // predicate later decides whether that repo/branch pair resolves from the
-// worktree or from GitHub; only an omitted branch needs the workspace branch
-// supplied here. Graph diffs always use their explicit refs.
+// worktree or from GitHub. An omitted branch inherits the checked-out workspace
+// branch only for that same repository; another repository uses its own default
+// branch. Graph diffs always use their explicit refs.
 function resolveTargetBranches(
   targets: GraphTriggerTarget,
   repo: string,
@@ -227,14 +228,14 @@ function resolveTargetBranches(
   defaultBranchForState: (state: CanvasState) => string
 ): string[] {
   const workspaceBranch = optionalString(state?.workspaceBranch);
-  const omittedWorkspaceBranch =
+  const workspaceRepoTarget =
     !targets.comparesCommittedBranches &&
     workspaceBranch &&
     repo === optionalString(state?.workspaceRepo);
   return targets.branches.map(
     (candidate) =>
       candidate ||
-      (omittedWorkspaceBranch ? workspaceBranch : defaultBranchForState(state))
+      (workspaceRepoTarget ? workspaceBranch : defaultBranchForState(state))
   );
 }
 

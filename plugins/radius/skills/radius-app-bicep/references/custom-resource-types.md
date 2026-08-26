@@ -73,7 +73,7 @@ types:
 Rules:
 
 - Base properties `environment` (required) and `application` (optional) are always present.
-- `codeReference` (optional, `type: string`) is always declared too. A generated custom type compiles to a **closed** object built from this manifest, so do not rely on it picking up the base properties that built-in types get from Radius's base resource schema: unless the schema declares `codeReference`, authoring it on a custom-type resource fails with `BCP037`. Declare the property explicitly; do NOT use `additionalProperties: true`, which would disable validation for every stray property. Never list `codeReference` in `required`.
+- `codeReference` (`type: string`) is always declared too. Keep it optional in the reusable type schema, but set it on every generated resource instance as required by the app-model generation contract. A generated custom type compiles to a **closed** object built from this manifest, so do not rely on it picking up the base properties that built-in types get from Radius's base resource schema: unless the schema declares `codeReference`, authoring it on a custom-type resource fails with `BCP037`. Declare the property explicitly; do NOT use `additionalProperties: true`, which would disable validation for every stray property. Never list `codeReference` in the schema's `required` array.
 - Developer inputs are plain typed properties; use `enum: [...]` for a fixed value set.
 - Mark every sensitive input or sensitive output `x-radius-sensitive: true`.
 - Read-only outputs set `readOnly: true` and are populated by the recipe; do not list them in `required`.

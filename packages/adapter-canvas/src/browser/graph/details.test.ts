@@ -65,10 +65,13 @@ describe("detail rows", () => {
   it("uses inert safe links for invalid direct and local destinations", () => {
     expect(
       linkRow(ICON_LINK, "<label>", "javascript:alert(1)", true)
-    ).toContain('<a href="#"');
+    ).toContain('<span aria-disabled="true"');
     expect(
       linkRow(ICON_LINK, "<label>", "javascript:alert(1)", true)
     ).not.toContain("data-external-url");
+    expect(
+      linkRow(ICON_LINK, "<label>", "javascript:alert(1)", true)
+    ).not.toContain('href="#"');
     expect(
       linkRow(ICON_LINK, "label", "https://example.test", false)
     ).not.toContain("word-break:break-all");

@@ -1032,6 +1032,114 @@ describe("initializeGraphPage", () => {
     expect(browser.nav.reloads).toBe(0);
   });
 
+  it("keeps a pending branch listing current across loaded-graph retries", async () => {
+    const { browser, branch } = fixture({ loaded: true });
+    const branches = createDeferred<HttpResponse>();
+    let calls = 0;
+    browser.net.handle("/api/discover-branches", () => branches.promise);
+    browser.net.handle("/api/load-graph", () => {
+      calls++;
+      return calls === 1 ?
+          jsonResponse({ needsAppBicep: true })
+        : jsonResponse({ resources: [{ id: "app/rebuilt" }] });
+    });
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    browser.clock.tick(GRAPH_RETRY_MS);
+    await flushPromises();
+    branches.resolve(
+      jsonResponse({
+        branches: [
+          { name: "feature", sha: "aaaaaaa" },
+          { name: "release", sha: "bbbbbbb" }
+        ]
+      })
+    );
+    await flushPromises();
+
+    expect(Array.from(branch.options).map((option) => option.value)).toContain(
+      "release"
+    );
+  });
+
+  it("preserves a loaded graph when model rebuilding times out", async () => {
+    const { browser, status } = fixture({ loaded: true });
+    const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
+    const setError = vi.fn();
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ needsAppBicep: true })
+    );
+    initializeGraphPage(
+      browser.context,
+      globals({
+        radiusRenderGraph: vi.fn(() => controller),
+        radiusSetGraphError: setError
+      })
+    );
+    await flushPromises();
+
+    const attempts = Math.ceil(GRAPH_APP_BICEP_TIMEOUT_MS / GRAPH_RETRY_MS);
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      browser.clock.tick(GRAPH_RETRY_MS);
+      await flushPromises();
+    }
+
+    expect(controller.destroy).not.toHaveBeenCalled();
+    expect(setError).not.toHaveBeenCalled();
+    expect(status?.textContent).toBe(
+      `Unable to refresh the application graph: ${GRAPH_APP_BICEP_TIMEOUT_MESSAGE}`
+    );
+  });
+
+  it("retries a stale loaded-graph refresh without replacing the current graph", async () => {
+    const { browser, status } = fixture({ loaded: true });
+    const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
+    const render = vi.fn(() => controller);
+    let calls = 0;
+    browser.net.handle("/api/load-graph", () => {
+      calls++;
+      return calls === 1 ?
+          jsonResponse({ stale: true })
+        : jsonResponse({ resources: [{ id: "app/refreshed" }] });
+    });
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    expect(status?.textContent).toContain("Retrying");
+    expect(controller.destroy).not.toHaveBeenCalled();
+    browser.clock.tick(GRAPH_STALE_RETRY_MS);
+    await flushPromises();
+
+    expect(calls).toBe(2);
+    expect(controller.update).toHaveBeenCalledWith([{ id: "app/refreshed" }]);
+    expect(controller.destroy).not.toHaveBeenCalled();
+  });
+
+  it("preserves the current graph when a refresh response has no resources", async () => {
+    const { browser, status } = fixture({ loaded: true });
+    const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
+    const render = vi.fn(() => controller);
+    const setError = vi.fn();
+    browser.net.handle("/api/load-graph", () => jsonResponse({}));
+
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render, radiusSetGraphError: setError })
+    );
+    await flushPromises();
+
+    expect(render).toHaveBeenCalledTimes(1);
+    expect(controller.destroy).not.toHaveBeenCalled();
+    expect(setError).not.toHaveBeenCalled();
+    expect(status?.textContent).toBe(
+      "Unable to refresh the application graph: the response did not include any resources."
+    );
+  });
+
   it("surfaces a refresh error message from the server", async () => {
     const { browser, status } = fixture({ loaded: true });
     browser.net.handle("/api/load-graph", () =>

@@ -453,7 +453,12 @@ describe("buildSourceUrl", () => {
     expect(githubSourceReferenceUrl(reference)).toBe("");
   });
 
-  it.each(["[parameters('sourceReference')]", "src/app.ts\nforged"])(
+  it.each([
+    "[parameters('sourceReference')]",
+    "src/app.ts\nforged",
+    "src/app.ts#L0",
+    "src/app.ts#section"
+  ])(
     "falls back to the repository for an invalid local reference: %s",
     (reference) => {
       expect(

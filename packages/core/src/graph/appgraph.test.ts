@@ -271,6 +271,7 @@ describe("applicationGraphToResources", () => {
       new Map([
         ["frontend", 3],
         ["web", 3],
+        ["Radius.Compute/containers\u0000web", 3],
         ["database", 7]
       ])
     );
