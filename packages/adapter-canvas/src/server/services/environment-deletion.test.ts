@@ -346,7 +346,7 @@ describe("runEnvironmentDeletion — best-effort warnings", () => {
     expect(ports.deleteGitHubEnvironment).not.toHaveBeenCalled();
   });
 
-  it("warns when the github env delete fails", async () => {
+  it("fails partial when the github env delete fails", async () => {
     const op = makeOp({ provider: "aws", includeAzureCleanup: false });
     const ports = makePorts({
       deleteGitHubEnvironment: vi.fn(async () => ({
@@ -354,18 +354,30 @@ describe("runEnvironmentDeletion — best-effort warnings", () => {
       }))
     });
     await runEnvironmentDeletion(op, ports);
-    expect(stage(op, STAGE_DELETE_GITHUB_ENV)).toBe("warning");
-    const warn = op.steps.find(
-      (s: { warning?: { code?: string; message?: string } }) =>
-        s.warning?.code === "github-env-delete-failed"
-    );
-    expect(warn?.warning?.message).toBe(
-      "The GitHub environment delete failed."
-    );
-    expect(op.state).toBe("succeeded_with_warnings");
+    expect(stage(op, STAGE_DELETE_GITHUB_ENV)).toBe("failed");
+    // The GitHub environment is the primary artifact of this stage, so a failure
+    // to delete it must not be papered over as a warning — the operation ends as
+    // a retryable partial failure that resumes at the GitHub stage.
+    expect(op.state).toBe("failed_partial");
+    expect(op.failure?.code).toBe("github-env-delete-failed");
+    // No success acknowledgement: the review app-registration stage never runs.
+    expect(stage(op, STAGE_REVIEW_APP_REGISTRATION)).not.toBe("succeeded");
   });
 
-  it("treats a thrown github env delete as a warning", async () => {
+  it("surfaces the github env delete detail on failure", async () => {
+    const op = makeOp({ provider: "aws", includeAzureCleanup: false });
+    const ports = makePorts({
+      deleteGitHubEnvironment: vi.fn(async () => ({
+        outcome: "failed" as const,
+        detail: "HTTP 403: forbidden"
+      }))
+    });
+    await runEnvironmentDeletion(op, ports);
+    expect(op.state).toBe("failed_partial");
+    expect(op.failure?.message).toBe("HTTP 403: forbidden");
+  });
+
+  it("treats a thrown github env delete as a partial failure", async () => {
     const op = makeOp({ provider: "aws", includeAzureCleanup: false });
     const ports = makePorts({
       deleteGitHubEnvironment: vi.fn(async () => {
@@ -373,7 +385,9 @@ describe("runEnvironmentDeletion — best-effort warnings", () => {
       })
     });
     await runEnvironmentDeletion(op, ports);
-    expect(stage(op, STAGE_DELETE_GITHUB_ENV)).toBe("warning");
+    expect(stage(op, STAGE_DELETE_GITHUB_ENV)).toBe("failed");
+    expect(op.state).toBe("failed_partial");
+    expect(op.failure?.message).toBe("network");
   });
 });
 

@@ -1,0 +1,10 @@
+---
+"radius": patch
+---
+
+Harden the asynchronous environment-deletion flow against four correctness and reliability gaps in the destructive teardown path:
+
+- **Never treat a bare GitHub 404 as confirmed absence.** GitHub returns 404 both for an environment that is truly gone and for one the acting credential cannot see, so the shared delete primitive no longer records a 404 as `not_found` on its own. It now confirms absence against a complete, paginated environment listing read by the same account; an unreadable listing (a permission-masked 404) or one that still shows the environment is reported as a failure instead of a silent successful deletion.
+- **Report an unfinished GitHub-environment deletion as a partial failure.** When the GitHub environment delete cannot be confirmed, the runner now ends the operation as `failed_partial` (retryable, resuming at the GitHub stage) rather than finishing `succeeded_with_warnings`. The completed Radius and credential stages are retained, and the canvas no longer shows a "deleted" acknowledgement while the environment may still exist. A warning remains reserved for a retained *secondary* artifact (e.g. a reused credential), not for the primary environment itself.
+- **Do not re-dispatch an ambiguous workflow run.** The delete dispatcher only retries `gh workflow run` with the injected token stripped after a positively identified missing-`workflow`-scope rejection. A timed-out, signalled, network, 404, or rate-limited dispatch is no longer retried, so an accepted-but-unacknowledged dispatch can never start the destructive workflow a second time under a different keyring identity.
+- **Verify both workflow files before dispatch.** Before starting the deletion, Radius reads both `delete-environment.yml` and its reusable `delete-environment-azure.yml` provider (which carries the "no deployed applications" safety guard) back from the default branch and confirms they match the packaged source. A missing, stale, or unreadable file stops the deletion and names the offending file and branch, so the workflow never runs against an unverified guard.

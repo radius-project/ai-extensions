@@ -294,6 +294,8 @@ import { createDeployRequestService } from "./server/services/deploy-request.js"
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
+import { shouldRetryWithKeyringCredential } from "./server/services/workflow-credential-fallback.js";
+import { verifyWorkflowFilesMatchSource } from "./server/services/delete-environment-workflow-verification.js";
 import {
   executeRecoverableMutation,
   ProviderMutationRecoveryError,
@@ -2748,20 +2750,65 @@ async function deleteRadiusEnvironmentViaWorkflow(
     DELETE_ENV_DISPATCHER_FILE,
     DELETE_ENV_AZURE_FILE
   ]);
-  const commitFail = sync.failed.find(
-    (f) => f.path.split("/").pop() === DELETE_ENV_DISPATCHER_FILE
-  );
-  if (commitFail) {
+  // Committing the workflows is best-effort and can silently no-op (a protected
+  // branch, or an exception `ensureWorkflowsCurrent` swallows), and the delete
+  // dispatcher `uses:` the reusable provider file that carries the "no deployed
+  // applications" safety guard. `gh workflow run` resolves BOTH files from the
+  // default branch, so before dispatching we read BOTH back from that branch and
+  // confirm they match the packaged source. Any file that is missing, stale, or
+  // unreadable stops the deletion here — a stale provider means a stale guard,
+  // and dispatching against it could tear down an environment that still has
+  // deployed applications. (The narrow `sync.failed` list only names files whose
+  // commit definitely failed; the read-back is the authoritative gate because it
+  // also catches a swallowed sync exception that reports no failure at all.)
+  let expectedDeleteWorkflows: Record<string, string>;
+  try {
+    expectedDeleteWorkflows = await generateDeleteWorkflow(environment);
+  } catch (error) {
     return {
       outcome: "failed",
-      detail: `Could not commit ${DELETE_ENV_DISPATCHER_FILE} to the "${commitFail.branch}" branch of ${repo}.`
+      detail: `Could not build the delete-environment workflow templates to verify them: ${errorMessage(
+        error
+      )}`
+    };
+  }
+  const workflowVerification = await verifyWorkflowFilesMatchSource(
+    [DELETE_ENV_DISPATCHER_FILE, DELETE_ENV_AZURE_FILE].map((file) => ({
+      file,
+      path: `.github/workflows/${file}`,
+      expected: expectedDeleteWorkflows[file] || ""
+    })),
+    {
+      defaultBranch: async () => (await getDefaultBranch(repo)) || "",
+      readFile: (path, branch) => fetchFileFromRepo(repo, path, branch),
+      errorMessage
+    }
+  );
+  if (!workflowVerification.ok) {
+    return {
+      outcome: "failed",
+      detail: `${workflowVerification.detail} Radius did not start the deletion of "${environment}" in ${repo}.`
     };
   }
   const ghWorkflow = async (args: string[]): Promise<CommandResult> => {
     const first = await runGhForDeploy(args);
     if (first.code === 0) return first;
     const env = process.env;
-    if (!(env.GH_TOKEN || env.GITHUB_TOKEN)) return first;
+    // Dispatching a workflow requires the `workflow` scope, which an injected
+    // GH_TOKEN often lacks. Retry with it stripped ONLY when that fallback is
+    // safe: the failure positively names the missing scope, and the dispatch did
+    // not time out. A timed-out (or otherwise killed) dispatch may already have
+    // been accepted by GitHub, so re-running it would start the destructive
+    // delete workflow a SECOND time; and the retry runs as whichever account the
+    // keyring holds, so it must never be entered on an unknown failure.
+    const retryAllowed = shouldRetryWithKeyringCredential({
+      stderr: first.stderr,
+      timedOut: first.timedOut === true,
+      hasInjectedToken: Boolean(
+        env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim()
+      )
+    });
+    if (!retryAllowed) return first;
     const fallbackEnv = { ...env };
     delete fallbackEnv.GH_TOKEN;
     delete fallbackEnv.GITHUB_TOKEN;

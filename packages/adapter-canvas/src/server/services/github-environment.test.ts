@@ -761,7 +761,11 @@ describe("ensureGitHubEnvironment", () => {
 
 describe("deleteGitHubEnvironmentIdempotent", () => {
   function deletePorts(
-    gh: (args: string[]) => Promise<{ code: number | string; stderr?: string }>
+    gh: (args: string[]) => Promise<{
+      code: number | string;
+      stdout?: string;
+      stderr?: string;
+    }>
   ) {
     const calls: string[][] = [];
     const invalidated: string[] = [];
@@ -778,6 +782,19 @@ describe("deleteGitHubEnvironmentIdempotent", () => {
         }
       }
     };
+  }
+
+  // A gh fake that answers the DELETE and the follow-up environment listing
+  // separately, so the 404 absence check can be exercised deterministically.
+  function deleteThenList(
+    del: { code: number | string; stderr?: string },
+    list: { code: number | string; stdout?: string; stderr?: string }
+  ): (args: string[]) => Promise<{
+    code: number | string;
+    stdout?: string;
+    stderr?: string;
+  }> {
+    return async (args: string[]) => (args.includes("--paginate") ? list : del);
   }
 
   it("deletes a live environment and invalidates the env-list cache", async () => {
@@ -811,11 +828,41 @@ describe("deleteGitHubEnvironmentIdempotent", () => {
     expect(invalidated).toEqual(["octo/app"]);
   });
 
-  it("treats an HTTP 404 as already-gone and still invalidates the cache", async () => {
-    const { ports, invalidated } = deletePorts(async () => ({
-      code: 1,
-      stderr: "gh: HTTP 404 Not Found"
-    }));
+  it("treats an HTTP 404 as already-gone only once a readable listing confirms absence", async () => {
+    const { ports, calls, invalidated } = deletePorts(
+      deleteThenList(
+        { code: 1, stderr: "gh: HTTP 404 Not Found" },
+        { code: 0, stdout: "prod\nstaging\n" }
+      )
+    );
+
+    const outcome = await deleteGitHubEnvironmentIdempotent(
+      "octo/app",
+      "dev",
+      ports
+    );
+
+    expect(outcome).toEqual({ outcome: "not_found" });
+    expect(invalidated).toEqual(["octo/app"]);
+    // The absence was verified against a complete listing, not the bare 404.
+    expect(calls[1]).toEqual([
+      "api",
+      "--paginate",
+      "-H",
+      "Accept: application/vnd.github+json",
+      "/repos/octo/app/environments",
+      "--jq",
+      ".environments[].name"
+    ]);
+  });
+
+  it("treats a case-insensitive 'not found' message as already-gone when the listing is empty", async () => {
+    const { ports, invalidated } = deletePorts(
+      deleteThenList(
+        { code: 1, stderr: "environment Not Found" },
+        { code: 0, stdout: "" }
+      )
+    );
 
     const outcome = await deleteGitHubEnvironmentIdempotent(
       "octo/app",
@@ -827,11 +874,13 @@ describe("deleteGitHubEnvironmentIdempotent", () => {
     expect(invalidated).toEqual(["octo/app"]);
   });
 
-  it("treats a case-insensitive 'not found' message as already-gone", async () => {
-    const { ports, invalidated } = deletePorts(async () => ({
-      code: 1,
-      stderr: "environment Not Found"
-    }));
+  it("does NOT treat a 404 as absence when the listing still shows the environment", async () => {
+    const { ports, invalidated } = deletePorts(
+      deleteThenList(
+        { code: 1, stderr: "gh: HTTP 404 Not Found" },
+        { code: 0, stdout: "prod\nDev\nstaging\n" }
+      )
+    );
 
     const outcome = await deleteGitHubEnvironmentIdempotent(
       "octo/app",
@@ -839,8 +888,45 @@ describe("deleteGitHubEnvironmentIdempotent", () => {
       ports
     );
 
-    expect(outcome).toEqual({ outcome: "not_found" });
-    expect(invalidated).toEqual(["octo/app"]);
+    expect(outcome.outcome).toBe("failed");
+    expect(outcome.detail).toMatch(/permission problem rather than absence/);
+    // A permission-masked 404 must never invalidate the cache as if gone.
+    expect(invalidated).toEqual([]);
+  });
+
+  it("does NOT treat a 404 as absence when the listing is unreadable", async () => {
+    const { ports, invalidated } = deletePorts(
+      deleteThenList(
+        { code: 1, stderr: "gh: HTTP 404 Not Found" },
+        { code: 1, stderr: "HTTP 403: forbidden" }
+      )
+    );
+
+    const outcome = await deleteGitHubEnvironmentIdempotent(
+      "octo/app",
+      "dev",
+      ports
+    );
+
+    expect(outcome.outcome).toBe("failed");
+    expect(outcome.detail).toBe("HTTP 403: forbidden");
+    expect(invalidated).toEqual([]);
+  });
+
+  it("falls back to a default detail when a 404 listing is unreadable without stderr", async () => {
+    const { ports, invalidated } = deletePorts(
+      deleteThenList({ code: 1, stderr: "gh: HTTP 404 Not Found" }, { code: 1 })
+    );
+
+    const outcome = await deleteGitHubEnvironmentIdempotent(
+      "octo/app",
+      "dev",
+      ports
+    );
+
+    expect(outcome.outcome).toBe("failed");
+    expect(outcome.detail).toMatch(/may be masking a permission problem/);
+    expect(invalidated).toEqual([]);
   });
 
   it("reports a genuine failure with the trimmed stderr and never invalidates the cache", async () => {

@@ -320,14 +320,13 @@ export async function runEnvironmentDeletion(
             // state; do NOT delete the GitHub environment a retry still needs.
             if (complete === false) return true;
           }
-          await deleteGitHubEnvironmentStage(
+          return await deleteGitHubEnvironmentStage(
             op,
             ports,
             repo,
             environment,
             repoId
           );
-          return false;
         });
         await ports.persist();
         if (stopped) return;
@@ -368,8 +367,15 @@ export async function runEnvironmentDeletion(
         return;
       }
     } else {
-      await deleteGitHubEnvironmentStage(op, ports, repo, environment, repoId);
+      const stopped = await deleteGitHubEnvironmentStage(
+        op,
+        ports,
+        repo,
+        environment,
+        repoId
+      );
       await ports.persist();
+      if (stopped) return;
     }
   }
 
@@ -404,8 +410,8 @@ async function deleteGitHubEnvironmentStage(
   repo: string,
   environment: string,
   repoId: number
-): Promise<void> {
-  if (!stagePending(op, STAGE_DELETE_GITHUB_ENV)) return;
+): Promise<boolean> {
+  if (!stagePending(op, STAGE_DELETE_GITHUB_ENV)) return false;
   enterStage(op, STAGE_DELETE_GITHUB_ENV);
   addStep(op, {
     stage: STAGE_DELETE_GITHUB_ENV,
@@ -421,49 +427,67 @@ async function deleteGitHubEnvironmentStage(
     ghOutcome = { outcome: "failed", detail: ports.errorMessage(error) };
   }
   if (ghOutcome.outcome === "failed") {
+    // The GitHub environment is the PRIMARY artifact of this stage, not a
+    // secondary one that a warning could paper over: if its deletion could not
+    // be confirmed the environment may still exist, so the operation must not
+    // report success (or show a success acknowledgement in the panel). Latch a
+    // retryable partial failure at this stage. The completed Radius and
+    // credential stages stay `succeeded`, so a retry resumes here (see
+    // `applyDeletionRetry`) rather than repeating work that already converged.
+    const message =
+      ghOutcome.detail ||
+      "The GitHub environment delete failed. The GitHub environment may still exist — retry the deletion.";
     addStep(op, {
       stage: STAGE_DELETE_GITHUB_ENV,
-      kind: "warning",
-      label: "Could not delete the GitHub environment",
-      warning: {
+      kind: "observation",
+      label: "Could not delete the GitHub environment — deletion stopped",
+      state: "failed"
+    });
+    setStageState(op, STAGE_DELETE_GITHUB_ENV, "failed");
+    finish(op, "failed_partial", {
+      failure: {
         code: "github-env-delete-failed",
-        message: ghOutcome.detail || "The GitHub environment delete failed.",
-        impact: "The GitHub environment may still exist. Retry the deletion."
+        stage: STAGE_DELETE_GITHUB_ENV,
+        stepSeq: null,
+        message,
+        classification: "user-fixable",
+        evidence: null
       }
     });
-    setStageState(op, STAGE_DELETE_GITHUB_ENV, "warning");
-  } else {
-    addStep(op, {
-      stage: STAGE_DELETE_GITHUB_ENV,
-      kind: "mutation",
-      label:
-        ghOutcome.outcome === "not_found" ?
-          "No GitHub environment to delete"
-        : "Deleted the GitHub environment",
-      state: "succeeded"
-    });
-    setStageState(op, STAGE_DELETE_GITHUB_ENV, "succeeded");
-    if (op.request?.credentialConsumerRetirementReady) {
-      try {
-        await ports.clearEnvironmentCredentialProvenance(repoId, environment);
-      } catch (error) {
-        addStep(op, {
-          stage: STAGE_DELETE_GITHUB_ENV,
-          kind: "warning",
-          label:
-            "Deleted the environment but could not retire its credential record",
-          warning: {
-            code: "credential-provenance-clear-failed",
-            message: ports.errorMessage(error),
-            impact:
-              "A stale local consumer record may cause Radius to retain a shared credential during later cleanup."
-          }
-        });
-        setStageState(op, STAGE_DELETE_GITHUB_ENV, "warning");
-      }
+    await ports.persist();
+    return true;
+  }
+  addStep(op, {
+    stage: STAGE_DELETE_GITHUB_ENV,
+    kind: "mutation",
+    label:
+      ghOutcome.outcome === "not_found" ?
+        "No GitHub environment to delete"
+      : "Deleted the GitHub environment",
+    state: "succeeded"
+  });
+  setStageState(op, STAGE_DELETE_GITHUB_ENV, "succeeded");
+  if (op.request?.credentialConsumerRetirementReady) {
+    try {
+      await ports.clearEnvironmentCredentialProvenance(repoId, environment);
+    } catch (error) {
+      addStep(op, {
+        stage: STAGE_DELETE_GITHUB_ENV,
+        kind: "warning",
+        label:
+          "Deleted the environment but could not retire its credential record",
+        warning: {
+          code: "credential-provenance-clear-failed",
+          message: ports.errorMessage(error),
+          impact:
+            "A stale local consumer record may cause Radius to retain a shared credential during later cleanup."
+        }
+      });
+      setStageState(op, STAGE_DELETE_GITHUB_ENV, "warning");
     }
   }
   await ports.persist();
+  return false;
 }
 
 async function deleteEnvironmentCredentials(
