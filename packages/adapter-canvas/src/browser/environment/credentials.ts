@@ -4,6 +4,9 @@
 // deep-linking, and resuming an in-flight operation belong to the page
 // controller that composes this module with the Environments pane, not here.
 
+import { remediationView } from "@radius-project/core/remediations";
+import { createCommandAction } from "../command-action.js";
+import type { CommandActionHandle } from "../command-action.js";
 import { escapeBrowserHtml } from "../html.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { isRecord, readArray, readBoolean, readString } from "../json.js";
@@ -19,6 +22,7 @@ import type {
   EnvironmentDecisionPort,
   EnvironmentFormPreset
 } from "./environments.js";
+import type { RemediationView } from "@radius-project/core/remediations";
 import type { EnvironmentConfirmDialog } from "./confirm-dialog.js";
 
 export const CREDENTIALS_ENTRY_KEY = "environment-credentials";
@@ -26,10 +30,23 @@ export const CREDENTIAL_PROFILES_PATH = "/api/credential-profiles";
 export const CREDENTIAL_DELETE_PATH = "/api/delete-credential-profile";
 export const CREDENTIAL_SAVE_PATH = "/api/save-credential-profile";
 export const GITHUB_IDENTITY_PATH = "/api/github-identity";
-export const AZURE_CLI_ASSIST_PATH = "/api/azure-cli-assist";
 export const VERIFY_AZURE_PATH = "/api/verify-azure-login";
 export const VERIFY_AWS_PATH = "/api/verify-aws-login";
-export const GHCR_COPY_RESET_MS = 1500;
+/**
+ * Rebuild a remediation view from a server payload.
+ *
+ * Only the id and its parameters are taken from the payload; the command text
+ * is rebuilt locally from the registry, so a payload can never name a command
+ * of its own. A remediation that does not resolve is dropped rather than shown
+ * as an action that cannot run.
+ */
+export function payloadRemediation(payload: unknown): RemediationView | null {
+  if (!isRecord(payload)) return null;
+  const entry = payload["remediation"];
+  if (!isRecord(entry)) return null;
+  const view = remediationView(entry["id"], entry["params"]);
+  return view.runnable ? view : null;
+}
 
 export interface CredentialProfile {
   name: string;
@@ -81,16 +98,8 @@ export interface GitHubAccessView {
   statusHtml: string | null;
   statusColor: string;
   commandVisible: boolean;
-  command: string;
+  remediation: RemediationView | null;
   retryVisible: boolean;
-}
-
-export type AzureCliAssistAction = "install" | "login";
-
-export interface AzureCliAssistPromptView {
-  title: string;
-  message: string;
-  confirmLabel: string;
 }
 
 export interface CredentialsPaneDependencies {
@@ -101,6 +110,8 @@ export interface CredentialsPaneDependencies {
 
 export interface CredentialsPaneOptions {
   repo: string;
+  /** Nonce for mutating requests; run-command hand-off is rejected without it. */
+  mutationNonce: string;
   decisions: EnvironmentDecisionPort;
   confirmDialog?: EnvironmentConfirmDialog;
 }
@@ -208,17 +219,21 @@ function packagesCredentialLogin(identity: GitHubPackagesIdentity): string {
 export function renderGitHubAccessView(
   identity: GitHubPackagesIdentity
 ): GitHubAccessView {
+  // No account we can name, so there is no command we can offer. Both the
+  // unreadable-identity case and an acting login the registry will not accept
+  // land here, because in either one Radius cannot build the switch safely.
+  const noAccount: GitHubAccessView = {
+    packagesVerified: false,
+    statusText:
+      "Could not detect a GitHub CLI account. Sign in with gh auth login, then retry.",
+    statusHtml: null,
+    statusColor: "var(--rad-danger)",
+    commandVisible: false,
+    remediation: null,
+    retryVisible: false
+  };
   if (identity.error !== "" || identity.actingLogin === "") {
-    return {
-      packagesVerified: false,
-      statusText:
-        "Could not detect a GitHub CLI account. Sign in with gh auth login, then retry.",
-      statusHtml: null,
-      statusColor: "var(--rad-danger)",
-      commandVisible: false,
-      command: "",
-      retryVisible: false
-    };
+    return noAccount;
   }
   const login = packagesCredentialLogin(identity);
   if (packagesCredentialCanWrite(identity)) {
@@ -234,7 +249,7 @@ export function renderGitHubAccessView(
       )}</strong> using ${source}.`,
       statusColor: "var(--rad-primary)",
       commandVisible: false,
-      command: "",
+      remediation: null,
       retryVisible: false
     };
   }
@@ -264,14 +279,25 @@ export function renderGitHubAccessView(
         : "No stored GitHub CLI account can publish packages either — run the command below to sign one in, then retry, or restart the session with a token that has <code>write:packages</code>."),
       statusColor: "var(--rad-warning)",
       commandVisible: alternative === null,
-      command:
+      remediation:
         alternative === null ?
-          "gh auth login -h github.com -s read:packages -s write:packages"
-        : "",
+          remediationView("github-cli-login", { packages: "true" })
+        : null,
       retryVisible: true
     };
   }
-  const command = `gh auth switch -h github.com -u ${login} && gh auth refresh -h github.com -s read:packages -s write:packages`;
+  // Resolve the command here rather than at the mount site. A non-empty login
+  // is not necessarily one the registry will build a command from, and when
+  // the row's visibility was decided separately the two disagreed: the row
+  // appeared, empty, under status text telling the user to run the command
+  // below. One answer drives the status, the row, and the callout.
+  // Target the credential that actually publishes, not the acting account: the
+  // acting account may already hold write:packages, in which case refreshing it
+  // changes nothing and the publisher stays broken.
+  const remediation = remediationView("github-packages-scope", { login });
+  if (!remediation.runnable) {
+    return noAccount;
+  }
   return {
     packagesVerified: false,
     statusText: "",
@@ -282,27 +308,8 @@ export function renderGitHubAccessView(
       "<strong>Note:</strong> <code>gh auth switch</code> changes the active account machine-wide until you switch back.",
     statusColor: "var(--rad-warning)",
     commandVisible: true,
-    command,
+    remediation,
     retryVisible: true
-  };
-}
-
-export function azureCliAssistPromptView(
-  action: AzureCliAssistAction
-): AzureCliAssistPromptView {
-  if (action === "install") {
-    return {
-      title: "Install Azure CLI?",
-      message:
-        "Azure CLI is not installed. Would you like Copilot to attempt to install it and then start Azure login?",
-      confirmLabel: "Ask Copilot to install"
-    };
-  }
-  return {
-    title: "Start Azure login?",
-    message:
-      "No active Azure session was found. Would you like Copilot to start the Azure login flow?",
-    confirmLabel: "Start Azure login"
   };
 }
 
@@ -367,16 +374,10 @@ export function initializeCredentialsPane(
   const btnVerifyAws = context.dom.inputById("btn-verify-aws");
   const credGhcrStatus = context.dom.byId("cred-ghcr-status");
   const credGhcrCommandRow = context.dom.byId("cred-ghcr-command-row");
-  const credGhcrCommand = context.dom.byId("cred-ghcr-command");
   const credGhcrRetry = context.dom.inputById("cred-ghcr-retry");
-  const credGhcrCopy = context.dom.byId("cred-ghcr-copy");
+  const credVerifyAction = context.dom.byId("cred-verify-action");
   const envVerifyModal = context.dom.byId("env-verify-modal");
   const envVerifyTitle = context.dom.byId("env-verify-title");
-  const azureCliAssistModal = context.dom.byId("azure-cli-assist-modal");
-  const azureCliAssistTitle = context.dom.byId("azure-cli-assist-title");
-  const azureCliAssistMessage = context.dom.byId("azure-cli-assist-message");
-  const azureCliAssistConfirm = context.dom.byId("azure-cli-assist-confirm");
-  const azureCliAssistCancel = context.dom.byId("azure-cli-assist-cancel");
 
   if (
     !credLanding ||
@@ -407,16 +408,10 @@ export function initializeCredentialsPane(
     !btnVerifyAws ||
     !credGhcrStatus ||
     !credGhcrCommandRow ||
-    !credGhcrCommand ||
     !credGhcrRetry ||
-    !credGhcrCopy ||
+    !credVerifyAction ||
     !envVerifyModal ||
-    !envVerifyTitle ||
-    !azureCliAssistModal ||
-    !azureCliAssistTitle ||
-    !azureCliAssistMessage ||
-    !azureCliAssistConfirm ||
-    !azureCliAssistCancel
+    !envVerifyTitle
   ) {
     return NOOP_TEARDOWN;
   }
@@ -429,7 +424,7 @@ export function initializeCredentialsPane(
   let tableAbort = context.net.createAbort();
   // Bumped whenever the form context changes (opening/reopening the form for
   // a different profile, returning to the landing table, or restarting
-  // verification). Async verify/save/assist responses compare against this
+  // verification). Async verify/save responses compare against this
   // token so a response for an earlier form/profile/provider can never
   // overwrite the state of whatever the user is looking at now.
   let formToken = 0;
@@ -437,11 +432,6 @@ export function initializeCredentialsPane(
   let credVerified: VerifiedCredentials | null = null;
   let credPackagesVerified = false;
   let formContext: "standalone" | "wizard" = "standalone";
-  let pendingAssist: {
-    action: AzureCliAssistAction;
-    tenantId: string;
-    fallbackMessage: string;
-  } | null = null;
   let active = true;
 
   const updateSaveState = (): void => {
@@ -454,25 +444,48 @@ export function initializeCredentialsPane(
     credPanelAws.style.display = isAws ? "" : "none";
   };
 
+  const commandActions = new Map<DomElement, CommandActionHandle>();
+  const mountCommandAction = (
+    host: DomElement,
+    remediation: RemediationView | null,
+    idPrefix: string
+  ): void => {
+    commandActions.get(host)?.dispose();
+    commandActions.delete(host);
+    if (remediation === null) {
+      host.replaceChildren();
+      return;
+    }
+    commandActions.set(
+      host,
+      createCommandAction(context, {
+        host,
+        remediation,
+        mutationNonce: options.mutationNonce,
+        idPrefix
+      })
+    );
+  };
+
   const resetVerification = (): void => {
     formToken += 1;
     credVerified = null;
+    mountCommandAction(credVerifyAction, null, "cred-verify");
     credVerifyStatus.style.display = "none";
     credVerifyStatus.innerHTML = "";
     credVerifyHint.style.display = "";
     updateSaveState();
   };
 
-  const verifyError = (message: string): void => {
+  const verifyError = (
+    message: string,
+    remediation: RemediationView | null = null
+  ): void => {
     credVerifyStatus.style.display = "block";
     credVerifyStatus.innerHTML = `<span style="color:var(--rad-danger);">${escapeBrowserHtml(
       message
     )}</span>`;
-  };
-
-  const verifyInfo = (message: string): void => {
-    credVerifyStatus.style.display = "block";
-    credVerifyStatus.innerHTML = `<span>${escapeBrowserHtml(message)}</span>`;
+    mountCommandAction(credVerifyAction, remediation, "cred-verify");
   };
 
   const markVerified = (verified: VerifiedCredentials): void => {
@@ -492,7 +505,7 @@ export function initializeCredentialsPane(
   const applyGitHubAccessView = (identity: GitHubPackagesIdentity): void => {
     const view = renderGitHubAccessView(identity);
     credPackagesVerified = view.packagesVerified;
-    credGhcrCommandRow.style.display = view.commandVisible ? "flex" : "none";
+    credGhcrCommandRow.style.display = view.commandVisible ? "block" : "none";
     credGhcrRetry.style.display = view.retryVisible ? "" : "none";
     if (view.statusHtml !== null) {
       credGhcrStatus.innerHTML = view.statusHtml;
@@ -500,7 +513,7 @@ export function initializeCredentialsPane(
       credGhcrStatus.textContent = view.statusText;
     }
     credGhcrStatus.style.color = view.statusColor;
-    credGhcrCommand.textContent = view.command;
+    mountCommandAction(credGhcrCommandRow, view.remediation, "cred-ghcr");
     updateSaveState();
   };
 
@@ -647,64 +660,6 @@ export function initializeCredentialsPane(
     credNameInput.focus();
   };
 
-  const closeAssistPrompt = (): void => {
-    azureCliAssistModal.style.display = "none";
-    pendingAssist = null;
-  };
-
-  const showAssistPrompt = (
-    action: AzureCliAssistAction,
-    tenantId: string,
-    fallbackMessage: string
-  ): void => {
-    pendingAssist = { action, tenantId, fallbackMessage };
-    const view = azureCliAssistPromptView(action);
-    azureCliAssistTitle.textContent = view.title;
-    azureCliAssistMessage.textContent = view.message;
-    azureCliAssistConfirm.textContent = view.confirmLabel;
-    azureCliAssistModal.style.display = "flex";
-    azureCliAssistConfirm.focus();
-  };
-
-  // The sole caller (the confirm handler below) only ever supplies the
-  // original, non-empty Azure verification error as fallbackMessage, so it is
-  // always appended rather than conditionally included.
-  const requestAzureCliAssist = (
-    action: AzureCliAssistAction,
-    tenantId: string,
-    fallbackMessage: string
-  ): void => {
-    const token = formToken;
-    void context.net
-      .fetch(AZURE_CLI_ASSIST_PATH, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, tenantId })
-      })
-      .then((response) => response.json())
-      .then(
-        (payload) => {
-          if (!active || token !== formToken) return;
-          const error = readString(payload, "error");
-          if (error !== "") {
-            verifyError(`${error} ${fallbackMessage}`);
-            return;
-          }
-          const message = readString(payload, "message");
-          verifyInfo(
-            message ||
-              "Copilot is helping with Azure CLI setup. After it finishes, click Verify Credentials again."
-          );
-        },
-        () => {
-          if (!active || token !== formToken) return;
-          verifyError(
-            `Could not reach Copilot for Azure CLI help. ${fallbackMessage}`
-          );
-        }
-      );
-  };
-
   const deleteCredentialProfile = (name: string, button: DomElement): void => {
     setButtonState(button, true, "Deleting…");
     void context.net
@@ -831,35 +786,6 @@ export function initializeCredentialsPane(
   });
 
   scope.on(credGhcrRetry, "click", () => loadGitHubAccess());
-  scope.on(credGhcrCopy, "click", () => {
-    const command = credGhcrCommand.textContent ?? "";
-    void context.clipboard.write(command).then((ok) => {
-      if (!active || !ok) return;
-      credGhcrCopy.textContent = "Copied";
-      scope.after(GHCR_COPY_RESET_MS, () => {
-        credGhcrCopy.textContent = "Copy command";
-      });
-    });
-  });
-
-  scope.on(azureCliAssistCancel, "click", () => {
-    const fallbackMessage = pendingAssist?.fallbackMessage ?? "";
-    closeAssistPrompt();
-    if (fallbackMessage) verifyError(fallbackMessage);
-  });
-
-  scope.on(azureCliAssistConfirm, "click", () => {
-    const request = pendingAssist;
-    closeAssistPrompt();
-    if (request) {
-      requestAzureCliAssist(
-        request.action,
-        request.tenantId,
-        request.fallbackMessage
-      );
-    }
-  });
-
   scope.on(btnVerifyAzure, "click", () => {
     const profileName = credNameInput.value.trim();
     const tenantId = azTenantId.value.trim();
@@ -895,18 +821,7 @@ export function initializeCredentialsPane(
           btnVerifyAzure.textContent = "Verify Credentials";
           const error = readString(payload, "error");
           if (error !== "") {
-            const code = readString(payload, "code");
-            const returnedTenantId =
-              readString(payload, "tenantId") || tenantId;
-            if (code === "az-login-required") {
-              showAssistPrompt("login", returnedTenantId, error);
-              return;
-            }
-            if (code === "az-cli-missing") {
-              showAssistPrompt("install", returnedTenantId, error);
-              return;
-            }
-            verifyError(error);
+            verifyError(error, payloadRemediation(payload));
             return;
           }
           const returnedTenantId = readString(payload, "tenantId");
@@ -960,7 +875,7 @@ export function initializeCredentialsPane(
           btnVerifyAws.textContent = "Verify Credentials";
           const error = readString(payload, "error");
           if (error !== "") {
-            verifyError(error);
+            verifyError(error, payloadRemediation(payload));
             return;
           }
           const returnedAccountId = readString(payload, "accountId");
@@ -1059,6 +974,8 @@ export function initializeCredentialsPane(
       active = false;
       tableAbort?.abort();
       release(rows);
+      for (const action of commandActions.values()) action.dispose();
+      commandActions.clear();
       scope.teardown();
     }
   };

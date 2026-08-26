@@ -176,6 +176,7 @@ describe("compiled page entry API contracts", () => {
     [
       "deploying-page",
       [
+        "/api/run-remediation",
         "/api/discover-branches",
         "/api/list-applications",
         "/api/list-environments",
@@ -188,13 +189,13 @@ describe("compiled page entry API contracts", () => {
     [
       "environment-page",
       [
+        "/api/run-remediation",
         "/api/list-environments",
         "/api/delete-environment",
         "/api/credential-profiles",
         "/api/delete-credential-profile",
         "/api/save-credential-profile",
         "/api/github-identity",
-        "/api/azure-cli-assist",
         "/api/verify-azure-login",
         "/api/verify-aws-login",
         "/api/discover",

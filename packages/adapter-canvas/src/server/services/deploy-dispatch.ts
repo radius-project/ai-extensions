@@ -6,6 +6,7 @@ import {
 } from "../../azure-oidc.js";
 import type { CanvasState, DeployErrorKind } from "../../shared.js";
 import { buildEnvironmentSuffix } from "@radius-project/core/platforms";
+import { remediationView } from "@radius-project/core/remediations";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
 import {
   needsWorkflowScope,
@@ -115,6 +116,14 @@ export interface DeployDispatchDependencies {
     workflowFile: string
   ): Promise<number | string | null>;
   classifyDeployDispatchFailure(stderr: string): DeployErrorKind;
+  // Generator-owned paths with uncommitted changes in the session worktree, as
+  // allowlisted tokens. Injected because a branch-not-pushed failure has to tell
+  // the user to commit the generated model before pushing it; a bare push would
+  // publish the branch without the files the run needs. Resolves to an empty
+  // list when nothing is pending or the worktree cannot be read.
+  uncommittedGeneratedPaths(
+    entry: DeployDispatchInstanceEntry
+  ): Promise<readonly string[]>;
   invalidateDeployListCache(repo: string): void;
   errorMessage(error: unknown): string;
   now(): number;
@@ -171,6 +180,7 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployDispatchDependencies)[] = [
   "ensureWorkflowsCurrent",
   "latestWorkflowRunId",
   "classifyDeployDispatchFailure",
+  "uncommittedGeneratedPaths",
   "invalidateDeployListCache",
   "errorMessage",
   "now"
@@ -751,6 +761,61 @@ export function createDeployDispatchService(
     };
   };
 
+  // Both branch-not-pushed paths (the pre-dispatch remote check and the "No ref
+  // found" dispatch failure) report the same blocker, so they share one message
+  // builder. It is the single place that decides whether the guidance is a bare
+  // push or a commit-then-push, which is what keeps the two paths from drifting
+  // into telling the user different things about the same worktree.
+  const reportBranchNotPushed = async (
+    entry: DeployDispatchInstanceEntry,
+    repo: string,
+    deployRef: string,
+    kind: DeployErrorKind,
+    log: (message: string) => void
+  ): Promise<void> => {
+    const paths = await dependencies.uncommittedGeneratedPaths(entry);
+    const dirty = paths.length > 0;
+    const remediation = remediationView("git-push-branch", {
+      branch: deployRef,
+      currentBranch: entry.state.workspaceBranch ?? "",
+      paths: paths.join(",")
+    });
+    const steps = remediation.runnable ? remediation.command : "";
+    log('❌ Branch "' + deployRef + '" has not been pushed to ' + repo + ".");
+    if (dirty) {
+      log(
+        "   Generated files are not committed yet: " +
+          paths.join(", ") +
+          " — pushing alone would not publish them."
+      );
+    }
+    log(
+      remediation.runnable ?
+        (dirty ?
+          "   Commit and push, then redeploy:  "
+        : "   Push it and redeploy:  ") + steps
+      : `   ${remediation.unsupportedReason}`
+    );
+    entry.state.deployError =
+      'The branch "' +
+      deployRef +
+      "\" hasn't been pushed to " +
+      repo +
+      " yet, so there's nothing on GitHub to deploy." +
+      (!remediation.runnable ? ` ${remediation.unsupportedReason}`
+      : dirty ?
+        " The generated Radius files (" +
+        paths.join(", ") +
+        ") are not committed either, so pushing on its own would not publish " +
+        "them. Commit them and push, then try again:\n\n    "
+      : " Push it and try again:\n\n    ") +
+      steps;
+    entry.state.deployErrorKind = kind;
+    entry.state.deployErrorBranch = deployRef;
+    entry.state.deployErrorPaths = paths.join(",");
+    entry.state.deployStatus = "failed";
+  };
+
   return {
     async prepareAndDispatch(request) {
       const { entry, repo, branch, provider, requestedEnvironment, log } =
@@ -774,21 +839,13 @@ export function createDeployDispatchService(
       const deployRef = branch;
 
       if (await branchIsMissingOnRemote(repo, deployRef)) {
-        const pushCmd = "git push -u origin " + deployRef;
-        log(
-          '❌ Branch "' + deployRef + '" has not been pushed to ' + repo + "."
+        await reportBranchNotPushed(
+          entry,
+          repo,
+          deployRef,
+          dependencies.branchNotPushedKind,
+          log
         );
-        log("   Push it and redeploy:  " + pushCmd);
-        entry.state.deployError =
-          'The branch "' +
-          deployRef +
-          "\" hasn't been pushed to " +
-          repo +
-          " yet, so there's nothing on GitHub to deploy. Push it and try again:\n\n    " +
-          pushCmd;
-        entry.state.deployErrorKind = dependencies.branchNotPushedKind;
-        entry.state.deployErrorBranch = deployRef;
-        entry.state.deployStatus = "failed";
         return { dispatched: false };
       }
 
@@ -920,18 +977,13 @@ export function createDeployDispatchService(
         // outcome, so the split is made once, where it can be tested.
         const dispatchKind = dependencies.classifyDeployDispatchFailure(de);
         if (dispatchKind === dependencies.branchNotPushedKind) {
-          const pushCmd = "git push -u origin " + deployRef;
-          log("   Push it and redeploy:  " + pushCmd);
-          entry.state.deployError =
-            'The branch "' +
-            deployRef +
-            "\" hasn't been pushed to " +
-            repo +
-            " yet, so there's nothing on GitHub to deploy. Push it and try again:\n\n    " +
-            pushCmd;
-          entry.state.deployErrorKind = dispatchKind;
-          entry.state.deployErrorBranch = deployRef;
-          entry.state.deployStatus = "failed";
+          await reportBranchNotPushed(
+            entry,
+            repo,
+            deployRef,
+            dispatchKind,
+            log
+          );
           return { dispatched: false };
         }
         const scopeHint =
