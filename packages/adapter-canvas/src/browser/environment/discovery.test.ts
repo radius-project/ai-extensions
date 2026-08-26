@@ -1147,6 +1147,7 @@ describe("discoverResources", () => {
     );
 
     await handle?.discoverResources("azure", "", "");
+    await flushPromises();
 
     expect(page.selects["azure-rg-select"].value).toBe("rg-1");
     expect(page.selects["azure-cluster-select"].value).toBe("aks-1");
@@ -1462,6 +1463,11 @@ describe("discoverResources", () => {
     const handle = initializeDiscoveryPanel(page.browser.context);
     await handle?.discoverResources("azure", "", "");
     expect(page.azureStatus.textContent).toBe("Discovery error: boom");
+    expect(
+      Array.from(page.selects["azure-namespace-select"].options).map(
+        (option) => option.value
+      )
+    ).toEqual(["", "__custom__"]);
   });
 
   it("reads the message field from a record-shaped (non-Error) rejection", async () => {
@@ -1609,9 +1615,14 @@ describe("discoverResources", () => {
     // back into discovery; the suppressed duplicate must re-assert it.
     refreshBtn.disabled = false;
     namespaceSelect.disabled = false;
+    namespaceSelect.value = "default";
     await handle?.discoverResources("azure", "sub-1", "tenant-1");
     expect(refreshBtn.disabled).toBe(true);
     expect(namespaceSelect.disabled).toBe(true);
+    expect(namespaceSelect.value).toBe("");
+    expect(
+      Array.from(namespaceSelect.options).map((option) => option.textContent)
+    ).toEqual(["Discovering namespaces…"]);
 
     resolveFirst(discoverResponse(azurePayload()));
     await firstCall;

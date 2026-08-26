@@ -248,6 +248,21 @@ function renderSelect(
   renderSelectOptions(context, select, items, placeholder);
 }
 
+function renderSelectLoading(
+  context: BrowserContext,
+  select: DomSelectElement,
+  label: string
+): void {
+  const loading = context.dom.createOption({
+    value: "",
+    label,
+    selected: true
+  });
+  loading.setAttribute("disabled", "true");
+  select.replaceChildren(loading);
+  select.disabled = true;
+}
+
 function selectOfferedValue(
   context: BrowserContext,
   selectId: string,
@@ -894,7 +909,13 @@ export function initializeDiscoveryPanel(
       // because callers enable Refresh optimistically when a profile is
       // selected, which would otherwise leave it clickable mid-discovery.
       if (refreshButton) refreshButton.disabled = true;
-      if (namespaceSelect) namespaceSelect.disabled = true;
+      if (namespaceSelect) {
+        renderSelectLoading(
+          context,
+          namespaceSelect,
+          "Discovering namespaces…"
+        );
+      }
       return;
     }
     // A different account supersedes whatever is outstanding: claim the newest
@@ -902,7 +923,9 @@ export function initializeDiscoveryPanel(
     const token = ++request.token;
     request.identity = identity;
     if (refreshButton) refreshButton.disabled = true;
-    if (namespaceSelect) namespaceSelect.disabled = true;
+    if (namespaceSelect) {
+      renderSelectLoading(context, namespaceSelect, "Discovering namespaces…");
+    }
     const isStale = (): boolean => !scope.active || request.token !== token;
     const statusEl = context.dom.byId(
       provider === "azure" ? "azure-discover-status" : "aws-discover-status"
@@ -1009,6 +1032,14 @@ export function initializeDiscoveryPanel(
       if (isStale()) return;
       if (statusEl)
         statusEl.textContent = `Discovery error: ${errorMessageOf(error)}`;
+      if (provider === "azure") {
+        renderSelect(
+          context,
+          "azure-namespace-select",
+          [],
+          "Select namespace…"
+        );
+      }
     } finally {
       // Only the newest request clears the slot; a superseded one must leave
       // both the identity and the disabled Refresh button owned by its

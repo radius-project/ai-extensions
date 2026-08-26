@@ -767,6 +767,10 @@ test.describe("Radius Canvas in Chromium", () => {
     await canvas.setScenario(scenario);
     await page.getByRole("button", { name: "Refresh" }).click();
     await expect(namespace).toBeDisabled();
+    await expect(namespace).toHaveValue("");
+    await expect(namespace.locator("option")).toHaveText(
+      "Discovering namespaces…"
+    );
 
     await expect(page.locator("#azure-discover-status")).toContainText(
       "Discovery failed: selected cluster unavailable"
