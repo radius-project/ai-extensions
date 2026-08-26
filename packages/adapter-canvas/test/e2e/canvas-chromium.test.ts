@@ -15,6 +15,10 @@ import {
 } from "./support/canvas-harness.js";
 import type { Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
+// Bound to the production constants so the retry cadence is exercised at the
+// value the compiled browser bundle actually schedules, not a copy of it.
+import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
+import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const VALID_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
@@ -602,6 +606,97 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(status).toHaveText(stableMessage ?? "");
 
     releaseRetry?.();
+  });
+
+  // The Modeled poll above proves `/api/load-graph` retries. Planned and Diff
+  // each schedule their own retry from their own compiled entry bundle, so
+  // neither is covered by that test: a broken timer or a mis-read payload in
+  // either bundle would ship green. These two journeys close that gap by
+  // driving the real browser code through wait, retry, and recovery.
+  test("retries the planned graph in the real browser until the model appears", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let requests = 0;
+    await page.route("**/api/plan-graph", async (route) => {
+      requests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        // The retry must observe a changed answer, so the second reply reports
+        // a current model rather than repeating the wait.
+        body: JSON.stringify(
+          requests === 1 ? { needsAppBicep: true } : { refreshed: true }
+        )
+      });
+    });
+
+    await gotoCanvas(page, canvas, "planned");
+    const status = page.locator("#plan-status");
+    await expect(status).toContainText(
+      "Copilot is generating .radius/app.bicep"
+    );
+
+    // Nothing announces the model's arrival, so only the scheduled retry can
+    // move the page off the wait.
+    await page.clock.fastForward(PLAN_RETRY_MS);
+    await expect.poll(() => requests).toBe(2);
+    await expect(status).toContainText("The planned deployment is current.");
+  });
+
+  test("retries the graph diff in the real browser until the model appears", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let requests = 0;
+    await page.route("**/api/diff-branches", async (route) => {
+      requests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          requests === 1 ? { needsAppBicep: true } : { refreshed: true }
+        )
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph-diff");
+    const status = page.locator("#diff-status");
+    await expect(status).toContainText(
+      "Copilot is generating .radius/app.bicep"
+    );
+
+    await page.clock.fastForward(DIFF_RETRY_MS);
+    await expect.poll(() => requests).toBe(2);
+    await expect(status).toContainText("The graph comparison is current.");
+  });
+
+  // A retry that re-armed the expired wait would loop forever, so the request
+  // that follows the wait must not ask the server to restart it.
+  test("does not restart an expired model wait from a diff retry @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    const restartFlags: unknown[] = [];
+    await page.route("**/api/diff-branches", async (route) => {
+      const body = route.request().postDataJSON() as { restartWait?: unknown };
+      restartFlags.push(body.restartWait);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ needsAppBicep: true })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph-diff");
+    await expect.poll(() => restartFlags.length).toBe(1);
+
+    await page.clock.fastForward(DIFF_RETRY_MS);
+    await expect.poll(() => restartFlags.length).toBe(2);
+    expect(restartFlags).toEqual([true, false]);
   });
 
   test("reports GitHub account mismatch accessibly without leaking raw CLI output @safety", async ({
