@@ -9,6 +9,7 @@ import {
 import type { ResolveOidcSubjectResult } from "../../azure-oidc.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
+import { unresolvedProviderMutations } from "../../operations.js";
 import {
   ENTRA_APP_RETENTION_NOTICE,
   resolveAzureAutoSetupApplication
@@ -19,6 +20,7 @@ import type {
   AzureAutoSetupOperation,
   AzureAutoSetupWorkflow
 } from "./azure-auto-setup-types.js";
+import { ProviderMutationRecoveryError } from "../services/provider-mutation-recovery.js";
 
 const OPERATION_FUNCTIONS = [
   "get",
@@ -59,6 +61,7 @@ function validateDependencies(dependencies: AzureAutoSetupDependencies): void {
     "ensureServicePrincipal",
     "finalizeSetupFailure",
     "persistMutationCheckpoint",
+    "honorStopBoundary",
     "sleep"
   ] as const) {
     if (typeof dependencies[name] !== "function") {
@@ -147,6 +150,22 @@ export async function handleAzureAutoSetup(
   let operation: AzureAutoSetupOperation | null = null;
   let steps: string[] = [];
   let runAzReady = false;
+  const stopBoundary = async (boundary: string) => {
+    const proceed = await dependencies.honorStopBoundary({
+      operation,
+      boundary,
+      persist: () => dependencies.operations.persist(),
+      report: (diagnostic) => dependencies.operations.report(diagnostic)
+    });
+    if (proceed) return true;
+    respond(context, 200, {
+      cancelled: true,
+      code: "operation-stopped",
+      boundary,
+      operationId: operation?.operationId
+    });
+    return false;
+  };
   try {
     const data = JSON.parse(body);
     const targetRepo = data.repo || "";
@@ -164,7 +183,6 @@ export async function handleAzureAutoSetup(
     const appNameProvided = typeof data.appName === "string";
     const requestedAppName = appNameProvided ? data.appName : "";
     const requestedSubscriptionId = (data.subscriptionId || "").trim();
-
     const fail = async (
       status: number,
       error: string,
@@ -192,6 +210,7 @@ export async function handleAzureAutoSetup(
             : null
         });
         await dependencies.operations.persist();
+        if (!(await stopBoundary("input_prompt"))) return;
         respond(context, status, {
           error,
           inputRequired: true,
@@ -201,6 +220,7 @@ export async function handleAzureAutoSetup(
         });
         return;
       }
+      if (!(await stopBoundary("before-azure-failure-cleanup"))) return;
       const failure = await dependencies.finalizeSetupFailure(operation, {
         status,
         error,
@@ -215,13 +235,16 @@ export async function handleAzureAutoSetup(
       });
       respond(context, failure.status, failure.body);
     };
-    const checkpoint = () =>
-      dependencies.persistMutationCheckpoint({
+    const checkpoint = async (boundary: string) => {
+      const saved = await dependencies.persistMutationCheckpoint({
         operation,
         persist: () => dependencies.operations.persist(),
         report: (diagnostic) => dependencies.operations.report(diagnostic),
         fail
       });
+      if (!saved) return false;
+      return stopBoundary(boundary);
+    };
 
     if (!targetRepo || !resourceGroup || !clusterName) {
       await fail(
@@ -428,26 +451,30 @@ export async function handleAzureAutoSetup(
       // Identity narration is advisory and never blocks setup.
     }
 
-    const accessMessage = await dependencies.external.preflightRepoAdmin(
-      targetRepo,
-      selectedExecutor
-    );
-    if (accessMessage) {
-      await fail(403, accessMessage, "repo-admin-required");
-      return;
-    }
-    const packageAccess =
-      await dependencies.external.preflightGhcrPackageWriteAccess(
+    const reconcilingProviderMutation =
+      unresolvedProviderMutations(operation).length > 0;
+    if (!reconcilingProviderMutation) {
+      const accessMessage = await dependencies.external.preflightRepoAdmin(
+        targetRepo,
         selectedExecutor
       );
-    if (!packageAccess.ok) {
-      await fail(
-        packageAccess.status,
-        packageAccess.error,
-        packageAccess.code,
-        { steps }
-      );
-      return;
+      if (accessMessage) {
+        await fail(403, accessMessage, "repo-admin-required");
+        return;
+      }
+      const packageAccess =
+        await dependencies.external.preflightGhcrPackageWriteAccess(
+          selectedExecutor
+        );
+      if (!packageAccess.ok) {
+        await fail(
+          packageAccess.status,
+          packageAccess.error,
+          packageAccess.code,
+          { steps }
+        );
+        return;
+      }
     }
     runAzReady = true;
 
@@ -459,12 +486,14 @@ export async function handleAzureAutoSetup(
       runGitHubJson: (apiPath) =>
         dependencies.external.runGitHubJson(apiPath, selectedExecutor),
       fail,
+      stopBoundary,
       checkpoint
     };
 
     let tenantId = (data.tenantId || "").trim();
     let subscriptionId = requestedSubscriptionId;
     steps.push(`Selecting subscription ${subscriptionId}...`);
+    if (!(await stopBoundary("before-azure-subscription-selection"))) return;
     const setResult = await workflow.runAz([
       "account",
       "set",
@@ -642,6 +671,20 @@ export async function handleAzureAutoSetup(
       steps
     });
   } catch (error) {
+    if (
+      error instanceof ProviderMutationRecoveryError &&
+      error.code === "provider-mutation-outcome-unknown" &&
+      operation
+    ) {
+      respond(context, 202, {
+        operationId: operation.operationId,
+        code: error.code,
+        reconciling: true,
+        message: error.message
+      });
+      return;
+    }
+    if (!(await stopBoundary("before-azure-failure-cleanup"))) return;
     const failure = await dependencies.finalizeSetupFailure(operation, {
       status: 400,
       error: errorMessage(error),

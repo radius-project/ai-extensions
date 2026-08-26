@@ -301,6 +301,10 @@ export type ProviderMutationRecord = {
   // state. Bounded so an unreadable resource becomes a named hand-off instead
   // of an endlessly rescheduled reconciliation.
   reconcileAttempts?: number;
+  // Whether an acknowledged create actually made a resource rather than finding
+  // the exact target already present. Persisted with confirmation so recovery
+  // never promotes a reused resource into cleanup ownership.
+  createdByOperation?: boolean;
   evidence: string | null;
 };
 
@@ -366,6 +370,9 @@ function readProviderRecovery(value: any): ProviderRecoveryRecord {
               entry.providerIdempotencyKey
             : null,
           providerId: optionalIdentityString(entry.providerId),
+          ...(typeof entry.createdByOperation === "boolean" ?
+            { createdByOperation: entry.createdByOperation }
+          : {}),
           ...(entry.intent && typeof entry.intent === "object" ?
             {
               intent: Object.fromEntries(
@@ -488,7 +495,8 @@ export function settleProviderMutation(
   mutationId: string,
   status: ProviderMutationStatus,
   evidence: string | null = null,
-  providerId: string | null = null
+  providerId: string | null = null,
+  createdByOperation?: boolean
 ): boolean {
   if (!PROVIDER_MUTATION_STATUSES.includes(status)) return false;
   const recovery = readProviderRecovery(op?.providerRecovery);
@@ -508,6 +516,9 @@ export function settleProviderMutation(
     // so the id it once carried is not evidence for anything a later pass
     // would match against.
     mutation.providerId = null;
+  }
+  if (typeof createdByOperation === "boolean") {
+    mutation.createdByOperation = createdByOperation;
   }
   mutation.evidence =
     typeof evidence === "string" && evidence.trim() ? evidence.trim() : null;

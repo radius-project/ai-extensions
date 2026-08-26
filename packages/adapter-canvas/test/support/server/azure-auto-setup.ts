@@ -84,6 +84,7 @@ export function createAzureAutoSetupTestDependencies(
     finalizeSetupFailure: async () => unexpected("finalizeSetupFailure"),
     persistMutationCheckpoint: async () =>
       unexpected("persistMutationCheckpoint"),
+    honorStopBoundary: async () => true,
     sleep: async () => unexpected("sleep"),
     stageAuthorizeIdentity: "authorize_identity",
     ...dependencyOverrides
