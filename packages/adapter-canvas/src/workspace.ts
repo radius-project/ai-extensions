@@ -6,7 +6,10 @@ import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { IGNORED_SOURCE_DIRS } from "@radius-project/core";
+import {
+  GENERATED_MODEL_PATHS,
+  IGNORED_SOURCE_DIRS
+} from "@radius-project/core";
 import type { CanvasState } from "./shared.js";
 
 export interface CanvasSessionWorkspace {
@@ -441,7 +444,45 @@ export async function workspaceHeadCommit(
 // model and origin record that an older layout keeps beside it. Changes confined
 // to these are not application-source changes, so committing a regenerated model
 // does not read as a reason to regenerate it again.
-const GENERATED_PATHS = [".radius", "app.bicep", "app.origin.json"];
+//
+// Shared with the remediation registry, which stages exactly this set when it
+// has to commit a generated model before pushing. One list means the paths a
+// push commits can never drift from the paths a freshness check discounts.
+const GENERATED_PATHS: readonly string[] = GENERATED_MODEL_PATHS;
+
+/**
+ * Which generator-owned paths have changes that are not committed yet — staged,
+ * unstaged, or untracked.
+ *
+ * Returns allowlisted tokens from `GENERATED_MODEL_PATHS`, never raw git output,
+ * so the result can be handed straight to the `git-push-branch` remediation.
+ * Resolves to an empty list when there is no workspace, no git, or nothing
+ * pending; callers treat that as "a plain push publishes everything it needs".
+ */
+export async function uncommittedGeneratedPaths(
+  workspacePath: string | null | undefined
+): Promise<readonly string[]> {
+  const pending: string[] = [];
+  for (const generated of GENERATED_PATHS) {
+    // Asked one path at a time on purpose. Porcelain lines are `XY <path>` with
+    // a significant leading space for an unstaged change, and `runGitResult`
+    // trims, so parsing a combined listing by column silently loses the first
+    // entry's path prefix. A per-path question needs no parsing at all: any
+    // output means that root has something uncommitted.
+    //
+    // `git status` also tolerates a pathspec matching nothing, unlike `git add`,
+    // so an absent member of the allowlist is simply empty rather than an error.
+    const result = await runGitResult(workspacePath, [
+      "status",
+      "--porcelain",
+      "-uall",
+      "--",
+      generated
+    ]);
+    if (result.ok && result.stdout) pending.push(generated);
+  }
+  return pending;
+}
 
 // Whether application source changed between `sinceCommit` and the current
 // working tree, ignoring paths the generator owns. This includes committed,

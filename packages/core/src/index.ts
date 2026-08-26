@@ -55,6 +55,24 @@ export type {
   AppOrigin
 } from "./modeling/index.js";
 export {
+  GENERATED_MODEL_PATHS,
+  REMEDIATION_IDS,
+  buildRemediation,
+  isRemediationId,
+  remediationSessionMessage,
+  remediationView
+} from "./remediations.js";
+export type {
+  GeneratedModelPath,
+  Remediation,
+  RemediationCwd,
+  RemediationId,
+  RemediationImpact,
+  RemediationResult,
+  RemediationSessionMessage,
+  RemediationView
+} from "./remediations.js";
+export {
   getPlatform,
   generatePortalUrl,
   buildOidcSubject,

@@ -200,6 +200,7 @@ export function initializeEnvironmentPage(
     context,
     {
       repo: state.repo,
+      mutationNonce: state.mutationNonce,
       decisions: context.dialogs,
       ...(confirmDialog ? { confirmDialog } : {})
     },

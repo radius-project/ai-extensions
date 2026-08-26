@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CLEANUP_COMMANDS,
   cleanupRemovedGitHubEnvironment,
+  cleanupRunnerKind,
   isCleanupCommandKind
 } from "./cleanup-commands.js";
 import {
@@ -219,5 +220,58 @@ describe("cleanupRemovedGitHubEnvironment", () => {
         }))
       )
     ).toBe(true);
+  });
+});
+
+describe("translating a persisted command kind to its runner key", () => {
+  it.each([
+    ["rollback", "rollback"],
+    ["retry_cleanup", "cleanup_retry"],
+    ["exit_setup", "exit_setup"]
+  ])("maps %s to %s", (commandKind, runnerKind) => {
+    expect(cleanupRunnerKind(commandKind)).toBe(runnerKind);
+  });
+
+  it("resolves every deletion kind to a spec the executor can run", () => {
+    for (const commandKind of ["rollback", "retry_cleanup", "exit_setup"]) {
+      const runnerKind = cleanupRunnerKind(commandKind);
+      expect(runnerKind).not.toBeNull();
+      // The defect this mapping exists for: a persisted kind handed straight to
+      // the executor selects no spec, and the pass dies on an undefined
+      // selector before it deletes anything or says why.
+      expect(CLEANUP_COMMANDS[runnerKind!]).toBeDefined();
+      expect(isCleanupCommandKind(runnerKind!)).toBe(true);
+    }
+  });
+
+  it("does not accept a persisted kind as a runner key in its own right", () => {
+    // `retry_cleanup` is a saved command, never a spec. Treating the two names
+    // as interchangeable is exactly what produced the undefined selector.
+    expect(isCleanupCommandKind("retry_cleanup")).toBe(false);
+    expect(CLEANUP_COMMANDS.retry_cleanup).toBeUndefined();
+  });
+
+  it.each([
+    ["a forward command", "retry_setup"],
+    ["a verification retry", "retry_verification"],
+    ["a stop", "stop"],
+    ["a runner key posing as a command kind", "cleanup_retry"],
+    ["an empty string", ""]
+  ])("returns nothing for %s", (_label, commandKind) => {
+    expect(cleanupRunnerKind(commandKind)).toBeNull();
+  });
+
+  it.each([
+    ["undefined", undefined],
+    ["null", null],
+    ["a number", 7],
+    ["an object", { kind: "rollback" }]
+  ])("returns nothing for %s", (_label, commandKind) => {
+    expect(cleanupRunnerKind(commandKind)).toBeNull();
+  });
+
+  it("does not inherit a mapping from the prototype chain", () => {
+    expect(cleanupRunnerKind("constructor")).toBeNull();
+    expect(cleanupRunnerKind("toString")).toBeNull();
   });
 });

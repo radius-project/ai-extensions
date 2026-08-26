@@ -12,6 +12,7 @@ import {
   type CanvasHarness
 } from "../e2e/support/canvas-harness.js";
 import type { Page } from "@playwright/test";
+import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
 
 type Theme = "dark" | "light";
@@ -486,7 +487,9 @@ test.describe("Radius Canvas visual baselines", () => {
       await expect(page.locator("#planned-branch")).toHaveValue(
         WORKTREE_BRANCH
       );
+      await expect(page.locator("#plan-btn")).toBeEnabled();
       await page.locator("#planned-branch").dispatchEvent("change");
+      await expect(page.locator("#plan-btn")).toBeDisabled();
       await expectWorktreeBranchRequests(requests.planGraph);
       await gotoVisual(page, canvas, "planned", theme);
       await expect(page.locator(".rad-node")).toHaveCount(2);
@@ -544,6 +547,9 @@ test.describe("Radius Canvas visual baselines", () => {
         .getByRole("button", { name: "New Credential Profile" })
         .click();
       await expect(page.locator("#cred-form")).toBeVisible();
+      await expect(page.locator("#cred-ghcr-status")).toContainText(
+        "using the stored GitHub CLI credential"
+      );
       await screenshot(page, `vi-05-credential-profile-form-${theme}.png`);
     });
   }
@@ -605,5 +611,72 @@ test.describe("Radius Canvas visual baselines", () => {
         await screenshot(page, `vi-07-deploy-${status}-${theme}.png`);
       });
     }
+  }
+
+  for (const theme of ["light", "dark"] as const) {
+    test(`VI-08 run-command callout in ${theme}`, async ({ page, canvas }) => {
+      test.setTimeout(45_000);
+      await seed(canvas, { activeSubtab: "credentials" });
+      // Drop write:packages from the keyring account. That is what turns the
+      // GitHub Packages row from a verified note into a run-command callout,
+      // which is the only state that renders the callout's styling.
+      await canvas.setGitHubKeyringScopes(["repo"]);
+      await gotoVisual(page, canvas, "credentials", theme);
+      await page
+        .getByRole("button", { name: "New Credential Profile" })
+        .click();
+      await expect(page.locator("#cred-form")).toBeVisible();
+
+      const row = page.locator("#cred-ghcr-command-row");
+      await expect(row).toBeVisible({ timeout: 15_000 });
+      await row.scrollIntoViewIfNeeded();
+
+      // Pin the callout itself: the command text, Copy, and Run with Copilot.
+      await expect(row).toContainText("gh auth refresh");
+      await expect(
+        row.getByRole("button", { name: COMMAND_RUN_LABEL })
+      ).toBeVisible();
+      await expect(row.getByRole("button", { name: "Copy" })).toBeVisible();
+      await expect(page.locator("#cred-ghcr-retry")).toBeVisible();
+
+      await screenshot(page, `vi-08-run-command-callout-${theme}.png`);
+    });
+
+    test(`VI-09 wizard github access callout in ${theme}`, async ({
+      page,
+      canvas
+    }) => {
+      test.setTimeout(45_000);
+      await seed(canvas, { activeSubtab: "environments" });
+      // The wizard reports its own readiness, so dropping the scopes here is
+      // what turns its GitHub access warning from prose into a callout. No
+      // other baseline covers this surface, which is how it shipped as plain
+      // text after the rest of the run-command work landed.
+      await canvas.setGitHubKeyringScopes(["repo"]);
+      await gotoVisual(page, canvas, "environment", theme);
+      await page.getByRole("button", { name: "New Environment" }).click();
+      await page.locator("#env-profile-button").click();
+      await page
+        .locator("#env-profile-menu")
+        .getByRole("option", { name: new RegExp(PROFILE_NAME) })
+        .click();
+      await page.locator("#env-step1-next").click();
+      await expect(page.locator("#env-step-details")).toBeVisible();
+
+      const repair = page.locator("#env-gh-repair");
+      await expect(repair).toBeVisible({ timeout: 15_000 });
+      await repair.scrollIntoViewIfNeeded();
+
+      // The command must be an actionable callout rather than a paragraph
+      // with the command buried in it.
+      await expect(repair).toContainText("gh auth switch");
+      await expect(repair).not.toContainText("In the terminal, run");
+      await expect(
+        repair.getByRole("button", { name: COMMAND_RUN_LABEL })
+      ).toBeVisible();
+      await expect(repair.getByRole("button", { name: "Copy" })).toBeVisible();
+
+      await screenshot(page, `vi-09-wizard-github-callout-${theme}.png`);
+    });
   }
 });

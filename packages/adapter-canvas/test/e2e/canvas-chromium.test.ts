@@ -14,6 +14,7 @@ import {
   type CanvasHarness
 } from "./support/canvas-harness.js";
 import type { Page } from "@playwright/test";
+import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const VALID_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
@@ -556,16 +557,16 @@ test.describe("Radius Canvas in Chromium", () => {
       "@acting-user"
     );
     await expectNoWcagViolations(page);
-    const showHowToFix = page.getByRole("button", {
-      name: "Show how to fix"
-    });
-    await expect(showHowToFix).toBeVisible();
-    await showHowToFix.focus();
-    await page.keyboard.press("Enter");
-    await expect(page.locator("#env-gh-details-panel")).toHaveAttribute(
-      "open",
-      ""
-    );
+
+    // The fix is offered directly, not tucked inside the technical-details
+    // disclosure, and it is reachable by keyboard.
+    const repair = page.locator("#env-gh-repair");
+    await expect(repair).toBeVisible();
+    await expect(repair).toContainText("gh auth switch");
+    const runButton = repair.getByRole("button", { name: COMMAND_RUN_LABEL });
+    await expect(repair.getByRole("button", { name: "Copy" })).toBeVisible();
+    await runButton.focus();
+    await expect(runButton).toBeFocused();
     await canvas.expectCliInvoked("gh");
   });
 
@@ -676,16 +677,17 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.getByRole("button", { name: "Verify Credentials" }).click();
     const verifyPayload = await (await verifyResponse).text();
 
-    const assistDialog = page.getByRole("dialog", {
-      name: "Start Azure login?"
-    });
-    await expect(assistDialog).toBeVisible();
-    await assistDialog.getByRole("button", { name: "Cancel" }).click();
+    const remediation = page.locator("#cred-verify-action");
+    await expect(remediation).toContainText("Sign in to Azure CLI");
+    await expect(remediation).toContainText(
+      `az login --use-device-code --tenant ${VALID_TENANT_ID}`
+    );
+    await expect(
+      remediation.getByRole("button", { name: "Run with Copilot" })
+    ).toBeVisible();
 
-    // The guidance half of the message is authored only by the server. The
-    // dialog's own copy also opens with "No active Azure session", so asserting
-    // that prefix alone would still pass if the cancel path stopped carrying
-    // the server's error through to the status line.
+    // The guidance remains server-authored while the action is rebuilt from the
+    // structured remediation reference rather than duplicated in a modal.
     await expect(page.locator("#cred-verify-status")).toContainText(
       'Run "az login --use-device-code" in your terminal, then click Verify Credentials again.'
     );
@@ -711,6 +713,7 @@ test.describe("Radius Canvas in Chromium", () => {
         )
       )
       .toBe(true);
+    await expectNoWcagViolations(page);
   });
 
   test("validates credential form requirements before any external command runs @safety", async ({
@@ -829,6 +832,144 @@ test.describe("Radius Canvas in Chromium", () => {
       cluster: "fixture-cluster"
     });
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
+  });
+
+  test("retries restored verification through the selected account and exact run identity @safety", async ({
+    page,
+    canvas
+  }) => {
+    const operationId = await canvas.seedRestartedVerificationFailure();
+    const exactCreatedAt = new Date().toISOString();
+    const decoyCreatedAt = new Date(Date.now() + 1000).toISOString();
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      {
+        tool: "gh",
+        args: [
+          "run",
+          "list",
+          "--workflow=radius-verify-credentials.yml",
+          "--limit",
+          "10",
+          "--json",
+          "databaseId",
+          "--repo",
+          REPOSITORY
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: '[{"databaseId":40}]'
+      },
+      {
+        tool: "gh",
+        args: [
+          "workflow",
+          "run",
+          "radius-verify-credentials.yml",
+          "-f",
+          "environment=fixture-environment",
+          "-f",
+          `radius_operation=${operationId}`,
+          "--repo",
+          REPOSITORY,
+          "--ref",
+          WORKTREE_BRANCH
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: ""
+      },
+      {
+        tool: "gh",
+        args: [
+          "run",
+          "list",
+          "--workflow=radius-verify-credentials.yml",
+          "--limit",
+          "10",
+          "--json",
+          "databaseId,createdAt,displayTitle,event,headBranch",
+          "--repo",
+          REPOSITORY
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: JSON.stringify([
+          {
+            databaseId: 42,
+            createdAt: decoyCreatedAt,
+            displayTitle:
+              "Radius verify fixture-environment [another-operation]",
+            event: "workflow_dispatch",
+            headBranch: WORKTREE_BRANCH
+          },
+          {
+            databaseId: 41,
+            createdAt: exactCreatedAt,
+            displayTitle: `Radius verify fixture-environment [${operationId}]`,
+            event: "workflow_dispatch",
+            headBranch: WORKTREE_BRANCH
+          }
+        ])
+      },
+      {
+        tool: "gh",
+        args: [
+          "run",
+          "view",
+          "41",
+          "--json",
+          "status,conclusion,jobs",
+          "--repo",
+          REPOSITORY
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: JSON.stringify({
+          status: "completed",
+          conclusion: "success",
+          jobs: []
+        })
+      }
+    );
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "environment");
+
+    const retry = page.locator("#env-progress-command-retry-verification");
+    await expect(retry).toBeVisible();
+    await expect(retry).toHaveText("Retry verification");
+    await retry.click();
+
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "gh" &&
+            call.args[0] === "workflow" &&
+            call.args.includes(`radius_operation=${operationId}`)
+        )
+      )
+      .toBe(true);
+    await expect
+      .poll(async () => (await canvas.operationRecord(operationId))["state"], {
+        timeout: 15_000
+      })
+      .toBe("succeeded");
+
+    const record = await canvas.operationRecord(operationId);
+    expect(record["verification"]).toMatchObject({
+      baselineRunId: 40,
+      runId: "41",
+      runUrl: `https://github.com/${REPOSITORY}/actions/runs/41`,
+      operationMarker: operationId
+    });
+    expect(record["providerRecovery"]).toMatchObject({
+      mutations: [
+        expect.objectContaining({
+          kind: "github_workflow.dispatch_retry",
+          status: "confirmed",
+          providerIdempotencyKey: operationId
+        })
+      ]
+    });
+    await expect(page.locator("body")).toContainText("Environment created");
+    await expectNoWcagViolations(page);
   });
 
   test("sends the worktree branch the page selected when Deploy is activated @safety", async ({
@@ -1204,6 +1345,8 @@ test.describe("Radius Canvas in Chromium", () => {
     page.on("framenavigated", (frame) => {
       if (frame === page.mainFrame()) navigations += 1;
     });
+    await gotoCanvas(page, canvas, "planned");
+    await expectNoWcagViolations(page);
     await page.route("**/api/ping", async (route) => {
       pings += 1;
       await route.fulfill({
@@ -1212,9 +1355,6 @@ test.describe("Radius Canvas in Chromium", () => {
         body: "{}"
       });
     });
-
-    await gotoCanvas(page, canvas, "planned");
-    await expectNoWcagViolations(page);
     const initialNavigations = navigations;
     await page.evaluate("window.dispatchEvent(new Event('focus'))");
     await expect.poll(() => pings).toBe(1);
@@ -1222,7 +1362,13 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.evaluate("window.dispatchEvent(new Event('focus'))");
     await expect.poll(() => pings).toBe(2);
     await expect(page.locator("#radius-reconnect-overlay")).toBeVisible();
-    await page.evaluate("window.dispatchEvent(new Event('focus'))");
+    const recoveryNavigation = page.waitForNavigation({
+      waitUntil: "domcontentloaded"
+    });
+    await page.evaluate(
+      "setTimeout(() => window.dispatchEvent(new Event('focus')), 0)"
+    );
+    await recoveryNavigation;
     await expect.poll(() => pings).toBe(3);
     await expect.poll(() => navigations - initialNavigations).toBe(1);
     await expect(page).toHaveURL(/page=planned/);

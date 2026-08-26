@@ -10,6 +10,7 @@ import {
   finish,
   finishSucceeded,
   isStale,
+  markVerificationRetryAcquisition,
   acceptCommand,
   beginRetryAttempt,
   canRetrySetup,
@@ -27,7 +28,9 @@ import {
   sanitizeResumeTarget,
   OPERATION_SCHEMA_VERSION,
   STAGE_VERIFY,
-  toClientView
+  toClientView,
+  canStartRollback,
+  legacyRecoveryQuarantine
 } from "./operations.js";
 import type { OperationStore } from "./operation-store.js";
 import {
@@ -95,7 +98,7 @@ async function resumeRecoveredOperation(operation, actions) {
 }
 
 function operation(overrides = {}) {
-  return createOperation({
+  const op = createOperation({
     provider: "azure",
     repo: "contoso/store",
     environment: "dev",
@@ -110,6 +113,8 @@ function operation(overrides = {}) {
     },
     ...overrides
   });
+  op.context = { githubLogin: "alice" };
+  return op;
 }
 
 afterEach(async () => {
@@ -181,6 +186,7 @@ describe("operation restart functional coverage", () => {
   it("restores an operation waiting for interactive input", async () => {
     const { first, restart } = await persistedRegistries();
     const op = operation();
+    expect(op.context.githubLogin).toBe("alice");
     first.start(op);
     requireInput(op, {
       code: "app-selection-required",
@@ -613,13 +619,16 @@ describe("operation restart functional coverage", () => {
 });
 
 describe("cooperative control functional coverage", () => {
-  const operation = () =>
-    createOperation({
+  const operation = () => {
+    const op = createOperation({
       provider: "azure",
       repo: "contoso/store",
       environment: "dev",
       journey: { origin: "environments" }
     });
+    op.context = { githubLogin: "alice" };
+    return op;
+  };
 
   it("honors a stop recorded before the extension restarted", async () => {
     const { first, restart } = await persistedRegistries();
@@ -661,6 +670,7 @@ describe("cooperative control functional coverage", () => {
       }
     };
     recordAzureApp(op, { state: "created", appId: "app-1" });
+    expect(op.context.githubLogin).toBe("alice");
     finish(op, "failed_partial", {
       failure: { code: "operation-stalled", message: "lost contact" }
     });
@@ -759,6 +769,7 @@ describe("cooperative control functional coverage", () => {
 
     const restored = await restart();
     const recovered = restored.get(op.operationId);
+    expect(recovered.context.githubLogin).toBe("alice");
     expect(recovered.state).toBe("running");
     expect(recovered.control.attempts.verification).toBe(1);
     expect(recovered.control.outcomes).toEqual([
@@ -775,6 +786,38 @@ describe("cooperative control functional coverage", () => {
     expect(recovered.verification.workflow).toBe(
       "radius-verify-credentials.yml"
     );
+  });
+
+  it("restores a persisted verification retry that was acquiring its selected executor", async () => {
+    const { first, restart } = await persistedRegistries();
+    const op = operation();
+    first.start(op);
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: "41",
+      runUrl: "https://github.com/contoso/store/actions/runs/41"
+    };
+    const accepted = acceptCommand(op, {
+      kind: "retry_verification",
+      attempt: 1,
+      target: "verification"
+    });
+    markVerificationRetryAcquisition(op, accepted.command.commandId);
+    await first.persist();
+
+    const restored = await restart();
+    const recovered = restored.get(op.operationId);
+    expect(recovered.state).toBe("running");
+    expect(recovered.recoveryState).toBe("verification_acquisition_pending");
+    expect(recovered.verification).toMatchObject({
+      acquisitionPending: true,
+      retryCommandId: accepted.command.commandId,
+      runId: "41"
+    });
   });
 
   it("loads a version 1 record written before the control fields existed", async () => {
@@ -807,7 +850,19 @@ describe("cooperative control functional coverage", () => {
     const restored = await restart();
     const recovered = restored.get(op.operationId);
     expect(recovered.schemaVersion).toBe(OPERATION_SCHEMA_VERSION);
-    expect(recovered.state).toBe("input_required");
+    // A version 1 record cannot say which provider requests it had in flight,
+    // so a restart quarantines it rather than resuming the input prompt and
+    // walking forward over work it cannot see.
+    expect(recovered.state).toBe("failed_partial");
+    expect(recovered.failure.code).toBe("operation-legacy-unrecoverable");
+    expect(recovered.providerRecovery.state).toBe("unrecoverable_legacy");
+    expect(legacyRecoveryQuarantine(recovered)).toContain(
+      "will neither continue the setup nor delete anything"
+    );
+    expect(canStartRollback(recovered)).toMatchObject({
+      ok: false,
+      code: "rollback-legacy-unrecoverable"
+    });
     expect(recovered.control.attempts).toEqual({
       setup: 1,
       verification: 0,
@@ -820,6 +875,37 @@ describe("cooperative control functional coverage", () => {
       headSha: null,
       workflowFiles: []
     });
+  });
+
+  it("still restores a current-version input prompt for the customer to answer", async () => {
+    const { first, filePath, restart } = await persistedRegistries();
+    const op = operation();
+    first.start(op);
+    requireInput(op, {
+      code: "app-selection-required",
+      message: "Choose an App Registration."
+    });
+    op.resumeRequest = {
+      needsAzureCredentials: true,
+      azure: {},
+      environment: {
+        repo: "contoso/store",
+        environment: "dev",
+        provider: "azure"
+      }
+    };
+    await first.persist();
+    // Untouched on disk: the record already carries the current schema.
+    expect(
+      JSON.parse(await fs.readFile(filePath, "utf8")).operations[0]
+        .schemaVersion
+    ).toBe(OPERATION_SCHEMA_VERSION);
+
+    const recovered = (await restart()).get(op.operationId);
+
+    expect(recovered.state).toBe("input_required");
+    expect(recovered.recoveryState).toBe("waiting_input");
+    expect(legacyRecoveryQuarantine(recovered)).toBeNull();
   });
 
   it("keeps the browser view free of secrets, evidence, and the private ledger", async () => {
@@ -848,5 +934,83 @@ describe("cooperative control functional coverage", () => {
     expect(view).not.toContain("resumeRequest");
     expect(view).not.toContain("setupArtifacts");
     expect(view).not.toContain("idempotencyKey");
+  });
+});
+
+describe("the checkpoint every Azure mutation passes through", () => {
+  function checkpointHarness(op) {
+    const failures = [];
+    return {
+      failures,
+      run: () =>
+        persistMutationCheckpoint({
+          operation: op,
+          persist: async () => {},
+          report: () => {},
+          fail: async (status, error, code) => {
+            failures.push({ status, error, code });
+          }
+        })
+    };
+  }
+
+  it("lets forward work continue while no rollback has been decided", async () => {
+    const op = createOperation({ operationId: "op_checkpoint" });
+    const harness = checkpointHarness(op);
+
+    await expect(harness.run()).resolves.toBe(true);
+    expect(harness.failures).toEqual([]);
+  });
+
+  it("halts forward work as soon as reconciliation demands a rollback", async () => {
+    const op = createOperation({ operationId: "op_checkpoint" });
+    op.providerRecovery.state = "rollback_pending";
+    const harness = checkpointHarness(op);
+
+    // Every Azure write in the setup saves its provenance here before the next
+    // one starts, so this is the single place that can guarantee no Service
+    // Principal, federated credential, or role assignment is added to a set
+    // the rollback selection has already been made for.
+    await expect(harness.run()).resolves.toBe(false);
+    expect(harness.failures).toEqual([
+      {
+        status: 409,
+        code: "provider-rollback-pending",
+        error: expect.stringContaining("must roll back")
+      }
+    ]);
+  });
+
+  it.each(["reconciling", "manual_required", "complete", "idle"])(
+    "continues through a %s recovery state",
+    async (state) => {
+      const op = createOperation({ operationId: "op_checkpoint" });
+      op.providerRecovery.state = state;
+      const harness = checkpointHarness(op);
+
+      await expect(harness.run()).resolves.toBe(true);
+    }
+  );
+
+  it("reports the persistence failure ahead of the rollback decision", async () => {
+    const op = createOperation({ operationId: "op_checkpoint" });
+    op.providerRecovery.state = "rollback_pending";
+    const failures = [];
+
+    const saved = await persistMutationCheckpoint({
+      operation: op,
+      persist: async () => {
+        throw new Error("disk full");
+      },
+      report: () => {},
+      fail: async (status, error, code) => {
+        failures.push({ status, code, error });
+      }
+    });
+
+    expect(saved).toBe(false);
+    expect(failures).toEqual([
+      expect.objectContaining({ code: "operation-persistence-failed" })
+    ]);
   });
 });

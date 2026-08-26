@@ -34,7 +34,8 @@ describe("deployingPage", () => {
 
     expect(readBrowserPageState(html, DEPLOYING_PAGE_STATE_ID)).toEqual({
       repo: "octo/app",
-      branch: "feature/x"
+      branch: "feature/x",
+      mutationNonce: ""
     });
     expect(html).toContain(browserEntryMarker("deploying-page"));
     expect(html.split(browserScript("deploying-page"))).toHaveLength(2);
@@ -50,7 +51,11 @@ describe("deployingPage", () => {
         }),
         DEPLOYING_PAGE_STATE_ID
       )
-    ).toEqual({ repo: "octo/planned", branch: "planned" });
+    ).toEqual({
+      repo: "octo/planned",
+      branch: "planned",
+      mutationNonce: ""
+    });
     expect(
       readBrowserPageState(
         deployingPage({
@@ -59,13 +64,30 @@ describe("deployingPage", () => {
         }),
         DEPLOYING_PAGE_STATE_ID
       )
-    ).toEqual({ repo: "octo/graph", branch: "graph" });
+    ).toEqual({ repo: "octo/graph", branch: "graph", mutationNonce: "" });
     expect(
       readBrowserPageState(
         deployingPage({ deployingRepo: "octo/deploying" }),
         DEPLOYING_PAGE_STATE_ID
       )
-    ).toEqual({ repo: "octo/deploying", branch: "main" });
+    ).toEqual({
+      repo: "octo/deploying",
+      branch: "main",
+      mutationNonce: ""
+    });
+  });
+
+  it("carries the browser mutation nonce into the serialized state", () => {
+    const html = deployingPage({
+      contextRepo: "octo/app",
+      browserMutationNonce: "nonce-1"
+    });
+
+    expect(readBrowserPageState(html, DEPLOYING_PAGE_STATE_ID)).toEqual({
+      repo: "octo/app",
+      branch: "main",
+      mutationNonce: "nonce-1"
+    });
   });
 
   it("keeps hostile state inert in markup and serialized state", () => {
@@ -76,7 +98,8 @@ describe("deployingPage", () => {
 
     expect(readBrowserPageState(html, DEPLOYING_PAGE_STATE_ID)).toEqual({
       repo: HOSTILE_STATE,
-      branch: HOSTILE_STATE
+      branch: HOSTILE_STATE,
+      mutationNonce: ""
     });
     expect(html).not.toContain("<script>alert(1)</script>");
     expect(html).not.toContain("<img src=x onerror=alert(1)>");

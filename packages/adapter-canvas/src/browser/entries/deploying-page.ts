@@ -14,7 +14,8 @@ function initialize(context: BrowserContext): BrowserTeardown {
   const state = readPageState(context, DEPLOYING_PAGE_STATE_ID);
   return initializeDeployingPage(context, {
     repo: readString(state, "repo"),
-    branch: readString(state, "branch")
+    branch: readString(state, "branch"),
+    mutationNonce: readString(state, "mutationNonce")
   });
 }
 

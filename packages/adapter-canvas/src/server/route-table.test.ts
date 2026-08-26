@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { remediationView } from "@radius-project/core";
 import {
   assertRouteTable,
   createServerRouteTable,
@@ -18,6 +19,10 @@ import { createAzureDiscoveryRoutes } from "./routes/azure-discovery.js";
 import { createAzureAutoSetupRoutes } from "./routes/azure-auto-setup.js";
 import { createIdentityProfilesRoutes } from "./routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./routes/identity-auth.js";
+import {
+  createRemediationRoutes,
+  productionRemediationDependencies
+} from "./routes/remediations.js";
 import {
   createGraphsPlanningRoutes,
   createGraphsPlanningStreamRoutes
@@ -88,7 +93,7 @@ const productionHandlers = {
     get: () => null,
     acquireForRetry: () => ({ ok: true }),
     persistOperations: () => Promise.resolve(),
-    isPullRequestMerged: () => Promise.resolve(false),
+    checkPullRequestMerge: () => Promise.resolve({ state: "open" }),
     schedule: () => true,
     invalidateEnvironmentListing: () => {}
   }),
@@ -181,6 +186,7 @@ const productionHandlers = {
           identity: { state: "error", detail: "" }
         },
         repair: null,
+        repairRemediation: null,
         restoration: null
       }
     }),
@@ -190,7 +196,12 @@ const productionHandlers = {
   }),
   ...createIdentityAuthRoutes({
     azureCredentialIdValidationError: () => "",
-    azureLoginRequiredResponse: () => ({ error: "", code: "", tenantId: "" }),
+    azureLoginRequiredResponse: () => ({
+      error: "",
+      code: "",
+      tenantId: "",
+      remediation: remediationView("azure-cli-login", {})
+    }),
     isCliCommandMissing: () => false,
     isUuid: () => false,
     buildAzureCliAssistMessage: () => ({ prompt: "", displayPrompt: "" }),
@@ -198,6 +209,12 @@ const productionHandlers = {
     runCommand: () => Promise.resolve(""),
     errorMessage: (error) => String(error)
   }),
+  ...createRemediationRoutes(
+    productionRemediationDependencies({
+      runSessionPrompt: () => Promise.resolve({ status: 200 }),
+      errorMessage: (error) => String(error)
+    })
+  ),
   ...createGraphsPlanningRoutes({
     readInstanceEntry: () => undefined,
     createDeployStatusReader: () => ({
@@ -314,8 +331,10 @@ const productionHandlers = {
     now: () => 0,
     getOperation: () => null,
     getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
+    isSelectedGitHubAuthorizationError: () => false,
     hasCompleteVerificationIdentity: () => false,
     findWorkflowRun: () => Promise.resolve(null),
+    settleVerificationDispatchRecovery: () => {},
     getRunDetail: () => Promise.resolve(null),
     fetchRunLog: () => Promise.resolve(null),
     extractErrorLines: () => [],
@@ -436,6 +455,7 @@ describe("server route ownership boundary", () => {
         (route) => route.mutationPolicy === "nonce-required"
       ).map(routeKey)
     ).toEqual([
+      "POST /api/run-remediation",
       "POST /api/github-account",
       "POST /api/operations",
       "POST /api/abandon-deployment",

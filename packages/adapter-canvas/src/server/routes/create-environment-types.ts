@@ -62,6 +62,7 @@ export interface PullRequestBranchState {
 
 export interface WorkflowCommitOutcome {
   ok: boolean;
+  cancelled?: boolean;
   stderr?: string;
   viaPr: boolean;
   // Provenance of the write, captured from the contents API response so a later
@@ -168,6 +169,7 @@ export interface CreateEnvironmentPullRequestResult {
   url?: string;
   number?: number;
   stderr?: string;
+  timedOut?: boolean;
 }
 
 export interface CredentialVerificationPlanResult {
@@ -176,4 +178,5 @@ export interface CredentialVerificationPlanResult {
   defaultBranch: string;
   pullRequestUrl: string;
   skipReason: string;
+  supportsOperationMarker?: boolean;
 }
