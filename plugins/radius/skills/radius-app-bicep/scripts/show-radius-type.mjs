@@ -8,12 +8,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const CONTRACT_VERSION = 1;
-const MAX_FLAGS = 31;
 const GENERATED_ROOT =
   "https://raw.githubusercontent.com/radius-project/radius";
 const GENERATED_PATH = "hack/bicep-types-radius/generated";
+const COMMIT_DIRECTORY = /^[0-9a-f]{40}$/iu;
 const USAGE =
   "Usage: show-radius-type.mjs --staging <directory> Radius.<namespace>/<type>[@<api-version>] [...]";
+
+class DefinitionNotFoundError extends Error {
+  constructor(type) {
+    super(
+      `Definition for resource type "${type}" was not found in the generated catalog for this Radius release.`
+    );
+  }
+}
 
 function message(error) {
   return error instanceof Error ? error.message : String(error);
@@ -24,11 +32,15 @@ function isObject(value) {
 }
 
 function sortedEntries(value) {
-  return Object.entries(value).sort(([left], [right]) =>
-    left < right ? -1
-    : left > right ? 1
-    : 0
-  );
+  return Object.entries(value).sort(([left], [right]) => {
+    if (left < right) return -1;
+    // Distinct entries from an object cannot have equal keys.
+    /* v8 ignore next */
+    if (left > right) return 1;
+    // This return preserves the comparator contract for that unreachable case.
+    /* v8 ignore next */
+    return 0;
+  });
 }
 
 function usageError(text = USAGE) {
@@ -42,7 +54,7 @@ function requireObject(value, context) {
 
 export function parseResourceSelector(value) {
   const match =
-    /^(Radius\.[A-Za-z][A-Za-z0-9.]*)\/([A-Za-z][A-Za-z0-9]*)(?:@([A-Za-z0-9][A-Za-z0-9.-]*))?$/u.exec(
+    /^(Radius(?:\.[A-Za-z][A-Za-z0-9]*)+)\/([A-Za-z][A-Za-z0-9]*)(?:@([A-Za-z0-9][A-Za-z0-9.-]*))?$/u.exec(
       value
     );
   if (match === null || match[1] === "Radius.Resources") {
@@ -126,11 +138,12 @@ function requirePlainConfigSection(config, name, source) {
 
 function validateStagingDirectory(input) {
   const stagingDir = path.resolve(input);
+  const runFile = path.join(stagingDir, "run.json");
   let staging;
   let run;
   try {
     staging = fs.lstatSync(stagingDir);
-    run = fs.lstatSync(path.join(stagingDir, "run.json"));
+    run = fs.lstatSync(runFile);
   } catch {
     throw new Error(`Invalid Radius staging directory "${input}".`);
   }
@@ -143,13 +156,33 @@ function validateStagingDirectory(input) {
   ) {
     throw new Error(`Invalid Radius staging directory "${input}".`);
   }
+
+  let record;
+  try {
+    record = JSON.parse(fs.readFileSync(runFile, "utf8"));
+  } catch {
+    throw new Error(`Invalid Radius staging directory "${input}".`);
+  }
+  if (
+    !isObject(record) ||
+    !isObject(record.baseline) ||
+    Object.values(record.baseline).some(
+      (value) => value !== null && typeof value !== "string"
+    )
+  ) {
+    throw new Error(`Invalid Radius staging directory "${input}".`);
+  }
   return stagingDir;
 }
 
 export async function writeStagedBicepConfig(stagingInput, extension) {
   const stagingDir = validateStagingDirectory(stagingInput);
+  const staged = path.join(stagingDir, "bicepconfig.json");
   const current = path.join(path.dirname(stagingDir), "bicepconfig.json");
-  const source = fs.existsSync(current) ? current : null;
+  const source =
+    fs.existsSync(staged) ? staged
+    : fs.existsSync(current) ? current
+    : null;
   let config = {};
   if (source !== null) {
     try {
@@ -212,6 +245,8 @@ function isExecutable(file) {
 }
 
 function managedBinaries(home = os.homedir()) {
+  // A single coverage run cannot execute both operating-system branches.
+  /* v8 ignore next */
   const suffix = process.platform === "win32" ? ".exe" : "";
   const directory = path.join(home, ".radius", "ai-extensions", "bin");
   return {
@@ -317,9 +352,7 @@ export function selectResource(index, selector) {
   let apiVersion = selector.apiVersion;
   if (apiVersion === undefined) {
     if (availableApiVersions.length === 0) {
-      throw new Error(
-        `Resource type "${selector.type}" is unavailable in this Radius release.`
-      );
+      throw new DefinitionNotFoundError(selector.type);
     }
     if (availableApiVersions.length > 1) {
       throw new Error(
@@ -348,7 +381,7 @@ export function selectResource(index, selector) {
 }
 
 export function decodePropertyFlags(flags, context = "property") {
-  if (!Number.isSafeInteger(flags) || flags < 0 || (flags & ~MAX_FLAGS) !== 0) {
+  if (!Number.isSafeInteger(flags) || flags < 0) {
     throw new Error(
       `${context} contains unsupported property flags "${flags}".`
     );
@@ -642,6 +675,9 @@ export function buildSchema(types, rootIndex) {
       property.flags,
       `Generated resource body property "${name}"`
     );
+    // Radius repeats read-only properties at the body root when the same type
+    // already appears in the properties envelope. Omit only those exact mirrors
+    // so the model sees one output path without hiding anything it can author.
     if (
       name !== "properties" &&
       !flags.writable &&
@@ -678,10 +714,49 @@ function noRetry(text) {
   return Object.assign(new Error(text), { noRetry: true });
 }
 
+async function readBoundedText(response, maxBytes) {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null && Number(contentLength) > maxBytes) {
+    throw noRetry(`Response exceeded ${maxBytes} bytes.`);
+  }
+
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw noRetry(`Response exceeded ${maxBytes} bytes.`);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total).toString("utf8");
+}
+
 export async function fetchJson(
   url,
-  { fetchImpl = globalThis.fetch, timeoutMs = 15_000 } = {}
+  {
+    fetchImpl = globalThis.fetch,
+    timeoutMs = 15_000,
+    maxBytes = 5 * 1024 * 1024
+  } = {}
 ) {
+  const source = new URL(url);
+  if (
+    source.protocol !== "https:" ||
+    source.hostname !== "raw.githubusercontent.com"
+  ) {
+    throw new Error(`Refusing unsupported source URL "${url}".`);
+  }
+
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -691,6 +766,9 @@ export async function fetchJson(
         redirect: "error",
         signal: controller.signal
       });
+      if (response.redirected) {
+        throw noRetry("Source request redirected unexpectedly.");
+      }
       if (!response.ok) {
         const error = new Error(
           `Source request failed with HTTP ${response.status}.`
@@ -702,7 +780,7 @@ export async function fetchJson(
         );
         throw error;
       }
-      const text = await response.text();
+      const text = await readBoundedText(response, maxBytes);
       try {
         return { value: JSON.parse(text), text };
       } catch {
@@ -737,6 +815,42 @@ function cacheFile(cacheRoot, commit, relativePath) {
   return path.join(cacheRoot, commit, ...relativePath.split("/"));
 }
 
+async function pruneCachedCommits(
+  currentCommit,
+  { cacheRoot = defaultCacheRoot(), warn = (text) => console.error(text) } = {}
+) {
+  let entries;
+  try {
+    entries = await fsp.readdir(cacheRoot, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return;
+    warn(
+      `Warning: could not inspect Radius definition cache: ${message(error)}`
+    );
+    return;
+  }
+
+  for (const entry of entries) {
+    if (
+      !entry.isDirectory() ||
+      !COMMIT_DIRECTORY.test(entry.name) ||
+      entry.name.toLowerCase() === currentCommit.toLowerCase()
+    ) {
+      continue;
+    }
+    try {
+      await fsp.rm(path.join(cacheRoot, entry.name), {
+        recursive: true,
+        force: true
+      });
+    } catch (error) {
+      warn(
+        `Warning: could not prune stale Radius definition cache "${entry.name}": ${message(error)}`
+      );
+    }
+  }
+}
+
 async function unlink(file) {
   try {
     await fsp.unlink(file);
@@ -765,7 +879,11 @@ async function writeCache(file, text) {
     await fsp.writeFile(temporary, text, { flag: "wx", mode: 0o600 });
     await fsp.rename(temporary, file);
   } finally {
-    await unlink(temporary).catch(() => {});
+    await unlink(temporary).catch(
+      // This requires the temporary file to become unremovable concurrently.
+      /* v8 ignore next */
+      () => {}
+    );
   }
 }
 
@@ -777,6 +895,7 @@ async function loadGeneratedJson(
     cacheRoot = defaultCacheRoot(),
     fetchImpl = globalThis.fetch,
     fetchTimeoutMs = 15_000,
+    maxResponseBytes = 5 * 1024 * 1024,
     skipCache = false,
     warn = (text) => console.error(text)
   } = {}
@@ -789,7 +908,8 @@ async function loadGeneratedJson(
   const url = `${GENERATED_ROOT}/${commit}/${GENERATED_PATH}/${relativePath}`;
   const fetched = await fetchJson(url, {
     fetchImpl,
-    timeoutMs: fetchTimeoutMs
+    timeoutMs: fetchTimeoutMs,
+    maxBytes: maxResponseBytes
   });
   validate(fetched.value);
   try {
@@ -801,9 +921,20 @@ async function loadGeneratedJson(
 }
 
 export async function resolveRadiusTypes(selectors, options = {}) {
-  const parsed = selectors.map((selector) =>
-    typeof selector === "string" ? parseResourceSelector(selector) : selector
-  );
+  const parsed = [
+    ...new Map(
+      selectors.map((selector) => {
+        const parsedSelector =
+          typeof selector === "string" ?
+            parseResourceSelector(selector)
+          : selector;
+        return [
+          `${parsedSelector.type}@${parsedSelector.apiVersion ?? ""}`,
+          parsedSelector
+        ];
+      })
+    ).values()
+  ];
   const requested = parsed.map(
     (selector) =>
       `${selector.type}${selector.apiVersion ? `@${selector.apiVersion}` : ""}`
@@ -816,6 +947,8 @@ export async function resolveRadiusTypes(selectors, options = {}) {
         parseRadiusIdentity(JSON.stringify(options.identity))
       : await queryManagedRadiusIdentity(options);
 
+    await pruneCachedCommits(identity.commit, options);
+
     stage = "generated resource index";
     const index = await loadGeneratedJson(
       "index.json",
@@ -825,10 +958,21 @@ export async function resolveRadiusTypes(selectors, options = {}) {
     );
     const loadedTypes = new Map();
     const resources = [];
+    const notFound = [];
     for (const selector of parsed) {
       current = `${selector.type}${selector.apiVersion ? `@${selector.apiVersion}` : ""}`;
       stage = "resource selection";
-      const selected = selectResource(index.value, selector);
+      let selected;
+      try {
+        selected = selectResource(index.value, selector);
+      } catch (error) {
+        if (!(error instanceof DefinitionNotFoundError)) throw error;
+        notFound.push({
+          type: selector.type,
+          message: error.message
+        });
+        continue;
+      }
 
       stage = "generated namespace definitions";
       let types = loadedTypes.get(selected.reference.relativePath);
@@ -848,7 +992,11 @@ export async function resolveRadiusTypes(selectors, options = {}) {
         schema = buildSchema(types.value, selected.reference.index);
       } catch (error) {
         if (!types.cached) throw error;
-        await unlink(types.file).catch(() => {});
+        await unlink(types.file).catch(
+          // This requires a valid cached file to become unremovable concurrently.
+          /* v8 ignore next */
+          () => {}
+        );
         types = await loadGeneratedJson(
           selected.reference.relativePath,
           identity.commit,
@@ -869,7 +1017,8 @@ export async function resolveRadiusTypes(selectors, options = {}) {
     return {
       contractVersion: CONTRACT_VERSION,
       extension: identity.extension,
-      resources
+      resources,
+      notFound
     };
   } catch (error) {
     throw new Error(
@@ -894,14 +1043,19 @@ export async function main(
       stdout.write(`${USAGE}\n`);
       return 0;
     }
+    const stagingDir = validateStagingDirectory(parsed.stagingDir);
     const contract = await resolve(parsed.selectors);
-    await writeConfig(parsed.stagingDir, contract.extension);
-    stdout.write(
-      `${JSON.stringify({
-        contractVersion: contract.contractVersion,
-        resources: contract.resources
-      })}\n`
-    );
+    const output = `${JSON.stringify({
+      contractVersion: contract.contractVersion,
+      resources: contract.resources,
+      notFound: contract.notFound
+    })}\n`;
+    if (contract.notFound.length > 0) {
+      stdout.write(output);
+      return 1;
+    }
+    await writeConfig(stagingDir, contract.extension);
+    stdout.write(output);
     return 0;
   } catch (error) {
     stderr.write(`${message(error)}\n`);
@@ -909,6 +1063,8 @@ export async function main(
   }
 }
 
+// Direct execution is verified in a child process, whose V8 data Vitest cannot merge.
+/* v8 ignore next 7 */
 if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))

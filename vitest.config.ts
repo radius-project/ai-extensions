@@ -7,10 +7,19 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary", "lcov"],
-      include: ["packages/*/src/**/*.ts"],
+      include: [
+        "packages/*/src/**/*.ts",
+        "plugins/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs"
+      ],
       exclude: ["packages/*/src/**/*.test.ts"],
       thresholds: {
         ...coverageBaseline.aggregate,
+        "plugins/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs": {
+          statements: 100,
+          branches: 100,
+          functions: 100,
+          lines: 100
+        },
         "packages/adapter-canvas/src/**":
           coverageBaseline.packages["adapter-canvas"],
         "packages/adapter-shared/src/**":
