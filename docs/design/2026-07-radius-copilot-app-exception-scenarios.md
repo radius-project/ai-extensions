@@ -17,7 +17,7 @@ The MVP does not support repositories without a containerized workload, preview 
 
 - **Canvas**: The GitHub Copilot app's extension framework, which renders extensions in the sidebar. Canvas is a Copilot capability, not a Radius component.
 - **Radius Canvas extension**: The Canvas extension, built on the Canvas framework, that powers the Radius side panel.
-- **Radius skill**: The Copilot skill that runs in the Copilot chat and drives the Radius flow. Invoked from a natural-language prompt or explicitly with the `/radius` command.
+- **Radius skill**: The Copilot skill that runs in the Copilot chat and drives the Radius flow. Invoked from a natural-language prompt or explicitly with the `/app-modeling` command.
 - **Radius plugin**: The GitHub Copilot app plugin that packages and versions the Radius skill and the Radius Canvas extension as one unit. Installed and updated from the Copilot app Plugins settings page.
 - **Radius side panel**: The GUI for Radius, built using the Radius Canvas extension and shown in the Copilot app sidebar. It displays the application graph, forms, and operation status, and is the surface the user opens, views, and interacts with.
 - **Repo Radius**: The component that runs each Radius operation as a GitHub Actions workflow and returns results as artifacts (for example, `run-rad-commands-result`, `verify-cloud-auth-result`). Defined in the [Repo Radius feature specification](https://github.com/radius-project/radius/pull/12078).
@@ -72,7 +72,7 @@ The Radius skill needs the repository checked out before it can do anything. Bri
 The session is ready with a repository attached, and the user asks Copilot something that should invoke the Radius skill, such as asking to see the application graph. Copilot answers generally and never invokes the Radius skill, so none of the Radius flow runs and the Radius side panel never appears.
 
 - **What the user sees:** A generic Copilot chat response with no Radius side panel and no application graph.
-- **Recovery:** The user invokes the skill explicitly with the `/radius` command (named after the plugin the user enabled), which is the deterministic entry point.
+- **Recovery:** The user invokes the skill explicitly with the `/app-modeling` command (named after the plugin the user enabled), which is the deterministic entry point.
 
 ### Exception 1.3: Cannot commit the enablement workflow files to the default branch
 

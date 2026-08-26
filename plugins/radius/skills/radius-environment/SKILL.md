@@ -34,6 +34,8 @@ The canvas drives a short wizard per provider: collect the environment's cloud s
 
 When the user asks to create or set up a Radius environment, **open the canvas straight to the environment wizard**:
 
+Before opening the canvas, confirm that a repository is attached to the current session. If none is attached, stop without creating state and ask: "Which configured repository should I set up the Radius environment for?" Retry from the beginning after the repository is available.
+
 ```javascript
 open_canvas({
   canvasId: "radius",

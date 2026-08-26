@@ -188,7 +188,6 @@ describe("P0-C built Radius extension artifact", () => {
       "plugin.json",
       "README.md",
       "THIRD-PARTY-NOTICES.txt",
-      "skills/radius/SKILL.md",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-graph/references/source-code-references.md"
@@ -197,6 +196,7 @@ describe("P0-C built Radius extension artifact", () => {
     for (const packagedPath of packagedPaths) {
       expect(existsSync(join(DIST, ...packagedPath.split("/")))).toBe(true);
     }
+    expect(existsSync(join(DIST, "skills", "radius", "SKILL.md"))).toBe(false);
     if (existsSync(SOURCE_CHANGELOG)) {
       expect(readFileSync(join(DIST, "CHANGELOG.md"), "utf8")).toBe(
         readFileSync(SOURCE_CHANGELOG, "utf8")
