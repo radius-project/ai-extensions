@@ -230,13 +230,10 @@ function installToLocal() {
     // resolves to a path that does not exist.
     const skillsFrom = join(distDir, "skills");
     if (existsSync(skillsFrom)) {
-      const skillsTo = join(installDir, "skills");
-      // Replace rather than merge, so a file deleted upstream does not linger
-      // in the install and keep being read.
-      rmSync(skillsTo, { recursive: true, force: true });
       const tmp = `${skillsTo}.tmp-${process.pid}`;
       rmSync(tmp, { recursive: true, force: true });
       cpSync(skillsFrom, tmp, { recursive: true });
+      rmSync(skillsTo, { recursive: true, force: true });
       renameSync(tmp, skillsTo);
     }
     // The plugin manifest carries the version recorded in each origin record.
