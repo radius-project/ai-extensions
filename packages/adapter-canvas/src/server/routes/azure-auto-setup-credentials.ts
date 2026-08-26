@@ -12,7 +12,8 @@ import type {
 } from "./azure-auto-setup-types.js";
 import {
   deterministicProviderUuid,
-  executeRecoverableMutation
+  executeRecoverableMutation,
+  providerMutationWillWrite
 } from "../services/provider-mutation-recovery.js";
 
 interface RoleAssignmentInput {
@@ -178,7 +179,7 @@ async function createFederatedCredentials({
   AzureAutoSetupCredentialInput,
   "workflow" | "dependencies" | "oidc" | "oidcSuffix" | "clientId" | "appName"
 >): Promise<boolean> {
-  const { steps, runAz, fail, checkpoint } = workflow;
+  const { steps, runAz, fail, stopBoundary, checkpoint } = workflow;
   const listResult = await runAz([
     "ad",
     "app",
@@ -270,6 +271,20 @@ async function createFederatedCredentials({
 
   for (const credential of credentials) {
     steps.push(`Creating federated credential "${credential.name}"...`);
+    const credentialTarget = `${clientId}:${credential.name}`;
+    // Only a forward create is stoppable. A credential listed here because its
+    // journal entry is still open needs the reconciling read to settle it.
+    if (
+      providerMutationWillWrite(
+        workflow.operation,
+        "azure_federated_credential.create",
+        credentialTarget
+      ) &&
+      !(await stopBoundary(
+        `before-federated-credential-create:${credential.name}`
+      ))
+    )
+      return false;
     const contents = JSON.stringify({
       name: credential.name,
       issuer: "https://token.actions.githubusercontent.com",
@@ -285,8 +300,12 @@ async function createFederatedCredentials({
         await executeRecoverableMutation<AzureAutoSetupCommandResult>({
           operation: workflow.operation,
           kind: "azure_federated_credential.create",
-          target: `${clientId}:${credential.name}`,
+          target: credentialTarget,
           persist: dependencies.operations.persist,
+          beforeMutation: () =>
+            stopBoundary(
+              `before-federated-credential-create:${credential.name}`
+            ),
           mutate: () =>
             runAz([
               "ad",
@@ -367,6 +386,7 @@ async function createFederatedCredentials({
             };
           }
         });
+      if (mutation.state === "cancelled") return false;
       result =
         mutation.state === "applied" ?
           mutation.value
@@ -381,6 +401,12 @@ async function createFederatedCredentials({
     }
     const created = result.code === 0;
     if (result.code !== 0) {
+      if (
+        !(await checkpoint(
+          `after-federated-credential-create-attempt:${credential.name}`
+        ))
+      )
+        return false;
       if (!result.stderr.includes("already exists")) {
         await fail(
           400,
@@ -438,7 +464,12 @@ async function createFederatedCredentials({
             (await readFederatedCredentialId(runAz, clientId, credential.name))
         }
       );
-      if (!(await checkpoint())) return false;
+      if (
+        !(await checkpoint(
+          `after-federated-credential-create:${credential.name}`
+        ))
+      )
+        return false;
     }
   }
   const unresolvedCredentials = unresolvedProviderMutations(
@@ -487,25 +518,48 @@ async function assignRole(
   operation: AzureAutoSetupCredentialInput["workflow"]["operation"],
   persist: () => Promise<void>,
   runAz: AzureAutoSetupCredentialInput["workflow"]["runAz"],
-  sleep: AzureAutoSetupCredentialInput["dependencies"]["sleep"]
-): Promise<{ ok: boolean; created: boolean; stderr: string }> {
+  sleep: AzureAutoSetupCredentialInput["dependencies"]["sleep"],
+  stopBoundary: AzureAutoSetupCredentialInput["workflow"]["stopBoundary"]
+): Promise<
+  | { ok: true; created: boolean; stderr: "" }
+  | { ok: false; stopped: true; created: false; stderr: "" }
+  | { ok: false; stopped?: false; created: false; stderr: string }
+> {
   let last: AzureAutoSetupCommandResult = {
     code: 1,
     stdout: "",
     stderr: ""
   };
+  const mutationKind = "azure_role_assignment.create";
+  const mutationTarget =
+    input.assignmentId || `${input.objectId}:${input.role}:${input.scope}`;
   for (let attempt = 0; attempt < 6; attempt++) {
+    const attemptNumber = attempt + 1;
+    // Only a forward attempt is stoppable. A journaled attempt that reaches here
+    // to be reconciled is a read, and stopping before it would strand the
+    // provenance of a request nobody saw answered.
+    if (
+      providerMutationWillWrite(operation, mutationKind, mutationTarget) &&
+      !(await stopBoundary(
+        `before-role-assignment:${input.role}:attempt-${attemptNumber}`
+      ))
+    ) {
+      return { ok: false, stopped: true, created: false, stderr: "" };
+    }
     const mutation =
       await executeRecoverableMutation<AzureAutoSetupCommandResult>({
         operation,
-        kind: "azure_role_assignment.create",
-        target:
-          input.assignmentId ||
-          `${input.objectId}:${input.role}:${input.scope}`,
+        kind: mutationKind,
+        target: mutationTarget,
         providerIdempotencyKey: input.assignmentId || null,
         persist,
+        beforeMutation: () =>
+          stopBoundary(
+            `before-role-assignment:${input.role}:attempt-${attemptNumber}`
+          ),
         mutate: () => runAz(buildRoleAssignmentArgs(input)),
         accept: (value) => value,
+        createdByOperation: (value) => !value.stderr.includes("already exists"),
         reconcile: async () => {
           if (!input.assignmentId) {
             return {
@@ -583,12 +637,28 @@ async function assignRole(
           }
           return {
             state: "applied" as const,
-            value: { code: 0, stdout: listed.stdout, stderr: "" },
+            value: {
+              code: 0,
+              stdout: listed.stdout,
+              stderr:
+                (
+                  providerMutationRecord(
+                    operation,
+                    mutationKind,
+                    mutationTarget
+                  )?.createdByOperation === false
+                ) ?
+                  "already exists"
+                : ""
+            },
             evidence:
               "The deterministic assignment ID, principal, role, and scope matched."
           };
         }
       });
+    if (mutation.state === "cancelled") {
+      return { ok: false, stopped: true, created: false, stderr: "" };
+    }
     last =
       mutation.state === "applied" ?
         mutation.value
@@ -597,15 +667,34 @@ async function assignRole(
           stdout: "",
           stderr: "Azure confirmed the role assignment was not created."
         };
-    if (last.code === 0 || last.stderr.includes("already exists")) {
+    if (last.code === 0) {
       return {
         ok: true,
-        created: last.code === 0 && !last.stderr.includes("already exists"),
+        created: !last.stderr.includes("already exists"),
         stderr: ""
       };
     }
+    if (
+      !(await stopBoundary(
+        `after-role-assignment-attempt:${input.role}:attempt-${attemptNumber}`
+      ))
+    ) {
+      return { ok: false, stopped: true, created: false, stderr: "" };
+    }
+    if (last.stderr.includes("already exists")) {
+      return { ok: true, created: false, stderr: "" };
+    }
     if (!isReplicationLagError(last.stderr)) break;
-    if (attempt < 5) await sleep(2000 * (attempt + 1));
+    if (attempt < 5) {
+      if (
+        !(await stopBoundary(
+          `before-role-assignment-backoff:${input.role}:attempt-${attemptNumber}`
+        ))
+      ) {
+        return { ok: false, stopped: true, created: false, stderr: "" };
+      }
+      await sleep(2000 * attemptNumber);
+    }
   }
   return { ok: false, created: false, stderr: last.stderr };
 }
@@ -622,7 +711,7 @@ export async function configureAzureAutoSetupCredentials({
   clusterResourceGroup,
   clusterName
 }: AzureAutoSetupCredentialInput): Promise<boolean> {
-  const { operation, steps, runAz, fail, checkpoint } = workflow;
+  const { operation, steps, runAz, fail, stopBoundary, checkpoint } = workflow;
 
   // Reconciliation may have decided this attempt must be undone while the
   // request that reached here was still in flight. Every mutation below adds a
@@ -644,9 +733,11 @@ export async function configureAzureAutoSetupCredentials({
     {
       operation,
       persist: dependencies.operations.persist
-    }
+    },
+    () => stopBoundary("before-service-principal-create")
   );
   if (!servicePrincipal.ok) {
+    if (servicePrincipal.stopped) return false;
     await fail(
       400,
       "Could not create or find the Service Principal: " +
@@ -670,7 +761,7 @@ export async function configureAzureAutoSetupCredentials({
       { objectId: servicePrincipal.objectId }
     : {})
   });
-  if (!(await checkpoint())) return false;
+  if (!(await checkpoint("after-service-principal"))) return false;
 
   if (isRollbackPending(operation)) {
     await fail(
@@ -726,7 +817,7 @@ export async function configureAzureAutoSetupCredentials({
   dependencies.operations.recordServicePrincipal(operation, {
     objectId: servicePrincipalObjectId
   });
-  if (!(await checkpoint())) return false;
+  if (!(await checkpoint("after-service-principal-object-id"))) return false;
 
   const contributorScope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`;
   const contributorAssignmentId = deterministicProviderUuid(
@@ -744,9 +835,11 @@ export async function configureAzureAutoSetupCredentials({
     operation,
     dependencies.operations.persist,
     runAz,
-    dependencies.sleep
+    dependencies.sleep,
+    stopBoundary
   );
   if (!contributor.ok) {
+    if (contributor.stopped) return false;
     await fail(
       400,
       "Failed to assign Contributor role: " + contributor.stderr,
@@ -763,7 +856,7 @@ export async function configureAzureAutoSetupCredentials({
       scope: contributorScope,
       principalObjectId: servicePrincipalObjectId
     });
-    if (!(await checkpoint())) return false;
+    if (!(await checkpoint("after-role-assignment:Contributor"))) return false;
   }
   if (isRollbackPending(operation)) {
     await fail(
@@ -797,7 +890,8 @@ export async function configureAzureAutoSetupCredentials({
     operation,
     dependencies.operations.persist,
     runAz,
-    dependencies.sleep
+    dependencies.sleep,
+    stopBoundary
   );
   if (clusterRole.ok) {
     steps.push("✅ AKS RBAC Cluster Admin role assigned");
@@ -808,8 +902,15 @@ export async function configureAzureAutoSetupCredentials({
         scope: clusterScope,
         principalObjectId: servicePrincipalObjectId
       });
-      if (!(await checkpoint())) return false;
+      if (
+        !(await checkpoint(
+          "after-role-assignment:Azure Kubernetes Service RBAC Cluster Admin"
+        ))
+      )
+        return false;
     }
+  } else if (clusterRole.stopped) {
+    return false;
   } else {
     steps.push(
       "⚠️ Could not assign the AKS RBAC Cluster Admin role automatically. " +

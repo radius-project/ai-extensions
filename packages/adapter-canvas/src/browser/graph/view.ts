@@ -227,9 +227,16 @@ export function createNodeComponent(
       settings.deployMode ? safeExternalUrl(data.portalUrl) : null;
     const head = h(
       "div",
-      { className: "rad-node__head" },
+      {
+        className:
+          badge ? "rad-node__head rad-node__head--with-badge" : "rad-node__head"
+      },
       icon,
-      h("span", { className: "rad-node__title" }, data.nodeName)
+      h(
+        "span",
+        { className: "rad-node__title", title: data.nodeName },
+        data.nodeName
+      )
     );
     const type = h(
       "div",

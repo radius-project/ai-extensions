@@ -14,6 +14,7 @@ import {
   type CanvasHarness
 } from "./support/canvas-harness.js";
 import type { Page } from "@playwright/test";
+import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const VALID_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
@@ -556,16 +557,16 @@ test.describe("Radius Canvas in Chromium", () => {
       "@acting-user"
     );
     await expectNoWcagViolations(page);
-    const showHowToFix = page.getByRole("button", {
-      name: "Show how to fix"
-    });
-    await expect(showHowToFix).toBeVisible();
-    await showHowToFix.focus();
-    await page.keyboard.press("Enter");
-    await expect(page.locator("#env-gh-details-panel")).toHaveAttribute(
-      "open",
-      ""
-    );
+
+    // The fix is offered directly, not tucked inside the technical-details
+    // disclosure, and it is reachable by keyboard.
+    const repair = page.locator("#env-gh-repair");
+    await expect(repair).toBeVisible();
+    await expect(repair).toContainText("gh auth switch");
+    const runButton = repair.getByRole("button", { name: COMMAND_RUN_LABEL });
+    await expect(repair.getByRole("button", { name: "Copy" })).toBeVisible();
+    await runButton.focus();
+    await expect(runButton).toBeFocused();
     await canvas.expectCliInvoked("gh");
   });
 
@@ -676,16 +677,17 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.getByRole("button", { name: "Verify Credentials" }).click();
     const verifyPayload = await (await verifyResponse).text();
 
-    const assistDialog = page.getByRole("dialog", {
-      name: "Start Azure login?"
-    });
-    await expect(assistDialog).toBeVisible();
-    await assistDialog.getByRole("button", { name: "Cancel" }).click();
+    const remediation = page.locator("#cred-verify-action");
+    await expect(remediation).toContainText("Sign in to Azure CLI");
+    await expect(remediation).toContainText(
+      `az login --use-device-code --tenant ${VALID_TENANT_ID}`
+    );
+    await expect(
+      remediation.getByRole("button", { name: "Run with Copilot" })
+    ).toBeVisible();
 
-    // The guidance half of the message is authored only by the server. The
-    // dialog's own copy also opens with "No active Azure session", so asserting
-    // that prefix alone would still pass if the cancel path stopped carrying
-    // the server's error through to the status line.
+    // The guidance remains server-authored while the action is rebuilt from the
+    // structured remediation reference rather than duplicated in a modal.
     await expect(page.locator("#cred-verify-status")).toContainText(
       'Run "az login --use-device-code" in your terminal, then click Verify Credentials again.'
     );
@@ -711,6 +713,7 @@ test.describe("Radius Canvas in Chromium", () => {
         )
       )
       .toBe(true);
+    await expectNoWcagViolations(page);
   });
 
   test("validates credential form requirements before any external command runs @safety", async ({
@@ -1342,6 +1345,8 @@ test.describe("Radius Canvas in Chromium", () => {
     page.on("framenavigated", (frame) => {
       if (frame === page.mainFrame()) navigations += 1;
     });
+    await gotoCanvas(page, canvas, "planned");
+    await expectNoWcagViolations(page);
     await page.route("**/api/ping", async (route) => {
       pings += 1;
       await route.fulfill({
@@ -1350,9 +1355,6 @@ test.describe("Radius Canvas in Chromium", () => {
         body: "{}"
       });
     });
-
-    await gotoCanvas(page, canvas, "planned");
-    await expectNoWcagViolations(page);
     const initialNavigations = navigations;
     await page.evaluate("window.dispatchEvent(new Event('focus'))");
     await expect.poll(() => pings).toBe(1);
@@ -1360,7 +1362,13 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.evaluate("window.dispatchEvent(new Event('focus'))");
     await expect.poll(() => pings).toBe(2);
     await expect(page.locator("#radius-reconnect-overlay")).toBeVisible();
-    await page.evaluate("window.dispatchEvent(new Event('focus'))");
+    const recoveryNavigation = page.waitForNavigation({
+      waitUntil: "domcontentloaded"
+    });
+    await page.evaluate(
+      "setTimeout(() => window.dispatchEvent(new Event('focus')), 0)"
+    );
+    await recoveryNavigation;
     await expect.poll(() => pings).toBe(3);
     await expect.poll(() => navigations - initialNavigations).toBe(1);
     await expect(page).toHaveURL(/page=planned/);

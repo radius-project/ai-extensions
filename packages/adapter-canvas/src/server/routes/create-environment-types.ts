@@ -62,6 +62,7 @@ export interface PullRequestBranchState {
 
 export interface WorkflowCommitOutcome {
   ok: boolean;
+  cancelled?: boolean;
   stderr?: string;
   viaPr: boolean;
   // Provenance of the write, captured from the contents API response so a later
