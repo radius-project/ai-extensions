@@ -6,6 +6,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const CANONICAL_VISUAL_IMAGE =
   "radius-canvas-visual:playwright-1.62.1-node-24.19.0";
+const dockerArchitectureAliases = new Map([
+  ["aarch64", "arm64"],
+  ["arm64", "arm64"],
+  ["amd64", "amd64"],
+  ["x86_64", "amd64"]
+]);
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dockerfile = "packages/adapter-canvas/test/visual/Dockerfile";
@@ -26,14 +32,7 @@ function bindMount(source, target, readOnly = false) {
 }
 
 export function createDockerRunArgs({ mode, root, uid, gid, pathApi = path }) {
-  const args = [
-    "run",
-    "--rm",
-    "--init",
-    "--ipc=host",
-    "--platform",
-    "linux/amd64"
-  ];
+  const args = ["run", "--rm", "--init", "--ipc=host"];
   if (Number.isInteger(uid) && Number.isInteger(gid)) {
     args.push("--user", `${uid}:${gid}`, "--env", "HOME=/tmp");
   }
@@ -62,15 +61,7 @@ export function createDockerBuildArgs({
   fileExists = existsSync,
   pathApi = path
 } = {}) {
-  const args = [
-    "build",
-    "--platform",
-    "linux/amd64",
-    "--file",
-    dockerfile,
-    "--tag",
-    CANONICAL_VISUAL_IMAGE
-  ];
+  const args = ["build", "--file", dockerfile, "--tag", CANONICAL_VISUAL_IMAGE];
   const userNpmrc = pathApi.resolve(home, ".npmrc");
   if (fileExists(userNpmrc)) {
     args.push("--secret", `id=npmrc,src=${userNpmrc}`);
@@ -90,11 +81,17 @@ export function dockerPrerequisiteError(result) {
     const detail = result.stderr?.trim();
     return `The Docker CLI is installed, but the Docker daemon is unavailable. Start Docker Desktop or Docker Engine, then retry.${detail ? `\n${detail}` : ""}`;
   }
-  const [, osType] = result.stdout.trim().split("|");
+  const [, osType, reportedArchitecture] = result.stdout.trim().split("|");
   if (osType !== "linux") {
     return osType ?
         `Docker is running with ${osType} containers. Switch Docker Desktop to Linux containers (or enable a Linux engine), then retry.`
       : "Docker did not report its container engine type. Ensure Docker is configured to run Linux containers, then retry.";
+  }
+  const architecture = dockerArchitectureAliases.get(reportedArchitecture);
+  if (!architecture) {
+    return reportedArchitecture ?
+        `Docker is running on unsupported ${reportedArchitecture} architecture. Use a Linux amd64 or arm64 Docker engine, then retry.`
+      : "Docker did not report its engine architecture. Ensure Docker is configured with a Linux amd64 or arm64 engine, then retry.";
   }
   return null;
 }
@@ -107,9 +104,9 @@ function runDocker(args, options = {}) {
   });
 }
 
-function requireDocker() {
-  const result = runDocker(
-    ["info", "--format", "{{.ServerVersion}}|{{.OSType}}"],
+function requireDocker(executeDocker) {
+  const result = executeDocker(
+    ["info", "--format", "{{.ServerVersion}}|{{.OSType}}|{{.Architecture}}"],
     {
       stdio: ["ignore", "pipe", "pipe"]
     }
@@ -135,20 +132,28 @@ function requireSuccessfulCommand(result, description) {
   }
 }
 
-export function runCanonicalVisual(argv = process.argv.slice(2)) {
+export function runCanonicalVisual(
+  argv = process.argv.slice(2),
+  {
+    executeDocker = runDocker,
+    prepareOutputs = prepareOutputDirectories,
+    uid = process.getuid?.(),
+    gid = process.getgid?.()
+  } = {}
+) {
   const mode = parseVisualMode(argv);
-  requireDocker();
-  prepareOutputDirectories();
+  requireDocker(executeDocker);
+  prepareOutputs();
 
-  const build = runDocker(createDockerBuildArgs(), { stdio: "inherit" });
+  const build = executeDocker(createDockerBuildArgs(), { stdio: "inherit" });
   requireSuccessfulCommand(build, "Failed to build the canonical visual image");
 
-  const run = runDocker(
+  const run = executeDocker(
     createDockerRunArgs({
       mode,
       root: repoRoot,
-      uid: process.getuid?.(),
-      gid: process.getgid?.()
+      uid,
+      gid
     }),
     { stdio: "inherit" }
   );

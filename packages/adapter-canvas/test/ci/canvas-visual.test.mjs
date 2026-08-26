@@ -7,7 +7,8 @@ import {
   createDockerBuildArgs,
   createDockerRunArgs,
   dockerPrerequisiteError,
-  parseVisualMode
+  parseVisualMode,
+  runCanonicalVisual
 } from "../../../../scripts/canvas-visual.mjs";
 
 describe("canonical Canvas visual runner", () => {
@@ -30,7 +31,7 @@ describe("canonical Canvas visual runner", () => {
     });
 
     expect(args).not.toContain("--user");
-    expect(args).toContain("linux/amd64");
+    expect(args).not.toContain("--platform");
     expect(args).toContain(
       "type=bind,source=C:\\src\\ai-extensions\\packages\\adapter-canvas\\test\\visual\\__screenshots__,target=/workspace/packages/adapter-canvas/test/visual/__screenshots__,readonly"
     );
@@ -55,6 +56,7 @@ describe("canonical Canvas visual runner", () => {
 
     expect(args).toContain("--user");
     expect(args).toContain("1000:1001");
+    expect(args).not.toContain("--platform");
     expect(snapshotMount).not.toContain("readonly");
     expect(args.slice(-4)).toEqual([
       CANONICAL_VISUAL_IMAGE,
@@ -74,6 +76,7 @@ describe("canonical Canvas visual runner", () => {
 
     expect(args).toContain("--secret");
     expect(args).toContain("id=npmrc,src=C:\\Users\\developer\\.npmrc");
+    expect(args).not.toContain("--platform");
     expect(args.at(-1)).toBe("C:\\src\\ai-extensions");
   });
 
@@ -85,6 +88,7 @@ describe("canonical Canvas visual runner", () => {
     });
 
     expect(args).not.toContain("--secret");
+    expect(args).not.toContain("--platform");
     expect(args.at(-1)).toBe("/src/ai-extensions");
   });
 
@@ -113,13 +117,28 @@ describe("canonical Canvas visual runner", () => {
       })
     ).toContain("Docker Desktop Linux engine failed");
     expect(
-      dockerPrerequisiteError({ status: 0, stdout: "29.7.2|windows" })
+      dockerPrerequisiteError({ status: 0, stdout: "29.7.2|windows|amd64" })
     ).toContain("Switch Docker Desktop to Linux containers");
+    expect(
+      dockerPrerequisiteError({ status: 0, stdout: "29.7.2|linux" })
+    ).toContain("did not report its engine architecture");
+    expect(
+      dockerPrerequisiteError({ status: 0, stdout: "29.7.2|linux|ppc64le" })
+    ).toContain("unsupported ppc64le architecture");
     expect(dockerPrerequisiteError({ status: 0, stdout: "29.7.2" })).toContain(
       "did not report its container engine type"
     );
     expect(
-      dockerPrerequisiteError({ status: 0, stdout: "29.7.2|linux" })
+      dockerPrerequisiteError({ status: 0, stdout: "29.7.2|linux|amd64" })
+    ).toBeNull();
+    expect(
+      dockerPrerequisiteError({ status: 0, stdout: "29.7.2|linux|arm64" })
+    ).toBeNull();
+    expect(
+      dockerPrerequisiteError({ status: 0, stdout: "29.7.2|linux|aarch64" })
+    ).toBeNull();
+    expect(
+      dockerPrerequisiteError({ status: 0, stdout: "29.7.2|linux|x86_64" })
     ).toBeNull();
   });
 
@@ -140,5 +159,113 @@ describe("canonical Canvas visual runner", () => {
     )?.[1];
 
     expect([...lockedVersions]).toEqual([imageVersion]);
+    expect(dockerfile).not.toMatch(/playwright:v[^ \n]+-(?:amd64|arm64)@/);
+  });
+
+  it("excludes ignored local credentials from the Docker build context", () => {
+    const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
+    const dockerignore = readFileSync(`${repoRoot}/.dockerignore`, "utf8");
+    const ignoredPaths = new Set(dockerignore.split(/\r?\n/));
+
+    for (const ignoredPath of [
+      ".env",
+      ".env.*",
+      "**/.env",
+      "**/.env.*",
+      ".radius-credentials.json",
+      "**/.radius-credentials.json"
+    ]) {
+      expect(ignoredPaths.has(ignoredPath), ignoredPath).toBe(true);
+    }
+  });
+
+  it("runs prerequisite, cleanup, build, and test steps in order", () => {
+    const calls = [];
+    const status = runCanonicalVisual(["check"], {
+      executeDocker(args) {
+        calls.push(args);
+        if (args[0] === "info") {
+          return { status: 0, stdout: "29.7.2|linux|arm64" };
+        }
+        return { status: 0 };
+      },
+      prepareOutputs() {
+        calls.push(["prepare"]);
+      },
+      uid: 1000,
+      gid: 1001
+    });
+
+    expect(status).toBe(0);
+    expect(calls.map(([command]) => command)).toEqual([
+      "info",
+      "prepare",
+      "build",
+      "run"
+    ]);
+    expect(calls[3]).toContain("1000:1001");
+  });
+
+  it("stops before cleanup and build when the Docker prerequisite fails", () => {
+    let prepared = false;
+    const executeDocker = () => ({
+      status: 1,
+      stderr: "daemon unavailable"
+    });
+
+    expect(() =>
+      runCanonicalVisual(["check"], {
+        executeDocker,
+        prepareOutputs() {
+          prepared = true;
+        }
+      })
+    ).toThrow("daemon unavailable");
+    expect(prepared).toBe(false);
+  });
+
+  it("stops before the test run when the image build fails", () => {
+    const commands = [];
+
+    expect(() =>
+      runCanonicalVisual(["check"], {
+        executeDocker(args) {
+          commands.push(args[0]);
+          if (args[0] === "info") {
+            return { status: 0, stdout: "29.7.2|linux|amd64" };
+          }
+          return { status: 1 };
+        },
+        prepareOutputs() {}
+      })
+    ).toThrow("Failed to build the canonical visual image");
+    expect(commands).toEqual(["info", "build"]);
+  });
+
+  it("surfaces Docker run startup failures and missing exit statuses", () => {
+    function executeDockerWithRunResult(runResult) {
+      return (args) => {
+        if (args[0] === "info") {
+          return { status: 0, stdout: "29.7.2|linux|amd64" };
+        }
+        if (args[0] === "build") return { status: 0 };
+        return runResult;
+      };
+    }
+
+    expect(() =>
+      runCanonicalVisual(["check"], {
+        executeDocker: executeDockerWithRunResult({
+          error: new Error("spawn failed")
+        }),
+        prepareOutputs() {}
+      })
+    ).toThrow("Failed to run the canonical visual tests: spawn failed");
+    expect(
+      runCanonicalVisual(["check"], {
+        executeDocker: executeDockerWithRunResult({ status: null }),
+        prepareOutputs() {}
+      })
+    ).toBe(1);
   });
 });

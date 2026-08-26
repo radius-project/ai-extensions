@@ -1,4 +1,10 @@
 .git
+.env
+.env.*
+**/.env
+**/.env.*
+.radius-credentials.json
+**/.radius-credentials.json
 .pnpm-store
 coverage
 node_modules
