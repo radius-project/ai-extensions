@@ -15,13 +15,13 @@
 export const RECIPE_PACK_REPO = "radius-project/resource-types-contrib";
 export const RECIPE_PACK_REF = "main";
 
-// Provider → committed recipe-pack file. Azure downloads the `azure-avm` pack;
+// Provider → committed recipe-pack file. Azure downloads the `azure-aks` pack;
 // AWS's real pack is generated inline at deploy time, so for modeling it (and any
 // plain Kubernetes environment) uses the committed kubernetes default pack.
 const PROVIDER_PACK_PATH: Record<string, string> = {
-  azure: "recipe-packs/azure/aks-recipepack.bicep",
-  aws: "recipe-packs/kubernetes/default-recipepack.bicep",
-  kubernetes: "recipe-packs/kubernetes/default-recipepack.bicep"
+  azure: "recipe-packs/azure-aks/azure-aks.bicep",
+  aws: "recipe-packs/kubernetes/default.bicep",
+  kubernetes: "recipe-packs/kubernetes/default.bicep"
 };
 
 export function recipePackPathForProvider(provider: string): string {
@@ -50,8 +50,8 @@ export interface RecipePackEntry {
 }
 
 // Curated map: normalized recipe source → the primary concrete resource its
-// recipe deploys. Seeded from the two committed packs (azure/aks-recipepack.bicep
-// and kubernetes/default-recipepack.bicep). Azure Verified Modules map 1:1 to an
+// recipe deploys. Seeded from the two committed packs (azure-aks/azure-aks.bicep
+// and kubernetes/default.bicep). Azure Verified Modules map 1:1 to an
 // ARM resource type; Kubernetes recipes map to their primary workload/object (the
 // supporting Secret/Service/etc. a recipe also creates are not modeled here).
 // Keys are the source with the registry prefix and version tag stripped — see
