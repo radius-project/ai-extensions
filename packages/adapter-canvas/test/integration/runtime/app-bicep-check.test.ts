@@ -447,13 +447,21 @@ test("fails when a non-application Radius resource has no durable source referen
 });
 
 test.each([
-  "https://github.com/acme/app/blob/main/src/app.ts",
   "/src/app.ts",
   "src\\app.ts",
   "../src/app.ts",
   "src/app.ts#L0",
-  "src/app.ts#not-a-line"
-])("fails for a non-repo-relative source reference: %s", (codeReference) => {
+  "src/app.ts#not-a-line",
+  "http://github.com/acme/app/blob/main/src/app.ts",
+  "https://example.com/acme/app/blob/main/src/app.ts",
+  "https://github.com/acme/app/tree/main/src",
+  "https://github.com/acme/app/blob/main/src/app.ts?plain=1",
+  "https://github.com/acme/app/blob/main/src/app.ts#L0",
+  "https://github.com/acme/app/blob/main/src/\napp.ts",
+  " src/app.ts",
+  "src/app.ts\nforged diagnostic",
+  "[concat('src/', 'app.ts')]"
+])("fails for an unsafe source reference: %s", (codeReference) => {
   const directory = temporaryDirectory();
   const compiledOutput = template({
     web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
@@ -467,7 +475,97 @@ test.each([
   );
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /must be a repo-relative path/u);
+  assert.match(result.stderr, /repo-relative worktree path/u);
+});
+
+test.each([
+  "src/app.ts",
+  "src/app.ts#L12",
+  "https://github.com/acme/app/blob/main/src/app.ts",
+  "https://github.com/acme/app/blob/feature/source-links/src/app.ts#L12"
+])("accepts a valid source reference: %s", (codeReference) => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
+      codeReference
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("resolves a top-level source-reference parameter default", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template(
+    {
+      web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
+        codeReference: "[parameters('sourceReference')]"
+      })
+    },
+    {
+      sourceReference: {
+        type: "string",
+        defaultValue: "src/app.ts#L12"
+      }
+    }
+  );
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("rejects an unresolved top-level source-reference expression", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template(
+    {
+      web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
+        codeReference: "[parameters('sourceReference')]"
+      })
+    },
+    { sourceReference: { type: "string" } }
+  );
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /must resolve to a repo-relative worktree path/u);
+});
+
+test("resolves source-reference parameters through local module invocations", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    module: localModuleResources(
+      {
+        queue: radiusResource("Radius.Messaging/rabbitMQ@2025-08-01-preview", {
+          codeReference: "[parameters('sourceReference')]"
+        })
+      },
+      { sourceReference: { type: "string" } },
+      { sourceReference: { value: "src/queue.ts#L4" } }
+    )
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
 });
 
 test("checks source references inside local modules", () => {
@@ -1412,6 +1510,53 @@ describe("repair budget", () => {
     assert.equal(second.status, 1);
     assert.doesNotMatch(second.stderr, /same compiler failure/u);
     assert.equal((readRepair(directory) as { attempts: number }).attempts, 2);
+  });
+
+  it("recognizes a repeated source-reference validation failure", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    const compiledOutput = template({
+      web: {
+        type: "Radius.Compute/containers@2025-08-01-preview",
+        properties: { properties: {} }
+      }
+    });
+
+    const first = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+    const second = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.doesNotMatch(first.stderr, /same compiler failure/u);
+    assert.match(second.stderr, /same compiler failure/u);
+  });
+
+  it("does not conflate changed source-reference validation failures", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    const missing = template({
+      web: {
+        type: "Radius.Compute/containers@2025-08-01-preview",
+        properties: { properties: {} }
+      }
+    });
+    const unsafe = template({
+      web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
+        codeReference: "../src/app.ts"
+      })
+    });
+
+    runChecker(directory, fakeBicep(directory, sarif([]), 0, missing));
+    const second = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, unsafe)
+    );
+
+    assert.doesNotMatch(second.stderr, /same compiler failure/u);
   });
 
   it("stops a stuck run once the budget is spent", () => {

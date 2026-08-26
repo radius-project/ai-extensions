@@ -46,7 +46,7 @@ The renderer ports the production improvements from `radius-project/github-exten
 
 ## Source-code references
 
-The `codeReference` on each non-application resource is what makes a graph node link back to its definition/initialization site in the source (e.g. the file that opens the MySQL connection). Generated models store it durably in `app.bicep`; the graph consumes that authored metadata.
+The `codeReference` on each non-application resource is what makes a graph node link back to its definition/initialization site in the source (e.g. the file that opens the MySQL connection). Generated models store it durably in `app.bicep` as either a current-worktree-relative path or an exact GitHub branch/file URL; the graph consumes that authored metadata.
 
 - The `radius-app-bicep` skill discovers and authors `codeReference` into `.radius/app.bicep` before publishing the model.
 - If a generated graph lacks a reference, repair the model through that skill. Do not treat the instance-scoped `update_source_refs` compatibility action as completion because its changes do not survive rebuilding the graph.
@@ -111,7 +111,7 @@ When the selected branch has no committed `.radius/app.bicep` (or `app.bicep`), 
 - **Selected branch is the current workspace branch:** writing `.radius/app.bicep` to the working tree is enough — the graph, planned, and PR-diff-preview views render straight from the on-disk worktree checkout, so no commit or push is required to preview the graph.
 - **Selected branch is a different branch:** the skill must model that branch's code (not the current worktree's), and the resulting `.radius/app.bicep` must be committed and pushed to that branch before the graph can render there. Prefer opening a pull request into the target branch rather than committing directly to it, and never push a generated model straight to a protected branch such as `main` without the user's explicit confirmation.
 
-Once `.radius/app.bicep` is committed on the target branch, reopen the view — nodes then deep-link to `https://github.com/<owner>/<repo>/blob/<branch>/<file>` for that branch's source.
+For the current graph view, keep the Canvas open while `.radius/app.bicep` is generated; it detects the model and renders in place. Planned and diff views still need to be reopened after the model is committed on a non-workspace target branch.
 
 ## Prerequisites
 
@@ -122,7 +122,7 @@ Once `.radius/app.bicep` is committed on the target branch, reopen the view — 
 ## Troubleshooting
 
 - **Empty graph**: no committed app definition on the branch. Author `.radius/app.bicep` with the `radius-app-bicep` skill and commit it, then refresh.
-- **Graph build fails**: inspect the Radius extension log and verify that its managed binary under `~/.radius/ai-extensions/bin` was checked, downloaded or upgraded as needed, and is executable. Never run `rad app graph` locally to reproduce the failure. Do not add `--preview` to this modeled command. On Windows, the extension runs its managed `rad.exe` detached to avoid a known `rad`/Bicep hang under Node's default job object.
+- **Graph build fails**: inspect the Radius extension log and verify that its managed binary under `~/.radius/ai-extensions/bin` was checked, downloaded or upgraded as needed, and is executable. Never run `rad app graph` locally to reproduce the failure. Do not add `--preview` to this modeled command. On Windows, the extension keeps its managed `rad.exe` attached and hidden, then terminates the process tree after a valid graph artifact or timeout.
 - **Stale graph**: Click Refresh to rebuild from the selected branch's current app definition.
 - **PR diff doesn't appear**: verify both base and head branches have a committed `app.bicep` that can be fetched. Branches without one are reported as missing — the diff no longer generates a model for an empty branch, and it no longer requires both branches to have deployed first.
 

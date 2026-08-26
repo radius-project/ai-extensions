@@ -7,7 +7,7 @@
 // listener per container so re-rendering a graph can never stack handlers.
 
 import { escapeBrowserHtml } from "../html.js";
-import { buildSourceUrl } from "./model.js";
+import { buildSourceUrl, githubSourceReferenceUrl } from "./model.js";
 import type { BrowserContext, DomElement } from "../ports.js";
 import type { GraphNodeData, GraphSettings } from "./build.js";
 
@@ -156,6 +156,8 @@ export function buildDetailRows(
           data.sourceUrl
         )
       );
+    } else if (githubSourceReferenceUrl(data.codeRef) && data.sourceUrl) {
+      rows.push(linkRow(ICON_SRC, "View source code", data.sourceUrl, true));
     }
     if (data.defFile) {
       rows.push(

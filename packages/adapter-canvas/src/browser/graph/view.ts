@@ -20,6 +20,7 @@ import type {
   ReactRoot
 } from "./vendor.js";
 import { safeExternalUrl } from "./details.js";
+import { githubSourceReferenceUrl } from "./model.js";
 
 const TYPE_LABEL_MAX_PX = 13;
 const TYPE_LABEL_MIN_PX = 7;
@@ -142,20 +143,10 @@ export function createNodeComponent(
         glyph,
         label
       );
-    } else if (settings.localSource) {
-      sourceRow = h(
-        "span",
-        {
-          className: "rad-node__source",
-          role: "button",
-          "aria-disabled": "true",
-          title: "No source reference found",
-          style: { opacity: 0.5, cursor: "default" }
-        },
-        glyph,
-        label
-      );
-    } else if (data.sourceUrl) {
+    } else if (
+      data.sourceUrl &&
+      (!settings.localSource || githubSourceReferenceUrl(data.codeRef))
+    ) {
       sourceRow = h(
         "a",
         {
@@ -171,6 +162,19 @@ export function createNodeComponent(
             event.stopPropagation();
             deps.openExternal(data.sourceUrl);
           }
+        },
+        glyph,
+        label
+      );
+    } else if (settings.localSource) {
+      sourceRow = h(
+        "span",
+        {
+          className: "rad-node__source",
+          role: "button",
+          "aria-disabled": "true",
+          title: "No source reference found",
+          style: { opacity: 0.5, cursor: "default" }
         },
         glyph,
         label

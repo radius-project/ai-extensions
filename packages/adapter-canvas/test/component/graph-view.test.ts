@@ -240,6 +240,30 @@ describe("graph view in a real browser", () => {
     expect(recorded.opened).toEqual([]);
   });
 
+  it("opens an exact GitHub source URL externally from a worktree graph", async () => {
+    const sourceUrl =
+      "https://github.com/acme/widgets/blob/release/src/web.ts#L4";
+    const { recorded } = mount({
+      localSource: true,
+      resources: [
+        {
+          ...RESOURCES[0],
+          codeReference: sourceUrl
+        }
+      ]
+    });
+    const web = await card("web");
+    const link = await within(web).findByRole("link", {
+      name: /View source code/
+    });
+
+    await userEvent.click(link);
+
+    expect(recorded.external).toEqual([sourceUrl]);
+    expect(recorded.local).toEqual([]);
+    expect(document.body.contains(link)).toBe(true);
+  });
+
   it("marks the source row disabled when the node has no reference", async () => {
     mount({ localSource: true });
     const db = await card("db");

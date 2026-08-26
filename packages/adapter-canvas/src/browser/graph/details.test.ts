@@ -102,6 +102,18 @@ describe("detail rows", () => {
     expect(rows[1]).toContain('data-local-line="12"');
   });
 
+  it("keeps an exact GitHub source URL external for a local-workspace graph", () => {
+    const sourceUrl =
+      "https://github.com/acme/widgets/blob/release/src/web.ts#L4";
+    const rows = buildDetailRows(
+      settings({ localSource: true }),
+      node({ codeRef: sourceUrl, sourceUrl, srcPath: "", srcLine: 0 })
+    );
+    expect(rows[0]).toContain(`href="${sourceUrl}"`);
+    expect(rows[0]).toContain('target="_blank" rel="noopener noreferrer"');
+    expect(rows[0]).not.toContain("data-local-src");
+  });
+
   it("omits the source row for a local node with no code reference", () => {
     const rows = buildDetailRows(
       settings({ localSource: true }),

@@ -1,6 +1,6 @@
 # Source-Code References for Graph Nodes
 
-Each graph node can carry a **source-code reference** — a repo-relative path (optionally with a `#L<line>` anchor) that points at the place in the code where that resource is defined, created, or initialized. The canvas turns this into a clickable deep link on the node, so a reviewer can jump from a box in the application graph straight to, say, the file that opens the MySQL connection.
+Each graph node can carry a **source-code reference** that points at the place in the code where that resource is defined, created, or initialized. It is either a repo-relative worktree path or an exact GitHub branch/file URL, optionally with a `#L<line>` anchor. The canvas turns it into a clickable node link, so a reviewer can jump from a box in the application graph straight to, say, the file that opens the MySQL connection.
 
 Radius treats this as optional metadata that a developer would normally hand-add. Because the app model here is generated rather than hand-crafted, this skill is responsible for finding that location and attaching it to the resource.
 
@@ -8,7 +8,7 @@ Radius treats this as optional metadata that a developer would normally hand-add
 
 The reference surfaces on the graph node as `codeRef` and is sourced from the resource's `codeReference` value:
 
-- **In `app.bicep`** — set `codeReference: '<path>[#L<line>]'` inside every non-application resource's `properties`. `rad app graph` preserves it and the canvas renders the link. The `radius-app-bicep` skill must populate it before publishing a generated model. Built-in types get the property from Radius's base resource schema; a generated `Radius.Resources/*` custom type is a closed object built from `custom-types.yaml` and accepts it only because that manifest declares it, so on a custom type generated before that rule, add the property to the manifest and republish the extension rather than authoring an unsupported property.
+- **In `app.bicep`** — set `codeReference` inside every non-application resource's `properties`. Use `'<path>[#L<line>]'` for a current-worktree file and an exact `https://github.com/<owner>/<repo>/blob/<branch>/<path>[#L<line>]` URL for a committed branch file. `rad app graph` preserves it and the canvas renders the link. The `radius-app-bicep` skill must populate it before publishing a generated model. Built-in types get the property from Radius's base resource schema; a generated `Radius.Resources/*` custom type is a closed object built from `custom-types.yaml` and accepts it only because that manifest declares it, so on a custom type generated before that rule, add the property to the manifest and republish the extension rather than authoring an unsupported property.
 - **When a graph reports a missing reference** — repair the staged `app.bicep` through the `radius-app-bicep` skill and rebuild the graph. The instance-scoped graph update action is retained for compatibility, but it is not durable model state and must not be used as the completion path for a generated model.
 
 `applications` resources never get a source reference — skip them.
@@ -72,8 +72,8 @@ Source extensions considered for content scans: `.js .ts .mjs .cjs .jsx .tsx .py
 
 ## Output format
 
-- Author a **repo-relative path** with forward slashes, optionally `#L<line>`: `src/db/mysql.js#L14`, `services/api/Dockerfile`. This is the canonical authored value.
-- Do not author a branch or full URL. The canvas resolves the repo-relative value against the graph's repo and branch into `<repo-url>/blob/<branch>/<path>#L<line>`. Radius's base resource schema documents `codeReference` as a fully-qualified source URI, but authoring a full URL breaks this canvas deep-link path, so keep authored values repo-relative.
+- For a source file in the selected current worktree, author a **repo-relative path** with forward slashes, optionally `#L<line>`: `src/db/mysql.js#L14`, `services/api/Dockerfile`. This keeps editor-canvas navigation available for uncommitted and local-only work.
+- For a source file resolved from a committed GitHub branch rather than the current worktree, author the exact `https://github.com/<owner>/<repo>/blob/<branch>/<path>[#L<line>]` URL. The URL must name the branch and file that were actually inspected. Never create such a URL for an uncommitted or unpushed file.
 - If nothing credible is found, stop and report that the generated model is incomplete rather than linking a wrong/test file or publishing without the durable reference.
 
 ## Verify

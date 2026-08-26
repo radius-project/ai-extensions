@@ -340,6 +340,22 @@ describe("node card", () => {
     expect(recorded.local).toEqual([]);
   });
 
+  it("opens an exact GitHub source URL through the host for a local graph", () => {
+    const sourceUrl =
+      "https://github.com/acme/widgets/blob/release/src/web.ts#L4";
+    const { tree, recorded } = renderCard(
+      node({ codeRef: sourceUrl, sourceUrl, srcPath: "", srcLine: 0 }),
+      { localSource: true }
+    );
+    const row = findByClass(tree, "rad-node__source nodrag nopan nokey");
+    callHandler(row, "onClick", {
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined
+    });
+    expect(recorded.external).toEqual([sourceUrl]);
+    expect(recorded.local).toEqual([]);
+  });
+
   it("renders an inert row when a remote node has no source URL", () => {
     const { tree } = renderCard(node({ sourceUrl: "" }));
     const row = findByClass(tree, "rad-node__source");

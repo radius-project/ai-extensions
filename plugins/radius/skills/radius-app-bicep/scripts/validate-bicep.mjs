@@ -376,7 +376,12 @@ function checkContainerImageBuildSources(
   return failed;
 }
 
-function checkSourceCodeReferences(template, app, parentPath = "") {
+function checkSourceCodeReferences(
+  template,
+  app,
+  parentPath = "",
+  parameterValues = new Map()
+) {
   let failed = false;
   for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
     const resourcePath = parentPath ? `${parentPath}.${symbol}` : symbol;
@@ -385,10 +390,27 @@ function checkSourceCodeReferences(template, app, parentPath = "") {
       if (
         nestedTemplate !== null &&
         typeof nestedTemplate === "object" &&
-        !Array.isArray(nestedTemplate) &&
-        checkSourceCodeReferences(nestedTemplate, app, resourcePath)
+        !Array.isArray(nestedTemplate)
       ) {
-        failed = true;
+        const nestedParameterValues = new Map();
+        for (const [name, argument] of Object.entries(
+          resource?.properties?.parameters ?? {}
+        )) {
+          nestedParameterValues.set(
+            name,
+            resolveTemplateString(argument?.value, template, parameterValues)
+          );
+        }
+        if (
+          checkSourceCodeReferences(
+            nestedTemplate,
+            app,
+            resourcePath,
+            nestedParameterValues
+          )
+        ) {
+          failed = true;
+        }
       }
       continue;
     }
@@ -400,24 +422,58 @@ function checkSourceCodeReferences(template, app, parentPath = "") {
       continue;
     }
 
-    const codeReference = resource?.properties?.properties?.codeReference;
-    if (typeof codeReference !== "string" || !codeReference.trim()) {
-      console.error(
-        `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: every non-application Radius resource must store its verified repo-relative source location in app.bicep.`
+    const rawCodeReference = resource?.properties?.properties?.codeReference;
+    if (typeof rawCodeReference !== "string" || !rawCodeReference.trim()) {
+      report(
+        `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: every non-application Radius resource must store its verified worktree path or GitHub branch/file URL in app.bicep.`
       );
       failed = true;
       continue;
     }
+    const codeReference = resolveTemplateString(
+      rawCodeReference,
+      template,
+      parameterValues
+    );
     const sourceLocationPattern =
-      /^(?!\.{1,2}(?:\/|$))(?!.*(?:^|\/)\.\.(?:\/|$))[^#\0]+(?:#L[1-9]\d*)?$/u;
+      /^(?!\.{1,2}(?:\/|$))(?!.*(?:^|\/)\.\.(?:\/|$))[^\u0000-\u001f\u007f#]+(?:#L[1-9]\d*)?$/u;
+    const githubSource = (() => {
+      if (typeof codeReference !== "string") {
+        return false;
+      }
+      try {
+        const parsed = new URL(codeReference);
+        const segments = parsed.pathname
+          .split("/")
+          .filter((segment) => segment !== "");
+        return (
+          parsed.protocol === "https:" &&
+          parsed.hostname.toLowerCase() === "github.com" &&
+          !parsed.username &&
+          !parsed.password &&
+          !parsed.port &&
+          !parsed.search &&
+          segments.length >= 5 &&
+          segments[2] === "blob" &&
+          (parsed.hash === "" || /^#L[1-9]\d*$/u.test(parsed.hash))
+        );
+      } catch {
+        return false;
+      }
+    })();
     if (
-      /^[A-Za-z][A-Za-z0-9+.-]*:/u.test(codeReference) ||
-      codeReference.startsWith("/") ||
-      codeReference.includes("\\") ||
-      !sourceLocationPattern.test(codeReference)
+      typeof codeReference !== "string" ||
+      codeReference !== codeReference.trim() ||
+      /[\u0000-\u001f\u007f]/u.test(codeReference) ||
+      codeReference.startsWith("[") ||
+      (!githubSource &&
+        (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(codeReference) ||
+          codeReference.startsWith("/") ||
+          codeReference.includes("\\") ||
+          !sourceLocationPattern.test(codeReference)))
     ) {
-      console.error(
-        `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: "${codeReference}" must be a repo-relative path using forward slashes, optionally followed by #L<line>.`
+      report(
+        `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: ${JSON.stringify(rawCodeReference)} must resolve to a repo-relative worktree path using forward slashes or an exact https://github.com/<owner>/<repo>/blob/<branch>/<file> URL, optionally followed by #L<line>.`
       );
       failed = true;
     }

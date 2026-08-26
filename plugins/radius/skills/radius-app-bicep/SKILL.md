@@ -225,7 +225,7 @@ Two runs of this skill over the same source, with the same generator version and
 
 ## Source-code reference metadata (`codeReference`)
 
-Each generated resource (except `applications`) must carry a `codeReference` in its `properties` — a repo-relative path, optionally with a `#L<line>` anchor, pointing at where that resource is defined/initialized in the source. It is metadata only: `rad app graph` preserves it and the application-graph canvas turns it into a clickable deep link on the node. It does not affect deployment.
+Each generated resource (except `applications`) must carry a `codeReference` in its `properties` pointing at where that resource is defined or initialized. Use a repo-relative path for a file available in the current worktree, or an exact GitHub `blob` URL when the source is being read from a committed repository branch. Either form may include a `#L<line>` anchor. It is metadata only: `rad app graph` preserves it and the application-graph canvas turns it into a clickable node link. It does not affect deployment.
 
 Populate it for every non-application resource you can locate, because the developer is not hand-adding it:
 
@@ -245,7 +245,7 @@ To find the definition/initialization site for each resource, follow the discove
 
 Custom types do not get it for free. A `Radius.Resources/*` type generated from `custom-types.yaml` compiles to a closed object built from that manifest, so it accepts `codeReference` only when its own schema declares the property — which [custom-resource-types.md](references/custom-resource-types.md) now requires for every generated type. Before authoring `codeReference` on a custom-type resource, confirm the type's schema declares it (add it and republish `custom-types.tgz` if it does not); otherwise omit it, or compilation fails with `BCP037: The property "codeReference" is not allowed`.
 
-Author it as a **repo-relative path** (`path` or `path#L<line>`), not a full URL — the graph canvas resolves it against the graph's repo and branch (`<repo-url>/blob/<branch>/<path>#L<line>`). Radius's base schema documents `codeReference` as a fully-qualified source URI, but a full URL breaks that canvas deep-link path, so author repo-relative here.
+Choose the form from the source status. For a file in the selected current worktree, author a **repo-relative path** (`path` or `path#L<line>`) so the canvas can open the on-disk file in the editor. For a file resolved from a committed GitHub branch rather than the current worktree, author its exact `https://github.com/<owner>/<repo>/blob/<branch>/<path>[#L<line>]` URL. Never use a GitHub URL for an uncommitted or unpushed file, and never use a local absolute path.
 
 ## Resource Type Resolution
 
@@ -401,7 +401,7 @@ Before returning the Bicep, verify:
 - [ ] Every dependency has a complete client tuple: subresource name, endpoint/FQDN transformation, port, protocol/version, TLS mode, auth mechanism/identity, secret source, and final client syntax. Provider modules, SKUs, regions, and firewall configuration remain outside `app.bicep`.
 - [ ] Runtime parser coercion and unset behavior, TLS, authentication, bootstrap, listener configuration, ingress evidence, and primary-feature readiness are proven. Required model aliases, storage backends, database clients, and messaging inputs/outputs reference only mandatory selected resources; a health endpoint, login screen, or idle/placeholder process is insufficient.
 - [ ] No required binding or dependency was deleted to satisfy stale mutable extension metadata or obtain a clean compile.
-- [ ] Every generated non-application resource stores a verified repo-relative `properties.codeReference` in `app.bicep`; no graph-only source-reference update is treated as completion.
+- [ ] Every generated non-application resource stores a verified `properties.codeReference` appropriate to its source status: repo-relative for a current-worktree file, or an exact GitHub `blob` URL for a committed branch file. No graph-only source-reference update is treated as completion.
 - [ ] Perform the static consistency pass in [runtime-contract.md](references/runtime-contract.md); no unresolved runtime caveat remains.
 - [ ] The generated Bicep contains no explanatory comments. `.radius/bicepconfig.json` resolves the `radius` extension for `app.bicep`: created or updated in place (a parent `bicepconfig.json` is used only as input, never modified).
 - [ ] The output follows the [deterministic output](#deterministic-output) rules, so regenerating from unchanged source would produce the identical file.
