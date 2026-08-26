@@ -2,4 +2,4 @@
 "radius": patch
 ---
 
-Keep the rolling `radius-edge` entry in the marketplace catalog on `main` in sync with the released version instead of leaving it at `0.0.0`. `pnpm run version:check` now covers it, so the catalog end users add can no longer advertise a stale version for the edge channel.
+Keep the single `radius` marketplace entry in sync with the released version while allowing the generated edge catalog to retarget and restamp that entry with its snapshot version. The catalog's source ref can switch the default from edge to stable without renaming the plugin.
