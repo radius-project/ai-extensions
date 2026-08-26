@@ -37,6 +37,7 @@ const RESOURCES = [
 ];
 
 interface Recorded {
+  external: string[];
   local: Array<[string, number, string]>;
   toggled: string[];
   opened: string[];
@@ -65,6 +66,7 @@ function mount(
   const settings = resolveGraphSettings({
     localSource: options.localSource ?? true,
     deployMode: options.deployMode,
+    repoUrl: "https://github.test/o/r",
     branch: "feature-branch"
   });
   const built = buildGraph(settings, options.resources ?? RESOURCES);
@@ -73,6 +75,7 @@ function mount(
 
   const { host, dispose } = createGraphHost();
   const recorded: Recorded = {
+    external: [],
     local: [],
     toggled: [],
     opened: [],
@@ -89,6 +92,7 @@ function mount(
       recorded.reloads += 1;
     },
     deps: {
+      openExternal: (url) => recorded.external.push(url),
       openLocalSource: (path, line, fallback) =>
         recorded.local.push([path, line, fallback]),
       toggleDetails: (data: GraphNodeData, card: DomElement | null) =>
@@ -253,6 +257,46 @@ describe("graph view in a real browser", () => {
     expect(document.body.contains(link)).toBe(true);
     // The card's own click handler must not also fire for a source click.
     expect(recorded.opened).toEqual([]);
+  });
+
+  it("opens a remote source link through the host without navigating the webview", async () => {
+    const { recorded } = mount({ localSource: false });
+    const web = await card("web");
+    const link = await within(web).findByRole("link", {
+      name: /View source code/
+    });
+
+    await userEvent.click(link);
+
+    expect(recorded.external).toEqual([
+      "https://github.test/o/r/blob/feature-branch/src/web.ts#L4"
+    ]);
+    expect(document.body.contains(link)).toBe(true);
+    expect(recorded.opened).toEqual([]);
+  });
+
+  it("opens an exact GitHub source URL externally from a worktree graph", async () => {
+    const sourceUrl =
+      "https://github.com/acme/widgets/blob/release/src/web.ts#L4";
+    const { recorded } = mount({
+      localSource: true,
+      resources: [
+        {
+          ...RESOURCES[0],
+          codeReference: sourceUrl
+        }
+      ]
+    });
+    const web = await card("web");
+    const link = await within(web).findByRole("link", {
+      name: /View source code/
+    });
+
+    await userEvent.click(link);
+
+    expect(recorded.external).toEqual([sourceUrl]);
+    expect(recorded.local).toEqual([]);
+    expect(document.body.contains(link)).toBe(true);
   });
 
   it("marks the source row disabled when the node has no reference", async () => {

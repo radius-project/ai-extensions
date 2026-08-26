@@ -32,10 +32,7 @@ updates:
           - "*"
 
   - package-ecosystem: npm
-    directories:
-      - "/"
-      - "/packages/*"
-      - "/plugins/*"
+    directory: "/"
     schedule:
       interval: weekly
     cooldown:

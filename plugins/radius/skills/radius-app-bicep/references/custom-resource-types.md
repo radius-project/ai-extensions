@@ -49,7 +49,7 @@ types:
               description: "(Optional) The Radius Application ID."
             codeReference:
               type: string
-              description: "(Optional) Repo-relative source path for graph deep-linking; metadata only, ignored by the recipe."
+              description: "(Optional) Worktree-relative path or exact GitHub branch/file URL for graph source navigation; metadata only, ignored by the recipe."
             # Developer inputs the application sets:
             <inputProperty>:
               type: string            # or integer / boolean
@@ -71,8 +71,9 @@ types:
 ```
 
 Rules:
+
 - Base properties `environment` (required) and `application` (optional) are always present.
-- `codeReference` (optional, `type: string`) is always declared too. A generated custom type compiles to a **closed** object built from this manifest, so do not rely on it picking up the base properties that built-in types get from Radius's base resource schema: unless the schema declares `codeReference`, authoring it on a custom-type resource fails with `BCP037`. Declare the property explicitly; do NOT use `additionalProperties: true`, which would disable validation for every stray property. Never list `codeReference` in `required`.
+- `codeReference` (`type: string`) is always declared too. Keep it optional in the reusable type schema, but set it on every generated resource instance as required by the app-model generation contract. A generated custom type compiles to a **closed** object built from this manifest, so do not rely on it picking up the base properties that built-in types get from Radius's base resource schema: unless the schema declares `codeReference`, authoring it on a custom-type resource fails with `BCP037`. Declare the property explicitly; do NOT use `additionalProperties: true`, which would disable validation for every stray property. Never list `codeReference` in the schema's `required` array.
 - Developer inputs are plain typed properties; use `enum: [...]` for a fixed value set.
 - Mark every sensitive input or sensitive output `x-radius-sensitive: true`.
 - Read-only outputs set `readOnly: true` and are populated by the recipe; do not list them in `required`.
@@ -98,7 +99,7 @@ A recipe is the module that actually provisions the resource; the recipe pack (s
 
 An Azure Verified Module needs NO authoring and NO publishing: reference the published module directly as the recipe pack entry's `source`, using its Microsoft Container Registry (MCR) path pinned to a specific version:
 
-```
+```yaml
 source: 'mcr.microsoft.com/bicep/avm/res/<service>/<resource>:<x.y.z>'
 ```
 
@@ -167,7 +168,7 @@ output result object = {
 
 Then publish it to the user's GitHub Container Registry for the repository being modeled by calling the `radius_publish_recipe` tool (never invoke `rad` directly), and use the resulting path as the recipe pack `source`. Pass `file` (the recipe path) and `target` (`br:ghcr.io/<owner>/<repo>/<recipe>:<tag>`):
 
-```
+```text
 file: <staging-dir>/<type>-recipe.bicep
 target: br:ghcr.io/<owner>/<repo>/<recipe>:<tag>
 ```
@@ -209,6 +210,7 @@ resource pack 'Radius.Core/recipePacks@2025-08-01-preview' = {
 ```
 
 Notes:
+
 - `parameters` values use Radius `{{context.resource...}}` templating (not Bicep expressions); this is how developer inputs reach the module. For an AVM module, include every parameter the module requires plus any that affect the outputs you consume (for example set `disableLocalAuth: false` when reading a shared-access connection string).
 - `outputs` maps the recipe's outputs to the type's `readOnly` property names. Non-secret outputs are mapped at the top level of `outputs` (`<typeProperty>: '<moduleOutputName>'`), and sensitive outputs go under the nested `secrets` map. Use the module's actual output names (verify them, do not guess). This recipe-pack mapping shape is deliberately different from an authored recipe's own return value in 4b, which is `output result object = { resources, values, secrets }`.
 - An authored recipe (4b) already returns `values`/`secrets` keyed by the type's property names, so in the recipe pack its `outputs` mapping is usually the identity (and can be omitted); an AVM module (4a) needs a real mapping because its output names differ (for example `host: 'fqdn'`).

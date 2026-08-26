@@ -69,7 +69,7 @@ export function buildRadiusCanvasInputSchema(defaultPage: string) {
       branch: {
         type: "string",
         description:
-          "Branch to read .radius/app.bicep from when repo is not the current workspace repository. Ignored for the workspace repository, which always uses the checked-out branch. Defaults to 'main'."
+          "Branch to read .radius/app.bicep from. For the workspace repository, omit this to use the checked-out branch; an explicit different branch is fetched from GitHub. Defaults to 'main' for another repository."
       },
       baseBranch: {
         type: "string",
@@ -85,16 +85,23 @@ export function buildRadiusCanvasInputSchema(defaultPage: string) {
   });
 }
 
+// Structural mirror of the SDK's `CanvasJsonSchema`, kept local so this module
+// stays dependency-free. `Record<string, unknown>` does not satisfy it.
+export type JsonValue =
+  null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
 export interface ActionDeclaration {
   name: string;
   description: string;
-  inputSchema: Record<string, unknown>;
+  inputSchema: { [key: string]: JsonValue };
 }
 
 // The 2 canvas actions, in their current order. Declarative shape only — see
-// canvas.ts for the handlers.
+// canvas.ts for the handlers. The explicit type argument checks each element
+// against ActionDeclaration; inferring a union would instead normalize the two
+// differing schemas into `?: undefined` members, which JsonValue rejects.
 export const RADIUS_ACTION_DECLARATIONS: readonly ActionDeclaration[] =
-  deepFreeze([
+  deepFreeze<ActionDeclaration[]>([
     {
       name: "get_graph_resources",
       description:
