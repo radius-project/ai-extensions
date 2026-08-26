@@ -1019,7 +1019,7 @@ describe("initializeEnvironmentPage", () => {
                   {
                     id: "stop",
                     kind: "stop",
-                    label: "Stop setup",
+                    label: "Stop Setup",
                     path: "/api/operations/op-1/stop",
                     description: "Stop at the next safe boundary."
                   }

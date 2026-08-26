@@ -3982,7 +3982,7 @@ export function projectOperationActions(op: any): any[] {
       {
         id: "stop",
         kind: "stop",
-        label: "Stop setup",
+        label: "Stop Setup",
         placement: "row",
         tone: "neutral",
         requiresConfirmation: false,

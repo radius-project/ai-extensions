@@ -180,7 +180,7 @@ const EXIT_ACTION_WITH_DELETIONS = {
 const STOP_ACTION = {
   id: "stop",
   kind: "stop",
-  label: "Stop setup",
+  label: "Stop Setup",
   description: "Radius finishes the current step and stops.",
   path: "/api/operations/op-1/stop",
   pending: false
@@ -1589,7 +1589,7 @@ describe("operation commands", () => {
     const rendered = buttons(browser);
     expect(rendered).toHaveLength(2);
     expect(rendered[0].id).toBe("env-progress-command-stop");
-    expect(rendered[0].textContent).toBe("Stop setup");
+    expect(rendered[0].textContent).toBe("Stop Setup");
     expect(rendered[0].getAttribute("type")).toBe("button");
     expect(rendered[0].className).toBe("rad-btn rad-btn--secondary");
     // A label the server did not name still gets an honest default rather
@@ -2626,7 +2626,7 @@ describe("rollback confirmation", () => {
           {
             id: "stop",
             kind: "stop",
-            label: "Stop setup",
+            label: "Stop Setup",
             description: "",
             path: "/api/operations/op-1/stop",
             pending: false

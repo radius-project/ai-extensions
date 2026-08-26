@@ -417,7 +417,7 @@ describe("operation controls real-loopback HIT", () => {
     );
     expect(before.actions.map((entry) => entry.id)).toEqual(["retry-deletion"]);
     expect(before.actions.map((entry) => entry.label)).not.toContain(
-      "Stop setup"
+      "Stop Setup"
     );
 
     const response = await post(
