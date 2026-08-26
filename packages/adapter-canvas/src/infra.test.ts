@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { parse as parseYaml } from "yaml";
 
 interface RecordedCommit {
   path: string;
@@ -44,7 +43,7 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
     "delete-application.yml":
       "name: delete\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n",
     "delete-azure.yml":
-      "name: delete-azure\njobs:\n  a:\n    steps:\n      - name: Delete Radius resource\n        uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
+      "name: delete-azure\njobs:\n  a:\n    uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
   };
   return {
     BASE_UPSTREAM,
@@ -92,7 +91,6 @@ const {
   generateVerifyWorkflow,
   generateDeployWorkflow,
   generateDeleteWorkflow,
-  configureControlPlaneHostAliases,
   configureVerifyGhcrProbe,
   configureVerifyOperationMarker
 } = await import("./infra.js");
@@ -219,108 +217,6 @@ describe("GHCR verification probe", () => {
     expect(workflow).not.toContain("| jq ");
     expect(workflow).not.toContain("uses: action");
     expect(workflow).toContain("- name: Summary");
-  });
-});
-
-describe("control-plane host aliases", () => {
-  const STEP_TEMPLATE = `jobs:
-  delete:
-    steps:
-      - name: Register cloud credentials with Radius
-        run: echo register
-
-      - name: Delete Radius resource
-        uses: radius-project/radius/.github/extension/actions/delete-resource@main
-        with:
-          name: trader-x
-
-      - name: Teardown
-        run: echo bye
-`;
-
-  function stepNames(workflow: string): string[] {
-    const parsed = parseYaml(workflow) as {
-      jobs: { delete: { steps: { name: string }[] } };
-    };
-    return parsed.jobs.delete.steps.map((step) => step.name);
-  }
-
-  it("runs the alias step immediately before the delete", () => {
-    const workflow = configureControlPlaneHostAliases(STEP_TEMPLATE);
-
-    expect(stepNames(workflow)).toEqual([
-      "Register cloud credentials with Radius",
-      "Make control-plane services reachable for paginated listings",
-      "Delete Radius resource",
-      "Teardown"
-    ]);
-  });
-
-  it("keeps the surrounding step indentation so the workflow stays parseable", () => {
-    const workflow = configureControlPlaneHostAliases(STEP_TEMPLATE);
-    const inserted = workflow
-      .split("\n")
-      .filter((line) => line.trim().length > 0)
-      .filter((line) => !STEP_TEMPLATE.split("\n").includes(line));
-
-    expect(inserted.length).toBeGreaterThan(0);
-    for (const line of inserted) {
-      expect(line.startsWith("      ")).toBe(true);
-    }
-    expect(() => parseYaml(workflow)).not.toThrow();
-  });
-
-  it("port-forwards each control-plane service and aliases its in-cluster names", () => {
-    const parsed = parseYaml(
-      configureControlPlaneHostAliases(STEP_TEMPLATE)
-    ) as {
-      jobs: { delete: { steps: { name: string; run?: string }[] } };
-    };
-    const run =
-      parsed.jobs.delete.steps.find(
-        (step) =>
-          step.name ===
-          "Make control-plane services reachable for paginated listings"
-      )?.run ?? "";
-
-    expect(run).toContain("for service in dynamic-rp applications-rp ucp; do");
-    expect(run).toContain(
-      'kubectl port-forward -n radius-system "service/$service" "$port:$port" --address 127.0.0.1'
-    );
-    expect(run).toContain(
-      'echo "127.0.0.1 $service.radius-system $service.radius-system.svc $service.radius-system.svc.cluster.local" | sudo tee -a /etc/hosts'
-    );
-    // A busy port would otherwise satisfy the readiness probe and alias the
-    // service to whatever else is listening.
-    expect(run).toContain("Port $port is already in use");
-  });
-
-  it.each([
-    {
-      name: "the delete-resource action is gone",
-      template: "jobs:\n  delete:\n    steps:\n      - run: rad app delete\n"
-    },
-    {
-      name: "the action is no longer referenced from a step",
-      template:
-        "jobs:\n  delete:\n    uses: radius-project/radius/.github/extension/actions/delete-resource@main\n"
-    }
-  ])("refuses a template where $name", ({ template }) => {
-    expect(() => configureControlPlaneHostAliases(template)).toThrow(
-      /no longer contains a delete-resource step/u
-    );
-  });
-
-  it("patches the generated provider workflow but not the dispatcher", async () => {
-    h.upstream = { ...BASE_UPSTREAM };
-    const files = await generateDeleteWorkflow("dev");
-
-    expect(files["delete-azure.yml"]).toContain(
-      "Make control-plane services reachable for paginated listings"
-    );
-    expect(files["delete-application.yml"]).not.toContain(
-      "Make control-plane services reachable"
-    );
   });
 });
 
