@@ -9,6 +9,7 @@ const { ghMock } = vi.hoisted(() => {
   return {
     ghMock: {
       calls: [] as string[][],
+      options: [] as Array<{ timeout?: number }>,
       handler: (
         _args: string[]
       ): {
@@ -23,7 +24,7 @@ vi.mock("./gh.js", () => ({
   cliExec: (
     _cmd: string,
     args: string[],
-    _opts: unknown,
+    opts: { timeout?: number },
     cb: (
       error: ExecFileException | null,
       stdout: string,
@@ -31,12 +32,14 @@ vi.mock("./gh.js", () => ({
     ) => void
   ) => {
     ghMock.calls.push(args);
+    ghMock.options.push(opts);
     const result = ghMock.handler(args);
     cb(result.error ?? null, result.stdout ?? "", "");
   }
 }));
 
-const { findWorkflowRun, latestWorkflowRunId } = await import("./deploy.js");
+const { findWorkflowRun, ghJson, latestWorkflowRunId } =
+  await import("./deploy.js");
 
 interface RunListEntry {
   databaseId?: number;
@@ -53,7 +56,37 @@ const DISPATCH_AT = 1_700_000_000_000;
 
 beforeEach(() => {
   ghMock.calls = [];
+  ghMock.options = [];
   ghMock.handler = () => ({ stdout: "[]" });
+});
+
+describe("ghJson ambient CLI reads", () => {
+  it("parses JSON and forwards the requested timeout", async () => {
+    replyWith('[{"databaseId":41}]');
+
+    await expect(ghJson(["run", "list"], null, 3210)).resolves.toEqual([
+      { databaseId: 41 }
+    ]);
+    expect(ghMock.calls).toEqual([["run", "list"]]);
+    expect(ghMock.options).toEqual([{ timeout: 3210 }]);
+  });
+
+  it("returns the caller-provided fallback when the command fails", async () => {
+    const fallback: unknown[] = [];
+    ghMock.handler = () => ({
+      error: Object.assign(new Error("gh failed"), { code: 1 })
+    });
+
+    await expect(ghJson(["run", "list"], fallback)).resolves.toBe(fallback);
+    expect(ghMock.options).toEqual([{ timeout: 15000 }]);
+  });
+
+  it("returns the caller-provided fallback for malformed JSON", async () => {
+    const fallback = { unavailable: true };
+    replyWith("not json");
+
+    await expect(ghJson(["run", "list"], fallback)).resolves.toBe(fallback);
+  });
 });
 
 describe("findWorkflowRun known-id shortcut", () => {
