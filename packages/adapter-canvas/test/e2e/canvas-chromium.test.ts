@@ -1340,45 +1340,85 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }) => {
-    // The heartbeat drops a ping requested while another is still in flight, so
-    // the counter has to advance on response completion rather than on request
-    // interception. Counting at interception let the next dispatched focus be
-    // swallowed by that guard, leaving the overlay assertions to race the
-    // interval timer instead of the events this test drives.
-    let completedPings = 0;
     let pingStatus = 200;
     let navigations = 0;
     page.on("framenavigated", (frame) => {
       if (frame === page.mainFrame()) navigations += 1;
     });
-    await page.route("**/api/ping", async (route) => {
-      const status = pingStatus;
+    const heartbeatUrl = `${canvas.baseUrl}/api/ping`;
+    await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await page.addInitScript(`
+      (() => {
+        const originalFetch = window.fetch;
+        const heartbeatUrl = ${JSON.stringify(heartbeatUrl)};
+        let observedHeartbeatPings = 0;
+        let completedHeartbeatPings = 0;
+        Object.defineProperty(window, "__radiusObservedHeartbeatPings", {
+          get: () => observedHeartbeatPings
+        });
+        Object.defineProperty(window, "__radiusCompletedHeartbeatPings", {
+          get: () => completedHeartbeatPings
+        });
+        window.fetch = async (...args) => {
+          const response = await originalFetch(...args);
+          const requestUrl = new URL(String(args[0]), window.location.href);
+          if (requestUrl.href !== heartbeatUrl) return response;
+
+          const ok = response.ok;
+          let observed = false;
+          Object.defineProperty(response, "ok", {
+            configurable: true,
+            get() {
+              if (!observed) {
+                observed = true;
+                observedHeartbeatPings += 1;
+                // A task runs after every promise reaction in the heartbeat
+                // chain, including finally clearing the in-flight guard.
+                setTimeout(() => {
+                  completedHeartbeatPings += 1;
+                }, 0);
+              }
+              return ok;
+            }
+          });
+          return response;
+        };
+      })();
+    `);
+    await page.route(heartbeatUrl, async (route) => {
       await route.fulfill({
-        status,
+        status: pingStatus,
         contentType: "application/json",
         body: "{}"
       });
-      completedPings += 1;
     });
     await gotoCanvas(page, canvas, "planned");
     await expectNoWcagViolations(page);
-    // The accessibility scan can run for an unpredictable share of the
-    // heartbeat interval, so the page is restarted to put the next interval
-    // ping well beyond the focus-driven sequence below. Serving 200 until the
-    // sequence starts keeps any earlier ping from recording a miss.
     await gotoCanvas(page, canvas, "planned");
+    const currentTime = await page.evaluate<number>("Date.now()");
+    await page.clock.pauseAt(currentTime + 1_000);
 
     const overlay = page.locator("#radius-reconnect-overlay");
     const initialNavigations = navigations;
     const focusForPing = async (): Promise<void> => {
-      const pingFinished = page.waitForEvent("requestfinished", (request) =>
-        request.url().includes("/api/ping")
+      const beforeObserved = await page.evaluate<number>(
+        "window.__radiusObservedHeartbeatPings"
+      );
+      const beforeCompleted = await page.evaluate<number>(
+        "window.__radiusCompletedHeartbeatPings"
       );
       await page.evaluate("window.dispatchEvent(new Event('focus'))");
-      await pingFinished;
-      await page.evaluate(
-        () => new Promise<void>((resolve) => queueMicrotask(resolve))
-      );
+      await expect
+        .poll(() =>
+          page.evaluate<number>("window.__radiusObservedHeartbeatPings")
+        )
+        .toBe(beforeObserved + 1);
+      await page.clock.runFor(0);
+      await expect
+        .poll(() =>
+          page.evaluate<number>("window.__radiusCompletedHeartbeatPings")
+        )
+        .toBe(beforeCompleted + 1);
     };
 
     pingStatus = 503;
@@ -1395,8 +1435,9 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.evaluate(
       "setTimeout(() => window.dispatchEvent(new Event('focus')), 0)"
     );
+    await page.clock.runFor(0);
     await recoveryNavigation;
     await expect.poll(() => navigations - initialNavigations).toBe(1);
-    await expect(page).toHaveURL(/page=planned/);
+    await expect(page).toHaveURL(`${canvas.baseUrl}/?page=planned`);
   });
 });
