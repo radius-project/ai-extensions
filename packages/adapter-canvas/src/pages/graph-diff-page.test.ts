@@ -42,6 +42,7 @@ describe("graphDiffPage", () => {
       repo: "octo/app",
       base: "main",
       head: "feature",
+      workspaceBranch: "",
       resources: [],
       modelingError: ""
     });
@@ -69,6 +70,7 @@ describe("graphDiffPage", () => {
       repo: "octo/app",
       base: "main",
       head: "feature",
+      workspaceBranch: "",
       resources,
       modelingError: ""
     });
@@ -91,10 +93,39 @@ describe("graphDiffPage", () => {
       repo: "octo/app",
       base: "main",
       head: "feature",
+      workspaceBranch: "",
       resources: [],
       modelingError: "Your application model couldn't be compiled."
     });
   });
+
+  // The diff page is the only page that renders two branches at once, so it
+  // ships the worktree branch name and lets the browser decide per node.
+  it.each([
+    ["populated", "octo/app", "feature"],
+    ["empty for another repository", "other/app", ""]
+  ])(
+    "serializes a workspace branch %s on both the empty and populated payloads",
+    (_label, workspaceRepo, expected) => {
+      for (const diffResources of [
+        [],
+        [{ id: "added", diffStatus: "added" }]
+      ]) {
+        const html = graphDiffPage({
+          diffTargetRepo: "octo/app",
+          diffBase: "main",
+          diffHead: "feature",
+          diffResources,
+          workspacePath: "C:\\work\\app",
+          workspaceRepo,
+          workspaceBranch: "feature"
+        });
+        expect(
+          readBrowserPageState(html, "radius-graph-diff-state")
+        ).toMatchObject({ workspaceBranch: expected });
+      }
+    }
+  );
 
   it("keeps hostile branch and repository state inert", () => {
     const html = graphDiffPage({

@@ -23,10 +23,6 @@ import type { GraphResource } from "../graph/model.js";
 import type { GraphController } from "../graph/surface.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import { readPageState } from "./state.js";
-import {
-  GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
-  GRAPH_APP_BICEP_TIMEOUT_MS
-} from "../../graph-progress-contract.js";
 
 const ENTRY_KEY = "graph-page";
 export const GRAPH_PAGE_STATE_ID = "radius-graph-page-state";
@@ -37,11 +33,6 @@ export const GRAPH_PROGRESS_MS = 800;
 // carries the diagnostic; this only explains the disabled control.
 export const GRAPH_PLAN_BLOCKED_TITLE =
   "Plan Deployment is unavailable until the application model compiles.";
-// How long the page waits for Copilot to author .radius/app.bicep before it
-// gives up. Nothing reports back when the modeling skill finishes or refuses —
-// the page only learns by asking again — so an unbounded retry would spin
-// forever on a repository the skill cannot model at all.
-export { GRAPH_APP_BICEP_TIMEOUT_MESSAGE, GRAPH_APP_BICEP_TIMEOUT_MS };
 
 interface GraphPageState {
   repo: string;
@@ -121,9 +112,6 @@ export function initializeGraphPage(
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
   let progressView: GraphProgressView | null = null;
-  // When the current wait for Copilot to author .radius/app.bicep began, or
-  // null when the page is not waiting on one.
-  let appBicepWaitStartedAtMs: number | null = null;
   let renderedOptions: GraphOptions | null = null;
   // Whether the selected branch's model has compiled. It starts pending even
   // for a server-rendered graph, because that page immediately re-requests the
@@ -207,7 +195,6 @@ export function initializeGraphPage(
     requestAbort?.abort();
     requestAbort = null;
     requestActive = false;
-    appBicepWaitStartedAtMs = null;
     if (retry !== null) entry.cancel(retry);
     retry = null;
     stopProgress();
@@ -299,27 +286,6 @@ export function initializeGraphPage(
       });
   };
 
-  const waitForAppBicep = (
-    message: string,
-    continueWaiting: () => void = () => load({ continuing: true }),
-    timeoutFailure: () => void = () =>
-      showFailure(GRAPH_APP_BICEP_TIMEOUT_MESSAGE)
-  ): void => {
-    const now = context.clock.now();
-    if (appBicepWaitStartedAtMs === null) appBicepWaitStartedAtMs = now;
-    if (now - appBicepWaitStartedAtMs >= GRAPH_APP_BICEP_TIMEOUT_MS) {
-      appBicepWaitStartedAtMs = null;
-      stopProgress();
-      timeoutFailure();
-      return;
-    }
-    showStatus(context, message, "info");
-    retry = entry.after(GRAPH_RETRY_MS, () => {
-      retry = null;
-      continueWaiting();
-    });
-  };
-
   const load = (options: { readonly continuing?: boolean } = {}): void => {
     if (requestActive || !entry.active) return;
     const branch = branchSelect?.value.trim() || page.branch;
@@ -341,11 +307,16 @@ export function initializeGraphPage(
       wrapper.innerHTML = '<div id="graph-container"></div>';
     }
     setLoading("graph-container");
-    showStatus(
-      context,
-      "Checking the selected branch for .radius/app.bicep…",
-      "info"
-    );
+    // Automatic retries continue the same wait. Keep its status text stable
+    // instead of flashing "Checking…" before every response restores the
+    // generating message.
+    if (!options.continuing) {
+      showStatus(
+        context,
+        "Checking the selected branch for .radius/app.bicep…",
+        "info"
+      );
+    }
     startProgress(
       requestGeneration,
       "Checking the selected branch for .radius/app.bicep…",
@@ -355,7 +326,11 @@ export function initializeGraphPage(
       .fetch("/api/load-graph", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo: page.repo, branch }),
+        body: JSON.stringify({
+          repo: page.repo,
+          branch,
+          restartWait: options.continuing !== true
+        }),
         signal: requestAbort?.signal
       })
       .then((response) => response.json())
@@ -376,14 +351,21 @@ export function initializeGraphPage(
           return;
         }
         // The work continues off-page while Copilot authors the model, so the
-        // panel keeps running rather than being torn down and rebuilt.
+        // panel keeps running rather than being torn down and rebuilt. The
+        // server owns how long that wait may last and drops `needsAppBicep`
+        // when it expires, which lands the answer on the error path below.
         if (readBoolean(payload, "needsAppBicep")) {
-          waitForAppBicep(
-            "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…"
+          showStatus(
+            context,
+            "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…",
+            "info"
           );
+          retry = entry.after(GRAPH_RETRY_MS, () => {
+            retry = null;
+            load({ continuing: true });
+          });
           return;
         }
-        appBicepWaitStartedAtMs = null;
         if (readBoolean(payload, "stale")) {
           showStatus(
             context,
@@ -412,7 +394,6 @@ export function initializeGraphPage(
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== generation) return;
-        appBicepWaitStartedAtMs = null;
         const message = "Failed to generate the application graph.";
         stopProgress();
         context.logger.error("Radius graph request failed.", error);
@@ -450,7 +431,14 @@ export function initializeGraphPage(
       localSource: page.localSource
     };
     renderOrUpdate(page.resources, graphOptions);
-    const refreshLoadedGraph = (): void => {
+    // Refreshing a preloaded graph keeps the rendered nodes on screen, so the
+    // retrying paths below re-enter this request rather than `load`, which
+    // blanks the container before it fetches. Only the first request restarts
+    // the server-side wait; the polls that continue it must not, or the wait
+    // would never age out.
+    const refreshLoadedGraph = (
+      options: { readonly continuing?: boolean } = {}
+    ): void => {
       const refreshGeneration = ++generation;
       requestAbort = context.net.createAbort();
       void context.net
@@ -460,7 +448,8 @@ export function initializeGraphPage(
           body: JSON.stringify({
             repo: page.repo,
             branch: page.branch,
-            refresh: true
+            refresh: true,
+            restartWait: options.continuing !== true
           }),
           signal: requestAbort?.signal
         })
@@ -468,7 +457,6 @@ export function initializeGraphPage(
         .then((payload) => {
           if (refreshGeneration !== generation) return;
           if (isRecord(payload) && Array.isArray(payload.resources)) {
-            appBicepWaitStartedAtMs = null;
             modelState = "ready";
             syncPrimaryButton();
             stopProgress();
@@ -478,16 +466,19 @@ export function initializeGraphPage(
               localSource: sourceProvenance(payload)
             });
           } else if (readBoolean(payload, "needsAppBicep")) {
-            waitForAppBicep(
+            // A preloaded graph refresh can discover that the model disappeared
+            // just like the initial load can. The server owns how long that wait
+            // may last and drops `needsAppBicep` when it expires, which lands the
+            // answer on the error path below.
+            showStatus(
+              context,
               "Copilot is rebuilding the application graph from .radius/app.bicep with the Radius app-bicep skill.",
-              refreshLoadedGraph,
-              () =>
-                showStatus(
-                  context,
-                  `Unable to refresh the application graph: ${GRAPH_APP_BICEP_TIMEOUT_MESSAGE}`,
-                  "error"
-                )
+              "info"
             );
+            retry = entry.after(GRAPH_RETRY_MS, () => {
+              retry = null;
+              refreshLoadedGraph({ continuing: true });
+            });
           } else if (readBoolean(payload, "stale")) {
             showStatus(
               context,
@@ -496,7 +487,7 @@ export function initializeGraphPage(
             );
             retry = entry.after(GRAPH_STALE_RETRY_MS, () => {
               retry = null;
-              refreshLoadedGraph();
+              refreshLoadedGraph({ continuing: true });
             });
           } else {
             const error = readString(payload, "error");

@@ -23,6 +23,7 @@ import {
   settleDeployStatuses
 } from "../../../src/deploy-artifacts.js";
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
+import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../../../src/graph-progress-contract.js";
 
 let container: CanvasServerContainer | undefined;
 
@@ -49,6 +50,7 @@ interface Harness {
   modeledOutcome: { status: number; error?: string; retry?: boolean };
   modeledResources: CanvasGraphResource[];
   setEntryMissing(missing: boolean): void;
+  setModelingActivity(atMs: number | null): void;
   advanceClock(ms: number): void;
 }
 
@@ -71,6 +73,7 @@ function start(): Harness {
   };
   const modeledResources: CanvasGraphResource[] = [];
   let entryMissing = false;
+  let modelingActivityAtMs: number | null = null;
   let nowMs = 0;
 
   const routes = createTestRouteTable(
@@ -115,6 +118,7 @@ function start(): Harness {
         error instanceof Error ? error.message : String(error),
       repoMatchesWorkspace: (current, repo) =>
         !!current.workspaceRepo && current.workspaceRepo === repo,
+      observeModelingRun: () => Promise.resolve(modelingActivityAtMs),
       now: () => nowMs
     })
   );
@@ -148,6 +152,9 @@ function start(): Harness {
     modeledResources,
     setEntryMissing(missing) {
       entryMissing = missing;
+    },
+    setModelingActivity(atMs) {
+      modelingActivityAtMs = atMs;
     },
     advanceClock(ms) {
       nowMs += ms;
@@ -198,6 +205,43 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       // still reports the time the build has actually been running.
       elapsedMs: 4_000
     });
+  });
+
+  it("observes a scoped modeling run before expiring progress", async () => {
+    const harness = start();
+    const staleActivityAtMs = 1_000;
+    harness.advanceClock(staleActivityAtMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS);
+    harness.setModelingActivity(
+      staleActivityAtMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS - 1
+    );
+    harness.state.graphProgressRecords = {
+      graph: {
+        graphBuildEvents: [],
+        graphProgressGeneration: 1,
+        graphProgressStartedAtMs: 0,
+        graphProgressActive: true,
+        graphProgressView: "graph",
+        graphProgressKey: "octo/app",
+        graphProgressRepo: "octo/app",
+        graphProgressBranches: ["main"],
+        graphProgressOwner: 1,
+        graphProgressAwaitingModel: true,
+        graphProgressWaitStartedAtMs: 1
+      }
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/progress?view=graph`);
+    const payload = (await response.json()) as { active: boolean };
+
+    expect(response.status).toBe(200);
+    expect(payload).toMatchObject({ active: true });
+    expect(
+      harness.state.graphProgressRecords.graph?.graphProgressAwaitingModel
+    ).toBe(true);
+    expect(
+      harness.state.graphProgressRecords.graph?.graphProgressLastActivityAtMs
+    ).toBe(staleActivityAtMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS - 1);
   });
 
   it("greys out an unresolvable repo without constructing a reader", async () => {

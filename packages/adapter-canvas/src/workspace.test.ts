@@ -9,12 +9,14 @@ import {
   workspaceGraphJsonPath,
   toSafeRepoRelPath,
   isWorkspaceSelection,
+  workspaceBranchForRepo,
   resolveSessionId,
   resolvePersistedSessionId,
   workspaceFileExists,
   hasRadiusApplicationModel,
   fetchWorkspaceTree,
   isWorkspacePath,
+  modelingRunLastActivityAtMs,
   workspaceHeadCommit,
   uncommittedGeneratedPaths,
   workspaceSourceChangedSince,
@@ -182,6 +184,61 @@ describe("isWorkspaceSelection", () => {
   });
 });
 
+// The graph diff renders two branches at once, so it needs the workspace branch
+// itself rather than a yes/no answer for one branch.
+describe("workspaceBranchForRepo", () => {
+  const state = {
+    workspacePath: "C:/wt/app",
+    workspaceRepo: "acme/app",
+    workspaceBranch: "feature-x"
+  };
+
+  it("returns the checked-out branch for the workspace repo", () => {
+    expect(workspaceBranchForRepo(state, "acme/app")).toBe("feature-x");
+  });
+
+  it("is empty for a different repo", () => {
+    expect(workspaceBranchForRepo(state, "acme/other")).toBe("");
+  });
+
+  it("is empty for an empty/unspecified repo (fail-closed)", () => {
+    expect(workspaceBranchForRepo(state, "")).toBe("");
+    expect(workspaceBranchForRepo(state, undefined)).toBe("");
+  });
+
+  it("is empty when no workspace path is set", () => {
+    expect(
+      workspaceBranchForRepo(
+        { workspaceRepo: "acme/app", workspaceBranch: "feature-x" },
+        "acme/app"
+      )
+    ).toBe("");
+  });
+
+  it("is empty when the workspace branch is unknown", () => {
+    expect(
+      workspaceBranchForRepo(
+        { workspacePath: "C:/wt/app", workspaceRepo: "acme/app" },
+        "acme/app"
+      )
+    ).toBe("");
+  });
+
+  it("is empty for missing state", () => {
+    expect(workspaceBranchForRepo(null, "acme/app")).toBe("");
+    expect(workspaceBranchForRepo(undefined, "acme/app")).toBe("");
+  });
+
+  it("agrees with isWorkspaceSelection for every branch it is asked about", () => {
+    for (const branch of ["feature-x", "main", ""]) {
+      expect(isWorkspaceSelection(state, "acme/app", branch)).toBe(
+        !!workspaceBranchForRepo(state, "acme/app") &&
+          workspaceBranchForRepo(state, "acme/app") === branch
+      );
+    }
+  });
+});
+
 // COPILOT_AGENT_SESSION_ID is sometimes a W3C traceparent ("00-<trace>-<span>-00")
 // instead of a session UUID. That value builds a bogus session-state path whose
 // workspace.yaml does not exist, so resolveSessionId must skip it and fall
@@ -283,6 +340,105 @@ describe("workspaceFileExists", () => {
       expect(await workspaceFileExists(dir, "../outside.txt")).toBe(false);
       expect(await workspaceFileExists("", "src/main.go")).toBe(false);
       expect(await workspaceFileExists(dir, "")).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("modelingRunLastActivityAtMs", () => {
+  async function workspaceDir(): Promise<string> {
+    return fs.mkdtemp(path.join(os.tmpdir(), "radius-staging-"));
+  }
+
+  it("reports when a staging directory was created", async () => {
+    const dir = await workspaceDir();
+    try {
+      const staging = path.join(dir, ".radius", ".staging-run-7");
+      await fs.mkdir(staging, {
+        recursive: true
+      });
+      const expected = (await fs.stat(staging)).mtimeMs;
+      expect(await modelingRunLastActivityAtMs(dir)).toBe(expected);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports the newest staged artifact activity", async () => {
+    const dir = await workspaceDir();
+    try {
+      const staging = path.join(dir, ".radius", ".staging-run-7");
+      const appBicep = path.join(staging, "app.bicep");
+      await fs.mkdir(staging, { recursive: true });
+      await fs.writeFile(appBicep, "// model\n");
+      await fs.utimes(staging, new Date(1_000), new Date(1_000));
+      await fs.utimes(appBicep, new Date(2_000), new Date(2_000));
+      const expected = (await fs.stat(appBicep)).mtimeMs;
+
+      expect(await modelingRunLastActivityAtMs(dir)).toBe(expected);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports the newest activity across concurrent staging directories", async () => {
+    const dir = await workspaceDir();
+    try {
+      const older = path.join(dir, ".radius", ".staging-run-7");
+      const newer = path.join(dir, ".radius", ".staging-run-8");
+      await fs.mkdir(older, { recursive: true });
+      await fs.mkdir(newer, { recursive: true });
+      await fs.utimes(older, new Date(1_000), new Date(1_000));
+      await fs.utimes(newer, new Date(2_000), new Date(2_000));
+      const expected = (await fs.stat(newer)).mtimeMs;
+
+      expect(await modelingRunLastActivityAtMs(dir)).toBe(expected);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports no activity once the run removes its staging directory", async () => {
+    const dir = await workspaceDir();
+    try {
+      const staging = path.join(dir, ".radius", ".staging-run-7");
+      await fs.mkdir(staging, { recursive: true });
+      await fs.rm(staging, { recursive: true, force: true });
+      await fs.writeFile(path.join(dir, ".radius", "app.bicep"), "// model\n");
+      expect(await modelingRunLastActivityAtMs(dir)).toBeNull();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Only a directory counts. A file whose name happens to match is not a run,
+  // and treating it as one would keep the graph waiting indefinitely.
+  it("ignores a non-directory entry and a bare prefix", async () => {
+    const dir = await workspaceDir();
+    try {
+      await fs.mkdir(path.join(dir, ".radius"), { recursive: true });
+      await fs.writeFile(path.join(dir, ".radius", ".staging-x"), "");
+      await fs.mkdir(path.join(dir, ".radius", ".staging"), {
+        recursive: true
+      });
+      expect(await modelingRunLastActivityAtMs(dir)).toBeNull();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Answering null is what lets an unreadable workspace end the wait rather
+  // than renew it forever.
+  it("reports no activity with no .radius directory, no workspace, or an unreadable one", async () => {
+    const dir = await workspaceDir();
+    try {
+      expect(await modelingRunLastActivityAtMs(dir)).toBeNull();
+      expect(await modelingRunLastActivityAtMs("")).toBeNull();
+      expect(await modelingRunLastActivityAtMs(null)).toBeNull();
+      expect(await modelingRunLastActivityAtMs(undefined)).toBeNull();
+      await fs.writeFile(path.join(dir, ".radius"), "not a directory");
+      expect(await modelingRunLastActivityAtMs(dir)).toBeNull();
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
