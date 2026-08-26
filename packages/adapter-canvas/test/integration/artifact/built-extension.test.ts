@@ -1,4 +1,6 @@
 import {
+  copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -6,12 +8,13 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
   type Dirent
 } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
@@ -32,6 +35,30 @@ const DIST = join(REPO_ROOT, "plugins", "radius", "dist");
 const ARTIFACT = join(DIST, "extension.mjs");
 const SOURCE_MAP = `${ARTIFACT}.map`;
 const SOURCE_CHANGELOG = join(REPO_ROOT, "plugins", "radius", "CHANGELOG.md");
+const SOURCE_SKILL = join(
+  REPO_ROOT,
+  "plugins",
+  "radius",
+  "skills",
+  "radius-app-bicep"
+);
+const DIST_SKILL = join(DIST, "skills", "radius-app-bicep");
+const SOURCE_CODE_REFERENCE = join(
+  REPO_ROOT,
+  "plugins",
+  "radius",
+  "skills",
+  "radius-app-graph",
+  "references",
+  "source-code-references.md"
+);
+const DIST_CODE_REFERENCE = join(
+  DIST,
+  "skills",
+  "radius-app-graph",
+  "references",
+  "source-code-references.md"
+);
 // Independent reviewed oracle: unlike importing the live declaration builders,
 // this fixture changes only when a contract update is deliberately accepted.
 const EXPECTED_REGISTRATION = JSON.parse(
@@ -47,6 +74,55 @@ function filesUnder(path: string): string[] {
     const child = join(path, entry.name);
     return entry.isDirectory() ? filesUnder(child) : [child];
   });
+}
+
+function relativeFilesUnder(root: string): string[] {
+  return filesUnder(root)
+    .map((filePath) => relative(root, filePath).replaceAll("\\", "/"))
+    .sort();
+}
+
+function expectMatchingFile(source: string, destination: string): void {
+  expect(readFileSync(destination)).toEqual(readFileSync(source));
+}
+
+function prepareBuildWorkspace(
+  workspaceRoot: string,
+  missingAsset: readonly string[]
+): string {
+  for (const entry of [".node-version", "pnpm-workspace.yaml"]) {
+    copyFileSync(join(REPO_ROOT, entry), join(workspaceRoot, entry));
+  }
+
+  const sourceAdapter = join(REPO_ROOT, "packages", "adapter-canvas");
+  const workspaceAdapter = join(workspaceRoot, "packages", "adapter-canvas");
+  mkdirSync(workspaceAdapter, { recursive: true });
+  for (const entry of ["build.mjs", "package.json"]) {
+    copyFileSync(join(sourceAdapter, entry), join(workspaceAdapter, entry));
+  }
+  cpSync(join(sourceAdapter, "src"), join(workspaceAdapter, "src"), {
+    recursive: true
+  });
+  symlinkSync(
+    join(sourceAdapter, "node_modules"),
+    join(workspaceAdapter, "node_modules"),
+    "junction"
+  );
+
+  const sourcePlugin = join(REPO_ROOT, "plugins", "radius");
+  const workspacePlugin = join(workspaceRoot, "plugins", "radius");
+  mkdirSync(workspacePlugin, { recursive: true });
+  for (const entry of ["plugin.json", "package.json", "README.md"]) {
+    copyFileSync(join(sourcePlugin, entry), join(workspacePlugin, entry));
+  }
+  cpSync(join(sourcePlugin, "skills"), join(workspacePlugin, "skills"), {
+    recursive: true
+  });
+  rmSync(join(workspacePlugin, "skills", ...missingAsset), {
+    recursive: true
+  });
+
+  return workspaceAdapter;
 }
 
 function assertCurrentArtifact(): void {
@@ -298,6 +374,10 @@ describe("P0-C built Radius extension artifact", () => {
         readFileSync(sourceSkill, "utf8")
       );
     }
+    expect(relativeFilesUnder(DIST_SKILL)).toEqual(
+      relativeFilesUnder(SOURCE_SKILL)
+    );
+    expectMatchingFile(SOURCE_CODE_REFERENCE, DIST_CODE_REFERENCE);
     const notices = readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8");
     for (const marker of [
       "===== react@19.2.8 =====",
@@ -458,10 +538,13 @@ describe("P0-C built Radius extension artifact", () => {
     );
   });
 
-  it("installs the third-party notices beside the local extension", () => {
+  it("installs every managed file without deleting unrelated root files", () => {
     const installDir = mkdtempSync(join(tmpdir(), "radius-canvas-install-"));
     const installPath = join(installDir, "extension.mjs");
+    const unrelatedRootFile = join(installDir, "unrelated-root.txt");
     try {
+      writeFileSync(unrelatedRootFile, "keep root\n");
+
       execFileSync(process.execPath, ["build.mjs", "--install"], {
         cwd: join(REPO_ROOT, "packages", "adapter-canvas"),
         env: {
@@ -471,9 +554,23 @@ describe("P0-C built Radius extension artifact", () => {
         stdio: "pipe"
       });
 
-      expect(
-        readFileSync(join(installDir, "THIRD-PARTY-NOTICES.txt"), "utf8")
-      ).toBe(readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8"));
+      const managedFiles = [
+        "extension.mjs",
+        "extension.mjs.map",
+        "THIRD-PARTY-NOTICES.txt",
+        "package.json",
+        ...relativeFilesUnder(DIST_SKILL).map(
+          (filePath) => `skills/radius-app-bicep/${filePath}`
+        ),
+        "skills/radius-app-graph/references/source-code-references.md"
+      ];
+      for (const managedFile of managedFiles) {
+        expectMatchingFile(
+          join(DIST, ...managedFile.split("/")),
+          join(installDir, ...managedFile.split("/"))
+        );
+      }
+      expect(readFileSync(unrelatedRootFile, "utf8")).toBe("keep root\n");
     } finally {
       rmSync(installDir, { recursive: true, force: true });
     }
@@ -514,4 +611,56 @@ describe("P0-C built Radius extension artifact", () => {
       rmSync(installDir, { recursive: true, force: true });
     }
   });
+
+  it.each([
+    {
+      asset: "radius-app-bicep skill",
+      missingAsset: ["radius-app-bicep"],
+      expectedPath: "radius-app-bicep"
+    },
+    {
+      asset: "app-graph source reference",
+      missingAsset: [
+        "radius-app-graph",
+        "references",
+        "source-code-references.md"
+      ],
+      expectedPath: "source-code-references.md"
+    }
+  ])(
+    "fails before installing when the $asset is absent",
+    ({ missingAsset, expectedPath }) => {
+      const workspaceRoot = mkdtempSync(
+        join(tmpdir(), "radius-canvas-missing-install-asset-")
+      );
+      const installDir = join(workspaceRoot, "installed");
+      const installPath = join(installDir, "extension.mjs");
+      try {
+        const buildDirectory = prepareBuildWorkspace(
+          workspaceRoot,
+          missingAsset
+        );
+        const result = spawnSync(process.execPath, ["build.mjs", "--install"], {
+          cwd: buildDirectory,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            RADIUS_CANVAS_INSTALL_PATH: installPath
+          }
+        });
+
+        expect(result.error).toBeUndefined();
+        expect(result.signal).toBeNull();
+        expect(result.status).not.toBe(0);
+        expect(result.stderr).toContain(
+          "[canvas] install copy failed: Missing required local-install asset:"
+        );
+        expect(result.stderr).toContain(expectedPath);
+        expect(result.stdout).not.toContain("[canvas] installed");
+        expect(existsSync(installDir)).toBe(false);
+      } finally {
+        rmSync(workspaceRoot, { recursive: true, force: true });
+      }
+    }
+  );
 });

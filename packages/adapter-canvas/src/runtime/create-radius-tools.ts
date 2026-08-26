@@ -48,15 +48,16 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
       // product cannot model it, so the skill is withheld entirely. A repository
       // with SEVERAL Dockerfiles is not refused at all (2.2) — it is the normal
       // shape of a microservices application and must still be modeled as one
-      // application — so the bootstrap is returned as usual, with a brief
-      // appended describing the candidate directories and the narrow case in
-      // which the agent should stop and ask the user where the application is.
+      // application — so the bootstrap is returned as usual, with a brief field
+      // describing the candidate directories and the narrow case in which the
+      // agent should stop and ask the user where the application is.
       //
       // Any failure to establish the repository's contents returns the handoff
       // unchanged: both checks act on evidence, never on a lookup that did not
       // work.
       handler: async (args: ToolArgs) => {
         const repoPath = args.repoPath as string | undefined;
+        let brief: string | undefined;
         const state = await workspaceState().catch(() => null);
         // The listing this check can obtain describes the worktree, so it is
         // evidence about the worktree and anything inside it — a subdirectory
@@ -104,15 +105,12 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
             !!repoPath &&
             deps.workspace.isWorkspacePath(state.workspacePath, repoPath) &&
             !deps.workspace.isWorkspacePath(repoPath, state.workspacePath);
-          const brief =
-            answeredWithDirectory ? null : (
-              ambiguousAppSourceBrief(source, listing)
+          brief =
+            answeredWithDirectory ? undefined : (
+              (ambiguousAppSourceBrief(source, listing) ?? undefined)
             );
-          if (brief) {
-            return `${deps.radiusAppBicepSkill(repoPath)}\n---\n\n${brief}\n`;
-          }
         }
-        return deps.radiusAppBicepSkill(repoPath);
+        return deps.radiusAppBicepSkill(repoPath, brief);
       }
     },
     {

@@ -34,10 +34,14 @@ export interface ArtifactRegistrationSnapshot {
   }>;
   hooks: Array<{ name: string; callable: boolean }>;
   bootstrap: {
-    compact: boolean;
+    fields: string[];
     skill: string;
-    hasSkillBase: boolean;
-    hasSkillVersion: boolean;
+    repoPathMatchesWorkspace: boolean;
+    skillBaseRelativeToArtifact: string;
+    skillVersionMatchesPackage: boolean;
+    instruction: string;
+    requiredFiles: string[];
+    containsLegacyInlinedHeading: boolean;
   };
 }
 

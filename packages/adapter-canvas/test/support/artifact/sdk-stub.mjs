@@ -1,5 +1,18 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
+
 let joinCount = 0;
 let joinedDeclaration;
+
+const REQUIRED_SKILL_FILES = [
+  "SKILL.md",
+  "scripts/promote-app-model.mjs",
+  "scripts/validate-bicep.mjs",
+  "scripts/write-app-origin.mjs",
+  "../radius-app-graph/references/source-code-references.md"
+];
+const LEGACY_INLINED_HEADING =
+  "# radius-app-bicep skill (bundled with the Radius extension)";
 
 function json(value) {
   return JSON.parse(JSON.stringify(value));
@@ -26,6 +39,12 @@ export async function joinSession(declaration) {
     repoPath: process.env.RADIUS_ARTIFACT_WORKSPACE
   });
   const bootstrap = JSON.parse(String(bootstrapText));
+  const artifactPath = resolve(process.env.RADIUS_ARTIFACT_PATH);
+  const artifactDir = dirname(artifactPath);
+  const skillBase = String(bootstrap.skillBase);
+  const packageVersion = JSON.parse(
+    readFileSync(join(artifactDir, "package.json"), "utf8")
+  ).version;
   await send({
     type: "registered",
     snapshot: {
@@ -57,10 +76,22 @@ export async function joinSession(declaration) {
         }))
         .sort((left, right) => left.name.localeCompare(right.name)),
       bootstrap: {
-        compact: String(bootstrapText).length < 1000,
+        fields: Object.keys(bootstrap),
         skill: bootstrap.skill,
-        hasSkillBase: Boolean(bootstrap.skillBase),
-        hasSkillVersion: Boolean(bootstrap.skillVersion)
+        repoPathMatchesWorkspace:
+          bootstrap.repoPath === process.env.RADIUS_ARTIFACT_WORKSPACE,
+        skillBaseRelativeToArtifact: relative(
+          artifactDir,
+          skillBase
+        ).replaceAll("\\", "/"),
+        skillVersionMatchesPackage: bootstrap.skillVersion === packageVersion,
+        instruction: bootstrap.instruction,
+        requiredFiles: REQUIRED_SKILL_FILES.filter((requiredFile) =>
+          existsSync(join(skillBase, requiredFile))
+        ),
+        containsLegacyInlinedHeading: String(bootstrapText).includes(
+          LEGACY_INLINED_HEADING
+        )
       }
     }
   });
