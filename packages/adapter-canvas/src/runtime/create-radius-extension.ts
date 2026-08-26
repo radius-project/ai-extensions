@@ -23,6 +23,7 @@ import {
   deployFailureNoticeMessage
 } from "./hooks.js";
 import { createPullRequestGraphDiffGuard } from "./pr-graph-diff-guard.js";
+import { sourceEditorInstanceId } from "./canvas-lifecycle.js";
 import { errorMessage } from "./util.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { SessionPort } from "./session.js";
@@ -179,7 +180,9 @@ export function createRadiusExtension(
       }
       await session.rpc.canvas.open({
         canvasId: "editor",
-        instanceId: "radius-source",
+        // Per-file handle: a shared instanceId would make the host focus the
+        // panel already showing the first file instead of opening this one.
+        instanceId: sourceEditorInstanceId(safe),
         input: {
           scope: "repo",
           path: safe,
