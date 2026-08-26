@@ -33,6 +33,7 @@ import {
 } from "../../../test/support/browser/fakes.js";
 import type { FakeBrowser } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
+import { COMMAND_RUN_LABEL } from "../command-action.js";
 
 const HOSTILE = "<img src=x onerror=alert(1)>'\"&";
 
@@ -71,7 +72,7 @@ interface ProfilesPage {
   noteEl: ReturnType<typeof createFakeElement>;
   recheckBtn: ReturnType<typeof createFakeInput>;
   detailsEl: ReturnType<typeof createFakeElement>;
-  fixAccessBtn: ReturnType<typeof createFakeElement>;
+  repairEl: ReturnType<typeof createFakeElement>;
 }
 
 function renderProfilesPage(
@@ -126,7 +127,6 @@ function renderProfilesPage(
   const detailsPanel = createFakeElement("env-gh-details-panel");
   const detailsEl = createFakeElement(GITHUB_IDENTITY_IDS.details);
   const repairEl = createFakeElement(GITHUB_IDENTITY_IDS.repair);
-  const fixAccessBtn = createFakeElement(GITHUB_IDENTITY_IDS.fix);
 
   for (const element of [
     button,
@@ -154,8 +154,7 @@ function renderProfilesPage(
     recheckBtn,
     detailsPanel,
     detailsEl,
-    repairEl,
-    fixAccessBtn
+    repairEl
   ]) {
     if (options.omit?.includes(element.id)) continue;
     browser.document.add(element);
@@ -187,10 +186,9 @@ function renderProfilesPage(
     noteEl,
     recheckBtn,
     detailsEl,
-    fixAccessBtn
+    repairEl
   };
 }
-
 function makeDeps(overrides: Partial<CredentialProfilesPanelDeps> = {}): {
   deps: CredentialProfilesPanelDeps;
   profileChanges: Array<CredentialProfile | null>;
@@ -244,6 +242,7 @@ function readinessResponse(
     ready?: boolean;
     summary?: string;
     repair?: string | null;
+    repairRemediation?: unknown;
     login?: string;
     packageState?: "ready" | "missing" | "error";
   } = {}
@@ -260,6 +259,7 @@ function readinessResponse(
           "Ready to configure deployments"
         : "Additional GitHub access is required"),
       repair: input.repair ?? null,
+      repairRemediation: input.repairRemediation ?? null,
       checks: {
         repository: {
           state: ready ? "ready" : "missing",
@@ -400,6 +400,7 @@ describe("parseGithubReadiness", () => {
       credentialSource: "",
       summary: "",
       repair: "",
+      repairRemediation: null,
       selectionHandle: "",
       checks: {}
     });
@@ -410,6 +411,39 @@ describe("parseGithubReadiness", () => {
     ).toEqual({
       repository: { state: "", detail: "" }
     });
+  });
+
+  it("resolves a runnable repair remediation through the registry", () => {
+    const view = parseGithubReadiness({
+      readiness: {
+        repairRemediation: {
+          id: "github-account-scopes",
+          params: { login: "octocat", packages: "true", ignored: 5 }
+        }
+      }
+    }).repairRemediation;
+    expect(view?.runnable).toBe(true);
+    expect(view?.command).toContain("gh auth switch");
+    expect(view?.command).toContain("write:packages");
+  });
+
+  it("drops a repair remediation that is missing, unknown, or not runnable", () => {
+    const parse = (repairRemediation: unknown): unknown =>
+      parseGithubReadiness({ readiness: { repairRemediation } })
+        .repairRemediation;
+    expect(parse(undefined)).toBeNull();
+    expect(parse("gh auth refresh")).toBeNull();
+    expect(parse({ id: "not-a-remediation", params: {} })).toBeNull();
+    // A known id whose parameters cannot build a command must not render an
+    // enabled button in the wizard.
+    expect(parse({ id: "github-account-scopes", params: {} })).toBeNull();
+    expect(parse({ id: "github-account-scopes" })).toBeNull();
+    expect(
+      parse({ id: "github-account-scopes", params: "login=octocat" })
+    ).toBeNull();
+    expect(
+      parse({ id: "github-account-scopes", params: { login: "octocat" } })
+    ).toBeNull();
   });
 });
 
@@ -654,6 +688,19 @@ describe("githubIdentityNote", () => {
     const note = githubIdentityNote({ ...base, actingHasWorkflow: false });
     expect(note.specs[0].text).toContain("missing the workflow scope ");
     expect(note.specs[0].text).toContain("-s workflow");
+  });
+
+  it("omits the command when the login is one the registry will not run", () => {
+    const note = githubIdentityNote({
+      ...base,
+      actingLogin: HOSTILE,
+      actingHasPackages: false
+    });
+    // No runnable command means no command text: the note says what to do
+    // rather than printing something that would not work if pasted.
+    expect(note.specs[0].text).not.toContain("-h github.com -u");
+    expect(note.specs[0].text).toContain("Grant the missing scopes");
+    expect(note.showRecheck).toBe(true);
   });
 
   it("falls back to the muted acts-as note, rendering the login as a text node only", () => {
@@ -1224,15 +1271,13 @@ describe("github identity loading and rendering", () => {
     const optionsEl = createFakeElement(PROFILE_MENU_IDS.options);
     const hiddenInput = createFakeInput(PROFILE_MENU_IDS.select);
     const fieldEl = createFakeElement(GITHUB_IDENTITY_IDS.field);
-    const fixAccess = createFakeElement(GITHUB_IDENTITY_IDS.fix);
     for (const element of [
       button,
       menu,
       valueEl,
       optionsEl,
       hiddenInput,
-      fieldEl,
-      fixAccess
+      fieldEl
     ]) {
       browser.document.add(element);
     }
@@ -1253,7 +1298,6 @@ describe("github identity loading and rendering", () => {
     await expect(handle?.loadGithubIdentity(true)).resolves.toBeUndefined();
     expect(fieldEl.style.display).toBe("");
     expect(() => handle?.invalidateReadiness()).not.toThrow();
-    expect(() => fixAccess.dispatch("click")).not.toThrow();
   });
 
   it("hides the field without a recheck button to toggle when identity has an error", async () => {
@@ -1569,6 +1613,112 @@ describe("github identity loading and rendering", () => {
     await handle?.loadGithubIdentity();
     expect(fakeText(page.noteEl)).toBe("Additional GitHub access is required");
     expect(fakeText(page.detailsEl)).toContain("missing access");
+  });
+
+  it("renders a run-command callout when the repair is a scope grant", async () => {
+    const page = renderProfilesPage();
+    const { deps } = makeDeps();
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+      readinessResponse({
+        ready: false,
+        repair: "The account @alice needs the write:packages permission.",
+        repairRemediation: {
+          id: "github-account-scopes",
+          params: { login: "alice", packages: "true" }
+        }
+      })
+    );
+    page.browser.net.handle(IDENTITY_URL(), () =>
+      jsonResponse({
+        actingLogin: "alice",
+        displayLogin: "alice",
+        actingHasWorkflow: true,
+        actingHasPackages: false,
+        accounts: []
+      })
+    );
+    const handle = setupIdentity(page, deps);
+    await handle?.loadGithubIdentity();
+
+    expect(page.repairEl.style.display).toBe("");
+    expect(fakeText(page.noteEl)).toContain(
+      "This will make @alice the active GitHub CLI account if it is not already active."
+    );
+    // The command must be an actionable callout, not prose the user has to
+    // retype, so the run affordance has to be present.
+    expect(fakeText(page.repairEl)).toContain(COMMAND_RUN_LABEL);
+    expect(fakeText(page.repairEl)).toContain("gh auth switch");
+    expect(fakeText(page.repairEl)).not.toContain("In the terminal, run");
+  });
+
+  it("falls back to prose when the repair is not a runnable command", async () => {
+    const page = renderProfilesPage();
+    const { deps } = makeDeps();
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+      readinessResponse({
+        ready: false,
+        repair: "Grant repository administrator access.",
+        repairRemediation: null
+      })
+    );
+    page.browser.net.handle(IDENTITY_URL(), () =>
+      jsonResponse({
+        actingLogin: "alice",
+        displayLogin: "alice",
+        actingHasWorkflow: true,
+        actingHasPackages: true,
+        accounts: []
+      })
+    );
+    const handle = setupIdentity(page, deps);
+    await handle?.loadGithubIdentity();
+
+    expect(page.repairEl.style.display).toBe("");
+    expect(fakeText(page.repairEl)).toBe(
+      "Grant repository administrator access."
+    );
+    expect(fakeText(page.repairEl)).not.toContain(COMMAND_RUN_LABEL);
+  });
+
+  it("replaces a mounted callout when a later re-check needs no command", async () => {
+    const page = renderProfilesPage();
+    // No mutation nonce: the callout still renders, it just cannot run.
+    const { deps } = makeDeps({ mutationNonce: undefined });
+    let withCallout = true;
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+      readinessResponse(
+        withCallout ?
+          {
+            ready: false,
+            repair: "The account @alice needs the write:packages permission.",
+            repairRemediation: {
+              id: "github-account-scopes",
+              params: { login: "alice", packages: "true" }
+            }
+          }
+        : { ready: true, repair: "" }
+      )
+    );
+    page.browser.net.handle(IDENTITY_URL(), () =>
+      jsonResponse({
+        actingLogin: "alice",
+        displayLogin: "alice",
+        actingHasWorkflow: true,
+        actingHasPackages: false,
+        accounts: []
+      })
+    );
+    const handle = setupIdentity(page, deps);
+    await handle?.loadGithubIdentity();
+    expect(fakeText(page.repairEl)).toContain(COMMAND_RUN_LABEL);
+
+    withCallout = false;
+    await handle?.loadGithubIdentity();
+
+    // The stale callout must be torn down, not left behind next to the new
+    // state.
+    expect(fakeText(page.repairEl)).toBe("");
+    expect(page.repairEl.style.display).toBe("none");
   });
 
   it("marks non-actionable rows as disabled and does not bind a switch handler", async () => {
@@ -1992,7 +2142,7 @@ describe("switching a github account", () => {
     expect(fakeText(page.noteEl)).toBe("Could not check GitHub access.");
   });
 
-  it("opens technical details from Show how to fix", async () => {
+  it("shows the repair without needing the technical details opened", async () => {
     const page = renderProfilesPage();
     const { deps } = makeDeps();
     page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
@@ -2004,11 +2154,10 @@ describe("switching a github account", () => {
     const handle = setupWithAccounts(page, deps);
     await handle?.loadGithubIdentity();
 
-    page.fixAccessBtn.dispatch("click");
-
-    const detailsPanel = page.browser.context.dom.byId("env-gh-details-panel");
-    if (!detailsPanel) throw new Error("details panel missing");
-    expect(Reflect.get(detailsPanel, "open")).toBe(true);
+    // The fix used to live inside a collapsed "View technical details"
+    // disclosure, so it stayed invisible until the user went looking for it.
+    expect(page.repairEl.style.display).toBe("");
+    expect(fakeText(page.repairEl)).toBe("Run a safe repair command.");
   });
 });
 

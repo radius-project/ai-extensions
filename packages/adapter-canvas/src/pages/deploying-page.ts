@@ -127,7 +127,14 @@ ${DELETE_DEPLOYMENT_DIALOG_HTML}
 </style>
 
 <div hidden id="${DEPLOYING_PAGE_STATE_ID}">${escapeHtml(
-      inlineJson({ repo: ctxRepo, branch: ctxBranch })
+      inlineJson({
+        repo: ctxRepo,
+        branch: ctxBranch,
+        mutationNonce:
+          typeof state.browserMutationNonce === "string" ?
+            state.browserMutationNonce
+          : ""
+      })
     )}</div>
 ${browserScriptTag("deploying-page")}`,
     "deployments"

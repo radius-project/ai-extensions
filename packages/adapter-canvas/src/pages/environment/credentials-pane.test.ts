@@ -44,7 +44,8 @@ describe("credentialsPaneMarkup", () => {
   it("holds a slot for the GitHub Packages gate and the verification result", () => {
     const html = credentialsPaneMarkup("credentials");
     expect(html).toContain('id="cred-ghcr-section"');
-    expect(html).toContain('id="cred-ghcr-command"');
+    expect(html).toContain('id="cred-ghcr-command-row"');
+    expect(html).toContain('id="cred-verify-action"');
     expect(html).toContain('id="cred-verify-status"');
     expect(html).toContain('id="cred-verify-hint"');
   });
