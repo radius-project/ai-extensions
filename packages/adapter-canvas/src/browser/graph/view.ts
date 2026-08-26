@@ -20,6 +20,7 @@ import type {
   ReactRoot
 } from "./vendor.js";
 import { safeExternalUrl } from "./details.js";
+import { isLocalSourceNode } from "./build.js";
 import { githubSourceReferenceUrl } from "./model.js";
 
 const TYPE_LABEL_MAX_PX = 13;
@@ -125,7 +126,8 @@ export function createNodeComponent(
     // open its URL, and a local graph with no reference for this node shows a
     // disabled row.
     let sourceRow: unknown;
-    if (settings.localSource && data.srcPath) {
+    const localSource = isLocalSourceNode(settings, data);
+    if (localSource && data.srcPath) {
       sourceRow = h(
         "a",
         {
@@ -145,7 +147,7 @@ export function createNodeComponent(
       );
     } else if (
       data.sourceUrl &&
-      (!settings.localSource || githubSourceReferenceUrl(data.codeRef))
+      (!localSource || githubSourceReferenceUrl(data.codeRef))
     ) {
       sourceRow = h(
         "a",
@@ -166,7 +168,7 @@ export function createNodeComponent(
         glyph,
         label
       );
-    } else if (settings.localSource) {
+    } else if (localSource) {
       sourceRow = h(
         "span",
         {

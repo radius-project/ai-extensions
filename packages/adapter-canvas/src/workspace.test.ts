@@ -9,6 +9,7 @@ import {
   workspaceGraphJsonPath,
   toSafeRepoRelPath,
   isWorkspaceSelection,
+  workspaceBranchForRepo,
   resolveSessionId,
   resolvePersistedSessionId,
   workspaceFileExists,
@@ -179,6 +180,61 @@ describe("isWorkspaceSelection", () => {
         "feature-x"
       )
     ).toBe(false);
+  });
+});
+
+// The graph diff renders two branches at once, so it needs the workspace branch
+// itself rather than a yes/no answer for one branch.
+describe("workspaceBranchForRepo", () => {
+  const state = {
+    workspacePath: "C:/wt/app",
+    workspaceRepo: "acme/app",
+    workspaceBranch: "feature-x"
+  };
+
+  it("returns the checked-out branch for the workspace repo", () => {
+    expect(workspaceBranchForRepo(state, "acme/app")).toBe("feature-x");
+  });
+
+  it("is empty for a different repo", () => {
+    expect(workspaceBranchForRepo(state, "acme/other")).toBe("");
+  });
+
+  it("is empty for an empty/unspecified repo (fail-closed)", () => {
+    expect(workspaceBranchForRepo(state, "")).toBe("");
+    expect(workspaceBranchForRepo(state, undefined)).toBe("");
+  });
+
+  it("is empty when no workspace path is set", () => {
+    expect(
+      workspaceBranchForRepo(
+        { workspaceRepo: "acme/app", workspaceBranch: "feature-x" },
+        "acme/app"
+      )
+    ).toBe("");
+  });
+
+  it("is empty when the workspace branch is unknown", () => {
+    expect(
+      workspaceBranchForRepo(
+        { workspacePath: "C:/wt/app", workspaceRepo: "acme/app" },
+        "acme/app"
+      )
+    ).toBe("");
+  });
+
+  it("is empty for missing state", () => {
+    expect(workspaceBranchForRepo(null, "acme/app")).toBe("");
+    expect(workspaceBranchForRepo(undefined, "acme/app")).toBe("");
+  });
+
+  it("agrees with isWorkspaceSelection for every branch it is asked about", () => {
+    for (const branch of ["feature-x", "main", ""]) {
+      expect(isWorkspaceSelection(state, "acme/app", branch)).toBe(
+        !!workspaceBranchForRepo(state, "acme/app") &&
+          workspaceBranchForRepo(state, "acme/app") === branch
+      );
+    }
   });
 });
 

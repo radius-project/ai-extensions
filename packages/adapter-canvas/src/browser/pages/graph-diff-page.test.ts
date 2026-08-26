@@ -34,6 +34,7 @@ interface FixtureOptions {
   withBaseSelect?: boolean;
   withHeadSelect?: boolean;
   modelingError?: string;
+  workspaceBranch?: unknown;
 }
 
 function fixture(options: FixtureOptions = {}) {
@@ -48,6 +49,10 @@ function fixture(options: FixtureOptions = {}) {
     withHeadSelect = true,
     modelingError = ""
   } = options;
+  // Distinguish an omitted key from an explicit undefined so a scenario can
+  // model state that never carried a workspace branch at all.
+  const workspaceBranch =
+    "workspaceBranch" in options ? options.workspaceBranch : "feature";
   const browser = createFakeBrowser();
   const state = createFakeElement(GRAPH_DIFF_STATE_ID);
   state.textContent = JSON.stringify({
@@ -55,7 +60,8 @@ function fixture(options: FixtureOptions = {}) {
     base,
     head,
     resources,
-    modelingError
+    modelingError,
+    workspaceBranch
   });
   const repoInput = createFakeInput("diff-repo-select", repo);
   const app = createFakeSelect("diff-app");
@@ -127,7 +133,8 @@ describe("initializeGraphDiffPage", () => {
       expect.objectContaining({
         diffMode: true,
         branch: "feature",
-        baseBranch: "main"
+        baseBranch: "main",
+        workspaceBranch: "feature"
       })
     );
     expect(base.listenerCount("change")).toBe(1);
@@ -136,6 +143,31 @@ describe("initializeGraphDiffPage", () => {
     expect(base.listenerCount()).toBe(0);
     expect(head.listenerCount()).toBe(0);
   });
+
+  // Without a workspace branch every node falls back to a remote URL, which is
+  // the safe outcome when the page cannot say which branch is on disk.
+  it.each([
+    ["absent", undefined],
+    ["not a string", 7]
+  ])(
+    "passes an empty workspace branch to the graph when it is %s",
+    async (_label, workspaceBranch) => {
+      const { browser } = fixture({
+        resources: [{ id: "app/web" }],
+        workspaceBranch
+      });
+      const render = vi.fn();
+
+      initializeGraphDiffPage(browser.context, { radiusRenderGraph: render });
+      await flushPromises();
+
+      expect(render).toHaveBeenCalledWith(
+        "graph-container",
+        [{ id: "app/web" }],
+        expect.objectContaining({ workspaceBranch: "" })
+      );
+    }
+  );
 
   it("rejects a stale comparison and leaves no debounce timer", async () => {
     const { browser, head, status } = fixture();
