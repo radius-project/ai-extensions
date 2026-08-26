@@ -26,9 +26,9 @@ export const RADIUS_CANVAS_DISPLAY_NAME = "Radius";
 export const RADIUS_CANVAS_DESCRIPTION =
   "Application modeling and deployment: configure cloud credentials, generate app.bicep, visualize application graphs, view PR diffs, and create deployment environments.";
 
-// The 7 pages the canvas can render. Kept here (not just in hooks.ts's
-// GRAPH_PAGES) because the canvas's own inputSchema enum is the contract the
-// SDK/agent sees; hooks.ts separately owns which of these are graph-generating.
+// The 7 pages the canvas can render. The canvas's own inputSchema enum is the
+// contract the SDK/agent sees; which of these render a graph is decided by the
+// server's graph routes, which are the sole owner of the model-freshness turn.
 export const RADIUS_CANVAS_PAGES = deepFreeze([
   "credentials",
   "graph",
@@ -162,34 +162,37 @@ export const RADIUS_ACTION_DECLARATIONS: readonly ActionDeclaration[] =
 
 // additionalContext returned from onSessionStart. Pure static data — the
 // wiring that returns it lives in extension.ts (createRadiusExtension).
+export const RADIUS_CANVAS_INSTANCE_ID = "radius-panel";
+
 export const RADIUS_SESSION_START_CONTEXT = `When opening the Radius Canvas (canvasId: "radius"), ALWAYS:
-1. Use instanceId "radius-panel" — this ensures only ONE Radius Canvas panel is ever open (reusing the same panel for all views).
+1. Reuse the instanceId of any Radius Canvas already open in this session. If none is open, use instanceId "${RADIUS_CANVAS_INSTANCE_ID}". Reopening the existing instance refreshes its server and client connections and ensures only ONE Radius Canvas panel is open.
 2. Pass the current session's repository as the "repo" input in owner/repo format.
 3. Treat the current Copilot session worktree branch as the graph branch. Do not default graph views to main for the session repo.
+In every example below, "<radius-instance>" means the existing Radius Canvas instanceId when one is open, or "${RADIUS_CANVAS_INSTANCE_ID}" only when none is open.
 
 IMPORTANT — Automatic PR Graph Diff: When a pull request is created (via create_pull_request tool or any PR creation action):
 1. FIRST, call the radius_generate_pr_diff_markdown tool with the repo, base branch, and head branch.
 2. If it returns a Mermaid application graph diff diagram and summary, include the exact returned markdown at the TOP of the PR description/body (before any other content), and THEN open the Radius Canvas to the graph-diff page:
-   open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "graph-diff", repo: "<current-repo>", baseBranch: "<pr-base-branch>", headBranch: "<pr-head-branch>" } })
+   open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph-diff", repo: "<current-repo>", baseBranch: "<pr-base-branch>", headBranch: "<pr-head-branch>" } })
    The PR description will show the app graph diff inline on GitHub, and the canvas provides the interactive version.
 3. If the call is denied, the graph is unavailable, branch resolution fails, or the tool reports an error, create the pull request without a graph diff section. Do not add a sentence to the PR body explaining why the graph is missing. Report the reason in chat, and do not open the graph-diff Canvas. This rule governs only the graph diff section; describe the change itself normally, including any Radius modeling changes.
 
 When the user asks to "show me the app graph", "show me the application graph", "show the app graph", or similar phrases:
 1. First, check whether .radius/app.bicep (or app.bicep) exists in the working tree.
 2. If it does not, author it using the radius_generate_app tool (the radius-app-bicep skill owns namespaces, types, and structure, and writes the file to the working tree) and follow that skill to completion.
-3. Only AFTER the skill has written app.bicep to the working tree, open: open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "graph", repo: "<current-repo>" } }). For the current workspace repo and branch, the graph and planned pages render from the on-disk working tree, so no push is needed (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so it must be committed and pushed there.
+3. Only AFTER the skill has written app.bicep to the working tree, open: open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph", repo: "<current-repo>" } }). For the current workspace repo and branch, the graph and planned pages render from the on-disk working tree, so no push is needed (modeling does not push). For a different repo or branch, the canvas reads .radius/app.bicep from that remote branch, so it must be committed and pushed there.
 
-The planned page resolves .radius/app.bicep from the working tree the same way. The graph-diff page instead compares two branches, so each branch being compared must already contain the committed model.
+The planned page resolves .radius/app.bicep from the working tree the same way. The graph-diff page also reads an on-disk .radius/app.bicep for whichever side exactly matches the current workspace repo and branch. Do not commit or push the current worktree merely to compare it. A different repo or branch is read from GitHub and must already contain a committed model; if it does not, report that the diff is unavailable rather than publishing the worktree.
 
-When the user asks to "show me the planned graph", "plan my app": open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "planned", repo: "<current-repo>" } }).
+When the user asks to "show me the planned graph", "plan my app": open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "planned", repo: "<current-repo>" } }).
 
-When the user asks to "deploy my app", "create environment": open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "environment", repo: "<current-repo>" } }).
+When the user asks to "deploy my app", "create environment": open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "environment", repo: "<current-repo>" } }).
 
-When the user asks to "configure OIDC", "set up cloud credentials", "add credentials": open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "credentials", repo: "<current-repo>" } }).
+When the user asks to "configure OIDC", "set up cloud credentials", "add credentials": open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "credentials", repo: "<current-repo>" } }).
 
-When the user asks to "show the diff", "compare branches", "app graph diff": open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "graph-diff", repo: "<current-repo>" } }).
+When the user asks to "show the diff", "compare branches", "app graph diff": open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "graph-diff", repo: "<current-repo>" } }).
 
-CRITICAL: Always use instanceId "radius-panel" for ALL Radius Canvas operations. Never use different instanceIds — this prevents multiple panels from opening.
+CRITICAL: Once a Radius Canvas is open, always use its actual instanceId for every Radius Canvas operation. Use "${RADIUS_CANVAS_INSTANCE_ID}" only for the first open when no Radius instance exists.
 
 When planned graph resolution cannot resolve a resource type, distinguish two cases. (1) The type exists but no recipe or recipe pack is registered for it in the target Environment: report the unresolved type and explain that a recipe pack providing it must be registered to the environment; do NOT generate a custom type or an inline singleton recipe for this case. (2) No built-in type fits the needed backing service at all: the radius-app-bicep skill generates a custom resource type (namespace Radius.Resources) together with its own recipe pack, following the skill's custom-resource-types guidance (Azure scope for now). In both cases recipes are supplied via recipe packs, not inline per-type singleton recipes, so do NOT fabricate a singleton recipe in app.bicep or in the graph. If a needed service is not provisionable on Azure, report it to the user instead of inventing a type.`;
 

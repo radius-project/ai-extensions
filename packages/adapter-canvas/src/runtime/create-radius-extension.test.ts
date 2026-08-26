@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { serializeAppOrigin } from "@radius-project/core";
+import { hashAppBicep } from "../app-bicep-hash.js";
 import {
   createRadiusExtension,
   KEEPALIVE_INTERVAL_MS,
@@ -143,7 +145,93 @@ describe("RU-19: onPreToolUse hook", () => {
     expect(result).toBeUndefined();
   });
 
-  it("denies with a permission decision + additionalContext when app.bicep is missing", async () => {
+  it("uses the canonical instance initially, then reuses the live Radius instance", async () => {
+    const { ext } = setup();
+
+    const missing = await ext.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: { canvasId: "radius", input: { page: "graph" } }
+    });
+    const differentAfterDefault = await ext.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        instanceId: "app-graph-studious",
+        input: { page: "graph" }
+      }
+    });
+    const canonicalAgain = await ext.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        instanceId: "radius-panel",
+        input: { page: "graph" }
+      }
+    });
+
+    expect(missing).toBeUndefined();
+    expect(differentAfterDefault).toEqual(
+      expect.objectContaining({ permissionDecision: "deny" })
+    );
+    expect(differentAfterDefault?.additionalContext).toContain("radius-panel");
+    expect(canonicalAgain).toBeUndefined();
+  });
+
+  it("reuses an arbitrary existing Radius instance instead of opening the canonical default", async () => {
+    const { ext } = setup();
+    await ext.canvases[0].open({
+      extensionId: "radius-project.radius",
+      canvasId: "radius",
+      instanceId: "app-graph",
+      input: { page: "graph" }
+    });
+
+    const canonical = await ext.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        instanceId: "radius-panel",
+        input: { page: "planned" }
+      }
+    });
+    const existing = await ext.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        instanceId: "app-graph",
+        input: { page: "planned" }
+      }
+    });
+
+    expect(canonical).toEqual(
+      expect.objectContaining({ permissionDecision: "deny" })
+    );
+    expect(canonical?.additionalContext).toContain("`app-graph`");
+    expect(existing).toBeUndefined();
+  });
+
+  it("releases an unfulfilled Radius reservation after open_canvas fails", async () => {
+    const { ext } = setup();
+    await ext.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: { canvasId: "radius" }
+    });
+
+    await ext.hooks.onPostToolUseFailure({
+      toolName: "open_canvas",
+      toolArgs: { canvasId: "radius" },
+      error: "host unavailable"
+    });
+
+    await expect(
+      ext.hooks.onPreToolUse({
+        toolName: "open_canvas",
+        toolArgs: { canvasId: "radius", instanceId: "replacement-panel" }
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it("allows opening a graph page with no application model, leaving the decision to the graph routes", async () => {
     const { ext, deps } = setup();
     (
       deps.workspace.detectWorkspaceContext as ReturnType<typeof vi.fn>
@@ -156,11 +244,27 @@ describe("RU-19: onPreToolUse hook", () => {
       toolName: "open_canvas",
       toolArgs: {
         canvasId: "radius",
+        instanceId: "radius-panel",
         input: { page: "graph", repo: "acme/widgets" }
       }
     });
-    expect(result).toMatchObject({ permissionDecision: "deny" });
-    expect(result?.additionalContext).toContain(".radius/app.bicep");
+    expect(result).toBeUndefined();
+  });
+
+  it("never inspects the application model for an open_canvas call", async () => {
+    const { ext, deps } = setup();
+    const fetchBicep = deps.core.fetchBicepFromRepo as ReturnType<typeof vi.fn>;
+    fetchBicep.mockClear();
+
+    await ext.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        input: { page: "graph", repo: "acme/widgets" }
+      }
+    });
+
+    expect(fetchBicep).not.toHaveBeenCalled();
   });
 
   it("allows when app.bicep exists on the branch", async () => {
@@ -173,26 +277,11 @@ describe("RU-19: onPreToolUse hook", () => {
       toolName: "open_canvas",
       toolArgs: {
         canvasId: "radius",
+        instanceId: "radius-panel",
         input: { page: "graph", repo: "acme/widgets", branch: "main" }
       }
     });
     expect(result).toBeUndefined();
-  });
-
-  it("fails open (never throws, returns undefined) when a dependency throws", async () => {
-    const { ext, deps } = setup();
-    (
-      deps.workspace.detectWorkspaceContext as ReturnType<typeof vi.fn>
-    ).mockRejectedValue(new Error("workspace lookup exploded"));
-    await expect(
-      ext.hooks.onPreToolUse({
-        toolName: "open_canvas",
-        toolArgs: {
-          canvasId: "radius",
-          input: { page: "graph", repo: "acme/widgets" }
-        }
-      })
-    ).resolves.toBeUndefined();
   });
 });
 
@@ -299,18 +388,26 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     const { ext, deps, capturedHostCallbacks } = setup();
     const session = createFakeSession();
     ext.attachSession(session);
+    await ext.canvases[0].open({
+      extensionId: "radius-project.radius",
+      canvasId: "radius",
+      instanceId: "app-graph",
+      input: { page: "graph" }
+    });
+    const state = deps.servers.get("app-graph")?.state;
     expect(capturedHostCallbacks.appBicepHandoff).toBeTypeOf("function");
     await capturedHostCallbacks.appBicepHandoff!({
       repo: "acme/widgets",
       branches: ["main"],
-      page: "graph"
+      page: "graph",
+      state
     });
     expect(session.send).toHaveBeenCalledOnce();
     const sent = (session.send as ReturnType<typeof vi.fn>).mock
       .calls[0][0] as { prompt: string; displayPrompt: string };
     // The agent half must carry the full instructions...
     expect(sent.prompt).toBe(
-      appBicepHandoffPrompt("acme/widgets", "graph", ["main"])
+      appBicepHandoffPrompt("acme/widgets", "graph", ["main"], "app-graph")
     );
     // ...and the timeline half must be the short stand-in, not the reverse.
     expect(sent.displayPrompt).toBe(
@@ -318,6 +415,127 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     );
     expect(sent.displayPrompt).not.toContain("radius_generate_app");
     void deps;
+  });
+
+  it("routes a stale worktree model through the same handoff, asking for a refresh instead of authoring", async () => {
+    const fake = createFakeDependencies({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": "resource db {}" }
+    });
+    fake.sessionHolder.set(createFakeSession());
+    const ext = createRadiusExtension(fake.deps);
+    const session = createFakeSession();
+    ext.attachSession(session);
+
+    await fake.capturedHostCallbacks.appBicepHandoff!({
+      repo: "acme/widgets",
+      branches: ["main"],
+      page: "graph",
+      state: {
+        workspacePath: "/ws",
+        workspaceRepo: "acme/widgets",
+        workspaceBranch: "main"
+      }
+    });
+
+    const sent = (session.send as ReturnType<typeof vi.fn>).mock.calls.map(
+      (call) => call[0] as { prompt: string }
+    );
+    expect(sent).toHaveLength(1);
+    expect(sent[0].prompt).toContain("needs to be regenerated");
+  });
+
+  it("reports the same unchanged model only once per panel", async () => {
+    const { ext, capturedHostCallbacks } = setup();
+    const session = createFakeSession();
+    ext.attachSession(session);
+    const state = {};
+
+    await capturedHostCallbacks.appBicepHandoff!({
+      repo: "acme/widgets",
+      branches: ["main"],
+      page: "graph",
+      state
+    });
+    await capturedHostCallbacks.appBicepHandoff!({
+      repo: "acme/widgets",
+      branches: ["main"],
+      page: "graph",
+      state
+    });
+
+    expect(session.send).toHaveBeenCalledOnce();
+  });
+
+  // The memo key names the commit each origin record carries, so a long session
+  // that regenerates repeatedly would otherwise grow it for as long as the
+  // process runs.
+  it("evicts the oldest remembered staleness rather than growing the memo forever", async () => {
+    let commit = 0;
+    const fake = createFakeDependencies({
+      bicepByRepoBranch: { "workspace:acme/widgets@main": "resource db {}" },
+      headCommits: { "workspace:/ws": "f".repeat(40) },
+      sourceChangedSince: true
+    });
+    fake.deps.appModel.fetchWorkspaceFile = async () =>
+      serializeAppOrigin({
+        generatedAt: "2026-08-11T05:32:32.000Z",
+        sourceCommit: String(commit).padStart(40, "0"),
+        skillVersion: "0.1.0-test",
+        appBicepHash: hashAppBicep("resource db {}")
+      });
+    fake.sessionHolder.set(createFakeSession());
+    const ext = createRadiusExtension(fake.deps);
+    const session = createFakeSession();
+    ext.attachSession(session);
+    const send = session.send as ReturnType<typeof vi.fn>;
+    // No panel state, so only the extension-scoped memo can suppress anything.
+    const report = async (at: number) => {
+      commit = at;
+      send.mockClear();
+      await fake.capturedHostCallbacks.appBicepHandoff!({
+        repo: "acme/widgets",
+        branches: ["main"],
+        page: "graph"
+      });
+      return send.mock.calls.length;
+    };
+
+    expect(await report(1)).toBe(1);
+    expect(await report(1)).toBe(0);
+
+    // Push the first problem past the memo's limit.
+    for (let at = 2; at <= 130; at += 1) await report(at);
+
+    // Re-asking about a signal that fell out is harmless: the point is to stop a
+    // tight loop, not to remember forever.
+    expect(await report(1)).toBe(1);
+  });
+
+  it("releases the handoff reservation when the session rejects delivery, allowing a later call to deliver", async () => {
+    const { ext, capturedHostCallbacks } = setup();
+    const session = createFakeSession();
+    const send = session.send as ReturnType<typeof vi.fn>;
+    send.mockRejectedValueOnce(new Error("session closed"));
+    send.mockResolvedValueOnce(undefined);
+    ext.attachSession(session);
+
+    // First call fails — the reservation must be released.
+    await expect(
+      capturedHostCallbacks.appBicepHandoff!({
+        repo: "acme/widgets",
+        branches: ["main"],
+        page: "graph"
+      })
+    ).rejects.toThrow("session closed");
+    expect(send).toHaveBeenCalledOnce();
+
+    // Second call succeeds — proves the dedupe key was freed.
+    await capturedHostCallbacks.appBicepHandoff!({
+      repo: "acme/widgets",
+      branches: ["main"],
+      page: "graph"
+    });
+    expect(send).toHaveBeenCalledTimes(2);
   });
 
   it("registers a deploy-repair handoff that sends the full prompt to the agent and a short display prompt to the timeline", async () => {

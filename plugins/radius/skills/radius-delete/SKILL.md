@@ -18,6 +18,7 @@ Two distinct teardown flows are available from the Radius canvas:
 ## Prerequisites
 
 Before invoking this skill:
+
 1. A GitHub deploy environment configured with cloud credentials → use the `radius-environment` skill if missing.
 2. For a deployment delete: the application was deployed to that environment at least once (the delete restores persisted state to know what to remove).
 3. Authenticated `gh` CLI access to dispatch workflows. The extension shells out to `gh`, which uses your stored GitHub credential (the keyring credential from `gh auth token`) and falls back to it when an injected token lacks the `workflow` scope — there is no separate extension-managed PAT to configure.
@@ -26,7 +27,7 @@ Before invoking this skill:
 
 Open the canvas hub and use the deployed-application view:
 
-1. `open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "environment", repo: "<owner/repo>" } })`
+1. Reuse the existing Radius canvas instanceId when one is open; otherwise use `radius-panel`: `open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "environment", repo: "<owner/repo>" } })`
 2. Select the environment (and, for a deployment delete, the deployed application).
 3. Click **Delete Deployment** to tear down the app, or use the environment's delete control to remove the GitHub environment. Live status streams until success / failure / timeout.
 

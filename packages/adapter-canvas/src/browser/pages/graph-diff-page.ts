@@ -19,6 +19,10 @@ const ENTRY_KEY = "graph-diff-page";
 export const GRAPH_DIFF_STATE_ID = "radius-graph-diff-state";
 export const DIFF_DEBOUNCE_MS = 500;
 export const DIFF_PROGRESS_MS = 800;
+// How long to wait before asking again while Copilot authors the model. The
+// server decides when the wait has run out and answers with an error instead of
+// `needsAppBicep`, which ends the loop.
+export const DIFF_RETRY_MS = 10_000;
 export const DIFF_PROGRESS_STEPS_ID = "diff-progress-steps";
 
 interface DiffState {
@@ -76,6 +80,14 @@ export function initializeGraphDiffPage(
   let controller: GraphController | null = null;
   let progress: ScopeTimer | null = null;
   let progressView: GraphProgressView | null = null;
+  let appBicepRetry: ScopeTimer | null = null;
+  let initialRefresh = state.resources.length > 0;
+  let restartWait = true;
+
+  const stopAppBicepRetry = (): void => {
+    if (appBicepRetry !== null) entry.cancel(appBicepRetry);
+    appBicepRetry = null;
+  };
   let modelingFailureVisible = Boolean(state.modelingError);
   const showModelingFailure = (message: string): void => {
     controller?.destroy();
@@ -124,11 +136,17 @@ export function initializeGraphDiffPage(
       });
   };
 
-  const compare = (headElement: DomSelectElement): void => {
+  const compare = (
+    headElement: DomSelectElement,
+    refresh = state.resources.length > 0
+  ): void => {
     pending = null;
+    stopAppBicepRetry();
     const base = baseSelect?.value ?? "";
     const head = headElement.value;
     const repo = repoInput?.value ?? state.repo;
+    const restartExpiredWait = restartWait;
+    restartWait = false;
     if (!repo || !base || !head) return;
     if (modelingFailureVisible) {
       const graphContainer = context.dom.byId("graph-container");
@@ -162,7 +180,13 @@ export function initializeGraphDiffPage(
       .fetch("/api/diff-branches", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ base, head, repo }),
+        body: JSON.stringify({
+          base,
+          head,
+          repo,
+          refresh,
+          restartWait: restartExpiredWait
+        }),
         signal: requestAbort?.signal
       })
       .then((response) => response.json())
@@ -182,6 +206,13 @@ export function initializeGraphDiffPage(
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the diff will appear once it is saved.",
             "info"
           );
+          // Nothing announces the model's arrival, so the diff only learns by
+          // asking again. Without this the page reported the wait once and then
+          // sat there permanently, even after the model landed.
+          appBicepRetry = entry.after(DIFF_RETRY_MS, () => {
+            appBicepRetry = null;
+            compare(headElement, refresh);
+          });
         } else {
           const error = readString(payload, "error");
           if (error) {
@@ -196,6 +227,8 @@ export function initializeGraphDiffPage(
             }
           } else if (readBoolean(payload, "reload")) {
             context.nav.reload();
+          } else if (readBoolean(payload, "refreshed")) {
+            showStatus(context, "The graph comparison is current.", "info");
           } else {
             const message = readString(payload, "message");
             if (message) showStatus(context, message, "info");
@@ -221,9 +254,15 @@ export function initializeGraphDiffPage(
     generation++;
     requestAbort?.abort();
     requestAbort = null;
+    stopAppBicepRetry();
     stopProgress();
     if (pending !== null) entry.cancel(pending);
-    pending = entry.after(DIFF_DEBOUNCE_MS, () => compare(headElement));
+    restartWait = true;
+    const refresh = initialRefresh;
+    initialRefresh = false;
+    pending = entry.after(DIFF_DEBOUNCE_MS, () =>
+      compare(headElement, refresh)
+    );
   };
 
   if (headSelect) {
@@ -239,7 +278,7 @@ export function initializeGraphDiffPage(
   void populateDiffBranches(context, state.repo, {
     preferBase: state.base,
     preferHead: state.head,
-    autoCompare: state.resources.length === 0 && !state.modelingError,
+    autoCompare: !state.modelingError,
     lifecycle: entry
   });
 
