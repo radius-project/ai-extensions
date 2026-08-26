@@ -916,7 +916,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     await harness.extension.shutdown("test");
   });
 
-  it("honors a caller-named branch of the workspace repository", async () => {
+  it("honors a caller-named branch when the workspace repository is implicit", async () => {
     const harness = await createRuntimeSdkHarness({
       workspaceTreeByRepoBranch: {
         "acme/widgets@main": ["src/index.ts", "Dockerfile"]
@@ -928,7 +928,7 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       toolName: "open_canvas",
       toolArgs: {
         canvasId: "radius",
-        input: { page: "graph", repo: "acme/widgets", branch: "legacy" }
+        input: { page: "graph", branch: "legacy" }
       }
     });
 
@@ -939,6 +939,15 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       "acme/widgets",
       "legacy"
     );
+
+    await harness.host.open("radius-panel", {
+      page: "graph",
+      branch: "legacy"
+    });
+    expect(harness.servers.get("radius-panel")?.state).toMatchObject({
+      contextRepo: "acme/widgets",
+      contextBranch: "legacy"
+    });
 
     await harness.extension.shutdown("test");
   });

@@ -38,13 +38,17 @@ export function linkRow(
   showUrl: boolean
 ): string {
   const safeHref = safeExternalUrl(href) || "#";
+  const external =
+    safeHref === "#" ? "" : (
+      ` data-external-url="${escapeBrowserHtml(safeHref)}"`
+    );
   const sub =
     showUrl ?
       `<div style="${SUBTITLE_STYLE}">${escapeBrowserHtml(safeHref)}</div>`
     : "";
   return (
     '<div style="padding:6px 4px;">' +
-    `<a href="${escapeBrowserHtml(safeHref)}" target="_blank" rel="noopener noreferrer" style="${LINK_STYLE}">` +
+    `<a href="${escapeBrowserHtml(safeHref)}"${external} target="_blank" rel="noopener noreferrer" style="${LINK_STYLE}">` +
     iconSvg +
     `<span>${escapeBrowserHtml(label)}</span></a>${sub}</div>`
   );
@@ -281,6 +285,9 @@ export interface DetailsPanel {
 }
 
 export interface DetailsPanelDeps {
+  // Opens a validated external URL through the Canvas host rather than relying
+  // on native navigation inside the webview.
+  openExternal(url: string): void;
   // Opens a repo-relative worktree file in the editor canvas, falling back to
   // the file's remote URL. Supplied by the renderer so the panel does not own a
   // network policy of its own.
@@ -356,6 +363,15 @@ export function createDetailsPanel(
         parseInt(element.getAttribute("data-local-line") ?? "", 10) || 0,
         element.getAttribute("data-fallback-url") ?? ""
       );
+      return;
+    }
+    const externalEl = find("[data-external-url]");
+    if (externalEl !== null && externalEl !== undefined) {
+      event.preventDefault();
+      const url = safeExternalUrl(
+        (externalEl as DomElement).getAttribute("data-external-url") ?? ""
+      );
+      if (url) deps.openExternal(url);
       return;
     }
     if (find("#" + PANEL_ID)) return;

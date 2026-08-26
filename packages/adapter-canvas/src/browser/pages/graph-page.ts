@@ -298,6 +298,22 @@ export function initializeGraphPage(
       });
   };
 
+  const waitForAppBicep = (message: string): void => {
+    const now = context.clock.now();
+    if (appBicepWaitStartedAtMs === null) appBicepWaitStartedAtMs = now;
+    if (now - appBicepWaitStartedAtMs >= GRAPH_APP_BICEP_TIMEOUT_MS) {
+      appBicepWaitStartedAtMs = null;
+      stopProgress();
+      showFailure(GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
+      return;
+    }
+    showStatus(context, message, "info");
+    retry = entry.after(GRAPH_RETRY_MS, () => {
+      retry = null;
+      load({ continuing: true });
+    });
+  };
+
   const load = (options: { readonly continuing?: boolean } = {}): void => {
     if (requestActive || !entry.active) return;
     const branch = branchSelect?.value.trim() || page.branch;
@@ -356,23 +372,9 @@ export function initializeGraphPage(
         // The work continues off-page while Copilot authors the model, so the
         // panel keeps running rather than being torn down and rebuilt.
         if (readBoolean(payload, "needsAppBicep")) {
-          const now = context.clock.now();
-          if (appBicepWaitStartedAtMs === null) appBicepWaitStartedAtMs = now;
-          if (now - appBicepWaitStartedAtMs >= GRAPH_APP_BICEP_TIMEOUT_MS) {
-            appBicepWaitStartedAtMs = null;
-            stopProgress();
-            showFailure(GRAPH_APP_BICEP_TIMEOUT_MESSAGE);
-            return;
-          }
-          showStatus(
-            context,
-            "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…",
-            "info"
+          waitForAppBicep(
+            "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…"
           );
-          retry = entry.after(GRAPH_RETRY_MS, () => {
-            retry = null;
-            load({ continuing: true });
-          });
           return;
         }
         appBicepWaitStartedAtMs = null;
@@ -465,10 +467,12 @@ export function initializeGraphPage(
             localSource: sourceProvenance(payload)
           });
         } else if (readBoolean(payload, "needsAppBicep")) {
-          showStatus(
-            context,
-            "Copilot is rebuilding the application graph from .radius/app.bicep with the Radius app-bicep skill.",
-            "info"
+          startProgress(
+            refreshGeneration,
+            "Checking the selected branch for .radius/app.bicep…"
+          );
+          waitForAppBicep(
+            "Copilot is rebuilding the application graph from .radius/app.bicep with the Radius app-bicep skill."
           );
         } else {
           const error = readString(payload, "error");
@@ -519,6 +523,7 @@ export function initializeGraphPage(
       load();
     })
     .catch((error: unknown) => {
+      if (!entry.active || generation !== branchListingGeneration) return;
       context.logger.error("Radius could not load graph branches.", error);
       showStatus(context, "Unable to load branches.", "error");
     });

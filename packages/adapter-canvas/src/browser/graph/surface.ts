@@ -299,7 +299,10 @@ export function createGraphSurface(
 
     const panel =
       settings.enablePopup ?
-        createDetailsPanel(context, container, settings, { openLocalSource })
+        createDetailsPanel(context, container, settings, {
+          openExternal,
+          openLocalSource
+        })
       : null;
     record.panel = panel;
 

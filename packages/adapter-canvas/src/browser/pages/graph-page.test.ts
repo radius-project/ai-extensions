@@ -1003,6 +1003,35 @@ describe("initializeGraphPage", () => {
     expect(status?.textContent).toContain("rebuilding the application graph");
   });
 
+  it("retries a loaded graph until the rebuilt model is available", async () => {
+    const { browser, status } = fixture({ loaded: true });
+    const render = vi.fn();
+    let calls = 0;
+    browser.net.handle("/api/load-graph", () => {
+      calls++;
+      return calls === 1 ?
+          jsonResponse({ needsAppBicep: true })
+        : jsonResponse({ resources: [{ id: "app/rebuilt" }] });
+    });
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    browser.clock.tick(GRAPH_RETRY_MS);
+    await flushPromises();
+
+    expect(calls).toBe(2);
+    expect(render).toHaveBeenLastCalledWith(
+      "graph-container",
+      [{ id: "app/rebuilt" }],
+      expect.objectContaining({ branch: "feature" })
+    );
+    expect(status?.textContent).toBe("Application graph ready.");
+    expect(browser.nav.reloads).toBe(0);
+  });
+
   it("surfaces a refresh error message from the server", async () => {
     const { browser, status } = fixture({ loaded: true });
     browser.net.handle("/api/load-graph", () =>
@@ -1059,6 +1088,31 @@ describe("initializeGraphPage", () => {
 
     expect(status?.textContent).toBe("Unable to load branches.");
     expect(browser.logger.errors.length).toBeGreaterThan(0);
+  });
+
+  it("ignores a stale branch-list failure after the selected branch changes", async () => {
+    const { browser, branch, status } = fixture({ loaded: false });
+    const listing = createDeferred<HttpResponse>();
+    browser.net.handle("/api/discover-branches", () => listing.promise);
+    browser.net.handle(
+      "/api/load-graph",
+      () => new Promise<HttpResponse>(() => {})
+    );
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    branch.value = "other";
+    branch.dispatch("change");
+    await flushPromises();
+    listing.reject(new Error("stale branch failure"));
+    await flushPromises();
+
+    expect(status?.textContent).not.toBe("Unable to load branches.");
+    expect(
+      browser.logger.errors.some(
+        (entry) => entry.message === "Radius could not load graph branches."
+      )
+    ).toBe(false);
   });
 
   it("ignores a stale progress response superseded by a branch change", async () => {

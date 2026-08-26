@@ -67,6 +67,9 @@ describe("detail rows", () => {
       linkRow(ICON_LINK, "<label>", "javascript:alert(1)", true)
     ).toContain('<a href="#"');
     expect(
+      linkRow(ICON_LINK, "<label>", "javascript:alert(1)", true)
+    ).not.toContain("data-external-url");
+    expect(
       linkRow(ICON_LINK, "label", "https://example.test", false)
     ).not.toContain("word-break:break-all");
     const local = localLinkRow(ICON_SRC, "<source>", "src/a.ts", 0, "bad");
@@ -81,6 +84,9 @@ describe("detail rows", () => {
     expect(rows[0]).toContain(ICON_SRC);
     expect(rows[0]).toContain(
       'href="https://github.test/o/r/blob/main/src/web.ts#L4"'
+    );
+    expect(rows[0]).toContain(
+      'data-external-url="https://github.test/o/r/blob/main/src/web.ts#L4"'
     );
     expect(rows[0]).toContain('target="_blank" rel="noopener noreferrer"');
     expect(rows[0]).toContain("View source code");
@@ -336,6 +342,7 @@ describe("panel position", () => {
 interface PanelHarness {
   browser: ReturnType<typeof createFakeBrowser>;
   container: ReturnType<typeof createFakeElement>;
+  external: string[];
   opened: Array<[string, number, string]>;
   panel: ReturnType<typeof createDetailsPanel>;
   panelElement: ReturnType<typeof createFakeElement>;
@@ -344,19 +351,23 @@ interface PanelHarness {
 function setup(options: GraphOptions = {}): PanelHarness {
   const browser = createFakeBrowser();
   const container = createFakeElement("graph-container");
+  const external: string[] = [];
   const opened: Array<[string, number, string]> = [];
   const panel = createDetailsPanel(
     browser.context,
     container,
     settings(options),
     {
+      openExternal: (url) => {
+        external.push(url);
+      },
       openLocalSource: (path, line, fallback) => {
         opened.push([path, line, fallback]);
       }
     }
   );
   const panelElement = container.appended[0];
-  return { browser, container, opened, panel, panelElement };
+  return { browser, container, external, opened, panel, panelElement };
 }
 
 function measurable(element: DomElement, rect: Record<string, number>) {
@@ -489,6 +500,37 @@ describe("details panel", () => {
     expect(harness.opened).toEqual([
       ["src/web.ts", 4, "https://github.test/o/r/blob/x"]
     ]);
+  });
+
+  it("delegates an external row click to the Canvas host", () => {
+    const harness = setup({ localSource: true });
+    const row = createFakeElement("row");
+    const url = "https://github.com/acme/widgets/blob/release/src/web.ts#L4";
+    row.setAttribute("data-external-url", url);
+    row.ancestors.set("[data-external-url]", row);
+    let prevented = 0;
+
+    harness.container.dispatch("click", {
+      target: row,
+      preventDefault: () => {
+        prevented += 1;
+      }
+    });
+
+    expect(prevented).toBe(1);
+    expect(harness.external).toEqual([url]);
+    expect(harness.opened).toEqual([]);
+  });
+
+  it("rejects an unsafe delegated external URL", () => {
+    const harness = setup();
+    const row = createFakeElement("row");
+    row.setAttribute("data-external-url", "javascript:alert(1)");
+    row.ancestors.set("[data-external-url]", row);
+
+    harness.container.dispatch("click", { target: row });
+
+    expect(harness.external).toEqual([]);
   });
 
   it("treats a row with unreadable attributes as an open with no line", () => {
