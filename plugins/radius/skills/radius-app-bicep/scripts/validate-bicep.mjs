@@ -411,7 +411,9 @@ function sourceLocationBasename(codeReference) {
     }
   }
   const segments = location.split("/").filter((segment) => segment !== "");
-  return segments.length === 0 ? "" : segments[segments.length - 1].toLowerCase();
+  return segments.length === 0 ?
+      ""
+    : segments[segments.length - 1].toLowerCase();
 }
 
 function isPackagingSourceLocation(codeReference) {
