@@ -34,7 +34,7 @@ This note builds on [Progress UX for credential and environment creation](./2026
 
 ## Objectives
 
-> **Issue Reference:** [#306: Environment Creation Hardening: Add cancellation, resume, and retry controls](https://github.com/radius-project/ai-extensions/issues/306). [Stack #517](https://github.com/radius-project/ai-extensions/pull/517) orders the replacement implementation as [PR #508](https://github.com/radius-project/ai-extensions/pull/508), [PR #511](https://github.com/radius-project/ai-extensions/pull/511), [PR #515](https://github.com/radius-project/ai-extensions/pull/515), and [PR #516](https://github.com/radius-project/ai-extensions/pull/516). PRs #508, #511, and #515 are merged; PR #516 contains the remaining cooperative Stop-boundary work.
+> **Issue Reference:** [#306: Environment Creation Hardening: Add cancellation, resume, and retry controls](https://github.com/radius-project/ai-extensions/issues/306). Native stack 517 ordered the replacement implementation as [PR #508](https://github.com/radius-project/ai-extensions/pull/508), [PR #511](https://github.com/radius-project/ai-extensions/pull/511), [PR #515](https://github.com/radius-project/ai-extensions/pull/515), and [PR #516](https://github.com/radius-project/ai-extensions/pull/516). All four implementation pull requests are merged.
 
 ### Goals
 
@@ -482,7 +482,7 @@ N/A. The controls govern Canvas orchestration and external adapter mutations. No
 - [`src/server/services/environment-listing-cache.ts`](../../packages/adapter-canvas/src/server/services/environment-listing-cache.ts) prevents stale listings after cleanup.
 - [`src/gh.ts`](../../packages/adapter-canvas/src/gh.ts) selects, verifies, pins, and describes the effective GitHub credential.
 - [`src/server.ts`](../../packages/adapter-canvas/src/server.ts) composes per-instance executors and runs ordered cleanup.
-- `src/server/services/operation-stop-boundary.ts` is added by PR #516 to centralize persist-and-honor Stop behavior between provider mutations.
+- [`src/server/services/operation-stop-boundary.ts`](../../packages/adapter-canvas/src/server/services/operation-stop-boundary.ts) centralizes persist-and-honor Stop behavior between provider mutations.
 - [`src/pages/environment/environments-pane.ts`](../../packages/adapter-canvas/src/pages/environment/environments-pane.ts) renders progress and confirmation markup.
 - [`src/browser/environment/operations.ts`](../../packages/adapter-canvas/src/browser/environment/operations.ts) renders the operation, sends controls, polls, manages focus, and applies terminal results.
 - [`src/browser/environment/page.ts`](../../packages/adapter-canvas/src/browser/environment/page.ts) owns the Create Environment latch and supplies the terminal reset.
@@ -566,7 +566,7 @@ Every external system sits behind a controlled port or fake. Pull-request tests 
 
 ### Validation gates
 
-The implementation stack runs frozen install, typecheck, lint, formatting, Markdown lint, full Vitest coverage, build, runtime integration, HTTP integration, artifact integration, browser component tests, and Canvas Chromium. PR #516 reports 7,225 Vitest tests passed with 19 skipped, 129 runtime integration tests, 248 HTTP integration tests, 6 artifact integration tests, 9 browser component tests, and 25 Canvas Chromium tests with no retries at its pinned head.
+The implementation stack runs frozen install, typecheck, lint, formatting, Markdown lint, full Vitest coverage, build, runtime integration, HTTP integration, artifact integration, browser component tests, and Canvas Chromium. Merged PR #516 reported 7,225 Vitest tests passed with 19 skipped, 129 runtime integration tests, 248 HTTP integration tests, 6 artifact integration tests, 9 browser component tests, and 25 Canvas Chromium tests with no retries.
 
 ## Security
 
@@ -650,14 +650,14 @@ No new telemetry service, metric backend, or trace exporter is part of this desi
 
 ## Delivery status
 
-The work was split into [stack #517](https://github.com/radius-project/ai-extensions/pull/517) so each safety layer could be reviewed and merged independently:
+The work was split into native stack 517 so each safety layer could be reviewed and merged independently:
 
 1. **[PR #508](https://github.com/radius-project/ai-extensions/pull/508), merged.** Durable commands, action projection, artifact provenance, workflow-first rollback, selected credential fixes, cleanup Stop rejection, retained-cleanup admission, and browser recovery UX.
 2. **[PR #511](https://github.com/radius-project/ai-extensions/pull/511), merged.** Schema version 5, provider and cleanup journals, exact immutable identity and absence proof, bounded reconciliation, fail-closed journal persistence, and restart recovery.
 3. **[PR #515](https://github.com/radius-project/ai-extensions/pull/515), merged.** Selected-account verification recovery, persisted acquisition and tracking deadlines, exact run identity, and restart-safe monitoring.
-4. **[PR #516](https://github.com/radius-project/ai-extensions/pull/516), draft.** Cooperative per-mutation Stop boundaries, direct recovery routing, `provider-reconciliation-pending`, bounded prerequisite failures, and atomic workflow fallback behavior.
+4. **[PR #516](https://github.com/radius-project/ai-extensions/pull/516), merged.** Cooperative per-mutation Stop boundaries, direct recovery routing, `provider-reconciliation-pending`, bounded prerequisite failures, and atomic workflow fallback behavior.
 
-The original [PR #358](https://github.com/radius-project/ai-extensions/pull/358) is closed and superseded. Issue #306 remains open until PR #516 lands and the stack is qualified. Issue #506 is a separate required follow-up for unavailable durable storage.
+The original [PR #358](https://github.com/radius-project/ai-extensions/pull/358) is closed and superseded. Issue #306 is closed. Issue #506 is a separate required follow-up for unavailable durable storage.
 
 ## Open questions
 
@@ -717,4 +717,4 @@ Rejected when the blob chain breaks. Another actor may have edited the file betw
 
 ## Design review notes
 
-Draft for review. Stack #517 supersedes the closed PR #358. PRs #508, #511, and #515 are merged, and PR #516 contains the remaining Stop-boundary implementation. The design accepts the narrow concurrent GitHub environment creator race and records the session-scoped admission limit. Issue #506 remains a difficult unresolved safety gap because the disabled operation store can acknowledge writes that will not survive restart.
+Draft for review. Native stack 517 supersedes the closed PR #358, and PRs #508, #511, #515, and #516 are merged. The design accepts the narrow concurrent GitHub environment creator race and records the session-scoped admission limit. Issue #506 remains a difficult unresolved safety gap because the disabled operation store can acknowledge writes that will not survive restart.
