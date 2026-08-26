@@ -86,7 +86,9 @@ export function appModelHandoffKey(
         status.freshness.status,
         status.refreshable ? "local" : "remote",
         origin?.sourceCommit ?? "",
-        origin?.skillVersion ?? ""
+        origin?.skillVersion ?? "",
+        origin ? "" : status.freshness.appBicepHash,
+        status.freshness.requiresConfirmation ? "confirm" : "auto"
       ].join("/");
     })
   ].join("::");
