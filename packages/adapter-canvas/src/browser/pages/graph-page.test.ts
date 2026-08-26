@@ -635,6 +635,31 @@ describe("initializeGraphPage", () => {
     expect(bodies[2]).toContain('"restartWait":false');
   });
 
+  it("keeps the generating status stable while an automatic retry is pending", async () => {
+    const { browser, status } = fixture({ loaded: false });
+    const retry = createDeferred<HttpResponse>();
+    let calls = 0;
+    browser.net.handle("/api/load-graph", () => {
+      calls++;
+      return calls === 1 ?
+          jsonResponse({ needsAppBicep: true })
+        : retry.promise;
+    });
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    const generating = status?.textContent;
+
+    browser.clock.tick(GRAPH_RETRY_MS);
+    await flushPromises();
+
+    expect(calls).toBe(2);
+    expect(status?.textContent).toBe(generating);
+
+    retry.resolve(jsonResponse({ needsAppBicep: true }));
+    await flushPromises();
+    expect(status?.textContent).toBe(generating);
+  });
+
   it("retries quickly after a stale response", async () => {
     const { browser, status } = fixture({ loaded: false });
     let calls = 0;

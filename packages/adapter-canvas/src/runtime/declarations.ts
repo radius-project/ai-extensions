@@ -155,8 +155,10 @@ export const RADIUS_ACTION_DECLARATIONS: readonly ActionDeclaration[] =
 
 // additionalContext returned from onSessionStart. Pure static data — the
 // wiring that returns it lives in extension.ts (createRadiusExtension).
+export const RADIUS_CANVAS_INSTANCE_ID = "radius-panel";
+
 export const RADIUS_SESSION_START_CONTEXT = `When opening the Radius Canvas (canvasId: "radius"), ALWAYS:
-1. Use instanceId "radius-panel" — this ensures only ONE Radius Canvas panel is ever open (reusing the same panel for all views).
+1. Use instanceId "${RADIUS_CANVAS_INSTANCE_ID}" — this ensures only ONE Radius Canvas panel is ever open (reusing the same panel for all views).
 2. Pass the current session's repository as the "repo" input in owner/repo format.
 3. Treat the current Copilot session worktree branch as the graph branch. Do not default graph views to main for the session repo.
 

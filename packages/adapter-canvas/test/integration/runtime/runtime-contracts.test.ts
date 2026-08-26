@@ -155,6 +155,35 @@ describe("P0-A Radius runtime registration contract", () => {
     await enabled.extension.shutdown("test");
   });
 
+  it("rejects noncanonical Radius canvas instances at the SDK hook boundary", async () => {
+    const harness = await createRuntimeSdkHarness();
+
+    const rejected = await harness.extension.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        instanceId: "app-graph-studious",
+        input: { page: "graph", repo: "acme/widgets" }
+      }
+    });
+    const accepted = await harness.extension.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        instanceId: "radius-panel",
+        input: { page: "graph", repo: "acme/widgets" }
+      }
+    });
+
+    expect(rejected).toEqual(
+      expect.objectContaining({ permissionDecision: "deny" })
+    );
+    expect(rejected?.additionalContext).toContain("radius-panel");
+    expect(accepted).toBeUndefined();
+
+    await harness.extension.shutdown("test");
+  });
+
   it("requires the matching application graph diff and opens the interactive PR diff", async () => {
     const harness = await createRuntimeSdkHarness({
       radiusEnabled: true,
@@ -789,6 +818,7 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
         toolName: "open_canvas",
         toolArgs: {
           canvasId: "radius",
+          instanceId: "radius-panel",
           input: { page: "graph", repo: "acme/widgets" }
         }
       })

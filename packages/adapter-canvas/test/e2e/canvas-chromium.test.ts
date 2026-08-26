@@ -514,6 +514,7 @@ test.describe("Radius Canvas in Chromium", () => {
       await new Promise<void>((resolve) => {
         releaseResponse.current = resolve;
       });
+
       await route.continue();
     });
 
@@ -530,6 +531,41 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("body")).not.toContainText(
       "Application graph ready"
     );
+  });
+
+  test("keeps the modeling status stable while the graph automatically polls", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let requests = 0;
+    let releaseRetry: (() => void) | undefined;
+    await page.route("**/api/load-graph", async (route) => {
+      requests++;
+      if (requests > 1) {
+        await new Promise<void>((resolve) => {
+          releaseRetry = resolve;
+        });
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ needsAppBicep: true })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+    const status = page.locator("#graph-status, #graph-refresh-status");
+    await expect(status).toContainText(
+      "Copilot is generating .radius/app.bicep"
+    );
+    const stableMessage = await status.textContent();
+
+    await page.clock.fastForward(10_000);
+    await expect.poll(() => requests).toBe(2);
+    await expect(status).toHaveText(stableMessage ?? "");
+
+    releaseRetry?.();
   });
 
   test("reports GitHub account mismatch accessibly without leaking raw CLI output @safety", async ({

@@ -144,6 +144,40 @@ describe("RU-19: onPreToolUse hook", () => {
     expect(result).toBeUndefined();
   });
 
+  it("requires every Radius open to reuse the canonical canvas instance", async () => {
+    const { ext } = setup();
+
+    const missing = await ext.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: { canvasId: "radius", input: { page: "graph" } }
+    });
+    const different = await ext.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        instanceId: "app-graph-studious",
+        input: { page: "graph" }
+      }
+    });
+    const canonical = await ext.hooks.onPreToolUse({
+      toolName: "open_canvas",
+      toolArgs: {
+        canvasId: "radius",
+        instanceId: "radius-panel",
+        input: { page: "graph" }
+      }
+    });
+
+    expect(missing).toEqual(
+      expect.objectContaining({ permissionDecision: "deny" })
+    );
+    expect(different).toEqual(
+      expect.objectContaining({ permissionDecision: "deny" })
+    );
+    expect(different?.additionalContext).toContain("radius-panel");
+    expect(canonical).toBeUndefined();
+  });
+
   it("allows opening a graph page with no application model, leaving the decision to the graph routes", async () => {
     const { ext, deps } = setup();
     (
@@ -157,6 +191,7 @@ describe("RU-19: onPreToolUse hook", () => {
       toolName: "open_canvas",
       toolArgs: {
         canvasId: "radius",
+        instanceId: "radius-panel",
         input: { page: "graph", repo: "acme/widgets" }
       }
     });
@@ -189,6 +224,7 @@ describe("RU-19: onPreToolUse hook", () => {
       toolName: "open_canvas",
       toolArgs: {
         canvasId: "radius",
+        instanceId: "radius-panel",
         input: { page: "graph", repo: "acme/widgets", branch: "main" }
       }
     });

@@ -32,9 +32,7 @@ export interface AppModelHandoffRequest {
   branches: ReadonlyArray<string | undefined>;
   page: string;
   // The canvas instance's state: the branch context the readers resolve against,
-  // and the carrier of the last handoff key. Absent when no panel is open, in
-  // which case the workspace context is resolved fresh and nothing is
-  // deduplicated per panel.
+  // the latest request for cancellation, and delivered handoffs keyed by target.
   state?: CanvasState;
 }
 
@@ -97,6 +95,9 @@ export function appModelHandoffKey(
 export function createAppModelHandoff(
   deps: AppModelHandoffDependencies
 ): AppModelHandoff {
+  const targetKey = (repo: string, branches: ReadonlyArray<string>): string =>
+    `${repo}::${branches.join(",")}`;
+
   return async function handOffAppModel({
     repo,
     branches,
@@ -118,7 +119,27 @@ export function createAppModelHandoff(
       targets.map((branch) => deps.resolveStatus(repo, branch, context))
     );
     const key = appModelHandoffKey(repo, targets, statuses);
-    if (state?.appBicepHandoffKey === key) return;
+    const target = targetKey(repo, targets);
+    if (state?.appBicepHandoffKeys?.[target] === key) return;
+
+    if (state) {
+      state.appBicepHandoffKeys ??= {};
+      state.appBicepHandoffKeys[target] = key;
+      state.appBicepHandoffKey = key;
+    }
+
+    const ownsReservation = (): boolean =>
+      state === undefined ||
+      (state.appBicepHandoffKeys?.[target] === key &&
+        state.appBicepHandoffKey === key);
+    const releaseReservation = (): void => {
+      if (state?.appBicepHandoffKeys?.[target] === key) {
+        delete state.appBicepHandoffKeys[target];
+      }
+      if (state?.appBicepHandoffKey === key) {
+        delete state.appBicepHandoffKey;
+      }
+    };
 
     const present = statuses.filter(
       (status) => status.freshness.status !== "missing"
@@ -129,40 +150,31 @@ export function createAppModelHandoff(
       // and Diff can all discover the same missing model together; without this
       // reservation they each pass the check above while the first probe is in
       // flight and send duplicate authoring turns.
-      if (state) state.appBicepHandoffKey = key;
       let sources: AppSourceEvaluation[];
       try {
         sources = await Promise.all(
           targets.map((branch) => deps.evaluateSource(repo, branch, context))
         );
       } catch (error) {
-        if (state?.appBicepHandoffKey === key) {
-          delete state.appBicepHandoffKey;
-        }
+        releaseReservation();
         throw error;
       }
       // The modeling skill cannot author this repository at all. Deliberately
       // does NOT consume the key: adding a Dockerfile later must make the next
       // render eligible for the handoff.
       if (sources.every((source) => source.status === "none")) {
-        if (state?.appBicepHandoffKey === key) {
-          delete state.appBicepHandoffKey;
-        }
+        releaseReservation();
         return;
       }
-      if (state && state.appBicepHandoffKey !== key) return;
+      if (!ownsReservation()) return;
       try {
         await deps.send(appBicepHandoffMessage(repo, page, targets));
       } catch (sendError) {
-        if (state?.appBicepHandoffKey === key) {
-          delete state.appBicepHandoffKey;
-        }
+        releaseReservation();
         throw sendError;
       }
       return;
     }
-
-    if (state) state.appBicepHandoffKey = key;
 
     // Checked before plain staleness: a model this extension cannot prove it
     // generated needs the user's agreement, because regenerating it destroys
@@ -173,17 +185,13 @@ export function createAppModelHandoff(
     if (unverified) {
       const refreshKey = refreshRequestKey(unverified);
       if (!deps.shouldRequestRefresh(refreshKey)) {
-        if (state?.appBicepHandoffKey === key) {
-          delete state.appBicepHandoffKey;
-        }
+        releaseReservation();
         return;
       }
       try {
         await deps.send(appModelUnverifiedMessage(unverified));
       } catch (sendError) {
-        if (state?.appBicepHandoffKey === key) {
-          delete state.appBicepHandoffKey;
-        }
+        releaseReservation();
         deps.releaseRefreshMemo(refreshKey);
         throw sendError;
       }
@@ -196,17 +204,13 @@ export function createAppModelHandoff(
     if (outdated) {
       const refreshKey = refreshRequestKey(outdated);
       if (!deps.shouldRequestRefresh(refreshKey)) {
-        if (state?.appBicepHandoffKey === key) {
-          delete state.appBicepHandoffKey;
-        }
+        releaseReservation();
         return;
       }
       try {
         await deps.send(appModelRefreshMessage(outdated));
       } catch (sendError) {
-        if (state?.appBicepHandoffKey === key) {
-          delete state.appBicepHandoffKey;
-        }
+        releaseReservation();
         deps.releaseRefreshMemo(refreshKey);
         throw sendError;
       }

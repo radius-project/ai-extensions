@@ -16,7 +16,10 @@ import { createRadiusCanvas } from "./create-radius-canvas.js";
 import { createRadiusTools } from "./create-radius-tools.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import { createAppModelHandoff } from "./app-model-handoff.js";
-import { RADIUS_SESSION_START_CONTEXT } from "./declarations.js";
+import {
+  RADIUS_CANVAS_INSTANCE_ID,
+  RADIUS_SESSION_START_CONTEXT
+} from "./declarations.js";
 import {
   deployRepairHandoffMessage,
   deployFailureNoticeMessage
@@ -125,7 +128,7 @@ export function createRadiusExtension(
     openGraphDiff: ({ repo, baseBranch, headBranch }) =>
       deps.session.get().rpc.canvas.open({
         canvasId: "radius",
-        instanceId: "radius-panel",
+        instanceId: RADIUS_CANVAS_INSTANCE_ID,
         input: { page: "graph-diff", repo, baseBranch, headBranch }
       })
   });
@@ -444,7 +447,30 @@ export function createRadiusExtension(
       // render already passes through the HTTP routes, which report the missing
       // model in the page and drive the authoring turn themselves. Keeping the
       // deny as well produced two authoring prompts for one open.
-      onPreToolUse: (input) => pullRequestGraphDiffGuard.onPreToolUse(input),
+      onPreToolUse: async (input) => {
+        if (input.toolName === "open_canvas") {
+          const canvasId =
+            input.toolArgs !== null && typeof input.toolArgs === "object" ?
+              Reflect.get(input.toolArgs, "canvasId")
+            : undefined;
+          const instanceId =
+            input.toolArgs !== null && typeof input.toolArgs === "object" ?
+              Reflect.get(input.toolArgs, "instanceId")
+            : undefined;
+          if (
+            canvasId === "radius" &&
+            instanceId !== RADIUS_CANVAS_INSTANCE_ID
+          ) {
+            return {
+              permissionDecision: "deny",
+              permissionDecisionReason:
+                "Radius uses one canonical canvas instance.",
+              additionalContext: `Retry open_canvas with instanceId \`${RADIUS_CANVAS_INSTANCE_ID}\`. Reuse that instance for every Radius page so polling or agent-driven reopens cannot create duplicate panels.`
+            };
+          }
+        }
+        return await pullRequestGraphDiffGuard.onPreToolUse(input);
+      },
       onPostToolUse: (input) => pullRequestGraphDiffGuard.onPostToolUse(input),
       onPostToolUseFailure: (input) =>
         pullRequestGraphDiffGuard.onPostToolUseFailure(input),

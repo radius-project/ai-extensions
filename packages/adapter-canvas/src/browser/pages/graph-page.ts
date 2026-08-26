@@ -306,11 +306,16 @@ export function initializeGraphPage(
       wrapper.innerHTML = '<div id="graph-container"></div>';
     }
     setLoading("graph-container");
-    showStatus(
-      context,
-      "Checking the selected branch for .radius/app.bicep…",
-      "info"
-    );
+    // Automatic retries continue the same wait. Keep its status text stable
+    // instead of flashing "Checking…" before every response restores the
+    // generating message.
+    if (!options.continuing) {
+      showStatus(
+        context,
+        "Checking the selected branch for .radius/app.bicep…",
+        "info"
+      );
+    }
     startProgress(
       requestGeneration,
       "Checking the selected branch for .radius/app.bicep…",

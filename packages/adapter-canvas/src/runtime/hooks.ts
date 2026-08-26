@@ -28,6 +28,7 @@ import {
   modelFailureSummaryList
 } from "../model-failure-policy.js";
 import { freshnessIdentity } from "@radius-project/core";
+import { RADIUS_CANVAS_INSTANCE_ID } from "./declarations.js";
 import type { AppModelStatus } from "./graph-context.js";
 
 interface DeployRepairDetails {
@@ -76,8 +77,9 @@ function graphSourceNote(
   return [
     `To render the ${page} view${where}${onPhrase}, .radius/app.bicep must exist on that branch.`,
     "If the selected branch is your current workspace branch, writing it to the working tree is enough (the graph renders from the on-disk tree; modeling does not push).",
+    "The selected branch name is immutable for this request. If the host renames the worktree branch before you edit files, publish the completed model to the originally selected branch before reopening the view.",
     "If the selected branch is a DIFFERENT branch, model it against that branch's code and commit + push .radius/app.bicep to that branch — prefer opening a pull request into it, and do not push generated files directly to a protected branch such as main without the user's confirmation.",
-    "Once the file is committed on that branch, reopen the view; nodes then deep-link to https://github.com/<owner>/<repo>/blob/<branch>/<file>."
+    `Once the model is available on that branch, reopen the view with instanceId \`${RADIUS_CANVAS_INSTANCE_ID}\`; never create another Radius canvas instance. Nodes then deep-link to https://github.com/<owner>/<repo>/blob/<branch>/<file>.`
   ].join(" ");
 }
 

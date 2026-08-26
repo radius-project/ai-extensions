@@ -260,6 +260,37 @@ describe("createAppModelHandoff", () => {
     expect(sent).toHaveLength(1);
   });
 
+  it("does not redispatch an old target after the same panel observes a renamed branch", async () => {
+    const state: CanvasState = {};
+    const statuses = {
+      original: modelStatus("a/b", "original", { status: "missing" }),
+      renamed: modelStatus("a/b", "renamed")
+    };
+    const { handOff, sent, evaluateSource } = harness({ statuses });
+
+    await handOff({
+      repo: "a/b",
+      branches: ["original"],
+      page: "graph",
+      state
+    });
+    await handOff({
+      repo: "a/b",
+      branches: ["renamed"],
+      page: "graph",
+      state
+    });
+    await handOff({
+      repo: "a/b",
+      branches: ["original"],
+      page: "graph",
+      state
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(evaluateSource).toHaveBeenCalledOnce();
+  });
+
   it("releases a missing-model reservation when source evaluation fails", async () => {
     const state: CanvasState = {};
     const evaluateSource = vi
@@ -311,6 +342,43 @@ describe("createAppModelHandoff", () => {
 
     await expect(pending).rejects.toThrow("source unavailable");
     expect(state.appBicepHandoffKey).toBe("newer-request");
+  });
+
+  it("does not clear a newer target classification when an older source probe fails", async () => {
+    const state: CanvasState = {};
+    let rejectSource!: (error: Error) => void;
+    let statusCall = 0;
+    const evaluateSource = vi.fn(
+      () =>
+        new Promise<AppSourceEvaluation>((_resolve, reject) => {
+          rejectSource = reject;
+        })
+    );
+    const { handOff, sent } = harness({
+      resolveStatus: vi.fn(async () => {
+        statusCall++;
+        return modelStatus("a/b", "feat", {
+          status: statusCall === 1 ? "missing" : "up-to-date"
+        });
+      }),
+      evaluateSource
+    });
+    const request = {
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state
+    };
+
+    const older = handOff(request);
+    await vi.waitFor(() => expect(evaluateSource).toHaveBeenCalledOnce());
+    await handOff(request);
+    rejectSource(new Error("source unavailable"));
+    await expect(older).rejects.toThrow("source unavailable");
+    await handOff(request);
+
+    expect(sent).toEqual([]);
+    expect(evaluateSource).toHaveBeenCalledOnce();
   });
 
   it("does not send an older handoff after a newer reservation replaces it", async () => {

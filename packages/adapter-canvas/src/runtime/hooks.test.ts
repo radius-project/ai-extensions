@@ -70,9 +70,11 @@ describe("appBicepHandoffPrompt", () => {
   it("names the selected branch in the opening line and gives cross-branch commit/push guidance", () => {
     const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
     expect(msg).toContain("(branch `feat`)");
+    expect(msg).toContain("selected branch name is immutable");
     expect(msg).toContain("commit + push");
     expect(msg).toContain("pull request");
     expect(msg).toContain("protected branch such as main");
+    expect(msg).toContain("instanceId `radius-panel`");
   });
 
   it("names multiple branches when given several", () => {
