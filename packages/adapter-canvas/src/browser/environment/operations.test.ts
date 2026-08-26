@@ -5160,6 +5160,39 @@ describe("acknowledging a finished deletion pass", () => {
     expect(browser.net.calls).toHaveLength(0);
   });
 
+  it("dismissDisplayed persists the dismissal and hides the panel", async () => {
+    const browser = setup();
+    browser.net.handle(dismissUrl("op-1"), () =>
+      jsonResponse({ operationId: "op-1" })
+    );
+    const controller = controllerFor(browser);
+    controller?.renderProgress(completedRollback());
+
+    controller?.dismissDisplayed();
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(browser.net.calls).toEqual([
+      {
+        url: dismissUrl("op-1"),
+        init: {
+          method: "POST",
+          headers: { "X-Radius-Mutation-Nonce": "" },
+          signal: expect.anything()
+        }
+      }
+    ]);
+  });
+
+  it("dismissDisplayed does nothing when no operation is displayed", () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+
+    controller?.dismissDisplayed();
+
+    expect(browser.net.calls).toHaveLength(0);
+  });
+
   it.each(["resolve", "reject"] as const)(
     "ignores dismissal %s after teardown",
     async (settlement) => {

@@ -1477,6 +1477,9 @@ describe("initializeEnvironmentPage", () => {
       deleteRequested = true;
       return jsonResponse({ success: true }, true, 202);
     });
+    page.browser.net.handle(`${OPERATIONS_PATH}/del-1/dismiss`, () =>
+      jsonResponse({ operationId: "del-1" })
+    );
     page.browser.net.handle(
       `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
       () => {
@@ -1553,9 +1556,14 @@ describe("initializeEnvironmentPage", () => {
     );
     let deleteRequested = false;
     let operationPolls = 0;
+    let dismissed = false;
     page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () => {
       deleteRequested = true;
       return jsonResponse({ success: true }, true, 202);
+    });
+    page.browser.net.handle(`${OPERATIONS_PATH}/del-1/dismiss`, () => {
+      dismissed = true;
+      return jsonResponse({ operationId: "del-1" });
     });
     page.browser.net.handle(
       `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
@@ -1600,7 +1608,91 @@ describe("initializeEnvironmentPage", () => {
       "Microsoft Entra app registration was not deleted"
     );
 
+    // Acknowledging a warnings outcome must not dismiss the operation: the
+    // panel keeps offering the retry the warnings may warrant.
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+    expect(dismissed).toBe(false);
+
     teardown();
+  });
+
+  it("dismisses a clean azure delete on acknowledgement so it stays gone after navigation", async () => {
+    const page = fixture();
+    const remove = createFakeInput("delete-row");
+    remove.setAttribute("data-env", "dev");
+    page.browser.document.addSelectorAll(".js-delete-env", [remove]);
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [{ name: "dev", status: "success", provider: "azure" }]
+        })
+    );
+    let deleteRequested = false;
+    let dismissed = false;
+    let operationPolls = 0;
+    page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () => {
+      deleteRequested = true;
+      return jsonResponse({ success: true }, true, 202);
+    });
+    page.browser.net.handle(`${OPERATIONS_PATH}/del-1/dismiss`, () => {
+      dismissed = true;
+      return jsonResponse({ operationId: "del-1" });
+    });
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => {
+        // Once dismissed, the server reports nothing for the repo — the exact
+        // condition a returning user's resume must honor.
+        if (!deleteRequested || dismissed) {
+          return jsonResponse({ operation: null });
+        }
+        operationPolls += 1;
+        const terminal = operationPolls >= 2;
+        return jsonResponse({
+          operation: {
+            operationId: "del-1",
+            kind: "delete",
+            environment: "dev",
+            provider: "azure",
+            state: terminal ? "succeeded" : "running",
+            terminalState: terminal ? "succeeded" : null,
+            summary: "Deleting dev…"
+          }
+        });
+      }
+    );
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    remove.dispatch("click");
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(1600);
+    await flushPromises();
+    await flushPromises();
+
+    // The succeeded panel is on screen alongside the acknowledgement dialog.
+    expect(page.elements[PROGRESS_IDS.panel].style.display).not.toBe("none");
+
+    // Confirming the acknowledgement dismisses the operation and hides the
+    // panel — the single click a user expects to close a finished deletion.
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+    expect(dismissed).toBe(true);
+    expect(page.elements[PROGRESS_IDS.panel].style.display).toBe("none");
+
+    teardown();
+
+    // Returning to the page (a fresh mount) must not resurface the dismissed
+    // panel: the server now reports no operation for the repo.
+    const rejoin = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+    expect(page.elements[PROGRESS_IDS.panel].style.display).toBe("none");
+
+    rejoin();
   });
 
   it("shows the acknowledgement dialog when rejoining a running azure delete", async () => {

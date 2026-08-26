@@ -234,7 +234,13 @@ export function initializeEnvironmentPage(
       confirmLabel: "Done",
       confirmVariant: "primary",
       hideCancel: true,
-      onConfirm: () => {}
+      // Acknowledging a clean deletion is also the dismissal: without this the
+      // operation stays undismissed and its progress panel reappears when the
+      // user navigates away and returns. A warning outcome keeps its panel so
+      // the offered retry is still reachable, so only a clean success dismisses.
+      onConfirm: () => {
+        if (!withWarnings) operations.dismissDisplayed();
+      }
     });
   };
   const credentials = initializeCredentialsPane(

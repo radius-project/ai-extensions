@@ -417,6 +417,7 @@ export interface EnvironmentOperationsController {
   renderProgress(op: OperationRecord | null): void;
   stopProgress(): void;
   hideProgress(): void;
+  dismissDisplayed(): void;
   focusPanel(): void;
   syncFailureOperation(data: unknown): Promise<boolean>;
   trackProgress(
@@ -2206,51 +2207,59 @@ export function initializeEnvironmentOperations(
       });
   }
 
+  // Dismissal is a durable command: the server records `dismissedAt` so a
+  // reload or navigation cannot bring a settled panel back. Both the panel's
+  // own dismiss button and the delete acknowledgement dialog route through here
+  // so acknowledging a deletion persists the same way clicking dismiss does.
+  function submitDismissal(operationId: string): void {
+    if (operationId === "" || dismissInFlight) return;
+    const dismissSession = session;
+    dismissInFlight = true;
+    void fetchTracked(dismissUrl(operationId), {
+      method: "POST",
+      headers: {
+        "X-Radius-Mutation-Nonce": options.mutationNonce || ""
+      }
+    })
+      .then((response) => {
+        dismissInFlight = false;
+        if (
+          !scope.active ||
+          session !== dismissSession ||
+          displayedOperationId !== operationId
+        ) {
+          return;
+        }
+        if (!response.ok) throw new Error("Operation dismissal failed.");
+        hideProgress();
+      })
+      .catch(() => {
+        dismissInFlight = false;
+        if (
+          !scope.active ||
+          session !== dismissSession ||
+          displayedOperationId !== operationId
+        ) {
+          return;
+        }
+        setCommandError(
+          "Radius could not save this dismissal. Try dismissing it again."
+        );
+      });
+  }
+
   const dismissEl = dom.byId(PROGRESS_IDS.dismiss);
   if (dismissEl) {
-    scope.on(dismissEl, "click", () => {
-      const operationId = displayedOperationId;
-      if (operationId === "" || dismissInFlight) return;
-      const dismissSession = session;
-      dismissInFlight = true;
-      void fetchTracked(dismissUrl(operationId), {
-        method: "POST",
-        headers: {
-          "X-Radius-Mutation-Nonce": options.mutationNonce || ""
-        }
-      })
-        .then((response) => {
-          dismissInFlight = false;
-          if (
-            !scope.active ||
-            session !== dismissSession ||
-            displayedOperationId !== operationId
-          ) {
-            return;
-          }
-          if (!response.ok) throw new Error("Operation dismissal failed.");
-          hideProgress();
-        })
-        .catch(() => {
-          dismissInFlight = false;
-          if (
-            !scope.active ||
-            session !== dismissSession ||
-            displayedOperationId !== operationId
-          ) {
-            return;
-          }
-          setCommandError(
-            "Radius could not save this dismissal. Try dismissing it again."
-          );
-        });
-    });
+    scope.on(dismissEl, "click", () => submitDismissal(displayedOperationId));
   }
 
   return {
     renderProgress,
     stopProgress,
     hideProgress,
+    dismissDisplayed() {
+      submitDismissal(displayedOperationId);
+    },
     focusPanel,
     syncFailureOperation,
     trackProgress,
