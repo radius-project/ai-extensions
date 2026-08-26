@@ -39,7 +39,7 @@ The extension keeps the committed delete workflow files current before dispatchi
 3. Installs `k3d` + the `rad` CLI + Terraform and installs Radius on the ephemeral control plane wired to the target cluster (same setup as deploy).
 4. Projects GitHub OIDC tokens into the pods and registers the cloud identity with `rad credential register`, so recipe deletes can reach the target cluster and cloud.
 5. Authenticates to GHCR with the repository `GITHUB_TOKEN`, exports environment-scoped `RADIUS_STATE_BACKEND`, `RADIUS_STATE_REGISTRY`, and `RADIUS_STATE_ARCHIVE`, then runs `rad startup` to restore the control-plane databases and Terraform recipe-state Secrets persisted by the previous run — this is what tells the delete which environment, recipe packs, resources, and Terraform state exist. Unlike deploy, it does **not** recreate the environment, recipe pack, or registry credentials.
-6. Runs `rad app delete <name> --yes --preview` (`--preview` switches the CLI to the deployed-application API path) via the `delete-resource` composite action, which writes a `rad-delete-result` artifact (JSON: `outcome`, `exitCode`, `resourceType`, `name`, `output`).
+6. Runs `rad app delete <name> --yes --preview` (`--preview` switches the CLI to the deployed-application API path) via the `delete-resource` composite action, which writes a `rad-delete-result` artifact (JSON: `outcome`, `exitCode`, `resourceType`, `name`, `output`). Immediately before that, the extension-added "Make control-plane services reachable for paginated listings" step port-forwards the control-plane services (`dynamic-rp`, `applications-rp`, `ucp`) onto loopback and aliases their in-cluster DNS names in `/etc/hosts`, so a paginated listing's absolute cluster-internal `nextLink` still resolves from the runner.
 7. `rad shutdown` (`if: always()`) persists the post-delete control-plane databases and Terraform recipe-state Secrets back to the state archive — the OCI-backed archive by default (pushed to the GHCR repository in `RADIUS_STATE_REGISTRY` under the `RADIUS_STATE_ARCHIVE` tag, default `radius-state`), or the `radius-state` git orphan branch when `RADIUS_STATE_BACKEND=git`. On failure, logs are uploaded as the `radius-logs` artifact; the k3d cluster is always deleted.
 
 ## What the environment-delete flow does
@@ -59,6 +59,9 @@ The extension keeps the committed delete workflow files current before dispatchi
 
 - **`The target resource is in progress state: Updating` (409 Conflict) on delete**
   → A resource was stranded in a non-terminal state by a prior run whose control plane was torn down before its async operation finished. The persisted state restores it still `Updating`, and no operation completes it, so every delete 409s. Force the resource to a terminal state (or remove its record) on a running control plane, then persist state, before retrying the delete.
+
+- **`dial tcp: lookup dynamic-rp.radius-system ... no such host` during `rad app delete`**
+  → The application has more than one page of resources of a single type, and the CLI followed the listing's absolute cluster-internal `nextLink` directly instead of going through the Kubernetes API-server proxy. The committed delete workflow now aliases the control-plane services onto loopback before the delete, so re-sync the workflow files (dispatching the delete from the canvas does this automatically) and retry. If the alias step logs `Port ... is already in use` or `Could not port-forward ...`, that service was not aliased and the same failure returns.
 
 ## Related files
 

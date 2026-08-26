@@ -331,10 +331,120 @@ export async function generateDeleteWorkflow(
       generated[DELETE_APP_DISPATCHER_FILE]
     );
   }
+  if (generated && typeof generated[DELETE_AZURE_FILE] === "string") {
+    generated[DELETE_AZURE_FILE] = configureControlPlaneHostAliases(
+      generated[DELETE_AZURE_FILE]
+    );
+  }
   for (const [file, workflow] of Object.entries(generated)) {
     assertValidWorkflowYaml(workflow, `delete workflow "${file}"`);
   }
   return generated;
+}
+
+// The composite action the delete provider workflow uses to run `rad ... delete`.
+// Anchoring on the action reference (rather than the step's display name) keeps
+// the host-alias step attached to the delete even if upstream renames the step.
+const DELETE_RESOURCE_ACTION = "actions/delete-resource@";
+
+// Radius control-plane services whose paginated `nextLink` values can name them
+// directly. Each is port-forwarded onto the same loopback port and aliased, so a
+// verbatim in-cluster URL still resolves from the runner.
+const CONTROL_PLANE_SERVICES = ["dynamic-rp", "applications-rp", "ucp"];
+
+/**
+ * Insert a step that makes the Radius control-plane services reachable from the
+ * runner under their in-cluster DNS names, immediately before the delete step.
+ *
+ * `rad` reaches the ephemeral control plane through the Kubernetes API-server
+ * proxy, but a paginated resource listing returns a `nextLink` that is an
+ * absolute cluster-internal URL (`http://dynamic-rp.radius-system:8082/...`).
+ * The CLI dials that URL verbatim, bypassing the proxy, and the runner cannot
+ * resolve the in-cluster service name — so `rad app delete` fails during
+ * enumeration, before anything is deleted, for any application with more than
+ * one page of resources of a single type (radius-project/ai-extensions#441).
+ *
+ * The inserted step port-forwards each control-plane service onto the same port
+ * on loopback and appends an `/etc/hosts` alias for its in-cluster names, which
+ * are otherwise unresolvable on the runner. It runs after the state restore and
+ * the deployment restarts that precede the delete, so the forwarded pods are the
+ * ones the delete talks to.
+ */
+export function configureControlPlaneHostAliases(workflow: string): string {
+  const lines = workflow.split("\n");
+  const actionIndex = lines.findIndex((line) =>
+    line.includes(DELETE_RESOURCE_ACTION)
+  );
+  // Without the alias step the committed workflow keeps the pagination failure,
+  // so a template that no longer runs the delete-resource action is reported
+  // rather than silently shipped unpatched.
+  const stepIndex =
+    actionIndex < 0 ? -1 : findEnclosingStepIndex(lines, actionIndex);
+  if (stepIndex < 0) {
+    throw new Error(
+      "The upstream delete workflow template no longer contains a delete-resource step, so Radius cannot make the control-plane services reachable for paginated resource listings."
+    );
+  }
+  const stepLine = lines[stepIndex];
+  const indent = stepLine.slice(
+    0,
+    stepLine.length - stepLine.trimStart().length
+  );
+  lines.splice(stepIndex, 0, ...controlPlaneHostAliasStep(indent).split("\n"));
+  return lines.join("\n");
+}
+
+// Walk back from a line inside a step to the `- ` item line that starts it.
+function findEnclosingStepIndex(lines: string[], from: number): number {
+  for (let index = from; index >= 0; index--) {
+    if (/^\s*-\s+\S/u.test(lines[index])) return index;
+  }
+  return -1;
+}
+
+function controlPlaneHostAliasStep(indent: string): string {
+  const services = CONTROL_PLANE_SERVICES.join(" ");
+  return `${indent}- name: Make control-plane services reachable for paginated listings
+${indent}  shell: bash
+${indent}  run: |
+${indent}    set -euo pipefail
+${indent}    # rad follows a paginated listing's nextLink verbatim, and the control
+${indent}    # plane returns an absolute in-cluster URL (for example
+${indent}    # http://dynamic-rp.radius-system:8082/...) that bypasses the kube proxy
+${indent}    # and does not resolve on the runner. Port-forward each service onto the
+${indent}    # same loopback port and alias its in-cluster names to 127.0.0.1 so the
+${indent}    # directly dialed nextLink still reaches the control plane.
+${indent}    for service in ${services}; do
+${indent}      port="$(kubectl get service "$service" -n radius-system -o jsonpath='{.spec.ports[0].port}' 2>/dev/null || true)"
+${indent}      if [ -z "$port" ]; then
+${indent}        echo "Skipping $service: no service port found."
+${indent}        continue
+${indent}      fi
+${indent}      # A port already in use would make the readiness probe below pass
+${indent}      # against the wrong listener and alias the service to it.
+${indent}      if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+${indent}        exec 3>&-
+${indent}        echo "::warning::Port $port is already in use; not aliasing $service."
+${indent}        continue
+${indent}      fi
+${indent}      kubectl port-forward -n radius-system "service/$service" "$port:$port" --address 127.0.0.1 >/dev/null 2>&1 &
+${indent}      ready=""
+${indent}      for _ in $(seq 1 30); do
+${indent}        if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+${indent}          exec 3>&-
+${indent}          ready="yes"
+${indent}          break
+${indent}        fi
+${indent}        sleep 1
+${indent}      done
+${indent}      if [ -z "$ready" ]; then
+${indent}        echo "::warning::Could not port-forward $service on port $port; paginated listings that name it may fail."
+${indent}        continue
+${indent}      fi
+${indent}      echo "127.0.0.1 $service.radius-system $service.radius-system.svc $service.radius-system.svc.cluster.local" | sudo tee -a /etc/hosts >/dev/null
+${indent}      echo "✅ $service reachable on 127.0.0.1:$port"
+${indent}    done
+`;
 }
 
 /**
