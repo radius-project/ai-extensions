@@ -59,9 +59,16 @@ jobs:
         run: pnpm run test:integration:windows-process
 
   canvas-chromium:
-    name: Canvas Chromium
+    name: Canvas Chromium (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Playwright pins workers to 1 because the canvas server module keeps
+    # process-global listing caches and shared credentials. Shards are separate
+    # processes on separate runners, so they parallelize without that hazard.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     container:
       image: mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
     permissions:
@@ -85,17 +92,22 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Vitest browser mode, not Playwright, so `--shard` does not apply. Run it
+      # once instead of duplicating it in every shard.
       - name: Run Canvas browser component tests
+        if: matrix.shard == 1
         run: pnpm run test:component
 
+      # No `--` before the flag: pnpm v11 consumes that separator instead of
+      # forwarding it, which silently runs the whole suite in every shard.
       - name: Run Chromium Canvas tests
-        run: pnpm run test:chromium
+        run: pnpm run test:chromium --shard=${{ matrix.shard }}/${{ strategy.job-total }}
 
       - name: Upload Chromium diagnostics and retry-only reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: canvas-playwright-artifacts
+          name: canvas-playwright-artifacts-shard-${{ matrix.shard }}
           path: |
             packages/adapter-canvas/test-results
             packages/adapter-canvas/playwright-report
@@ -137,14 +149,17 @@ jobs:
       - name: Check derived versions
         run: pnpm run version:check
 
-      - name: Typecheck
-        run: pnpm run typecheck
+      # Three independent single-threaded checks. Run concurrently so they use
+      # every runner core instead of one core at a time.
+      - parallel:
+          - name: Typecheck
+            run: pnpm run typecheck
 
-      - name: Lint
-        run: pnpm run lint
+          - name: Lint
+            run: pnpm run lint
 
-      - name: Check formatting
-        run: pnpm run format:check
+          - name: Check formatting
+            run: pnpm run format:check
 
       - name: Run Node tests with coverage
         id: coverage
