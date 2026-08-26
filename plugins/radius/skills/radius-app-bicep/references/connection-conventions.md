@@ -20,7 +20,7 @@ For every dependency:
 1. Inspect source, entrypoint, compose, and configuration files for the exact values the workload reads.
 2. Record the selected profile's required names, casing, defaults, types, literal values, URL/config syntax, endpoint transformations, and secret handling.
 3. Inspect the exact resource outputs and connection projection supplied by the target schema and recipe.
-4. Prove the full client tuple: subresource, complete endpoint, port, protocol/version, TLS, auth mechanism, secret, and final source-supported format.
+4. Prove the full client tuple: subresource, complete endpoint, port, protocol/version, TLS, auth mechanism, secret, and final source-supported format. Include the credential's **shape**: an aggregate URL and discrete host/port/password fields are different contracts, and a client accepts only the one it parses (see [Credential shape](secrets-handling.md#credential-shape)).
 5. Select the wiring for each app-native value:
    - explicit `env.value` from a verified nonsecret output or literal, or from a developer-supplied `@secure()` parameter (Radius encrypts and injects it);
    - `valueFrom.secretKeyRef` from an exact Recipe-generated managed secret and key via `<resource>.properties.secrets.name`;
@@ -95,6 +95,7 @@ env: {
 2. Never assume one universal JSON or scalar `CONNECTION_*` projection. Verify the target version.
 3. Sensitive recipe outputs may be omitted from generic projection. Resolve and bind them through the exact secret contract described in [secrets-handling.md](secrets-handling.md).
    A recipe-generated sensitive app-native key must use an explicit `secretKeyRef` even when its name looks exactly like `CONNECTION_<NAME>_<PROPERTY>`; the matching connection does not project the secret. Bind it directly from schema-declared managed-secret metadata, never through an authored wrapper or guessed resource property. A developer-supplied credential you already hold as a `@secure()` parameter goes straight to `env.value` instead.
+   Nonsecret `host`/`port` outputs are an address, not a credential: wiring only the address is complete only where the exact target Recipe provably generates no credential — otherwise it silently drops authentication. When the credential the Recipe generates is exposed in a shape the client cannot parse, report the gap per [Credential shape](secrets-handling.md#credential-shape) instead of wiring the address alone.
 4. Reference a nonsecret read-only output only when the exact schema exposes it and the exact target Recipe maps it. Do not **set** read-only properties.
 5. Use `disableDefaultEnvVars` only on the connection entry, only when the exact container schema supports it, and only when generic projection would conflict with the application.
 6. Treat case, number-to-string conversion, URL encoding, TLS mode, and protocol-specific formatting as part of the app's runtime contract.
