@@ -106,14 +106,19 @@ For example `mcr.microsoft.com/bicep/avm/res/db-for-my-sql/flexible-server:0.10.
 
 Do NOT guess the module's parameter or output names, and do NOT guess the version to pin. Verify both against the module's real interface, in this order.
 
-**First, look for an existing recipe pack that already uses the same module.** The Azure packs live in `recipe-packs/azure/` in `radius-project/resource-types-contrib`. Search them by **module path, not by type name** — no local clone is required:
+**First, look for an existing recipe pack that already uses the same module.** The Azure packs live in `recipe-packs/azure/` in `radius-project/resource-types-contrib`. Fetch the pack as raw text and scan it for the module path — **search by module path, not by type name**. This needs no local clone and no platform-specific shell utilities:
 
 ```text
 gh api repos/radius-project/resource-types-contrib/contents/recipe-packs/azure/aks-recipepack.bicep \
-  --jq '.content' | base64 -d | grep -n "avm/res/event-hub/namespace"
+  -H "Accept: application/vnd.github.raw"
 ```
 
-A pack may use the module under a type name unrelated to the one you are generating — the canonical Azure pack provisions `Radius.Data/mongoDatabases` from `avm/res/document-db/database-account` and `Radius.Messaging/kafka` from `avm/res/event-hub/namespace`, so grepping for `cosmos` or `eventHub` finds nothing while grepping the module path finds both. When a pack entry exists, reuse its pinned version, its `parameters`, and its `outputs` mapping as-is; those values are already known to work together.
+Read the returned text and look for the `source:` line carrying `avm/res/<service>/<resource>`. A pack may use the module under a type name unrelated to the one you are generating — the canonical Azure pack provisions `Radius.Data/mongoDatabases` from `avm/res/document-db/database-account` and `Radius.Messaging/kafka` from `avm/res/event-hub/namespace`, so searching for `cosmos` or `eventHub` finds nothing while searching the module path finds both.
+
+When a pack entry exists, it is evidence about the **module**, not a template for your type. Reuse the module-side facts as-is, and adapt everything that names the other type:
+
+- **Reuse verbatim:** the pinned `:x.y.z`, the `parameters` **keys** (module parameter names), any constant parameter values including required SKU/capacity settings and known workarounds such as `disableLocalAuth: false` and `enableTelemetry: false`, and the `outputs` **values** (module output names).
+- **Adapt to your type:** every `{{context}}` expression and every `outputs` **key**. A `{{context.resource.properties.<x>}}` value reads a property of the *other* type's schema, and an `outputs` key names one of *its* read-only properties. The Kafka entry passes `{{context.resource.properties.topic}}` and maps `host` / `secrets.connectionString`; copying those into a type whose schema declares neither `topic` nor `host` produces a pack that resolves nothing at deploy time. Substitute the corresponding property names from the `custom-types.yaml` you authored in step 1, and drop any parameter whose value has no counterpart there.
 
 **Only when no pack uses the module**, read the interface from the **pinned version's** source, never the default branch:
 
@@ -228,6 +233,7 @@ Use the custom type as `Radius.Resources/<typeNamePlural>@2025-08-01-preview` an
 - `custom-types.yaml`, `custom-types.tgz`, and `custom-recipe-pack.bicep` exist in `.radius/`, plus `<type>-recipe.bicep` when one was authored.
 - The recipe pack `source` resolves: a pinned MCR AVM path (4a), or a GHCR path that was actually published (4b).
 - For an AVM `source`, every value in the pack's `outputs` map — including the nested `secrets` values — appears as an `output` in the **pinned version's** `main.bicep`, and every `parameters` key appears as a `param`. Verified against `<x.y.z>`, not the module's default branch or README.
+- Nothing type-specific was carried over from another type's pack entry: every `{{context.resource.properties.<x>}}` names a property declared in this type's `custom-types.yaml`, and every `outputs` key is one of this type's own read-only properties.
 - The recipe pack `parameters` cover the module's required inputs (via `{{context}}`), and `outputs` map every `readOnly` property of the type (sensitive ones under `secrets`).
 - An authored recipe returns `output result object = { resources, values, secrets }`, with `values` and `secrets` keyed by the type's property names.
 - The generated type is Azure-provisionable. A non-Azure need was reported, not invented.
