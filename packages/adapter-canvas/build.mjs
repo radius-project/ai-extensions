@@ -230,6 +230,7 @@ function installToLocal() {
     // resolves to a path that does not exist.
     const skillsFrom = join(distDir, "skills");
     if (existsSync(skillsFrom)) {
+      const skillsTo = join(installDir, "skills");
       const tmp = `${skillsTo}.tmp-${process.pid}`;
       rmSync(tmp, { recursive: true, force: true });
       cpSync(skillsFrom, tmp, { recursive: true });
