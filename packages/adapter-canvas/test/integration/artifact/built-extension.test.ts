@@ -271,8 +271,8 @@ describe("P0-C built Radius extension artifact", () => {
     }
     const notices = readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8");
     for (const marker of [
-      "===== react@18.3.1 =====",
-      "===== react-dom@18.3.1 =====",
+      "===== react@19.2.8 =====",
+      "===== react-dom@19.2.8 =====",
       "===== reactflow@11.11.4 =====",
       "===== dagre@0.8.5 =====",
       "===== @reactflow/core@11.11.4 =====",

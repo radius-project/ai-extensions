@@ -236,7 +236,9 @@ describe("canvas pages over real loopback HTTP", () => {
     const response = await get("/?page=graph");
 
     expect(response.body).not.toMatch(/<script[^>]+src=/);
-    expect(response.body).not.toContain('rel="stylesheet"');
+    // Matched as an element, not a substring: the inlined React bundle carries
+    // a `link[rel="stylesheet"]` query selector of its own.
+    expect(response.body).not.toMatch(/<link[^>]+rel="stylesheet"/);
     expect(response.body).not.toContain("unpkg.com");
   });
 

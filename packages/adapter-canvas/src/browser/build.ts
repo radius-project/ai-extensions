@@ -405,6 +405,10 @@ export function compileBrowserEntrySpec(
         spec.name === "graph" ?
           {
             "process.env.NODE_ENV": '"production"',
+            // React's global error reporter keeps a `process.emit` fallback
+            // behind a `typeof process` guard; erasing the binding drops that
+            // dead branch instead of shipping a Node reach into the browser.
+            process: "undefined",
             clearImmediate: "undefined",
             setImmediate: "undefined",
             global: "globalThis"
