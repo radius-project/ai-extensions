@@ -570,6 +570,48 @@ test.describe("Radius Canvas in Chromium", () => {
     await canvas.expectCliInvoked("gh");
   });
 
+  test("plans a deployment for an existing environment from its row", async ({
+    page,
+    canvas
+  }) => {
+    await page.route("**/api/list-environments**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          environments: [
+            {
+              name: "fixture-environment",
+              provider: "azure",
+              status: "success"
+            }
+          ]
+        })
+      });
+    });
+    await gotoCanvas(page, canvas, "environment");
+
+    const row = page
+      .getByRole("row")
+      .filter({ hasText: "fixture-environment" });
+    const plan = row.getByRole("button", { name: "Plan Deployment" });
+    await expect(plan).toBeVisible();
+    await expect(row.getByRole("button", { name: "Deploy Apps" })).toHaveCount(
+      0
+    );
+    await expectNoWcagViolations(page);
+
+    await plan.focus();
+    await page.keyboard.press("Enter");
+
+    await expect(page).toHaveURL(
+      /page=deploying&env=fixture-environment(?:&|$)/
+    );
+    await expect(page.locator("#deploy-env-select")).toHaveValue(
+      "fixture-environment"
+    );
+  });
+
   test("recovers from the scope warning when Re-check is activated by keyboard", async ({
     page,
     canvas
