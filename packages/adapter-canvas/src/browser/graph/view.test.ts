@@ -167,7 +167,9 @@ describe("node card", () => {
     expect(props(findByClass(tree, "rad-node__icon")).src).toBe(
       "data:image/svg+xml,icon"
     );
-    expect(childrenOf(findByClass(tree, "rad-node__title"))).toEqual(["web"]);
+    const title = findByClass(tree, "rad-node__title");
+    expect(childrenOf(title)).toEqual(["web"]);
+    expect(props(title).title).toBe("web");
     expect(props(findByClass(tree, "rad-node__type")).title).toBe(
       "Compute/containers"
     );

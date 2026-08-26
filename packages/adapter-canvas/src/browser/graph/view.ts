@@ -217,7 +217,11 @@ export function createNodeComponent(
       "div",
       { className: "rad-node__head" },
       icon,
-      h("span", { className: "rad-node__title" }, data.nodeName)
+      h(
+        "span",
+        { className: "rad-node__title", title: data.nodeName },
+        data.nodeName
+      )
     );
     const type = h(
       "div",

@@ -19,6 +19,7 @@ import {
   realClock,
   realGraphVendor
 } from "./support/real-vendor.js";
+import { SHELL_STYLE_CSS } from "../../src/pages/shell-styles.js";
 import type { GraphNodeData } from "../../src/browser/graph/build.js";
 import type { GraphResource } from "../../src/browser/graph/model.js";
 import type { MountedGraph } from "../../src/browser/graph/view.js";
@@ -123,6 +124,35 @@ describe("graph view in a real browser", () => {
     // cannot make: React Flow only paints once it has measured its container.
     expect(web.getBoundingClientRect().width).toBeGreaterThan(0);
     expect(db.getBoundingClientRect().height).toBeGreaterThan(0);
+  });
+
+  it("keeps long resource names inside the card", async () => {
+    const name = "recommendationservice";
+    const style = document.createElement("style");
+    style.textContent = SHELL_STYLE_CSS;
+    document.head.appendChild(style);
+    disposers.push(() => style.remove());
+
+    mount({
+      resources: [
+        {
+          id: "app/recommendation",
+          name,
+          type: "Radius.Compute/containers"
+        }
+      ]
+    });
+
+    const recommendation = await card(name);
+    const title = within(recommendation).getByTitle(name);
+    const titleBounds = title.getBoundingClientRect();
+    const cardBounds = recommendation.getBoundingClientRect();
+    const styles = getComputedStyle(title);
+
+    expect(title.scrollWidth).toBeGreaterThan(title.clientWidth);
+    expect(styles.overflow).toBe("hidden");
+    expect(styles.textOverflow).toBe("ellipsis");
+    expect(titleBounds.right).toBeLessThanOrEqual(cardBounds.right);
   });
 
   it("renders the deployed parent with its representative concrete root type", async () => {
