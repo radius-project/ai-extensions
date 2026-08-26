@@ -361,12 +361,43 @@ export interface OperationRecord {
   readonly terminal: OperationTerminalPayload | null;
 }
 
+// The failure category the server inferred from a failed verify run, mapping to
+// the Part 4 exception scenarios: "oidc-trust" (4.3), "permissions" (4.4),
+// "cluster-unreachable" / "cloud-unreachable" (4.5), or "generic" when no
+// specific cause was identified. Empty on a non-failed status.
+export type VerifyFailureCategory =
+  | ""
+  | "oidc-trust"
+  | "permissions"
+  | "cluster-unreachable"
+  | "cloud-unreachable"
+  | "generic";
+
 export interface VerifyStatus {
   readonly state: string;
   readonly terminal: boolean;
   readonly error: string;
   readonly runUrl: string;
   readonly activity: string;
+  readonly category: VerifyFailureCategory;
+  readonly component: string;
+  readonly missingPermissions: readonly string[];
+  readonly detail: string;
+}
+
+const VERIFY_FAILURE_CATEGORIES: readonly VerifyFailureCategory[] = [
+  "oidc-trust",
+  "permissions",
+  "cluster-unreachable",
+  "cloud-unreachable",
+  "generic"
+];
+
+function readVerifyCategory(payload: unknown): VerifyFailureCategory {
+  const value = readString(payload, "category");
+  return VERIFY_FAILURE_CATEGORIES.includes(value as VerifyFailureCategory) ?
+      (value as VerifyFailureCategory)
+    : "";
 }
 
 export interface EnvironmentOperationsDeps {
@@ -700,7 +731,84 @@ export function parseVerifyStatus(payload: unknown): VerifyStatus {
     terminal: readBoolean(payload, "terminal"),
     error: readString(payload, "error"),
     runUrl: readString(payload, "runUrl"),
-    activity: readString(payload, "activity")
+    activity: readString(payload, "activity"),
+    category: readVerifyCategory(payload),
+    component: readString(payload, "component"),
+    missingPermissions: readStringArray(payload, "missingPermissions"),
+    detail: readString(payload, "detail")
+  };
+}
+
+export interface VerifyFailureDescription {
+  readonly headline: string;
+  readonly guidance: string;
+  readonly permissions: readonly string[];
+  readonly offerBypass: boolean;
+}
+
+function providerLabel(provider: string): string {
+  if (provider === "aws") return "AWS";
+  if (provider === "azure") return "Azure";
+  return "the cloud provider";
+}
+
+// Turn a classified verify failure into user-facing recovery copy. Pure: the
+// category and fields come from the server's classifier (4.3 oidc-trust, 4.4
+// permissions, 4.5 cluster/cloud-unreachable) and an unknown/empty category
+// falls back to the existing generic failure message so a novel failure is never
+// mislabeled. `offerBypass` gates the "Create environment anyway" recovery: an
+// OIDC-trust gap (4.3) must be fixed before the environment is usable, so it is
+// never bypassable, whereas a permissions gap or an unreachable endpoint may be
+// resolved after the environment record exists.
+export function describeVerifyFailure(
+  status: VerifyStatus,
+  provider: string
+): VerifyFailureDescription {
+  const cloud = providerLabel(provider);
+  if (status.category === "oidc-trust") {
+    return {
+      headline: `GitHub Actions isn’t trusted to sign in to ${cloud}.`,
+      guidance:
+        status.detail !== "" ?
+          status.detail
+        : `The verification workflow reached ${cloud}, but the OIDC trust for this repository isn’t configured. Fix the federated-credential / trust policy, then re-verify.`,
+      permissions: [],
+      offerBypass: false
+    };
+  }
+  if (status.category === "permissions") {
+    return {
+      headline: `Signed in to ${cloud}, but the identity is missing required permissions.`,
+      guidance:
+        status.detail !== "" ?
+          status.detail
+        : "Grant the missing permissions to the deploy identity and re-verify, or create the environment now and fix access before deploying.",
+      permissions: status.missingPermissions,
+      offerBypass: true
+    };
+  }
+  if (status.category === "cluster-unreachable") {
+    const named = status.component !== "" ? ` (${status.component})` : "";
+    return {
+      headline: "Radius couldn’t reach the Kubernetes cluster.",
+      guidance: `Credentials were accepted, but the cluster${named} couldn’t be reached. Check it is running and reachable, then re-verify — or create the environment now and deploy once it’s reachable.`,
+      permissions: [],
+      offerBypass: true
+    };
+  }
+  if (status.category === "cloud-unreachable") {
+    return {
+      headline: `Radius couldn’t reach ${cloud}.`,
+      guidance: `The verification workflow couldn’t contact ${cloud}. This is usually transient. Re-verify — or create the environment now and deploy once connectivity is restored.`,
+      permissions: [],
+      offerBypass: true
+    };
+  }
+  return {
+    headline: "Credential verification failed.",
+    guidance: status.error,
+    permissions: [],
+    offerBypass: false
   };
 }
 
@@ -1851,10 +1959,16 @@ export function initializeEnvironmentOperations(
             panel.classList.remove("env-progress--done");
             panel.classList.add("env-progress--failed");
             const activityEl = dom.byId(PROGRESS_IDS.activity);
-            if (activityEl)
-              activityEl.textContent =
-                `Credential verification failed. ${v.error}` +
-                (v.runUrl === "" ? "" : ` View the run: ${v.runUrl}`);
+            if (activityEl) {
+              const desc = describeVerifyFailure(v, provider);
+              const parts = [desc.headline, desc.guidance];
+              if (desc.permissions.length > 0)
+                parts.push(`Missing: ${desc.permissions.join(", ")}.`);
+              if (v.runUrl !== "") parts.push(`View the run: ${v.runUrl}`);
+              activityEl.textContent = parts
+                .filter((part) => part !== "")
+                .join(" ");
+            }
             return;
           }
           if (v.activity !== "") verifyActivity = v.activity;

@@ -5,6 +5,7 @@ import type {
   EnvironmentsDependencies,
   EnvironmentVerifyRun
 } from "./environments-types.js";
+import { classifyVerifyFailure } from "./verify-failure-classification.js";
 
 // The `environments` family, minus `POST /api/create-environment`, which is
 // large enough to live in its own `create-environment*.ts` seams. The four routes
@@ -767,6 +768,12 @@ export async function handleVerifyStatus(
     const failureHelp = oidcHelp || noSubscriptionsHelp;
     if (failureHelp)
       errMsg = failureHelp + "\n\n\u2014 raw error \u2014\n" + errMsg;
+    const classification = classifyVerifyFailure({
+      failedSteps: failed,
+      log: log || "",
+      oidcHelp,
+      noSubscriptionsHelp
+    });
     if (verifyOp && verifyOp.currentStage === dependencies.stageVerify) {
       const failedAtAzureAccess = isAzureRbacVerificationFailure(
         failed,
@@ -800,7 +807,23 @@ export async function handleVerifyStatus(
           dependencies.reportOperationDiagnostic(diagnostic)
       });
     }
-    respond({ state: "failed", runId, runUrl, error: errMsg });
+    respond({
+      state: "failed",
+      runId,
+      runUrl,
+      error: errMsg,
+      category: classification.category,
+      ...(classification.component ?
+        { component: classification.component }
+      : {}),
+      ...((
+        classification.missingPermissions &&
+        classification.missingPermissions.length > 0
+      ) ?
+        { missingPermissions: classification.missingPermissions }
+      : {}),
+      ...(classification.detail ? { detail: classification.detail } : {})
+    });
   } catch (e) {
     if (!isCurrentVerificationRequest()) {
       respondWithCurrentVerification();

@@ -14,7 +14,8 @@ import {
   previewEntryLabel,
   previewResourceLabel,
   parseOperationResponse,
-  parseVerifyStatus
+  parseVerifyStatus,
+  describeVerifyFailure
 } from "./operations.js";
 import type {
   AppPickerChoice,
@@ -504,7 +505,11 @@ describe("parseOperationResponse", () => {
               ],
               keeps: "not-a-list",
               manualActionRequired: [
-                { kind: "role_assignment", target: "Contributor", action: "Go" }
+                {
+                  kind: "role_assignment",
+                  target: "Contributor",
+                  action: "Go"
+                }
               ]
             }
           },
@@ -703,7 +708,11 @@ describe("parseVerifyStatus", () => {
       terminal: false,
       error: "",
       runUrl: "",
-      activity: ""
+      activity: "",
+      category: "",
+      component: "",
+      missingPermissions: [],
+      detail: ""
     });
   });
 
@@ -721,8 +730,127 @@ describe("parseVerifyStatus", () => {
       terminal: true,
       error: "",
       runUrl: "https://example.test/run",
-      activity: "Checking credentials"
+      activity: "Checking credentials",
+      category: "",
+      component: "",
+      missingPermissions: [],
+      detail: ""
     });
+  });
+
+  it("reads a categorized failure payload with permissions and detail", () => {
+    expect(
+      parseVerifyStatus({
+        state: "failed",
+        terminal: true,
+        error: "denied",
+        runUrl: "https://example.test/run",
+        activity: "",
+        category: "permissions",
+        component: "cloud provider",
+        missingPermissions: ["eks:DescribeCluster", "sts:AssumeRole"],
+        detail: "The identity is missing required permissions."
+      })
+    ).toEqual({
+      state: "failed",
+      terminal: true,
+      error: "denied",
+      runUrl: "https://example.test/run",
+      activity: "",
+      category: "permissions",
+      component: "cloud provider",
+      missingPermissions: ["eks:DescribeCluster", "sts:AssumeRole"],
+      detail: "The identity is missing required permissions."
+    });
+  });
+
+  it("ignores an unrecognized category value", () => {
+    expect(
+      parseVerifyStatus({ state: "failed", category: "bogus" }).category
+    ).toBe("");
+  });
+});
+
+describe("describeVerifyFailure", () => {
+  const failure = (over: Record<string, unknown>) =>
+    parseVerifyStatus({ state: "failed", ...over });
+
+  it("describes an OIDC-trust failure without offering bypass", () => {
+    const desc = describeVerifyFailure(
+      failure({ category: "oidc-trust" }),
+      "azure"
+    );
+    expect(desc.headline).toContain("isn’t trusted to sign in to Azure");
+    expect(desc.guidance).toContain("OIDC trust");
+    expect(desc.offerBypass).toBe(false);
+    expect(desc.permissions).toEqual([]);
+  });
+
+  it("prefers a server-supplied detail for the OIDC guidance", () => {
+    const desc = describeVerifyFailure(
+      failure({ category: "oidc-trust", detail: "Add the enterprise claim." }),
+      "aws"
+    );
+    expect(desc.headline).toContain("AWS");
+    expect(desc.guidance).toBe("Add the enterprise claim.");
+  });
+
+  it("lists missing permissions and offers bypass for a permissions failure", () => {
+    const desc = describeVerifyFailure(
+      failure({
+        category: "permissions",
+        missingPermissions: ["eks:DescribeCluster"]
+      }),
+      "aws"
+    );
+    expect(desc.headline).toContain("Signed in to AWS");
+    expect(desc.permissions).toEqual(["eks:DescribeCluster"]);
+    expect(desc.offerBypass).toBe(true);
+  });
+
+  it("prefers a server-supplied detail for the permissions guidance", () => {
+    const desc = describeVerifyFailure(
+      failure({ category: "permissions", detail: "Grant Reader." }),
+      "azure"
+    );
+    expect(desc.guidance).toBe("Grant Reader.");
+  });
+
+  it("names the cluster component when unreachable", () => {
+    const desc = describeVerifyFailure(
+      failure({ category: "cluster-unreachable", component: "aks-prod" }),
+      "azure"
+    );
+    expect(desc.headline).toContain("Kubernetes cluster");
+    expect(desc.guidance).toContain("(aks-prod)");
+    expect(desc.offerBypass).toBe(true);
+  });
+
+  it("omits the component parenthetical when none is provided", () => {
+    const desc = describeVerifyFailure(
+      failure({ category: "cluster-unreachable" }),
+      "azure"
+    );
+    expect(desc.guidance).not.toContain("(");
+  });
+
+  it("describes a cloud-unreachable failure", () => {
+    const desc = describeVerifyFailure(
+      failure({ category: "cloud-unreachable" }),
+      "aws"
+    );
+    expect(desc.headline).toContain("reach AWS");
+    expect(desc.offerBypass).toBe(true);
+  });
+
+  it("falls back to the raw error for an unclassified failure", () => {
+    const desc = describeVerifyFailure(
+      failure({ category: "", error: "boom" }),
+      "unknown-provider"
+    );
+    expect(desc.headline).toBe("Credential verification failed.");
+    expect(desc.guidance).toBe("boom");
+    expect(desc.offerBypass).toBe(false);
   });
 });
 
@@ -1143,7 +1271,11 @@ describe("verify status polling", () => {
     const controller = controllerFor(browser);
     await primeVerifyPoll(browser, controller);
     browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
-      jsonResponse({ state: "failed", error: "Actions run failed", runUrl: "" })
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        runUrl: ""
+      })
     );
 
     await tickClock(browser.clock, 1500);
@@ -1151,6 +1283,27 @@ describe("verify status polling", () => {
     expect(browser.els[PROGRESS_IDS.activity].textContent).toBe(
       "Credential verification failed. Actions run failed"
     );
+  });
+
+  it("renders category-specific guidance and missing permissions on a classified failure", async () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        runUrl: "",
+        category: "permissions",
+        missingPermissions: ["eks:DescribeCluster", "sts:AssumeRole"]
+      })
+    );
+
+    await tickClock(browser.clock, 1500);
+
+    const text = browser.els[PROGRESS_IDS.activity].textContent ?? "";
+    expect(text).toContain("missing required permissions");
+    expect(text).toContain("Missing: eks:DescribeCluster, sts:AssumeRole.");
   });
 
   it("ignores a stale verify-status response that resolves after its session was superseded", async () => {
@@ -2052,7 +2205,11 @@ describe("previewEntryLabel", () => {
 
   it("says nothing extra when the server sent no reason", () => {
     expect(
-      previewEntryLabel({ kind: "azure_app", target: "radius-dev", action: "" })
+      previewEntryLabel({
+        kind: "azure_app",
+        target: "radius-dev",
+        action: ""
+      })
     ).toBe("App Registration: radius-dev");
   });
 });

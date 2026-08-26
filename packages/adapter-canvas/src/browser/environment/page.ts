@@ -10,6 +10,11 @@ import {
 import { initializeDiscoveryPanel } from "./discovery.js";
 import { createEnvironmentConfirmDialog } from "./confirm-dialog.js";
 import {
+  validateAwsRoleArn,
+  validateAzureClientId,
+  validateEnvironmentName
+} from "./form-validation.js";
+import {
   initializeEnvironmentPane,
   isEnvironmentPaneController,
   type EnvironmentPaneController
@@ -334,8 +339,9 @@ export function initializeEnvironmentPage(
       return;
     }
     const environment = environmentInput.value.trim();
-    if (environment === "") {
-      showFormError("Please enter an environment name.");
+    const environmentNameError = validateEnvironmentName(environment);
+    if (environmentNameError !== "") {
+      showFormError(environmentNameError);
       return;
     }
     const targetRepo = targetRepoInput.value.trim();
@@ -385,6 +391,19 @@ export function initializeEnvironmentPage(
         "The selected profile needs both an account ID and region. Delete the profile and create it again with those values before creating the environment."
       );
       return;
+    }
+    if (provider === "azure") {
+      const clientIdError = validateAzureClientId(clientIdInput.value);
+      if (clientIdError !== "") {
+        showFormError(clientIdError);
+        return;
+      }
+    } else {
+      const roleArnError = validateAwsRoleArn(selectedProfile.roleArn ?? "");
+      if (roleArnError !== "") {
+        showFormError(roleArnError);
+        return;
+      }
     }
 
     const branch = branchInput.value || state.branch;

@@ -2009,7 +2009,8 @@ describe("environments — real loopback", () => {
         runId: "55",
         runUrl: "https://github.com/octo/app/actions/runs/55",
         error:
-          "Credential verification failed (failure). Failed step: Verify.\nboom"
+          "Credential verification failed (failure). Failed step: Verify.\nboom",
+        category: "generic"
       });
       expect(finish).toHaveBeenCalledWith(operation, "failed_partial", {
         failure: {
@@ -2021,6 +2022,70 @@ describe("environments — real loopback", () => {
             "Credential verification failed (failure). Failed step: Verify.\nboom"
         }
       });
+      expect(persistOperations).toHaveBeenCalledOnce();
+    } finally {
+      await container.stopAll();
+    }
+  });
+
+  it("classifies a cluster-access verification failure with category and permissions", async () => {
+    const operation = {
+      repo: "octo/app",
+      environment: "dev",
+      context: { githubLogin: "octocat" },
+      currentStage: "verify",
+      verification: {
+        dispatchedAt: 123,
+        workflow: "verify.yml",
+        ref: "feature",
+        environment: "dev",
+        runId: "77"
+      }
+    };
+    const finish = vi.fn();
+    const persistOperations = vi.fn(() => Promise.resolve());
+    const container = createControlledEnvironmentServer({
+      readInstanceEntry: () => undefined,
+      getOperation: () => operation,
+      hasCompleteVerificationIdentity: () => true,
+      getRunDetail: () =>
+        Promise.resolve({
+          status: "completed",
+          conclusion: "failure",
+          steps: [{ name: "Check AKS cluster access", conclusion: "failure" }]
+        }),
+      fetchRunLog: () =>
+        Promise.resolve(
+          "Error: AuthorizationFailed. The client does not have permission to perform action 'Microsoft.ContainerService/managedClusters/read'."
+        ),
+      extractErrorLines: () => ["denied"],
+      extractGitHubActionsStepLog: () => "",
+      explainOidcEnterpriseClaim: () => "",
+      explainNoSubscriptions: () => "",
+      finish,
+      persistBestEffort,
+      persistOperations,
+      reportOperationDiagnostic: () => {}
+    });
+    try {
+      const controlled = await container.getOrCreate("verify-cluster-failure");
+      const res = await fetch(
+        controlled.baseUrl +
+          "/api/verify-status?repo=octo/app&environment=dev&operationId=op-1"
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        state: string;
+        category: string;
+        component?: string;
+        missingPermissions?: string[];
+      };
+      expect(body.state).toBe("failed");
+      expect(body.category).toBe("permissions");
+      expect(body.component).toBeUndefined();
+      expect(body.missingPermissions).toEqual([
+        "Microsoft.ContainerService/managedClusters/read"
+      ]);
       expect(persistOperations).toHaveBeenCalledOnce();
     } finally {
       await container.stopAll();
