@@ -71,7 +71,11 @@ const GRAPH_RESOURCES: CanvasGraphResource[] = [
 ];
 
 const DIFF_RESOURCES: CanvasGraphResource[] = [
-  { ...GRAPH_RESOURCES[0], diffStatus: "modified" },
+  {
+    ...GRAPH_RESOURCES[0],
+    connections: [{ id: "app/new-cache", direction: "outbound" }],
+    diffStatus: "modified"
+  },
   { ...GRAPH_RESOURCES[1], id: "app/new-cache", diffStatus: "added" },
   { ...GRAPH_RESOURCES[2], diffStatus: "unchanged" },
   {
