@@ -643,7 +643,7 @@ describe("ensureServicePrincipal", () => {
     });
 
     it.each([["prepared"], ["outcome_unknown"]])(
-      "neither replays nor claims a create left %s",
+      "settles without replaying or claiming a create left %s",
       async (status) => {
         const operation = journalled();
         const mutation = prepareProviderMutation(operation, {
@@ -665,8 +665,18 @@ describe("ensureServicePrincipal", () => {
           objectId: "sp-object-1"
         });
         expect(calls).toEqual([
+          ["ad", "sp", "show", "--id", "app-1", "--query", "id", "-o", "tsv"],
           ["ad", "sp", "show", "--id", "app-1", "--query", "id", "-o", "tsv"]
         ]);
+        expect(
+          operation.providerRecovery.mutations.find(
+            (entry: { kind: string }) =>
+              entry.kind === "azure_service_principal.create"
+          )
+        ).toMatchObject({
+          status: "confirmed",
+          providerId: "sp-object-1"
+        });
       }
     );
 
