@@ -127,7 +127,7 @@ describe("graph view in a real browser", () => {
   });
 
   it("keeps long resource names inside the card", async () => {
-    const name = "recommendationservice";
+    const name = "recommendationservice-".repeat(8);
     const style = document.createElement("style");
     style.textContent = SHELL_STYLE_CSS;
     document.head.appendChild(style);
