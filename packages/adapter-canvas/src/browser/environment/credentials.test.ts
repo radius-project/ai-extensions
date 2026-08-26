@@ -1,16 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EnvironmentConfirmOptions } from "./confirm-dialog.js";
 import {
-  AZURE_CLI_ASSIST_PATH,
   CREDENTIAL_DELETE_PATH,
   CREDENTIAL_PROFILES_PATH,
   CREDENTIAL_SAVE_PATH,
   CREDENTIALS_ENTRY_KEY,
-  GHCR_COPY_RESET_MS,
   GITHUB_IDENTITY_PATH,
+  payloadRemediation,
   VERIFY_AWS_PATH,
   VERIFY_AZURE_PATH,
-  azureCliAssistPromptView,
   credentialRowsMarkup,
   initializeCredentialsPane,
   isCredentialsPaneController,
@@ -23,6 +21,7 @@ import type { CredentialProfile } from "./credentials.js";
 const USAGE_LOOKUP_URL = "/api/list-environments?repo=octo%2Fapp";
 import {
   createDeferred,
+  fakeText,
   createFakeBrowser,
   createFakeElement,
   createFakeInput,
@@ -64,16 +63,10 @@ function buildElements() {
     btnVerifyAws: createFakeInput("btn-verify-aws"),
     credGhcrStatus: createFakeElement("cred-ghcr-status"),
     credGhcrCommandRow: createFakeElement("cred-ghcr-command-row"),
-    credGhcrCommand: createFakeElement("cred-ghcr-command"),
     credGhcrRetry: createFakeInput("cred-ghcr-retry"),
-    credGhcrCopy: createFakeElement("cred-ghcr-copy"),
+    credVerifyAction: createFakeElement("cred-verify-action"),
     envVerifyModal: createFakeElement("env-verify-modal"),
-    envVerifyTitle: createFakeElement("env-verify-title"),
-    azureCliAssistModal: createFakeElement("azure-cli-assist-modal"),
-    azureCliAssistTitle: createFakeElement("azure-cli-assist-title"),
-    azureCliAssistMessage: createFakeElement("azure-cli-assist-message"),
-    azureCliAssistConfirm: createFakeElement("azure-cli-assist-confirm"),
-    azureCliAssistCancel: createFakeElement("azure-cli-assist-cancel")
+    envVerifyTitle: createFakeElement("env-verify-title")
   };
   elements.credForm.style.display = "none";
   elements.credPanelAws.style.display = "none";
@@ -105,7 +98,7 @@ function renderPage(repo = "octo/app") {
   };
   const initialized = initializeCredentialsPane(
     browser.context,
-    { repo, decisions, confirmDialog },
+    { repo, mutationNonce: "test-nonce", decisions, confirmDialog },
     dependencies
   );
   if (!isCredentialsPaneController(initialized)) {
@@ -247,6 +240,23 @@ const LEGACY_IDENTITY = {
   packagesCredentialSource: ""
 } as const;
 
+// The identity shape grew required fields; these cases only care about a few,
+// so default the rest rather than repeating them in every row.
+function pkgIdentity(
+  overrides: Partial<Parameters<typeof renderGitHubAccessView>[0]> = {}
+): Parameters<typeof renderGitHubAccessView>[0] {
+  return {
+    error: "",
+    actingLogin: "octocat",
+    actingHasPackages: false,
+    accounts: [],
+    packagesLogin: "octocat",
+    packagesHasWrite: false,
+    packagesCredentialSource: "keyring",
+    ...overrides
+  };
+}
+
 describe("GitHub Packages identity parsing and rendering", () => {
   it("parses identity fields and defaults malformed booleans", () => {
     expect(
@@ -324,7 +334,7 @@ describe("GitHub Packages identity parsing and rendering", () => {
       "Select the stored account <strong>@publisher</strong>"
     );
     expect(view.commandVisible).toBe(false);
-    expect(view.command).toBe("");
+    expect(view.remediation).toBeNull();
   });
 
   it("says the session token is verified when it is the credential that publishes", () => {
@@ -359,7 +369,7 @@ describe("GitHub Packages identity parsing and rendering", () => {
     // A switch/refresh command here would be a dead end; a fresh sign-in is
     // the only thing that helps.
     expect(view.commandVisible).toBe(true);
-    expect(view.command).toBe(
+    expect(view.remediation?.command).toBe(
       "gh auth login -h github.com -s read:packages -s write:packages"
     );
     expect(view.retryVisible).toBe(true);
@@ -377,8 +387,9 @@ describe("GitHub Packages identity parsing and rendering", () => {
     });
     expect(view.packagesVerified).toBe(false);
     expect(view.statusHtml).toContain("The stored GitHub CLI credential for");
-    expect(view.command).toBe(
-      "gh auth switch -h github.com -u publisher && gh auth refresh -h github.com -s read:packages -s write:packages"
+    // Line-separated, not `&&`: Windows PowerShell 5.1 cannot parse `&&`.
+    expect(view.remediation?.command).toBe(
+      "gh auth switch -h github.com -u publisher\ngh auth refresh -h github.com -s read:packages -s write:packages"
     );
   });
 
@@ -428,24 +439,53 @@ describe("GitHub Packages identity parsing and rendering", () => {
     expect(view.packagesVerified).toBe(false);
     expect(view.commandVisible).toBe(true);
     expect(view.retryVisible).toBe(true);
-    expect(view.command).toBe(
-      "gh auth switch -h github.com -u octocat && gh auth refresh -h github.com -s read:packages -s write:packages"
+    expect(view.remediation?.command).toBe(
+      "gh auth switch -h github.com -u octocat\ngh auth refresh -h github.com -s read:packages -s write:packages"
     );
   });
-});
 
-describe("Azure CLI assist prompt copy", () => {
-  it("describes the install action", () => {
-    const view = azureCliAssistPromptView("install");
-    expect(view.title).toBe("Install Azure CLI?");
-    expect(view.confirmLabel).toBe("Ask Copilot to install");
+  // The row's visibility and the command it hosts used to be decided
+  // separately, so a login the registry rejects left an empty row on screen
+  // under status text telling the user to run the command below.
+  it("falls back to the no-account view when the login is not usable", () => {
+    const view = renderGitHubAccessView({
+      error: "",
+      actingLogin: "not a valid login!",
+      actingHasPackages: false,
+      accounts: [],
+      packagesLogin: "not a valid login!",
+      packagesHasWrite: false,
+      packagesCredentialSource: "keyring"
+    });
+
+    expect(view.commandVisible).toBe(false);
+    expect(view.remediation).toBeNull();
+    expect(view.retryVisible).toBe(false);
+    expect(view.statusText).toContain("Could not detect a GitHub CLI account");
   });
 
-  it("describes the login action", () => {
-    const view = azureCliAssistPromptView("login");
-    expect(view.title).toBe("Start Azure login?");
-    expect(view.confirmLabel).toBe("Start Azure login");
-  });
+  it.each([
+    ["missing login", pkgIdentity({ actingLogin: "" })],
+    ["identity error", pkgIdentity({ error: "boom" })],
+    [
+      "verified",
+      pkgIdentity({ actingHasPackages: true, packagesHasWrite: true })
+    ],
+    ["needs scope", pkgIdentity({})],
+    [
+      "unusable login",
+      pkgIdentity({ actingLogin: "bad login!", packagesLogin: "bad login!" })
+    ]
+  ])(
+    "never shows the command row without a command for %s",
+    (_name, identity) => {
+      const view = renderGitHubAccessView(identity);
+
+      // The row is visible exactly when there is a runnable command to host.
+      // Asserting non-null is not enough: a refused build still yields a view.
+      expect(view.commandVisible).toBe(view.remediation?.runnable === true);
+    }
+  );
 });
 
 describe("credentials pane initialization", () => {
@@ -458,6 +498,7 @@ describe("credentials pane initialization", () => {
       browser.context,
       {
         repo: "octo/app",
+        mutationNonce: "test-nonce",
         decisions: { confirm: () => true, notify: () => {} }
       },
       {
@@ -478,7 +519,11 @@ describe("credentials pane initialization", () => {
 
     const second = initializeCredentialsPane(
       page.browser.context,
-      { repo: "octo/app", decisions: page.decisions },
+      {
+        repo: "octo/app",
+        mutationNonce: "test-nonce",
+        decisions: page.decisions
+      },
       page.dependencies
     );
     expect(isCredentialsPaneController(second)).toBe(false);
@@ -870,10 +915,13 @@ describe("GitHub Packages identity check", () => {
     );
     page.elements.newCredBtn.dispatch("click");
     await flushPromises();
-    expect(page.elements.credGhcrCommandRow.style.display).toBe("flex");
+    expect(page.elements.credGhcrCommandRow.style.display).toBe("block");
     expect(page.elements.credGhcrRetry.style.display).toBe("");
-    expect(page.elements.credGhcrCommand.textContent).toContain(
-      "gh auth switch"
+    expect(fakeText(page.elements.credGhcrCommandRow)).toContain(
+      "gh auth switch -h github.com -u octocat"
+    );
+    expect(fakeText(page.elements.credGhcrCommandRow)).toContain(
+      "Run with Copilot"
     );
   });
 
@@ -928,65 +976,6 @@ describe("GitHub Packages identity check", () => {
     expect(calls[1]?.url).toBe(`${GITHUB_IDENTITY_PATH}?fresh=1`);
   });
 
-  it("copies the command and resets the label after a delay", async () => {
-    const page = renderPage();
-    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
-      jsonResponse({ actingLogin: "octocat", actingHasPackages: false })
-    );
-    page.elements.newCredBtn.dispatch("click");
-    await flushPromises();
-    page.elements.credGhcrCopy.dispatch("click");
-    await flushPromises();
-    expect(page.browser.clipboard.writes).toEqual([
-      page.elements.credGhcrCommand.textContent
-    ]);
-    expect(page.elements.credGhcrCopy.textContent).toBe("Copied");
-    page.browser.clock.tick(GHCR_COPY_RESET_MS);
-    expect(page.elements.credGhcrCopy.textContent).toBe("Copy command");
-  });
-
-  it("copies an empty string when the command text has not been set", async () => {
-    const page = renderPage();
-    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
-      jsonResponse({ actingLogin: "octocat", actingHasPackages: false })
-    );
-    page.elements.newCredBtn.dispatch("click");
-    await flushPromises();
-    page.elements.credGhcrCommand.textContent = null;
-    page.elements.credGhcrCopy.dispatch("click");
-    await flushPromises();
-    expect(page.browser.clipboard.writes).toEqual([""]);
-  });
-
-  it("does not relabel the copy button when the clipboard write is unsuccessful", async () => {
-    const page = renderPage();
-    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
-      jsonResponse({ actingLogin: "octocat", actingHasPackages: false })
-    );
-    page.elements.newCredBtn.dispatch("click");
-    await flushPromises();
-    page.browser.clipboard.write = vi.fn(() => Promise.resolve(false));
-    page.elements.credGhcrCopy.dispatch("click");
-    await flushPromises();
-    expect(page.elements.credGhcrCopy.textContent).not.toBe("Copied");
-  });
-
-  it("ignores a copy confirmation that resolves after teardown", async () => {
-    const page = renderPage();
-    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
-      jsonResponse({ actingLogin: "octocat", actingHasPackages: false })
-    );
-    page.elements.newCredBtn.dispatch("click");
-    await flushPromises();
-    const deferred = createDeferred<boolean>();
-    page.browser.clipboard.write = vi.fn(() => deferred.promise);
-    page.elements.credGhcrCopy.dispatch("click");
-    page.controller.teardown();
-    deferred.resolve(true);
-    await flushPromises();
-    expect(page.elements.credGhcrCopy.textContent).not.toBe("Copied");
-  });
-
   it("ignores a late identity check response that resolves after teardown", async () => {
     const page = renderPage();
     const deferred = createDeferred<HttpResponse>();
@@ -1004,8 +993,33 @@ describe("GitHub Packages identity check", () => {
   });
 });
 
-describe("Azure CLI assist prompt", () => {
-  async function openFormReadyToVerify() {
+describe("payloadRemediation", () => {
+  it("rebuilds a view from an id and its parameters", () => {
+    const view = payloadRemediation({
+      remediation: { id: "aws-cli-login", params: {} }
+    });
+
+    expect(view?.id).toBe("aws-cli-login");
+    expect(view?.command).toContain("aws sso login");
+  });
+
+  it("ignores a payload that is not a record", () => {
+    expect(payloadRemediation("nope")).toBeNull();
+  });
+
+  it("ignores a payload without a remediation record", () => {
+    expect(payloadRemediation({ remediation: "aws-cli-login" })).toBeNull();
+  });
+
+  it("ignores a remediation that cannot be resolved", () => {
+    expect(
+      payloadRemediation({ remediation: { id: "made-up", params: {} } })
+    ).toBeNull();
+  });
+});
+
+describe("verify remediation callouts", () => {
+  it("offers to run the command a failed Azure verification suggests", async () => {
     const page = renderPage();
     page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
       jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
@@ -1015,167 +1029,89 @@ describe("Azure CLI assist prompt", () => {
     page.elements.credNameInput.value = "acme";
     page.elements.azTenantId.value = "tenant-in-form";
     page.elements.azSubId.value = "sub-in-form";
-    return page;
-  }
-
-  it("prompts to sign in for az-login-required and confirms the flow", async () => {
-    const page = await openFormReadyToVerify();
     page.browser.net.handle(VERIFY_AZURE_PATH, () =>
       jsonResponse({
-        error: "Not logged in.",
-        code: "az-login-required",
-        tenantId: "server-tenant"
+        error: "Azure subscription is not selected.",
+        code: "az-subscription",
+        remediation: {
+          id: "azure-subscription-set",
+          params: { subscriptionId: "11111111-2222-3333-4444-555555555555" }
+        }
       })
     );
+
     page.elements.btnVerifyAzure.dispatch("click");
     await flushPromises();
-    expect(page.elements.azureCliAssistModal.style.display).toBe("flex");
-    expect(page.elements.azureCliAssistTitle.textContent).toBe(
-      "Start Azure login?"
-    );
-    expect(page.elements.azureCliAssistConfirm.focusCount).toBe(1);
 
-    page.browser.net.handle(AZURE_CLI_ASSIST_PATH, (init) => {
-      expect(JSON.parse(String(init?.body))).toEqual({
-        action: "login",
-        tenantId: "server-tenant"
-      });
-      return jsonResponse({ message: "Signing you in…" });
-    });
-    page.elements.azureCliAssistConfirm.dispatch("click");
-    expect(page.elements.azureCliAssistModal.style.display).toBe("none");
-    await flushPromises();
-    expect(page.elements.credVerifyStatus.innerHTML).toContain(
-      "Signing you in…"
+    expect(fakeText(page.elements.credVerifyAction)).toContain(
+      "az account set --subscription 11111111-2222-3333-4444-555555555555"
     );
   });
 
-  it("prompts to install for az-cli-missing", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({ error: "Azure CLI missing.", code: "az-cli-missing" })
-    );
-    page.elements.btnVerifyAzure.dispatch("click");
-    await flushPromises();
-    expect(page.elements.azureCliAssistTitle.textContent).toBe(
-      "Install Azure CLI?"
-    );
-  });
-
-  it("shows a default info message when the assist response omits one", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({ error: "nope", code: "az-cli-missing" })
-    );
-    page.elements.btnVerifyAzure.dispatch("click");
-    await flushPromises();
-    page.browser.net.handle(AZURE_CLI_ASSIST_PATH, () => jsonResponse({}));
-    page.elements.azureCliAssistConfirm.dispatch("click");
-    await flushPromises();
-    expect(page.elements.credVerifyStatus.innerHTML).toContain(
-      "Copilot is helping with Azure CLI setup"
-    );
-  });
-
-  it("shows the assist error with the fallback message appended", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({ error: "nope", code: "az-cli-missing" })
-    );
-    page.elements.btnVerifyAzure.dispatch("click");
-    await flushPromises();
-    page.browser.net.handle(AZURE_CLI_ASSIST_PATH, () =>
-      jsonResponse({ error: "assist failed" })
-    );
-    page.elements.azureCliAssistConfirm.dispatch("click");
-    await flushPromises();
-    expect(page.elements.credVerifyStatus.innerHTML).toContain("assist failed");
-    expect(page.elements.credVerifyStatus.innerHTML).toContain("nope");
-  });
-
-  it("shows a generic error without the raw exception on an assist network failure", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({ error: "nope", code: "az-cli-missing" })
-    );
-    page.elements.btnVerifyAzure.dispatch("click");
-    await flushPromises();
-    page.browser.net.handle(AZURE_CLI_ASSIST_PATH, () =>
-      Promise.reject(new Error("raw secret detail"))
-    );
-    page.elements.azureCliAssistConfirm.dispatch("click");
-    await flushPromises();
-    expect(page.elements.credVerifyStatus.innerHTML).toContain(
-      "Could not reach Copilot"
-    );
-    expect(page.elements.credVerifyStatus.innerHTML).not.toContain(
-      "raw secret detail"
-    );
-  });
-
-  it("cancels and shows the fallback message when one is pending", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({ error: "nope", code: "az-cli-missing" })
-    );
-    page.elements.btnVerifyAzure.dispatch("click");
-    await flushPromises();
-    page.elements.azureCliAssistCancel.dispatch("click");
-    expect(page.elements.azureCliAssistModal.style.display).toBe("none");
-    expect(page.elements.credVerifyStatus.innerHTML).toContain("nope");
-  });
-
-  it("cancels quietly when there is no pending assist request", () => {
+  it("offers to run the command a failed AWS verification suggests", async () => {
     const page = renderPage();
-    expect(() =>
-      page.elements.azureCliAssistCancel.dispatch("click")
-    ).not.toThrow();
-    expect(() =>
-      page.elements.azureCliAssistConfirm.dispatch("click")
-    ).not.toThrow();
-  });
-
-  it("ignores a stale assist response after the form context changes", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({ error: "nope", code: "az-cli-missing" })
+    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
+      jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
     );
-    page.elements.btnVerifyAzure.dispatch("click");
-    await flushPromises();
-    const deferred = createDeferred<HttpResponse>();
-    page.browser.net.handle(AZURE_CLI_ASSIST_PATH, () => deferred.promise);
-    page.elements.azureCliAssistConfirm.dispatch("click");
-
-    // Reopen (bumps the form token) before the assist response arrives.
-    page.elements.cancelCredBtn.dispatch("click");
-    page.browser.net.handle(`${CREDENTIAL_PROFILES_PATH}?repo=octo%2Fapp`, () =>
-      jsonResponse({ profiles: [] })
-    );
-    await flushPromises();
     page.elements.newCredBtn.dispatch("click");
-    const statusBefore = page.elements.credVerifyStatus.innerHTML;
-
-    deferred.resolve(jsonResponse({ message: "late" }));
     await flushPromises();
-    expect(page.elements.credVerifyStatus.innerHTML).toBe(statusBefore);
+    page.elements.credProviderSelect.value = "aws";
+    page.elements.credProviderSelect.dispatch("change");
+    page.elements.credNameInput.value = "acme";
+    page.elements.awsAccountId.value = "123456789012";
+    page.elements.awsRegion.value = "us-west-2";
+    page.browser.net.handle(VERIFY_AWS_PATH, () =>
+      jsonResponse({
+        error: "No active AWS session.",
+        remediation: { id: "aws-cli-login", params: {} }
+      })
+    );
+
+    page.elements.btnVerifyAws.dispatch("click");
+    await flushPromises();
+
+    expect(fakeText(page.elements.credVerifyAction)).toContain("aws sso login");
   });
 
-  it("ignores an assist network failure that resolves after teardown", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({ error: "nope", code: "az-cli-missing" })
+  it("clears mounted callouts on teardown", async () => {
+    const page = renderPage();
+    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
+      jsonResponse({ actingLogin: "octocat", actingHasPackages: false })
     );
-    page.elements.btnVerifyAzure.dispatch("click");
+    page.elements.newCredBtn.dispatch("click");
     await flushPromises();
-    const deferred = createDeferred<HttpResponse>();
-    page.browser.net.handle(AZURE_CLI_ASSIST_PATH, () => deferred.promise);
-    page.elements.azureCliAssistConfirm.dispatch("click");
-    const statusBefore = page.elements.credVerifyStatus.innerHTML;
+    expect(page.elements.credGhcrCommandRow.children).toHaveLength(1);
 
     page.controller.teardown();
-    deferred.reject(new Error("late network failure"));
-    await expect(flushPromises()).resolves.not.toThrow();
-    expect(page.elements.credVerifyStatus.innerHTML).toBe(statusBefore);
+
+    expect(page.elements.credGhcrCommandRow.children).toHaveLength(0);
+  });
+
+  it("clears a previous callout when verification is reset", async () => {
+    const page = renderPage();
+    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
+      jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
+    );
+    page.elements.newCredBtn.dispatch("click");
+    await flushPromises();
+    page.elements.credProviderSelect.value = "aws";
+    page.elements.credProviderSelect.dispatch("change");
+    page.elements.credNameInput.value = "acme";
+    page.elements.awsAccountId.value = "123456789012";
+    page.elements.awsRegion.value = "us-west-2";
+    page.browser.net.handle(VERIFY_AWS_PATH, () =>
+      jsonResponse({
+        error: "No active AWS session.",
+        remediation: { id: "aws-cli-login", params: {} }
+      })
+    );
+    page.elements.btnVerifyAws.dispatch("click");
+    await flushPromises();
+
+    page.elements.credProviderSelect.value = "azure";
+    page.elements.credProviderSelect.dispatch("change");
+
+    expect(page.elements.credVerifyAction.children).toHaveLength(0);
   });
 });
 
@@ -1209,6 +1145,45 @@ describe("Azure verification", () => {
       "Tenant ID and a Subscription ID"
     );
   });
+
+  it.each([
+    [
+      "az-login-required",
+      { id: "azure-cli-login", params: {} },
+      "Sign in to Azure CLI",
+      "az login --use-device-code"
+    ],
+    [
+      "az-cli-missing",
+      { id: "azure-cli-install", params: {} },
+      "Install Azure CLI and sign in",
+      "az login --use-device-code"
+    ]
+  ])(
+    "renders %s through the shared remediation callout",
+    async (code, remediation, title, command) => {
+      const page = renderPage();
+      await openForm(page);
+      page.elements.credNameInput.value = "acme";
+      page.elements.azTenantId.value = "t";
+      page.elements.azSubId.value = "s";
+      page.browser.net.handle(VERIFY_AZURE_PATH, () =>
+        jsonResponse({
+          error: "Azure authentication needs attention.",
+          code,
+          remediation
+        })
+      );
+
+      page.elements.btnVerifyAzure.dispatch("click");
+      await flushPromises();
+
+      const action = fakeText(page.elements.credVerifyAction);
+      expect(action).toContain(title);
+      expect(action).toContain(command);
+      expect(action).toContain("Run with Copilot");
+    }
+  );
 
   it("verifies successfully, fills in server-confirmed ids, and enables save", async () => {
     const page = renderPage();
@@ -1256,7 +1231,7 @@ describe("Azure verification", () => {
     expect(page.elements.credVerifyStatus.innerHTML).toContain(
       "subscription not found"
     );
-    expect(page.elements.azureCliAssistModal.style.display).not.toBe("flex");
+    expect(page.elements.credVerifyAction.children).toHaveLength(0);
   });
 
   it("shows a generic error without the raw exception on a network failure", async () => {
@@ -1817,26 +1792,16 @@ describe("teardown", () => {
     expect(page.browser.net.calls).toHaveLength(2);
   });
 
-  it("cancels a pending clipboard-copy reset timer on teardown", async () => {
-    const page = renderPage();
-    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
-      jsonResponse({ actingLogin: "octocat", actingHasPackages: false })
-    );
-    page.elements.newCredBtn.dispatch("click");
-    await flushPromises();
-    page.elements.credGhcrCopy.dispatch("click");
-    await flushPromises();
-    expect(page.browser.clock.pending).toBeGreaterThan(0);
-    page.controller.teardown();
-    expect(page.browser.clock.pending).toBe(0);
-  });
-
   it("allows re-initializing after teardown", () => {
     const page = renderPage();
     page.controller.teardown();
     const reinitialized = initializeCredentialsPane(
       page.browser.context,
-      { repo: "octo/app", decisions: page.decisions },
+      {
+        repo: "octo/app",
+        mutationNonce: "test-nonce",
+        decisions: page.decisions
+      },
       page.dependencies
     );
     expect(isCredentialsPaneController(reinitialized)).toBe(true);

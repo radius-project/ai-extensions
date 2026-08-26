@@ -5,6 +5,8 @@
 // src/pages/deploying/client-deployments.ts into one importable, testable
 // module per the Radius Canvas re-architecture.
 
+import { remediationView } from "@radius-project/core/remediations";
+import { createCommandAction } from "../command-action.js";
 import { createDeleteDeploymentDialog } from "../delete-dialog.js";
 import { escapeBrowserHtml } from "../html.js";
 import { isRecord, readBoolean, readRecord, readString } from "../json.js";
@@ -29,6 +31,7 @@ import {
   parseDeploymentListing,
   parseEnvironmentListing
 } from "../repositories.js";
+import type { CommandActionHandle } from "../command-action.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type {
   AbortHandle,
@@ -77,6 +80,8 @@ const LOAD_FAILURE_ROW =
 
 export interface DeployingPageOptions {
   repo: string;
+  /** Nonce for mutating requests; run-command hand-off is rejected without it. */
+  mutationNonce: string;
   // The current worktree/session branch. Never defaulted to "main" here: the
   // caller (the page renderer) supplies it, matching the branch the session
   // is actually on.
@@ -106,6 +111,7 @@ interface DeployStatusPayload {
   deployRunUrl: string;
   errorKind: string;
   errorBranch: string;
+  errorPaths: string;
   repairing: boolean;
   handoff: DeployHandoff;
   active: boolean;
@@ -119,6 +125,7 @@ interface DeployFailureDetails {
   runUrl: string;
   errorKind: string;
   errorBranch: string;
+  errorPaths: string;
   repairing: boolean;
   handoff: DeployHandoff;
 }
@@ -190,6 +197,7 @@ function parseDeployStatus(payload: unknown): DeployStatusPayload {
     deployRunUrl: readString(payload, "deployRunUrl"),
     errorKind: readString(payload, "errorKind"),
     errorBranch: readString(payload, "errorBranch"),
+    errorPaths: readString(payload, "errorPaths"),
     repairing: readBoolean(payload, "repairing"),
     handoff: parseHandoff(payload),
     active: readBoolean(payload, "active"),
@@ -796,6 +804,37 @@ export function initializeDeployingPage(
     if (progressFailActions) progressFailActions.style.display = "none";
   };
 
+  let pushAction: CommandActionHandle | null = null;
+
+  // Offers to push the unpushed branch. The command is rebuilt from the
+  // registry rather than from the rendered text, and a push is high impact, so
+  // the callout takes its own confirmation before anything is handed off.
+  const mountPushAction = (branch: string, paths: string): void => {
+    pushAction?.dispose();
+    pushAction = null;
+    if (branch === "") return;
+    const host = context.dom.byId("deploy-push-action");
+    if (!host) return;
+    // `paths` names the generated files the server found uncommitted. Passing
+    // it through turns the offer into commit-then-push, because pushing alone
+    // would publish the branch without the model the deploy reads.
+    const remediation = remediationView("git-push-branch", {
+      branch,
+      currentBranch: options.branch,
+      paths
+    });
+    if (!remediation.runnable) {
+      host.textContent = remediation.unsupportedReason;
+      return;
+    }
+    pushAction = createCommandAction(context, {
+      host,
+      remediation,
+      mutationNonce: options.mutationNonce,
+      idPrefix: "deploy-push"
+    });
+  };
+
   // Switches the deploy modal into a "failed" state. errorKind lets a
   // well-known failure (an unpushed branch, a missing OIDC credential) render a
   // tailored panel instead of raw workflow error text.
@@ -804,17 +843,13 @@ export function initializeDeployingPage(
     if (progressFailIcon) progressFailIcon.style.display = "";
     if (details.errorKind === "branch-not-pushed") {
       const branchName = details.errorBranch || "your branch";
-      const pushCmd = `git push -u origin ${branchName}`;
       if (progressTitle) progressTitle.innerHTML = "Branch not pushed yet";
       if (progressSubtitle) {
         progressSubtitle.style.color = "var(--rad-text-secondary)";
         progressSubtitle.innerHTML =
           `<div style="color:var(--rad-text);">The branch <code style="background:var(--rad-code-bg); padding:1px 5px; border-radius:4px;">${escapeBrowserHtml(branchName)}</code> hasn't been pushed to GitHub yet, so there's nothing to deploy for <strong>${escapeBrowserHtml(details.app)}</strong>.</div>` +
           `<div style="margin-top:10px; color:var(--rad-text-secondary);">Push it, then deploy again:</div>` +
-          `<div style="margin-top:8px; display:flex; align-items:center; gap:8px; background:var(--rad-code-bg); border:1px solid var(--rad-stroke); border-radius:6px; padding:8px 10px;">` +
-          `<code style="flex:1; font-family:var(--font-mono, monospace); font-size:12px; color:var(--rad-text); white-space:nowrap; overflow-x:auto;">${escapeBrowserHtml(pushCmd)}</code>` +
-          `<button type="button" id="deploy-copy-push" class="rad-btn rad-btn--neutral" style="margin:0; padding:2px 10px; font-size:12px; flex:none;">Copy</button>` +
-          `</div>`;
+          `<div id="deploy-push-action" style="margin-top:8px;"></div>`;
       }
     } else if (details.errorKind === "oidc-subject-missing") {
       // Unlike an unpushed branch there is no command the user can run here:
@@ -887,19 +922,11 @@ export function initializeDeployingPage(
     // Rebind rather than accumulate: showDeployFailed can run repeatedly
     // while Copilot's repair handoff keeps retrying.
     release(copyBindings);
-    const copyButton = context.dom.byId("deploy-copy-push");
-    if (copyButton) {
-      bind(copyBindings, copyButton, "click", () => {
-        const cmd = `git push -u origin ${details.errorBranch || ""}`;
-        void context.clipboard.write(cmd).then((copied) => {
-          if (!copied || !entry.active) return;
-          copyButton.textContent = "Copied";
-          entry.after(1500, () => {
-            copyButton.textContent = "Copy";
-          });
-        });
-      });
-    }
+    const pushable = details.errorKind === "branch-not-pushed";
+    mountPushAction(
+      pushable ? details.errorBranch : "",
+      pushable ? details.errorPaths : ""
+    );
     const fixCredentialsButton = context.dom.byId("deploy-fix-credentials");
     if (fixCredentialsButton) {
       bind(copyBindings, fixCredentialsButton, "click", () => {
@@ -965,6 +992,7 @@ export function initializeDeployingPage(
               runUrl: status.deployRunUrl,
               errorKind: status.errorKind,
               errorBranch: status.errorBranch,
+              errorPaths: status.errorPaths,
               repairing: status.repairing,
               handoff: status.handoff
             });
@@ -1132,6 +1160,7 @@ export function initializeDeployingPage(
                 runUrl: status.deployRunUrl,
                 errorKind: status.errorKind,
                 errorBranch: status.errorBranch,
+                errorPaths: status.errorPaths,
                 repairing: false,
                 handoff: status.handoff
               });
@@ -1146,6 +1175,7 @@ export function initializeDeployingPage(
               runUrl: status.deployRunUrl,
               errorKind: status.errorKind,
               errorBranch: status.errorBranch,
+              errorPaths: status.errorPaths,
               repairing: status.repairing,
               handoff: status.handoff
             });
@@ -1233,6 +1263,8 @@ export function initializeDeployingPage(
     release(rowBindings);
     release(inlineBindings);
     release(copyBindings);
+    pushAction?.dispose();
+    pushAction = null;
     deploymentsAbort?.abort();
   });
 
