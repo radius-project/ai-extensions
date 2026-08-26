@@ -179,12 +179,17 @@ export function initializePlannedGraphPage(
     }
 
     plan.requestFailed = false;
-    if (context.dom.byId("graph-container-wrapper")) {
-      controller?.destroy();
-      controller = null;
+    // A refresh validates the graph that is already on screen. Destroying the
+    // controller and swapping in the loading state would blank exactly the
+    // cached graph the refresh exists to confirm, and the `refreshed` reply
+    // returns without re-rendering because it assumes that graph is still up.
+    if (!refresh || controller === null) {
+      if (context.dom.byId("graph-container-wrapper")) {
+        controller?.destroy();
+        controller = null;
+      }
+      setLoading(graphContainer(context));
     }
-    const containerId = graphContainer(context);
-    setLoading(containerId);
     stopProgress();
     const abort = context.net.createAbort();
     requestAbort = abort;

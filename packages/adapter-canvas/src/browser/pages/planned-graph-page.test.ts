@@ -244,6 +244,62 @@ describe("initializePlannedGraphPage", () => {
     expect(status.textContent).toBe("The planned deployment is current.");
   });
 
+  it("keeps the cached planned graph on screen while a refresh reconciles freshness", async () => {
+    const { browser, status } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({ refreshed: true })
+    );
+    const destroy = vi.fn();
+    const render = vi.fn(() => ({ update: vi.fn(), destroy }));
+    const setLoading = vi.fn();
+    initializePlannedGraphPage(browser.context, {
+      radiusRenderGraph: render,
+      radiusSetGraphLoading: setLoading
+    });
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    // The refresh exists to confirm the graph that is already rendered, and the
+    // `refreshed` reply returns without re-rendering. Swapping in the loading
+    // state here would leave the page permanently blank.
+    expect(setLoading).not.toHaveBeenCalled();
+    expect(destroy).not.toHaveBeenCalled();
+    expect(render).toHaveBeenCalledOnce();
+    expect(status.textContent).toBe("The planned deployment is current.");
+  });
+
+  it("shows the loading state when the user re-plans an already rendered graph", async () => {
+    const { browser, branch } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({ refreshed: true })
+    );
+    const destroy = vi.fn();
+    const render = vi.fn(() => ({ update: vi.fn(), destroy }));
+    const setLoading = vi.fn();
+    initializePlannedGraphPage(browser.context, {
+      radiusRenderGraph: render,
+      radiusSetGraphLoading: setLoading
+    });
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+    expect(setLoading).not.toHaveBeenCalled();
+
+    branch.value = "other";
+    branch.dispatch("change");
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+
+    // A user-driven plan replaces the graph, so the stale one must come down.
+    expect(setLoading).toHaveBeenCalledOnce();
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
   it("reloads when cached planned resources are stale and the workflow says so", async () => {
     const { browser } = fixture({
       resources: [{ id: "app/web" }]

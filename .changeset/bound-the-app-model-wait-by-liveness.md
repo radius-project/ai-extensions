@@ -12,4 +12,6 @@ The expiry decision moved to the server, into the single place every graph route
 
 The Planned and Diff tabs also kept their part of the bargain for the first time. Both announced "Copilot is generating .radius/app.bicep…" once and then never asked again, so neither recovered even after the model was written — the panel simply sat there until the user reloaded. Both now retry until the model lands or the server ends the wait, and a fresh page request explicitly starts a new bounded wait after an expiry.
 
+The Planned tab also reconciles freshness when it opens, so a cached graph is confirmed against the current model rather than trusted indefinitely. That check runs behind the graph already on screen: it no longer tears the rendered graph down and swaps in the loading state before asking, which had left the tab blank whenever the answer was that nothing had changed.
+
 Automatic retries now retain the current generating message instead of flashing the initial branch-check message on every poll. Model handoffs are remembered independently for each repo and branch target within the canvas instance, so reopening that instance after a worktree branch rename cannot make its old iframe dispatch the same prompt again. Radius canvas opens also enforce reuse of the first live Radius instance ID, preventing an agent-driven reopen from creating a second panel.
