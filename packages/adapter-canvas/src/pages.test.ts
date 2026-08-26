@@ -196,7 +196,6 @@ describe("compiled page entry API contracts", () => {
         "/api/delete-credential-profile",
         "/api/save-credential-profile",
         "/api/github-identity",
-        "/api/azure-cli-assist",
         "/api/verify-azure-login",
         "/api/verify-aws-login",
         "/api/discover",

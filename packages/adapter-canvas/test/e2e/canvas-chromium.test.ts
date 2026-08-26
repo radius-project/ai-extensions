@@ -677,16 +677,17 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.getByRole("button", { name: "Verify Credentials" }).click();
     const verifyPayload = await (await verifyResponse).text();
 
-    const assistDialog = page.getByRole("dialog", {
-      name: "Start Azure login?"
-    });
-    await expect(assistDialog).toBeVisible();
-    await assistDialog.getByRole("button", { name: "Cancel" }).click();
+    const remediation = page.locator("#cred-verify-action");
+    await expect(remediation).toContainText("Sign in to Azure CLI");
+    await expect(remediation).toContainText(
+      `az login --use-device-code --tenant ${VALID_TENANT_ID}`
+    );
+    await expect(
+      remediation.getByRole("button", { name: "Run with Copilot" })
+    ).toBeVisible();
 
-    // The guidance half of the message is authored only by the server. The
-    // dialog's own copy also opens with "No active Azure session", so asserting
-    // that prefix alone would still pass if the cancel path stopped carrying
-    // the server's error through to the status line.
+    // The guidance remains server-authored while the action is rebuilt from the
+    // structured remediation reference rather than duplicated in a modal.
     await expect(page.locator("#cred-verify-status")).toContainText(
       'Run "az login --use-device-code" in your terminal, then click Verify Credentials again.'
     );
@@ -712,6 +713,7 @@ test.describe("Radius Canvas in Chromium", () => {
         )
       )
       .toBe(true);
+    await expectNoWcagViolations(page);
   });
 
   test("validates credential form requirements before any external command runs @safety", async ({

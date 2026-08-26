@@ -231,12 +231,17 @@ function hasScope(executor: SelectedGhExecutor, scope: string): boolean {
   return executor.scopes.includes(scope);
 }
 
+interface RepairGuidance {
+  readonly repair: string | null;
+  readonly remediation: { id: string; params: Record<string, string> } | null;
+}
+
 function repairGuidance(
   login: string,
   needsWorkflow: boolean,
   needsPackages: boolean,
   repositoryReady: boolean
-): string | null {
+): RepairGuidance {
   const requiredPermissions: string[] = [];
   const refreshScopes: string[] = [];
   if (needsWorkflow) {
@@ -262,13 +267,22 @@ function repairGuidance(
       ...(needsPackages ? { packages: "true" } : {})
     });
     return fix.runnable ?
-        `The account @${login} needs ${permissions} to proceed. In the terminal, run:\n${fix.command}\nThe first command makes @${login} the active GitHub CLI account if it is not already active.`
-      : `The account @${login} needs ${permissions} to proceed. Grant the missing scopes with GitHub CLI, or select an account that already has them.`;
+        {
+          repair: `The account @${login} needs ${permissions} to proceed. In the terminal, run:\n${fix.command}\n${fix.warning}`,
+          remediation: { id: fix.id, params: { ...fix.params } }
+        }
+      : {
+          repair: `The account @${login} needs ${permissions} to proceed. Grant the missing scopes with GitHub CLI, or select an account that already has them.`,
+          remediation: null
+        };
   }
   if (!repositoryReady) {
-    return `Grant @${login} repository administrator access, or select an account that can administer this repository.`;
+    return {
+      repair: `Grant @${login} repository administrator access, or select an account that can administer this repository.`,
+      remediation: null
+    };
   }
-  return null;
+  return { repair: null, remediation: null };
 }
 
 async function inspectRepository(
@@ -404,24 +418,10 @@ export function createGitHubAccountReadinessService(
               lease.value.needsPackages,
               lease.value.repositoryReady
             )
-          : lease.restoration.guidance;
-        // Only a scope gap is a runnable command. A missing repository grant
-        // or a failed restoration stays prose, so the callout never appears
-        // offering to run something that would not fix the stated problem.
-        const repairRemediation =
-          (
-            restorationReady &&
-            (lease.value.needsWorkflow || lease.value.needsPackages)
-          ) ?
-            {
-              id: "github-account-scopes",
-              params: {
-                login: lease.selectedLogin,
-                ...(lease.value.needsWorkflow ? { workflow: "true" } : {}),
-                ...(lease.value.needsPackages ? { packages: "true" } : {})
-              }
-            }
-          : null;
+          : {
+              repair: lease.restoration.guidance,
+              remediation: null
+            };
         return {
           ready,
           login: lease.selectedLogin,
@@ -431,8 +431,8 @@ export function createGitHubAccountReadinessService(
               "Ready to configure deployments"
             : "Additional GitHub access is required",
           checks,
-          repair,
-          repairRemediation,
+          repair: repair.repair,
+          repairRemediation: repair.remediation,
           restoration: lease.restoration
         };
       } catch (error) {

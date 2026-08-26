@@ -2039,7 +2039,7 @@ export async function invokeSessionPrompt(
   if (typeof handler !== "function") {
     return {
       status: 503,
-      error: "Could not reach the Copilot session to start Azure CLI help."
+      error: "Could not reach the Copilot session to run this command."
     };
   }
   try {
@@ -2048,7 +2048,7 @@ export async function invokeSessionPrompt(
   } catch {
     return {
       status: 502,
-      error: "The Copilot session could not start Azure CLI help."
+      error: "The Copilot session could not run this command."
     };
   }
 }

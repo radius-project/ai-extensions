@@ -213,7 +213,7 @@ describe("GitHub account readiness", () => {
       }
     });
     expect(result.repair).toBe(
-      "The account @octocat needs the workflow and write:packages permissions to proceed. In the terminal, run:\ngh auth switch -h github.com -u octocat\ngh auth refresh -h github.com -s workflow -s read:packages -s write:packages\nThe first command makes @octocat the active GitHub CLI account if it is not already active."
+      "The account @octocat needs the workflow and write:packages permissions to proceed. In the terminal, run:\ngh auth switch -h github.com -u octocat\ngh auth refresh -h github.com -s workflow -s read:packages -s write:packages\nThis will make @octocat the active GitHub CLI account if it is not already active."
     );
     expect(probePackageAccess).not.toHaveBeenCalled();
     expect(result.repairRemediation).toEqual({
@@ -239,6 +239,7 @@ describe("GitHub account readiness", () => {
     // A login the registry refuses must never be spliced into a command.
     expect(result.repair).not.toContain("gh auth switch");
     expect(result.repair).toContain("Grant the missing scopes with GitHub CLI");
+    expect(result.repairRemediation).toBeNull();
   });
 
   it("names only the selected account when package permission is missing", async () => {
@@ -254,7 +255,7 @@ describe("GitHub account readiness", () => {
     });
 
     expect(result.repair).toBe(
-      "The account @octocat needs the write:packages permission to proceed. In the terminal, run:\ngh auth switch -h github.com -u octocat\ngh auth refresh -h github.com -s read:packages -s write:packages\nThe first command makes @octocat the active GitHub CLI account if it is not already active."
+      "The account @octocat needs the write:packages permission to proceed. In the terminal, run:\ngh auth switch -h github.com -u octocat\ngh auth refresh -h github.com -s read:packages -s write:packages\nThis will make @octocat the active GitHub CLI account if it is not already active."
     );
     expect(result.repair).not.toContain("original");
     expect(result.repairRemediation).toEqual({

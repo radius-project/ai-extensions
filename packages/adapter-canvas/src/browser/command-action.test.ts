@@ -15,7 +15,8 @@ import {
 import type { CommandActionPhase } from "./command-action.js";
 import {
   createFakeBrowser,
-  createFakeElement
+  createFakeElement,
+  fakeText
 } from "../../test/support/browser/fakes.js";
 import type { FakeElement } from "../../test/support/browser/fakes.js";
 import type { BrowserContext, HttpResponse } from "./ports.js";
@@ -38,6 +39,8 @@ describe("commandActionView", () => {
     const view = commandActionView(initialCommandActionState(LOW));
 
     expect(view.command).toBe("az login --use-device-code");
+    expect(view.title).toBe(LOW.title);
+    expect(view.copyVisible).toBe(true);
     expect(view.copy).toEqual({
       label: COMMAND_COPY_LABEL,
       disabled: false,
@@ -111,8 +114,8 @@ describe("commandActionView", () => {
     expect(view.run.disabled).toBe(true);
     expect(view.run.title).toBe(UNSUPPORTED.unsupportedReason);
     expect(view.statusText).toBe(UNSUPPORTED.unsupportedReason);
-    // Copy is the fallback and must survive the disabled action.
-    expect(view.copy.disabled).toBe(false);
+    expect(view.copyVisible).toBe(false);
+    expect(view.copy.disabled).toBe(true);
   });
 
   it("keeps a reported outcome visible for a non-runnable command", () => {
@@ -127,6 +130,34 @@ describe("commandActionView", () => {
     );
     expect(commandActionView(initialCommandActionState(LOW)).cwdNote).toBe("");
   });
+
+  it("warns copied multi-command sequences to stop at the first failure", () => {
+    const remediation = remediationView("github-account-scopes", {
+      login: "octocat",
+      packages: "true"
+    });
+
+    const view = commandActionView(initialCommandActionState(remediation));
+    expect(view.sequenceWarning).toBe(
+      "Run these commands in order. If one fails, stop and do not run the remaining commands."
+    );
+    expect(view.preRunWarning).toContain(
+      "This will make @octocat the active GitHub CLI account"
+    );
+  });
+
+  it("does not repeat a standing warning in the confirmation text", () => {
+    const remediation = remediationView("github-account-scopes", {
+      login: "octocat",
+      packages: "true"
+    });
+    const view = commandActionView(stateWith(remediation, "confirming"));
+
+    expect(view.confirmText).not.toContain(remediation.warning);
+    expect(view.confirmText).toContain(
+      "The active account changes for github.com machine-wide"
+    );
+  });
 });
 
 describe("commandActionSpecs", () => {
@@ -137,6 +168,10 @@ describe("commandActionSpecs", () => {
     );
 
     expect(specs.container.children?.[0]).toMatchObject({
+      className: "rad-command-action-title",
+      text: LOW.title
+    });
+    expect(specs.container.children?.[1]).toMatchObject({
       tag: "code",
       text: "az login --use-device-code"
     });
@@ -174,8 +209,23 @@ describe("commandActionSpecs", () => {
 
     expect(specs.buttons[1].attrs?.disabled).toBe("disabled");
     expect(specs.status).toMatchObject({
-      attrs: { role: "status", style: "color:var(--rad-text-secondary)" }
+      attrs: {
+        role: "status",
+        tabindex: "-1",
+        style: "color:var(--rad-text-secondary)"
+      }
     });
+  });
+
+  it("omits Copy when there is no safe command to copy", () => {
+    const specs = commandActionSpecs(
+      commandActionView(initialCommandActionState(UNSUPPORTED)),
+      "unsupported"
+    );
+
+    expect(specs.buttons.map((button) => button.id)).toEqual([
+      "unsupported-run"
+    ]);
   });
 
   it.each([
@@ -204,6 +254,7 @@ interface MountOptions {
   responses?: MountResponse[];
   fetchThrows?: boolean;
   clipboardOk?: boolean;
+  showWarning?: boolean;
 }
 
 function mount(options: MountOptions = {}) {
@@ -240,7 +291,8 @@ function mount(options: MountOptions = {}) {
     host,
     remediation: options.remediation ?? LOW,
     mutationNonce: NONCE,
-    idPrefix: "callout"
+    idPrefix: "callout",
+    showWarning: options.showWarning
   });
 
   function button(role: "copy" | "run" | "cancel"): FakeElement | undefined {
@@ -260,6 +312,13 @@ function mount(options: MountOptions = {}) {
     );
   }
 
+  function status(): FakeElement | undefined {
+    const root = host.children[0];
+    return root.children.find(
+      (child) => child.className === "rad-command-action-status"
+    );
+  }
+
   // Three microtask turns drain fetch -> json -> state update.
   async function settle(): Promise<void> {
     for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
@@ -272,6 +331,7 @@ function mount(options: MountOptions = {}) {
     requests: browser.net.calls,
     errors: browser.logger.errors,
     button,
+    status,
     statusText,
     settle
   };
@@ -284,6 +344,17 @@ describe("createCommandAction", () => {
     expect(mounted.host.children).toHaveLength(1);
     expect(mounted.button("copy")?.textContent).toBe(COMMAND_COPY_LABEL);
     expect(mounted.button("cancel")).toBeUndefined();
+  });
+
+  it("hides a warning that the owning surface already renders", () => {
+    const remediation = remediationView("github-account-scopes", {
+      login: "octocat",
+      packages: "true"
+    });
+    const mounted = mount({ remediation, showWarning: false });
+
+    expect(fakeText(mounted.host)).not.toContain(remediation.warning);
+    expect(fakeText(mounted.host)).toContain(remediation.title);
   });
 
   it("copies the command and restores the label after the reset delay", async () => {
@@ -347,12 +418,16 @@ describe("createCommandAction", () => {
   it("takes a second confirmation before a high-impact command", async () => {
     const mounted = mount({ remediation: HIGH });
 
+    mounted.browser.document.activeElement = mounted.button("run");
     mounted.button("run")?.dispatch("click");
     expect(mounted.requests).toHaveLength(0);
     expect(mounted.button("run")?.textContent).toBe(HIGH.confirmLabel);
+    expect(mounted.button("run")?.focusCount).toBe(1);
     expect(mounted.button("cancel")).toBeDefined();
 
+    mounted.browser.document.activeElement = mounted.button("run");
     mounted.button("run")?.dispatch("click");
+    expect(mounted.status()?.focusCount).toBe(1);
     await mounted.settle();
 
     expect(mounted.requests).toHaveLength(1);
@@ -366,10 +441,12 @@ describe("createCommandAction", () => {
     const mounted = mount({ remediation: HIGH });
 
     mounted.button("run")?.dispatch("click");
+    mounted.browser.document.activeElement = mounted.button("cancel");
     mounted.button("cancel")?.dispatch("click");
 
     expect(mounted.requests).toHaveLength(0);
     expect(mounted.statusText()).toBe("Cancelled. Nothing was run.");
+    expect(mounted.status()?.focusCount).toBe(1);
   });
 
   it("reports the server's reason when the hand-off is refused", async () => {

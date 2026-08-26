@@ -396,7 +396,7 @@ describe("deploy dispatch environment and branch preflight", () => {
   });
 
   it("tells the user to commit the generated model before pushing it", async () => {
-    const { input, state, logs } = request();
+    const { input, state, logs } = request({ workspaceBranch: "feat" });
     const gh = recordingGh();
     const service = createDeployDispatchService(
       dependencies({
@@ -424,7 +424,7 @@ describe("deploy dispatch environment and branch preflight", () => {
       "━━ Deploying Radius application ━━",
       '❌ Branch "feat" has not been pushed to acme/widgets.',
       "   Generated files are not committed yet: .radius, app.bicep — pushing alone would not publish them.",
-      '   Commit and push, then redeploy:  git add -- .radius app.bicep\n    git commit -m "Add Radius application model" -- .radius app.bicep\n    git push -u origin feat'
+      '   Commit and push, then redeploy:  git add -- .radius app.bicep\ngit commit -m "Add Radius application model" -- .radius app.bicep\ngit push -u origin feat'
     ]);
     expect(gh.calls).toEqual([]);
   });
@@ -1707,7 +1707,7 @@ describe("deploy dispatch workflow publication and dispatch", () => {
   });
 
   it("also asks for a commit when an unresolvable ref meets an uncommitted model", async () => {
-    const { input, state, logs } = request();
+    const { input, state, logs } = request({ workspaceBranch: "feat" });
     const gh = recordingGh([
       { code: 1, stderr: "no ref found for: feat", stdout: "" }
     ]);
@@ -1728,6 +1728,30 @@ describe("deploy dispatch workflow publication and dispatch", () => {
     expect(state.deployError).toContain("git add -- .radius");
     expect(logs).toContain(
       "   Generated files are not committed yet: .radius — pushing alone would not publish them."
+    );
+  });
+
+  it("does not offer to commit generated files onto a different selected branch", async () => {
+    const { input, state, logs } = request({
+      workspaceBranch: "feature/worktree"
+    });
+    const service = createDeployDispatchService(
+      dependencies({
+        getBranchHeadSha: () => Promise.resolve(null),
+        getDefaultBranch: () => Promise.resolve("main"),
+        uncommittedGeneratedPaths: () => Promise.resolve([".radius"])
+      })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(state.deployError).not.toContain("git add");
+    expect(state.deployError).toContain(
+      "checked-out branch feature/worktree, not the selected branch feat"
+    );
+    expect(logs).toContain(
+      "   The generated files are in the checked-out branch feature/worktree, not the selected branch feat. Select feature/worktree or commit the files yourself before pushing feat."
     );
   });
 

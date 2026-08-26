@@ -199,6 +199,7 @@ describe("run-command callout styles", () => {
     impact: "high",
     runnable: true,
     unsupportedReason: "",
+    warning: "",
     confirmTitle: "Push this branch?",
     confirmBody: "This writes to the remote.",
     confirmLabel: "Push",
@@ -214,6 +215,7 @@ describe("run-command callout styles", () => {
     // assert the container pieces the idle callout does not emit.
     expect(SHELL_STYLE_CSS).toContain(".rad-command-action-buttons");
     expect(SHELL_STYLE_CSS).toContain(".rad-command-action-status");
+    expect(SHELL_STYLE_CSS).toContain(".rad-command-action-warning");
   });
 
   it("keeps the command block readable verbatim", () => {

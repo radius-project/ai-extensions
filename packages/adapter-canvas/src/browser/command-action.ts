@@ -1,7 +1,8 @@
 // Shared "run this command" affordance for canvas warnings and suggestions.
 //
 // Several surfaces tell the user to run a terminal command. This turns that
-// prose into an action: the command is shown verbatim, Copy always works, and
+// prose into an action: the command is shown verbatim, Copy works when there is
+// a command to copy, and
 // Run hands the command to the Copilot session through
 // `POST /api/run-remediation`.
 //
@@ -39,8 +40,12 @@ export interface CommandActionButtonView {
 }
 
 export interface CommandActionView {
+  readonly title: string;
   readonly command: string;
   readonly cwdNote: string;
+  readonly preRunWarning: string;
+  readonly sequenceWarning: string;
+  readonly copyVisible: boolean;
   readonly copy: CommandActionButtonView;
   readonly run: CommandActionButtonView;
   readonly cancelVisible: boolean;
@@ -105,17 +110,29 @@ export function commandActionView(
   const { remediation } = state;
   const status = statusFor(state);
   const runnable = remediation.runnable;
+  const confirmText =
+    (
+      remediation.warning !== "" &&
+      remediation.confirmBody.startsWith(remediation.warning)
+    ) ?
+      remediation.confirmBody.slice(remediation.warning.length).trim()
+    : remediation.confirmBody;
   return {
+    title: remediation.title,
     command: remediation.command,
     cwdNote:
       remediation.cwd === "workspace" ?
         "Runs in this repository's workspace."
       : "",
+    preRunWarning: remediation.warning,
+    sequenceWarning:
+      remediation.command.includes("\n") ?
+        "Run these commands in order. If one fails, stop and do not run the remaining commands."
+      : "",
+    copyVisible: remediation.command !== "",
     copy: {
       label: state.copied ? COMMAND_COPIED_LABEL : COMMAND_COPY_LABEL,
-      // Copy is never taken away: it is the fallback when the action cannot
-      // run at all, including when Radius does not offer to run this command.
-      disabled: false,
+      disabled: remediation.command === "",
       title: `Copy \`${remediation.command}\` to the clipboard`
     },
     run: {
@@ -127,7 +144,7 @@ export function commandActionView(
         : `Ask Copilot to run \`${remediation.command}\``
     },
     cancelVisible: runnable && state.phase === "confirming",
-    confirmText: state.phase === "confirming" ? remediation.confirmBody : "",
+    confirmText: state.phase === "confirming" ? confirmText : "",
     statusText:
       !runnable && status.text === "" ?
         remediation.unsupportedReason
@@ -162,6 +179,11 @@ export function commandActionSpecs(
 ): CommandActionSpecs {
   const children: ElementSpec[] = [
     {
+      tag: "div",
+      className: "rad-command-action-title",
+      text: view.title
+    },
+    {
       tag: "code",
       className: "rad-command-action-command",
       text: view.command
@@ -174,6 +196,22 @@ export function commandActionSpecs(
       text: view.cwdNote
     });
   }
+  if (view.preRunWarning !== "") {
+    children.push({
+      tag: "div",
+      className: "rad-command-action-warning",
+      attrs: { role: "note" },
+      text: view.preRunWarning
+    });
+  }
+  if (view.sequenceWarning !== "") {
+    children.push({
+      tag: "div",
+      className: "rad-command-action-warning",
+      attrs: { role: "note" },
+      text: view.sequenceWarning
+    });
+  }
   if (view.confirmText !== "") {
     children.push({
       tag: "div",
@@ -183,13 +221,17 @@ export function commandActionSpecs(
     });
   }
   const buttons: ElementSpec[] = [
-    {
-      tag: "button",
-      id: `${idPrefix}-copy`,
-      className: "rad-btn rad-btn--neutral",
-      text: view.copy.label,
-      attrs: { type: "button", title: view.copy.title }
-    },
+    ...(view.copyVisible ?
+      [
+        {
+          tag: "button",
+          id: `${idPrefix}-copy`,
+          className: "rad-btn rad-btn--neutral",
+          text: view.copy.label,
+          attrs: { type: "button", title: view.copy.title }
+        }
+      ]
+    : []),
     {
       tag: "button",
       id: `${idPrefix}-run`,
@@ -223,9 +265,11 @@ export function commandActionSpecs(
         null
       : {
           tag: "div",
+          id: `${idPrefix}-status`,
           className: "rad-command-action-status",
           attrs: {
             role: "status",
+            tabindex: "-1",
             style: `color:${TONE_COLORS[view.statusTone]}`
           },
           text: view.statusText
@@ -239,6 +283,8 @@ export interface CommandActionOptions {
   /** Nonce for `X-Radius-Mutation-Nonce`; the route rejects a request without it. */
   readonly mutationNonce: string;
   readonly idPrefix: string;
+  /** Hide a warning already rendered immediately above this callout. */
+  readonly showWarning?: boolean;
 }
 
 export interface CommandActionHandle {
@@ -275,27 +321,60 @@ export function createCommandAction(
   let disposed = false;
 
   function render(): void {
-    const view = commandActionView(state);
+    const active = context.dom.document.activeElement;
+    const activeId =
+      (
+        typeof active === "object" &&
+        active !== null &&
+        "id" in active &&
+        typeof active.id === "string"
+      ) ?
+        active.id
+      : "";
+    const projected = commandActionView(state);
+    const view =
+      options.showWarning === false ?
+        { ...projected, preRunWarning: "" }
+      : projected;
     const specs = commandActionSpecs(view, options.idPrefix);
     const root = buildElement(context.dom, specs.container);
     const row = buildElement(context.dom, {
       tag: "div",
       className: "rad-command-action-buttons"
     });
-    const listeners = [onCopy, onRun, onCancel];
-    specs.buttons.forEach((spec, index) => {
+    const focusTargets = new Map<string, DomElement>();
+    specs.buttons.forEach((spec) => {
       const button = buildElement(context.dom, spec);
       // Real buttons need the property, not only the attribute, for the click
       // to be suppressed.
       Reflect.set(button, "disabled", spec.attrs?.disabled !== undefined);
-      button.addEventListener("click", listeners[index]);
+      const listener =
+        spec.id?.endsWith("-copy") ? onCopy
+        : spec.id?.endsWith("-cancel") ? onCancel
+        : onRun;
+      button.addEventListener("click", listener);
+      if (spec.id !== undefined) focusTargets.set(spec.id, button);
       row.appendChild(button);
     });
     root.appendChild(row);
     if (specs.status !== null) {
-      root.appendChild(buildElement(context.dom, specs.status));
+      const status = buildElement(context.dom, specs.status);
+      if (specs.status.id !== undefined) {
+        focusTargets.set(specs.status.id, status);
+      }
+      root.appendChild(status);
     }
     options.host.replaceChildren(root);
+    if (activeId.startsWith(`${options.idPrefix}-`)) {
+      const preferred =
+        activeId === `${options.idPrefix}-run` && view.run.disabled ?
+          `${options.idPrefix}-status`
+        : activeId;
+      (
+        focusTargets.get(preferred) ??
+        focusTargets.get(`${options.idPrefix}-status`)
+      )?.focus();
+    }
   }
 
   function update(next: Partial<CommandActionState>): void {

@@ -98,6 +98,8 @@ export interface RemediationView {
   readonly runnable: boolean;
   /** Empty when `runnable`; otherwise why the action is offered disabled. */
   readonly unsupportedReason: string;
+  /** Concise impact shown before Run is clicked. Empty when none is needed. */
+  readonly warning: string;
   readonly confirmTitle: string;
   readonly confirmBody: string;
   readonly confirmLabel: string;
@@ -183,17 +185,23 @@ export const GENERATED_MODEL_PATHS = [
 
 export type GeneratedModelPath = (typeof GENERATED_MODEL_PATHS)[number];
 
-// Normalize a caller's requested paths to allowlisted members, in the
-// allowlist's own order and without duplicates. Anything unrecognized is
-// dropped: staging fewer generated files still produces a correct push, so an
-// unknown entry degrades the commit rather than refusing it. `branch` is what
-// this remediation genuinely cannot proceed without.
-function generatedPaths(value: unknown): readonly GeneratedModelPath[] {
+// Preserve whether a caller supplied any non-empty path. The builder uses that
+// distinction to fail closed instead of turning an all-unknown request into a
+// bare push that omits the generated model.
+function requestedGeneratedPaths(value: unknown): readonly string[] {
   const requested =
     Array.isArray(value) ? value
     : typeof value === "string" ? value.split(",")
     : [];
-  const wanted = new Set(requested.map((entry) => text(entry)));
+  return requested.map((entry) => text(entry)).filter((entry) => entry !== "");
+}
+
+// Retain allowlisted members in canonical order and without duplicates. Unknown
+// members are safe to drop only when at least one recognized path remains.
+function generatedPaths(
+  requested: readonly string[]
+): readonly GeneratedModelPath[] {
+  const wanted = new Set(requested);
   return GENERATED_MODEL_PATHS.filter((candidate) => wanted.has(candidate));
 }
 
@@ -231,10 +239,10 @@ function azureLoginArgv(tenantId: string): readonly string[] {
  * until PowerShell 7. Separate lines run correctly in PowerShell, cmd.exe, bash,
  * and zsh alike.
  *
- * Losing `&&` means a later command still runs after an earlier one fails. That
- * is the safer direction here: every multi-command remediation this registry
- * builds is idempotent and re-runnable, and the alternative is copy text that a
- * whole class of users cannot run at all.
+ * Losing `&&` means a later command can run after an earlier one fails. The UI
+ * and agent prompt therefore tell the user or agent to stop at the first
+ * failure. No portable shell operator can enforce that across Windows
+ * PowerShell 5.1, cmd.exe, bash, and zsh.
  */
 function displayLines(commands: readonly (readonly string[])[]): string {
   return commands
@@ -532,7 +540,25 @@ function buildGitPushBranch(
   // the caller tells us which generated paths are dirty and those are staged and
   // committed first, in the same remediation, rather than being left as a step
   // the user has to infer.
-  const paths = generatedPaths(params.paths);
+  const requestedPaths = requestedGeneratedPaths(params.paths);
+  const paths = generatedPaths(requestedPaths);
+  if (requestedPaths.length > 0 && paths.length === 0) {
+    return {
+      ok: false,
+      reason:
+        "Radius did not recognize any generated model path it can safely commit."
+    };
+  }
+  const currentBranch = branchName(params.currentBranch);
+  if (paths.length > 0 && currentBranch !== branch) {
+    return {
+      ok: false,
+      reason:
+        currentBranch === "" ?
+          "Radius could not confirm the checked-out branch, so it will not commit generated files."
+        : `The generated files are in the checked-out branch ${currentBranch}, not the selected branch ${branch}. Select ${currentBranch} or commit the files yourself before pushing ${branch}.`
+    };
+  }
   const commands: readonly (readonly string[])[] =
     paths.length > 0 ?
       [
@@ -545,7 +571,11 @@ function buildGitPushBranch(
     ok: true,
     remediation: {
       id: "git-push-branch",
-      params: { branch, paths: paths.join(",") },
+      params: {
+        branch,
+        paths: paths.join(","),
+        ...(paths.length > 0 ? { currentBranch } : {})
+      },
       title:
         paths.length > 0 ?
           "Commit the Radius model and push the branch"
@@ -628,6 +658,7 @@ export function remediationView(id: unknown, params: unknown): RemediationView {
       impact: "high",
       runnable: false,
       unsupportedReason: result.reason,
+      warning: "",
       confirmTitle: "",
       confirmBody: "",
       confirmLabel: "",
@@ -635,6 +666,13 @@ export function remediationView(id: unknown, params: unknown): RemediationView {
     };
   }
   const { remediation } = result;
+  const warning =
+    (
+      remediation.id === "github-packages-scope" ||
+      remediation.id === "github-account-scopes"
+    ) ?
+      `This will make @${remediation.params.login} the active GitHub CLI account if it is not already active.`
+    : "";
   return {
     id: remediation.id,
     params: remediation.params,
@@ -644,6 +682,7 @@ export function remediationView(id: unknown, params: unknown): RemediationView {
     impact: remediation.impact,
     runnable: true,
     unsupportedReason: "",
+    warning,
     confirmTitle: remediation.confirmTitle,
     confirmBody: remediation.confirmBody,
     confirmLabel: remediation.confirmLabel,

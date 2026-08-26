@@ -135,6 +135,9 @@ describe("run-command callout in Chromium", () => {
     await user.click(button(/^Run with Copilot$/));
 
     expect(screen.getByRole("alert").textContent).toBe(HIGH.confirmBody);
+    expect(document.activeElement).toBe(
+      button(new RegExp(`^${HIGH.confirmLabel}$`))
+    );
     expect(scope.requests).toEqual([]);
 
     await user.click(button(new RegExp(`^${HIGH.confirmLabel}$`)));
@@ -142,6 +145,7 @@ describe("run-command callout in Chromium", () => {
     await waitFor(() => {
       expect(scope.requests).toHaveLength(1);
     });
+    expect(document.activeElement).toBe(screen.getByRole("status"));
     expect(scope.requests[0].body).toMatchObject({
       id: "git-push-branch",
       confirmed: true
@@ -160,6 +164,7 @@ describe("run-command callout in Chromium", () => {
     );
     expect(scope.requests).toEqual([]);
     expect(screen.queryByRole("alert")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("status"));
   });
 
   it("reports the server's reason when the hand-off is refused", async () => {
@@ -223,7 +228,7 @@ describe("run-command callout in Chromium", () => {
     await user.click(run);
 
     expect(scope.requests).toEqual([]);
-    expect(button(/^Copy$/).disabled).toBe(false);
+    expect(screen.queryByRole("button", { name: /^Copy$/ })).toBeNull();
   });
 
   it("empties the host and ignores a late response once disposed", async () => {

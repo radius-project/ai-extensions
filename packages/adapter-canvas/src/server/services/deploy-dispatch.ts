@@ -6,6 +6,7 @@ import {
 } from "../../azure-oidc.js";
 import type { CanvasState, DeployErrorKind } from "../../shared.js";
 import { buildEnvironmentSuffix } from "@radius-project/core/platforms";
+import { remediationView } from "@radius-project/core/remediations";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
 import {
   needsWorkflowScope,
@@ -773,23 +774,13 @@ export function createDeployDispatchService(
     log: (message: string) => void
   ): Promise<void> => {
     const paths = await dependencies.uncommittedGeneratedPaths(entry);
-    const pushCmd = "git push -u origin " + deployRef;
     const dirty = paths.length > 0;
-    // Pushing publishes commits, not the working tree. When the generated model
-    // is still uncommitted, a bare push produces a branch the workflow can check
-    // out but cannot deploy from, so the staging and commit steps are named
-    // explicitly rather than left for the user to infer. With nothing pending,
-    // the guidance stays exactly as it was: a push is genuinely all that is
-    // needed, and naming a commit step would be wrong.
-    const steps =
-      dirty ?
-        "git add -- " +
-        paths.join(" ") +
-        '\n    git commit -m "Add Radius application model" -- ' +
-        paths.join(" ") +
-        "\n    " +
-        pushCmd
-      : pushCmd;
+    const remediation = remediationView("git-push-branch", {
+      branch: deployRef,
+      currentBranch: entry.state.workspaceBranch ?? "",
+      paths: paths.join(",")
+    });
+    const steps = remediation.runnable ? remediation.command : "";
     log('❌ Branch "' + deployRef + '" has not been pushed to ' + repo + ".");
     if (dirty) {
       log(
@@ -799,9 +790,11 @@ export function createDeployDispatchService(
       );
     }
     log(
-      (dirty ?
-        "   Commit and push, then redeploy:  "
-      : "   Push it and redeploy:  ") + steps
+      remediation.runnable ?
+        (dirty ?
+          "   Commit and push, then redeploy:  "
+        : "   Push it and redeploy:  ") + steps
+      : `   ${remediation.unsupportedReason}`
     );
     entry.state.deployError =
       'The branch "' +
@@ -809,7 +802,8 @@ export function createDeployDispatchService(
       "\" hasn't been pushed to " +
       repo +
       " yet, so there's nothing on GitHub to deploy." +
-      (dirty ?
+      (!remediation.runnable ? ` ${remediation.unsupportedReason}`
+      : dirty ?
         " The generated Radius files (" +
         paths.join(", ") +
         ") are not committed either, so pushing on its own would not publish " +

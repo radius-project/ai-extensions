@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { EnvironmentConfirmOptions } from "./confirm-dialog.js";
 import {
-  AZURE_CLI_ASSIST_PATH,
   CREDENTIAL_DELETE_PATH,
   CREDENTIAL_PROFILES_PATH,
   CREDENTIAL_SAVE_PATH,
@@ -10,7 +9,6 @@ import {
   payloadRemediation,
   VERIFY_AWS_PATH,
   VERIFY_AZURE_PATH,
-  azureCliAssistPromptView,
   credentialRowsMarkup,
   initializeCredentialsPane,
   isCredentialsPaneController,
@@ -68,12 +66,7 @@ function buildElements() {
     credGhcrRetry: createFakeInput("cred-ghcr-retry"),
     credVerifyAction: createFakeElement("cred-verify-action"),
     envVerifyModal: createFakeElement("env-verify-modal"),
-    envVerifyTitle: createFakeElement("env-verify-title"),
-    azureCliAssistModal: createFakeElement("azure-cli-assist-modal"),
-    azureCliAssistTitle: createFakeElement("azure-cli-assist-title"),
-    azureCliAssistMessage: createFakeElement("azure-cli-assist-message"),
-    azureCliAssistConfirm: createFakeElement("azure-cli-assist-confirm"),
-    azureCliAssistCancel: createFakeElement("azure-cli-assist-cancel")
+    envVerifyTitle: createFakeElement("env-verify-title")
   };
   elements.credForm.style.display = "none";
   elements.credPanelAws.style.display = "none";
@@ -493,20 +486,6 @@ describe("GitHub Packages identity parsing and rendering", () => {
       expect(view.commandVisible).toBe(view.remediation?.runnable === true);
     }
   );
-});
-
-describe("Azure CLI assist prompt copy", () => {
-  it("describes the install action", () => {
-    const view = azureCliAssistPromptView("install");
-    expect(view.title).toBe("Install Azure CLI?");
-    expect(view.confirmLabel).toBe("Ask Copilot to install");
-  });
-
-  it("describes the login action", () => {
-    const view = azureCliAssistPromptView("login");
-    expect(view.title).toBe("Start Azure login?");
-    expect(view.confirmLabel).toBe("Start Azure login");
-  });
 });
 
 describe("credentials pane initialization", () => {
@@ -1136,181 +1115,6 @@ describe("verify remediation callouts", () => {
   });
 });
 
-describe("Azure CLI assist prompt", () => {
-  async function openFormReadyToVerify() {
-    const page = renderPage();
-    page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
-      jsonResponse({ actingLogin: "octocat", actingHasPackages: true })
-    );
-    page.elements.newCredBtn.dispatch("click");
-    await flushPromises();
-    page.elements.credNameInput.value = "acme";
-    page.elements.azTenantId.value = "tenant-in-form";
-    page.elements.azSubId.value = "sub-in-form";
-    return page;
-  }
-
-  it("prompts to sign in for az-login-required and confirms the flow", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({
-        error: "Not logged in.",
-        code: "az-login-required",
-        tenantId: "server-tenant"
-      })
-    );
-    page.elements.btnVerifyAzure.dispatch("click");
-    await flushPromises();
-    expect(page.elements.azureCliAssistModal.style.display).toBe("flex");
-    expect(page.elements.azureCliAssistTitle.textContent).toBe(
-      "Start Azure login?"
-    );
-    expect(page.elements.azureCliAssistConfirm.focusCount).toBe(1);
-
-    page.browser.net.handle(AZURE_CLI_ASSIST_PATH, (init) => {
-      expect(JSON.parse(String(init?.body))).toEqual({
-        action: "login",
-        tenantId: "server-tenant"
-      });
-      return jsonResponse({ message: "Signing you in…" });
-    });
-    page.elements.azureCliAssistConfirm.dispatch("click");
-    expect(page.elements.azureCliAssistModal.style.display).toBe("none");
-    await flushPromises();
-    expect(page.elements.credVerifyStatus.innerHTML).toContain(
-      "Signing you in…"
-    );
-  });
-
-  it("prompts to install for az-cli-missing", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({ error: "Azure CLI missing.", code: "az-cli-missing" })
-    );
-    page.elements.btnVerifyAzure.dispatch("click");
-    await flushPromises();
-    expect(page.elements.azureCliAssistTitle.textContent).toBe(
-      "Install Azure CLI?"
-    );
-  });
-
-  it("shows a default info message when the assist response omits one", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({ error: "nope", code: "az-cli-missing" })
-    );
-    page.elements.btnVerifyAzure.dispatch("click");
-    await flushPromises();
-    page.browser.net.handle(AZURE_CLI_ASSIST_PATH, () => jsonResponse({}));
-    page.elements.azureCliAssistConfirm.dispatch("click");
-    await flushPromises();
-    expect(page.elements.credVerifyStatus.innerHTML).toContain(
-      "Copilot is helping with Azure CLI setup"
-    );
-  });
-
-  it("shows the assist error with the fallback message appended", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({ error: "nope", code: "az-cli-missing" })
-    );
-    page.elements.btnVerifyAzure.dispatch("click");
-    await flushPromises();
-    page.browser.net.handle(AZURE_CLI_ASSIST_PATH, () =>
-      jsonResponse({ error: "assist failed" })
-    );
-    page.elements.azureCliAssistConfirm.dispatch("click");
-    await flushPromises();
-    expect(page.elements.credVerifyStatus.innerHTML).toContain("assist failed");
-    expect(page.elements.credVerifyStatus.innerHTML).toContain("nope");
-  });
-
-  it("shows a generic error without the raw exception on an assist network failure", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({ error: "nope", code: "az-cli-missing" })
-    );
-    page.elements.btnVerifyAzure.dispatch("click");
-    await flushPromises();
-    page.browser.net.handle(AZURE_CLI_ASSIST_PATH, () =>
-      Promise.reject(new Error("raw secret detail"))
-    );
-    page.elements.azureCliAssistConfirm.dispatch("click");
-    await flushPromises();
-    expect(page.elements.credVerifyStatus.innerHTML).toContain(
-      "Could not reach Copilot"
-    );
-    expect(page.elements.credVerifyStatus.innerHTML).not.toContain(
-      "raw secret detail"
-    );
-  });
-
-  it("cancels and shows the fallback message when one is pending", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({ error: "nope", code: "az-cli-missing" })
-    );
-    page.elements.btnVerifyAzure.dispatch("click");
-    await flushPromises();
-    page.elements.azureCliAssistCancel.dispatch("click");
-    expect(page.elements.azureCliAssistModal.style.display).toBe("none");
-    expect(page.elements.credVerifyStatus.innerHTML).toContain("nope");
-  });
-
-  it("cancels quietly when there is no pending assist request", () => {
-    const page = renderPage();
-    expect(() =>
-      page.elements.azureCliAssistCancel.dispatch("click")
-    ).not.toThrow();
-    expect(() =>
-      page.elements.azureCliAssistConfirm.dispatch("click")
-    ).not.toThrow();
-  });
-
-  it("ignores a stale assist response after the form context changes", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({ error: "nope", code: "az-cli-missing" })
-    );
-    page.elements.btnVerifyAzure.dispatch("click");
-    await flushPromises();
-    const deferred = createDeferred<HttpResponse>();
-    page.browser.net.handle(AZURE_CLI_ASSIST_PATH, () => deferred.promise);
-    page.elements.azureCliAssistConfirm.dispatch("click");
-
-    // Reopen (bumps the form token) before the assist response arrives.
-    page.elements.cancelCredBtn.dispatch("click");
-    page.browser.net.handle(`${CREDENTIAL_PROFILES_PATH}?repo=octo%2Fapp`, () =>
-      jsonResponse({ profiles: [] })
-    );
-    await flushPromises();
-    page.elements.newCredBtn.dispatch("click");
-    const statusBefore = page.elements.credVerifyStatus.innerHTML;
-
-    deferred.resolve(jsonResponse({ message: "late" }));
-    await flushPromises();
-    expect(page.elements.credVerifyStatus.innerHTML).toBe(statusBefore);
-  });
-
-  it("ignores an assist network failure that resolves after teardown", async () => {
-    const page = await openFormReadyToVerify();
-    page.browser.net.handle(VERIFY_AZURE_PATH, () =>
-      jsonResponse({ error: "nope", code: "az-cli-missing" })
-    );
-    page.elements.btnVerifyAzure.dispatch("click");
-    await flushPromises();
-    const deferred = createDeferred<HttpResponse>();
-    page.browser.net.handle(AZURE_CLI_ASSIST_PATH, () => deferred.promise);
-    page.elements.azureCliAssistConfirm.dispatch("click");
-    const statusBefore = page.elements.credVerifyStatus.innerHTML;
-
-    page.controller.teardown();
-    deferred.reject(new Error("late network failure"));
-    await expect(flushPromises()).resolves.not.toThrow();
-    expect(page.elements.credVerifyStatus.innerHTML).toBe(statusBefore);
-  });
-});
-
 describe("Azure verification", () => {
   async function openForm(page: ReturnType<typeof renderPage>) {
     page.browser.net.handle(`${GITHUB_IDENTITY_PATH}?fresh=1`, () =>
@@ -1341,6 +1145,45 @@ describe("Azure verification", () => {
       "Tenant ID and a Subscription ID"
     );
   });
+
+  it.each([
+    [
+      "az-login-required",
+      { id: "azure-cli-login", params: {} },
+      "Sign in to Azure CLI",
+      "az login --use-device-code"
+    ],
+    [
+      "az-cli-missing",
+      { id: "azure-cli-install", params: {} },
+      "Install Azure CLI and sign in",
+      "az login --use-device-code"
+    ]
+  ])(
+    "renders %s through the shared remediation callout",
+    async (code, remediation, title, command) => {
+      const page = renderPage();
+      await openForm(page);
+      page.elements.credNameInput.value = "acme";
+      page.elements.azTenantId.value = "t";
+      page.elements.azSubId.value = "s";
+      page.browser.net.handle(VERIFY_AZURE_PATH, () =>
+        jsonResponse({
+          error: "Azure authentication needs attention.",
+          code,
+          remediation
+        })
+      );
+
+      page.elements.btnVerifyAzure.dispatch("click");
+      await flushPromises();
+
+      const action = fakeText(page.elements.credVerifyAction);
+      expect(action).toContain(title);
+      expect(action).toContain(command);
+      expect(action).toContain("Run with Copilot");
+    }
+  );
 
   it("verifies successfully, fills in server-confirmed ids, and enables save", async () => {
     const page = renderPage();
@@ -1388,7 +1231,7 @@ describe("Azure verification", () => {
     expect(page.elements.credVerifyStatus.innerHTML).toContain(
       "subscription not found"
     );
-    expect(page.elements.azureCliAssistModal.style.display).not.toBe("flex");
+    expect(page.elements.credVerifyAction.children).toHaveLength(0);
   });
 
   it("shows a generic error without the raw exception on a network failure", async () => {

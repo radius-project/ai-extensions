@@ -563,7 +563,8 @@ export function initializeCredentialProfilesPanel(
       host,
       remediation,
       mutationNonce: deps.mutationNonce || "",
-      idPrefix: "env-gh-repair"
+      idPrefix: "env-gh-repair",
+      showWarning: false
     });
   };
 
@@ -750,7 +751,9 @@ export function initializeCredentialProfilesPanel(
               "Ready to configure deployments"
             : "Additional GitHub access is required")
         },
-        ...(remediation ? [{ tag: "div", text: remediation.confirmBody }] : [])
+        ...(remediation?.warning ?
+          [{ tag: "div", text: remediation.warning }]
+        : [])
       ]);
       noteEl.style.color =
         githubReadiness.ready ?

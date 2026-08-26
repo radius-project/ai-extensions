@@ -818,7 +818,15 @@ export function initializeDeployingPage(
     // `paths` names the generated files the server found uncommitted. Passing
     // it through turns the offer into commit-then-push, because pushing alone
     // would publish the branch without the model the deploy reads.
-    const remediation = remediationView("git-push-branch", { branch, paths });
+    const remediation = remediationView("git-push-branch", {
+      branch,
+      currentBranch: options.branch,
+      paths
+    });
+    if (!remediation.runnable) {
+      host.textContent = remediation.unsupportedReason;
+      return;
+    }
     pushAction = createCommandAction(context, {
       host,
       remediation,

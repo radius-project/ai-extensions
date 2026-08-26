@@ -447,6 +447,7 @@ describe("git push remediation", () => {
     it("stages and commits the generated model before pushing", () => {
       const remediation = build("git-push-branch", {
         branch: "feature/login",
+        currentBranch: "feature/login",
         paths: ".radius,app.bicep"
       });
 
@@ -470,6 +471,7 @@ describe("git push remediation", () => {
       );
       expect(remediation.params).toEqual({
         branch: "feature/login",
+        currentBranch: "feature/login",
         paths: ".radius,app.bicep"
       });
       expect(remediation.title).toBe(
@@ -509,6 +511,7 @@ describe("git push remediation", () => {
 
         const remediation = build("git-push-branch", {
           branch: "feature/login",
+          currentBranch: "feature/login",
           paths: "app.bicep"
         });
         const [add, commit] = remediation.argv;
@@ -527,6 +530,7 @@ describe("git push remediation", () => {
     it("accepts an array of paths", () => {
       const remediation = build("git-push-branch", {
         branch: "main",
+        currentBranch: "main",
         paths: [".radius"]
       });
 
@@ -536,6 +540,7 @@ describe("git push remediation", () => {
     it("normalizes paths to the allowlist order and drops duplicates", () => {
       const remediation = build("git-push-branch", {
         branch: "main",
+        currentBranch: "main",
         paths: "app.origin.json,.radius,.radius"
       });
 
@@ -553,26 +558,36 @@ describe("git push remediation", () => {
       ["a glob", "*"],
       ["the worktree root", "."],
       ["an unrelated source path", "src/index.ts"],
-      ["a near-miss prefix", ".radiusx"],
-      ["an empty entry", ""]
-    ])("drops %s rather than staging it", (_label, path) => {
-      const remediation = build("git-push-branch", {
+      ["a near-miss prefix", ".radiusx"]
+    ])("refuses %s rather than staging it", (_label, path) => {
+      const result = buildRemediation("git-push-branch", {
         branch: "main",
+        currentBranch: "main",
         paths: path
       });
 
-      // A path outside the allowlist degrades to a plain push: staging fewer
-      // generated files still pushes correctly, and nothing unallowlisted may
-      // ever reach a `git add`.
+      expect(result).toEqual({
+        ok: false,
+        reason:
+          "Radius did not recognize any generated model path it can safely commit."
+      });
+    });
+
+    it("treats an empty path entry as no generated paths", () => {
+      const remediation = build("git-push-branch", {
+        branch: "main",
+        paths: ""
+      });
+
       expect(remediation.argv).toEqual([
         ["git", "push", "-u", "origin", "main"]
       ]);
-      expect(remediation.params.paths).toBe("");
     });
 
     it("keeps the allowlisted members of a partly invalid list", () => {
       const remediation = build("git-push-branch", {
         branch: "main",
+        currentBranch: "main",
         paths: "src/index.ts,.radius"
       });
 
@@ -595,6 +610,7 @@ describe("git push remediation", () => {
       expect(
         buildRemediation("git-push-branch", {
           branch: "--force",
+          currentBranch: "--force",
           paths: ".radius"
         }).ok
       ).toBe(false);
@@ -603,12 +619,42 @@ describe("git push remediation", () => {
     it("exposes the staged paths on the view", () => {
       const view = remediationView("git-push-branch", {
         branch: "main",
+        currentBranch: "main",
         paths: ".radius"
       });
 
       expect(view.runnable).toBe(true);
       expect(view.params.paths).toBe(".radius");
       expect(view.command).toContain("git add -- .radius");
+    });
+
+    it("refuses to commit generated files from a different checked-out branch", () => {
+      const view = remediationView("git-push-branch", {
+        branch: "feature/selected",
+        currentBranch: "feature/worktree",
+        paths: ".radius"
+      });
+
+      expect(view.runnable).toBe(false);
+      expect(view.unsupportedReason).toContain(
+        "checked-out branch feature/worktree"
+      );
+      expect(view.unsupportedReason).toContain(
+        "selected branch feature/selected"
+      );
+    });
+
+    it("refuses to commit when the checked-out branch is unknown", () => {
+      const result = buildRemediation("git-push-branch", {
+        branch: "feature/selected",
+        paths: ".radius"
+      });
+
+      expect(result).toEqual({
+        ok: false,
+        reason:
+          "Radius could not confirm the checked-out branch, so it will not commit generated files."
+      });
     });
   });
 
@@ -650,6 +696,10 @@ describe("remediationView", () => {
       impact: remediation.impact,
       runnable: true,
       unsupportedReason: "",
+      warning:
+        id === "github-packages-scope" || id === "github-account-scopes" ?
+          `This will make @${remediation.params.login} the active GitHub CLI account if it is not already active.`
+        : "",
       confirmTitle: remediation.confirmTitle,
       confirmBody: remediation.confirmBody,
       confirmLabel: remediation.confirmLabel,
@@ -673,7 +723,8 @@ describe("remediationView", () => {
         "params",
         "runnable",
         "title",
-        "unsupportedReason"
+        "unsupportedReason",
+        "warning"
       ].sort()
     );
   });
@@ -775,6 +826,7 @@ describe("remediationSessionMessage", () => {
     const message = remediationSessionMessage(
       build("git-push-branch", {
         branch: "feature/login",
+        currentBranch: "feature/login",
         paths: ".radius"
       })
     );
@@ -801,7 +853,11 @@ describe("remediationSessionMessage", () => {
     // portability, so the stop-on-failure condition has to be stated.
     for (const remediation of [
       build("github-account-scopes", { login: "octocat", packages: "true" }),
-      build("git-push-branch", { branch: "feature/login", paths: ".radius" })
+      build("git-push-branch", {
+        branch: "feature/login",
+        currentBranch: "feature/login",
+        paths: ".radius"
+      })
     ]) {
       expect(remediationSessionMessage(remediation).prompt).toContain(
         "If a command fails, stop and report it rather than running the rest."
@@ -870,7 +926,14 @@ describe("remediationSessionMessage", () => {
   // agent went and deployed instead of stopping at the push. Retrying the
   // deploy is the user's action in the canvas, which is what the callout says.
   it.each([
-    ["with generated paths", { branch: "feature/login", paths: ".radius" }],
+    [
+      "with generated paths",
+      {
+        branch: "feature/login",
+        currentBranch: "feature/login",
+        paths: ".radius"
+      }
+    ],
     ["with a bare push", { branch: "feature/login" }]
   ])("never asks the agent to deploy after a push %s", (_name, params) => {
     const message = remediationSessionMessage(build("git-push-branch", params));

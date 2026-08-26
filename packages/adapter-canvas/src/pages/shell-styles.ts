@@ -314,6 +314,7 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     border: 1px solid var(--rad-stroke);
     border-radius: var(--rad-radius);
   }
+  .rad-command-action-title { margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--rad-text); }
   /* The command is the point of the callout: it must be readable verbatim and
      stay copyable, so it wraps on whitespace rather than being clipped, and a
      multi-command remediation keeps its newlines. */
@@ -325,6 +326,9 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     white-space: pre-wrap; overflow-wrap: anywhere;
   }
   .rad-command-action-cwd { margin-top: 6px; font-size: 11px; color: var(--rad-text-tertiary); }
+  .rad-command-action-warning {
+    margin-top: 8px; font-size: 12px; line-height: 1.45; color: var(--rad-warning);
+  }
   .rad-command-action-confirm {
     margin-top: 10px; padding: 8px 10px;
     background: var(--rad-warning-bg); color: var(--rad-text);

@@ -179,7 +179,11 @@ describe("run-remediation real-loopback HIT", () => {
       entry.baseUrl,
       {
         id: "git-push-branch",
-        params: { branch: BRANCH, paths: ".radius,app.bicep" },
+        params: {
+          branch: BRANCH,
+          currentBranch: BRANCH,
+          paths: ".radius,app.bicep"
+        },
         confirmed: true
       },
       browserHeaders(entry.baseUrl)
@@ -199,31 +203,23 @@ describe("run-remediation real-loopback HIT", () => {
     ["a glob", "*"],
     ["the worktree root", "."],
     ["an unrelated source path", "src/secrets.ts"]
-  ])(
-    "never stages %s a client asks for, and pushes without it",
-    async (_label, path) => {
-      const harness = start();
-      const entry = await container!.getOrCreate("panel-a");
+  ])("refuses %s a client asks to stage", async (_label, path) => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
 
-      const response = await post(
-        entry.baseUrl,
-        {
-          id: "git-push-branch",
-          params: { branch: BRANCH, paths: path },
-          confirmed: true
-        },
-        browserHeaders(entry.baseUrl)
-      );
+    const response = await post(
+      entry.baseUrl,
+      {
+        id: "git-push-branch",
+        params: { branch: BRANCH, currentBranch: BRANCH, paths: path },
+        confirmed: true
+      },
+      browserHeaders(entry.baseUrl)
+    );
 
-      // The registry rebuilds the command from an allowlist, so a path the
-      // client invented is dropped entirely rather than reaching a `git add`.
-      expect(response.status).toBe(200);
-      expect(harness.sent[0].prompt).not.toContain("git add");
-      expect(harness.sent[0].prompt).toContain(
-        `Run \`git push -u origin ${BRANCH}\` in this Copilot session.`
-      );
-    }
-  );
+    expect(response.status).toBe(400);
+    expect(harness.sent).toHaveLength(0);
+  });
 
   it.each([
     ["an unknown id", { id: "wipe-the-disk" }],

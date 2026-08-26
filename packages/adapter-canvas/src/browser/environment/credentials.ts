@@ -30,7 +30,6 @@ export const CREDENTIAL_PROFILES_PATH = "/api/credential-profiles";
 export const CREDENTIAL_DELETE_PATH = "/api/delete-credential-profile";
 export const CREDENTIAL_SAVE_PATH = "/api/save-credential-profile";
 export const GITHUB_IDENTITY_PATH = "/api/github-identity";
-export const AZURE_CLI_ASSIST_PATH = "/api/azure-cli-assist";
 export const VERIFY_AZURE_PATH = "/api/verify-azure-login";
 export const VERIFY_AWS_PATH = "/api/verify-aws-login";
 /**
@@ -101,14 +100,6 @@ export interface GitHubAccessView {
   commandVisible: boolean;
   remediation: RemediationView | null;
   retryVisible: boolean;
-}
-
-export type AzureCliAssistAction = "install" | "login";
-
-export interface AzureCliAssistPromptView {
-  title: string;
-  message: string;
-  confirmLabel: string;
 }
 
 export interface CredentialsPaneDependencies {
@@ -322,25 +313,6 @@ export function renderGitHubAccessView(
   };
 }
 
-export function azureCliAssistPromptView(
-  action: AzureCliAssistAction
-): AzureCliAssistPromptView {
-  if (action === "install") {
-    return {
-      title: "Install Azure CLI?",
-      message:
-        "Azure CLI is not installed. Would you like Copilot to attempt to install it and then start Azure login?",
-      confirmLabel: "Ask Copilot to install"
-    };
-  }
-  return {
-    title: "Start Azure login?",
-    message:
-      "No active Azure session was found. Would you like Copilot to start the Azure login flow?",
-    confirmLabel: "Start Azure login"
-  };
-}
-
 function setButtonState(
   button: DomElement,
   disabled: boolean,
@@ -406,11 +378,6 @@ export function initializeCredentialsPane(
   const credVerifyAction = context.dom.byId("cred-verify-action");
   const envVerifyModal = context.dom.byId("env-verify-modal");
   const envVerifyTitle = context.dom.byId("env-verify-title");
-  const azureCliAssistModal = context.dom.byId("azure-cli-assist-modal");
-  const azureCliAssistTitle = context.dom.byId("azure-cli-assist-title");
-  const azureCliAssistMessage = context.dom.byId("azure-cli-assist-message");
-  const azureCliAssistConfirm = context.dom.byId("azure-cli-assist-confirm");
-  const azureCliAssistCancel = context.dom.byId("azure-cli-assist-cancel");
 
   if (
     !credLanding ||
@@ -444,12 +411,7 @@ export function initializeCredentialsPane(
     !credGhcrRetry ||
     !credVerifyAction ||
     !envVerifyModal ||
-    !envVerifyTitle ||
-    !azureCliAssistModal ||
-    !azureCliAssistTitle ||
-    !azureCliAssistMessage ||
-    !azureCliAssistConfirm ||
-    !azureCliAssistCancel
+    !envVerifyTitle
   ) {
     return NOOP_TEARDOWN;
   }
@@ -462,7 +424,7 @@ export function initializeCredentialsPane(
   let tableAbort = context.net.createAbort();
   // Bumped whenever the form context changes (opening/reopening the form for
   // a different profile, returning to the landing table, or restarting
-  // verification). Async verify/save/assist responses compare against this
+  // verification). Async verify/save responses compare against this
   // token so a response for an earlier form/profile/provider can never
   // overwrite the state of whatever the user is looking at now.
   let formToken = 0;
@@ -470,11 +432,6 @@ export function initializeCredentialsPane(
   let credVerified: VerifiedCredentials | null = null;
   let credPackagesVerified = false;
   let formContext: "standalone" | "wizard" = "standalone";
-  let pendingAssist: {
-    action: AzureCliAssistAction;
-    tenantId: string;
-    fallbackMessage: string;
-  } | null = null;
   let active = true;
 
   const updateSaveState = (): void => {
@@ -529,11 +486,6 @@ export function initializeCredentialsPane(
       message
     )}</span>`;
     mountCommandAction(credVerifyAction, remediation, "cred-verify");
-  };
-
-  const verifyInfo = (message: string): void => {
-    credVerifyStatus.style.display = "block";
-    credVerifyStatus.innerHTML = `<span>${escapeBrowserHtml(message)}</span>`;
   };
 
   const markVerified = (verified: VerifiedCredentials): void => {
@@ -708,64 +660,6 @@ export function initializeCredentialsPane(
     credNameInput.focus();
   };
 
-  const closeAssistPrompt = (): void => {
-    azureCliAssistModal.style.display = "none";
-    pendingAssist = null;
-  };
-
-  const showAssistPrompt = (
-    action: AzureCliAssistAction,
-    tenantId: string,
-    fallbackMessage: string
-  ): void => {
-    pendingAssist = { action, tenantId, fallbackMessage };
-    const view = azureCliAssistPromptView(action);
-    azureCliAssistTitle.textContent = view.title;
-    azureCliAssistMessage.textContent = view.message;
-    azureCliAssistConfirm.textContent = view.confirmLabel;
-    azureCliAssistModal.style.display = "flex";
-    azureCliAssistConfirm.focus();
-  };
-
-  // The sole caller (the confirm handler below) only ever supplies the
-  // original, non-empty Azure verification error as fallbackMessage, so it is
-  // always appended rather than conditionally included.
-  const requestAzureCliAssist = (
-    action: AzureCliAssistAction,
-    tenantId: string,
-    fallbackMessage: string
-  ): void => {
-    const token = formToken;
-    void context.net
-      .fetch(AZURE_CLI_ASSIST_PATH, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, tenantId })
-      })
-      .then((response) => response.json())
-      .then(
-        (payload) => {
-          if (!active || token !== formToken) return;
-          const error = readString(payload, "error");
-          if (error !== "") {
-            verifyError(`${error} ${fallbackMessage}`);
-            return;
-          }
-          const message = readString(payload, "message");
-          verifyInfo(
-            message ||
-              "Copilot is helping with Azure CLI setup. After it finishes, click Verify Credentials again."
-          );
-        },
-        () => {
-          if (!active || token !== formToken) return;
-          verifyError(
-            `Could not reach Copilot for Azure CLI help. ${fallbackMessage}`
-          );
-        }
-      );
-  };
-
   const deleteCredentialProfile = (name: string, button: DomElement): void => {
     setButtonState(button, true, "Deleting…");
     void context.net
@@ -892,24 +786,6 @@ export function initializeCredentialsPane(
   });
 
   scope.on(credGhcrRetry, "click", () => loadGitHubAccess());
-  scope.on(azureCliAssistCancel, "click", () => {
-    const fallbackMessage = pendingAssist?.fallbackMessage ?? "";
-    closeAssistPrompt();
-    if (fallbackMessage) verifyError(fallbackMessage);
-  });
-
-  scope.on(azureCliAssistConfirm, "click", () => {
-    const request = pendingAssist;
-    closeAssistPrompt();
-    if (request) {
-      requestAzureCliAssist(
-        request.action,
-        request.tenantId,
-        request.fallbackMessage
-      );
-    }
-  });
-
   scope.on(btnVerifyAzure, "click", () => {
     const profileName = credNameInput.value.trim();
     const tenantId = azTenantId.value.trim();
@@ -945,17 +821,6 @@ export function initializeCredentialsPane(
           btnVerifyAzure.textContent = "Verify Credentials";
           const error = readString(payload, "error");
           if (error !== "") {
-            const code = readString(payload, "code");
-            const returnedTenantId =
-              readString(payload, "tenantId") || tenantId;
-            if (code === "az-login-required") {
-              showAssistPrompt("login", returnedTenantId, error);
-              return;
-            }
-            if (code === "az-cli-missing") {
-              showAssistPrompt("install", returnedTenantId, error);
-              return;
-            }
             verifyError(error, payloadRemediation(payload));
             return;
           }
