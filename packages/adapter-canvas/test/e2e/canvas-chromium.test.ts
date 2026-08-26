@@ -726,7 +726,9 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(resourceGroup).toContainText("rg-selected");
     await resourceGroup.selectOption("rg-selected");
     await cluster.selectOption("aks-selected");
+    await expect(namespace).toBeDisabled();
     await expect(namespace).toContainText("selected-team");
+    await expect(namespace).toBeEnabled();
     await namespace.selectOption("selected-team");
 
     await expect
@@ -764,10 +766,12 @@ test.describe("Radius Canvas in Chromium", () => {
     }
     await canvas.setScenario(scenario);
     await page.getByRole("button", { name: "Refresh" }).click();
+    await expect(namespace).toBeDisabled();
 
     await expect(page.locator("#azure-discover-status")).toContainText(
       "Discovery failed: selected cluster unavailable"
     );
+    await expect(namespace).toBeEnabled();
     await expect(namespace.locator("option")).toHaveCount(2);
     await expect(namespace).not.toContainText("default");
     await expect(namespace).not.toContainText("selected-team");

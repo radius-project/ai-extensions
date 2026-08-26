@@ -846,6 +846,10 @@ export function initializeDiscoveryPanel(
     const refreshButton = context.dom.inputById(
       provider === "azure" ? "azure-refresh-btn" : "aws-refresh-btn"
     );
+    const namespaceSelect =
+      provider === "azure" ?
+        context.dom.selectById("azure-namespace-select")
+      : null;
     const request = discoveryRequests[provider];
     const previousAccount = discoveryAccounts[provider];
     const accountChanged =
@@ -890,6 +894,7 @@ export function initializeDiscoveryPanel(
       // because callers enable Refresh optimistically when a profile is
       // selected, which would otherwise leave it clickable mid-discovery.
       if (refreshButton) refreshButton.disabled = true;
+      if (namespaceSelect) namespaceSelect.disabled = true;
       return;
     }
     // A different account supersedes whatever is outstanding: claim the newest
@@ -897,6 +902,7 @@ export function initializeDiscoveryPanel(
     const token = ++request.token;
     request.identity = identity;
     if (refreshButton) refreshButton.disabled = true;
+    if (namespaceSelect) namespaceSelect.disabled = true;
     const isStale = (): boolean => !scope.active || request.token !== token;
     const statusEl = context.dom.byId(
       provider === "azure" ? "azure-discover-status" : "aws-discover-status"
@@ -1010,6 +1016,7 @@ export function initializeDiscoveryPanel(
       if (request.token === token) {
         request.identity = null;
         if (scope.active && refreshButton) refreshButton.disabled = false;
+        if (scope.active && namespaceSelect) namespaceSelect.disabled = false;
       }
     }
   };

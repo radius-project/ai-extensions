@@ -1576,10 +1576,28 @@ describe("discoverResources", () => {
     ).toEqual(["", "aks-1", "__custom__"]);
   });
 
-  it("keeps Refresh disabled when a duplicate request is suppressed", async () => {
+  it("suppresses a duplicate Azure discovery when the namespace select is absent", async () => {
+    const browser = createFakeBrowser();
+    let resolveFirst: (value: HttpResponse) => void = () => {};
+    const first = new Promise<HttpResponse>((resolve) => {
+      resolveFirst = resolve;
+    });
+    browser.net.handle(DISCOVER_ENDPOINT, () => first);
+    const handle = initializeDiscoveryPanel(browser.context);
+    const firstCall = handle?.discoverResources("azure", "", "");
+
+    await expect(
+      handle?.discoverResources("azure", "", "")
+    ).resolves.toBeUndefined();
+    resolveFirst(discoverResponse(azurePayload()));
+    await firstCall;
+  });
+
+  it("keeps Azure refresh controls disabled when a duplicate request is suppressed", async () => {
     const page = renderDiscoveryPage();
     const refreshBtn = createFakeInput("azure-refresh-btn");
     page.browser.document.add(refreshBtn);
+    const namespaceSelect = page.selects["azure-namespace-select"];
     let resolveFirst: (value: HttpResponse) => void = () => {};
     const first = new Promise<HttpResponse>((resolve) => {
       resolveFirst = resolve;
@@ -1590,13 +1608,16 @@ describe("discoverResources", () => {
     // Profile selection optimistically re-enables Refresh before delegating
     // back into discovery; the suppressed duplicate must re-assert it.
     refreshBtn.disabled = false;
+    namespaceSelect.disabled = false;
     await handle?.discoverResources("azure", "sub-1", "tenant-1");
     expect(refreshBtn.disabled).toBe(true);
+    expect(namespaceSelect.disabled).toBe(true);
 
     resolveFirst(discoverResponse(azurePayload()));
     await firstCall;
     await flushPromises();
     expect(refreshBtn.disabled).toBe(false);
+    expect(namespaceSelect.disabled).toBe(false);
   });
 
   it("supersedes an in-flight azure discovery when the account changes", async () => {
@@ -1675,10 +1696,11 @@ describe("discoverResources", () => {
     expect(page.selects["azure-rg-select"].value).toBe("rg-2");
   });
 
-  it("leaves Refresh disabled when a superseded response settles first", async () => {
+  it("leaves Azure refresh controls disabled when a superseded response settles first", async () => {
     const page = renderDiscoveryPage();
     const refreshBtn = createFakeInput("azure-refresh-btn");
     page.browser.document.add(refreshBtn);
+    const namespaceSelect = page.selects["azure-namespace-select"];
     let resolveFirst: (value: HttpResponse) => void = () => {};
     let resolveSecond: (value: HttpResponse) => void = () => {};
     const first = new Promise<HttpResponse>((resolve) => {
@@ -1702,11 +1724,13 @@ describe("discoverResources", () => {
     // The newer request still owns the panel, so its predecessor completing
     // must not hand Refresh back to the user.
     expect(refreshBtn.disabled).toBe(true);
+    expect(namespaceSelect.disabled).toBe(true);
 
     resolveSecond(discoverResponse(azurePayload()));
     await secondCall;
     await flushPromises();
     expect(refreshBtn.disabled).toBe(false);
+    expect(namespaceSelect.disabled).toBe(false);
   });
 
   it("re-runs a discovery for an account whose earlier request already finished", async () => {
