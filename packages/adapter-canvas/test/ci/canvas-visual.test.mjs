@@ -173,7 +173,8 @@ describe("canonical Canvas visual runner", () => {
       "**/.env",
       "**/.env.*",
       ".radius-credentials.json",
-      "**/.radius-credentials.json"
+      "**/.radius-credentials.json",
+      "packages/adapter-canvas/test/e2e/.tmp"
     ]) {
       expect(ignoredPaths.has(ignoredPath), ignoredPath).toBe(true);
     }

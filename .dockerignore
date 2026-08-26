@@ -13,5 +13,6 @@ packages/*/node_modules
 packages/*/playwright-report
 packages/*/playwright-visual-report
 packages/*/test-results
+packages/adapter-canvas/test/e2e/.tmp
 plugins/*/dist
 plugins/*/node_modules
