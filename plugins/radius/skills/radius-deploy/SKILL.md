@@ -18,6 +18,7 @@ Trigger the `Radius - Run rad Commands` workflow which spins up an ephemeral k3d
 ## Prerequisites
 
 Before invoking this skill, all of these must exist:
+
 1. A GitHub Environment configured with cloud credentials → use the `radius-environment` skill if missing.
 2. A `.radius/app.bicep` file → use the `radius-app-bicep` skill if missing.
 3. The user's PAT in the extension's storage (auto-seeded from `gh auth token`).
@@ -31,7 +32,7 @@ Before invoking this skill, all of these must exist:
    - Click **Deploy**
 3. The canvas immediately triggers the workflow (no intermediate form). Live status streams in until success / failure / timeout.
 
-> **Canvas not opening?** If the Radius panel does not appear even though this skill and the Radius plugin are installed, the canvas may not be registered due to a known GitHub Copilot app bug. Run the `radius-fix-canvas-installation` skill to repair it, then reload extensions (or restart the app) and try again.
+> **Canvas not opening?** If `open_canvas` reports that the `radius` canvas is unavailable or failed to load, stop deployment and run `radius-fix-canvas-installation`. After repair, reload extensions or restart the app and retry. If the installed plugin files are missing or corrupt, respond: "The Radius plugin didn't load completely, so I can't show its view in the sidebar. Reinstalling usually fixes this: remove the Radius plugin from the Plugins settings page, add it again, then restart the Copilot app."
 
 ## Deploy tools
 
@@ -64,7 +65,7 @@ The workflow checks the branch out **from GitHub**. A fix that exists only in th
 
 The workflow can also be dispatched straight from the GitHub API:
 
-```
+```http
 POST /repos/{owner}/{repo}/actions/workflows/run-rad-commands.yml/dispatches
 { "ref": "<branch>", "inputs": { "environment": "<env-name>" } }
 ```

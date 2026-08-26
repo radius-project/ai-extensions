@@ -188,6 +188,7 @@ describe("P0-C built Radius extension artifact", () => {
       "plugin.json",
       "README.md",
       "THIRD-PARTY-NOTICES.txt",
+      "skills/radius/SKILL.md",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-graph/references/source-code-references.md"

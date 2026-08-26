@@ -761,7 +761,7 @@ export async function handleCreateEnvironment(
           baseBranch: prState?.base || verifyPlan.defaultBranch || null,
           userMessage:
             pullRequestUrl ?
-              "Merge the pull request to finish setup; credential verification and deploys run once it lands."
+              `I couldn't push the workflow files to the default branch of \`${targetRepo}\` directly, so I committed them to \`${prState?.branch || defaultBranch}\` and opened a pull request: ${pullRequestUrl}. Merge it to finish setting up the repository.`
             : `Open and merge a pull request from "${
                 prState?.branch || "the setup branch"
               }" into "${

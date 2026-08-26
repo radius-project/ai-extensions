@@ -625,14 +625,11 @@ export function initializeEnvironmentPane(
       )}</strong> Environment <strong>${escapeBrowserHtml(
         name
       )}</strong> is set up, but one step is left for you. `;
-      if (hasPullRequest) {
+      if (readString(terminal, "userMessage")) {
+        html += escapeBrowserHtml(readString(terminal, "userMessage"));
+      } else if (hasPullRequest) {
         html +=
           "Radius could not push the deploy workflows to the default branch, so it opened a pull request. Credential verification and deploys start working once it merges.";
-      } else if (readString(terminal, "userMessage")) {
-        // A non-PR action-required outcome (e.g. incomplete cloud credentials,
-        // issue #219) carries its own guidance; show it verbatim rather than the
-        // open-a-pull-request text, which would not apply.
-        html += escapeBrowserHtml(readString(terminal, "userMessage"));
       } else {
         html += `Radius committed the deploy workflows to <code>${escapeBrowserHtml(
           readString(terminal, "branch") || "the setup branch"

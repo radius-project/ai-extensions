@@ -23,7 +23,7 @@ import { cloudCredentialsComplete } from "../../deploy.js";
 export const WORKFLOW_SCOPE_HINT =
   ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.';
 export const WRITE_ACCESS_HINT =
-  " Check that you have write access to the repository and that GitHub Actions is enabled.";
+  " Get write access or fork the repository, attach the writable repository to the session, confirm GitHub Actions is enabled, and retry.";
 
 export const VERIFY_WORKFLOW_PATH =
   ".github/workflows/radius-verify-credentials.yml";

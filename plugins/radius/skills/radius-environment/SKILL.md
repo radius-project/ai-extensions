@@ -21,10 +21,12 @@ Create a GitHub Environment configured with the cloud credentials and private GH
 The canvas drives a short wizard per provider: collect the environment's cloud settings, create and verify a dedicated private/internal GHCR state package with the user's stored GitHub CLI credential, write the package path and cloud settings as GitHub Environment variables, then commit and dispatch the provider's verification workflow. A package bootstrap, visibility, or repository-linkage failure stops setup before verification or automatic deployment.
 
 ### AWS
+
 1. **Form inputs**: env name, IAM Role ARN, AWS region, account ID, EKS cluster name, optional VPC + subnet IDs (required if the app uses `Radius.Data/mySqlDatabases`). These are written as GitHub Environment variables.
 2. **Credential + cluster verification**: commits/updates `.github/workflows/verify-aws.yml` and dispatches it. The workflow logs into AWS via OIDC and runs `aws sts get-caller-identity`, then runs `aws eks update-kubeconfig` for the EKS cluster and `kubectl cluster-info` to confirm cluster access. Status is polled and shown live in the canvas.
 
 ### Azure
+
 1. **Form inputs**: env name, AAD App (client) ID, tenant ID, subscription ID, resource group, AKS cluster name. These are written as GitHub Environment variables.
 2. **Credential + cluster verification**: commits/updates `.github/workflows/verify-azure.yml` and dispatches it. The workflow runs `azure/login` via OIDC and `az account show`, then `az aks get-credentials` + `kubelogin convert-kubeconfig` + `kubectl cluster-info` to confirm AKS access. Status is polled and shown live in the canvas.
 
@@ -32,7 +34,7 @@ The canvas drives a short wizard per provider: collect the environment's cloud s
 
 When the user asks to create or set up a Radius environment, **open the canvas straight to the environment wizard**:
 
-```
+```javascript
 open_canvas({
   canvasId: "radius",
   instanceId: "radius-panel",
@@ -42,7 +44,7 @@ open_canvas({
 
 For credentials/OIDC setup:
 
-```
+```javascript
 open_canvas({
   canvasId: "radius",
   instanceId: "radius-panel",
@@ -52,26 +54,30 @@ open_canvas({
 
 The popup lands directly on the create-environment form for the chosen provider. No navigation needed.
 
-> **Canvas not opening?** If the Radius panel does not appear even though this skill and the Radius plugin are installed, the canvas may not be registered due to a known GitHub Copilot app bug. Run the `radius-fix-canvas-installation` skill to repair it, then reload extensions (or restart the app) and try again.
+> **Canvas not opening?** If `open_canvas` reports that the `radius` canvas is unavailable or failed to load, stop setup and run `radius-fix-canvas-installation`. After repair, reload extensions or restart the app and retry. If the installed plugin files are missing or corrupt, respond: "The Radius plugin didn't load completely, so I can't show its view in the sidebar. Reinstalling usually fixes this: remove the Radius plugin from the Plugins settings page, add it again, then restart the Copilot app."
 
 ## Required variables on the GitHub Environment
 
 The verification workflow reads only GitHub Actions **variables** (`vars`), never secrets. OIDC eliminates the need to store long-lived cloud credentials.
 
 **Common**
+
 - `RADIUS_STATE_BACKEND` — explicitly set to `oci`.
 - `RADIUS_STATE_REGISTRY` — package-only, per-environment GHCR path used by `rad startup` and `rad shutdown`, for example `ghcr.io/example/my-app-radius-state-production-1a2b3c4d5e6f`. It does not include `:radius-state`; the extension derives this value and each GitHub Environment receives a different package.
 - `RADIUS_STATE_ARCHIVE` — the separate OCI state tag, set to `radius-state`.
 
 **AWS** — read by `verify-aws.yml`:
+
 - `AWS_ROLE_ARN` — ARN of the IAM role the runner assumes via OIDC
 - `AWS_REGION` — AWS region (e.g. `us-west-2`)
 - `AWS_EKS_CLUSTER_NAME` — name of the EKS cluster the workflow verifies access to
 
 **AWS** — also set from the form for deploys (not read by verification):
+
 - `AWS_ACCOUNT_ID`, `RADIUS_VPC_ID`, `RADIUS_SUBNET_IDS`
 
 **Azure** — read by `verify-azure.yml`:
+
 - `AZURE_CLIENT_ID` — AAD application (client) ID
 - `AZURE_TENANT_ID` — Azure tenant ID
 - `AZURE_SUBSCRIPTION_ID` — Azure subscription ID

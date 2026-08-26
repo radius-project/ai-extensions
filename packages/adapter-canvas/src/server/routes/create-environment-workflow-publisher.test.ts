@@ -253,6 +253,8 @@ describe("describeWorkflowCommitFailure", () => {
     expect(failure.code).toBe("deploy-workflow-commit-failed");
     expect(failure.error).toContain("protected branch");
     expect(failure.error.endsWith(WRITE_ACCESS_HINT)).toBe(true);
+    expect(failure.error).toContain("fork the repository");
+    expect(failure.error).toContain("retry");
   });
 
   it.each<[stderr: string | undefined, label: string]>([

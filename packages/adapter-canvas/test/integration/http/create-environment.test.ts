@@ -1243,7 +1243,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(harness.committedFiles).toEqual([]);
   });
 
-  it("fails 400 with the write-access hint for any other commit refusal", async () => {
+  it("fails 400 with fork and access recovery for any other commit refusal", async () => {
     start({
       gh: [
         {
@@ -1257,9 +1257,9 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
 
     expect(response.status).toBe(400);
     const payload = (await response.json()) as { error: string };
-    expect(payload.error).toContain(
-      "Check that you have write access to the repository"
-    );
+    expect(payload.error).toContain("Get write access or fork the repository");
+    expect(payload.error).toContain("attach the writable repository");
+    expect(payload.error).toContain("retry");
   });
 
   it("fails 400 when the verify workflow cannot be dispatched after every retry", async () => {
@@ -1342,7 +1342,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
             branch: "radius/setup-dev-workflows-1700000000000",
             baseBranch: "main",
             userMessage:
-              "Merge the pull request to finish setup; credential verification and deploys run once it lands."
+              "I couldn't push the workflow files to the default branch of `octo/app` directly, so I committed them to `radius/setup-dev-workflows-1700000000000` and opened a pull request: https://github.com/octo/app/pull/7. Merge it to finish setting up the repository."
           }
         }
       }

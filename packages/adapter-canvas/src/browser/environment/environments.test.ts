@@ -1070,6 +1070,22 @@ describe("environment terminal banners", () => {
       'href="https://github.com/octo/app/pull/1"'
     );
 
+    page.controller.showActionRequired(
+      "azure",
+      "prod",
+      "https://github.com/octo/app/pull/1",
+      {
+        userMessage:
+          "I couldn't push workflow files for <octo/app>; merge the pull request."
+      }
+    );
+    expect(page.elements.actionText.innerHTML).toContain(
+      "I couldn&#39;t push workflow files for &lt;octo/app&gt;; merge the pull request."
+    );
+    expect(page.elements.actionText.innerHTML).toContain(
+      'href="https://github.com/octo/app/pull/1"'
+    );
+
     page.controller.showActionRequired("aws", "<prod>", "javascript:alert(1)", {
       branch: "<setup>",
       baseBranch: "<main>"
@@ -1082,9 +1098,6 @@ describe("environment terminal banners", () => {
     expect(page.elements.actionText.innerHTML).toContain("the setup branch");
     expect(page.elements.action.style.display).toBe("flex");
 
-    // A non-PR outcome carrying its own guidance (incomplete cloud credentials,
-    // issue #219) shows the message verbatim, escaped, instead of the
-    // open-a-pull-request text.
     page.controller.showActionRequired("azure", "dev", "", {
       userMessage: "Missing <subscription> ID."
     });
