@@ -31,6 +31,46 @@ on:
 permissions: {}
 
 jobs:
+  static-checks:
+    name: Static checks
+    runs-on: ubuntu-latest
+    # Deliberately a separate job rather than a `parallel` step group inside
+    # the build job. These checks are CPU-bound and single-threaded, and the
+    # runner only has two cores, so sharing them buys nothing; a second runner
+    # is what actually removes this work from the critical path.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check derived versions
+        run: pnpm run version:check
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Check formatting
+        run: pnpm run format:check
+
   windows-process-integration:
     name: Windows process integration
     runs-on: windows-latest
@@ -143,23 +183,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      # Must run before the version is resolved below, which rewrites
-      # plugins/radius/package.json in the workspace.
-      - name: Check derived versions
-        run: pnpm run version:check
-
-      # Three independent single-threaded checks. Run concurrently so they use
-      # every runner core instead of one core at a time.
-      - parallel:
-          - name: Typecheck
-            run: pnpm run typecheck
-
-          - name: Lint
-            run: pnpm run lint
-
-          - name: Check formatting
-            run: pnpm run format:check
 
       - name: Run Node tests with coverage
         id: coverage
