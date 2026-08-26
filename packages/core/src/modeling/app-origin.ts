@@ -50,8 +50,10 @@ export type AppModelFreshnessStatus =
   // nor its validity can be established.
   | "unrecorded"
   // Model no longer matches the bytes the recorded generation produced, so a
-  // human edited it after generation.
-  | "edited"
+  // human edited it after generation, AND something else already calls for a
+  // regeneration. An edit on its own is not reported here: see the ordering
+  // note on `evaluateAppModelFreshness`.
+  | "manually-edited"
   // Source moved on since the model was generated.
   | "source-changed"
   // A different generator version produced the model.
@@ -64,11 +66,20 @@ export interface AppModelFreshness {
   // trusted. `missing` is not stale, since there is nothing to refresh and it
   // has to be generated, so callers can keep the two paths distinct.
   stale: boolean;
-  // True when regenerating would destroy content this module cannot prove came
-  // from the generator, so the user has to approve the overwrite first.
+  // True when regenerating could destroy work that exists nowhere else, so the
+  // user has to approve the overwrite first. Two cases qualify: a model edited
+  // after it was generated, and a model with no origin record that git cannot
+  // give back. A model with no record that IS committed and clean does not:
+  // nothing shows anyone touched it, git still has it, and every model written
+  // before records existed would otherwise prompt on its first graph open.
   requiresConfirmation: boolean;
   // Human-readable statement of the evidence, safe to put in an agent prompt.
   reason: string;
+  // Fingerprint of the model this verdict describes, or "" when there is none.
+  // Not a comparison result: it identifies WHICH model was judged. A recorded
+  // model is identified by its record, but an unrecorded one has no record, so
+  // this is the only thing that tells two of them apart. See freshnessIdentity.
+  appBicepHash: string;
   origin: AppOrigin | null;
 }
 
@@ -91,6 +102,12 @@ export interface AppModelFreshnessInput {
   sourceChanged?: boolean;
   // Current generator version. Empty when it could not be resolved.
   generatorVersion?: string | null;
+  // Whether the model on disk could be recovered after an overwrite, because it
+  // is committed and unmodified. Only consulted when there is no origin record,
+  // where it decides whether replacing the file can destroy anything. Undefined
+  // means unknown, which is treated as "not recoverable": we would rather ask
+  // than overwrite a file we cannot show is safe to overwrite.
+  modelRecoverable?: boolean;
   // Fingerprints the model the same way the writer did. Injected because this
   // package must stay free of Node built-ins (see normalizeAppBicep).
   hashAppBicep(content: string): string;
@@ -165,21 +182,59 @@ function freshness(
   status: AppModelFreshnessStatus,
   reason: string,
   origin: AppOrigin | null,
-  requiresConfirmation = false
+  requiresConfirmation = false,
+  appBicepHash = ""
 ): AppModelFreshness {
   return {
     status,
     stale: status !== "up-to-date" && status !== "missing",
     requiresConfirmation,
     reason,
+    appBicepHash,
     origin
   };
+}
+
+// Identity of one freshness verdict, for callers that report a problem once and
+// then stay quiet until it changes. Reporting the same thing on every graph open
+// is noise, but sharing a key across two different situations is worse: the
+// second one is never reported at all.
+//
+// A recorded model is identified by the record it carries. An unrecorded model
+// has none, so every one of them on a branch would otherwise look identical, and
+// swapping the file for a different one would go unnoticed. Its own bytes stand
+// in for the record there.
+//
+// `requiresConfirmation` is part of the identity because it can flip without the
+// model changing at all: committing the file, or adding a gitignore rule that
+// matches it, changes whether replacing it would destroy anything. Two verdicts
+// that call for different actions must never share a key, whatever the model.
+export function freshnessIdentity(status: AppModelFreshness): string {
+  return [
+    status.origin?.sourceCommit ?? "",
+    status.origin?.skillVersion ?? "",
+    status.origin ? "" : status.appBicepHash,
+    status.requiresConfirmation ? "confirm" : "auto"
+  ].join("/");
 }
 
 // Classifies the model on a branch. Unknown facts fail OPEN (reported as
 // up-to-date) rather than triggering a refresh: regeneration overwrites the
 // user's model, so it must be driven by positive evidence of staleness, never by
 // our own inability to resolve a commit or a version.
+//
+// A manual edit is deliberately checked LAST, against the others, rather than
+// first. On its own an edit is not a reason to regenerate: if the source and the
+// generator both still match, the model describes the current source and the
+// only thing we cannot say is that we wrote it. Reporting that would ask the
+// user to justify their own edit on every graph open, forever, since an edit is
+// permanent and there is no way for them to accept it. So an edit only matters
+// once something else already calls for a regeneration, which is exactly when
+// the overwrite would cost them work and their answer changes what we do.
+//
+// The edit is not load-bearing for validity either. `rad app graph` compiles the
+// model to build the graph, so a broken edit surfaces its own compile error on
+// the graph surface, which is a better signal than a warning we could give.
 export function evaluateAppModelFreshness(
   input: AppModelFreshnessInput
 ): AppModelFreshness {
@@ -188,22 +243,31 @@ export function evaluateAppModelFreshness(
     return freshness("missing", "No application model exists yet.", null);
   }
 
+  const appBicepHash = input.hashAppBicep(model);
   const origin = parseAppOrigin(input.originText);
   if (!origin) {
+    // Without a record we cannot tell whether anyone edited this model, so the
+    // question we can answer instead is whether overwriting it would cost them
+    // anything. A committed, unmodified file survives in git, and regeneration
+    // writes only the working tree, so the user can read the diff and undo it.
+    // An untracked or already-modified file exists nowhere else, so replacing
+    // it is final and is theirs to approve.
+    const recoverable = input.modelRecoverable === true;
+    const unrecorded = `The model has no usable ${APP_ORIGIN_REPO_PATH} origin record, so the source revision it was generated from and whether it still compiles cannot be established.`;
+    // Three distinct answers, and they must not be collapsed. Saying the file
+    // is untracked when git simply could not be reached asserts a fact we never
+    // established, which is the same mistake as calling an unverifiable model
+    // out of date. Both still require confirmation; only the wording differs.
+    const detail =
+      input.modelRecoverable === false ?
+        " It also has uncommitted changes or is untracked, so regenerating it would discard content that exists nowhere else."
+      : " Git could not say whether it is committed, so there is no way to show that regenerating it would leave a copy behind.";
     return freshness(
       "unrecorded",
-      `The model has no usable ${APP_ORIGIN_REPO_PATH} origin record, so the source revision it was generated from and whether it still compiles cannot be established.`,
+      recoverable ? unrecorded : `${unrecorded}${detail}`,
       null,
-      true
-    );
-  }
-
-  if (origin.appBicepHash !== input.hashAppBicep(model)) {
-    return freshness(
-      "edited",
-      `The model no longer matches the content recorded in ${APP_ORIGIN_REPO_PATH}, so it was edited after it was generated.`,
-      origin,
-      true
+      !recoverable,
+      appBicepHash
     );
   }
 
@@ -213,30 +277,45 @@ export function evaluateAppModelFreshness(
   const sourceMoved =
     input.sourceChanged ??
     (headCommit ? headCommit !== origin.sourceCommit : false);
-  if (sourceMoved) {
-    return freshness(
-      "source-changed",
-      `The model was generated from commit ${origin.sourceCommit}, but the source has changed since${headCommit ? ` (the branch is now at ${headCommit})` : ""}, so it may no longer describe the current source.`,
-      origin
-    );
-  }
-
   const generatorVersion = optionalString(input.generatorVersion);
-  if (
+  const generatorMoved = Boolean(
     generatorVersion &&
     origin.skillVersion &&
     generatorVersion !== origin.skillVersion
-  ) {
+  );
+
+  const drifted: AppModelFreshnessStatus | null =
+    sourceMoved ? "source-changed"
+    : generatorMoved ? "generator-changed"
+    : null;
+  const driftReason =
+    sourceMoved ?
+      `The model was generated from commit ${origin.sourceCommit}, but the source has changed since${headCommit ? ` (the branch is now at ${headCommit})` : ""}, so it may no longer describe the current source.`
+    : `The model was generated by radius-app-bicep ${origin.skillVersion}, but ${generatorVersion} is installed now.`;
+
+  const edited = origin.appBicepHash !== appBicepHash;
+
+  if (!drifted) {
     return freshness(
-      "generator-changed",
-      `The model was generated by radius-app-bicep ${origin.skillVersion}, but ${generatorVersion} is installed now.`,
-      origin
+      "up-to-date",
+      edited ?
+        `The model is current with commit ${origin.sourceCommit}, though it no longer matches the content recorded in ${APP_ORIGIN_REPO_PATH}, so it was edited after it was generated.`
+      : `The model is current with commit ${origin.sourceCommit}.`,
+      origin,
+      false,
+      appBicepHash
     );
   }
 
-  return freshness(
-    "up-to-date",
-    `The model is current with commit ${origin.sourceCommit}.`,
-    origin
-  );
+  if (edited) {
+    return freshness(
+      "manually-edited",
+      `${driftReason} It was also edited after it was generated, so it no longer matches the content recorded in ${APP_ORIGIN_REPO_PATH} and regenerating it would discard those edits.`,
+      origin,
+      true,
+      appBicepHash
+    );
+  }
+
+  return freshness(drifted, driftReason, origin, false, appBicepHash);
 }

@@ -10,6 +10,7 @@ export interface AzureAutoSetupCommandResult {
   code: string | number;
   stdout: string;
   stderr: string;
+  timedOut?: boolean;
 }
 
 export interface AzureAutoSetupOperation {
@@ -20,6 +21,13 @@ export interface AzureAutoSetupOperation {
   currentStage: string;
   state?: string;
   inputRequired?: unknown;
+  providerRecovery?: unknown;
+  setupArtifacts?: {
+    azureApp?: {
+      origin?: string;
+      appId?: string | null;
+    };
+  };
 }
 
 export interface AzureAutoSetupFailureResponse {
@@ -45,9 +53,13 @@ export interface AzureAutoSetupOperationLifecyclePort {
   isStale(operation: AzureAutoSetupOperation): boolean;
   create(input: Record<string, unknown>): AzureAutoSetupOperation;
   buildStages(): unknown[];
-  start(
-    operation: AzureAutoSetupOperation
-  ): { ok: true } | { ok: false; conflict: { operationId: string } };
+  start(operation: AzureAutoSetupOperation):
+    | { ok: true }
+    | {
+        ok: false;
+        reason?: "operation-in-progress" | "previous-cleanup-required";
+        conflict: { operationId: string };
+      };
   persist(): Promise<void>;
   report(diagnostic: { code: string; message: string }): void;
   finish(
@@ -93,11 +105,12 @@ export interface AzureAutoSetupOperationArtifactPort {
   ): void;
   recordCreatedFederatedCredential(
     operation: AzureAutoSetupOperation,
-    entry: { name: string; subject: string }
+    entry: { name: string; subject: string; providerId?: string | null }
   ): void;
   recordCreatedRoleAssignment(
     operation: AzureAutoSetupOperation,
     entry: {
+      assignmentId?: string;
       role: string;
       scope: string;
       principalObjectId: string;
@@ -147,9 +160,18 @@ export interface AzureAutoSetupDependencies {
   tempFile: AzureAutoSetupTempFilePort;
   ensureServicePrincipal(
     clientId: string,
-    runAz: (args: string[]) => Promise<Partial<AzureAutoSetupCommandResult>>
+    runAz: (args: string[]) => Promise<Partial<AzureAutoSetupCommandResult>>,
+    mutationRecovery?: {
+      operation: object & { operationId: string };
+      persist(): Promise<void>;
+    }
   ): Promise<
-    | { ok: true; state: "created" | "reused"; objectId: string | null }
+    | {
+        ok: true;
+        state: "created" | "reused" | "created_candidate";
+        origin: "unknown" | "pre_existing" | "this_operation";
+        objectId: string | null;
+      }
     | { ok: false; stderr: string }
   >;
   finalizeSetupFailure(
@@ -213,10 +235,12 @@ export interface AzureAutoSetupCredentialInput {
     "ensureServicePrincipal" | "sleep" | "tempFile"
   > & {
     operations: Pick<
-      AzureAutoSetupOperationArtifactPort,
+      AzureAutoSetupOperationArtifactPort &
+        AzureAutoSetupOperationLifecyclePort,
       | "recordServicePrincipal"
       | "recordCreatedFederatedCredential"
       | "recordCreatedRoleAssignment"
+      | "persist"
     >;
   };
   oidc: ResolveOidcSubjectResult;

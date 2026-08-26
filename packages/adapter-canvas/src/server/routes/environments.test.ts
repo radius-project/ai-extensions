@@ -26,8 +26,13 @@ import { getOrCreateServer, persistBestEffort } from "../../server.js";
 import {
   addLegacyStep as recordLegacyStep,
   finishSucceeded as finishSetupSucceeded,
+  hasCompleteVerificationIdentity,
   isTerminalState as isSetupTerminalState
 } from "../../operations.js";
+import {
+  isSelectedGhAuthorizationError,
+  SelectedGhAuthorizationError
+} from "../../deploy.js";
 import { createTestRouteTable } from "../../../test/support/server/route-table.js";
 
 interface Recording {
@@ -111,16 +116,19 @@ function deps(
     cliExec: unset("cliExec") as never,
     envListCacheGet: unset("envListCacheGet") as never,
     envListCacheSet: unset("envListCacheSet") as never,
+    envListCacheGeneration: unset("envListCacheGeneration") as never,
     envListCacheDelete: unset("envListCacheDelete") as never,
     envListTtlMs: 15000,
     kickoffWorkflowSync: unset("kickoffWorkflowSync") as never,
     now: unset("now") as never,
     getOperation: unset("getOperation") as never,
     getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
+    isSelectedGitHubAuthorizationError: () => false,
     hasCompleteVerificationIdentity: unset(
       "hasCompleteVerificationIdentity"
     ) as never,
     findWorkflowRun: unset("findWorkflowRun") as never,
+    settleVerificationDispatchRecovery: () => {},
     getRunDetail: unset("getRunDetail") as never,
     fetchRunLog: unset("fetchRunLog") as never,
     extractErrorLines: unset("extractErrorLines") as never,
@@ -470,6 +478,40 @@ describe("environments — delete-environment refusal ladder", () => {
     expect(recording.body).toContain("is still being deleted from environment");
   });
 
+  it("rung 3: routes a failed teardown to its recovery controls", async () => {
+    const active: EnvironmentActiveDeployment = {
+      app: "store",
+      environment: "dev",
+      provider: "azure",
+      status: "delete-failed",
+      deploymentId: "1",
+      runUrl: "u"
+    };
+    const { recording, ctx } = context(
+      "POST",
+      "/api/delete-environment",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+    await handleDeleteEnvironment(
+      ctx,
+      deps({
+        readInstanceEntry: () => entryWith({ graphBranch: "gb" }),
+        resolveRepoAppName: () => Promise.resolve("store"),
+        resolveEnvDeployment: () => Promise.resolve(active)
+      })
+    );
+
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body)).toEqual({
+      error:
+        'The previous teardown of application "store" from environment "dev" failed. Retry Delete or stop tracking the deployment before deleting the environment.',
+      code: "app-deployed",
+      app: "store",
+      environment: "dev",
+      redirect: "/?page=deployed&application=store&environment=dev"
+    });
+  });
+
   it("rung 4: 500 when the DELETE command fails", async () => {
     const runCommand = vi.fn(() => Promise.reject(new Error("boom")));
     const { recording, ctx } = context(
@@ -592,6 +634,7 @@ describe("environments — list-environments", () => {
         now,
         envListCacheGet: () => ({ at: 0, payload: { environments: [] } }),
         envListCacheSet,
+        envListCacheGeneration: () => 0,
         cliExec: cliFake(script),
         envListTtlMs: 15000
       })
@@ -618,6 +661,7 @@ describe("environments — list-environments", () => {
       deps({
         now: () => 0,
         envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
         cliExec: cliFake(script)
       })
     );
@@ -657,6 +701,7 @@ describe("environments — list-environments", () => {
       deps({
         now: () => 5,
         envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
         envListCacheSet,
         cliExec: cliFake(script),
         readInstanceEntry: () => entry,
@@ -705,6 +750,7 @@ describe("environments — list-environments", () => {
       ctx,
       deps({
         envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
         envListCacheSet: vi.fn(),
         now: () => 0,
         cliExec: cliFake(script),
@@ -753,6 +799,7 @@ describe("environments — list-environments", () => {
         deps({
           now: () => 0,
           envListCacheGet: () => undefined,
+          envListCacheGeneration: () => 0,
           envListCacheSet: vi.fn(),
           cliExec: cliFake(script),
           readInstanceEntry: () => undefined,
@@ -785,6 +832,7 @@ describe("environments — list-environments", () => {
       deps({
         now: () => 0,
         envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
         envListCacheSet: vi.fn(),
         cliExec: cliFake(script),
         readInstanceEntry: () => undefined,
@@ -822,12 +870,109 @@ describe("environments — list-environments", () => {
       deps({
         now: () => 0,
         envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
         cliExec
       })
     );
     expect(JSON.parse(recording.body)).toEqual({
       environments: [],
       error: "spawn failed"
+    });
+  });
+
+  // A listing is assembled from many `gh` calls, so a rollback that deletes the
+  // GitHub environment can land while one is still running. The listing still
+  // answers with what it read, but it must not write that reading into the
+  // cache it no longer describes — otherwise the picker keeps serving the
+  // rolled-back environment, still Pending, for a whole TTL.
+  describe("a listing invalidated while it was being assembled", () => {
+    const managedScript: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "42\tin_progress\t" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: {
+        stdout: "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc"
+      },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+      [ENV_PATH.statuses("o/r", "100")]: {
+        stdout: "https://github.com/o/r/actions/runs/42"
+      }
+    };
+
+    it("answers with what it read but refuses to cache it", async () => {
+      const envListCacheSet = vi.fn();
+      const generations = [0, 1];
+      const { recording, ctx } = context(
+        "GET",
+        "/api/list-environments?repo=o/r"
+      );
+      await handleListEnvironments(
+        ctx,
+        deps({
+          now: () => 0,
+          envListCacheGet: () => undefined,
+          envListCacheSet,
+          // Read once when the listing starts and once before it caches: the
+          // second read is the invalidation the deleting pass performed.
+          envListCacheGeneration: () => generations.shift() ?? 1,
+          cliExec: cliFake(managedScript),
+          readInstanceEntry: () => undefined,
+          repoMatchesWorkspace: () => false,
+          kickoffWorkflowSync: vi.fn()
+        })
+      );
+      const parsed = JSON.parse(recording.body);
+      expect(parsed.environments).toMatchObject([
+        { name: "dev", status: "pending" }
+      ]);
+      expect(envListCacheSet).not.toHaveBeenCalled();
+    });
+
+    it("refuses to cache an empty listing invalidated meanwhile", async () => {
+      const envListCacheSet = vi.fn();
+      const generations = [3, 4];
+      const { recording, ctx } = context(
+        "GET",
+        "/api/list-environments?repo=o/r"
+      );
+      await handleListEnvironments(
+        ctx,
+        deps({
+          now: () => 0,
+          envListCacheGet: () => undefined,
+          envListCacheSet,
+          envListCacheGeneration: () => generations.shift() ?? 4,
+          cliExec: cliFake({
+            [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+            [ENV_PATH.names("o/r")]: { stdout: "" }
+          })
+        })
+      );
+      expect(JSON.parse(recording.body)).toEqual({ environments: [] });
+      expect(envListCacheSet).not.toHaveBeenCalled();
+    });
+
+    it("caches normally when the generation is unchanged", async () => {
+      const envListCacheSet = vi.fn();
+      const { ctx } = context("GET", "/api/list-environments?repo=o/r");
+      await handleListEnvironments(
+        ctx,
+        deps({
+          now: () => 11,
+          envListCacheGet: () => undefined,
+          envListCacheSet,
+          envListCacheGeneration: () => 9,
+          cliExec: cliFake(managedScript),
+          readInstanceEntry: () => undefined,
+          repoMatchesWorkspace: () => false,
+          kickoffWorkflowSync: vi.fn()
+        })
+      );
+      expect(envListCacheSet).toHaveBeenCalledWith("o/r", {
+        at: 11,
+        payload: {
+          environments: [expect.objectContaining({ name: "dev" })]
+        }
+      });
     });
   });
 });
@@ -880,7 +1025,11 @@ describe("environments — verify-status", () => {
       ctx,
       deps({
         readInstanceEntry: () => undefined,
-        getOperation: () => ({ repo: "o/r", environment: "dev" }),
+        getOperation: () => ({
+          repo: "o/r",
+          environment: "dev",
+          context: { githubLogin: "octocat" }
+        }),
         hasCompleteVerificationIdentity: () => false
       })
     );
@@ -938,7 +1087,216 @@ describe("environments — verify-status", () => {
     });
   });
 
-  it("uses legacy ambient verification for pre-pinning operations", async () => {
+  it.each([
+    {
+      phase: "run detail",
+      status: 403 as const,
+      runId: "55",
+      findWorkflowRun: () => {
+        throw new Error("known run must not be discovered");
+      },
+      getRunDetail: () =>
+        Promise.reject(
+          new SelectedGhAuthorizationError(
+            "alice",
+            403,
+            "gh: Forbidden (HTTP 403)"
+          )
+        )
+    }
+  ])(
+    "terminalizes selected-account $phase authorization failure immediately",
+    async ({ status, runId, findWorkflowRun, getRunDetail }) => {
+      const operation: any = {
+        operationId: "op1",
+        repo: "o/r",
+        environment: "dev",
+        state: "running",
+        currentStage: "verify",
+        context: { githubLogin: "alice" },
+        verification: {
+          dispatchedAt: 123,
+          workflow: "verify.yml",
+          ref: "main",
+          environment: "dev",
+          runId
+        }
+      };
+      const steps: string[] = [];
+      const persistOperations = vi.fn(() => Promise.resolve());
+      const { recording, ctx } = context(
+        "GET",
+        "/api/verify-status?repo=o/r&environment=dev&operationId=op1"
+      );
+
+      await handleVerifyStatus(
+        ctx,
+        deps({
+          readInstanceEntry: () => undefined,
+          getOperation: () => operation,
+          getSelectedGitHubExecutor: () =>
+            successfulSelectedGhExecutor({ login: "alice" }),
+          isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+          hasCompleteVerificationIdentity,
+          findWorkflowRun,
+          getRunDetail,
+          addLegacyStep: (_operation, text) => {
+            steps.push(text);
+          },
+          finish: (target: any, state, options: any) => {
+            target.state = state;
+            target.endedAt = "finished";
+            target.failure = options.failure;
+          },
+          persistBestEffort,
+          persistOperations,
+          reportOperationDiagnostic: () => {}
+        })
+      );
+
+      expect(JSON.parse(recording.body)).toEqual({
+        state: "failed",
+        terminal: true,
+        code: "verification-retry-github-account-unavailable",
+        runId,
+        error:
+          "Radius could not use @alice to monitor credential verification. Re-check that account and retry verification."
+      });
+      expect(operation).toMatchObject({
+        state: "failed_partial",
+        failure: {
+          code: "verification-retry-github-account-unavailable",
+          evidence: expect.stringContaining(`HTTP ${status}`)
+        }
+      });
+      expect(steps).toEqual([
+        "❌ Could not use @alice to monitor credential verification."
+      ]);
+      expect(persistOperations).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it("does not let a stale successful poll finish a newer verification retry", async () => {
+    const operation: any = {
+      operationId: "op1",
+      repo: "o/r",
+      environment: "dev",
+      state: "running",
+      currentStage: "verify",
+      context: { githubLogin: "alice" },
+      verification: {
+        dispatchedAt: 123,
+        workflow: "verify.yml",
+        ref: "main",
+        environment: "dev",
+        runId: "55",
+        retryCommandId: "cmd-old"
+      }
+    };
+    let executor = successfulSelectedGhExecutor({ login: "alice" });
+    const finishSucceeded = vi.fn();
+    const { recording, ctx } = context(
+      "GET",
+      "/api/verify-status?repo=o/r&environment=dev&operationId=op1"
+    );
+
+    await handleVerifyStatus(
+      ctx,
+      deps({
+        readInstanceEntry: () => undefined,
+        getOperation: () => operation,
+        getSelectedGitHubExecutor: () => executor,
+        hasCompleteVerificationIdentity: () => true,
+        getRunDetail: () => {
+          operation.verification = {
+            ...operation.verification,
+            dispatchedAt: 456,
+            runId: "77",
+            retryCommandId: "cmd-new"
+          };
+          executor = successfulSelectedGhExecutor({ login: "alice" });
+          return Promise.resolve({
+            status: "completed",
+            conclusion: "success",
+            steps: []
+          });
+        },
+        finishSucceeded
+      })
+    );
+
+    expect(JSON.parse(recording.body)).toEqual({
+      state: "pending",
+      runId: "77"
+    });
+    expect(finishSucceeded).not.toHaveBeenCalled();
+    expect(operation.state).toBe("running");
+  });
+
+  it("does not let a stale authorization failure terminate a newer retry", async () => {
+    const operation: any = {
+      operationId: "op1",
+      repo: "o/r",
+      environment: "dev",
+      state: "running",
+      currentStage: "verify",
+      context: { githubLogin: "alice" },
+      verification: {
+        dispatchedAt: 123,
+        workflow: "verify.yml",
+        ref: "main",
+        environment: "dev",
+        runId: "55",
+        retryCommandId: "cmd-old"
+      }
+    };
+    let executor = successfulSelectedGhExecutor({ login: "alice" });
+    const finish = vi.fn();
+    const persistOperations = vi.fn(() => Promise.resolve());
+    const { recording, ctx } = context(
+      "GET",
+      "/api/verify-status?repo=o/r&environment=dev&operationId=op1"
+    );
+
+    await handleVerifyStatus(
+      ctx,
+      deps({
+        readInstanceEntry: () => undefined,
+        getOperation: () => operation,
+        getSelectedGitHubExecutor: () => executor,
+        hasCompleteVerificationIdentity: () => true,
+        getRunDetail: () => {
+          operation.verification = {
+            ...operation.verification,
+            dispatchedAt: 456,
+            runId: "77",
+            retryCommandId: "cmd-new"
+          };
+          executor = successfulSelectedGhExecutor({ login: "alice" });
+          return Promise.reject(
+            new SelectedGhAuthorizationError(
+              "alice",
+              403,
+              "gh: Forbidden (HTTP 403)"
+            )
+          );
+        },
+        isSelectedGitHubAuthorizationError: isSelectedGhAuthorizationError,
+        finish,
+        persistOperations
+      })
+    );
+
+    expect(JSON.parse(recording.body)).toEqual({
+      state: "pending",
+      runId: "77"
+    });
+    expect(finish).not.toHaveBeenCalled();
+    expect(persistOperations).not.toHaveBeenCalled();
+    expect(operation.state).toBe("running");
+  });
+
+  it("fails an operation-scoped verification closed without a saved account", async () => {
     const operation = {
       repo: "o/r",
       environment: "dev",
@@ -952,6 +1310,8 @@ describe("environments — verify-status", () => {
       }
     };
     const findWorkflowRun = vi.fn(() => Promise.resolve(null));
+    const finish = vi.fn();
+    const persistBestEffort = vi.fn(() => Promise.resolve(true));
     const { recording, ctx } = context(
       "GET",
       "/api/verify-status?repo=o/r&environment=dev&operationId=op1"
@@ -961,24 +1321,37 @@ describe("environments — verify-status", () => {
       deps({
         readInstanceEntry: () => undefined,
         getOperation: () => operation,
-        hasCompleteVerificationIdentity: () => true,
+        hasCompleteVerificationIdentity,
         getSelectedGitHubExecutor: () => undefined,
-        findWorkflowRun
+        findWorkflowRun,
+        addLegacyStep: vi.fn(),
+        finish,
+        persistBestEffort,
+        persistOperations: () => Promise.resolve(),
+        reportOperationDiagnostic: () => {}
       })
     );
-    expect(findWorkflowRun).toHaveBeenCalledWith(
-      "o/r",
-      "verify.yml",
-      123,
-      null
-    );
+    expect(findWorkflowRun).not.toHaveBeenCalled();
     expect(JSON.parse(recording.body)).toEqual({
-      state: "pending",
-      runId: null
+      state: "failed",
+      terminal: true,
+      code: "verification-retry-github-account-missing",
+      runId: null,
+      error:
+        "Radius cannot monitor credential verification because this operation does not name the GitHub account that started it."
     });
+    expect(finish).toHaveBeenCalledWith(
+      operation,
+      "failed_partial",
+      expect.objectContaining({
+        failure: expect.objectContaining({
+          code: "verification-retry-github-account-missing"
+        })
+      })
+    );
   });
 
-  it("caches a discovered run id onto instance state when there is no operation", async () => {
+  it("does not cache an unmarked run when there is no operation", async () => {
     const state: Record<string, unknown> = { deployDispatchedAt: 123 };
     const findWorkflowRun = vi.fn(() => Promise.resolve(555));
     const { recording, ctx } = context("GET", "/api/verify-status?repo=o/r");
@@ -990,17 +1363,11 @@ describe("environments — verify-status", () => {
         getRunDetail: () => Promise.resolve(null)
       })
     );
-    expect(findWorkflowRun).toHaveBeenCalledWith(
-      "o/r",
-      "radius-verify-credentials.yml",
-      123,
-      null
-    );
-    expect(state.verifyRunId).toBe(555);
+    expect(findWorkflowRun).not.toHaveBeenCalled();
+    expect(state.verifyRunId).toBeUndefined();
     expect(JSON.parse(recording.body)).toEqual({
       state: "pending",
-      runId: 555,
-      runUrl: "https://github.com/o/r/actions/runs/555"
+      runId: null
     });
   });
 
@@ -1037,6 +1404,7 @@ describe("environments — verify-status", () => {
     const op = {
       repo: "o/r",
       environment: "dev",
+      context: { githubLogin: "octocat" },
       state: "running",
       currentStage: "verify",
       verification: { dispatchedAt: 1, runId: 9 }
@@ -1084,6 +1452,7 @@ describe("environments — verify-status", () => {
     const op = {
       repo: "o/r",
       environment: "dev",
+      context: { githubLogin: "octocat" },
       state: "input_required",
       currentStage: "verify",
       verification: { dispatchedAt: 1, runId: 9 }
@@ -1131,6 +1500,7 @@ describe("environments — verify-status", () => {
     const op = {
       repo: "o/r",
       environment: "dev",
+      context: { githubLogin: "octocat" },
       currentStage: "verify",
       verification: { dispatchedAt: 1, runId: 9 }
     };
@@ -1158,11 +1528,126 @@ describe("environments — verify-status", () => {
       })
     );
     expect(finish).toHaveBeenCalledOnce();
+    expect(finish).toHaveBeenCalledWith(
+      op,
+      "failed_partial",
+      expect.objectContaining({
+        failure: expect.objectContaining({ code: "verify-run-failed" })
+      })
+    );
     const parsed = JSON.parse(recording.body);
     expect(parsed.state).toBe("failed");
     expect(parsed.error).toContain("OIDC help");
     expect(parsed.error).toContain("Failed step: Verify.");
     expect(parsed.error).toContain("boom");
+  });
+
+  it.each([
+    [
+      "a missing Azure subscription",
+      "Azure Login (OIDC)",
+      "The identity cannot see a subscription.",
+      "No subscriptions found"
+    ],
+    [
+      "the AKS access verification step with an authorization refusal",
+      "Verify AKS Access",
+      "",
+      "Error from server (Forbidden): service account cannot get resource pods"
+    ]
+  ])(
+    "classifies %s as an RBAC verification failure",
+    async (_label, stepName, rbacHelp, runLog) => {
+      const finish = vi.fn();
+      const { ctx } = context(
+        "GET",
+        "/api/verify-status?repo=o/r&operationId=op1"
+      );
+      const op = {
+        repo: "o/r",
+        environment: "dev",
+        context: { githubLogin: "octocat" },
+        currentStage: "verify",
+        verification: { dispatchedAt: 1, runId: 9 }
+      };
+
+      await handleVerifyStatus(
+        ctx,
+        deps({
+          readInstanceEntry: () => undefined,
+          getOperation: () => op,
+          hasCompleteVerificationIdentity: () => true,
+          getRunDetail: () =>
+            Promise.resolve(
+              detail({
+                conclusion: "failure",
+                steps: [{ name: stepName, conclusion: "failure" }]
+              })
+            ),
+          fetchRunLog: () => Promise.resolve(runLog),
+          extractErrorLines: () => [],
+          extractGitHubActionsStepLog: () => "No subscriptions found",
+          explainOidcEnterpriseClaim: () => "",
+          explainNoSubscriptions: () => rbacHelp,
+          finish,
+          persistBestEffort: () => Promise.resolve(true)
+        })
+      );
+
+      expect(finish).toHaveBeenCalledWith(
+        op,
+        "failed_partial",
+        expect.objectContaining({
+          failure: expect.objectContaining({ code: "verify-run-rbac-failed" })
+        })
+      );
+    }
+  );
+
+  it("does not call a runner failure in the AKS access step RBAC propagation", async () => {
+    const finish = vi.fn();
+    const { ctx } = context(
+      "GET",
+      "/api/verify-status?repo=o/r&operationId=op1"
+    );
+    const op = {
+      repo: "o/r",
+      environment: "dev",
+      context: { githubLogin: "octocat" },
+      currentStage: "verify",
+      verification: { dispatchedAt: 1, runId: 9 }
+    };
+
+    await handleVerifyStatus(
+      ctx,
+      deps({
+        readInstanceEntry: () => undefined,
+        getOperation: () => op,
+        hasCompleteVerificationIdentity: () => true,
+        getRunDetail: () =>
+          Promise.resolve(
+            detail({
+              conclusion: "failure",
+              steps: [{ name: "Verify AKS Access", conclusion: "failure" }]
+            })
+          ),
+        fetchRunLog: () => Promise.resolve(null),
+        extractErrorLines: () => [],
+        extractGitHubActionsStepLog: () => "",
+        explainOidcEnterpriseClaim: () => "",
+        explainNoSubscriptions: () => "",
+        finish,
+        persistBestEffort: () => Promise.resolve(true)
+      })
+    );
+
+    expect(finish).toHaveBeenCalledWith(
+      op,
+      "failed_partial",
+      expect.objectContaining({
+        failure: expect.objectContaining({ code: "verify-run-failed" })
+      })
+    );
   });
 
   it("maps a thrown collaborator to an unknown state", async () => {
@@ -1243,6 +1728,7 @@ describe("environments — real loopback", () => {
     };
     const container = createControlledEnvironmentServer({
       envListCacheGet: () => undefined,
+      envListCacheGeneration: () => 0,
       envListCacheSet: vi.fn(),
       now: () => 0,
       cliExec: cliFake(script),
@@ -1283,6 +1769,7 @@ describe("environments — real loopback", () => {
     };
     const container = createControlledEnvironmentServer({
       envListCacheGet: () => undefined,
+      envListCacheGeneration: () => 0,
       envListCacheSet: vi.fn(),
       now: () => 0,
       cliExec: cliFake(script),
@@ -1326,6 +1813,7 @@ describe("environments — real loopback", () => {
     };
     const container = createControlledEnvironmentServer({
       envListCacheGet: () => undefined,
+      envListCacheGeneration: () => 0,
       envListCacheSet: vi.fn(),
       now: () => 0,
       cliExec: cliFake(script),
@@ -1359,10 +1847,11 @@ describe("environments — real loopback", () => {
     });
   });
 
-  it("discovers and persists a matched operation run id over controlled HTTP", async () => {
+  it("does not let an unrelated successful run finish initial verification", async () => {
     const operation = {
       repo: "octo/app",
       environment: "dev",
+      context: { githubLogin: "octocat" },
       currentStage: "verify",
       verification: {
         dispatchedAt: 123,
@@ -1372,13 +1861,14 @@ describe("environments — real loopback", () => {
       }
     };
     const findWorkflowRun = vi.fn(() => Promise.resolve(55));
+    const getRunDetail = vi.fn(() => Promise.resolve(null));
     const persistOperations = vi.fn(() => Promise.resolve());
     const container = createControlledEnvironmentServer({
       readInstanceEntry: () => undefined,
       getOperation: () => operation,
       hasCompleteVerificationIdentity: () => true,
       findWorkflowRun,
-      getRunDetail: () => Promise.resolve(null),
+      getRunDetail,
       persistBestEffort,
       persistOperations,
       reportOperationDiagnostic: () => {}
@@ -1392,25 +1882,17 @@ describe("environments — real loopback", () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({
         state: "pending",
-        runId: 55,
-        runUrl: "https://github.com/octo/app/actions/runs/55"
+        runId: null
       });
-      expect(findWorkflowRun).toHaveBeenCalledWith(
-        "octo/app",
-        "verify.yml",
-        123,
-        null,
-        expect.objectContaining({ login: "octocat" })
-      );
+      expect(findWorkflowRun).not.toHaveBeenCalled();
+      expect(getRunDetail).not.toHaveBeenCalled();
       expect(operation.verification).toEqual({
         dispatchedAt: 123,
         workflow: "verify.yml",
         ref: "feature",
-        environment: "dev",
-        runId: "55",
-        runUrl: "https://github.com/octo/app/actions/runs/55"
+        environment: "dev"
       });
-      expect(persistOperations).toHaveBeenCalledOnce();
+      expect(persistOperations).not.toHaveBeenCalled();
     } finally {
       await container.stopAll();
     }
@@ -1420,6 +1902,7 @@ describe("environments — real loopback", () => {
     const operation = {
       repo: "octo/app",
       environment: "dev",
+      context: { githubLogin: "octocat" },
       state: "running",
       currentStage: "verify",
       stages: [{ id: "verify", state: "running" }],
@@ -1482,6 +1965,7 @@ describe("environments — real loopback", () => {
     const operation = {
       repo: "octo/app",
       environment: "dev",
+      context: { githubLogin: "octocat" },
       currentStage: "verify",
       verification: {
         dispatchedAt: 123,

@@ -7,11 +7,14 @@ import type { IncomingMessage } from "node:http";
 
 // The gh/az command shape every runner in this slice resolves to. `code` is
 // `string | number` because the legacy route compared it against both `0` and
-// `"0"` depending on which helper produced it.
+// `"0"` depending on which helper produced it. `timedOut` is set when the
+// runner's own timeout killed the child, so the command's outcome is unknown
+// and no credential fallback may re-run it.
 export interface CreateEnvironmentCommandResult {
   code: string | number;
   stdout: string;
   stderr: string;
+  timedOut?: boolean;
 }
 
 // Options forwarded to the CLI runner. Only `timeout` and `env` are ever set by
@@ -34,7 +37,15 @@ export interface CreateEnvironmentCliExec {
     args: string[],
     options: CreateEnvironmentCliOptions,
     callback: (
-      error: (Error & { code?: string | number | null }) | null,
+      // `killed`/`signal` are how execFile reports a child it terminated when
+      // the timeout elapsed; the runner turns them into `timedOut`.
+      error:
+        | (Error & {
+            code?: string | number | null;
+            killed?: boolean;
+            signal?: NodeJS.Signals | null;
+          })
+        | null,
       stdout: string,
       stderr: string
     ) => void
@@ -53,6 +64,19 @@ export interface WorkflowCommitOutcome {
   ok: boolean;
   stderr?: string;
   viaPr: boolean;
+  // Provenance of the write, captured from the contents API response so a later
+  // rollback can prove the file on GitHub is still exactly what Radius wrote.
+  // Absent when the commit failed or GitHub answered with something this code
+  // could not read, which fails a post-commit rollback closed.
+  commitSha?: string | null;
+  blobSha?: string | null;
+  contentSha256?: string | null;
+  // The blob the path held before this write, or null when Radius created the
+  // file. A revert restores the former and deletes the latter.
+  previousBlobSha?: string | null;
+  // True only when the pre-write lookup proved either the previous blob or that
+  // the path was absent. A failed lookup remains unknown and blocks rollback.
+  previousBlobKnown?: boolean;
 }
 
 // The operation record as this route reads and writes it. Declared with every
@@ -64,6 +88,12 @@ export interface CreateEnvironmentOperation {
   environment?: string;
   provider?: string;
   currentStage?: string;
+  // The terminal verdict, or the running/input state. Read by the continuation
+  // guard so a closed record cannot be adopted, and by the stop boundary.
+  state?: unknown;
+  // Walked by the operation model when a stop or a failure closes the record.
+  stages?: unknown;
+  steps?: unknown;
   // The real record stores a prompt object here (or `null`), not a flag; the
   // refusal only tests it for truthiness, so `unknown` keeps this declaration
   // from being narrower than what `operations.ts` actually writes.
@@ -79,10 +109,15 @@ export interface CreateEnvironmentOperation {
       name?: unknown;
     };
   };
+  // Set by the stop route and read by `guardStopBoundary` at each safe
+  // checkpoint between remote mutations. Optional because a fixture that never
+  // exercises cancellation has no reason to set it.
+  stopRequested?: boolean;
 }
 
 export interface OperationStartConflict {
   ok: false;
+  reason?: "operation-in-progress" | "previous-cleanup-required";
   conflict: { operationId: string };
 }
 
@@ -133,6 +168,7 @@ export interface CreateEnvironmentPullRequestResult {
   url?: string;
   number?: number;
   stderr?: string;
+  timedOut?: boolean;
 }
 
 export interface CredentialVerificationPlanResult {
@@ -141,4 +177,5 @@ export interface CredentialVerificationPlanResult {
   defaultBranch: string;
   pullRequestUrl: string;
   skipReason: string;
+  supportsOperationMarker?: boolean;
 }

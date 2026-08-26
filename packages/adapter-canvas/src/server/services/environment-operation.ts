@@ -20,8 +20,10 @@ export interface EnvironmentOperationRecord {
   setupArtifacts: {
     githubEnvironment: {
       state: string;
+      origin?: string;
       repo: string | null;
       name: string | null;
+      providerId: string | null;
     };
   };
 }
@@ -56,12 +58,23 @@ export interface EnvironmentOperationWorkflowDependencies {
   ): void;
   recordGitHubEnvironment(
     operation: EnvironmentOperationRecord,
-    patch: { state: string; repo: string; name: string }
+    patch: {
+      state: string;
+      origin: string;
+      repo: string;
+      name: string;
+      providerId?: string | null;
+    }
   ): void;
+  promoteCreatedGitHubEnvironment(
+    operation: EnvironmentOperationRecord,
+    identity: { repo: string; name: string }
+  ): boolean;
   addLegacyStep(operation: EnvironmentOperationRecord, text: string): void;
   persistEnvironmentResolution(
     operation: EnvironmentOperationRecord
   ): Promise<boolean>;
+  persistProviderMutation(): Promise<void>;
   finalizeEnvironmentResolutionFailure(
     operation: EnvironmentOperationRecord,
     input: { status: number; error: string; code: string },
@@ -72,6 +85,7 @@ export interface EnvironmentOperationWorkflowDependencies {
     pathname: string,
     data: unknown
   ): Promise<Record<string, unknown> | null>;
+  now(): number;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -112,6 +126,7 @@ async function failResolution(
   if (ensureError?.createdCandidate) {
     dependencies.recordGitHubEnvironment(operation, {
       state: "created_candidate",
+      origin: "unknown",
       repo: ensureError.createdCandidate.repo,
       name: ensureError.createdCandidate.name
     });
@@ -161,7 +176,12 @@ export async function runEnvironmentOperationWorkflow(
       requestedName: operation.environment,
       readGitHubJson: (apiPath) =>
         dependencies.readGitHubJson(apiPath, executor),
-      runGh: (args) => executor.run(args)
+      runGh: (args) => executor.run(args),
+      now: dependencies.now,
+      mutationRecovery: {
+        operation,
+        persist: dependencies.persistProviderMutation
+      }
     });
   } catch (error) {
     return failResolution(operation, executor, dependencies, error);
@@ -171,9 +191,38 @@ export async function runEnvironmentOperationWorkflow(
   dependencies.setCanonicalEnvironment(operation, ensured.name);
   dependencies.recordGitHubEnvironment(operation, {
     state: ensured.state,
+    origin: ensured.state === "reused" ? "pre_existing" : "unknown",
     repo: operation.repo,
-    name: ensured.name
+    name: ensured.name,
+    // GitHub's own id for the environment, so a rollback can tell what this
+    // request wrote from a replacement the customer created under the same
+    // name. Without it the cleanup gate has nothing to match and refuses.
+    providerId: ensured.providerId
   });
+  // The proof is settled inside `ensureGitHubEnvironment` rather than derived
+  // here, because a reconciled mutation proves ownership from the re-read body
+  // against the journalled start time and this call site has neither.
+  if (
+    ensured.creationProof?.proven &&
+    dependencies.promoteCreatedGitHubEnvironment(operation, {
+      repo: operation.repo,
+      name: ensured.name
+    })
+  ) {
+    dependencies.addLegacyStep(
+      operation,
+      `✅ GitHub environment "${ensured.name}" created by this setup — Radius owns it and can remove it.`
+    );
+  } else if (
+    ensured.state === "created_candidate" &&
+    ensured.creationProof &&
+    !ensured.creationProof.proven
+  ) {
+    dependencies.addLegacyStep(
+      operation,
+      `ℹ️ Radius left GitHub environment "${ensured.name}" outside its cleanup scope. ${ensured.creationProof.detail}`
+    );
+  }
   if (requestedName === ensured.name) {
     dependencies.addLegacyStep(
       operation,

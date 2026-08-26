@@ -254,7 +254,9 @@ describe("P0-C built Radius extension artifact", () => {
     expect({ ...builtPlugin, version: sourcePlugin.version }).toEqual(
       sourcePlugin
     );
-    expect(builtPlugin.version).toEqual(expect.any(String));
+    // plugin.json is the manifest the host reads, so a published build must not
+    // advertise a different version from the package it ships.
+    expect(builtPlugin.version).toBe(builtPackage.version);
     expect(readFileSync(join(DIST, "README.md"), "utf8")).toBe(
       readFileSync(join(REPO_ROOT, "plugins", "radius", "README.md"), "utf8")
     );

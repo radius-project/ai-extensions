@@ -290,6 +290,10 @@ function publisherRecorder(script: PublisherScript = {}) {
     path: string;
     branch: string | null;
     mode: string;
+    commitSha: string | null;
+    blobSha: string | null;
+    contentSha256: string | null;
+    previousBlobSha: string | null;
   }> = [];
   const commitCalls: string[] = [];
   const journal: string[] = [];
@@ -306,7 +310,15 @@ function publisherRecorder(script: PublisherScript = {}) {
     commitWorkflowFileSmart: async (path) => {
       commitCalls.push(path);
       return (
-        script.commits?.[path] ?? { ok: true, viaPr: script.viaPr ?? false }
+        script.commits?.[path] ?? {
+          ok: true,
+          viaPr: script.viaPr ?? false,
+          commitSha: `commit-${commitCalls.length}`,
+          blobSha: `blob-${commitCalls.length}`,
+          contentSha256: `digest-${commitCalls.length}`,
+          previousBlobSha: null,
+          previousBlobKnown: true
+        }
       );
     },
     recordCommittedWorkflowFile: (_operation, entry) => {
@@ -363,23 +375,65 @@ describe("publishWorkflowFiles", () => {
       ".github/workflows/radius-delete.yml"
     ]);
     expect(recorder.gateCount()).toBe(3);
+    // Each file is recorded with the provenance of its own write, so a later
+    // rollback verifies the blob that belongs to that path rather than a shared
+    // guess.
     expect(recorder.committed).toEqual([
       {
         path: VERIFY_WORKFLOW_PATH,
         branch: "main",
-        mode: "default_branch"
+        mode: "default_branch",
+        commitSha: "commit-1",
+        blobSha: "blob-1",
+        contentSha256: "digest-1",
+        previousBlobSha: null,
+        previousBlobKnown: true
       },
       {
         path: ".github/workflows/run-rad-commands.yml",
         branch: "main",
-        mode: "default_branch"
+        mode: "default_branch",
+        commitSha: "commit-2",
+        blobSha: "blob-2",
+        contentSha256: "digest-2",
+        previousBlobSha: null,
+        previousBlobKnown: true
       },
       {
         path: ".github/workflows/radius-delete.yml",
         branch: "main",
-        mode: "default_branch"
+        mode: "default_branch",
+        commitSha: "commit-3",
+        blobSha: "blob-3",
+        contentSha256: "digest-3",
+        previousBlobSha: null,
+        previousBlobKnown: true
       }
     ]);
+  });
+
+  it("records nulls when a commit reported no provenance", async () => {
+    // An older `gh` or an unreadable response still commits the file; the
+    // record says so honestly instead of inventing an identity, which is what
+    // later refuses to roll the file back automatically.
+    const recorder = publisherRecorder({
+      commits: {
+        [VERIFY_WORKFLOW_PATH]: { ok: true, viaPr: false }
+      }
+    });
+
+    await publishWorkflowFiles(recorder.ports, recorder.target);
+
+    expect(recorder.committed[0]).toEqual({
+      path: VERIFY_WORKFLOW_PATH,
+      branch: "main",
+      mode: "default_branch",
+      commitSha: null,
+      blobSha: null,
+      contentSha256: null,
+      previousBlobSha: null,
+      previousBlobKnown: false
+    });
   });
 
   it("records the pull-request branch when the commits fell back to one", async () => {

@@ -15,6 +15,10 @@ import {
 } from "./create-environment-gh-runner.js";
 import { createWorkflowFileCommitter } from "./create-environment-workflow-committer.js";
 import {
+  providerMutationRecord,
+  unresolvedProviderMutations
+} from "../../operations.js";
+import {
   applyProviderConfiguration,
   publishWorkflowFiles
 } from "./create-environment-workflow-publisher.js";
@@ -33,6 +37,15 @@ import type {
   GhcrPreflightResult,
   SetupFailureResponse
 } from "./create-environment-types.js";
+import {
+  executeRecoverableMutation,
+  ProviderMutationRecoveryError
+} from "../services/provider-mutation-recovery.js";
+import { selectedEnvironmentReader } from "../services/github-environment.js";
+import {
+  findExactVerificationRun,
+  hasPostDispatchVerificationRuns
+} from "../../verification-run-identity.js";
 
 // Seam 4 of the `POST /api/create-environment` slice: the seven-step use case.
 //
@@ -80,6 +93,17 @@ export interface CreateEnvironmentDependencies
     operation: CreateEnvironmentOperation | null;
     persist: () => Promise<void>;
     report: (diagnostic: { code: string; message: string }) => void;
+  }): Promise<boolean>;
+  // Honors a recorded stop between remote mutations. Returns false once it has
+  // closed the operation and answered the request, so the caller must return
+  // without touching Azure or GitHub again. Never called while a command is in
+  // flight: Radius lets the current write finish and stops before the next one.
+  guardStopBoundary(input: {
+    operation: CreateEnvironmentOperation | null;
+    boundary: string;
+    persist: () => Promise<void>;
+    report: (diagnostic: { code: string; message: string }) => void;
+    respond: (status: number, body: Record<string, unknown>) => void;
   }): Promise<boolean>;
   runAzCommand(
     args: string[]
@@ -129,8 +153,22 @@ export interface CreateEnvironmentDependencies
   ): void;
   recordGitHubEnvironment(
     operation: CreateEnvironmentOperation,
-    patch: { state: string; repo: string; name: string }
+    patch: {
+      state: string;
+      repo: string;
+      name: string;
+      providerId?: string | null;
+      origin?: string;
+    }
   ): void;
+  // Promotes the environment this request wrote from "Radius may own this" to
+  // "Radius created this", and only after the identity is durably saved. It
+  // answers false when the ledger cannot match the proof, which leaves the safe
+  // under-claim in place.
+  promoteCreatedGitHubEnvironment(
+    operation: CreateEnvironmentOperation,
+    identity: { repo: string; name: string }
+  ): boolean;
   envListCacheDelete(repo: string): void;
   ociStateBackend: string;
   defaultStateArchive: string;
@@ -152,7 +190,16 @@ export interface CreateEnvironmentDependencies
   generateDeleteWorkflow(environment: string): Promise<Record<string, string>>;
   recordCommittedWorkflowFile(
     operation: CreateEnvironmentOperation,
-    entry: { path: string; branch: string | null; mode: string }
+    entry: {
+      path: string;
+      branch: string | null;
+      mode: string;
+      commitSha: string | null;
+      blobSha: string | null;
+      contentSha256: string | null;
+      previousBlobSha: string | null;
+      previousBlobKnown: boolean;
+    }
   ): void;
   deleteLegacyDeployWorkflow(
     repo: string,
@@ -190,6 +237,7 @@ export interface CreateEnvironmentDependencies
     targetRepo: string;
     envName: string;
     ref?: string;
+    operationMarker?: string;
   }): string[];
   verifyWorkflowFile: string;
   stageVerify: string;
@@ -247,6 +295,11 @@ export async function handleCreateEnvironment(
   let steps: string[] = [];
   let deleteGitHubEnvironmentRunner:
     ((args: string[]) => Promise<unknown>) | null = null;
+  // The cleanup's identity gate reads the environment back before deleting it.
+  // It has to read through the same account the environment was created with,
+  // or an access failure reads as "gone" and the delete goes out blind.
+  let readGitHubEnvironmentRunner:
+    ((args: string[]) => Promise<CreateEnvironmentCommandResult>) | null = null;
   try {
     const data: CreateEnvironmentRequestData = JSON.parse(body);
     const admission = await admitCreateEnvironmentRequest(data, dependencies);
@@ -275,6 +328,7 @@ export async function handleCreateEnvironment(
         throw new Error(detail || "GitHub API request failed.");
       }
     };
+    readGitHubEnvironmentRunner = selectedEnvironmentReader(selectedExecutor);
 
     steps = [];
     const rawPush = steps.push.bind(steps);
@@ -288,6 +342,15 @@ export async function handleCreateEnvironment(
       }
       return rawPush(...items);
     };
+    const stopBoundary = (boundary: string) =>
+      dependencies.guardStopBoundary({
+        operation,
+        boundary,
+        persist: () => dependencies.persistOperations(),
+        report: (diagnostic) =>
+          dependencies.reportOperationDiagnostic(diagnostic),
+        respond
+      });
 
     // Preflight repo access + admin BEFORE any GitHub mutation. Reachable
     // directly when credentials already exist and azure-auto-setup is skipped,
@@ -308,12 +371,14 @@ export async function handleCreateEnvironment(
           provider === "azure" ?
             (args: string[]) => dependencies.runAzCommand(args)
           : null,
-        runDeleteEnvironment: deleteGitHubEnvironmentRunner
+        runDeleteEnvironment: deleteGitHubEnvironmentRunner,
+        readEnvironment: readGitHubEnvironmentRunner
       });
       respond(failure.status, failure.body);
       return;
     }
 
+    if (!(await stopBoundary("before-ghcr-bootstrap"))) return;
     const ghcrPreflight =
       await dependencies.preflightGhcrPackageWriteAccess(selectedExecutor);
     if (!ghcrPreflight.ok) {
@@ -322,7 +387,8 @@ export async function handleCreateEnvironment(
         error: ghcrPreflight.error,
         code: ghcrPreflight.code,
         steps,
-        runDeleteEnvironment: deleteGitHubEnvironmentRunner
+        runDeleteEnvironment: deleteGitHubEnvironmentRunner,
+        readEnvironment: readGitHubEnvironmentRunner
       });
       respond(failure.status, failure.body);
       return;
@@ -340,7 +406,12 @@ export async function handleCreateEnvironment(
         requestedName: envName,
         readGitHubJson: (apiPath) =>
           dependencies.readGitHubJson(apiPath, selectedExecutor),
-        runGh: (args) => selectedExecutor.run(args)
+        runGh: (args) => selectedExecutor.run(args),
+        mutationRecovery: {
+          operation,
+          persist: () => dependencies.persistOperations()
+        },
+        now: dependencies.now
       });
     } catch (error) {
       if (
@@ -350,7 +421,8 @@ export async function handleCreateEnvironment(
         dependencies.recordGitHubEnvironment(operation, {
           state: "created_candidate",
           repo: error.createdCandidate.repo,
-          name: error.createdCandidate.name
+          name: error.createdCandidate.name,
+          origin: "unknown"
         });
       }
       throw error;
@@ -389,24 +461,52 @@ export async function handleCreateEnvironment(
           provider === "azure" ?
             (args: string[]) => dependencies.runAzCommand(args)
           : null,
-        runDeleteEnvironment: deleteGitHubEnvironmentRunner
+        runDeleteEnvironment: deleteGitHubEnvironmentRunner,
+        readEnvironment: readGitHubEnvironmentRunner
       });
       respond(failure.status, failure.body);
     };
-    const checkpoint = () =>
-      dependencies.persistMutationCheckpoint({
+    // Both gates in one call: the checkpoint saves the provenance of the write
+    // that just finished, and the boundary then decides whether a stop recorded
+    // while it ran should be honored before the next write starts.
+    const checkpoint = async (boundary = "environment-mutation") => {
+      const saved = await dependencies.persistMutationCheckpoint({
         operation,
         persist: () => dependencies.persistOperations(),
         report: (diagnostic) =>
           dependencies.reportOperationDiagnostic(diagnostic),
         fail
       });
+      if (!saved) return false;
+      return stopBoundary(boundary);
+    };
 
     dependencies.recordGitHubEnvironment(operation, {
       state: ensuredEnvironment.state,
       repo: targetRepo,
-      name: envName
+      name: envName,
+      providerId: ensuredEnvironment.providerId,
+      origin: ensuredEnvironment.state === "reused" ? "pre_existing" : "unknown"
     });
+    if (
+      ensuredEnvironment.creationProof?.proven &&
+      dependencies.promoteCreatedGitHubEnvironment(operation, {
+        repo: targetRepo,
+        name: envName
+      })
+    ) {
+      steps.push(
+        `✅ GitHub environment "${envName}" created by this setup — Radius owns it and can remove it.`
+      );
+    } else if (
+      ensuredEnvironment.state === "created_candidate" &&
+      ensuredEnvironment.creationProof &&
+      !ensuredEnvironment.creationProof.proven
+    ) {
+      steps.push(
+        `ℹ️ Radius left GitHub environment "${envName}" outside its cleanup scope. ${ensuredEnvironment.creationProof.detail}`
+      );
+    }
     if (requestedEnvName === envName) {
       steps.push(`✅ GitHub environment "${envName}" resolved.`);
     } else {
@@ -414,11 +514,21 @@ export async function handleCreateEnvironment(
         `✅ GitHub resolved requested environment "${requestedEnvName}" as "${envName}".`
       );
     }
-    if (!(await checkpoint())) return;
+    if (!(await checkpoint("after-github-environment"))) return;
 
-    const defaultBranch =
-      (await dependencies.getDefaultBranch(targetRepo, selectedExecutor)) ||
-      "main";
+    const defaultBranch = await dependencies.getDefaultBranch(
+      targetRepo,
+      selectedExecutor
+    );
+    if (!defaultBranch) {
+      await fail(
+        400,
+        `Could not determine the default branch for ${targetRepo}, so Radius did not commit workflow files with guessed rollback provenance.`,
+        "default-branch-unavailable",
+        { steps }
+      );
+      return;
+    }
     const stateRegistry = dependencies.stateRegistryForEnvironment(
       targetRepo,
       envName
@@ -450,6 +560,10 @@ export async function handleCreateEnvironment(
         errorMessage: (error) => dependencies.errorMessage(error),
         pushStep: (message) => {
           steps.push(message);
+        },
+        mutationRecovery: {
+          operation,
+          persist: () => dependencies.persistOperations()
         },
         now: () => dependencies.now()
       },
@@ -505,6 +619,11 @@ export async function handleCreateEnvironment(
     // /api/verify-status, which would otherwise spin until the timeout.
     let verifySkipReason = "";
 
+    // This is the commit point. After it, a stop keeps the resources in place
+    // rather than removing them, because the workflow files may already be
+    // visible to the repository.
+    if (!(await stopBoundary("before-workflow-commit"))) return;
+
     // Steps 3, 4 and 4b: publish the verify, deploy and delete workflow files.
     // `gate` is this use case's own `checkpoint`, passed in so the gates fire at
     // the same points they did inline; the publisher never finalizes or
@@ -528,7 +647,7 @@ export async function handleCreateEnvironment(
         pushStep: (message) => {
           steps.push(message);
         },
-        gate: checkpoint
+        gate: () => checkpoint("after-workflow-commit")
       },
       { operation, targetRepo, envName, provider, defaultBranch }
     );
@@ -538,6 +657,25 @@ export async function handleCreateEnvironment(
         steps,
         ghError: published.ghError
       });
+      return;
+    }
+    // The delete-workflow commit is treated as non-critical and its failure is
+    // swallowed into a warning step, which is right for a commit that simply
+    // did not happen. A workflow write whose outcome is unknown is a different
+    // thing: it leaves a journal entry nothing later settles, and reporting
+    // success here would hand the customer a finished environment whose
+    // destructive gates are already blocked. Same refusal the credential path
+    // gives.
+    const unresolvedWorkflowWrites = unresolvedProviderMutations(
+      operation
+    ).filter((mutation) => mutation.kind === "github_workflow.put");
+    if (unresolvedWorkflowWrites.length > 0) {
+      await fail(
+        409,
+        "Provider reconciliation is still pending for a workflow file Radius wrote. Radius will not complete setup or start another provider mutation.",
+        "provider-reconciliation-pending",
+        { steps }
+      );
       return;
     }
 
@@ -564,14 +702,125 @@ export async function handleCreateEnvironment(
           prState.base +
           "` are not permitted. Merge this PR to enable deploying and deleting the application from the Radius canvas."
       ].join("\n");
-      const pr = await dependencies.createPullRequestApi(
-        targetRepo,
-        prState.branch,
-        prState.base,
-        prTitle,
-        prBody,
-        selectedExecutor
-      );
+      const prMutation =
+        await executeRecoverableMutation<CreateEnvironmentPullRequestResult>({
+          operation,
+          kind: "github_pull_request.create",
+          target: `${targetRepo}:${prState.branch}:${prState.base}`,
+          providerIdempotencyKey: prState.branch,
+          persist: () => dependencies.persistOperations(),
+          mutate: async () => {
+            const result = await dependencies.createPullRequestApi(
+              targetRepo,
+              prState.branch,
+              prState.base,
+              prTitle,
+              prBody,
+              selectedExecutor
+            );
+            return {
+              code: result.ok ? 0 : 1,
+              stdout: result.ok ? JSON.stringify(result) : "",
+              stderr: result.stderr || "",
+              timedOut: result.timedOut
+            };
+          },
+          accept: (result) =>
+            JSON.parse(result.stdout) as CreateEnvironmentPullRequestResult,
+          // GitHub's own number for the pull request, settled with the status.
+          // The reconcile below matches on head and base ref names, which a
+          // customer can recreate; the number cannot be.
+          providerIdOf: (_result, value) =>
+            typeof value?.number === "number" ? String(value.number) : null,
+          reconcile: async () => {
+            const listed = await runGh([
+              "api",
+              `/repos/${targetRepo}/pulls?state=open&head=${encodeURIComponent(
+                prState.branch
+              )}&base=${encodeURIComponent(prState.base)}&per_page=10`
+            ]);
+            if (listed.code !== 0 && listed.code !== "0") {
+              throw new Error(
+                listed.stderr ||
+                  listed.stdout ||
+                  "GitHub pull requests could not be read."
+              );
+            }
+            let matches: Array<{ html_url: string; number: number }> = [];
+            try {
+              const parsed: unknown = JSON.parse(listed.stdout);
+              if (Array.isArray(parsed)) {
+                matches = parsed
+                  .filter(
+                    (
+                      value
+                    ): value is {
+                      html_url: string;
+                      number: number;
+                      head: { ref: string };
+                      base: { ref: string };
+                    } =>
+                      value !== null &&
+                      typeof value === "object" &&
+                      "html_url" in value &&
+                      typeof value.html_url === "string" &&
+                      "number" in value &&
+                      typeof value.number === "number" &&
+                      "head" in value &&
+                      value.head !== null &&
+                      typeof value.head === "object" &&
+                      "ref" in value.head &&
+                      value.head.ref === prState.branch &&
+                      "base" in value &&
+                      value.base !== null &&
+                      typeof value.base === "object" &&
+                      "ref" in value.base &&
+                      value.base.ref === prState.base
+                  )
+                  .map((value) => ({
+                    html_url: value.html_url,
+                    number: value.number
+                  }));
+              }
+            } catch {
+              throw new Error(
+                "GitHub returned an unreadable pull request list."
+              );
+            }
+            if (matches.length === 0) {
+              return {
+                state: "not_applied" as const,
+                evidence:
+                  "GitHub confirmed no open pull request uses the operation-specific branch."
+              };
+            }
+            if (matches.length > 1) {
+              return {
+                state: "manual_required" as const,
+                guidance:
+                  `Multiple pull requests use operation branch "${prState.branch}". ` +
+                  "Radius will not create, close, or modify any of them."
+              };
+            }
+            return {
+              state: "applied" as const,
+              value: {
+                ok: true,
+                url: matches[0].html_url,
+                number: matches[0].number
+              },
+              evidence:
+                "The pull request head and base match the operation-specific branch provenance."
+            };
+          }
+        });
+      const pr: CreateEnvironmentPullRequestResult =
+        prMutation.state === "applied" ?
+          prMutation.value
+        : {
+            ok: false,
+            stderr: "GitHub confirmed the pull request was not created."
+          };
       if (pr.ok) {
         pullRequestUrl = pr.url || "";
         steps.push("✅ Opened pull request #" + pr.number + ": " + pr.url);
@@ -591,6 +840,7 @@ export async function handleCreateEnvironment(
             '".'
         );
       }
+      if (!(await checkpoint("after-pull-request"))) return;
     }
     // Step 5: Dispatch the verify workflow.
     //
@@ -602,6 +852,9 @@ export async function handleCreateEnvironment(
     let verifyRunUrl = "";
     let verifyRunId: string | number | null = null;
     const dispatchedAt = dependencies.now();
+    let verificationRef = defaultBranch;
+    let baselineRunId: number | null = null;
+    let verificationManualReason = "";
     const verifyPlan = await dependencies.planCredentialVerification({
       targetRepo,
       prState: prState || null,
@@ -638,55 +891,272 @@ export async function handleCreateEnvironment(
           `ℹ️ The verify workflow is already on "${verifyPlan.defaultBranch}", so verification runs now against branch "${verifyPlan.ref}" rather than waiting for the merge.`
         );
       steps.push("Dispatching verify-credentials workflow...");
-      // Wait briefly for GitHub to index the workflow, then dispatch with a few
-      // retries to ride out indexing/propagation races.
+      if (!(await stopBoundary("before-verification-dispatch"))) return;
+      // Wait briefly for GitHub to index the workflow. The dispatch itself is
+      // issued once: if Radius loses the response, it discovers and adopts the
+      // accepted run instead of dispatching a duplicate.
       await dependencies.sleep(3000);
-      const dispatchDelays = [0, 2000, 5000];
-      let dispatchResult: CreateEnvironmentCommandResult = {
-        code: 1,
-        stdout: "",
-        stderr: ""
-      };
-      for (const delay of dispatchDelays) {
-        if (delay > 0) await dependencies.sleep(delay);
-        dispatchResult = await runGhWorkflow(
-          dependencies.buildVerifyWorkflowDispatchArgs({
-            workflowFile: dependencies.verifyWorkflowFile,
-            targetRepo,
-            envName,
-            ref: verifyPlan.ref
-          })
+      const baselineResult = await runGh([
+        "run",
+        "list",
+        "--workflow=" + dependencies.verifyWorkflowFile,
+        "--limit",
+        "1",
+        "--json",
+        "databaseId",
+        "--repo",
+        targetRepo
+      ]);
+      if (baselineResult.code !== 0 && baselineResult.code !== "0") {
+        await fail(
+          502,
+          "Radius could not read the verification-run baseline, so it did not dispatch the workflow. Retry after GitHub Actions run history is readable.",
+          "verify-baseline-read-failed",
+          {
+            steps,
+            ghError: baselineResult.stderr || baselineResult.stdout || ""
+          }
         );
-        if (dispatchResult.code === 0) break;
+        return;
       }
-
-      if (dispatchResult.code === 0) {
-        steps.push("✅ Credentials verification dispatched.");
-        await dependencies.sleep(5000);
+      baselineRunId = null;
+      try {
+        const parsed: unknown = JSON.parse(baselineResult.stdout);
+        if (!Array.isArray(parsed)) throw new Error("expected an array");
+        const first = Array.isArray(parsed) ? parsed[0] : null;
+        if (
+          first &&
+          typeof first === "object" &&
+          "databaseId" in first &&
+          Number.isFinite(Number(first.databaseId))
+        ) {
+          baselineRunId = Number(first.databaseId);
+        }
+      } catch {
+        await fail(
+          502,
+          "GitHub returned an unreadable verification-run baseline, so Radius did not dispatch the workflow.",
+          "verify-baseline-read-failed",
+          { steps }
+        );
+        return;
+      }
+      verificationRef = verifyPlan.ref || defaultBranch;
+      const supportsOperationMarker =
+        verifyPlan.supportsOperationMarker !== false;
+      const operationMarker =
+        supportsOperationMarker ? operation.operationId : "";
+      const verificationActionsUrl =
+        `https://github.com/${targetRepo}/actions/workflows/` +
+        encodeURIComponent(dependencies.verifyWorkflowFile);
+      const dispatchMutationKind = "github_workflow.dispatch";
+      const dispatchMutationTarget = `${targetRepo}:${dependencies.verifyWorkflowFile}:${verificationRef}:${envName}`;
+      // A dispatch still awaiting an answer already sent its identity. Re-deriving
+      // one here would move it: `gh run list --limit 1` on a resumed pass returns
+      // the interrupted dispatch's own run, so a fresh baseline excludes the very
+      // run being looked for, and a fresh `dispatchedAt` excludes it again. A
+      // refused attempt is not reconcilable and contributes nothing.
+      const dispatchedMutation = providerMutationRecord(
+        operation,
+        dispatchMutationKind,
+        dispatchMutationTarget
+      );
+      const dispatchIntent =
+        (
+          dispatchedMutation?.status === "prepared" ||
+          dispatchedMutation?.status === "outcome_unknown" ||
+          dispatchedMutation?.status === "confirmed"
+        ) ?
+          dispatchedMutation.intent
+        : undefined;
+      const identityDispatchedAt =
+        typeof dispatchIntent?.dispatchedAt === "number" ?
+          dispatchIntent.dispatchedAt
+        : dispatchedAt;
+      const identityBaselineRunId =
+        typeof dispatchIntent?.baselineRunId === "number" ?
+          dispatchIntent.baselineRunId
+        : dispatchIntent?.baselineRunId === null ? null
+        : baselineRunId;
+      const identityRef =
+        typeof dispatchIntent?.ref === "string" ?
+          dispatchIntent.ref
+        : verificationRef;
+      const identityMarker =
+        typeof dispatchIntent?.operationMarker === "string" ?
+          dispatchIntent.operationMarker
+        : operationMarker;
+      // Written from the identity that was actually sent, so a recovered pass
+      // never overwrites the markers `recovered-verification-run` reads with
+      // freshly derived ones that can no longer find the run.
+      operation.verification = {
+        dispatchedAt: identityDispatchedAt,
+        workflow: dependencies.verifyWorkflowFile,
+        ref: identityRef,
+        environment: envName,
+        event: "workflow_dispatch",
+        operationMarker: identityMarker || null,
+        baselineRunId: identityBaselineRunId,
+        runId: null,
+        runUrl: null
+      };
+      const discoverAcceptedRun = async (): Promise<
+        | { state: "applied"; value: string; evidence: string }
+        | { state: "manual_required"; guidance: string }
+      > => {
         const runsResult = await runGh([
           "run",
           "list",
-          "--workflow=radius-verify-credentials.yml",
+          "--workflow=" + dependencies.verifyWorkflowFile,
           "--limit",
-          "1",
+          "10",
           "--json",
-          "databaseId,status,url",
+          "databaseId,createdAt,displayTitle,event,headBranch",
           "--repo",
           targetRepo
         ]);
+        if (runsResult.code !== 0 && runsResult.code !== "0") {
+          throw new Error(
+            runsResult.stderr ||
+              runsResult.stdout ||
+              "GitHub workflow runs could not be read."
+          );
+        }
+        let parsed: unknown;
         try {
-          const parsed: unknown = JSON.parse(runsResult.stdout);
-          const runs = Array.isArray(parsed) ? parsed : [];
-          if (runs.length > 0) {
-            verifyRunId = runs[0].databaseId;
-            verifyRunUrl =
-              "https://github.com/" +
-              targetRepo +
-              "/actions/runs/" +
-              verifyRunId;
-            steps.push("Verify run: " + verifyRunUrl);
+          parsed = JSON.parse(runsResult.stdout);
+        } catch {
+          throw new Error("GitHub returned an unreadable workflow run list.");
+        }
+        if (!identityMarker) {
+          return {
+            state: "manual_required",
+            guidance: `The installed verification workflow does not expose Radius's operation marker. Check the accepted run in ${verificationActionsUrl}; Radius will not guess which run belongs to this operation or dispatch another one.`
+          };
+        }
+        const exact = findExactVerificationRun(parsed, {
+          baselineRunId: identityBaselineRunId,
+          dispatchedAt: identityDispatchedAt,
+          ref: identityRef,
+          environment: envName,
+          operationMarker: identityMarker
+        });
+        if (exact.state === "applied") {
+          return {
+            state: "applied",
+            value: exact.runId,
+            evidence:
+              "The workflow, ref, environment, event, and operation-specific run title matched exactly."
+          };
+        }
+        if (exact.state === "ambiguous") {
+          return {
+            state: "manual_required",
+            guidance: `Multiple verification runs carry this operation's exact marker. Check ${verificationActionsUrl}; Radius will not choose one or dispatch another run.`
+          };
+        }
+        if (
+          hasPostDispatchVerificationRuns(
+            parsed,
+            identityBaselineRunId,
+            identityDispatchedAt
+          )
+        ) {
+          return {
+            state: "manual_required",
+            guidance:
+              `GitHub exposed one or more new verification runs, but none matches this operation's exact workflow/ref/environment/event marker. ` +
+              `Check ${verificationActionsUrl}; Radius will not adopt or redispatch a run.`
+          };
+        }
+        throw new Error(
+          "No verification run with this operation's exact marker is visible yet."
+        );
+      };
+      const dispatch = await executeRecoverableMutation({
+        operation,
+        kind: dispatchMutationKind,
+        target: dispatchMutationTarget,
+        // The identity this dispatch sends is journalled with it, so a recovery
+        // reads back the baseline and time it actually used instead of deriving
+        // ones that can no longer match the run it created.
+        intent: {
+          dispatchedAt: identityDispatchedAt,
+          baselineRunId: identityBaselineRunId,
+          ref: identityRef,
+          environment: envName,
+          operationMarker: identityMarker || null
+        },
+        providerIdempotencyKey: identityMarker || null,
+        persist: () => dependencies.persistOperations(),
+        mutate: () =>
+          runGhWorkflow(
+            dependencies.buildVerifyWorkflowDispatchArgs({
+              workflowFile: dependencies.verifyWorkflowFile,
+              targetRepo,
+              envName,
+              ref: verifyPlan.ref,
+              operationMarker
+            })
+          ),
+        accept: () => "",
+        reconcile: async () => {
+          for (const delay of [0, 2000, 5000]) {
+            if (delay > 0) await dependencies.sleep(delay);
+            try {
+              return await discoverAcceptedRun();
+            } catch {
+              if (delay === 5000)
+                throw new Error(
+                  "GitHub has not exposed an accepted verification run yet."
+                );
+            }
           }
-        } catch {}
+          throw new Error(
+            "GitHub has not exposed an accepted verification run."
+          );
+        }
+      });
+      const dispatchResult =
+        dispatch.state === "applied" ?
+          { code: 0, stdout: "", stderr: "" }
+        : dispatch.result || {
+            code: 1,
+            stdout: "",
+            stderr: "GitHub confirmed the dispatch was not accepted."
+          };
+
+      if (dispatchResult.code === 0) {
+        steps.push("✅ Credentials verification dispatched.");
+        if (dispatch.state === "applied" && dispatch.recovered) {
+          verifyRunId = dispatch.value;
+        } else if (!operationMarker) {
+          verificationManualReason =
+            `GitHub accepted verification, but the installed legacy workflow cannot expose an operation-specific run marker. ` +
+            `Review the run in ${verificationActionsUrl}. Radius will not adopt or redispatch it.`;
+          verifyRunUrl = verificationActionsUrl;
+        } else {
+          await dependencies.sleep(5000);
+          try {
+            const discovered = await discoverAcceptedRun();
+            if (discovered.state === "applied") {
+              verifyRunId = discovered.value;
+            } else {
+              verificationManualReason = discovered.guidance;
+              verifyRunUrl = verificationActionsUrl;
+            }
+          } catch {
+            verificationManualReason =
+              `GitHub accepted verification, but Radius could not confirm the exact marked run. ` +
+              `Review ${verificationActionsUrl}; Radius will not adopt another run or dispatch again.`;
+            verifyRunUrl = verificationActionsUrl;
+          }
+        }
+        if (verifyRunId !== null) {
+          verifyRunUrl =
+            "https://github.com/" + targetRepo + "/actions/runs/" + verifyRunId;
+          steps.push("Verify run: " + verifyRunUrl);
+        }
       } else {
         const detail =
           (dispatchResult.stderr || dispatchResult.stdout || "").trim() ||
@@ -694,11 +1164,16 @@ export async function handleCreateEnvironment(
         steps.push("❌ Could not dispatch verify workflow: " + detail);
         await fail(
           400,
-          "Environment and state package were configured, but the verify workflow could not be dispatched after multiple attempts. " +
+          "Environment and state package were configured, but GitHub definitively rejected the verify workflow dispatch. " +
             detail,
           "verify-dispatch-failed",
           {
             environment: envName,
+            event: "workflow_dispatch",
+            operationMarker:
+              verifyPlan.supportsOperationMarker !== false ?
+                operation.operationId
+              : null,
             provider,
             repo: targetRepo,
             stateBackend: dependencies.ociStateBackend,
@@ -715,17 +1190,49 @@ export async function handleCreateEnvironment(
     // Record dispatch markers so the deploy monitor can track the correct
     // (newly-triggered) runs rather than any stale runs.
     {
+      const priorVerification =
+        (
+          operation.verification !== null &&
+          typeof operation.verification === "object"
+        ) ?
+          operation.verification
+        : {};
+      const priorOperationMarker =
+        (
+          "operationMarker" in priorVerification &&
+          typeof priorVerification.operationMarker === "string"
+        ) ?
+          priorVerification.operationMarker
+        : "";
       operation.verification = {
+        ...priorVerification,
         dispatchedAt,
         workflow: dependencies.verifyWorkflowFile,
-        ref: verifyPlan.ref || defaultBranch,
+        ref: verificationRef,
+        event: "workflow_dispatch",
+        operationMarker:
+          priorOperationMarker || (prState ? operation.operationId : null),
+        baselineRunId,
         environment: envName,
         runId: verifyRunId == null ? null : String(verifyRunId),
         runUrl: verifyRunUrl || null
       };
       if (verifyPlan.shouldDispatch)
         dependencies.enterStage(operation, dependencies.stageVerify);
-      if (!(await checkpoint())) return;
+      // Record the commit identity, including any pull request, before the
+      // safe-boundary check. A stop honored here must still be able to tell the
+      // customer that the workflows were committed and where.
+      dependencies.recordCommitState(operation, {
+        mode:
+          verifyPlan.shouldDispatch ?
+            prState ? "pull_request"
+            : "default_branch"
+          : "pull_request",
+        branch: prState?.branch || defaultBranch,
+        baseBranch: prState?.base || verifyPlan.defaultBranch || defaultBranch,
+        pullRequestUrl: pullRequestUrl || null
+      });
+      if (!(await checkpoint("after-verification-dispatch"))) return;
       const entry = dependencies.readInstanceEntry(context.instanceId);
       if (entry) {
         entry.state.deployDispatchedAt = dispatchedAt;
@@ -734,15 +1241,10 @@ export async function handleCreateEnvironment(
       }
     }
 
-    const actionRequired = !verifyPlan.shouldDispatch;
+    const actionRequired =
+      !verifyPlan.shouldDispatch || verificationManualReason !== "";
     dependencies.recordCleanupState(operation, { state: "not_needed" });
     if (actionRequired) {
-      dependencies.recordCommitState(operation, {
-        mode: "pull_request",
-        branch: prState?.branch || defaultBranch,
-        baseBranch: prState?.base || verifyPlan.defaultBranch || defaultBranch,
-        pullRequestUrl: pullRequestUrl || null
-      });
       // The third terminal state, and the one the product kept getting wrong.
       // Verification was never dispatched, so there is nothing to wait for and
       // nothing failed — the operation is finished and the remaining work is the
@@ -755,12 +1257,16 @@ export async function handleCreateEnvironment(
       );
       dependencies.finish(operation, "action_required", {
         terminal: {
-          reason: "pr-merge-required",
+          reason:
+            verificationManualReason ?
+              "verification-run-manual"
+            : "pr-merge-required",
           pullRequestUrl: pullRequestUrl || null,
           branch: prState?.branch || null,
           baseBranch: prState?.base || verifyPlan.defaultBranch || null,
           userMessage:
-            pullRequestUrl ?
+            verificationManualReason ||
+            (pullRequestUrl ?
               `I couldn't push the workflow files to the default branch of \`${targetRepo}\` directly, so I committed them to \`${prState?.branch || defaultBranch}\` and opened a pull request: ${pullRequestUrl}. Merge it to finish setting up the repository.`
             : `Open and merge a pull request from "${
                 prState?.branch || "the setup branch"
@@ -768,7 +1274,7 @@ export async function handleCreateEnvironment(
                 prState?.base ||
                 verifyPlan.defaultBranch ||
                 "the default branch"
-              }" to finish setup.`
+              }" to finish setup.`)
         }
       });
       await dependencies.persistBestEffort({
@@ -807,14 +1313,8 @@ export async function handleCreateEnvironment(
           dependencies.reportOperationDiagnostic(diagnostic)
       });
     } else {
-      dependencies.recordCommitState(operation, {
-        mode: prState ? "pull_request" : "default_branch",
-        branch: prState?.branch || defaultBranch,
-        baseBranch: prState?.base || verifyPlan.defaultBranch || defaultBranch,
-        pullRequestUrl: pullRequestUrl || null
-      });
-      // Verification is dispatched but still running; stage and exact dispatch
-      // identity were persisted together above.
+      // Verification is dispatched but still running; stage, commit identity,
+      // and exact dispatch identity were persisted together above.
     }
 
     respond(200, {
@@ -846,10 +1346,26 @@ export async function handleCreateEnvironment(
       steps
     });
   } catch (e) {
+    if (
+      e instanceof ProviderMutationRecoveryError &&
+      e.code === "provider-mutation-outcome-unknown" &&
+      op
+    ) {
+      respond(202, {
+        operationId: op.operationId,
+        code: e.code,
+        reconciling: true,
+        message: e.message
+      });
+      return;
+    }
     const failure = await dependencies.finalizeSetupFailure(op, {
       status: 400,
       error: dependencies.errorMessage(e),
-      code: "create-environment-unhandled",
+      code:
+        e instanceof ProviderMutationRecoveryError ?
+          e.code
+        : "create-environment-unhandled",
       classification: "unknown",
       evidence: e instanceof Error ? e.stack || null : null,
       steps,
@@ -857,7 +1373,8 @@ export async function handleCreateEnvironment(
         op && op.provider === "azure" ?
           (args: string[]) => dependencies.runAzCommand(args)
         : null,
-      runDeleteEnvironment: deleteGitHubEnvironmentRunner
+      runDeleteEnvironment: deleteGitHubEnvironmentRunner,
+      readEnvironment: readGitHubEnvironmentRunner
     });
     respond(failure.status, failure.body);
   }
