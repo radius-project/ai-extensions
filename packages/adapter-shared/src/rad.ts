@@ -36,6 +36,16 @@ import {
   applicationGraphToResources,
   filterGraphVisualizationResources
 } from "@radius-project/core";
+import {
+  killChildTree,
+  managedBicepEnv as processManagedBicepEnv,
+  RadProcessError,
+  spawnRad
+} from "./rad-process.mjs";
+import type { ProcessResult, SpawnRadOptions } from "./rad-process.mjs";
+
+export { killChildTree, RadProcessError, spawnRad };
+export type { ProcessResult, SpawnRadOptions };
 
 // --- Shared named types -----------------------------------------------------
 //
@@ -51,20 +61,6 @@ import {
  * NEVER console.log — an adapter's stdout may be a JSON-RPC channel.
  */
 export type Logger = (message: string) => void;
-
-/** Captured output of a completed process invocation. */
-export interface ProcessResult {
-  stdout: string;
-  stderr: string;
-}
-
-/** Options accepted by every managed-rad spawn helper. */
-export interface SpawnRadOptions {
-  cwd?: string;
-  env?: NodeJS.ProcessEnv;
-  timeout?: number;
-  label?: string;
-}
 
 interface SpawnManagedRadOptions extends SpawnRadOptions {
   log?: Logger;
@@ -177,23 +173,6 @@ export interface RunRadBicepPublishOptions {
   timeout?: number;
 }
 
-/**
- * Thrown by a managed rad/bicep process invocation, carrying the captured
- * stdout/stderr so callers can surface rad's actual diagnostic output (rad
- * prints Bicep compile errors like BCP* to stdout, not stderr).
- */
-export class RadProcessError extends Error {
-  readonly stdout: string;
-  readonly stderr: string;
-
-  constructor(message: string, stdout: string, stderr: string) {
-    super(message);
-    this.name = "RadProcessError";
-    this.stdout = stdout;
-    this.stderr = stderr;
-  }
-}
-
 // Narrows an unknown catch binding to a human-readable message without ever
 // assuming it is an Error (a thrown value can be anything in JS/TS).
 function errorMessage(err: unknown): string {
@@ -235,6 +214,13 @@ export const MANAGED_RAD_BIN = path.join(
 export const MANAGED_RAD_PATH = path.join(MANAGED_RAD_BIN, `rad${EXE}`);
 export const MANAGED_BICEP_PATH = path.join(MANAGED_RAD_BIN, `bicep${EXE}`);
 
+export function managedBicepEnv(
+  env: NodeJS.ProcessEnv = {},
+  bicepPath: string = MANAGED_BICEP_PATH
+): NodeJS.ProcessEnv {
+  return processManagedBicepEnv(env, bicepPath);
+}
+
 // The ACR repository that publishes the Radius Bicep extension: the `Radius.*`
 // type index bicep resolves `extension radius` against. `rad app graph` compiles
 // Bicep offline, but bicep still needs a bicepconfig.json beside the .bicep
@@ -259,13 +245,6 @@ let cachedRadPath: string | null = null;
 const ensureBicepPromises = new Map<string, Promise<string>>();
 
 function noop(): void {}
-
-export function managedBicepEnv(
-  env: NodeJS.ProcessEnv = {},
-  bicepPath: string = MANAGED_BICEP_PATH
-): NodeJS.ProcessEnv {
-  return { ...env, BICEP: bicepPath };
-}
 
 // Maps Node's platform/arch onto the GitHub release asset naming used by rad
 // (rad_<os>_<arch>[.exe]).
@@ -402,30 +381,6 @@ async function waitForBicepDownload(
     await new Promise((r) => setTimeout(r, intervalMs));
   }
   return "timeout";
-}
-
-// Terminates rad and any bicep child it spawned. On Windows, `taskkill /t` kills
-// the whole process tree; on POSIX, rad is a process-group leader (spawned
-// detached), so signalling the group (-pid) stops rad and its children together.
-// Best-effort — any failure is swallowed.
-function killChildTree(child: ChildProcess | null | undefined): void {
-  if (!child || child.pid == null) return;
-  try {
-    if (IS_WIN) {
-      spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
-        stdio: "ignore",
-        windowsHide: true
-      });
-    } else {
-      process.kill(-child.pid, "SIGKILL");
-    }
-  } catch {
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      /* best-effort */
-    }
-  }
 }
 
 /**
@@ -932,109 +887,6 @@ export function ensureRadBinary({
       ensurePromise = null;
     });
   return ensurePromise;
-}
-
-/**
- * spawnRad - the process-handling core every managed-rad invocation needs:
- * spawn `radPath args`, capture stdout/stderr (capped at 32MB), and resolve
- * { stdout, stderr } on a zero exit or reject (with both streams attached) on a
- * non-zero exit, timeout, or spawn error. rad shells out to bicep as a
- * grandchild, so it spawns detached (rad leads its own process group), kills the
- * whole tree on timeout, and uses an exit/close grace window because that
- * grandchild can inherit and hold the stdio pipes open. `label` only names the
- * command in timeout/exit error messages; `env` is merged over process.env.
- * Exported for tests; managed-binary resolution lives in spawnManagedRad.
- */
-export function spawnRad(
-  radPath: string,
-  args: string[],
-  { cwd, env = {}, timeout = 120000, label = "rad" }: SpawnRadOptions = {}
-): Promise<ProcessResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(radPath, args, {
-      cwd,
-      env: { ...process.env, ...env },
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-      detached: true
-    });
-
-    const MAX = 32 * 1024 * 1024;
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    let graceTimer: ReturnType<typeof setTimeout> | null = null;
-    let exited: { code: number | null; signal: NodeJS.Signals | null } | null =
-      null;
-    child.stdout?.on("data", (c: Buffer) => {
-      if (stdout.length < MAX) stdout += c.toString();
-    });
-    child.stderr?.on("data", (c: Buffer) => {
-      if (stderr.length < MAX) stderr += c.toString();
-    });
-
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      if (graceTimer) clearTimeout(graceTimer);
-      killChildTree(child);
-      reject(
-        new RadProcessError(
-          `${label} timed out after ${timeout}ms`,
-          stdout,
-          stderr
-        )
-      );
-    }, timeout);
-
-    function finalize(code: number | null, signal: NodeJS.Signals | null) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (graceTimer) clearTimeout(graceTimer);
-      try {
-        child.stdout?.destroy();
-      } catch {
-        /* best-effort */
-      }
-      try {
-        child.stderr?.destroy();
-      } catch {
-        /* best-effort */
-      }
-      if (code === 0) {
-        resolve({ stdout, stderr });
-      } else {
-        // rad prints Bicep compile errors (BCP*) to stdout, not stderr, so keep
-        // both streams on the error for callers to surface.
-        reject(
-          new RadProcessError(
-            `${label} exited with code ${code}${signal ? ` (signal ${signal})` : ""}`,
-            stdout,
-            stderr
-          )
-        );
-      }
-    }
-
-    child.on("error", (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (graceTimer) clearTimeout(graceTimer);
-      reject(new RadProcessError(err.message, stdout, stderr));
-    });
-
-    child.on("exit", (code, signal) => {
-      exited = { code, signal };
-      if (settled || graceTimer) return;
-      graceTimer = setTimeout(() => finalize(code, signal), 2000);
-    });
-    child.on("close", (code, signal) => {
-      if (exited) finalize(exited.code, exited.signal);
-      else finalize(code, signal);
-    });
-  });
 }
 
 /**
