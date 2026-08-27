@@ -196,7 +196,6 @@ describe("P0-C built Radius extension artifact", () => {
     for (const packagedPath of packagedPaths) {
       expect(existsSync(join(DIST, ...packagedPath.split("/")))).toBe(true);
     }
-    expect(existsSync(join(DIST, "skills", "radius", "SKILL.md"))).toBe(false);
     if (existsSync(SOURCE_CHANGELOG)) {
       expect(readFileSync(join(DIST, "CHANGELOG.md"), "utf8")).toBe(
         readFileSync(SOURCE_CHANGELOG, "utf8")

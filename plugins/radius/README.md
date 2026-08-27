@@ -27,13 +27,13 @@ extension become available.
 
 ### Skills
 
-| Skill                            | Use it when you want to…                                                                                                                                                        |
-|----------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `radius-app-bicep`               | Generate or update the `.radius/app.bicep` manifest from a repo's contents.                                                                                                     |
-| `radius-app-graph`               | Build, refresh, or diff the Radius application graph.                                                                                                                           |
-| `radius-environment`             | Create and verify an AWS/Azure deploy environment and its OIDC trust.                                                                                                           |
-| `radius-deploy`                  | Deploy (or troubleshoot) an app via the generated GitHub Actions workflow.                                                                                                      |
-| `radius-delete`                  | Delete a deployed app via the generated GitHub Actions workflow, or remove a GitHub deploy environment.                                                                         |
+| Skill | Use it when you want to… |
+| ----- | ------------------------- |
+| `radius-app-bicep` | Generate or update the `.radius/app.bicep` manifest from a repo's contents. |
+| `radius-app-graph` | Build, refresh, or diff the Radius application graph. |
+| `radius-environment` | Create and verify an AWS/Azure deploy environment and its OIDC trust. |
+| `radius-deploy` | Deploy (or troubleshoot) an app via the generated GitHub Actions workflow. |
+| `radius-delete` | Delete a deployed app via the generated GitHub Actions workflow, or remove a GitHub deploy environment. |
 | `radius-fix-canvas-installation` | Repair a missing Radius canvas after install/update by copying the canvas files into the app's probed `extensions/` folder (temporary workaround for a GitHub Copilot app bug). |
 
 ### Canvas extension
@@ -47,7 +47,7 @@ built artifact — see [Development](#development) to rebuild it.
 
 Once installed, just ask Copilot naturally:
 
-```text
+```
 generate an app.bicep for this repo
 show me the application graph
 set up cloud credentials for Azure
