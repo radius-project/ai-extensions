@@ -21,7 +21,7 @@ const PLUGIN_MANIFEST = "plugins/radius/plugin.json";
 const SOURCE_OF_TRUTH = "plugins/radius/package.json";
 
 const RELEASED = "0.4.0";
-const SNAPSHOT = "0.5.0-edge-20260824000000";
+const SNAPSHOT = "0.5.0-edge-0b33186";
 
 const temporaryRepositories = [];
 
