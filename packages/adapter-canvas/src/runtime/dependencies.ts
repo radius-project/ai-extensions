@@ -216,6 +216,10 @@ export interface HostCallbackDependencies {
       repo: string;
       branches: string[];
       page: string;
+      // The canvas instance's state, so the runtime resolves each branch's model
+      // against the same workspace context the route rendered from and can
+      // deduplicate against this panel's last handoff.
+      state?: CanvasState;
     }) => Promise<unknown>
   ): void;
   setDeployRepairHandoff(

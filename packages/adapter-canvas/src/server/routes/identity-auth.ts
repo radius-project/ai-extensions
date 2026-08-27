@@ -1,3 +1,5 @@
+import { remediationView } from "@radius-project/core";
+import type { RemediationView } from "@radius-project/core";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
 
@@ -30,6 +32,9 @@ export interface AzureLoginRequiredResponse {
   error: string;
   code: string;
   tenantId: string;
+  // The same guidance the prose carries, in a form the canvas can offer to run.
+  // Prose is unchanged, so a client that ignores this field is unaffected.
+  remediation: RemediationView;
 }
 
 // Shaped exactly like `runCommand` from `gh.ts`. Only the three fields these
@@ -134,7 +139,8 @@ export async function handleVerifyAzureLogin(
           JSON.stringify({
             error: "Azure CLI is not installed.",
             code: "az-cli-missing",
-            tenantId
+            tenantId,
+            remediation: remediationView("azure-cli-install", { tenantId })
           })
         );
       } else {
@@ -264,7 +270,8 @@ export async function handleVerifyAwsLogin(
       response.end(
         JSON.stringify({
           error:
-            'No active AWS CLI session. Run "aws configure" (or "aws sso login") in your terminal, then click Verify again.'
+            'No active AWS CLI session. Run "aws configure" (or "aws sso login") in your terminal, then click Verify again.',
+          remediation: remediationView("aws-cli-login", {})
         })
       );
       return;

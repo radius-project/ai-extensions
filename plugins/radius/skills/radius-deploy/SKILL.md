@@ -27,7 +27,7 @@ Before invoking this skill, all of these must exist:
 
 Before opening the canvas, confirm that a repository is attached to the current session. If none is attached, stop without creating state and ask: "Which configured repository should I deploy the Radius application from?" Retry from the beginning after the repository is available.
 
-1. `open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "environment", repo: "<owner/repo>" } })`
+1. Reuse the existing Radius canvas instanceId when one is open; otherwise use `radius-panel`: `open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "environment", repo: "<owner/repo>" } })`
 2. In the hub:
    - **Applications ▾**: pick the bicep app file (auto-selected if only one)
    - **Envs ▾**: pick the target env (tagged with AWS / AZURE)

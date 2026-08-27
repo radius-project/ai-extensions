@@ -29,7 +29,7 @@ Open the canvas hub and use the deployed-application view:
 
 Before opening the canvas, confirm that a repository is attached to the current session. If none is attached, stop without creating state and ask: "Which configured repository should I delete the Radius deployment or environment from?" Retry from the beginning after the repository is available.
 
-1. `open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "environment", repo: "<owner/repo>" } })`
+1. Reuse the existing Radius canvas instanceId when one is open; otherwise use `radius-panel`: `open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "environment", repo: "<owner/repo>" } })`
 2. Select the environment (and, for a deployment delete, the deployed application).
 3. Click **Delete Deployment** to tear down the app, or use the environment's delete control to remove the GitHub environment. Live status streams until success / failure / timeout.
 

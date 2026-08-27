@@ -1,0 +1,22 @@
+{
+  "resources": {
+    "Radius.Core/applications@2025-08-01-preview": {
+      "$ref": "radius/radius.test/2025-08-01-preview/types.json#/32"
+    },
+    "Radius.Compute/containerImages@2025-08-01-preview": {
+      "$ref": "radius/radius.test/2025-08-01-preview/types.json#/19"
+    },
+    "Radius.Compute/containers@2025-08-01-preview": {
+      "$ref": "radius/radius.test/2025-08-01-preview/types.json#/27"
+    },
+    "Radius.Data/postgreSqlDatabases@2025-08-01-preview": {
+      "$ref": "radius/radius.test/2025-08-01-preview/types.json#/14"
+    }
+  },
+  "resourceFunctions": {},
+  "settings": {
+    "name": "Radius",
+    "version": "fixture",
+    "isSingleton": false
+  }
+}

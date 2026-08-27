@@ -15,6 +15,10 @@ import {
   isRepeatedFailure,
   parseRepairState
 } from "@radius-project/core/modeling";
+import {
+  githubSourceReferenceUrl,
+  srcPathFromRef
+} from "../../../src/browser/graph/model.js";
 
 const root = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -367,7 +371,12 @@ const interpolatedGitRef =
   "[format('git::https://github.com/example/app.git?ref={0}', parameters('gitRef'))]";
 
 function radiusResource<T extends object>(type: string, properties: T) {
-  return { type, properties: { properties } };
+  return {
+    type,
+    properties: {
+      properties: { codeReference: "src/resource.ts#L1", ...properties }
+    }
+  };
 }
 
 function imageResource(source: unknown) {
@@ -417,6 +426,288 @@ test("passes a warning-free Bicep compilation", () => {
   assert.equal(result.stderr, "");
 });
 
+test("fails when a non-application Radius resource has no durable source reference", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: {
+      type: "Radius.Compute/containers@2025-08-01-preview",
+      properties: { properties: {} }
+    },
+    app: {
+      type: "Radius.Core/applications@2025-08-01-preview",
+      properties: { properties: {} }
+    }
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /source-code-reference/u);
+  assert.match(result.stderr, /web\.properties\.codeReference/u);
+  assert.doesNotMatch(result.stderr, /app\.properties\.codeReference/u);
+});
+
+test("explains how to update a custom type missing source-reference support", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    queue: {
+      type: "Radius.Resources/queues@2025-08-01-preview",
+      properties: { properties: {} }
+    }
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /add the optional codeReference string property/u
+  );
+  assert.match(result.stderr, /republish custom-types\.tgz/u);
+});
+
+test.each([
+  "/src/app.ts",
+  "src\\app.ts",
+  "../src/app.ts",
+  "src/app.ts#L0",
+  "src/app.ts#not-a-line",
+  "http://github.com/acme/app/blob/main/src/app.ts",
+  "https://example.com/acme/app/blob/main/src/app.ts",
+  "https://github.com/acme/app/tree/main/src",
+  "https://github.com/acme/app/blob/main/src/app.ts?plain=1",
+  "https://github.com/acme/app/blob/main/src/app.ts#L0",
+  "https://github.com/acme/app/blob/main/src/\napp.ts",
+  " src/app.ts",
+  "src/app.ts\nforged diagnostic",
+  "[concat('src/', 'app.ts')]"
+])("fails for an unsafe source reference: %s", (codeReference) => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
+      codeReference
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /repo-relative worktree path/u);
+  if (codeReference === "src\\app.ts" || codeReference === "/src/app.ts") {
+    // Authoring rejects platform-specific separators, while rendering keeps
+    // legacy separators and a legacy leading slash readable in persisted graphs.
+    assert.equal(srcPathFromRef(codeReference), "src/app.ts");
+  } else {
+    assert.equal(githubSourceReferenceUrl(codeReference), "");
+    assert.equal(srcPathFromRef(codeReference), "");
+  }
+});
+
+test.each([
+  "src/app.ts",
+  "src/app.ts#L12",
+  "https://github.com/acme/app/blob/main/src/app.ts",
+  "https://github.com/acme/app/blob/feature/source-links/src/app.ts#L12"
+])("accepts a valid source reference: %s", (codeReference) => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
+      codeReference
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+  assert.ok(
+    githubSourceReferenceUrl(codeReference) || srcPathFromRef(codeReference)
+  );
+});
+
+test("resolves a top-level source-reference parameter default", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template(
+    {
+      web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
+        codeReference: "[parameters('sourceReference')]"
+      })
+    },
+    {
+      sourceReference: {
+        type: "string",
+        defaultValue: "src/app.ts#L12"
+      }
+    }
+  );
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("rejects an unresolved top-level source-reference expression", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template(
+    {
+      web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
+        codeReference: "[parameters('sourceReference')]"
+      })
+    },
+    { sourceReference: { type: "string" } }
+  );
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /must resolve to a repo-relative worktree path/u);
+});
+
+test("resolves source-reference parameters through local module invocations", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    module: localModuleResources(
+      {
+        queue: radiusResource("Radius.Messaging/rabbitMQ@2025-08-01-preview", {
+          codeReference: "[parameters('sourceReference')]"
+        })
+      },
+      { sourceReference: { type: "string" } },
+      { sourceReference: { value: "src/queue.ts#L4" } }
+    )
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("checks source references inside local modules", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    module: localModuleResources({
+      queue: {
+        type: "Radius.Messaging/rabbitMQ@2025-08-01-preview",
+        properties: { properties: {} }
+      }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /module\.queue\.properties\.codeReference/u);
+});
+
+test.each([
+  "Dockerfile",
+  "services/api/Dockerfile",
+  "Dockerfile.prod",
+  "api.Dockerfile",
+  "docker-compose.yml",
+  "docker-compose.override.yaml",
+  "compose.yaml",
+  "deploy/chart.yaml",
+  "deploy/values.yaml",
+  "services/api/dockerfile#L3",
+  "https://github.com/acme/app/blob/main/services/api/Dockerfile",
+  "https://github.com/acme/app/blob/main/Docker%66ile",
+  "https://github.com/acme/app/blob/main/services/api/docker-compose%2Eyml",
+  "https://github.com/acme/app/blob/main/bad%ZZdir/Dockerfile"
+])(
+  "rejects a packaging file as a container source reference: %s",
+  (codeReference) => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
+        codeReference
+      })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /is a packaging file/u);
+    assert.match(result.stderr, /web\.properties\.codeReference/u);
+  }
+);
+
+test("accepts the Dockerfile a containerImages resource builds from", () => {
+  // The image resource exists to build that file, so it is the definition site.
+  // Only the workload that runs the image must point past it at the entrypoint.
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    image: radiusResource(containerImageType, {
+      build: {
+        source: `git::https://github.com/example/app.git?ref=${fullSha}`
+      },
+      codeReference: "services/api/Dockerfile"
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test.each([
+  "src/server.ts",
+  "cmd/api/main.go#L12",
+  "src/dockerfile-generator.ts",
+  "src/compose-loader.ts"
+])(
+  "accepts a container entrypoint that is not a packaging file: %s",
+  (codeReference) => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
+        codeReference
+      })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  }
+);
+
 test("fails and surfaces a Bicep warning even when Bicep exits successfully", () => {
   const directory = temporaryDirectory();
   const result = runChecker(
@@ -446,6 +737,33 @@ test("fails and surfaces a Bicep warning even when Bicep exits successfully", ()
     result.stderr,
     /app\.bicep:12: warning use-secure-value-for-secure-inputs: Property 'password' expects a secure value\./u
   );
+});
+
+test("adds custom-type repair guidance to a codeReference BCP037 diagnostic", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(
+      directory,
+      sarif([
+        {
+          ruleId: "BCP037",
+          message: {
+            text: 'The property "codeReference" is not allowed on objects of type "properties".'
+          },
+          level: "error"
+        }
+      ]),
+      1
+    )
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /add the optional codeReference string property/u
+  );
+  assert.match(result.stderr, /republish custom-types\.tgz/u);
 });
 
 test("surfaces informational diagnostics without failing", () => {
@@ -1339,6 +1657,53 @@ describe("repair budget", () => {
     assert.equal(second.status, 1);
     assert.doesNotMatch(second.stderr, /same compiler failure/u);
     assert.equal((readRepair(directory) as { attempts: number }).attempts, 2);
+  });
+
+  it("recognizes a repeated source-reference validation failure", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    const compiledOutput = template({
+      web: {
+        type: "Radius.Compute/containers@2025-08-01-preview",
+        properties: { properties: {} }
+      }
+    });
+
+    const first = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+    const second = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.doesNotMatch(first.stderr, /same compiler failure/u);
+    assert.match(second.stderr, /same compiler failure/u);
+  });
+
+  it("does not conflate changed source-reference validation failures", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    const missing = template({
+      web: {
+        type: "Radius.Compute/containers@2025-08-01-preview",
+        properties: { properties: {} }
+      }
+    });
+    const unsafe = template({
+      web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
+        codeReference: "../src/app.ts"
+      })
+    });
+
+    runChecker(directory, fakeBicep(directory, sarif([]), 0, missing));
+    const second = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, unsafe)
+    );
+
+    assert.doesNotMatch(second.stderr, /same compiler failure/u);
   });
 
   it("stops a stuck run once the budget is spent", () => {
