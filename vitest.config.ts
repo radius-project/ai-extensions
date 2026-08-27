@@ -9,6 +9,7 @@ export default defineConfig({
       reporter: ["text", "json-summary", "lcov"],
       include: [
         "packages/*/src/**/*.ts",
+        "packages/*/src/**/*.mjs",
         "plugins/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs",
         "plugins/radius/skills/radius-app-bicep/scripts/radius-type-schema.mjs"
       ],

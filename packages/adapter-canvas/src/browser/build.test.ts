@@ -515,6 +515,27 @@ describe("in-memory browser compiler", () => {
     );
   });
 
+  // The vendored React and React Flow bundles carry Node fallbacks behind
+  // `typeof` guards, so the graph entry erases those bindings at build time
+  // rather than relying on the browser-safety scan to tolerate them.
+  it("erases the Node globals the vendored graph libraries reach for", () => {
+    const calls: Array<Parameters<BrowserBuild>[0]> = [];
+    const build: BrowserBuild = (options) => {
+      calls.push(options);
+      return buildResult("(() => {})();");
+    };
+
+    compileBrowserEntrySpec(browserEntrySpec("graph"), build);
+
+    expect(calls[0].define).toEqual({
+      "process.env.NODE_ENV": '"production"',
+      process: "undefined",
+      clearImmediate: "undefined",
+      setImmediate: "undefined",
+      global: "globalThis"
+    });
+  });
+
   it("surfaces compiler failures and invalid output shapes with the entry name", () => {
     expect(() =>
       compileBrowserEntrySpec(HEARTBEAT_SPEC, () => {
