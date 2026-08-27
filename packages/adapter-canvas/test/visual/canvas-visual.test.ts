@@ -17,7 +17,7 @@ import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
 
 type Theme = "dark" | "light";
 
-type GraphRequestBody = { branch: string; repo: string };
+type GraphRequestBody = { branch: string; repo: string; refresh?: boolean };
 
 type GraphRequests = {
   loadGraph: GraphRequestBody[];
@@ -329,9 +329,16 @@ async function routeGraphControls(
   await page.route(`${canvas.baseUrl}/api/plan-graph`, async (route) => {
     const body: unknown = route.request().postDataJSON();
     if (isGraphRequestBody(body)) planGraph.push(body);
+    // The planned page reconciles freshness on mount by re-posting with
+    // `refresh`. The server answers that with `refreshed` when the cached graph
+    // is still current, so the fixture has to as well: replying with an error
+    // would drive the page down the failure path on every load.
+    const refresh = isGraphRequestBody(body) && body.refresh === true;
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify({ error: "Fixture request completed." })
+      body: JSON.stringify(
+        refresh ? { refreshed: true } : { error: "Fixture request completed." }
+      )
     });
   });
   await page.route(

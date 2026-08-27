@@ -1,26 +1,22 @@
-// Pre-tool-use hook logic for auto-triggering app.bicep creation and refresh.
+// Handoff prompts for authoring and refreshing .radius/app.bicep.
 //
 // With the recipe-pack refactor, .radius/app.bicep is authored exclusively by
 // the radius-app-bicep skill (the agent) — this adapter never fabricates bicep.
 // But the application-graph views require that file to exist AND to still
-// describe the branch it sits on. This module holds the decision logic for a
-// pre-tool-use hook that intercepts the tool calls which generate a graph *from*
-// app.bicep (opening a graph canvas page, or producing the PR graph diff
-// markdown) and denies the call when there is no app.bicep yet, or when the one
-// on the workspace branch is stale, instructing the agent to run the
-// radius-app-bicep skill to create/refresh and SAVE .radius/app.bicep first,
-// then retry. The extension itself never writes bicep; it only triggers the
-// skill.
+// describe the branch it sits on. This module owns the wording used to ask the
+// agent for that work.
 //
-// Kept as a pure module (no SDK imports, no top-level joinSession) so the hook
-// decision can be unit-tested in isolation from extension.ts.
-
-// Canvas pages that render an application graph built from app.bicep.
-export const GRAPH_PAGES = new Set(["graph", "planned", "graph-diff"]);
+// It no longer owns the decision. A pre-tool-use hook used to intercept opening
+// a graph canvas page and deny the call until a model existed, alongside a
+// canvas-open fallback and the graph HTTP routes, so one missing model could
+// produce several authoring turns. The routes are the single owner now (see
+// runtime/app-model-handoff.ts); this module is prompts only.
+//
+// Kept as a pure module (no SDK imports, no top-level joinSession) so the
+// wording can be unit-tested in isolation from extension.ts.
 
 // Page the canvas lands on when a caller opens it without naming one. Owned here
-// (next to GRAPH_PAGES) so the page vocabulary lives in one pure module and the
-// hook below cannot drift from what the canvas actually renders.
+// so the page vocabulary lives in one pure module.
 export const DEFAULT_CANVAS_PAGE = "graph";
 
 import {
@@ -31,70 +27,14 @@ import {
   infrastructureFailureSummaryList,
   modelFailureSummaryList
 } from "../model-failure-policy.js";
-import {
-  UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
-  freshnessIdentity,
-  unsupportedAppSourceReport
-} from "@radius-project/core";
-import type { AppSourceEvaluation } from "@radius-project/core";
+import { freshnessIdentity } from "@radius-project/core";
+import { RADIUS_CANVAS_INSTANCE_ID } from "./declarations.js";
 import type { AppModelStatus } from "./graph-context.js";
-import type { CanvasState } from "../shared.js";
-
-interface GraphTriggerTarget {
-  repo: string;
-  branches: Array<string | undefined>;
-  // True for a trigger that compares two explicitly named committed branches
-  // (graph-diff). Those branches mean exactly what they say.
-  comparesCommittedBranches: boolean;
-}
-
-interface AppBicepHookInput {
-  toolName?: unknown;
-  toolArgs?: unknown;
-}
-
-interface AppBicepHookDependencies {
-  workspaceState(): Promise<CanvasState>;
-  defaultBranchForState(state: CanvasState): string;
-  appModelStatus(
-    repo: string,
-    branch: string,
-    state: CanvasState
-  ): Promise<AppModelStatus>;
-  // What a branch's source listing says about whether the repository can be
-  // modeled at all. Consulted only when no model exists, since a model that is
-  // already there answers the question by existing.
-  appSource(
-    repo: string,
-    branch: string,
-    state: CanvasState
-  ): Promise<AppSourceEvaluation>;
-  // True the first time this exact staleness evidence is seen, false afterwards.
-  // Owned by the caller so the memo lives with the extension instance.
-  shouldRequestRefresh(key: string): boolean;
-}
-
-export interface AppBicepHookOutput {
-  permissionDecision: "deny";
-  permissionDecisionReason: string;
-  additionalContext: string;
-}
 
 interface DeployRepairDetails {
   error?: string;
   deployRunUrl?: string;
   attemptId?: string;
-}
-
-function record(value: unknown): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    return {};
-  }
-  return Object.fromEntries(Object.entries(value));
-}
-
-function optionalString(value: unknown): string | undefined {
-  return typeof value === "string" && value ? value : undefined;
 }
 
 // Shared instruction lines for the two handoff prompts below. The radius-app-bicep
@@ -130,6 +70,9 @@ function graphSourceNote(
   page: string,
   repo: string,
   branches: ReadonlyArray<string | undefined>,
+  canvasInstanceId: string,
+  // False for a view that keeps polling while it waits, so telling the agent to
+  // reopen it would be wrong: the model appearing is enough.
   reopenAfterModel = true
 ): string {
   const phrase = branchPhrase(branches);
@@ -138,218 +81,12 @@ function graphSourceNote(
   return [
     `To render the ${page} view${where}${onPhrase}, .radius/app.bicep must exist on that branch.`,
     "If the selected branch is your current workspace branch, writing it to the working tree is enough (the graph renders from the on-disk tree; modeling does not push).",
+    "The selected branch name is immutable for this request. If the host renames the worktree branch before you edit files, publish the completed model to the originally selected branch before reopening the view.",
     "If the selected branch is a DIFFERENT branch, model it against that branch's code and commit + push .radius/app.bicep to that branch — prefer opening a pull request into it, and do not push generated files directly to a protected branch such as main without the user's confirmation.",
     reopenAfterModel ?
-      "Once the file is committed on that branch, reopen the view; nodes then deep-link to https://github.com/<owner>/<repo>/blob/<branch>/<file>."
-    : "Once the file is available on that branch, the open view detects it automatically; nodes then deep-link to https://github.com/<owner>/<repo>/blob/<branch>/<file>."
+      `Once the model is available on that branch, reopen the view with instanceId \`${canvasInstanceId}\`; never create another Radius canvas instance. Reopening that exact instance refreshes its server and client connections. Nodes then deep-link to https://github.com/<owner>/<repo>/blob/<branch>/<file>.`
+    : `Once the model is available on that branch, the view at instanceId \`${canvasInstanceId}\` detects it automatically; never create another Radius canvas instance. Nodes then deep-link to https://github.com/<owner>/<repo>/blob/<branch>/<file>.`
   ].join(" ");
-}
-
-// Instruction fed back to the agent (as additionalContext) when a graph tool is
-// denied because app.bicep is missing. It must steer the agent to the skill and
-// to write the file, never to fabricate a graph or singleton recipes.
-export function appBicepReminder(
-  repo: string,
-  branches: Array<string | undefined> = []
-): string {
-  const where = repo ? ` for ${repo}` : "";
-  return [
-    `No .radius/app.bicep exists${where}, so the application graph cannot be generated yet.`,
-    "",
-    `Create it now before retrying. ${SKILL_HANDOFF}`,
-    graphSourceNote("graph", repo, branches),
-    "After the file is written, retry the original action.",
-    "",
-    RECIPE_PACK_NOTE
-  ].join("\n");
-}
-
-// Given a tool call, return the { repo, branches } to check for app.bicep, or
-// null when the tool is not a graph-generating trigger this hook governs.
-// `branches` may contain a single `undefined` entry meaning "the default branch
-// for the current workspace/state" (resolved by the caller via deps).
-export function graphTriggerTargets(
-  toolName: unknown,
-  toolArgs: unknown
-): GraphTriggerTarget | null {
-  const args = record(toolArgs);
-
-  if (toolName === "open_canvas") {
-    if (args.canvasId !== "radius") return null;
-    const input = record(args.input);
-    // A page-less open lands on the canvas's default page, so resolve it the
-    // same way the canvas does before deciding whether this is a graph trigger.
-    const page = optionalString(input.page) || DEFAULT_CANVAS_PAGE;
-    if (!GRAPH_PAGES.has(page)) return null;
-    if (page === "graph-diff") {
-      const branches = [
-        optionalString(input.baseBranch),
-        optionalString(input.headBranch)
-      ].filter((branch): branch is string => Boolean(branch));
-      return {
-        repo: optionalString(input.repo) || "",
-        branches: branches.length ? branches : [undefined],
-        comparesCommittedBranches: true
-      };
-    }
-    return {
-      repo: optionalString(input.repo) || "",
-      branches: [optionalString(input.branch)],
-      comparesCommittedBranches: false
-    };
-  }
-
-  if (toolName === "radius_generate_pr_diff_markdown") {
-    const branches = [
-      optionalString(args.baseBranch),
-      optionalString(args.headBranch)
-    ].filter((branch): branch is string => Boolean(branch));
-    return {
-      repo: optionalString(args.repo) || "",
-      branches: branches.length ? branches : [undefined],
-      comparesCommittedBranches: true
-    };
-  }
-
-  return null;
-}
-
-// The branches this trigger will actually be judged against.
-//
-// Preserve an explicit ordinary-graph branch. The shared workspace-selection
-// predicate later decides whether that repo/branch pair resolves from the
-// worktree or from GitHub. An omitted branch inherits the checked-out workspace
-// branch only for that same repository; another repository uses its own default
-// branch. Graph diffs always use their explicit refs.
-function resolveTargetBranches(
-  targets: GraphTriggerTarget,
-  repo: string,
-  state: CanvasState,
-  defaultBranchForState: (state: CanvasState) => string
-): string[] {
-  const workspaceBranch = optionalString(state?.workspaceBranch);
-  const workspaceRepoTarget =
-    !targets.comparesCommittedBranches &&
-    workspaceBranch &&
-    repo === optionalString(state?.workspaceRepo);
-  return targets.branches.map(
-    (candidate) =>
-      candidate ||
-      (workspaceRepoTarget ? workspaceBranch : defaultBranchForState(state))
-  );
-}
-
-// Core pre-tool-use decision. `deps` supplies the I/O so this stays pure:
-//   deps.workspaceState(): Promise<state>        — current workspace/repo/branch
-//   deps.defaultBranchForState(state): string
-//   deps.appModelStatus(repo, branch, state): Promise<AppModelStatus>
-//
-// Returns a PreToolUseHookOutput ({ permissionDecision: "deny", ... }) when the
-// graph trigger fires and either no app.bicep exists on any target branch, or
-// the one on the workspace branch is provably out of date. Otherwise returns
-// undefined (allow). For multi-branch triggers (graph-diff) a graph can still
-// render if only one side has bicep, so it denies only when ALL are empty.
-//
-// Two stale cases deliberately do NOT deny:
-//   • A model on a branch that is not the workspace's. Refreshing it would need
-//     a commit and a push, so blocking the view would strand the user with no
-//     action the skill is allowed to take.
-//   • A model that needs regenerating AND was edited after it was generated.
-//     Overwriting it destroys the user's own work, so it needs their agreement.
-//     The canvas raises that conversation while the graph renders, rather than
-//     blocking the view on it here. A model with no record at all is not in this
-//     group: it is regenerated like any other untrustworthy model, without
-//     asking. Nor is an edit on a model that is otherwise current, which is not
-//     reported at all.
-export async function evaluateAppBicepHook(
-  input: AppBicepHookInput,
-  deps: AppBicepHookDependencies
-): Promise<AppBicepHookOutput | undefined> {
-  const targets = graphTriggerTargets(input.toolName, input.toolArgs);
-  if (!targets) return undefined;
-
-  const state = await deps.workspaceState();
-  const repo = targets.repo || state?.contextRepo || "";
-  if (!repo) return undefined; // no repo context to check against → fail open
-
-  const branches = resolveTargetBranches(
-    targets,
-    repo,
-    state,
-    deps.defaultBranchForState
-  );
-
-  const statuses = await Promise.all(
-    branches.map(async (branch) => {
-      try {
-        return await deps.appModelStatus(repo, branch, state);
-      } catch {
-        return null;
-      }
-    })
-  );
-
-  const present = statuses.filter(
-    (status): status is AppModelStatus =>
-      !!status && status.freshness.status !== "missing"
-  );
-
-  if (!present.length) {
-    // This is the path most users reach modeling through, so it is also where an
-    // unmodelable repository has to be caught: telling the agent to create a
-    // model it cannot create is what turned this exception into a late,
-    // ambiguous failure. Only a branch whose listing was actually established
-    // and actually lacks a Dockerfile counts, and every candidate branch has to
-    // agree — one modelable branch means there is still real work to hand off.
-    const sources = await Promise.all(
-      branches.map(async (branch) => {
-        try {
-          return await deps.appSource(repo, branch, state);
-        } catch {
-          return null;
-        }
-      })
-    );
-    if (sources.every((source) => source?.status === "none")) {
-      return {
-        permissionDecision: "deny",
-        // The reason is what the user is shown, so it carries only the
-        // statement about their repository. The agent-facing half — what not to
-        // author, and that nothing was written — belongs in additionalContext.
-        permissionDecisionReason: UNSUPPORTED_NO_DOCKERFILE_MESSAGE,
-        additionalContext: unsupportedAppSourceReport(repo)
-      };
-    }
-    return {
-      permissionDecision: "deny",
-      permissionDecisionReason:
-        "No .radius/app.bicep found. It must be created and saved by the radius-app-bicep skill before the application graph can be generated.",
-      additionalContext: appBicepReminder(repo, branches)
-    };
-  }
-
-  const outdated = present.find(
-    (status) =>
-      status.refreshable &&
-      status.freshness.stale &&
-      !status.freshness.requiresConfirmation
-  );
-  if (!outdated) return undefined;
-
-  // Ask for a refresh once per distinct staleness signal. A regeneration that
-  // does not clear the drift (the branch head moves again when the refreshed
-  // model is committed, say) would otherwise deny every later graph open, so
-  // the second look at identical evidence renders the model instead of blocking
-  // the user on a fix that already ran.
-  if (!deps.shouldRequestRefresh(refreshRequestKey(outdated))) {
-    return undefined;
-  }
-
-  return {
-    permissionDecision: "deny",
-    permissionDecisionReason: `The .radius/app.bicep on \`${outdated.branch}\` must be regenerated by the radius-app-bicep skill before the application graph can be trusted. ${outdated.freshness.reason}`,
-    additionalContext: appModelRefreshReminder(outdated)
-  };
 }
 
 // Identifies one staleness signal: the same branch, classification, and evidence
@@ -364,26 +101,6 @@ export function refreshRequestKey(status: AppModelStatus): string {
     status.freshness.status,
     freshnessIdentity(status.freshness)
   ].join("::");
-}
-
-// Instruction fed back to the agent when a graph tool is denied because the
-// model on the workspace branch no longer describes its source. Distinct from
-// appBicepReminder: the file exists, so the agent must be told what changed and
-// that the fix is a regeneration rather than a first-time authoring.
-export function appModelRefreshReminder(status: AppModelStatus): string {
-  const where = status.repo ? ` for ${status.repo}` : "";
-  return [
-    `The application model${where} on branch \`${status.branch}\` needs to be regenerated before the application graph can be trusted.`,
-    "",
-    status.freshness.reason,
-    "",
-    `Refresh it now before retrying. ${SKILL_HANDOFF}`,
-    "Regenerate from the current source rather than editing the existing file: the model is stale as a whole, not broken in one place.",
-    "The model is on your current workspace branch, so writing the working tree is enough. Do not commit or push it as part of the refresh.",
-    "After the model is rewritten, retry the original action.",
-    "",
-    RECIPE_PACK_NOTE
-  ].join("\n");
 }
 
 // The two halves of an automated handoff turn. `prompt` is what the agent
@@ -405,7 +122,8 @@ export interface HandoffMessage {
 export function appBicepHandoffPrompt(
   repo: string,
   page = "graph",
-  branches: Array<string | undefined> = []
+  branches: Array<string | undefined> = [],
+  canvasInstanceId = RADIUS_CANVAS_INSTANCE_ID
 ): string {
   const where = repo ? ` for ${repo}` : "";
   const phrase = branchPhrase(branches);
@@ -417,9 +135,9 @@ export function appBicepHandoffPrompt(
     : `The Radius ${page} view${where}${onPhrase} can't render yet because its application model hasn't been generated. Generate it now, then open the ${page} view again.`,
     "",
     SKILL_HANDOFF,
-    graphSourceNote(page, repo, branches, !rendersInPlace),
+    graphSourceNote(page, repo, branches, canvasInstanceId, !rendersInPlace),
     rendersInPlace ?
-      "Do not reopen the Radius Canvas. The current graph view is already waiting and will render the model in place once it is available."
+      `Do not open another Radius canvas. The view at instanceId \`${canvasInstanceId}\` is already waiting and renders the model in place once it is available.`
     : `Once the model is available on the selected repo and branch, open the Radius ${page} view again so it loads.`,
     "",
     RECIPE_PACK_NOTE
@@ -447,20 +165,20 @@ export function appBicepHandoffDisplayPrompt(
 export function appBicepHandoffMessage(
   repo: string,
   page = "graph",
-  branches: Array<string | undefined> = []
+  branches: Array<string | undefined> = [],
+  canvasInstanceId = RADIUS_CANVAS_INSTANCE_ID
 ): HandoffMessage {
   return {
-    prompt: appBicepHandoffPrompt(repo, page, branches),
+    prompt: appBicepHandoffPrompt(repo, page, branches, canvasInstanceId),
     displayPrompt: appBicepHandoffDisplayPrompt(repo, page, branches)
   };
 }
 
 // Prompt sent when a graph view rendered a model whose source has moved on, on
-// a branch the skill can rewrite. The pre-tool-use hook normally catches this
-// first and denies the open so the model is refreshed before anything renders.
-// But the canvas also opens on paths the hook never sees (a programmatic reload
-// after source refs are attached, or the user opening the panel), and on those
-// the stale model would otherwise be shown with no signal at all.
+// a branch the skill can rewrite. The graph routes reconcile freshness on every
+// render — tool-driven opens, direct panel opens, programmatic reloads after
+// source refs are attached, and refreshes alike — so a stale model is never
+// shown with no signal at all.
 export function appModelRefreshPrompt(status: AppModelStatus): string {
   const where = status.repo ? ` for ${status.repo}` : "";
   return [

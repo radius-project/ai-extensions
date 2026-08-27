@@ -112,6 +112,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         readInstanceEntry: () => (entryMissing ? undefined : { state }),
         pipeline,
         triggerAppBicepHandoff: () => {},
+        observeModelingRun: () => Promise.resolve(null),
         triggerGraphRepairHandoff: () => ({
           attempt: 1,
           maxAttempts: 3,

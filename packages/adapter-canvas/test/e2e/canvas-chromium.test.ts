@@ -16,11 +16,17 @@ import {
 } from "./support/canvas-harness.js";
 import type { Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
+// Bound to the production constants so the retry cadence is exercised at the
+// value the compiled browser bundle actually schedules, not a copy of it.
+import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
+import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const VALID_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
 const SOURCE_FILE = "src/web/app.ts";
 const SOURCE_LINE = 12;
+const REMOVED_SOURCE_FILE = "src/web/worker.ts";
+const DIFF_BASE_BRANCH = "main";
 
 async function filesContainingText(
   directory: string,
@@ -249,7 +255,8 @@ test.describe("Radius Canvas in Chromium", () => {
       .toBe(true);
     expect(bodyFor(canvas, "/api/load-graph")).toEqual({
       repo: REPOSITORY,
-      branch: WORKTREE_BRANCH
+      branch: WORKTREE_BRANCH,
+      restartWait: true
     });
     await expect
       .poll(async () =>
@@ -505,6 +512,74 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator(".rad-node")).toHaveCount(3);
   });
 
+  test("routes each graph diff source link by the branch that node lives on @safety", async ({
+    page,
+    canvas
+  }) => {
+    // The worktree is checked out on the head branch, so a head-side node must
+    // reach the real open-source route while a removed node -- whose file lives
+    // on the base branch and may not exist locally at all -- stays external.
+    await canvas.seedState({
+      ...baseCanvasState(canvas.workspacePath),
+      diffTargetRepo: REPOSITORY,
+      diffBase: DIFF_BASE_BRANCH,
+      diffHead: WORKTREE_BRANCH,
+      branches: [DIFF_BASE_BRANCH, WORKTREE_BRANCH],
+      diffResources: [
+        {
+          id: "app/web",
+          name: "web",
+          type: "Radius.Compute/containers",
+          codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
+          diffStatus: "added"
+        },
+        {
+          id: "app/old-worker",
+          name: "old-worker",
+          type: "Radius.Compute/containers",
+          codeReference: `${REMOVED_SOURCE_FILE}#L${SOURCE_LINE}`,
+          diffStatus: "removed"
+        }
+      ]
+    });
+    await gotoCanvas(page, canvas, "graph-diff");
+    await expect(page.locator(".rad-node")).toHaveCount(2);
+
+    const removedLink = page
+      .locator(".rad-node")
+      .filter({ hasText: "old-worker" })
+      .first()
+      .getByRole("link", { name: "View source code" });
+    await expect(removedLink).toHaveAttribute(
+      "href",
+      `https://github.com/${REPOSITORY}/blob/${DIFF_BASE_BRANCH}/${REMOVED_SOURCE_FILE}#L${SOURCE_LINE}`
+    );
+    // A remote link is a real target="_blank" anchor the host opens.
+    await expect(removedLink).toHaveAttribute("target", "_blank");
+
+    const headLink = page
+      .locator(".rad-node")
+      .filter({ hasText: "web" })
+      .first()
+      .getByRole("link", { name: "View source code" });
+    await expect(headLink).not.toHaveAttribute("target", "_blank");
+
+    // Activating the remote link is deliberately not exercised here: it is a real
+    // target="_blank" anchor, so the host would open github.com and the harness
+    // must stay offline. The component suite clicks it against the real DOM and
+    // asserts it reaches openExternal rather than the workspace opener.
+    expect(bodyFor(canvas, "/api/open-source")).toBeUndefined();
+
+    await headLink.focus();
+    await expect(headLink).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    await expect
+      .poll(() => bodyFor(canvas, "/api/open-source"))
+      .toEqual({ path: SOURCE_FILE, line: SOURCE_LINE });
+    await expect(page.locator(".rad-node")).toHaveCount(2);
+  });
+
   test("does not let a late real graph response mutate a page that was already torn down @safety", async ({
     page,
     canvas
@@ -516,6 +591,7 @@ test.describe("Radius Canvas in Chromium", () => {
       await new Promise<void>((resolve) => {
         releaseResponse.current = resolve;
       });
+
       await route.continue();
     });
 
@@ -532,6 +608,166 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("body")).not.toContainText(
       "Application graph ready"
     );
+  });
+
+  test("cancels an in-flight graph when the branch selection changes @safety", async ({
+    page,
+    canvas
+  }) => {
+    let releaseFirst: (() => void) | undefined;
+    const branches: string[] = [];
+    await page.route("**/api/load-graph", async (route) => {
+      const body = route.request().postDataJSON() as { branch?: string };
+      branches.push(body.branch || "");
+      if (branches.length === 1) {
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+        await route.abort().catch(() => undefined);
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ resources: [] })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+    await expect.poll(() => branches).toEqual([WORKTREE_BRANCH]);
+    await page.getByLabel("Branch").selectOption("release");
+
+    await expect.poll(() => branches).toEqual([WORKTREE_BRANCH, "release"]);
+    await expect(
+      page.locator("#graph-status, #graph-refresh-status")
+    ).toContainText("Application graph ready");
+    releaseFirst?.();
+  });
+
+  test("keeps the modeling status stable while the graph automatically polls", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let requests = 0;
+    let releaseRetry: (() => void) | undefined;
+    await page.route("**/api/load-graph", async (route) => {
+      requests++;
+      if (requests > 1) {
+        await new Promise<void>((resolve) => {
+          releaseRetry = resolve;
+        });
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ needsAppBicep: true })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+    const status = page.locator("#graph-status, #graph-refresh-status");
+    await expect(status).toContainText(
+      "Copilot is generating .radius/app.bicep"
+    );
+    const stableMessage = await status.textContent();
+
+    await page.clock.fastForward(10_000);
+    await expect.poll(() => requests).toBe(2);
+    await expect(status).toHaveText(stableMessage ?? "");
+
+    releaseRetry?.();
+  });
+
+  // The Modeled poll above proves `/api/load-graph` retries. Planned and Diff
+  // each schedule their own retry from their own compiled entry bundle, so
+  // neither is covered by that test: a broken timer or a mis-read payload in
+  // either bundle would ship green. These two journeys close that gap by
+  // driving the real browser code through wait, retry, and recovery.
+  test("retries the planned graph in the real browser until the model appears", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let requests = 0;
+    await page.route("**/api/plan-graph", async (route) => {
+      requests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        // The retry must observe a changed answer, so the second reply reports
+        // a current model rather than repeating the wait.
+        body: JSON.stringify(
+          requests === 1 ? { needsAppBicep: true } : { refreshed: true }
+        )
+      });
+    });
+
+    await gotoCanvas(page, canvas, "planned");
+    const status = page.locator("#plan-status");
+    await expect(status).toContainText(
+      "Copilot is generating .radius/app.bicep"
+    );
+
+    // Nothing announces the model's arrival, so only the scheduled retry can
+    // move the page off the wait.
+    await page.clock.fastForward(PLAN_RETRY_MS);
+    await expect.poll(() => requests).toBe(2);
+    await expect(status).toContainText("The planned deployment is current.");
+  });
+
+  test("retries the graph diff in the real browser until the model appears", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let requests = 0;
+    await page.route("**/api/diff-branches", async (route) => {
+      requests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          requests === 1 ? { needsAppBicep: true } : { refreshed: true }
+        )
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph-diff");
+    const status = page.locator("#diff-status");
+    await expect(status).toContainText(
+      "Copilot is generating .radius/app.bicep"
+    );
+
+    await page.clock.fastForward(DIFF_RETRY_MS);
+    await expect.poll(() => requests).toBe(2);
+    await expect(status).toContainText("The graph comparison is current.");
+  });
+
+  // A retry that re-armed the expired wait would loop forever, so the request
+  // that follows the wait must not ask the server to restart it.
+  test("does not restart an expired model wait from a diff retry @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    const restartFlags: unknown[] = [];
+    await page.route("**/api/diff-branches", async (route) => {
+      const body = route.request().postDataJSON() as { restartWait?: unknown };
+      restartFlags.push(body.restartWait);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ needsAppBicep: true })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph-diff");
+    await expect.poll(() => restartFlags.length).toBe(1);
+
+    await page.clock.fastForward(DIFF_RETRY_MS);
+    await expect.poll(() => restartFlags.length).toBe(2);
+    expect(restartFlags).toEqual([true, false]);
   });
 
   test("reports GitHub account mismatch accessibly without leaking raw CLI output @safety", async ({

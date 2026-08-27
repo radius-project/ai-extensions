@@ -20,6 +20,7 @@ import {
   DIFF_DEBOUNCE_MS,
   DIFF_PROGRESS_MS,
   DIFF_PROGRESS_STEPS_ID,
+  DIFF_RETRY_MS,
   GRAPH_DIFF_STATE_ID,
   initializeGraphDiffPage
 } from "./graph-diff-page.js";
@@ -34,6 +35,7 @@ interface FixtureOptions {
   withBaseSelect?: boolean;
   withHeadSelect?: boolean;
   modelingError?: string;
+  workspaceBranch?: unknown;
 }
 
 function fixture(options: FixtureOptions = {}) {
@@ -48,6 +50,10 @@ function fixture(options: FixtureOptions = {}) {
     withHeadSelect = true,
     modelingError = ""
   } = options;
+  // Distinguish an omitted key from an explicit undefined so a scenario can
+  // model state that never carried a workspace branch at all.
+  const workspaceBranch =
+    "workspaceBranch" in options ? options.workspaceBranch : "feature";
   const browser = createFakeBrowser();
   const state = createFakeElement(GRAPH_DIFF_STATE_ID);
   state.textContent = JSON.stringify({
@@ -55,7 +61,8 @@ function fixture(options: FixtureOptions = {}) {
     base,
     head,
     resources,
-    modelingError
+    modelingError,
+    workspaceBranch
   });
   const repoInput = createFakeInput("diff-repo-select", repo);
   const app = createFakeSelect("diff-app");
@@ -127,7 +134,8 @@ describe("initializeGraphDiffPage", () => {
       expect.objectContaining({
         diffMode: true,
         branch: "feature",
-        baseBranch: "main"
+        baseBranch: "main",
+        workspaceBranch: "feature"
       })
     );
     expect(base.listenerCount("change")).toBe(1);
@@ -135,6 +143,75 @@ describe("initializeGraphDiffPage", () => {
     teardown();
     expect(base.listenerCount()).toBe(0);
     expect(head.listenerCount()).toBe(0);
+  });
+
+  // Without a workspace branch every node falls back to a remote URL, which is
+  // the safe outcome when the page cannot say which branch is on disk.
+  it.each([
+    ["absent", undefined],
+    ["not a string", 7]
+  ])(
+    "passes an empty workspace branch to the graph when it is %s",
+    async (_label, workspaceBranch) => {
+      const { browser } = fixture({
+        resources: [{ id: "app/web" }],
+        workspaceBranch
+      });
+      const render = vi.fn();
+
+      initializeGraphDiffPage(browser.context, { radiusRenderGraph: render });
+      await flushPromises();
+
+      expect(render).toHaveBeenCalledWith(
+        "graph-container",
+        [{ id: "app/web" }],
+        expect.objectContaining({ workspaceBranch: "" })
+      );
+    }
+  );
+
+  it("reconciles freshness for preloaded diff resources by invoking the HTTP workflow", async () => {
+    const { browser, status } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    let diffCalls = 0;
+    let requestBody = "";
+    browser.net.handle("/api/diff-branches", (init) => {
+      diffCalls++;
+      requestBody = String(init?.body ?? "");
+      return jsonResponse({
+        refreshed: true,
+        message: "Comparing main → feature"
+      });
+    });
+    const render = vi.fn();
+    initializeGraphDiffPage(browser.context, { radiusRenderGraph: render });
+    await flushPromises();
+
+    // After branch listing loads, auto-compare triggers the debounced POST.
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(diffCalls).toBe(1);
+    expect(requestBody).toContain('"refresh":true');
+    expect(requestBody).toContain('"restartWait":true');
+    expect(render).toHaveBeenCalledOnce();
+    expect(status.textContent).toBe("The graph comparison is current.");
+  });
+
+  it("reloads when preloaded diff resources are stale and the workflow says so", async () => {
+    const { browser } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({ reload: true })
+    );
+    initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+    await flushPromises();
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(browser.nav.reloads).toBe(1);
   });
 
   it("rejects a stale comparison and leaves no debounce timer", async () => {
@@ -202,6 +279,7 @@ describe("initializeGraphDiffPage", () => {
       radiusRenderGraph: vi.fn(),
       radiusSetGraphError: setError
     });
+    await flushPromises();
 
     head.dispatch("change");
     browser.clock.tick(DIFF_DEBOUNCE_MS);
@@ -365,6 +443,101 @@ describe("initializeGraphDiffPage", () => {
     expect(status.textContent).toContain(
       "Copilot is generating .radius/app.bicep"
     );
+  });
+
+  // Nothing announces the model's arrival, so a page that reported the wait
+  // once and then stopped asking never recovered — even after the model landed.
+  it("keeps asking until the model lands, then renders the diff", async () => {
+    const renderGraph = vi.fn();
+    const { browser, head, status } = fixture();
+    let calls = 0;
+    const bodies: string[] = [];
+    browser.net.handle("/api/diff-branches", (init) => {
+      calls++;
+      bodies.push(String(init?.body ?? ""));
+      return calls < 3 ?
+          jsonResponse({ needsAppBicep: true })
+        : jsonResponse({ message: "Graphs are identical." });
+    });
+    browser.net.handle("/api/progress?view=diff", () =>
+      jsonResponse({ events: [] })
+    );
+    initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: renderGraph
+    });
+    await flushPromises();
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      browser.clock.tick(DIFF_RETRY_MS);
+      await flushPromises();
+    }
+
+    expect(calls).toBe(3);
+    expect(bodies[0]).toContain('"restartWait":true');
+    expect(bodies[1]).toContain('"restartWait":false');
+    expect(bodies[2]).toContain('"restartWait":false');
+    expect(status.textContent).toBe("Graphs are identical.");
+  });
+
+  it("stops asking once the server ends the wait", async () => {
+    const { browser, head, status } = fixture();
+    let calls = 0;
+    browser.net.handle("/api/diff-branches", () => {
+      calls++;
+      return jsonResponse({
+        error: "No modeling run has started.",
+        appBicepWaitExpired: true
+      });
+    });
+    browser.net.handle("/api/progress?view=diff", () =>
+      jsonResponse({ events: [] })
+    );
+    initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+    await flushPromises();
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    browser.clock.tick(DIFF_RETRY_MS * 5);
+    await flushPromises();
+
+    expect(calls).toBe(1);
+    expect(status.textContent).toContain("No modeling run has started.");
+  });
+
+  // A pending retry must not fire a request for a selection the user replaced.
+  it("abandons a pending retry when the selection changes", async () => {
+    const { browser, head, base } = fixture();
+    const bodies: string[] = [];
+    browser.net.handle("/api/diff-branches", (init) => {
+      bodies.push(String(init?.body ?? ""));
+      return jsonResponse({ needsAppBicep: true });
+    });
+    browser.net.handle("/api/progress?view=diff", () =>
+      jsonResponse({ events: [] })
+    );
+    initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+    await flushPromises();
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    const halfDebounce = Math.floor(DIFF_DEBOUNCE_MS / 2);
+    browser.clock.tick(DIFF_RETRY_MS - halfDebounce);
+    base.value = "another";
+    base.dispatch("change");
+    browser.clock.tick(halfDebounce);
+    await flushPromises();
+    expect(bodies).toHaveLength(1);
+
+    browser.clock.tick(DIFF_DEBOUNCE_MS - halfDebounce);
+    await flushPromises();
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies.at(-1)).toContain('"base":"another"');
   });
 
   it("shows the refusal verbatim when the skill cannot model the repo", async () => {

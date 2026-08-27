@@ -358,6 +358,48 @@ describe("node card", () => {
     expect(recorded.local).toEqual([]);
   });
 
+  // On the diff page the card is routed by the node's own branch, so the two
+  // sides of one comparison behave differently within the same render.
+  it("opens the on-disk file for a diff node on the checked-out branch", () => {
+    const { tree, recorded } = renderCard(
+      node({
+        sourceBranch: "feature-x",
+        sourceUrl: "https://github.test/o/r/blob/feature-x/src/web.ts#L4"
+      }),
+      {
+        diffMode: true,
+        branch: "feature-x",
+        baseBranch: "main",
+        workspaceBranch: "feature-x"
+      }
+    );
+    const row = findByClass(tree, "rad-node__source nodrag nopan nokey");
+    expect(props(row).target).toBeUndefined();
+    callHandler(row, "onClick");
+    expect(recorded.local).toEqual([
+      ["src/web.ts", 4, "https://github.test/o/r/blob/feature-x/src/web.ts#L4"]
+    ]);
+    expect(recorded.external).toEqual([]);
+  });
+
+  it("opens a removed diff node through the host on the base branch", () => {
+    const sourceUrl = "https://github.test/o/r/blob/main/src/web.ts#L4";
+    const { tree, recorded } = renderCard(
+      node({ sourceBranch: "main", diffStatus: "removed", sourceUrl }),
+      {
+        diffMode: true,
+        branch: "feature-x",
+        baseBranch: "main",
+        workspaceBranch: "feature-x"
+      }
+    );
+    const row = findByClass(tree, "rad-node__source nodrag nopan nokey");
+    expect(props(row).target).toBe("_blank");
+    callHandler(row, "onClick");
+    expect(recorded.external).toEqual([sourceUrl]);
+    expect(recorded.local).toEqual([]);
+  });
+
   it("renders an inert row when a remote node has no source URL", () => {
     const { tree } = renderCard(node({ sourceUrl: "" }));
     const row = findByClass(tree, "rad-node__source");
