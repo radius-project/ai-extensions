@@ -8,7 +8,8 @@ import os from "node:os";
 import path from "node:path";
 import {
   GENERATED_MODEL_PATHS,
-  IGNORED_SOURCE_DIRS
+  IGNORED_SOURCE_DIRS,
+  isStagingDirName
 } from "@radius-project/core";
 import type { CanvasState } from "./shared.js";
 
@@ -260,6 +261,20 @@ export function isWorkspaceSelection(
   );
 }
 
+// The branch this workspace has checked out for `repo`, or "" when there is no
+// worktree for it. A page that renders one branch can ask isWorkspaceSelection
+// directly; the graph diff renders two branches at once and only the checked-out
+// one has on-disk files, so it needs the name itself to decide per node. Empty
+// is fail-closed in the same way: an unknown workspace branch never matches a
+// node's branch, so the node keeps its remote link.
+export function workspaceBranchForRepo(
+  state: CanvasState | null | undefined,
+  repo: string | null | undefined
+): string {
+  if (!state?.workspacePath || !repoMatches(state, repo)) return "";
+  return state.workspaceBranch || "";
+}
+
 export function defaultBranchForState(
   state: CanvasState | null | undefined
 ): string {
@@ -374,6 +389,64 @@ function isLegacyRadiusAppModel(content: string): boolean {
       content
     )
   );
+}
+
+// The newest filesystem activity from a modeling run in the workspace checkout.
+//
+// A run creates `.radius/.staging-<runId>/` before it writes anything and
+// removes it when it finishes. The newest mtime proves that the run existed and
+// may provide a newer observation, but callers must not treat an unchanged mtime
+// as proof that source analysis or recipe publishing stopped.
+//
+// Any read failure answers null. This decides whether to keep waiting, so an
+// unreadable `.radius/` must let the wait end rather than renew it forever.
+export async function modelingRunLastActivityAtMs(
+  workspacePath: string | null | undefined
+): Promise<number | null> {
+  if (!workspacePath) return null;
+  try {
+    const dir = safeWorkspacePath(workspacePath, ".radius");
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const stagingDirs = entries.filter(
+      (entry) => entry.isDirectory() && isStagingDirName(entry.name)
+    );
+    const activityTimes = await Promise.all(
+      stagingDirs.map(async (entry): Promise<number | null> => {
+        const stagingDir = path.join(dir, entry.name);
+        try {
+          const [stagingStat, stagedEntries] = await Promise.all([
+            fs.stat(stagingDir),
+            fs.readdir(stagingDir, { withFileTypes: true })
+          ]);
+          const stagedStats = await Promise.all(
+            stagedEntries
+              .filter((stagedEntry) => !stagedEntry.isSymbolicLink())
+              .map(async (stagedEntry) => {
+                try {
+                  return await fs.stat(path.join(stagingDir, stagedEntry.name));
+                } catch {
+                  return null;
+                }
+              })
+          );
+          return Math.max(
+            stagingStat.mtimeMs,
+            ...stagedStats.flatMap((stat) => (stat ? [stat.mtimeMs] : []))
+          );
+        } catch {
+          // The run may have published between listing `.radius/` and probing
+          // its staging directory. That completed run is no longer activity.
+          return null;
+        }
+      })
+    );
+    const observed = activityTimes.filter(
+      (activityAtMs): activityAtMs is number => activityAtMs !== null
+    );
+    return observed.length > 0 ? Math.max(...observed) : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function hasRadiusApplicationModel(

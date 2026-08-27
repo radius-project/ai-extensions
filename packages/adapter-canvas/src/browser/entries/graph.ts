@@ -46,6 +46,7 @@ function asOptions(value: unknown): GraphOptions {
     "repoUrl",
     "branch",
     "baseBranch",
+    "workspaceBranch",
     "lineType",
     "curveStyle"
   ] as const) {

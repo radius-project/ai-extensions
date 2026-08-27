@@ -1,10 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  FAKE_CLI_TOOLS,
   removeDirectoryWithRetries,
   replaceSharedCredentials,
   stopHarnessServer,
   unwindHarnessConstruction
 } from "./canvas-harness.js";
+
+describe("fake CLI isolation", () => {
+  it("intercepts every cloud command used by environment discovery", () => {
+    expect(FAKE_CLI_TOOLS).toEqual(["gh", "rad", "az", "aws", "kubectl"]);
+  });
+});
 
 describe("removeDirectoryWithRetries", () => {
   it("retries transient locks with a bounded increasing delay", async () => {

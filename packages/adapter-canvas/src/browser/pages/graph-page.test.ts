@@ -17,9 +17,8 @@ import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { formatElapsed } from "../progress-format.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
+import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
 import {
-  GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
-  GRAPH_APP_BICEP_TIMEOUT_MS,
   GRAPH_PAGE_STATE_ID,
   GRAPH_PLAN_BLOCKED_TITLE,
   GRAPH_PROGRESS_MS,
@@ -646,8 +645,10 @@ describe("initializeGraphPage", () => {
   it("schedules a slow retry while Copilot drafts app.bicep and cancels it on a branch change", async () => {
     const { browser, branch, status } = fixture({ loaded: false });
     let calls = 0;
-    browser.net.handle("/api/load-graph", () => {
+    const bodies: string[] = [];
+    browser.net.handle("/api/load-graph", (init) => {
       calls++;
+      bodies.push(String(init?.body ?? ""));
       return jsonResponse({ needsAppBicep: true });
     });
     initializeGraphPage(browser.context, globals());
@@ -668,6 +669,34 @@ describe("initializeGraphPage", () => {
     browser.clock.tick(GRAPH_RETRY_MS);
     await flushPromises();
     expect(calls).toBe(3);
+    expect(bodies[0]).toContain('"restartWait":true');
+    expect(bodies[1]).toContain('"restartWait":true');
+    expect(bodies[2]).toContain('"restartWait":false');
+  });
+
+  it("keeps the generating status stable while an automatic retry is pending", async () => {
+    const { browser, status } = fixture({ loaded: false });
+    const retry = createDeferred<HttpResponse>();
+    let calls = 0;
+    browser.net.handle("/api/load-graph", () => {
+      calls++;
+      return calls === 1 ?
+          jsonResponse({ needsAppBicep: true })
+        : retry.promise;
+    });
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    const generating = status?.textContent;
+
+    browser.clock.tick(GRAPH_RETRY_MS);
+    await flushPromises();
+
+    expect(calls).toBe(2);
+    expect(status?.textContent).toBe(generating);
+
+    retry.resolve(jsonResponse({ needsAppBicep: true }));
+    await flushPromises();
+    expect(status?.textContent).toBe(generating);
   });
 
   it("retries quickly after a stale response", async () => {
@@ -726,6 +755,28 @@ describe("initializeGraphPage", () => {
     await flushPromises();
 
     expect(browser.nav.reloads).toBe(0);
+  });
+
+  it("aborts an in-flight graph and requests the newly selected branch", async () => {
+    const { browser, branch } = fixture({ loaded: false });
+    const first = createDeferred<HttpResponse>();
+    const requestedBranches: string[] = [];
+    browser.net.handle("/api/load-graph", (init) => {
+      const body = JSON.parse(String(init?.body)) as { branch?: string };
+      requestedBranches.push(body.branch || "");
+      return requestedBranches.length === 1 ?
+          first.promise
+        : jsonResponse({ resources: [] });
+    });
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    branch.value = "another";
+    branch.dispatch("change");
+    await flushPromises();
+
+    expect(browser.net.aborted).toBe(1);
+    expect(requestedBranches).toEqual(["feature", "another"]);
   });
 
   it("updates a loaded graph for a new branch using response provenance", async () => {
@@ -973,11 +1024,19 @@ describe("initializeGraphPage", () => {
     );
   });
 
-  it("surfaces a needsAppBicep refresh message", async () => {
+  it("retries a preloaded graph refresh until the replacement model lands", async () => {
+    const render = vi.fn();
     const { browser, status } = fixture({ loaded: true });
-    browser.net.handle("/api/load-graph", () =>
-      jsonResponse({ needsAppBicep: true })
-    );
+    let calls = 0;
+    browser.net.handle("/api/load-graph", () => {
+      calls++;
+      return calls === 1 ?
+          jsonResponse({ needsAppBicep: true })
+        : jsonResponse({
+            resources: [{ id: "app/rebuilt" }],
+            fromWorkspace: true
+          });
+    });
     browser.net.handle("/api/progress?view=graph", () =>
       jsonResponse({
         generation: 1,
@@ -997,10 +1056,22 @@ describe("initializeGraphPage", () => {
         ]
       })
     );
-    initializeGraphPage(browser.context, globals());
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
     await flushPromises();
 
     expect(status?.textContent).toContain("rebuilding the application graph");
+    browser.clock.tick(GRAPH_RETRY_MS);
+    await flushPromises();
+
+    expect(calls).toBe(2);
+    expect(render).toHaveBeenLastCalledWith(
+      "graph-container",
+      [{ id: "app/rebuilt" }],
+      expect.objectContaining({ localSource: true })
+    );
   });
 
   it("retries a loaded graph until the rebuilt model is available", async () => {
@@ -1063,13 +1134,19 @@ describe("initializeGraphPage", () => {
     );
   });
 
-  it("preserves a loaded graph when model rebuilding times out", async () => {
+  it("preserves a loaded graph when the server ends the model wait", async () => {
     const { browser, status } = fixture({ loaded: true });
     const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
     const setError = vi.fn();
-    browser.net.handle("/api/load-graph", () =>
-      jsonResponse({ needsAppBicep: true })
-    );
+    let calls = 0;
+    const bodies: string[] = [];
+    browser.net.handle("/api/load-graph", (init) => {
+      calls++;
+      bodies.push(String(init?.body ?? ""));
+      return calls === 1 ?
+          jsonResponse({ needsAppBicep: true })
+        : jsonResponse({ error: GRAPH_APP_BICEP_TIMEOUT_MESSAGE });
+    });
     initializeGraphPage(
       browser.context,
       globals({
@@ -1079,12 +1156,15 @@ describe("initializeGraphPage", () => {
     );
     await flushPromises();
 
-    const attempts = Math.ceil(GRAPH_APP_BICEP_TIMEOUT_MS / GRAPH_RETRY_MS);
-    for (let attempt = 0; attempt < attempts; attempt++) {
-      browser.clock.tick(GRAPH_RETRY_MS);
-      await flushPromises();
-    }
+    browser.clock.tick(GRAPH_RETRY_MS);
+    await flushPromises();
 
+    // The page owns no clock of its own: it waits until the server stops
+    // answering `needsAppBicep`, and only the first request may restart that
+    // server-side wait.
+    expect(calls).toBe(2);
+    expect(bodies[0]).toContain('"restartWait":true');
+    expect(bodies[1]).toContain('"restartWait":false');
     expect(controller.destroy).not.toHaveBeenCalled();
     expect(setError).not.toHaveBeenCalled();
     expect(status?.textContent).toBe(
@@ -1619,9 +1699,53 @@ describe("initializeGraphPage", () => {
       ]);
     });
 
-    it("gives up on the app.bicep wait once it exceeds the timeout", async () => {
+    it("stops retrying once the server ends the app.bicep wait", async () => {
       const setError = vi.fn();
       const { browser, progressHost, status } = fixture({ loaded: false });
+      let calls = 0;
+      browser.net.handle("/api/load-graph", () => {
+        calls++;
+        // The server owns the wait: once it expires it drops `needsAppBicep`
+        // and answers with the reason, which is what ends the page's polling.
+        return calls < 3 ?
+            jsonResponse({ needsAppBicep: true })
+          : jsonResponse({
+              error: GRAPH_APP_BICEP_TIMEOUT_MESSAGE,
+              appBicepWaitExpired: true
+            });
+      });
+      initializeGraphPage(
+        browser.context,
+        globals({ radiusSetGraphError: setError })
+      );
+      await flushPromises();
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        browser.clock.tick(GRAPH_RETRY_MS);
+        await flushPromises();
+      }
+      const settled = calls;
+      browser.clock.tick(GRAPH_RETRY_MS * 5);
+      await flushPromises();
+
+      expect(settled).toBe(3);
+      expect(calls).toBe(settled);
+      expect(setError).toHaveBeenCalledWith(
+        "graph-container",
+        GRAPH_APP_BICEP_TIMEOUT_MESSAGE
+      );
+      expect(status?.textContent).toBe("");
+      // The failure belongs on the graph surface alone; a frozen panel left
+      // underneath would state it a second time.
+      expect(graphProgressStages(progressHost)).toEqual([]);
+    });
+
+    // The page must not impose a budget of its own: a modeling run that is
+    // demonstrably working keeps `needsAppBicep` coming, and the page keeps
+    // asking for as long as the server says to.
+    it("keeps polling for as long as the server answers needsAppBicep", async () => {
+      const setError = vi.fn();
+      const { browser } = fixture({ loaded: false });
       let calls = 0;
       browser.net.handle("/api/load-graph", () => {
         calls++;
@@ -1633,27 +1757,13 @@ describe("initializeGraphPage", () => {
       );
       await flushPromises();
 
-      // Nothing reports back when the modeling skill refuses a repository it
-      // cannot model, so the wait has to end on its own instead of polling for
-      // a file that will never arrive.
-      const attempts = Math.ceil(GRAPH_APP_BICEP_TIMEOUT_MS / GRAPH_RETRY_MS);
-      for (let attempt = 0; attempt < attempts; attempt++) {
+      for (let attempt = 0; attempt < 200; attempt++) {
         browser.clock.tick(GRAPH_RETRY_MS);
         await flushPromises();
       }
-      const settled = calls;
-      browser.clock.tick(GRAPH_RETRY_MS * 5);
-      await flushPromises();
 
-      expect(calls).toBe(settled);
-      expect(setError).toHaveBeenCalledWith(
-        "graph-container",
-        GRAPH_APP_BICEP_TIMEOUT_MESSAGE
-      );
-      expect(status?.textContent).toBe("");
-      // The failure belongs on the graph surface alone; a frozen panel left
-      // underneath would state it a second time.
-      expect(graphProgressStages(progressHost)).toEqual([]);
+      expect(calls).toBe(201);
+      expect(setError).not.toHaveBeenCalled();
     });
 
     it("stops immediately when the server says the skill cannot model the repo", async () => {

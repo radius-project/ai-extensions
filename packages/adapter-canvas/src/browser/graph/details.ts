@@ -8,6 +8,7 @@
 
 import { escapeBrowserHtml } from "../html.js";
 import { buildSourceUrl, githubSourceReferenceUrl } from "./model.js";
+import { isLocalSourceNode } from "./build.js";
 import type { BrowserContext, DomElement } from "../ports.js";
 import type { GraphNodeData, GraphSettings } from "./build.js";
 
@@ -152,7 +153,7 @@ export function buildDetailRows(
   data: GraphNodeData
 ): string[] {
   const rows: string[] = [];
-  if (settings.localSource) {
+  if (isLocalSourceNode(settings, data)) {
     if (data.srcPath) {
       rows.push(
         localLinkRow(
