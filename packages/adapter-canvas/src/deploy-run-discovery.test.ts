@@ -2,9 +2,9 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { ExecFileException } from "node:child_process";
 
 // The ./gh.ts stub records the args each `gh` invocation would run and replies
-// with whatever the active handler returns, so findWorkflowRun/latestWorkflowRunId
-// can be exercised without spawning the CLI. `vi.hoisted` runs before the module
-// factory so the mock can close over the shared handler.
+// with whatever the active handler returns, so ghJson, findWorkflowRun, and
+// latestWorkflowRunId can be exercised without spawning the CLI. `vi.hoisted`
+// runs before the module factory so the mock can close over the shared handler.
 const { ghMock } = vi.hoisted(() => {
   return {
     ghMock: {
@@ -79,6 +79,24 @@ describe("ghJson ambient CLI reads", () => {
 
     await expect(ghJson(["run", "list"], fallback)).resolves.toBe(fallback);
     expect(ghMock.options).toEqual([{ timeout: 15000 }]);
+  });
+
+  it("prefers a command failure over parseable stdout", async () => {
+    const fallback: unknown[] = [];
+    ghMock.handler = () => ({
+      error: Object.assign(new Error("gh failed"), { code: 1 }),
+      stdout: '[{"databaseId":41}]'
+    });
+
+    await expect(ghJson(["run", "list"], fallback)).resolves.toBe(fallback);
+  });
+
+  it("returns null by default when the command fails", async () => {
+    ghMock.handler = () => ({
+      error: Object.assign(new Error("gh failed"), { code: 1 })
+    });
+
+    await expect(ghJson(["run", "list"])).resolves.toBeNull();
   });
 
   it("returns the caller-provided fallback for malformed JSON", async () => {

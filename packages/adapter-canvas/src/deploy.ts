@@ -303,7 +303,7 @@ export function ghJson(
       }
       try {
         resolve(JSON.parse(stdout.trim()));
-      } catch (e) {
+      } catch {
         resolve(fallback);
       }
     });
