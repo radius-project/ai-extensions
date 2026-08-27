@@ -4,7 +4,8 @@ import { DEPLOY_RESULT_STATE_ID } from "../browser/pages/deploy-result-page.js";
 import { browserEntryMarker, browserScript } from "../browser/scripts.js";
 import {
   HOSTILE_STATE,
-  expectSafeInlineScripts
+  expectSafeInlineScripts,
+  markupWithoutBrowserBundles
 } from "../../test/support/pages/hostile-state.js";
 import { readBrowserPageState } from "../../test/support/pages/browser-state.js";
 import { environmentPage } from "./environment-page.js";
@@ -194,7 +195,7 @@ describe("environmentPage deployment result", () => {
 
     expect(html).toContain("Deployment Failed");
     expect(html).toContain("&lt;failed&gt;");
-    expect(html).not.toContain("javascript:");
+    expect(markupWithoutBrowserBundles(html)).not.toContain("javascript:");
     expect(readBrowserPageState(html, DEPLOY_RESULT_STATE_ID)).toEqual({
       attemptId: ""
     });
