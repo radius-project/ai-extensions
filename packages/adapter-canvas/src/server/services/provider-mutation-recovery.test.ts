@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createOperation,
   prepareProviderMutation,
+  requestStop,
   settleProviderMutation
 } from "../../operations.js";
 import {
@@ -9,7 +10,8 @@ import {
   deterministicProviderUuid,
   executeRecoverableMutation,
   ProviderMutationRecoveryError,
-  providerMutationOutcomeUnknown
+  providerMutationOutcomeUnknown,
+  providerMutationWillWrite
 } from "./provider-mutation-recovery.js";
 
 function command(
@@ -53,6 +55,84 @@ describe("provider mutation recovery", () => {
       recovered: false
     });
     expect(events).toEqual(["persist:prepared", "mutate", "persist:confirmed"]);
+  });
+
+  it("does not start a mutation when Stop arrives while its journal is saved", async () => {
+    const operation = createOperation({ operationId: "op_test" });
+    const events: string[] = [];
+    const mutate = vi.fn(async () => command());
+
+    const result = await executeRecoverableMutation({
+      operation,
+      kind: "github_environment.put",
+      target: "octo/app:prod",
+      persist: async () => {
+        const mutation = operation.providerRecovery.mutations[0];
+        events.push(`persist:${mutation?.status}`);
+        if (mutation?.status === "prepared") requestStop(operation);
+      },
+      beforeMutation: async () => {
+        events.push(
+          `boundary:${operation.providerRecovery.mutations[0]?.status}`
+        );
+        return false;
+      },
+      mutate,
+      accept: (value) => value,
+      reconcile: async () => {
+        throw new Error("a mutation that did not start is never reconciled");
+      }
+    });
+
+    expect(result).toEqual({ state: "cancelled" });
+    expect(mutate).not.toHaveBeenCalled();
+    expect(events).toEqual([
+      "persist:prepared",
+      "persist:not_applied",
+      "boundary:not_applied"
+    ]);
+  });
+
+  it("defers Stop while an older provider mutation still needs reconciliation", async () => {
+    const operation = createOperation({ operationId: "op_test" });
+    prepareProviderMutation(operation, {
+      kind: "provider_registration.create",
+      target: "provider-a",
+      intent: {
+        provider: "azure"
+      }
+    });
+    requestStop(operation);
+    const mutation = vi.fn(async () => command());
+    const beforeMutation = vi.fn(async () => true);
+
+    await expect(
+      executeRecoverableMutation({
+        operation,
+        kind: "github_environment.put",
+        target: "octo/app:dev",
+        persist: async () => undefined,
+        beforeMutation,
+        mutate: mutation,
+        accept: (result) => result,
+        reconcile: async () => ({ state: "not_applied" })
+      })
+    ).rejects.toMatchObject({
+      code: "provider-mutation-outcome-unknown"
+    });
+
+    expect(mutation).not.toHaveBeenCalled();
+    expect(beforeMutation).toHaveBeenCalledOnce();
+    expect(operation.providerRecovery?.mutations).toEqual([
+      expect.objectContaining({
+        kind: "provider_registration.create",
+        status: "prepared"
+      }),
+      expect.objectContaining({
+        kind: "github_environment.put",
+        status: "not_applied"
+      })
+    ]);
   });
 
   it("does not repeat a prepared mutation after restart and adopts provider state", async () => {
@@ -1168,5 +1248,53 @@ describe("the second attempt, across every settled status", () => {
     });
 
     expect({ mutated, reconciled }).toEqual({ mutated: 0, reconciled: 0 });
+  });
+});
+
+// A Stop belongs before a forward write and never before a reconciling read, so
+// the same predicate the journal uses to decide whether to write is the one
+// callers gate their Stop boundary on.
+describe("providerMutationWillWrite", () => {
+  function journaled(status: string) {
+    const operation = createOperation({ operationId: "op_test" });
+    const mutation = prepareProviderMutation(operation, {
+      kind: "github_environment.put",
+      target: "octo/app:dev"
+    });
+    if (status !== "prepared") {
+      settleProviderMutation(
+        operation,
+        mutation.mutationId,
+        status as "confirmed",
+        null
+      );
+    }
+    return operation;
+  }
+
+  it("writes when the journal has never seen this mutation", () => {
+    expect(
+      providerMutationWillWrite(
+        createOperation({ operationId: "op_test" }),
+        "github_environment.put",
+        "octo/app:dev"
+      )
+    ).toBe(true);
+  });
+
+  it.each([
+    ["not_applied", true],
+    ["prepared", false],
+    ["outcome_unknown", false],
+    ["confirmed", false],
+    ["manual_required", false]
+  ])("reports %s as willWrite=%s", (status, expected) => {
+    expect(
+      providerMutationWillWrite(
+        journaled(status),
+        "github_environment.put",
+        "octo/app:dev"
+      )
+    ).toBe(expected);
   });
 });

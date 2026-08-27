@@ -14,6 +14,16 @@ export function inlineScriptSources(html: string): string[] {
   );
 }
 
+// The shell inlines the vendored browser bundles, and React's own source
+// carries strings such as `matchMedia`, `javascript:` and `link[rel="stylesheet"]`.
+// An assertion about what a renderer emitted reads the document without them.
+export function markupWithoutBrowserBundles(html: string): string {
+  return html.replace(
+    /<script>\n\/\/ radius:browser-entry [\s\S]*?\n<\/script>/g,
+    ""
+  );
+}
+
 // Page state must never end the script element early or break the script it is
 // embedded in: every closing tag has to belong to a block the parser paired,
 // and every block has to parse.

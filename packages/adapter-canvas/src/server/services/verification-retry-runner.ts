@@ -1,6 +1,7 @@
 import type { SelectedGhExecutor } from "../../gh.js";
 import {
   providerMutationRecord,
+  shouldStop,
   settleProviderMutation
 } from "../../operations.js";
 import {
@@ -10,6 +11,7 @@ import {
 import {
   executeRecoverableMutation,
   ProviderMutationRecoveryError,
+  providerMutationWillWrite,
   type ProviderMutationCommandResult
 } from "./provider-mutation-recovery.js";
 import {
@@ -25,10 +27,17 @@ import {
 type VerificationRetryFinishOptions =
   { failure: Record<string, unknown> } | { terminal: Record<string, unknown> };
 
+export interface VerificationRetryStopBoundaryInput {
+  operation: VerificationRetryOperation;
+  boundary: string;
+  beforePersist(): void;
+}
+
 export interface VerificationRetryRunnerDependencies {
   createExecutor(login: string): Promise<SelectedGhExecutor>;
   registerExecutor(operationId: string, executor: SelectedGhExecutor): void;
   unregisterExecutor(operationId: string): void;
+  stopBoundary(input: VerificationRetryStopBoundaryInput): Promise<boolean>;
   buildDispatchArgs(input: {
     workflowFile: string;
     targetRepo: string;
@@ -238,6 +247,19 @@ export async function runVerificationRetry(
     return;
   }
 
+  const stopBoundary = (boundary: string) =>
+    dependencies.stopBoundary({
+      operation,
+      boundary,
+      beforePersist: () =>
+        dependencies.setCommandState(
+          operation,
+          commandId,
+          "finished",
+          "cancelled"
+        )
+    });
+
   const savedBeforeAcquisition = { ...(operation.verification || {}) };
   const retryTargetPhase = verificationRetryTargetPhase(
     savedBeforeAcquisition.accountUnavailablePhase
@@ -345,6 +367,7 @@ export async function runVerificationRetry(
         });
         return;
       }
+      if (!(await stopBoundary("after-verification-retry-dispatch"))) return;
       await dependencies.monitor(operation.operationId);
       dependencies.setCommandState(
         operation,
@@ -524,6 +547,17 @@ export async function runVerificationRetry(
       runUrl: null
     };
 
+    if (
+      providerMutationWillWrite(
+        operation,
+        "github_workflow.dispatch_retry",
+        mutationTarget
+      ) &&
+      !(await stopBoundary("before-verification-retry-dispatch-attempt"))
+    ) {
+      return;
+    }
+
     const discoverAcceptedRun = async () => {
       const listed = await executor.run(
         [
@@ -615,6 +649,8 @@ export async function runVerificationRetry(
         target: mutationTarget,
         providerIdempotencyKey: operationMarker || null,
         persist: dependencies.persistJournal,
+        beforeMutation: () =>
+          stopBoundary("before-verification-retry-dispatch-attempt"),
         mutate: () => {
           providerRequestStarted = true;
           return executor.run(
@@ -633,6 +669,20 @@ export async function runVerificationRetry(
         rethrowReconciliationError: dependencies.isAuthorizationError
       });
     } catch (error) {
+      if (
+        error instanceof ProviderMutationRecoveryError &&
+        error.code === "provider-mutation-outcome-unknown" &&
+        shouldStop(operation)
+      ) {
+        dependencies.setCommandState(
+          operation,
+          commandId,
+          "finished",
+          "provider-reconciliation-pending"
+        );
+        await dependencies.persist(operation);
+        return;
+      }
       if (
         error instanceof ProviderMutationRecoveryError &&
         error.code === "provider-mutation-recovery-persistence-failed"
@@ -721,6 +771,7 @@ export async function runVerificationRetry(
       return;
     }
 
+    if (dispatch.state === "cancelled") return;
     if (dispatch.state === "not_applied") {
       const rejected = dispatch.result;
       const authorizationError =
@@ -852,6 +903,7 @@ export async function runVerificationRetry(
     }
     dependencies.setCommandState(operation, commandId, "running");
     await dependencies.persist(operation);
+    if (!(await stopBoundary("after-verification-retry-dispatch"))) return;
     await dependencies.monitor(operation.operationId);
     dependencies.setCommandState(
       operation,

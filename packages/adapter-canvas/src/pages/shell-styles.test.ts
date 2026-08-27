@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { CRITICAL_SHELL_STYLE_CSS, SHELL_STYLE_CSS } from "./shell-styles.js";
+import {
+  commandActionSpecs,
+  commandActionView
+} from "../browser/command-action.js";
+import type { ElementSpec } from "../browser/dom.js";
+import type { RemediationView } from "@radius-project/core/remediations";
 
 type Rgb = [number, number, number];
 
@@ -155,5 +161,66 @@ describe("status color tokens", () => {
 describe("resource table status styles", () => {
   it("does not define decorative colored status circles", () => {
     expect(SHELL_STYLE_CSS).not.toContain(".rad-dot");
+  });
+});
+
+describe("run-command callout styles", () => {
+  // The callout builds its markup in the browser bundle while its styles live
+  // in this shell, so nothing in the type system connects the two. Deriving the
+  // class names from the real specs keeps that seam honest: a class the callout
+  // emits but the shell never styles renders as unstyled markup in the canvas.
+  function classesFrom(remediation: RemediationView): string[] {
+    const specs = commandActionSpecs(
+      commandActionView({
+        remediation,
+        phase: "confirming",
+        error: "",
+        copied: false
+      }),
+      "cmd"
+    );
+    const nodes: ElementSpec[] = [
+      specs.container,
+      ...(specs.container.children ?? []),
+      ...specs.buttons,
+      ...(specs.status === null ? [] : [specs.status])
+    ];
+    return [
+      ...new Set(nodes.flatMap((n) => (n.className ?? "").split(" ")))
+    ].filter((c) => c !== "");
+  }
+
+  const remediation: RemediationView = {
+    id: "git-push-branch",
+    params: { branch: "feature" },
+    title: "Push the branch",
+    command: "git push -u origin feature",
+    cwd: "workspace",
+    impact: "high",
+    runnable: true,
+    unsupportedReason: "",
+    warning: "",
+    confirmTitle: "Push this branch?",
+    confirmBody: "This writes to the remote.",
+    confirmLabel: "Push",
+    followUp: "Then choose Retry."
+  };
+
+  it.each(classesFrom(remediation))("styles .%s", (className) => {
+    expect(SHELL_STYLE_CSS).toContain(`.${className}`);
+  });
+
+  it("styles the buttons row and status shown only in later phases", () => {
+    // `cancel` and the status node appear only once the callout has a phase, so
+    // assert the container pieces the idle callout does not emit.
+    expect(SHELL_STYLE_CSS).toContain(".rad-command-action-buttons");
+    expect(SHELL_STYLE_CSS).toContain(".rad-command-action-status");
+    expect(SHELL_STYLE_CSS).toContain(".rad-command-action-warning");
+  });
+
+  it("keeps the command block readable verbatim", () => {
+    // A multi-command remediation is newline-joined, so collapsing whitespace
+    // would run `git add`, `git commit`, and `git push` together on one line.
+    expect(SHELL_STYLE_CSS).toContain("white-space: pre-wrap;");
   });
 });

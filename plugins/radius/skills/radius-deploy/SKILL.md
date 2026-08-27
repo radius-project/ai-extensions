@@ -18,13 +18,14 @@ Trigger the `Radius - Run rad Commands` workflow which spins up an ephemeral k3d
 ## Prerequisites
 
 Before invoking this skill, all of these must exist:
+
 1. A GitHub Environment configured with cloud credentials → use the `radius-environment` skill if missing.
 2. A `.radius/app.bicep` file → use the `radius-app-bicep` skill if missing.
 3. The user's PAT in the extension's storage (auto-seeded from `gh auth token`).
 
 ## How to invoke
 
-1. `open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "environment", repo: "<owner/repo>" } })`
+1. Reuse the existing Radius canvas instanceId when one is open; otherwise use `radius-panel`: `open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "environment", repo: "<owner/repo>" } })`
 2. In the hub:
    - **Applications ▾**: pick the bicep app file (auto-selected if only one)
    - **Envs ▾**: pick the target env (tagged with AWS / AZURE)
@@ -64,7 +65,7 @@ The workflow checks the branch out **from GitHub**. A fix that exists only in th
 
 The workflow can also be dispatched straight from the GitHub API:
 
-```
+```http
 POST /repos/{owner}/{repo}/actions/workflows/run-rad-commands.yml/dispatches
 { "ref": "<branch>", "inputs": { "environment": "<env-name>" } }
 ```

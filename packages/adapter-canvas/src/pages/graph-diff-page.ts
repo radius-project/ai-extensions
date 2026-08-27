@@ -2,6 +2,7 @@
 // an explicit committed base branch and head branch.
 
 import { escapeHtml, type CanvasState } from "../shared.js";
+import { workspaceBranchForRepo } from "../workspace.js";
 import { pageShell } from "./shell.js";
 import { graphHeader, graphHeaderClose } from "./graph-header.js";
 import { GRAPH_DIFF_SUBTITLE } from "./fragments.js";
@@ -78,6 +79,7 @@ ${GRAPH_DIFF_SUBTITLE}
           repo: targetRepo,
           base: baseBranch,
           head: headBranch,
+          workspaceBranch: workspaceBranchForRepo(state, targetRepo),
           resources: [],
           modelingError:
             state?.diffModelingFailed && state.diffError ? state.diffError : ""
@@ -152,6 +154,7 @@ ${
         repo: targetRepo,
         base: baseBranch,
         head: headBranch,
+        workspaceBranch: workspaceBranchForRepo(state, targetRepo),
         resources,
         modelingError:
           state?.diffModelingFailed && state.diffError ? state.diffError : ""

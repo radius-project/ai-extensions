@@ -2,13 +2,14 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { ExecFileException } from "node:child_process";
 
 // The ./gh.ts stub records the args each `gh` invocation would run and replies
-// with whatever the active handler returns, so findWorkflowRun/latestWorkflowRunId
-// can be exercised without spawning the CLI. `vi.hoisted` runs before the module
-// factory so the mock can close over the shared handler.
+// with whatever the active handler returns, so ghJson, findWorkflowRun, and
+// latestWorkflowRunId can be exercised without spawning the CLI. `vi.hoisted`
+// runs before the module factory so the mock can close over the shared handler.
 const { ghMock } = vi.hoisted(() => {
   return {
     ghMock: {
       calls: [] as string[][],
+      options: [] as Array<{ timeout?: number }>,
       handler: (
         _args: string[]
       ): {
@@ -23,7 +24,7 @@ vi.mock("./gh.js", () => ({
   cliExec: (
     _cmd: string,
     args: string[],
-    _opts: unknown,
+    opts: { timeout?: number },
     cb: (
       error: ExecFileException | null,
       stdout: string,
@@ -31,12 +32,14 @@ vi.mock("./gh.js", () => ({
     ) => void
   ) => {
     ghMock.calls.push(args);
+    ghMock.options.push(opts);
     const result = ghMock.handler(args);
     cb(result.error ?? null, result.stdout ?? "", "");
   }
 }));
 
-const { findWorkflowRun, latestWorkflowRunId } = await import("./deploy.js");
+const { findWorkflowRun, ghJson, latestWorkflowRunId } =
+  await import("./deploy.js");
 
 interface RunListEntry {
   databaseId?: number;
@@ -53,7 +56,55 @@ const DISPATCH_AT = 1_700_000_000_000;
 
 beforeEach(() => {
   ghMock.calls = [];
+  ghMock.options = [];
   ghMock.handler = () => ({ stdout: "[]" });
+});
+
+describe("ghJson ambient CLI reads", () => {
+  it("parses JSON and forwards the requested timeout", async () => {
+    replyWith('[{"databaseId":41}]');
+
+    await expect(ghJson(["run", "list"], null, 3210)).resolves.toEqual([
+      { databaseId: 41 }
+    ]);
+    expect(ghMock.calls).toEqual([["run", "list"]]);
+    expect(ghMock.options).toEqual([{ timeout: 3210 }]);
+  });
+
+  it("returns the caller-provided fallback when the command fails", async () => {
+    const fallback: unknown[] = [];
+    ghMock.handler = () => ({
+      error: Object.assign(new Error("gh failed"), { code: 1 })
+    });
+
+    await expect(ghJson(["run", "list"], fallback)).resolves.toBe(fallback);
+    expect(ghMock.options).toEqual([{ timeout: 15000 }]);
+  });
+
+  it("prefers a command failure over parseable stdout", async () => {
+    const fallback: unknown[] = [];
+    ghMock.handler = () => ({
+      error: Object.assign(new Error("gh failed"), { code: 1 }),
+      stdout: '[{"databaseId":41}]'
+    });
+
+    await expect(ghJson(["run", "list"], fallback)).resolves.toBe(fallback);
+  });
+
+  it("returns null by default when the command fails", async () => {
+    ghMock.handler = () => ({
+      error: Object.assign(new Error("gh failed"), { code: 1 })
+    });
+
+    await expect(ghJson(["run", "list"])).resolves.toBeNull();
+  });
+
+  it("returns the caller-provided fallback for malformed JSON", async () => {
+    const fallback = { unavailable: true };
+    replyWith("not json");
+
+    await expect(ghJson(["run", "list"], fallback)).resolves.toBe(fallback);
+  });
 });
 
 describe("findWorkflowRun known-id shortcut", () => {

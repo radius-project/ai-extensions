@@ -213,6 +213,30 @@ describe("RU-03: tool declarations", () => {
       );
     });
 
+    it("never requires publishing the current worktree for a graph diff", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Do not commit or push the current worktree merely to compare it."
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "whichever side exactly matches the current workspace repo and branch"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "report that the diff is unavailable rather than publishing the worktree"
+      );
+    });
+
+    it("uses the existing Radius instance in every concrete open example", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
+        'open_canvas({ canvasId: "radius", instanceId: "radius-panel"'
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        'instanceId: "<radius-instance>"'
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "always use its actual instanceId"
+      );
+    });
+
     it("keeps numbered instructions flush-left", () => {
       for (const line of RADIUS_SESSION_START_CONTEXT.split("\n")) {
         expect(line).not.toMatch(/^\s{4,}\d\./);
