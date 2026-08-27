@@ -841,10 +841,8 @@ test.describe("Radius Canvas in Chromium", () => {
     await plan.focus();
     await page.keyboard.press("Enter");
 
-    await expect(page).toHaveURL(
-      /page=deploying&env=fixture-environment(?:&|$)/
-    );
-    await expect(page.locator("#deploy-env-select")).toHaveValue(
+    await expect(page).toHaveURL(/page=planned&env=fixture-environment(?:&|$)/);
+    await expect(page.locator("#planned-env")).toHaveValue(
       "fixture-environment"
     );
   });

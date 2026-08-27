@@ -694,7 +694,7 @@ describe("environment list behavior", () => {
     expect(page.browser.net.calls).toHaveLength(0);
   });
 
-  it("renders records, wires row navigation, and polls pending state", async () => {
+  it("renders records, wires Plan Deployment navigation, and polls pending state", async () => {
     const page = renderPage();
     const rows = addRowButtons(page.browser);
     page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
@@ -716,7 +716,7 @@ describe("environment list behavior", () => {
     expect(page.elements.tableBody.innerHTML).toContain("dev");
     expect(rows.deploy.listenerCount("click")).toBe(1);
     rows.deploy.dispatch("click");
-    expect(page.browser.nav.assigned).toEqual(["/?page=deploying&env=dev"]);
+    expect(page.browser.nav.assigned).toEqual(["/?page=planned&env=dev"]);
     expect(page.browser.clock.timeouts).toBe(1);
 
     page.browser.clock.tick(ENVIRONMENT_POLL_MS);
@@ -725,7 +725,24 @@ describe("environment list behavior", () => {
     expect(rows.deploy.listenerCount("click")).toBe(1);
   });
 
-  it("navigates to the unqualified deploying page for an unnamed row", async () => {
+  it("URL-encodes the environment selected for planning", async () => {
+    const page = renderPage();
+    const rows = addRowButtons(page.browser, "dev/team east");
+    page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({
+        environments: [{ name: "dev/team east", status: "success" }]
+      })
+    );
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+
+    rows.deploy.dispatch("click");
+    expect(page.browser.nav.assigned).toEqual([
+      "/?page=planned&env=dev%2Fteam%20east"
+    ]);
+  });
+
+  it("navigates to the unqualified planned page for an unnamed row", async () => {
     const page = renderPage();
     const rows = addRowButtons(page.browser, "");
     page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
@@ -737,7 +754,7 @@ describe("environment list behavior", () => {
     await flushPromises();
 
     rows.deploy.dispatch("click");
-    expect(page.browser.nav.assigned).toEqual(["/?page=deploying"]);
+    expect(page.browser.nav.assigned).toEqual(["/?page=planned"]);
   });
 
   it("treats missing row data attributes as empty", async () => {
@@ -756,7 +773,7 @@ describe("environment list behavior", () => {
 
     deploy.dispatch("click");
     remove.dispatch("click");
-    expect(page.browser.nav.assigned).toEqual(["/?page=deploying"]);
+    expect(page.browser.nav.assigned).toEqual(["/?page=planned"]);
     expect(
       page.browser.net.calls.filter(
         (entry) => entry.url === ENVIRONMENT_DELETE_PATH

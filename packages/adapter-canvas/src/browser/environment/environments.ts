@@ -364,7 +364,7 @@ export function initializeEnvironmentPane(
       bind(rows, button, "click", () => {
         const name = button.getAttribute("data-env") ?? "";
         context.nav.assign(
-          `/?page=deploying${name ? `&env=${encodeURIComponent(name)}` : ""}`
+          `/?page=planned${name ? `&env=${encodeURIComponent(name)}` : ""}`
         );
       });
     }
