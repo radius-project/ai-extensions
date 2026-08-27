@@ -730,10 +730,11 @@ test.describe("Radius Canvas in Chromium", () => {
       "AKS Selected",
       "+ Enter custom..."
     ]);
-    await cluster.selectOption("aks-selected");
+    await expect(cluster).toHaveValue("aks-selected");
     await expect(namespace).toBeDisabled();
     await expect(namespace).toContainText("selected-team");
     await expect(namespace).toBeEnabled();
+    await expect(namespace).toHaveValue("default");
     await namespace.selectOption("selected-team");
 
     await expect

@@ -1105,11 +1105,16 @@ describe("discoverResources", () => {
     expect(page.selects["azure-namespace-select"].value).toBe("");
   });
 
-  it("renders azure clusters and resource groups without inventing namespaces", async () => {
+  it("selects a sole cluster and a discovered default namespace", async () => {
     const page = renderDiscoveryPage();
-    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
-      discoverResponse(azurePayload())
-    );
+    const bodies: Array<Record<string, string>> = [];
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      const body = JSON.parse(init?.body ?? "{}");
+      bodies.push(body);
+      return discoverResponse(
+        azurePayload({ namespaces: body.cluster ? ["team-a", "default"] : [] })
+      );
+    });
     const handle = initializeDiscoveryPanel(page.browser.context);
     await handle?.discoverResources("azure", "", "");
 
@@ -1126,10 +1131,20 @@ describe("discoverResources", () => {
     ).toEqual(["", "__custom__"]);
     page.selects["azure-rg-select"].value = "rg-1";
     page.selects["azure-rg-select"].dispatch("change");
+    await flushPromises();
     expect(
       Array.from(clusterSelect.options).map((option) => option.value)
     ).toEqual(["", "aks-1", "__custom__"]);
-    expect(clusterSelect.value).toBe("");
+    expect(clusterSelect.value).toBe("aks-1");
+    expect(namespaceSelect.value).toBe("default");
+    expect(bodies).toEqual([
+      { provider: "azure" },
+      {
+        provider: "azure",
+        resourceGroup: "rg-1",
+        cluster: "aks-1"
+      }
+    ]);
   });
 
   it("restores a saved azure selection once discovery has populated the lists", async () => {
@@ -1972,15 +1987,14 @@ describe("azure resource-group / cluster cross-filter", () => {
     expect(
       Array.from(clusterSelect.options).map((option) => option.value)
     ).toEqual(["", "aks-1", "__custom__"]);
-    expect(clusterSelect.value).toBe("");
+    expect(clusterSelect.value).toBe("aks-1");
 
-    clusterSelect.value = "aks-1";
     rgSelect.value = "rg-2";
     rgSelect.dispatch("change");
     expect(
       Array.from(clusterSelect.options).map((option) => option.value)
     ).toEqual(["", "aks-2", "__custom__"]);
-    expect(clusterSelect.value).toBe("");
+    expect(clusterSelect.value).toBe("aks-2");
     expect(handle?.currentInfraSelection("azure").resourceGroup).toBe("rg-2");
 
     page.customs["azure-rg-custom"].value = "rg-1";
@@ -1990,11 +2004,85 @@ describe("azure resource-group / cluster cross-filter", () => {
     ).toEqual(["", "aks-2", "__custom__"]);
   });
 
+  it("leaves the cluster unselected when a resource group has multiple clusters", async () => {
+    const page = renderDiscoveryPage();
+    const bodies: Array<Record<string, string>> = [];
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      bodies.push(JSON.parse(init?.body ?? "{}"));
+      return discoverResponse({
+        clusters: [
+          { id: "aks-1", name: "AKS One", resourceGroup: "rg-1" },
+          { id: "aks-2", name: "AKS Two", resourceGroup: "rg-1" }
+        ],
+        resourceGroups: [{ id: "rg-1", name: "rg-1" }],
+        namespaces: []
+      });
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+
+    page.selects["azure-rg-select"].value = "rg-1";
+    page.selects["azure-rg-select"].dispatch("change");
+    await flushPromises();
+
+    expect(page.selects["azure-cluster-select"].value).toBe("");
+    expect(bodies).toHaveLength(1);
+  });
+
+  it.each(["", "__custom__"])(
+    "does not restore auto-discovered namespaces after the cluster changes to %s",
+    async (newCluster) => {
+      const page = renderDiscoveryPage();
+      let resolveNamespaces: (value: HttpResponse) => void = () => {};
+      const namespaces = new Promise<HttpResponse>((resolve) => {
+        resolveNamespaces = resolve;
+      });
+      let requestCount = 0;
+      const resources = {
+        clusters: [{ id: "aks-1", name: "AKS One", resourceGroup: "rg-1" }],
+        resourceGroups: [{ id: "rg-1", name: "rg-1" }],
+        namespaces: []
+      };
+      page.browser.net.handle(DISCOVER_ENDPOINT, () => {
+        requestCount += 1;
+        return requestCount === 1 ? discoverResponse(resources) : namespaces;
+      });
+      const handle = initializeDiscoveryPanel(page.browser.context);
+      await handle?.discoverResources("azure", "sub-1", "tenant-1");
+
+      const clusterSelect = page.selects["azure-cluster-select"];
+      const namespaceSelect = page.selects["azure-namespace-select"];
+      page.selects["azure-rg-select"].value = "rg-1";
+      page.selects["azure-rg-select"].dispatch("change");
+      expect(clusterSelect.value).toBe("aks-1");
+      expect(namespaceSelect.disabled).toBe(true);
+
+      clusterSelect.value = newCluster;
+      clusterSelect.dispatch("change");
+      expect(namespaceSelect.disabled).toBe(false);
+
+      resolveNamespaces(
+        discoverResponse({ ...resources, namespaces: ["default"] })
+      );
+      await flushPromises();
+
+      expect(clusterSelect.value).toBe(newCluster);
+      expect(
+        Array.from(namespaceSelect.options).map((option) => option.value)
+      ).toEqual(["", "__custom__"]);
+      expect(namespaceSelect.value).toBe("");
+    }
+  );
+
   it("does not let an earlier namespace response restore clusters from another resource group", async () => {
     const page = renderDiscoveryPage();
-    let resolveNamespaces: (value: HttpResponse) => void = () => {};
-    const namespaces = new Promise<HttpResponse>((resolve) => {
-      resolveNamespaces = resolve;
+    let resolveEarlierNamespaces: (value: HttpResponse) => void = () => {};
+    const earlierNamespaces = new Promise<HttpResponse>((resolve) => {
+      resolveEarlierNamespaces = resolve;
+    });
+    let resolveCurrentNamespaces: (value: HttpResponse) => void = () => {};
+    const currentNamespaces = new Promise<HttpResponse>((resolve) => {
+      resolveCurrentNamespaces = resolve;
     });
     let requestCount = 0;
     const resources = {
@@ -2009,7 +2097,8 @@ describe("azure resource-group / cluster cross-filter", () => {
     };
     page.browser.net.handle(DISCOVER_ENDPOINT, () => {
       requestCount += 1;
-      return requestCount === 1 ? discoverResponse(resources) : namespaces;
+      if (requestCount === 1) return discoverResponse(resources);
+      return requestCount === 2 ? earlierNamespaces : currentNamespaces;
     });
     const handle = initializeDiscoveryPanel(page.browser.context);
     await handle?.discoverResources("azure", "sub-1", "tenant-1");
@@ -2019,29 +2108,39 @@ describe("azure resource-group / cluster cross-filter", () => {
     const namespaceSelect = page.selects["azure-namespace-select"];
     rgSelect.value = "rg-1";
     rgSelect.dispatch("change");
-    clusterSelect.value = "aks-1";
-    clusterSelect.dispatch("change");
+    expect(clusterSelect.value).toBe("aks-1");
     expect(namespaceSelect.disabled).toBe(true);
 
     rgSelect.value = "rg-2";
     rgSelect.dispatch("change");
-    expect(namespaceSelect.disabled).toBe(false);
+    expect(clusterSelect.value).toBe("aks-2");
+    expect(namespaceSelect.disabled).toBe(true);
     expect(
       Array.from(clusterSelect.options).map((option) => option.value)
     ).toEqual(["", "aks-2", "__custom__"]);
 
-    resolveNamespaces(
+    resolveEarlierNamespaces(
       discoverResponse({ ...resources, namespaces: ["stale-team"] })
     );
     await flushPromises();
 
     expect(rgSelect.value).toBe("rg-2");
+    expect(clusterSelect.value).toBe("aks-2");
+    expect(namespaceSelect.disabled).toBe(true);
+    expect(namespaceSelect.value).toBe("");
+
+    resolveCurrentNamespaces(
+      discoverResponse({ ...resources, namespaces: ["team-two", "default"] })
+    );
+    await flushPromises();
+
     expect(
       Array.from(clusterSelect.options).map((option) => option.value)
     ).toEqual(["", "aks-2", "__custom__"]);
     expect(
       Array.from(namespaceSelect.options).map((option) => option.value)
-    ).toEqual(["", "__custom__"]);
+    ).toEqual(["", "default", "team-two", "__custom__"]);
+    expect(namespaceSelect.value).toBe("default");
   });
 
   it("uses the selected option's resource group when AKS names repeat", async () => {

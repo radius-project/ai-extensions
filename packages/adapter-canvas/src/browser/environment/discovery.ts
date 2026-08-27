@@ -287,10 +287,13 @@ function renderAzureClusters(
   const select = context.dom.selectById("azure-cluster-select");
   if (!select) return;
   renderSelectOptions(context, select, list, "Select AKS cluster…");
-  if (keepValue === "") return;
-  // Both callers pass a non-empty value only after confirming it is present in
-  // the list being rendered, so no second membership branch is needed here.
-  select.value = keepValue;
+  if (keepValue !== "") {
+    // Both callers pass a non-empty value only after confirming it is present
+    // in the list, so no second membership branch is needed here.
+    select.value = keepValue;
+  } else if (list.length === 1) {
+    select.value = list[0].id;
+  }
 }
 
 function isAppRegistrationRecord(
@@ -843,16 +846,23 @@ export function initializeDiscoveryPanel(
     }
   };
 
-  const applyAzureResourceGroupFilter = (resourceGroup: string): void => {
+  const resetAzureNamespaceDiscovery = (): void => {
     const request = discoveryRequests.azure;
     request.token += 1;
     request.identity = null;
-    renderClustersForResourceGroup(resourceGroup, "");
     renderSelect(context, "azure-namespace-select", [], "Select namespace…");
     const namespaceSelect = context.dom.selectById("azure-namespace-select");
     if (namespaceSelect) namespaceSelect.disabled = false;
     const refreshButton = context.dom.inputById("azure-refresh-btn");
     if (refreshButton) refreshButton.disabled = false;
+  };
+
+  const applyAzureResourceGroupFilter = (resourceGroup: string): void => {
+    renderClustersForResourceGroup(resourceGroup, "");
+    resetAzureNamespaceDiscovery();
+    if (selectedAzureClusterId() !== "") {
+      void rediscoverAzureNamespaces();
+    }
   };
 
   const wireAzureInfraFilter = (): void => {
@@ -868,7 +878,10 @@ export function initializeDiscoveryPanel(
     });
     scope.on(clusterSelect, "change", () => {
       const clusterId = clusterSelect.value;
-      if (clusterId === "__custom__" || clusterId === "") return;
+      if (clusterId === "__custom__" || clusterId === "") {
+        resetAzureNamespaceDiscovery();
+        return;
+      }
       void rediscoverAzureNamespaces();
     });
     const customResourceGroup = context.dom.inputById("azure-rg-custom");
@@ -1017,6 +1030,9 @@ export function initializeDiscoveryPanel(
         );
         selectOfferedValue(context, "azure-namespace-select", "default");
         wireAzureInfraFilter();
+        if (cluster === "" && selectedAzureClusterId() !== "") {
+          void rediscoverAzureNamespaces();
+        }
       } else {
         if (statusEl) statusEl.textContent = discoverStatusText(data, "aws");
         const awsClusters = sortDiscoveryOptions(
