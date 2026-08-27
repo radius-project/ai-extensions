@@ -17,6 +17,10 @@ import type { GraphProgressView } from "../graph/progress.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
+import {
+  showGraphModelingFailure,
+  unsupportedGraphModelMessage
+} from "./graph-modeling-failure.js";
 
 const ENTRY_KEY = "planned-graph-page";
 export const PLANNED_GRAPH_STATE_ID = "radius-planned-graph-state";
@@ -109,12 +113,7 @@ export function initializePlannedGraphPage(
     controller = null;
     const wrapper = context.dom.byId("graph-container-wrapper");
     if (wrapper) wrapper.innerHTML = '<div id="graph-container"></div>';
-    requireBrowserFunction(globalScope, "radiusSetGraphError")(
-      "graph-container",
-      message
-    );
-    const statusElement = context.dom.byId("plan-status");
-    if (statusElement) statusElement.style.display = "none";
+    showGraphModelingFailure(context, globalScope, message, "plan-status");
     if (button) {
       button.disabled = true;
       button.setAttribute(
@@ -276,11 +275,9 @@ export function initializePlannedGraphPage(
           return;
         }
         plan.requestFailed = true;
-        if (readBoolean(payload, "appBicepUnsupported")) {
-          showModelingFailure(
-            readString(payload, "error") ||
-              "The Radius app-bicep skill cannot model this repository."
-          );
+        const unsupported = unsupportedGraphModelMessage(payload);
+        if (unsupported) {
+          showModelingFailure(unsupported);
           return;
         }
         if (readBoolean(payload, "needsAppBicep")) {

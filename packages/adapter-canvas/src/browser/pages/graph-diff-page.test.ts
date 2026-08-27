@@ -542,37 +542,51 @@ describe("initializeGraphDiffPage", () => {
 
   it("shows the refusal verbatim when the skill cannot model the repo", async () => {
     const { browser, head, status } = fixture();
+    const setError = vi.fn();
     browser.net.handle("/api/diff-branches", () =>
       jsonResponse({
         error: "octo/app has no Dockerfile on feature/x.",
         appBicepUnsupported: true
       })
     );
-    initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+    initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn(),
+      radiusSetGraphError: setError
+    });
     await flushPromises();
 
     head.dispatch("change");
     browser.clock.tick(DIFF_DEBOUNCE_MS);
     await flushPromises();
 
-    expect(status.textContent).toBe("octo/app has no Dockerfile on feature/x.");
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "octo/app has no Dockerfile on feature/x."
+    );
+    expect(status.style.display).toBe("none");
   });
 
   it("falls back to a generic refusal message without an error string", async () => {
     const { browser, head, status } = fixture();
+    const setError = vi.fn();
     browser.net.handle("/api/diff-branches", () =>
       jsonResponse({ appBicepUnsupported: true })
     );
-    initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+    initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn(),
+      radiusSetGraphError: setError
+    });
     await flushPromises();
 
     head.dispatch("change");
     browser.clock.tick(DIFF_DEBOUNCE_MS);
     await flushPromises();
 
-    expect(status.textContent).toBe(
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
       "The Radius app-bicep skill cannot model this repository."
     );
+    expect(status.style.display).toBe("none");
   });
 
   it("surfaces a diff computation error", async () => {

@@ -14,6 +14,10 @@ import type {
   DomSelectElement
 } from "../ports.js";
 import { readPageState } from "./state.js";
+import {
+  showGraphModelingFailure,
+  unsupportedGraphModelMessage
+} from "./graph-modeling-failure.js";
 
 const ENTRY_KEY = "graph-diff-page";
 export const GRAPH_DIFF_STATE_ID = "radius-graph-diff-state";
@@ -92,12 +96,7 @@ export function initializeGraphDiffPage(
   const showModelingFailure = (message: string): void => {
     controller?.destroy();
     controller = null;
-    requireBrowserFunction(globalScope, "radiusSetGraphError")(
-      "graph-container",
-      message
-    );
-    const status = context.dom.byId("diff-status");
-    if (status) status.style.display = "none";
+    showGraphModelingFailure(context, globalScope, message, "diff-status");
     modelingFailureVisible = true;
   };
   if (state.modelingError) showModelingFailure(state.modelingError);
@@ -193,13 +192,9 @@ export function initializeGraphDiffPage(
       .then((payload) => {
         if (requestGeneration !== generation) return;
         stopProgress();
-        if (readBoolean(payload, "appBicepUnsupported")) {
-          showStatus(
-            context,
-            readString(payload, "error") ||
-              "The Radius app-bicep skill cannot model this repository.",
-            "error"
-          );
+        const unsupported = unsupportedGraphModelMessage(payload);
+        if (unsupported) {
+          showModelingFailure(unsupported);
         } else if (readBoolean(payload, "needsAppBicep")) {
           showStatus(
             context,

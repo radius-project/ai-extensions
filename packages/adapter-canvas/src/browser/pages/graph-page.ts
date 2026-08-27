@@ -23,6 +23,10 @@ import type { GraphResource } from "../graph/model.js";
 import type { GraphController } from "../graph/surface.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import { readPageState } from "./state.js";
+import {
+  showGraphModelingFailure,
+  unsupportedGraphModelMessage
+} from "./graph-modeling-failure.js";
 
 const ENTRY_KEY = "graph-page";
 export const GRAPH_PAGE_STATE_ID = "radius-graph-page-state";
@@ -71,16 +75,6 @@ function showStatus(
   status.textContent = message;
 }
 
-// The status strip sits directly above the graph surface, so a failure written
-// to both renders as two identical error boxes. Clearing the strip leaves the
-// surface itself as the single place a failure is reported.
-function hideStatus(context: BrowserContext): void {
-  const status = statusElement(context);
-  if (!status) return;
-  status.style.display = "none";
-  status.textContent = "";
-}
-
 export function initializeGraphPage(
   context: BrowserContext,
   globalScope: unknown
@@ -94,12 +88,13 @@ export function initializeGraphPage(
     globalScope,
     "radiusSetGraphLoading"
   );
-  const setError = requireBrowserFunction(globalScope, "radiusSetGraphError");
   // Report a failure once, on the graph surface. The surface owns the content
   // area, so writing there also clears whatever loading state was showing.
   const showFailure = (message: string): void => {
-    setError("graph-container", message);
-    hideStatus(context);
+    showGraphModelingFailure(context, globalScope, message, [
+      "graph-status",
+      "graph-refresh-status"
+    ]);
   };
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
@@ -350,6 +345,14 @@ export function initializeGraphPage(
           hasLoadedGraph = true;
           return;
         }
+        const unsupported = unsupportedGraphModelMessage(payload);
+        if (unsupported) {
+          modelState = "failed";
+          syncPrimaryButton();
+          stopProgress();
+          showFailure(unsupported);
+          return;
+        }
         // The work continues off-page while Copilot authors the model, so the
         // panel keeps running rather than being torn down and rebuilt. The
         // server owns how long that wait may last and drops `needsAppBicep`
@@ -456,6 +459,7 @@ export function initializeGraphPage(
         .then((response) => response.json())
         .then((payload) => {
           if (refreshGeneration !== generation) return;
+          const unsupported = unsupportedGraphModelMessage(payload);
           if (isRecord(payload) && Array.isArray(payload.resources)) {
             modelState = "ready";
             syncPrimaryButton();
@@ -465,6 +469,12 @@ export function initializeGraphPage(
               ...graphOptions,
               localSource: sourceProvenance(payload)
             });
+          } else if (unsupported) {
+            modelState = "failed";
+            syncPrimaryButton();
+            stopProgress();
+            showFailure(unsupported);
+            return;
           } else if (readBoolean(payload, "needsAppBicep")) {
             // A preloaded graph refresh can discover that the model disappeared
             // just like the initial load can. The server owns how long that wait
