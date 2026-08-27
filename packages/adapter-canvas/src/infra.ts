@@ -801,7 +801,8 @@ export async function syncRepoWorkflows(
             path,
             choice.content,
             branch,
-            `Add ${fileName} from upstream Radius workflow templates`
+            `Add ${fileName} from upstream Radius workflow templates`,
+            branch === defaultBranch
           );
           created.add(path);
           log(`created ${path} on "${branch}"`);
@@ -837,7 +838,8 @@ export async function syncRepoWorkflows(
           path,
           choice.content,
           branch,
-          `Update ${fileName} to match upstream Radius workflow templates`
+          `Update ${fileName} to match upstream Radius workflow templates`,
+          branch === defaultBranch
         );
         updated.add(path);
         log(`updated ${path} on "${branch}"`);

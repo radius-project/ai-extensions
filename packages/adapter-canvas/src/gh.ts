@@ -1577,11 +1577,12 @@ export async function commitWorkflowFileToRepo(
   content: string,
   branch: string,
   message: string,
+  suppressCi: boolean,
   timeout = 30000
 ): Promise<boolean> {
   const sha = await getRepoFileSha(repo, path, branch);
   const body = JSON.stringify({
-    message: workflowCommitMessage(message, true),
+    message: workflowCommitMessage(message, suppressCi),
     content: Buffer.from(content, "utf8").toString("base64"),
     branch,
     ...(sha ? { sha } : {})

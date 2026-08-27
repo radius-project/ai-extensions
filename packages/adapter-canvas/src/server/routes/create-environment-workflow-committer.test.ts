@@ -166,7 +166,7 @@ describe("isProtectedBranchFailure", () => {
 });
 
 describe("committing a workflow file", () => {
-  it("adopts an exact workflow write after a timed-out response", async () => {
+  it("adopts an unchanged workflow write from branch history after a timed-out response", async () => {
     const h = harness({
       runGh: [
         { code: 1, stderr: "HTTP 404: Not Found" },
@@ -176,6 +176,8 @@ describe("committing a workflow file", () => {
         },
         {
           code: 0,
+          // GitHub excludes an unchanged-content commit from path-filtered
+          // history, but the branch history still returns its marker.
           stdout: JSON.stringify([
             {
               sha: "a".repeat(40),
@@ -213,6 +215,9 @@ describe("committing a workflow file", () => {
     expect(
       h.calls.filter((call) => call.kind === "runGhWorkflow")
     ).toHaveLength(1);
+    expect(
+      h.calls.find((call) => call.args[1]?.includes("/commits?"))?.args[1]
+    ).toBe("/repos/octo/app/commits?per_page=100");
     expect(operation.providerRecovery.mutations[0]).toMatchObject({
       status: "confirmed",
       intent: {
@@ -1252,6 +1257,11 @@ describe("recovering a setup branch after the default branch moved", () => {
     expect(
       h.calls.filter((call) => call.kind === "runGhWorkflow")
     ).toHaveLength(0);
+    expect(
+      h.calls.find((call) => call.args[1]?.includes("/commits?"))?.args[1]
+    ).toBe(
+      "/repos/octo/app/commits?sha=radius%2Fsetup-dev-workflows-workflow&per_page=100"
+    );
   });
 
   it("compares a recovered branch against the commit Radius cut it from", async () => {

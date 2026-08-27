@@ -964,7 +964,8 @@ describe.sequential("commitWorkflowFileToRepo", () => {
         ".github/workflows/radius.yml",
         "on: workflow_dispatch",
         "main",
-        "Update Radius workflow"
+        "Update Radius workflow",
+        true
       )
     ).resolves.toBe(true);
 
@@ -973,6 +974,32 @@ describe.sequential("commitWorkflowFileToRepo", () => {
       content: Buffer.from("on: workflow_dispatch").toString("base64"),
       branch: "main"
     });
+  });
+
+  it("keeps CI enabled for workflow commits on a pull request branch", async () => {
+    const { commitWorkflowFileToRepo } = await loadGh("linux");
+    let requestBody = "";
+    childProcess.execFile.mockImplementation((_file, args, _opts, callback) => {
+      callback(args?.includes("--jq") ? new Error("not found") : null, "", "");
+      return {
+        stdin: {
+          end(value?: string) {
+            if (value) requestBody = value;
+          }
+        }
+      };
+    });
+
+    await commitWorkflowFileToRepo(
+      "octo/app",
+      ".github/workflows/radius.yml",
+      "on: workflow_dispatch",
+      "feature",
+      "Update Radius workflow",
+      false
+    );
+
+    expect(JSON.parse(requestBody).message).toBe("Update Radius workflow");
   });
 });
 

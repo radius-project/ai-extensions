@@ -689,9 +689,12 @@ export function createWorkflowFileCommitter(
                     "It will not accept, overwrite, or remove that workflow."
                 };
               }
+              // GitHub omits empty commits from path-filtered history. A PUT of
+              // unchanged workflow content can still create such a commit, so
+              // recover it by its unique marker in the branch history instead.
               const commitsPath =
-                `/repos/${target.targetRepo}/commits?path=${encodeURIComponent(path)}` +
-                `${branch ? `&sha=${encodeURIComponent(branch)}` : ""}&per_page=10`;
+                `/repos/${target.targetRepo}/commits?` +
+                `${branch ? `sha=${encodeURIComponent(branch)}&` : ""}per_page=100`;
               const commits = await ports.runGh(["api", commitsPath]);
               if (commits.code !== 0 && commits.code !== "0") {
                 throw new Error(

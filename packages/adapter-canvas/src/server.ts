@@ -5348,6 +5348,7 @@ async function ensureDeployWorkflowsOnBranch(
       missing.join(", ")
   );
   const generated = await generateDeployWorkflow(envName, ".radius/app.bicep");
+  const defaultBranch = (await getDefaultBranch(repo)) || "main";
   for (const file of missing) {
     const content = generated && generated[file];
     if (!content) continue;
@@ -5360,7 +5361,8 @@ async function ensureDeployWorkflowsOnBranch(
         file +
         ") to " +
         branch +
-        " for worktree-consistent deploy"
+        " for worktree-consistent deploy",
+      branch === defaultBranch
     );
   }
 }
