@@ -25,6 +25,12 @@
 // before it stages anything: after this, a render asks again.
 export const MODELING_ANNOUNCEMENT_TTL_MS = 300000; // 5 min
 
+// Keep this aligned with STAGING_STALE_AFTER_MS in promote-app-model.mjs. A
+// completed run removes its staging directory, so a directory with no activity
+// for this long belongs to an interrupted run and must not suppress authoring
+// forever.
+export const MODELING_STAGING_ACTIVITY_TTL_MS = 6 * 60 * 60 * 1000;
+
 export interface ModelingAnnouncement {
   repo: string;
   // The branch being modeled. Empty when the target could not be resolved,
@@ -103,7 +109,11 @@ export function createModelingActivity(
       // suppresses the authoring handoff, so an unreadable workspace has to
       // leave the question askable rather than silence it.
       try {
-        return (await deps.observeStagedRun(repo, branches)) !== null;
+        const activityAtMs = await deps.observeStagedRun(repo, branches);
+        return (
+          activityAtMs !== null &&
+          deps.now() - activityAtMs < MODELING_STAGING_ACTIVITY_TTL_MS
+        );
       } catch {
         return false;
       }

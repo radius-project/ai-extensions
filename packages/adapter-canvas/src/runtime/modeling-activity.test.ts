@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   createModelingActivity,
-  MODELING_ANNOUNCEMENT_TTL_MS
+  MODELING_ANNOUNCEMENT_TTL_MS,
+  MODELING_STAGING_ACTIVITY_TTL_MS
 } from "./modeling-activity.js";
 import type { ModelingActivityDependencies } from "./modeling-activity.js";
 
@@ -92,10 +93,21 @@ describe("createModelingActivity", () => {
     expect(observeStagedRun).toHaveBeenCalledWith("a/b", ["feat"]);
   });
 
-  it("treats a run staging at epoch zero as activity, not as absence", async () => {
-    const { activity } = harness({ observeStagedRun: async () => 0 });
+  it("trusts staging activity until its inactivity window closes", async () => {
+    const { activity } = harness({
+      observeStagedRun: async () =>
+        1_000_000 - MODELING_STAGING_ACTIVITY_TTL_MS + 1
+    });
 
     expect(await activity.inFlight("a/b", ["feat"])).toBe(true);
+  });
+
+  it("does not let an orphaned staging directory suppress authoring forever", async () => {
+    const { activity } = harness({
+      observeStagedRun: async () => 1_000_000 - MODELING_STAGING_ACTIVITY_TTL_MS
+    });
+
+    expect(await activity.inFlight("a/b", ["feat"])).toBe(false);
   });
 
   it("reports no run when nothing is staged", async () => {

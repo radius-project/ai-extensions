@@ -306,7 +306,8 @@ export interface AppModelDependencies {
   // Newest filesystem activity from a modeling run staging into the workspace
   // checkout, or null when none is observable. A run creates
   // `.radius/.staging-<runId>/` before it writes anything and removes it when
-  // it publishes or aborts, so this is what proves a run is under way.
+  // it publishes or aborts. Consumers must apply an inactivity limit because
+  // an interrupted run can leave its staging directory behind.
   modelingRunLastActivityAtMs(
     workspacePath: string | null | undefined
   ): Promise<number | null>;
