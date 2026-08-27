@@ -208,7 +208,17 @@ describe("P0-C built Radius extension artifact", () => {
       "utf8"
     );
     expect(radiusTypeResolver).not.toContain("@radius-project/adapter-shared");
+    expect(radiusTypeResolver).not.toContain("packages/adapter-shared");
     expect(radiusTypeResolver).toContain("Managed Radius version query");
+    // The installed plugin has no workspace packages beside it, so every
+    // surviving import must be a Node builtin or the script fails at runtime.
+    const specifiers = [
+      ...radiusTypeResolver.matchAll(/\bfrom\s*"([^"]+)"/gu)
+    ].map((match) => match[1]);
+    expect(specifiers.length).toBeGreaterThan(0);
+    for (const specifier of specifiers) {
+      expect(specifier).toMatch(/^node:/u);
+    }
     if (existsSync(SOURCE_CHANGELOG)) {
       expect(readFileSync(join(DIST, "CHANGELOG.md"), "utf8")).toBe(
         readFileSync(SOURCE_CHANGELOG, "utf8")

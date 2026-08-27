@@ -12,9 +12,11 @@ export interface SpawnRadOptions {
   label?: string;
 }
 
+// bicepPath is required: this low-level helper has no default, so omitting it
+// would set BICEP to undefined. The rad.ts wrapper supplies MANAGED_BICEP_PATH.
 export function managedBicepEnv(
-  env?: NodeJS.ProcessEnv,
-  bicepPath?: string
+  env: NodeJS.ProcessEnv | undefined,
+  bicepPath: string
 ): NodeJS.ProcessEnv;
 
 export class RadProcessError extends Error {
