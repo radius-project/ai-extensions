@@ -8,6 +8,8 @@ which is the only host that can display it, so the plugin is installed from the 
 
 ## Installation
 
+The `radius` plugin will be available in the [`github/awesome-copilot`](https://github.com/github/awesome-copilot) plugin catalog.
+
 Open the GitHub Copilot app, select **Customize** in the side menu, and then select **Plugins**. Search for `radius` and install the plugin. See [Adding plugins](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-plugins) for details.
 
 Restart your Copilot session after installing so the skills and the canvas extension become available. Use the plugin's three-dot menu to update or uninstall it.

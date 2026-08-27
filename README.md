@@ -9,6 +9,8 @@ developers and platform engineers build and manage applications together.
 
 ## Install the plugin
 
+The `radius` plugin will be available in the [`github/awesome-copilot`](https://github.com/github/awesome-copilot) plugin catalog.
+
 The Radius canvas runs only in the [GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app). Open the app, select **Customize** in the side menu, and then select **Plugins**. Search for `radius` and install the plugin.
 
 Restart your Copilot session after installing so the skills and canvas become available. Use the plugin's three-dot menu to update or uninstall it.
