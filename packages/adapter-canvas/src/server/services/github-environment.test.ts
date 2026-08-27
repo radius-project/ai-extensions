@@ -582,6 +582,31 @@ describe("ensureGitHubEnvironment", () => {
     expect(calls).toHaveLength(3);
   });
 
+  it("retries the GitHub CLI standard connection diagnostic", async () => {
+    let reads = 0;
+    const ensured = await ensureGitHubEnvironment({
+      repo: "octo/app",
+      requestedName: "production",
+      readGitHubJson: async () => {
+        reads += 1;
+        return reads === 1 ?
+            readResult({
+              ok: false,
+              status: null,
+              stderr: "error connecting to api.github.com"
+            })
+          : readResult({ json: { name: "production", id: 17 } });
+      },
+      runGh: async () => {
+        throw new Error("an existing environment must not be mutated");
+      },
+      sleep: async () => {}
+    });
+
+    expect(ensured).toMatchObject({ state: "reused", providerId: "17" });
+    expect(reads).toBe(2);
+  });
+
   it("does not treat an unqualified Not Found message as authoritative absence", async () => {
     await expect(
       ensureGitHubEnvironment({

@@ -44,6 +44,9 @@ describe("provider mutation recovery", () => {
         return command({ stdout: '{"name":"prod"}' });
       },
       accept: (value) => JSON.parse(value.stdout) as { name: string },
+      onConfirmed: (_value, recovered) => {
+        events.push(`artifact:${String(recovered)}`);
+      },
       reconcile: async () => {
         throw new Error("successful mutations do not need reconciliation");
       }
@@ -54,7 +57,12 @@ describe("provider mutation recovery", () => {
       value: { name: "prod" },
       recovered: false
     });
-    expect(events).toEqual(["persist:prepared", "mutate", "persist:confirmed"]);
+    expect(events).toEqual([
+      "persist:prepared",
+      "mutate",
+      "artifact:false",
+      "persist:confirmed"
+    ]);
   });
 
   it("does not start a mutation when Stop arrives while its journal is saved", async () => {
@@ -91,6 +99,37 @@ describe("provider mutation recovery", () => {
       "persist:not_applied",
       "boundary:not_applied"
     ]);
+  });
+
+  it("records a failed pre-mutation identity validation as not applied", async () => {
+    const operation = createOperation({ operationId: "op_validation" });
+    const persisted: string[] = [];
+    const mutate = vi.fn(async () => command());
+
+    await expect(
+      executeRecoverableMutation({
+        operation,
+        kind: "github_environment_variable.put",
+        target: "octo/app:dev:A",
+        persist: async () => {
+          persisted.push(operation.providerRecovery.mutations[0]?.status || "");
+        },
+        validateBeforeMutation: async () => {
+          throw new Error("environment identity unavailable");
+        },
+        mutate,
+        accept: (value) => value,
+        reconcile: async () => {
+          throw new Error("validation failure must not reconcile");
+        }
+      })
+    ).rejects.toThrow("environment identity unavailable");
+
+    expect(mutate).not.toHaveBeenCalled();
+    expect(persisted).toEqual(["prepared", "not_applied"]);
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "not_applied"
+    });
   });
 
   it("defers Stop while an older provider mutation still needs reconciliation", async () => {
@@ -239,6 +278,7 @@ describe("provider mutation recovery", () => {
     const mutate = vi.fn(async () =>
       command({ code: 1, timedOut: true, stderr: "terminated" })
     );
+    const recorded: Array<{ value: number; recovered: boolean }> = [];
 
     const result = await executeRecoverableMutation({
       operation,
@@ -247,6 +287,9 @@ describe("provider mutation recovery", () => {
       persist: async () => {},
       mutate,
       accept: () => 0,
+      onConfirmed: (value, recovered) => {
+        recorded.push({ value, recovered });
+      },
       reconcile: async () => ({
         state: "applied",
         value: 42,
@@ -256,6 +299,7 @@ describe("provider mutation recovery", () => {
 
     expect(result).toEqual({ state: "applied", value: 42, recovered: true });
     expect(mutate).toHaveBeenCalledOnce();
+    expect(recorded).toEqual([{ value: 42, recovered: true }]);
     expect(operation.providerRecovery.mutations[0]).toMatchObject({
       status: "confirmed",
       evidence: "Run 42 appeared after the saved baseline."

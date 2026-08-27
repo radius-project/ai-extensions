@@ -26,9 +26,19 @@ export interface WorkflowScopeGhRunnerPorts {
 export interface WorkflowScopeGhRunnerTarget {
   targetRepo: string;
   envName: string;
+  environmentProviderId?: string | null;
   mutationRecovery?: {
     operation: object & { operationId: string };
     persist(): Promise<void>;
+    recordVariable(entry: {
+      repo: string;
+      environment: string;
+      environmentProviderId: string;
+      name: string;
+      valueSha256: string;
+      previousValue: string | null;
+      previousKnown: boolean;
+    }): void;
   };
 }
 
@@ -126,15 +136,85 @@ export function createWorkflowScopeGhRunner(
       );
       return true;
     }
+    const environmentProviderId = target.environmentProviderId;
+    if (!environmentProviderId) {
+      throw new Error(
+        `GitHub did not report an immutable id for environment "${target.envName}", so Radius did not write variable "${name}".`
+      );
+    }
     const mutationKind = "github_environment_variable.put";
     const mutationTarget = `${target.targetRepo}:${target.envName}:${name}`;
     const valueSha256 = createHash("sha256").update(value).digest("hex");
+    const readEnvironmentIdentity = async (): Promise<
+      | { state: "matched" }
+      | { state: "transient" | "malformed" | "replacement"; detail: string }
+    > => {
+      const environment = await runGh([
+        "api",
+        `/repos/${target.targetRepo}/environments/${encodeURIComponent(target.envName)}`
+      ]);
+      if (environment.code !== 0 && environment.code !== "0") {
+        return {
+          state: "transient",
+          detail:
+            environment.stderr ||
+            environment.stdout ||
+            "GitHub environment identity could not be read."
+        };
+      }
+      let environmentBody: { id?: unknown; node_id?: unknown };
+      try {
+        const parsed: unknown = JSON.parse(environment.stdout);
+        if (
+          typeof parsed !== "object" ||
+          parsed === null ||
+          Array.isArray(parsed)
+        ) {
+          throw new Error("expected an object");
+        }
+        environmentBody = parsed as { id?: unknown; node_id?: unknown };
+      } catch {
+        return {
+          state: "malformed",
+          detail: "GitHub returned unreadable environment identity."
+        };
+      }
+      const liveProviderId =
+        (
+          typeof environmentBody.id === "number" &&
+          Number.isFinite(environmentBody.id)
+        ) ?
+          String(environmentBody.id)
+        : typeof environmentBody.id === "string" && environmentBody.id.trim() ?
+          environmentBody.id.trim()
+        : (
+          typeof environmentBody.node_id === "string" &&
+          environmentBody.node_id.trim()
+        ) ?
+          environmentBody.node_id.trim()
+        : null;
+      if (!liveProviderId) {
+        return {
+          state: "malformed",
+          detail: "GitHub did not report the environment id."
+        };
+      }
+      return liveProviderId === environmentProviderId ?
+          { state: "matched" }
+        : {
+            state: "replacement",
+            detail: `GitHub environment "${target.targetRepo}:${target.envName}" now has id ${liveProviderId}, not ${environmentProviderId}.`
+          };
+    };
     const readVariable = async (): Promise<
       | { state: "absent" }
-      | { state: "present"; valueSha256: string }
+      | { state: "present"; value: string; valueSha256: string }
       | { state: "transient"; detail: string }
       | { state: "malformed"; detail: string }
+      | { state: "replacement"; detail: string }
     > => {
+      const environment = await readEnvironmentIdentity();
+      if (environment.state !== "matched") return environment;
       const path =
         `/repos/${target.targetRepo}/environments/` +
         `${encodeURIComponent(target.envName)}/variables/${encodeURIComponent(name)}`;
@@ -145,13 +225,11 @@ export function createWorkflowScopeGhRunner(
             `${current.stderr}\n${current.stdout}`
           )
         ) {
-          const environment = await runGh([
-            "api",
-            `/repos/${target.targetRepo}/environments/${encodeURIComponent(target.envName)}`
-          ]);
-          if (environment.code === 0 || environment.code === "0") {
+          const environmentAfter404 = await readEnvironmentIdentity();
+          if (environmentAfter404.state === "matched") {
             return { state: "absent" };
           }
+          return environmentAfter404;
         }
         return {
           state: "transient",
@@ -181,6 +259,7 @@ export function createWorkflowScopeGhRunner(
       }
       return {
         state: "present",
+        value: body.value,
         valueSha256: createHash("sha256").update(body.value).digest("hex")
       };
     };
@@ -189,42 +268,103 @@ export function createWorkflowScopeGhRunner(
       mutationKind,
       mutationTarget
     );
-    if (existing?.status === "not_applied") {
+    const savedIntent =
+      (
+        existing?.status === "prepared" ||
+        existing?.status === "outcome_unknown" ||
+        existing?.status === "confirmed"
+      ) ?
+        existing.intent
+      : null;
+    let previousKnown =
+      typeof savedIntent?.previousKnown === "boolean" ?
+        savedIntent.previousKnown
+      : false;
+    let previousValue =
+      savedIntent && "previousValue" in savedIntent ?
+        typeof savedIntent.previousValue === "string" ?
+          savedIntent.previousValue
+        : null
+      : null;
+    if (!savedIntent) {
       const observed = await readVariable();
       if (
+        existing?.status === "not_applied" &&
         observed.state === "present" &&
         observed.valueSha256 === valueSha256
       ) {
         return true;
       }
-      if (observed.state === "present") {
+      if (existing?.status === "not_applied" && observed.state === "present") {
         throw new ProviderMutationRecoveryError(
           `Environment variable "${name}" changed outside this setup. Radius will not overwrite the current value.`,
           "provider-mutation-manual-required"
         );
       }
-      if (observed.state === "malformed") {
+      if (observed.state === "replacement") {
         throw new ProviderMutationRecoveryError(
-          `${observed.detail} Radius will not overwrite it.`,
+          `${observed.detail} Radius did not write the variable.`,
           "provider-mutation-manual-required"
         );
       }
-      if (observed.state === "transient") {
-        throw new ProviderMutationRecoveryError(
-          `${observed.detail} Radius will not retry the write.`,
-          "provider-mutation-outcome-unknown"
+      if (observed.state === "malformed") {
+        throw new Error(
+          `${observed.detail} Radius did not write the variable.`
         );
       }
+      if (observed.state === "transient") {
+        throw new Error(
+          `${observed.detail} Radius did not write the variable.`
+        );
+      }
+      previousKnown = true;
+      previousValue = observed.state === "present" ? observed.value : null;
     }
+    const recordVariable = (): void =>
+      target.mutationRecovery?.recordVariable({
+        repo: target.targetRepo,
+        environment: target.envName,
+        environmentProviderId,
+        name,
+        valueSha256,
+        previousValue,
+        previousKnown
+      });
     const mutation =
       await executeRecoverableMutation<CreateEnvironmentCommandResult>({
         operation: target.mutationRecovery.operation,
         kind: mutationKind,
         target: mutationTarget,
-        intent: { name, valueSha256 },
+        intent: { name, value, valueSha256, previousKnown, previousValue },
         persist: target.mutationRecovery.persist,
+        validateBeforeMutation: async () => {
+          const current = await readVariable();
+          if (current.state === "replacement") {
+            throw new ProviderMutationRecoveryError(
+              `${current.detail} Radius did not write the variable.`,
+              "provider-mutation-manual-required"
+            );
+          }
+          if (current.state === "malformed" || current.state === "transient") {
+            throw new Error(current.detail);
+          }
+          const predecessorMatches =
+            previousKnown &&
+            ((previousValue === null && current.state === "absent") ||
+              (previousValue !== null &&
+                current.state === "present" &&
+                current.valueSha256 ===
+                  createHash("sha256").update(previousValue).digest("hex")));
+          if (!predecessorMatches) {
+            throw new ProviderMutationRecoveryError(
+              `Environment variable "${name}" changed after Radius recorded its previous value. Radius did not overwrite the current value.`,
+              "provider-mutation-manual-required"
+            );
+          }
+        },
         mutate: () => runGh(args),
         accept: (result) => result,
+        onConfirmed: recordVariable,
         reconcile: async () => {
           const observed = await readVariable();
           if (observed.state === "absent") {
@@ -238,6 +378,12 @@ export function createWorkflowScopeGhRunner(
             return {
               state: "manual_required" as const,
               guidance: `${observed.detail} Radius will not overwrite it.`
+            };
+          }
+          if (observed.state === "replacement") {
+            return {
+              state: "manual_required" as const,
+              guidance: `${observed.detail} Radius will not write the variable.`
             };
           }
           if (observed.state === "transient") {

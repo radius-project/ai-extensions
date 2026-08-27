@@ -224,7 +224,7 @@ export async function ensureGitHubEnvironment(input: {
       last = await input.readGitHubJson(apiPath);
       const transportFailure =
         last.status == null &&
-        /(?:ECONNRESET|ECONNABORTED|ETIMEDOUT|EAI_AGAIN|network is unreachable|socket hang up|timed? ?out)/i.test(
+        /(?:ECONNRESET|ECONNABORTED|ETIMEDOUT|EAI_AGAIN|network is unreachable|socket hang up|timed? ?out|error connecting to api\.github\.com|failed to connect|could not resolve host)/i.test(
           last.stderr || ""
         );
       const retryable =

@@ -360,6 +360,20 @@ describe("fetchGitHubJson retry", () => {
     expect(runner).toHaveBeenCalledTimes(2);
   });
 
+  it("retries the GitHub CLI standard connection diagnostic", async () => {
+    const runner = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: null,
+        stderr: "error connecting to api.github.com"
+      })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: {} });
+    const res = await fetchGitHubJson(runner, "/x", noSleep);
+    expect(res?.ok).toBe(true);
+    expect(runner).toHaveBeenCalledTimes(2);
+  });
+
   it("does not retry a malformed response with no HTTP status", async () => {
     const runner = vi.fn().mockResolvedValue({
       ok: false,

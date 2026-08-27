@@ -611,9 +611,43 @@ async function pushBootstrapManifest({
         `Failed to check the GHCR bootstrap manifest (HTTP ${response.status})${await responseDetail(response)}`
       );
     }
+    if (
+      parseDigestHeader(response, "GHCR bootstrap manifest") === manifestDigest
+    ) {
+      return "exact";
+    }
+    const legacy = await registryFetch(
+      requests,
+      registryOrigin,
+      bearerToken,
+      manifestPath,
+      { headers: { Accept: OCI_MANIFEST_MEDIA_TYPE } }
+    );
+    if (legacy.status !== 200) return "conflict";
+    let legacyBody: unknown;
+    try {
+      legacyBody = await legacy.json();
+    } catch {
+      return "conflict";
+    }
+    if (!isRecord(legacyBody)) return "conflict";
+    const annotations =
+      isRecord(legacyBody.annotations) ? legacyBody.annotations : {};
+    const legacySource =
+      typeof annotations["org.opencontainers.image.source"] === "string" ?
+        annotations["org.opencontainers.image.source"].toLowerCase()
+      : "";
+    const expectedSource =
+      manifest.annotations["org.opencontainers.image.source"].toLowerCase();
     return (
-        parseDigestHeader(response, "GHCR bootstrap manifest") ===
-          manifestDigest
+        legacyBody.schemaVersion === manifest.schemaVersion &&
+          legacyBody.mediaType === manifest.mediaType &&
+          legacyBody.artifactType === manifest.artifactType &&
+          JSON.stringify(legacyBody.config) ===
+            JSON.stringify(manifest.config) &&
+          JSON.stringify(legacyBody.layers) ===
+            JSON.stringify(manifest.layers) &&
+          legacySource === expectedSource
       ) ?
         "exact"
       : "conflict";
@@ -652,11 +686,21 @@ async function pushBootstrapManifest({
       manifestPath,
       {
         method: "PUT",
-        headers: { "Content-Type": OCI_MANIFEST_MEDIA_TYPE },
+        headers: {
+          "Content-Type": OCI_MANIFEST_MEDIA_TYPE,
+          "If-None-Match": "*"
+        },
         body: manifestBytes
       }
     ).catch(() => null);
     if (response && response.status < 500) {
+      if (response.status === 409 || response.status === 412) {
+        const state = await readManifest();
+        if (state === "exact") return;
+        throw new Error(
+          "GHCR bootstrap tag was published concurrently with a different manifest; refusing to overwrite it."
+        );
+      }
       if (response.status !== 201 && response.status !== 202) {
         throw new Error(
           `Failed to push the GHCR bootstrap manifest (HTTP ${response.status})${await responseDetail(response)}`
@@ -887,6 +931,7 @@ export async function bootstrapGHCRStatePackage({
     deadline: now() + bootstrapTimeoutMs,
     requestTimeoutMs
   };
+  const canonicalTargetRepository = targetRepository.toLowerCase();
   const parsed = parseRegistry(registry, registryOrigin);
   const auth =
     credentials || (await loadGhKeyringCredentials({ ghCommandPresentation }));
@@ -909,7 +954,7 @@ export async function bootstrapGHCRStatePackage({
   if (existingValue)
     validatePackage(
       parsePackageMetadata(existingValue),
-      targetRepository,
+      canonicalTargetRepository,
       true
     );
 
@@ -926,7 +971,7 @@ export async function bootstrapGHCRStatePackage({
     registryOrigin: parsed.registryOrigin,
     repositoryPath: parsed.repositoryPath,
     bearerToken,
-    targetRepository
+    targetRepository: canonicalTargetRepository
   });
 
   let metadata: GitHubPackageMetadata | null = null;
@@ -941,7 +986,10 @@ export async function bootstrapGHCRStatePackage({
     metadata = value ? parsePackageMetadata(value) : null;
     // validatePackage fails fast on public visibility and on a wrong repository
     // link; a not-yet-propagated (missing) link returns false so we keep retrying.
-    if (metadata && validatePackage(metadata, targetRepository, true)) {
+    if (
+      metadata &&
+      validatePackage(metadata, canonicalTargetRepository, true)
+    ) {
       return {
         registry,
         bootstrapTag: BOOTSTRAP_TAG,
@@ -958,7 +1006,7 @@ export async function bootstrapGHCRStatePackage({
       `GHCR state package "${registry}" was not visible through the GitHub Packages API after bootstrap.`
     );
   }
-  validatePackage(metadata, targetRepository);
+  validatePackage(metadata, canonicalTargetRepository);
   return {
     registry,
     bootstrapTag: BOOTSTRAP_TAG,

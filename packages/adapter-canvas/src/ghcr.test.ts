@@ -17,7 +17,8 @@ type AmbiguousWrite =
   | "commit-then-throw"
   | "fail-then-succeed"
   | "always-fail"
-  | "conflict-after-failure";
+  | "conflict-after-failure"
+  | "conflict-before-write";
 type SuccessIdentity = "exact" | "missing" | "wrong";
 
 interface HarnessOptions {
@@ -182,6 +183,13 @@ function createHarness({
     }
     if (
       url.origin === "https://registry.test" &&
+      method === "GET" &&
+      url.pathname.endsWith("/manifests/bootstrap")
+    ) {
+      return manifest ? json(manifest) : json({}, { status: 404 });
+    }
+    if (
+      url.origin === "https://registry.test" &&
       method === "POST" &&
       url.pathname.endsWith("/blobs/uploads/")
     ) {
@@ -247,6 +255,20 @@ function createHarness({
       const parsedManifest: BootstrapManifest = JSON.parse(
         body.toString("utf8")
       );
+      if (
+        manifestPushes === 1 &&
+        manifestAmbiguity === "conflict-before-write"
+      ) {
+        manifest = {
+          ...parsedManifest,
+          annotations: {
+            "org.opencontainers.image.source":
+              "https://github.com/other/repository"
+          }
+        };
+        manifestDigest = wrongDigest;
+        return new Response("", { status: 412 });
+      }
       if (manifestPushes === 1 && manifestAmbiguity === "commit-then-throw") {
         manifest = parsedManifest;
         manifestDigest = expectedDigest;
@@ -291,6 +313,10 @@ function createHarness({
     },
     get manifestPushes() {
       return manifestPushes;
+    },
+    setManifest(next: BootstrapManifest) {
+      manifest = next;
+      manifestDigest = digest(Buffer.from(JSON.stringify(next)));
     }
   };
 }
@@ -311,6 +337,7 @@ test("pushes one deterministic linked bootstrap artifact across repeated bootstr
     ...baseOptions,
     fetchImpl: harness.fetchImpl
   });
+
   const second = await bootstrapGHCRStatePackage({
     ...baseOptions,
     fetchImpl: harness.fetchImpl
@@ -351,6 +378,68 @@ test("pushes one deterministic linked bootstrap artifact across repeated bootstr
     new URL(tokenCall.url).searchParams.get("scope"),
     "repository:acme/app-radius-state-dev-123456789abc:pull,push"
   );
+  const manifestPut = harness.calls.find(
+    (call) =>
+      call.method === "PUT" &&
+      new URL(call.url).pathname.endsWith("/manifests/bootstrap")
+  );
+  assert.equal(manifestPut?.headers["If-None-Match"], "*");
+});
+
+test("treats repository casing as the same deterministic bootstrap identity", async () => {
+  const harness = createHarness();
+
+  await bootstrapGHCRStatePackage({
+    ...baseOptions,
+    fetchImpl: harness.fetchImpl
+  });
+
+  await bootstrapGHCRStatePackage({
+    ...baseOptions,
+    targetRepository: "Acme/App",
+    fetchImpl: harness.fetchImpl
+  });
+
+  assert.equal(harness.manifestPushes, 1);
+  assert.equal(
+    harness.manifest?.annotations?.["org.opencontainers.image.source"],
+    "https://github.com/acme/app"
+  );
+});
+
+test("accepts a legacy casing-equivalent bootstrap manifest", async () => {
+  const harness = createHarness();
+  await bootstrapGHCRStatePackage({
+    ...baseOptions,
+    fetchImpl: harness.fetchImpl
+  });
+  const existing = structuredClone(harness.manifest);
+  assert.ok(existing?.annotations);
+  existing.annotations["org.opencontainers.image.source"] =
+    "https://github.com/Acme/App";
+  harness.setManifest(existing);
+
+  await bootstrapGHCRStatePackage({
+    ...baseOptions,
+    fetchImpl: harness.fetchImpl
+  });
+
+  assert.equal(harness.manifestPushes, 1);
+});
+
+test("refuses a bootstrap manifest published concurrently", async () => {
+  const harness = createHarness({
+    manifestAmbiguity: "conflict-before-write"
+  });
+
+  await assert.rejects(
+    bootstrapGHCRStatePackage({
+      ...baseOptions,
+      fetchImpl: harness.fetchImpl
+    }),
+    /published concurrently with a different manifest/
+  );
+  assert.equal(harness.manifestPushes, 1);
 });
 
 test("passes a timeout signal to every request and enforces the bootstrap budget", async () => {

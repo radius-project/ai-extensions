@@ -875,6 +875,34 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     });
   });
 
+  it("accepts an unrelated flexible federated credential without a subject", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({
+            stdout: JSON.stringify([
+              { name: "dev", subject: SUBJECT },
+              {
+                name: "flexible",
+                subject: null,
+                claimsMatchingExpression: {
+                  languageVersion: 1,
+                  value: "claims['sub'] matches 'repo:octo/*'"
+                }
+              }
+            ])
+          });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+    expect(test.failures).toEqual([]);
+  });
+
   it("honors a short Retry-After for a rate-limited credential inventory read", async () => {
     let reads = 0;
     const test = harness({
@@ -1043,9 +1071,9 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     expect(test.failures[0]).toMatchObject({ code: "sp-objectid-failed" });
     expect(
       test.calls.filter((call) => call.startsWith("az:ad sp show"))
-    ).toHaveLength(3);
+    ).toHaveLength(6);
     expect(test.calls.filter((call) => call.startsWith("sleep:"))).toHaveLength(
-      2
+      5
     );
   });
 

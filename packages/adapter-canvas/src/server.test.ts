@@ -14,6 +14,7 @@ import {
   cleanupProviderRecoveryDisposition,
   cleanupGitHubEnvironmentArtifact,
   rollbackCommittedWorkflowFiles,
+  rollbackGitHubEnvironmentVariableArtifacts,
   guardStopBoundary,
   canReuseModeledGraph,
   DEPLOY_RAD_COMMANDS_STEP,
@@ -68,6 +69,7 @@ import {
   recordCreatedFederatedCredential,
   recordCreatedRoleAssignment,
   recordGitHubEnvironment,
+  recordGitHubEnvironmentVariable,
   recordServicePrincipal,
   reconcileRestoredOperation,
   fromPersistedOperation,
@@ -83,6 +85,7 @@ import {
   cleanupTargetKey,
   unresolvedCleanupTargets
 } from "./operations.js";
+import { createHash } from "node:crypto";
 import type { CanvasState } from "./shared.js";
 import type {
   DeployRepairHandoffInput,
@@ -1434,6 +1437,7 @@ describe("rollbackCommittedWorkflowFiles", () => {
       previousBlobSha: null,
       previousBlobKnown: true
     });
+
     return op;
   }
 
@@ -1618,6 +1622,73 @@ describe("rollbackCommittedWorkflowFiles", () => {
     });
 
     expect(deleted).toEqual([VERIFY_PATH]);
+  });
+});
+
+describe("rollbackGitHubEnvironmentVariableArtifacts", () => {
+  it("restores a previous value after the operation is persisted and reloaded", async () => {
+    const operation = newAzureOp();
+    recordGitHubEnvironmentVariable(operation, {
+      repo: "octo/app",
+      environment: "dev",
+      environmentProviderId: "env-1",
+      name: "AZURE_CLIENT_ID",
+      valueSha256: createHash("sha256").update("new").digest("hex"),
+      previousValue: "old",
+      previousKnown: true
+    });
+    const restored = fromPersistedOperation(toPersistedOperation(operation));
+    const calls: string[][] = [];
+
+    const outcome = await rollbackGitHubEnvironmentVariableArtifacts(restored, {
+      attempt: 1,
+      persist: async () => {},
+      run: async (args) => {
+        calls.push(args);
+        return (
+          args[1] === "/repos/octo/app/environments/dev" ?
+            {
+              code: 0,
+              stdout: JSON.stringify({ id: "env-1", name: "dev" }),
+              stderr: ""
+            }
+          : args[0] === "api" ?
+            {
+              code: 0,
+              stdout: JSON.stringify({
+                name: "AZURE_CLIENT_ID",
+                value: "new"
+              }),
+              stderr: ""
+            }
+          : { code: 0, stdout: "", stderr: "" }
+        );
+      }
+    });
+
+    expect(calls[4]).toEqual([
+      "variable",
+      "set",
+      "AZURE_CLIENT_ID",
+      "--body",
+      "old",
+      "--env",
+      "dev",
+      "--repo",
+      "octo/app"
+    ]);
+    expect(outcome).toMatchObject({
+      blocked: false,
+      results: [
+        {
+          artifactType: "github_environment_variable",
+          outcome: "restored"
+        }
+      ]
+    });
+    expect(restored.setupArtifacts.githubEnvironmentVariables[0].state).toBe(
+      "deleted"
+    );
   });
 });
 
@@ -4119,6 +4190,63 @@ describe("finalizeSetupFailure", () => {
       }
     ]);
     expect(op.state).toBe("failed_partial");
+  });
+
+  it("restores a configured variable before reporting automatic cleanup complete", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "reused",
+      repo: "octo/app",
+      name: "dev",
+      providerId: "env-1"
+    });
+    recordGitHubEnvironmentVariable(op, {
+      repo: "octo/app",
+      environment: "dev",
+      environmentProviderId: "env-1",
+      name: "AZURE_CLIENT_ID",
+      valueSha256: createHash("sha256").update("new").digest("hex"),
+      previousValue: "old",
+      previousKnown: true
+    });
+
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: "later setup failure",
+      code: "later-setup-failure",
+      steps: [],
+      runGitHubVariable: async (args) =>
+        args[1] === "/repos/octo/app/environments/dev" ?
+          {
+            code: 0,
+            stdout: JSON.stringify({ id: "env-1", name: "dev" }),
+            stderr: ""
+          }
+        : args[0] === "api" ?
+          {
+            code: 0,
+            stdout: JSON.stringify({
+              name: "AZURE_CLIENT_ID",
+              value: "new"
+            }),
+            stderr: ""
+          }
+        : { code: 0, stdout: "", stderr: "" }
+    });
+
+    expect(failure.body.cleanup).toMatchObject({
+      state: "succeeded",
+      results: [
+        {
+          artifactType: "github_environment_variable",
+          outcome: "restored"
+        }
+      ]
+    });
+    expect(op.setupArtifacts.githubEnvironmentVariables[0].state).toBe(
+      "deleted"
+    );
+    expect(op.state).toBe("failed");
   });
 });
 

@@ -265,6 +265,7 @@ async function reconcileMutation<T>(
   mutation: ProviderMutationRecord,
   reconcile: () => Promise<ProviderMutationReconciliation<T>>,
   persist: () => Promise<void>,
+  onConfirmed?: (value: T, recovered: boolean) => void,
   rethrowReconciliationError?: (error: unknown) => boolean
 ): Promise<RecoverableMutationResult<T>> {
   // `settleProviderMutation` normalizes the whole recovery record, so the entry
@@ -313,6 +314,7 @@ async function reconcileMutation<T>(
     outcome.evidence || null,
     outcome.state === "applied" ? (outcome.providerId ?? null) : null
   );
+  if (outcome.state === "applied") onConfirmed?.(outcome.value, true);
   requireRecoveryRollback(operation, mutation);
   await persistOrThrow(persist, "after reconciliation");
   return outcome.state === "applied" ?
@@ -399,6 +401,11 @@ export async function executeRecoverableMutation<T>(input: {
   intent?: Record<string, string | number | boolean | null> | null;
   persist(): Promise<void>;
   beforeMutation?(): Promise<boolean>;
+  /**
+   * Revalidate provider identity after intent is durable but before the request
+   * is sent. A rejection proves the provider mutation was not attempted.
+   */
+  validateBeforeMutation?(): Promise<void>;
   mutate(): Promise<ProviderMutationCommandResult>;
   accept(result: ProviderMutationCommandResult): T;
   /**
@@ -426,6 +433,11 @@ export async function executeRecoverableMutation<T>(input: {
    */
   acceptedEvidence?(result: ProviderMutationCommandResult): string | null;
   reconcile(): Promise<ProviderMutationReconciliation<T>>;
+  /**
+   * Add provider-specific artifact provenance before the confirmed journal entry
+   * is persisted, so a crash cannot save one without the other.
+   */
+  onConfirmed?(value: T, recovered: boolean): void;
   /**
    * Turn a conclusive provider rejection into a manual blocker in the same
    * settle. A destructive request Radius issued once and the provider refused
@@ -519,6 +531,23 @@ export async function executeRecoverableMutation<T>(input: {
       }
       return { state: "cancelled" };
     }
+    if (input.validateBeforeMutation) {
+      try {
+        await input.validateBeforeMutation();
+      } catch (error) {
+        settleProviderMutation(
+          input.operation,
+          mutation.mutationId,
+          "not_applied",
+          error instanceof Error ? error.message : String(error)
+        );
+        await persistOrThrow(
+          input.persist,
+          "after provider identity validation prevented the request"
+        );
+        throw error;
+      }
+    }
     let result: ProviderMutationCommandResult;
     try {
       result = await input.mutate();
@@ -538,6 +567,7 @@ export async function executeRecoverableMutation<T>(input: {
         mutation,
         input.reconcile,
         input.persist,
+        input.onConfirmed,
         input.rethrowReconciliationError
       );
     }
@@ -560,6 +590,7 @@ export async function executeRecoverableMutation<T>(input: {
         mutation,
         input.reconcile,
         input.persist,
+        input.onConfirmed,
         input.rethrowReconciliationError
       );
     }
@@ -574,6 +605,7 @@ export async function executeRecoverableMutation<T>(input: {
         input.providerIdOf?.(result, value) ?? null,
         input.createdByOperation?.(result, value)
       );
+      input.onConfirmed?.(value, false);
       await persistOrThrow(input.persist, "after the provider acknowledged it");
       return { state: "applied", value, recovered: false };
     }
@@ -620,6 +652,7 @@ export async function executeRecoverableMutation<T>(input: {
       mutation,
       input.reconcile,
       input.persist,
+      input.onConfirmed,
       input.rethrowReconciliationError
     );
   }

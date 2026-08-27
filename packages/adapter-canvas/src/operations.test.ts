@@ -33,6 +33,7 @@ import {
   recordCreatedFederatedCredential,
   recordCreatedRoleAssignment,
   recordGitHubEnvironment,
+  recordGitHubEnvironmentVariable,
   readWorkflowCommitArtifact,
   promoteCreatedGitHubEnvironment,
   reconcileArtifactProvenance,
@@ -96,6 +97,7 @@ import {
   workflowProvenanceGap,
   workflowRollbackCommitState,
   workflowRollbackTargets,
+  githubEnvironmentVariableRollbackTargets,
   canExitSetup,
   hasSurvivingCreatedArtifacts,
   isSetupExited,
@@ -1486,6 +1488,7 @@ describe("record shape", () => {
         name: null,
         providerId: null
       },
+      githubEnvironmentVariables: [],
       commit: {
         mode: "not_started",
         branch: null,
@@ -2244,6 +2247,30 @@ describe("registry", () => {
       ok: false,
       conflict: { operationId: first.operationId },
       reason: "previous-cleanup-required"
+    });
+  });
+
+  it("keeps the repository reserved while a variable-only rollback remains", () => {
+    const reg = createRegistry();
+    const first = newOp();
+    recordGitHubEnvironmentVariable(first, {
+      repo: first.repo,
+      environment: first.environment,
+      environmentProviderId: "env-1",
+      name: "AZURE_CLIENT_ID",
+      valueSha256:
+        "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      previousValue: null,
+      previousKnown: true
+    });
+    reg.start(first);
+    finish(first, "failed_partial", { failure: { code: "setup-failed" } });
+
+    expect(hasUnfinishedCleanupAuthority(first)).toBe(true);
+    expect(reg.start(newOp())).toMatchObject({
+      ok: false,
+      reason: "previous-cleanup-required",
+      conflict: { operationId: first.operationId }
     });
   });
 
@@ -3388,6 +3415,7 @@ describe("latestAny — the chip's repo-less lookup", () => {
     const live = createOperation({
       repo: "contoso/store",
       environment: "dev",
+      environmentProviderId: "env-1",
       provider: "azure",
       trigger: "ui"
     });
@@ -5193,7 +5221,11 @@ describe("stopped operations offer continuing and rolling back", () => {
       path: `/api/operations/${op.operationId}/retry/cleanup`
     });
     expect(actions[1].preview.removes.map((entry) => entry.target)).toEqual([
-      "radius-deploy (app-1)"
+      "radius-deploy (app-1)",
+      "contoso/store:dev",
+      "Contributor @ /subscriptions/s1",
+      "radius-main @ repo:contoso/store:ref:refs/heads/main",
+      "Service Principal for radius-deploy (app-1)"
     ]);
     expect(projectOperationHeadline(op)).toMatchObject({
       code: "rollback-incomplete",
@@ -5229,6 +5261,112 @@ describe("rollback eligibility", () => {
       ok: true,
       code: "rollback-allowed"
     });
+  });
+
+  it("persists and selects GitHub variable provenance before its environment", () => {
+    const op = stoppedWithCreatedResources();
+    recordGitHubEnvironmentVariable(op, {
+      repo: "contoso/store",
+      environment: "dev",
+      environmentProviderId: "env-1",
+      name: "AZURE_CLIENT_ID",
+      valueSha256:
+        "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      previousValue: "old-client",
+      previousKnown: true
+    });
+
+    expect(
+      provenOwnedCleanupTargets(op).map((entry) => entry.artifactType)
+    ).toEqual([
+      "github_environment_variable",
+      "github_environment",
+      "role_assignment",
+      "federated_credential",
+      "service_principal",
+      "azure_app"
+    ]);
+    expect(githubEnvironmentVariableRollbackTargets(op)).toEqual([
+      expect.objectContaining({
+        name: "AZURE_CLIENT_ID",
+        previousValue: "old-client",
+        previousKnown: true,
+        identity: "env-1|contoso/store:dev:azure_client_id"
+      })
+    ]);
+
+    const restored = fromPersistedOperation(toPersistedOperation(op));
+    expect(restored.setupArtifacts.githubEnvironmentVariables).toEqual(
+      op.setupArtifacts.githubEnvironmentVariables
+    );
+    expect(
+      recordCleanupDeletion(restored, {
+        artifactType: "github_environment_variable",
+        identity: "env-1|contoso/store:dev:azure_client_id"
+      })
+    ).toBe(true);
+    expect(githubEnvironmentVariableRollbackTargets(restored)).toEqual([]);
+  });
+
+  it("does not treat a missing predecessor value as proven absence", () => {
+    const ledger = readSetupArtifactLedger({
+      githubEnvironmentVariables: [
+        {
+          state: "created",
+          repo: "contoso/store",
+          environment: "dev",
+          environmentProviderId: "env-1",
+          name: "AZURE_CLIENT_ID",
+          valueSha256:
+            "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+          previousKnown: true
+        }
+      ]
+    });
+
+    expect(ledger.githubEnvironmentVariables[0]).toMatchObject({
+      previousValue: null,
+      previousKnown: false
+    });
+  });
+
+  it("carries unattempted downstream resources into a variable cleanup retry", () => {
+    const op = stoppedWithCreatedResources();
+    recordGitHubEnvironmentVariable(op, {
+      repo: "contoso/store",
+      environment: "dev",
+      environmentProviderId: "env-1",
+      name: "AZURE_CLIENT_ID",
+      valueSha256:
+        "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      previousValue: "old-client",
+      previousKnown: true
+    });
+    recordCleanupState(op, {
+      attempts: 1,
+      state: "succeeded_with_warnings",
+      results: [
+        {
+          attempt: 1,
+          artifactType: "github_environment_variable",
+          target: "contoso/store:dev variable AZURE_CLIENT_ID",
+          identity: "env-1|contoso/store:dev:azure_client_id",
+          outcome: "warning",
+          detail: "GitHub returned unreadable variable state."
+        }
+      ]
+    });
+
+    expect(
+      unresolvedCleanupTargets(op).map((entry) => entry.artifactType)
+    ).toEqual([
+      "github_environment_variable",
+      "github_environment",
+      "role_assignment",
+      "federated_credential",
+      "service_principal",
+      "azure_app"
+    ]);
   });
 
   it("never puts a reused or unprovable resource in the deletion set", () => {

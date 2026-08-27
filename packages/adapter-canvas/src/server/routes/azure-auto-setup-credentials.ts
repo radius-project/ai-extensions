@@ -29,7 +29,7 @@ interface FederatedCredential {
   subject: string;
 }
 
-const AZURE_PROPAGATION_ATTEMPTS = 3;
+const AZURE_PROPAGATION_ATTEMPTS = 6;
 const MAX_RETRY_DELAY_MS = 10_000;
 
 export function isRetryableAzureReadFailure(stderr?: string): boolean {
@@ -78,17 +78,27 @@ function parseFederatedCredentialInventory(stdout: string): {
         return null;
       }
       const entry = value as { name?: unknown; subject?: unknown };
+      const claimsMatchingExpression = (
+        value as { claimsMatchingExpression?: unknown }
+      ).claimsMatchingExpression;
+      const subject =
+        typeof entry.subject === "string" ? entry.subject.trim() : "";
+      const hasClaimsMatchingExpression =
+        (typeof claimsMatchingExpression === "string" &&
+          claimsMatchingExpression.trim() !== "") ||
+        (typeof claimsMatchingExpression === "object" &&
+          claimsMatchingExpression !== null &&
+          !Array.isArray(claimsMatchingExpression));
       if (
         typeof entry.name !== "string" ||
         !entry.name.trim() ||
-        typeof entry.subject !== "string" ||
-        !entry.subject.trim()
+        (!subject && !hasClaimsMatchingExpression)
       ) {
         return null;
       }
       credentials.push({
         name: entry.name.trim(),
-        subject: entry.subject.trim()
+        subject
       });
     }
     return {
@@ -261,7 +271,7 @@ async function createFederatedCredentials({
     "--id",
     clientId,
     "--query",
-    "[].{name:name,subject:subject}",
+    "[].{name:name,subject:subject,claimsMatchingExpression:claimsMatchingExpression}",
     "-o",
     "json"
   ];

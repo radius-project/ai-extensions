@@ -15,6 +15,7 @@ import {
 } from "./create-environment-gh-runner.js";
 import { createWorkflowFileCommitter } from "./create-environment-workflow-committer.js";
 import {
+  settleProviderMutation,
   shouldStop,
   terminalizeProviderManualRequired,
   unresolvedProviderMutations
@@ -165,6 +166,18 @@ export interface CreateEnvironmentDependencies
       origin?: string;
     }
   ): void;
+  recordGitHubEnvironmentVariable(
+    operation: CreateEnvironmentOperation,
+    entry: {
+      repo: string;
+      environment: string;
+      environmentProviderId: string;
+      name: string;
+      valueSha256: string;
+      previousValue: string | null;
+      previousKnown: boolean;
+    }
+  ): void;
   // Promotes the environment this request wrote from "Radius may own this" to
   // "Radius created this", and only after the identity is durably saved. It
   // answers false when the ledger cannot match the proof, which leaves the safe
@@ -305,6 +318,8 @@ export async function handleCreateEnvironment(
   // or an access failure reads as "gone" and the delete goes out blind.
   let readGitHubEnvironmentRunner:
     ((args: string[]) => Promise<CreateEnvironmentCommandResult>) | null = null;
+  let runGitHubVariableRunner:
+    ((args: string[]) => Promise<CreateEnvironmentCommandResult>) | null = null;
   try {
     const data: CreateEnvironmentRequestData = JSON.parse(body);
     const admission = await admitCreateEnvironmentRequest(data, dependencies);
@@ -334,6 +349,8 @@ export async function handleCreateEnvironment(
       }
     };
     readGitHubEnvironmentRunner = selectedEnvironmentReader(selectedExecutor);
+    runGitHubVariableRunner = (args) =>
+      selectedExecutor.run(args, { timeout: 20000 });
 
     steps = [];
     const rawPush = steps.push.bind(steps);
@@ -405,6 +422,7 @@ export async function handleCreateEnvironment(
             provider === "azure" ?
               (args: string[]) => dependencies.runAzCommand(args)
             : null,
+          runGitHubVariable: runGitHubVariableRunner,
           runDeleteEnvironment: deleteGitHubEnvironmentRunner,
           readEnvironment: readGitHubEnvironmentRunner
         });
@@ -422,6 +440,7 @@ export async function handleCreateEnvironment(
           error: ghcrPreflight.error,
           code: ghcrPreflight.code,
           steps,
+          runGitHubVariable: runGitHubVariableRunner,
           runDeleteEnvironment: deleteGitHubEnvironmentRunner,
           readEnvironment: readGitHubEnvironmentRunner
         });
@@ -475,11 +494,14 @@ export async function handleCreateEnvironment(
       {
         targetRepo,
         envName,
+        environmentProviderId: ensuredEnvironment.providerId,
         ...(provider === "azure" ?
           {
             mutationRecovery: {
               operation,
-              persist: () => dependencies.persistOperations()
+              persist: () => dependencies.persistOperations(),
+              recordVariable: (entry) =>
+                dependencies.recordGitHubEnvironmentVariable(operation, entry)
             }
           }
         : {})
@@ -509,6 +531,7 @@ export async function handleCreateEnvironment(
           provider === "azure" ?
             (args: string[]) => dependencies.runAzCommand(args)
           : null,
+        runGitHubVariable: runGitHubVariableRunner,
         runDeleteEnvironment: deleteGitHubEnvironmentRunner,
         readEnvironment: readGitHubEnvironmentRunner
       });
@@ -563,6 +586,41 @@ export async function handleCreateEnvironment(
       );
     }
     if (!(await checkpoint("after-github-environment"))) return;
+
+    const pendingVariable = unresolvedProviderMutations(operation).find(
+      (mutation) => mutation.kind === "github_environment_variable.put"
+    );
+    if (pendingVariable) {
+      const name =
+        typeof pendingVariable.intent?.name === "string" ?
+          pendingVariable.intent.name
+        : "";
+      const value =
+        typeof pendingVariable.intent?.value === "string" ?
+          pendingVariable.intent.value
+        : "";
+      if (!name || !value) {
+        const guidance =
+          "Radius cannot reconcile the interrupted GitHub environment variable because its saved intent is incomplete. Review the environment variables manually before starting a new setup.";
+        settleProviderMutation(
+          operation,
+          pendingVariable.mutationId,
+          "manual_required",
+          guidance
+        );
+        await dependencies.persistOperations();
+        throw new ProviderMutationRecoveryError(
+          guidance,
+          "provider-mutation-manual-required"
+        );
+      }
+      await setEnvironmentVariable(name, value);
+      if (
+        !(await checkpoint(`after-environment-variable-reconciliation:${name}`))
+      ) {
+        return;
+      }
+    }
 
     const defaultBranch = await dependencies.getDefaultBranch(
       targetRepo,
@@ -1360,6 +1418,7 @@ export async function handleCreateEnvironment(
         op && op.provider === "azure" ?
           (args: string[]) => dependencies.runAzCommand(args)
         : null,
+      runGitHubVariable: runGitHubVariableRunner,
       runDeleteEnvironment: deleteGitHubEnvironmentRunner,
       readEnvironment: readGitHubEnvironmentRunner
     });
