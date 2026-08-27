@@ -12,7 +12,8 @@ export type RouteOwner =
   | "repositories"
   | "graphs-planning"
   | "environments"
-  | "deployments";
+  | "deployments"
+  | "remediations";
 
 export type RouteHandler = (
   context: CanvasRequestContext
@@ -128,6 +129,7 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   ),
   legacyPost("/api/azure-cli-assist", "exact", "json", "identity-credentials"),
   legacyPost("/api/verify-aws-login", "exact", "json", "identity-credentials"),
+  declare("POST", "/api/run-remediation", "exact", "json", "remediations"),
   declare(
     "GET",
     "/api/credential-profiles",

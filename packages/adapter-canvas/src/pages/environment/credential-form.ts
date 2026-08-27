@@ -33,10 +33,7 @@ export function credentialFormMarkup(): string {
       <div class="rad-section__title">GitHub Packages access</div>
       <div class="rad-section__desc">Radius stores deployment state in a private GHCR package. Verify that the active GitHub account can publish packages before saving this profile.</div>
       <div id="cred-ghcr-status" style="margin-top:12px; font-size:13px; color:var(--rad-text-tertiary);">Checking GitHub Packages access…</div>
-      <div id="cred-ghcr-command-row" style="display:none; margin-top:10px; align-items:center; gap:8px; background:var(--rad-code-bg); border:1px solid var(--rad-stroke); border-radius:6px; padding:8px 10px;">
-        <code id="cred-ghcr-command" style="flex:1; font-family:var(--font-mono, monospace); font-size:12px; color:var(--rad-text); white-space:pre-wrap; overflow-wrap:anywhere;"></code>
-        <button type="button" id="cred-ghcr-copy" class="rad-btn rad-btn--neutral" style="margin:0; padding:2px 10px; font-size:12px; flex:none;">Copy command</button>
-      </div>
+      <div id="cred-ghcr-command-row" style="display:none; margin-top:10px;"></div>
       <button type="button" id="cred-ghcr-retry" class="rad-btn rad-btn--neutral" style="display:none; margin:10px 0 0;">I’ve updated permissions — retry</button>
     </div>
 
@@ -68,6 +65,7 @@ export function credentialFormMarkup(): string {
     </div>
 
     <div id="cred-verify-status" class="rad-verified-line" style="margin-top:14px; display:none;"></div>
+    <div id="cred-verify-action" style="margin-top:10px;"></div>
 
     <div class="rad-section">
       <div id="cred-verify-hint" style="font-size:13px; color:var(--rad-text-tertiary); padding:12px 14px; background:var(--rad-bg-subtle); border-radius:8px; margin-bottom:16px;">Verify your credentials above to continue profile setup.</div>

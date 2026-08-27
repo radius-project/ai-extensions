@@ -253,7 +253,13 @@ function printDiagnostic(result) {
     typeof result.message?.text === "string" && result.message.text ?
       result.message.text
     : "Bicep reported a diagnostic.";
-  report(`${location ? `${location}: ` : ""}${level}${rule}: ${text}`);
+  const customTypeHint =
+    result.ruleId === "BCP037" && /\bcodeReference\b/u.test(text) ?
+      " For a Radius.Resources custom type, add the optional codeReference string property to custom-types.yaml and republish custom-types.tgz before compiling again."
+    : "";
+  report(
+    `${location ? `${location}: ` : ""}${level}${rule}: ${text}${customTypeHint}`
+  );
 }
 
 function isFailure(result) {
@@ -376,6 +382,194 @@ function checkContainerImageBuildSources(
   return failed;
 }
 
+// A container's codeReference must lead to the code the workload runs. These
+// packaging files describe how it is built or deployed instead, so they render a
+// link that answers the wrong question. Kept in step with the "Always skip" list
+// in radius-app-graph/references/source-code-references.md.
+const packagingBasenamePatterns = [
+  /^dockerfile$/u,
+  /^dockerfile\..+$/u,
+  /^.+\.dockerfile$/u,
+  /^docker-compose.*\.ya?ml$/u,
+  /^compose.*\.ya?ml$/u,
+  /^chart\.ya?ml$/u,
+  /^values\.ya?ml$/u
+];
+
+// Decodes each path segment on its own so one malformed escape sequence degrades
+// to that segment's raw text instead of discarding the whole pathname.
+function decodePathname(pathname) {
+  return pathname
+    .split("/")
+    .map((segment) => {
+      try {
+        return decodeURIComponent(segment);
+      } catch {
+        return segment;
+      }
+    })
+    .join("/");
+}
+
+// Reduces either authored form -- a repo-relative worktree path or a GitHub blob
+// URL -- to the file's basename, so one list covers both.
+function sourceLocationBasename(codeReference) {
+  if (typeof codeReference !== "string") {
+    return "";
+  }
+  let location = codeReference.replace(/#L[1-9]\d*$/u, "");
+  if (/^https:\/\//iu.test(location)) {
+    try {
+      const { pathname } = new URL(location);
+      // `pathname` stays percent-encoded, and the host resolves the escapes, so
+      // "Docker%66ile" would otherwise slip past a literal basename comparison.
+      // A malformed escape falls back to the raw pathname rather than giving up,
+      // so a bad sequence elsewhere in the path cannot reopen the bypass.
+      location = decodePathname(pathname);
+    } catch {
+      return "";
+    }
+  }
+  const segments = location.split("/").filter((segment) => segment !== "");
+  return segments.length === 0 ?
+      ""
+    : segments[segments.length - 1].toLowerCase();
+}
+
+function isPackagingSourceLocation(codeReference) {
+  const basename = sourceLocationBasename(codeReference);
+  return (
+    basename !== "" &&
+    packagingBasenamePatterns.some((pattern) => pattern.test(basename))
+  );
+}
+
+function checkSourceCodeReferences(
+  template,
+  app,
+  parentPath = "",
+  parameterValues = new Map()
+) {
+  let failed = false;
+  for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
+    const resourcePath = parentPath ? `${parentPath}.${symbol}` : symbol;
+    if (resource?.type === "Microsoft.Resources/deployments") {
+      const nestedTemplate = resource?.properties?.template;
+      if (
+        nestedTemplate !== null &&
+        typeof nestedTemplate === "object" &&
+        !Array.isArray(nestedTemplate)
+      ) {
+        const nestedParameterValues = new Map();
+        for (const [name, argument] of Object.entries(
+          resource?.properties?.parameters ?? {}
+        )) {
+          nestedParameterValues.set(
+            name,
+            resolveTemplateString(argument?.value, template, parameterValues)
+          );
+        }
+        if (
+          checkSourceCodeReferences(
+            nestedTemplate,
+            app,
+            resourcePath,
+            nestedParameterValues
+          )
+        ) {
+          failed = true;
+        }
+      }
+      continue;
+    }
+    if (
+      typeof resource?.type !== "string" ||
+      !resource.type.startsWith("Radius.") ||
+      resource.type.startsWith("Radius.Core/applications@")
+    ) {
+      continue;
+    }
+
+    const rawCodeReference = resource?.properties?.properties?.codeReference;
+    const customTypeHint =
+      resource.type.startsWith("Radius.Resources/") ?
+        " If this custom type predates the source-reference contract, add the optional codeReference string property to custom-types.yaml and republish custom-types.tgz."
+      : "";
+    if (typeof rawCodeReference !== "string" || !rawCodeReference.trim()) {
+      report(
+        `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: every non-application Radius resource must store its verified worktree path or GitHub branch/file URL in app.bicep.${customTypeHint}`
+      );
+      failed = true;
+      continue;
+    }
+    const codeReference = resolveTemplateString(
+      rawCodeReference,
+      template,
+      parameterValues
+    );
+    const sourceLocationPattern =
+      /^(?!\.{1,2}(?:\/|$))(?!.*(?:^|\/)\.\.(?:\/|$))[^\u0000-\u001f\u007f#]+(?:#L[1-9]\d*)?$/u;
+    const githubSource = (() => {
+      if (typeof codeReference !== "string") {
+        return false;
+      }
+      try {
+        const parsed = new URL(codeReference);
+        const segments = parsed.pathname
+          .split("/")
+          .filter((segment) => segment !== "");
+        return (
+          parsed.protocol === "https:" &&
+          parsed.hostname.toLowerCase() === "github.com" &&
+          !parsed.username &&
+          !parsed.password &&
+          !parsed.port &&
+          !parsed.search &&
+          segments.length >= 5 &&
+          segments[2] === "blob" &&
+          (parsed.hash === "" || /^#L[1-9]\d*$/u.test(parsed.hash))
+        );
+      } catch {
+        return false;
+      }
+    })();
+    if (
+      typeof codeReference !== "string" ||
+      codeReference !== codeReference.trim() ||
+      /[\u0000-\u001f\u007f]/u.test(codeReference) ||
+      codeReference.startsWith("[") ||
+      (!githubSource &&
+        (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(codeReference) ||
+          codeReference.startsWith("/") ||
+          codeReference.includes("\\") ||
+          !sourceLocationPattern.test(codeReference)))
+    ) {
+      // An unresolved compiled ARM expression begins with "[". It is not a
+      // durable path and would render as a dead source link, so reject it along
+      // with malformed literal values.
+      report(
+        `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: ${JSON.stringify(rawCodeReference)} must resolve to a repo-relative worktree path using forward slashes or an exact https://github.com/<owner>/<repo>/blob/<branch>/<file> URL, optionally followed by #L<line>.${customTypeHint}`
+      );
+      failed = true;
+      continue;
+    }
+
+    // containerImages is deliberately exempt: a Dockerfile is that resource's
+    // definition site, while for the workload that runs the image it is only
+    // packaging.
+    if (
+      resource.type.startsWith("Radius.Compute/containers@") &&
+      isPackagingSourceLocation(codeReference)
+    ) {
+      report(
+        `${app}: error source-code-reference: ${resourcePath}.properties.codeReference: ${JSON.stringify(rawCodeReference)} is a packaging file; point a container at the entrypoint of the process it runs, resolved from its command/args or through the image's Dockerfile.`
+      );
+      failed = true;
+    }
+  }
+  return failed;
+}
+
 const executable = process.platform === "win32" ? "bicep.exe" : "bicep";
 const bicep = path.join(
   os.homedir(),
@@ -435,7 +629,14 @@ function check(app) {
   }
 
   const invalidBuildSource = checkContainerImageBuildSources(template, app);
-  return compilerFindings.some(isFailure) || invalidBuildSource ? 1 : 0;
+  const invalidSourceReference = checkSourceCodeReferences(template, app);
+  return (
+      compilerFindings.some(isFailure) ||
+        invalidBuildSource ||
+        invalidSourceReference
+    ) ?
+      1
+    : 0;
 }
 
 function main() {

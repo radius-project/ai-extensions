@@ -112,7 +112,7 @@ env: {
 }
 ```
 
-Kubernetes expands `$(VAR_NAME)` only from variables declared earlier in the environment list. Confirm the exact container recipe preserves this order, and preserve escaping through Bicep and any shell/config layer. Confirm the image has every shell or utility used by an entrypoint wrapper.
+Kubernetes expands `$(VAR_NAME)` only from variables declared earlier in the environment list. Confirm the exact container recipe preserves this order, and preserve escaping through Bicep and any shell/config layer. Confirm the image has every shell or utility used by an entrypoint wrapper. The inverse direction — the contract exposes one aggregate value and the application wants the parts — is governed by [Credential shape](#credential-shape); it is not symmetric with composition and is usually a contract gap to report.
 
 Credentials embedded in URLs must be URL-encoded. Kubernetes variable expansion does not encode them; use application logic or a verified runtime helper. If safe encoding cannot be guaranteed, do not generate a fragile connection string.
 
@@ -129,6 +129,52 @@ When the application accepts only one credential-bearing value, choose one prove
 
 If neither path exists, report the schema/application contract gap and do not emit a definition described as deployable.
 
+## Credential shape
+
+A resource type being available does not prove its credential fits the client. Before wiring any dependency that authenticates, resolve both sides:
+
+- **What the contract exposes.** The exact schema's nonsecret read-only outputs plus the exact keys declared under its managed-secret metadata, each proven against the Recipe that maps them. `host` and `port` are an address, not a credential.
+- **What the application consumes.** The exact native key and the exact value format the pinned client parses. A client that parses a credential-bearing URL and a client that takes discrete host/port/password/TLS fields are different contracts; neither accepts the other's value.
+
+The two shapes either match or they do not. When they match, bind them as they are — aggregate to aggregate, part to part. When they do not, that is a contract gap, and the rules below exist so it is reported rather than hidden.
+
+### The Recipe decides whether there is a credential
+
+Managed-secret metadata on a type says an aggregate output may carry a credential, not that one exists: a Recipe can map that same key to an unauthenticated value. Only the exact Recipe registered in the target Environment, read from its source, establishes whether the backend requires a credential and what the value's syntax is.
+
+- **The Recipe generates a credential.** Bind it. If the client cannot consume the shape it is exposed in and no proven runtime split exists, report the gap — never fall back to wiring `host`/`port` alone. That yields a model that deploys and silently cannot authenticate, the worst available outcome, because neither the model nor the deploy says the credential was dropped.
+- **The Recipe provably generates no credential.** Address-only wiring is complete for that Environment, since there is nothing to drop. Say so in the reply: name the Recipe and state that a Recipe generating a credential would require rewiring.
+- **The Recipe cannot be resolved.** Treat the declared credential as required and apply the first case. An unproven assumption that the backend is open is the same silent failure, arrived at by guessing.
+
+### Never reconstruct a credential you cannot read
+
+A declared managed-secret key is metadata, not a readable value, so an aggregate credential cannot be split in Bicep at all — there is nothing there to split. Do not:
+
+- read a declared key as `<resource>.properties.<key>` or `<resource>.properties.secrets.<key>` to slice or reformat it;
+- invent a discrete property (for example `password`, `accessKey`, `primaryKey`) that the exact schema does not declare, or bind a key name the managed-secret metadata does not declare;
+- author a `Radius.Security/secrets` whose `data` derives parts from an aggregate output or an aggregate from parts — an authored secret is no more a decomposition engine than a composition engine; or
+- generate a `Radius.Resources/*` custom type to obtain a shape the predefined type does not expose (see [custom-resource-types.md](custom-resource-types.md#when-to-generate-a-custom-type)).
+
+### Runtime decomposition needs a proven process
+
+Splitting an aggregate at runtime is the mirror of composing one and carries the mirror hazard: Kubernetes `$(VAR_NAME)` expansion cannot slice a value at all, and slicing in a shell does not percent-decode, so a credential that had to be URL-encoded into the aggregate comes back out wrong in exactly the cases that made encoding necessary. Treat decomposition as available only when one of these is proven:
+
+1. the application performs the split itself — its client accepts the aggregate, or its own configuration parses it into the fields it needs. This is the preferred form, because no wrapper is involved; or
+2. the pinned image already contains the shell, utilities, or executable parser the wrapper would use, the exact container schema supports the entrypoint/argument override, the override preserves the image's own entrypoint contract, and the split decodes correctly for every value the exact Recipe can generate.
+
+Establish that from the pinned image itself, not from its base's reputation: a `scratch`, distroless, or chiseled image normally has no shell, some debug variants of the same images do, and a compiled entrypoint that parses the value can succeed where a shell wrapper is impossible. What modeling cannot do is add a parser to an image it does not build, so for a third-party image the capability either exists at the modeled revision or option 2 does not apply.
+
+### Report the gap
+
+When neither shape matches and no proven decomposition path exists, this is a verified incompatibility: stop before the origin record and do not publish the run. Report, in the user's terms:
+
+- the resource type and API version, the Recipe it resolves to in the target Environment, and the credential keys that Recipe actually exposes;
+- the app-native key that needs a different shape, the source file and line that reads it, and the format that client accepts;
+- why runtime decomposition is unavailable — naming the pinned image and what it lacks when that is the reason; and
+- what would unblock it: the application consuming the exposed shape, or a Recipe/schema that exposes the values the client needs.
+
+Do not return the definition as deployable with the dependency unwired, silently unauthenticated, or hardcoded, and do not ask the user to choose between two wirings that are both wrong.
+
 ## Checklist
 
 - The input property, secret resource, managed-secret path, and key all exist in the exact configured schemas and recipe.
@@ -140,4 +186,5 @@ If neither path exists, report the schema/application contract gap and do not em
 - No secret is hardcoded, assumed URL-safe, or assumed to appear in generic connection variables.
 - A developer-supplied `@secure()` value reaches the app through a schema-sensitive property or by direct assignment to `env.value`. `secretKeyRef` is reserved for a Recipe-generated managed secret through the owner's read-only `<resource>.properties.secrets.name`. Author a secret only for genuine application secrets/config files delivered through a schema-supported mount or for a type whose schema requires `secretName`, never to wrap a Recipe output.
 - Runtime composition preserves dependency order, escaping, encoding, and image entrypoint behavior.
+- The credential shape the exact contract exposes matches the shape the pinned client parses, or the mismatch is reported. Address outputs stand alone only where the exact target Recipe is proven to provision no credential and the reply says so. No undeclared discrete property or secret key is invented, and no runtime split is assumed for an image with no shell.
 - A final credential-bearing URL/config is bound from a matching managed secret or safely composed at runtime; it is never reconstructed in Bicep or an authored secret.

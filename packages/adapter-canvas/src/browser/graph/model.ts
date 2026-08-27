@@ -546,7 +546,19 @@ function codeReferenceParts(codeRef: string): {
   path: string;
   line: number;
 } {
+  if (
+    codeRef !== codeRef.trim() ||
+    /[\u0000-\u001f\u007f]/.test(codeRef) ||
+    // Compiled ARM expressions are not paths. They must be resolved by model
+    // validation before graph rendering rather than becoming dead source links.
+    codeRef.startsWith("[")
+  ) {
+    return { path: "", line: 0 };
+  }
   const lineMatch = /#L([1-9][0-9]*)$/.exec(codeRef);
+  if (codeRef.includes("#") && lineMatch === null) {
+    return { path: "", line: 0 };
+  }
   const rawPath = codeRef.replace(/#L[1-9][0-9]*$/, "").replace(/\\/g, "/");
   const segments = rawPath.split("/").filter((segment) => segment !== "");
   if (
@@ -576,22 +588,52 @@ export function githubRepositoryUrl(repo: string): string {
     : "";
 }
 
+export function githubSourceReferenceUrl(codeRef: string): string {
+  if (codeRef !== codeRef.trim() || /[\u0000-\u001f\u007f]/.test(codeRef)) {
+    return "";
+  }
+  try {
+    const parsed = new URL(codeRef);
+    const segments = parsed.pathname
+      .split("/")
+      .filter((segment) => segment !== "");
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.hostname.toLowerCase() !== "github.com" ||
+      parsed.username ||
+      parsed.password ||
+      parsed.port ||
+      parsed.search ||
+      segments.length < 5 ||
+      segments[2] !== "blob" ||
+      (parsed.hash !== "" && !/^#L[1-9][0-9]*$/.test(parsed.hash))
+    ) {
+      return "";
+    }
+    return parsed.href;
+  } catch {
+    return "";
+  }
+}
+
 // Build the "View source code" URL for a node. When a precise code reference
-// was discovered, deep-link straight to that file (and line). Otherwise fall
-// back to the repo tree at the current branch so the link always resolves to a
-// real page instead of a dead affordance. Empty only when there is no repo
-// context at all.
+// is already an exact GitHub branch/file URL, preserve it. A repo-relative
+// reference is resolved against this graph's repository and branch. Otherwise
+// fall back to the repo tree so the link resolves to a real page instead of a
+// dead affordance. Empty only when neither an exact URL nor repo context exists.
 //
-// The single-backslash regex converts a Windows-generated codeReference to a
-// POSIX path so the link resolves. Unlike the legacy template-literal source
-// (which had to double-escape as /\\\\/g), this is real compiled code, so the
-// regex is written directly as one that matches a single backslash.
+// Validation requires newly authored metadata to use repo-relative POSIX paths.
+// Normalize legacy Windows references here so older stored graphs remain
+// navigable; unlike the legacy template-literal source (which had to
+// double-escape as /\\\\/g), this regex directly matches one backslash.
 export function buildSourceUrl(
   repoUrl: string,
   branch: string,
   codeRef: string,
   branchOverride?: string
 ): string {
+  const exactUrl = githubSourceReferenceUrl(codeRef);
+  if (exactUrl) return exactUrl;
   if (!repoUrl) return "";
   const br = branchOverride || branch;
   const reference = codeReferenceParts(codeRef);

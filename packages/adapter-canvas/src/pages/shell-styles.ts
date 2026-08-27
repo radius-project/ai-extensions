@@ -307,6 +307,40 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   .rad-btn--primary:disabled { background: var(--rad-stroke, #d1d9e0); color: var(--rad-text-tertiary, #656d76); opacity: 1; }
   .resolved-name { font-weight: 400; color: var(--rad-primary); font-size: 12px; }
 
+  /* ─── Run-command callout ─────────────────────────────────────────────── */
+  .rad-command-action {
+    margin-top: 12px; padding: 12px 14px;
+    background: var(--rad-surface);
+    border: 1px solid var(--rad-stroke);
+    border-radius: var(--rad-radius);
+  }
+  .rad-command-action-title { margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--rad-text); }
+  /* The command is the point of the callout: it must be readable verbatim and
+     stay copyable, so it wraps on whitespace rather than being clipped, and a
+     multi-command remediation keeps its newlines. */
+  .rad-command-action-command {
+    display: block; padding: 8px 10px;
+    background: var(--rad-code-bg); color: var(--rad-code-text);
+    border-radius: var(--rad-radius);
+    font-family: var(--rad-mono); font-size: 12px; line-height: 1.5;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .rad-command-action-cwd { margin-top: 6px; font-size: 11px; color: var(--rad-text-tertiary); }
+  .rad-command-action-warning {
+    margin-top: 8px; font-size: 12px; line-height: 1.45; color: var(--rad-warning);
+  }
+  .rad-command-action-confirm {
+    margin-top: 10px; padding: 8px 10px;
+    background: var(--rad-warning-bg); color: var(--rad-text);
+    border: 1px solid var(--rad-warning);
+    border-radius: var(--rad-radius); font-size: 12px; line-height: 1.45;
+  }
+  .rad-command-action-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+  /* The shared button rule carries a 16px top margin for form layouts; inside
+     the callout the row sets its own spacing. */
+  .rad-command-action-buttons .rad-btn { margin-top: 10px; }
+  .rad-command-action-status { margin-top: 8px; font-size: 12px; line-height: 1.45; }
+
   /* ─── Cards, sections, tables (Environments/Deployments) ──────────────── */
   .rad-card {
     background: var(--rad-surface); border: 1px solid var(--rad-stroke);
@@ -377,9 +411,13 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     pointer-events: auto; cursor: pointer;
   }
   .rad-node__head { display: flex; align-items: center; gap: 10px; }
+  .rad-node__head--with-badge { padding-right: 22px; }
   .rad-node__icon { width: 40px; height: 40px; flex: none; object-fit: contain; }
   .rad-node__badge { position: absolute; right: 12px; top: 12px; width: 22px; height: 22px; object-fit: contain; pointer-events: none; }
-  .rad-node__title { font-weight: 600; font-size: 16px; color: var(--rad-text); }
+  .rad-node__title {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-weight: 600; font-size: 16px; color: var(--rad-text);
+  }
   .rad-node__type {
     width: 100%; min-width: 0; overflow: hidden; white-space: nowrap;
     font-size: 13px; line-height: 18px; color: var(--rad-text-tertiary); margin-top: 6px;

@@ -19,6 +19,7 @@ import {
   realClock,
   realGraphVendor
 } from "./support/real-vendor.js";
+import { SHELL_STYLE_CSS } from "../../src/pages/shell-styles.js";
 import type { GraphNodeData } from "../../src/browser/graph/build.js";
 import type { GraphResource } from "../../src/browser/graph/model.js";
 import type { MountedGraph } from "../../src/browser/graph/view.js";
@@ -36,6 +37,7 @@ const RESOURCES = [
 ];
 
 interface Recorded {
+  external: string[];
   local: Array<[string, number, string]>;
   toggled: string[];
   opened: string[];
@@ -58,12 +60,19 @@ function mount(
   options: {
     localSource?: boolean;
     deployMode?: boolean;
+    diffMode?: boolean;
+    baseBranch?: string;
+    workspaceBranch?: string;
     resources?: GraphResource[];
   } = {}
 ): Mounted {
   const settings = resolveGraphSettings({
     localSource: options.localSource ?? true,
     deployMode: options.deployMode,
+    diffMode: options.diffMode,
+    baseBranch: options.baseBranch,
+    workspaceBranch: options.workspaceBranch,
+    repoUrl: "https://github.test/o/r",
     branch: "feature-branch"
   });
   const built = buildGraph(settings, options.resources ?? RESOURCES);
@@ -72,6 +81,7 @@ function mount(
 
   const { host, dispose } = createGraphHost();
   const recorded: Recorded = {
+    external: [],
     local: [],
     toggled: [],
     opened: [],
@@ -88,6 +98,7 @@ function mount(
       recorded.reloads += 1;
     },
     deps: {
+      openExternal: (url) => recorded.external.push(url),
       openLocalSource: (path, line, fallback) =>
         recorded.local.push([path, line, fallback]),
       toggleDetails: (data: GraphNodeData, card: DomElement | null) =>
@@ -123,6 +134,40 @@ describe("graph view in a real browser", () => {
     // cannot make: React Flow only paints once it has measured its container.
     expect(web.getBoundingClientRect().width).toBeGreaterThan(0);
     expect(db.getBoundingClientRect().height).toBeGreaterThan(0);
+  });
+
+  it("keeps long resource names inside the card", async () => {
+    const name = "recommendationservice-".repeat(8);
+    const style = document.createElement("style");
+    style.textContent = SHELL_STYLE_CSS;
+    document.head.appendChild(style);
+    disposers.push(() => style.remove());
+
+    mount({
+      deployMode: true,
+      resources: [
+        {
+          id: "app/recommendation",
+          name,
+          type: "Radius.Compute/containers",
+          deployStatus: "success"
+        }
+      ]
+    });
+
+    const recommendation = await card(name);
+    const title = within(recommendation).getByTitle(name);
+    const badge = within(recommendation).getByAltText("Deployed");
+    const titleBounds = title.getBoundingClientRect();
+    const cardBounds = recommendation.getBoundingClientRect();
+    const badgeBounds = badge.getBoundingClientRect();
+    const styles = getComputedStyle(title);
+
+    expect(title.scrollWidth).toBeGreaterThan(title.clientWidth);
+    expect(styles.overflow).toBe("hidden");
+    expect(styles.textOverflow).toBe("ellipsis");
+    expect(titleBounds.right).toBeLessThanOrEqual(cardBounds.right);
+    expect(titleBounds.right).toBeLessThanOrEqual(badgeBounds.left);
   });
 
   it("renders the deployed parent with its representative concrete root type", async () => {
@@ -218,6 +263,118 @@ describe("graph view in a real browser", () => {
     expect(document.body.contains(link)).toBe(true);
     // The card's own click handler must not also fire for a source click.
     expect(recorded.opened).toEqual([]);
+  });
+
+  it("opens a remote source link through the host without navigating the webview", async () => {
+    const { recorded } = mount({ localSource: false });
+    const web = await card("web");
+    const link = await within(web).findByRole("link", {
+      name: /View source code/
+    });
+
+    await userEvent.click(link);
+
+    expect(recorded.external).toEqual([
+      "https://github.test/o/r/blob/feature-branch/src/web.ts#L4"
+    ]);
+    expect(document.body.contains(link)).toBe(true);
+    expect(recorded.opened).toEqual([]);
+  });
+
+  it("opens an exact GitHub source URL externally from a worktree graph", async () => {
+    const sourceUrl =
+      "https://github.com/acme/widgets/blob/release/src/web.ts#L4";
+    const { recorded } = mount({
+      localSource: true,
+      resources: [
+        {
+          ...RESOURCES[0],
+          codeReference: sourceUrl
+        }
+      ]
+    });
+    const web = await card("web");
+    const link = await within(web).findByRole("link", {
+      name: /View source code/
+    });
+
+    await userEvent.click(link);
+
+    expect(recorded.external).toEqual([sourceUrl]);
+    expect(recorded.local).toEqual([]);
+    expect(document.body.contains(link)).toBe(true);
+  });
+
+  it("routes each diff node's source link by the branch that node lives on", async () => {
+    // The worktree can only have one of the two compared branches checked out,
+    // so a head-branch node must open locally while a removed node, whose file
+    // lives on the base branch, must still go out to the host.
+    const { recorded } = mount({
+      diffMode: true,
+      baseBranch: "main",
+      workspaceBranch: "feature-branch",
+      resources: [
+        {
+          id: "app/web",
+          name: "web",
+          type: "Radius.Compute/containers",
+          codeReference: "src/web.ts#L4",
+          diffStatus: "added"
+        },
+        {
+          id: "app/old-worker",
+          name: "old-worker",
+          type: "Radius.Compute/containers",
+          codeReference: "src/worker.ts#L9",
+          diffStatus: "removed"
+        }
+      ]
+    });
+
+    const web = await card("web");
+    await userEvent.click(
+      await within(web).findByRole("link", { name: /View source code/ })
+    );
+
+    expect(recorded.local).toEqual([["src/web.ts", 4, expect.any(String)]]);
+    expect(recorded.external).toEqual([]);
+
+    const worker = await card("old-worker");
+    await userEvent.click(
+      await within(worker).findByRole("link", { name: /View source code/ })
+    );
+
+    expect(recorded.local).toHaveLength(1);
+    expect(recorded.external).toEqual([
+      "https://github.test/o/r/blob/main/src/worker.ts#L9"
+    ]);
+  });
+
+  it("keeps every diff node remote when the worktree is on neither compared branch", async () => {
+    const { recorded } = mount({
+      diffMode: true,
+      baseBranch: "main",
+      workspaceBranch: "unrelated-branch",
+      resources: [
+        {
+          id: "app/web",
+          name: "web",
+          type: "Radius.Compute/containers",
+          codeReference: "src/web.ts#L4",
+          diffStatus: "added"
+        }
+      ]
+    });
+
+    const web = await card("web");
+    await userEvent.click(
+      await within(web).findByRole("link", { name: /View source code/ })
+    );
+
+    expect(recorded.local).toEqual([]);
+    expect(recorded.external).toEqual([
+      "https://github.test/o/r/blob/feature-branch/src/web.ts#L4"
+    ]);
   });
 
   it("marks the source row disabled when the node has no reference", async () => {

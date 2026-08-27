@@ -105,6 +105,10 @@ function dependencies(
       throw new Error("runCli not stubbed");
     },
     isUuid,
+    createTemporaryKubeconfig: () => ({
+      path: "/tmp/radius-kubeconfig-test",
+      remove: () => {}
+    }),
     parseServedReposFromSubjects: () => {
       throw new Error("parseServedReposFromSubjects not stubbed");
     },
@@ -459,10 +463,10 @@ describe("azure-discovery routes (SU-08)", () => {
         sub,
       groups: (sub = "") =>
         "az group list --query [].{id:name, name:name} -o json" + sub,
-      credentials: (cluster: string, rg: string) =>
-        `az aks get-credentials --name ${cluster} --resource-group ${rg} --overwrite-existing`,
+      credentials: (cluster: string, rg: string, sub = "") =>
+        `az aks get-credentials --name ${cluster} --resource-group ${rg} --file /tmp/radius-kubeconfig-test --overwrite-existing${sub}`,
       namespaces:
-        "kubectl get namespaces -o jsonpath={.items[*].metadata.name}",
+        "kubectl --kubeconfig /tmp/radius-kubeconfig-test get namespaces -o jsonpath={.items[*].metadata.name}",
       eks: "aws eks list-clusters --query clusters --output json",
       vpcs: "aws ec2 describe-vpcs --query Vpcs[].{id:VpcId, name:VpcId} --output json",
       subnets:
@@ -573,7 +577,8 @@ describe("azure-discovery routes (SU-08)", () => {
         expect(recording.contentType, bad).toBe("application/json");
         expect(JSON.parse(recording.body), bad).toEqual({
           error: `Invalid subscriptionId "${bad}" (expected a GUID).`,
-          ...REFUSAL
+          ...REFUSAL,
+          namespaces: []
         });
       }
     });
@@ -602,7 +607,7 @@ describe("azure-discovery routes (SU-08)", () => {
       expect(JSON.parse(recording.body)).toEqual({
         clusters: [],
         resourceGroups: [],
-        namespaces: NS_TRIPLE,
+        namespaces: [],
         vpcs: [],
         subnets: []
       });
@@ -646,28 +651,41 @@ describe("azure-discovery routes (SU-08)", () => {
       expect(JSON.parse(recording.body)).toEqual({
         clusters: [],
         resourceGroups: [],
-        namespaces: NS_TRIPLE,
+        namespaces: [],
         vpcs: [],
         subnets: []
       });
     });
 
-    it("projects clusters and resource groups and reads namespaces from the cluster", async () => {
+    it("projects resources and reads namespaces from the explicitly selected cluster", async () => {
       const cli = cliFake({
         [CLI.aks()]: JSON.stringify([
-          { id: "aks-1", name: "aks-1", resourceGroup: "rg-1" },
+          { id: "aks-first", name: "aks-first", resourceGroup: "rg-first" },
+          {
+            id: "aks-selected",
+            name: "aks-selected",
+            resourceGroup: "rg-selected"
+          },
           { id: 7, name: null },
           null,
           7,
           []
         ]),
-        [CLI.groups()]: JSON.stringify([{ id: "rg-1", name: "rg-1" }]),
-        [CLI.credentials("aks-1", "rg-1")]: "",
+        [CLI.groups()]: JSON.stringify([
+          { id: "rg-first", name: "rg-first" },
+          { id: "rg-selected", name: "rg-selected" }
+        ]),
+        [CLI.credentials("aks-selected", "rg-selected")]: "",
         [CLI.namespaces]: '"default" "radius-system"  '
       });
-      const recording = await discover(JSON.stringify({ provider: "azure" }), {
-        runCli: cli.runCli
-      });
+      const recording = await discover(
+        JSON.stringify({
+          provider: "azure",
+          resourceGroup: "rg-selected",
+          cluster: "aks-selected"
+        }),
+        { runCli: cli.runCli }
+      );
 
       expect(recording.status).toBe(200);
       expect(recording.contentType).toBe("application/json");
@@ -675,13 +693,21 @@ describe("azure-discovery routes (SU-08)", () => {
       // and the kubectl jsonpath output is de-quoted, split, and compacted.
       expect(JSON.parse(recording.body)).toEqual({
         clusters: [
-          { id: "aks-1", name: "aks-1", resourceGroup: "rg-1" },
+          { id: "aks-first", name: "aks-first", resourceGroup: "rg-first" },
+          {
+            id: "aks-selected",
+            name: "aks-selected",
+            resourceGroup: "rg-selected"
+          },
           { id: "", name: "", resourceGroup: "" },
           { id: "", name: "", resourceGroup: "" },
           { id: "", name: "", resourceGroup: "" },
           { id: "", name: "", resourceGroup: "" }
         ],
-        resourceGroups: [{ id: "rg-1", name: "rg-1", resourceGroup: "" }],
+        resourceGroups: [
+          { id: "rg-first", name: "rg-first", resourceGroup: "" },
+          { id: "rg-selected", name: "rg-selected", resourceGroup: "" }
+        ],
         namespaces: ["default", "radius-system"],
         vpcs: [],
         subnets: []
@@ -690,7 +716,10 @@ describe("azure-discovery routes (SU-08)", () => {
       expect(cli.calls).toEqual([
         { line: CLI.aks(), timeout: 30000 },
         { line: CLI.groups(), timeout: 30000 },
-        { line: CLI.credentials("aks-1", "rg-1"), timeout: 20000 },
+        {
+          line: CLI.credentials("aks-selected", "rg-selected"),
+          timeout: 20000
+        },
         { line: CLI.namespaces, timeout: 10000 }
       ]);
     });
@@ -708,9 +737,7 @@ describe("azure-discovery routes (SU-08)", () => {
       expect(JSON.parse(recording.body)).toEqual({
         clusters: [],
         resourceGroups: [],
-        // No cluster to reach, so the namespace list falls back rather than
-        // being left empty.
-        namespaces: NS_TRIPLE,
+        namespaces: [],
         vpcs: [],
         subnets: [],
         errors: { clusters: "aks denied", resourceGroups: "groups exploded" }
@@ -732,10 +759,7 @@ describe("azure-discovery routes (SU-08)", () => {
       expect(parsed.errors.clusters).toBe("x".repeat(800));
     });
 
-    it("falls back to the default namespaces when the cluster row carries no name", async () => {
-      // A cluster exists but its id is empty, so `get-credentials` is skipped
-      // entirely. `runCli` is scripted for only the two list calls, so
-      // attempting the credentials call would throw.
+    it("does not infer a namespace target from a discovered cluster", async () => {
       const cli = cliFake({
         [CLI.aks()]: JSON.stringify([{ name: "unnamed" }]),
         [CLI.groups()]: JSON.stringify([{ id: "rg-1", name: "rg-1" }])
@@ -751,10 +775,10 @@ describe("azure-discovery routes (SU-08)", () => {
       ]);
       expect(
         (JSON.parse(recording.body) as { namespaces: string[] }).namespaces
-      ).toEqual(NS_TRIPLE);
+      ).toEqual([]);
     });
 
-    it("falls back to the default namespaces when no resource group was discovered", async () => {
+    it("does not infer a namespace target from discovered resource groups", async () => {
       const cli = cliFake({
         [CLI.aks()]: JSON.stringify([{ id: "aks-1", name: "aks-1" }]),
         [CLI.groups()]: "[]"
@@ -769,10 +793,10 @@ describe("azure-discovery routes (SU-08)", () => {
       ]);
       expect(
         (JSON.parse(recording.body) as { namespaces: string[] }).namespaces
-      ).toEqual(NS_TRIPLE);
+      ).toEqual([]);
     });
 
-    it("falls back to the default namespaces when kubectl or get-credentials fails", async () => {
+    it("reports namespace discovery failures without a static fallback", async () => {
       for (const failing of [
         CLI.credentials("aks-1", "rg-1"),
         CLI.namespaces
@@ -787,7 +811,11 @@ describe("azure-discovery routes (SU-08)", () => {
           [failing]: { throws: new Error("kube down") }
         });
         const recording = await discover(
-          JSON.stringify({ provider: "azure" }),
+          JSON.stringify({
+            provider: "azure",
+            resourceGroup: "rg-1",
+            cluster: "aks-1"
+          }),
           {
             runCli: cli.runCli
           }
@@ -796,12 +824,10 @@ describe("azure-discovery routes (SU-08)", () => {
         expect(recording.status, failing).toBe(200);
         const parsed = JSON.parse(recording.body) as {
           namespaces: string[];
-          errors?: unknown;
+          errors?: Record<string, string>;
         };
-        // The namespace failure is absorbed by the fallback and never becomes
-        // an `errors` entry, unlike the two list queries above.
-        expect(parsed.namespaces, failing).toEqual(NS_TRIPLE);
-        expect(parsed.errors, failing).toBeUndefined();
+        expect(parsed.namespaces, failing).toEqual([]);
+        expect(parsed.errors?.namespaces, failing).toBe("kube down");
       }
     });
 
@@ -863,7 +889,8 @@ describe("azure-discovery routes (SU-08)", () => {
 
       expect(JSON.parse(recording.body)).toEqual({
         error: 'Invalid subscriptionId "x&calc" (expected a GUID).',
-        ...REFUSAL
+        ...REFUSAL,
+        namespaces: []
       });
     });
 

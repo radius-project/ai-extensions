@@ -1,5 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { stateRegistryForEnvironment } from "@radius-project/core";
+import {
+  remediationView,
+  stateRegistryForEnvironment
+} from "@radius-project/core";
 import type {
   GitHubAccountCoordinator,
   GitHubAccountRestoration
@@ -30,6 +33,13 @@ export interface GitHubAccountReadiness {
     identity: GitHubReadinessCheck;
   };
   repair: string | null;
+  /**
+   * The structured form of `repair` when the fix is a command Radius knows how
+   * to run. `repair` stays as prose for the cases that are not a command (a
+   * missing repository grant, a failed account restoration), so the two are
+   * not redundant.
+   */
+  repairRemediation: { id: string; params: Record<string, string> } | null;
   restoration: GitHubAccountRestoration | null;
 }
 
@@ -221,12 +231,17 @@ function hasScope(executor: SelectedGhExecutor, scope: string): boolean {
   return executor.scopes.includes(scope);
 }
 
+interface RepairGuidance {
+  readonly repair: string | null;
+  readonly remediation: { id: string; params: Record<string, string> } | null;
+}
+
 function repairGuidance(
   login: string,
   needsWorkflow: boolean,
   needsPackages: boolean,
   repositoryReady: boolean
-): string | null {
+): RepairGuidance {
   const requiredPermissions: string[] = [];
   const refreshScopes: string[] = [];
   if (needsWorkflow) {
@@ -242,15 +257,32 @@ function repairGuidance(
       requiredPermissions.length === 1 ?
         `the ${requiredPermissions[0]} permission`
       : `the ${requiredPermissions.join(" and ")} permissions`;
-    const refresh = `gh auth refresh --hostname github.com --scopes ${refreshScopes.join(
-      ","
-    )}`;
-    return `The account @${login} needs ${permissions} to proceed. In the terminal, run: gh auth switch --hostname github.com --user ${login}. Then run: ${refresh}. This will make @${login} the active GitHub CLI account if it is not already active.`;
+    // Derive the command from the remediation registry rather than writing it
+    // out here. Hand-built copies drift from what the Copy/Run buttons offer,
+    // and they miss registry-wide rules -- most recently the switch to one
+    // command per line, because `&&` will not parse in Windows PowerShell 5.1.
+    const fix = remediationView("github-account-scopes", {
+      login,
+      ...(needsWorkflow ? { workflow: "true" } : {}),
+      ...(needsPackages ? { packages: "true" } : {})
+    });
+    return fix.runnable ?
+        {
+          repair: `The account @${login} needs ${permissions} to proceed. In the terminal, run:\n${fix.command}\n${fix.warning}`,
+          remediation: { id: fix.id, params: { ...fix.params } }
+        }
+      : {
+          repair: `The account @${login} needs ${permissions} to proceed. Grant the missing scopes with GitHub CLI, or select an account that already has them.`,
+          remediation: null
+        };
   }
   if (!repositoryReady) {
-    return `Grant @${login} repository administrator access, or select an account that can administer this repository.`;
+    return {
+      repair: `Grant @${login} repository administrator access, or select an account that can administer this repository.`,
+      remediation: null
+    };
   }
-  return null;
+  return { repair: null, remediation: null };
 }
 
 async function inspectRepository(
@@ -386,7 +418,10 @@ export function createGitHubAccountReadinessService(
               lease.value.needsPackages,
               lease.value.repositoryReady
             )
-          : lease.restoration.guidance;
+          : {
+              repair: lease.restoration.guidance,
+              remediation: null
+            };
         return {
           ready,
           login: lease.selectedLogin,
@@ -396,7 +431,8 @@ export function createGitHubAccountReadinessService(
               "Ready to configure deployments"
             : "Additional GitHub access is required",
           checks,
-          repair,
+          repair: repair.repair,
+          repairRemediation: repair.remediation,
           restoration: lease.restoration
         };
       } catch (error) {
@@ -415,6 +451,7 @@ export function createGitHubAccountReadinessService(
             packages: check
           },
           repair: null,
+          repairRemediation: null,
           restoration: null
         };
       }

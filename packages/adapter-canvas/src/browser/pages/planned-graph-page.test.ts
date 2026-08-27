@@ -20,7 +20,8 @@ import {
   initializePlannedGraphPage,
   PLANNED_GRAPH_STATE_ID,
   PLAN_DEBOUNCE_MS,
-  PLAN_PROGRESS_MS
+  PLAN_PROGRESS_MS,
+  PLAN_RETRY_MS
 } from "./planned-graph-page.js";
 import { DEPLOYMENTS_PATH } from "../repositories.js";
 
@@ -215,6 +216,155 @@ describe("initializePlannedGraphPage", () => {
     expect(environment.listenerCount()).toBe(0);
   });
 
+  it("reconciles freshness for cached planned resources by invoking the plan workflow", async () => {
+    const { browser, status } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    let planCalls = 0;
+    let requestBody = "";
+    browser.net.handle("/api/plan-graph", (init) => {
+      planCalls++;
+      requestBody = String(init?.body ?? "");
+      return jsonResponse({ refreshed: true });
+    });
+    const render = vi.fn();
+    initializePlannedGraphPage(browser.context, {
+      radiusRenderGraph: render,
+      radiusSetGraphLoading: vi.fn()
+    });
+    await flushPromises();
+    // After selectors load, queue(true) fires immediately (no debounce).
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(planCalls).toBe(1);
+    expect(requestBody).toContain('"refresh":true');
+    expect(requestBody).toContain('"restartWait":true');
+    expect(render).toHaveBeenCalledOnce();
+    expect(status.textContent).toBe("The planned deployment is current.");
+  });
+
+  it("keeps the cached planned graph on screen while a refresh reconciles freshness", async () => {
+    const { browser, status } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({ refreshed: true })
+    );
+    const destroy = vi.fn();
+    const render = vi.fn(() => ({ update: vi.fn(), destroy }));
+    const setLoading = vi.fn();
+    initializePlannedGraphPage(browser.context, {
+      radiusRenderGraph: render,
+      radiusSetGraphLoading: setLoading
+    });
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    // The refresh exists to confirm the graph that is already rendered, and the
+    // `refreshed` reply returns without re-rendering. Swapping in the loading
+    // state here would leave the page permanently blank.
+    expect(setLoading).not.toHaveBeenCalled();
+    expect(destroy).not.toHaveBeenCalled();
+    expect(render).toHaveBeenCalledOnce();
+    expect(status.textContent).toBe("The planned deployment is current.");
+  });
+
+  it("shows the loading state when the user re-plans an already rendered graph", async () => {
+    const { browser, branch } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({ refreshed: true })
+    );
+    const destroy = vi.fn();
+    const render = vi.fn(() => ({ update: vi.fn(), destroy }));
+    const setLoading = vi.fn();
+    initializePlannedGraphPage(browser.context, {
+      radiusRenderGraph: render,
+      radiusSetGraphLoading: setLoading
+    });
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+    expect(setLoading).not.toHaveBeenCalled();
+
+    branch.value = "other";
+    branch.dispatch("change");
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+
+    // A user-driven plan replaces the graph, so the stale one must come down.
+    expect(setLoading).toHaveBeenCalledOnce();
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
+  it("reloads when cached planned resources are stale and the workflow says so", async () => {
+    const { browser } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    browser.net.handle("/api/plan-graph", () => jsonResponse({ reload: true }));
+    initializePlannedGraphPage(browser.context, {
+      radiusRenderGraph: vi.fn(),
+      radiusSetGraphLoading: vi.fn()
+    });
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(browser.nav.reloads).toBe(1);
+  });
+
+  it("uses refresh mode only for the initial cached reconciliation", async () => {
+    const { browser, branch } = fixture({
+      resources: [{ id: "app/web" }]
+    });
+    const bodies: string[] = [];
+    browser.net.handle("/api/plan-graph", (init) => {
+      bodies.push(String(init?.body ?? ""));
+      return jsonResponse(
+        bodies.length === 1 ? { refreshed: true } : { reload: true }
+      );
+    });
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    branch.value = "another";
+    branch.dispatch("change");
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toContain('"refresh":true');
+    expect(bodies[0]).toContain('"restartWait":true');
+    expect(bodies[1]).toContain('"refresh":false');
+    expect(bodies[1]).toContain('"restartWait":true');
+  });
+
+  it("omits an empty environment while reconciling cached resources", async () => {
+    const { browser } = fixture({
+      resources: [{ id: "app/web" }],
+      environment: "",
+      envListing: "error"
+    });
+    let requestBody = "";
+    browser.net.handle("/api/plan-graph", (init) => {
+      requestBody = String(init?.body ?? "");
+      return jsonResponse({ refreshed: true });
+    });
+
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(requestBody).toContain('"refresh":true');
+    expect(requestBody).not.toContain('"environment"');
+  });
+
   it("coalesces changes and ignores an outdated plan response", async () => {
     const { browser, branch, status } = fixture();
     browser.net.handle("/api/plan-graph", () =>
@@ -355,7 +505,9 @@ describe("initializePlannedGraphPage", () => {
       resources: [{ id: "app/web" }],
       envListing: "error"
     });
-    browser.net.handle("/api/plan-graph", () => jsonResponse({}));
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({ refreshed: true })
+    );
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
 
@@ -394,15 +546,21 @@ describe("initializePlannedGraphPage", () => {
   });
 
   it("sets a create-environment message on the container via the initial follow-up", async () => {
-    const { browser, container } = fixture({
+    const { browser, container, status } = fixture({
       envListing: "empty",
       resources: [{ id: "app/web" }]
     });
     container.innerHTML = "<div>stale</div>";
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({ refreshed: true })
+    );
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
 
-    expect(container.innerHTML).toContain(
+    expect(container.innerHTML).toBe("<div>stale</div>");
+    expect(status.textContent).toContain(
       "Create an environment to preview the planned deployment for this application."
     );
   });
@@ -412,7 +570,9 @@ describe("initializePlannedGraphPage", () => {
       envListing: "empty",
       resources: [{ id: "app/web" }]
     });
-    browser.net.handle("/api/plan-graph", () => jsonResponse({}));
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({ refreshed: true })
+    );
     initializePlannedGraphPage(browser.context, globals());
     await flushPromises();
     container.innerHTML = "<div>stale</div>";
@@ -684,6 +844,89 @@ describe("initializePlannedGraphPage", () => {
     );
   });
 
+  // Nothing announces the model's arrival, so a page that reported the wait
+  // once and then stopped asking never recovered — even after the model landed.
+  it("keeps asking until the model lands, then renders the planned graph", async () => {
+    const renderGraph = vi.fn();
+    const { browser, status } = fixture();
+    let calls = 0;
+    const bodies: string[] = [];
+    browser.net.handle("/api/plan-graph", (init) => {
+      calls++;
+      bodies.push(String(init?.body ?? ""));
+      return calls < 3 ?
+          jsonResponse({ needsAppBicep: true })
+        : jsonResponse({ reload: true });
+    });
+    initializePlannedGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: renderGraph })
+    );
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      browser.clock.tick(PLAN_RETRY_MS);
+      await flushPromises();
+      browser.clock.tick(0);
+      await flushPromises();
+    }
+
+    expect(calls).toBe(3);
+    expect(bodies[0]).toContain('"restartWait":true');
+    expect(bodies[1]).toContain('"restartWait":false');
+    expect(bodies[2]).toContain('"restartWait":false');
+    expect(browser.nav.reloads).toBe(1);
+    expect(status.textContent).toContain("Copilot is generating");
+  });
+
+  it("stops asking once the server ends the wait", async () => {
+    const { browser, status } = fixture();
+    let calls = 0;
+    browser.net.handle("/api/plan-graph", () => {
+      calls++;
+      return jsonResponse({
+        error: "No modeling run has started.",
+        appBicepWaitExpired: true
+      });
+    });
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+    browser.clock.tick(PLAN_RETRY_MS * 5);
+    await flushPromises();
+
+    expect(calls).toBe(1);
+    expect(status.textContent).toBe("Error: No modeling run has started.");
+  });
+
+  // A pending retry must not fire a request for a selection the user replaced.
+  it("abandons a pending retry when the selection changes", async () => {
+    const { browser, branch } = fixture();
+    const bodies: string[] = [];
+    browser.net.handle("/api/plan-graph", (init) => {
+      bodies.push(String(init?.body ?? ""));
+      return jsonResponse({ needsAppBicep: true });
+    });
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    branch.value = "another";
+    branch.dispatch("change");
+    browser.clock.tick(PLAN_DEBOUNCE_MS);
+    await flushPromises();
+    const settled = bodies.length;
+    browser.clock.tick(PLAN_RETRY_MS);
+    await flushPromises();
+
+    expect(bodies).toHaveLength(settled + 1);
+    expect(bodies.at(-1)).toContain('"branch":"another"');
+  });
+
   it("keeps external error detail out of user-visible failures", async () => {
     const { browser, status } = fixture();
     browser.net.handle("/api/plan-graph", () =>
@@ -705,8 +948,11 @@ describe("initializePlannedGraphPage", () => {
     const { browser, branch } = fixture();
     const first = createDeferred<HttpResponse>();
     let calls = 0;
-    browser.net.handle("/api/plan-graph", () => {
+    const requestedBranches: string[] = [];
+    browser.net.handle("/api/plan-graph", (init) => {
       calls++;
+      const body = JSON.parse(String(init?.body)) as { branch?: string };
+      requestedBranches.push(body.branch || "");
       return calls === 1 ? first.promise : jsonResponse({ reload: true });
     });
     initializePlannedGraphPage(browser.context, globals());
@@ -719,13 +965,11 @@ describe("initializePlannedGraphPage", () => {
     browser.clock.tick(PLAN_DEBOUNCE_MS);
     await flushPromises();
 
-    // Requests are serialized, so the replacement is still queued: it is only
-    // released once the superseded request settles.
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
+    expect(browser.net.aborted).toBe(1);
+    expect(requestedBranches).toEqual(["feature", "another"]);
 
     first.reject(new Error("stale plan failure"));
-    await flushPromises();
-    browser.clock.tick(PLAN_DEBOUNCE_MS);
     await flushPromises();
 
     expect(calls).toBe(2);
@@ -830,10 +1074,12 @@ describe("initializePlannedGraphPage", () => {
     expect(hint.innerHTML).toContain(
       "deployment plan is still updating, so deployment is temporarily unavailable"
     );
+    expect(
+      browser.net.calls.some((call) => call.url === "/api/plan-graph")
+    ).toBe(true);
 
     plan.resolve(jsonResponse({ reload: true }));
     await flushPromises();
-    expect(button.disabled).toBe(false);
   });
 
   it("abandons a queued plan when the page is torn down before it drains", async () => {
