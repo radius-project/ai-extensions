@@ -1,13 +1,13 @@
 ---
 name: radius-architecture-documenter
-description: 'Document the Radius Canvas extension architecture with Mermaid diagrams. Use for: generating architecture overviews, component diagrams, sequence diagrams from code, explaining how the canvas adapter and shared core work, answering architecture questions, producing entity-relationship diagrams, and distilling TypeScript/ESM code into human-readable descriptions. Writes living architecture docs to docs/architecture/. For proposing new changes with options and trade-offs, use radius-design-doc instead.'
+description: 'Document the Radius Canvas architecture with Mermaid diagrams. Use for: generating architecture overviews, component diagrams, sequence diagrams from code, explaining how the canvas adapter and shared core work, answering architecture questions, producing entity-relationship diagrams, and distilling TypeScript/ESM code into human-readable descriptions. Writes living architecture docs to docs/architecture/. For proposing new changes with options and trade-offs, use radius-design-doc instead.'
 argument-hint: 'Describe what part of the architecture to document or ask an architecture question'
 user-invocable: true
 ---
 
 # Architecture Documenter
 
-Expert skill for analyzing this repository, documenting how the Radius Canvas extension works today, and generating accurate Mermaid diagrams grounded in actual source code. Output goes in [`docs/architecture/`](../../../docs/architecture/README.md).
+Expert skill for analyzing this repository, documenting how Radius Canvas works today, and generating accurate Mermaid diagrams grounded in actual source code. Output goes in [`docs/architecture/`](../../../docs/architecture/README.md).
 
 ## Architecture doc or design doc?
 
