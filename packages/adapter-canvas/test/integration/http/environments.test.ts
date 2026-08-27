@@ -11,7 +11,11 @@ import {
   buildDeleteStages,
   createOperation,
   recordGitHubEnvironment,
-  toClientView
+  toClientView,
+  STAGE_DELETE_RADIUS_ENV,
+  STAGE_DELETE_CREDENTIAL,
+  STAGE_DELETE_GITHUB_ENV,
+  STAGE_REVIEW_APP_REGISTRATION
 } from "../../../src/operations.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
@@ -597,6 +601,151 @@ describe("the async delete route through its background runner", () => {
     ]);
     expect(after.status).toBe(200);
     expect(names(after.body)).toEqual([]);
+  });
+
+  // The success case above proves a completed teardown drops the environment
+  // from the picker. This one drives the same real route and background runner
+  // when the GitHub-environment stage fails conclusively: the operation must end
+  // as a retryable partial failure (never a success acknowledgement), the earlier
+  // Radius and credential stages must stay succeeded so a retry resumes at the
+  // GitHub stage, and — because the environment may still exist — the failed
+  // delete must NOT invalidate the listing cache, so the picker keeps offering it.
+  it("keeps the environment listed and ends failed_partial when the github delete fails", async () => {
+    const runnerFinished = deferred();
+    let harness: Harness;
+    let capturedOp:
+      | {
+          state: string;
+          failure?: { code?: string; message?: string };
+          stages: Array<{ id: string; state: string }>;
+        }
+      | undefined;
+    const stageState = (id: string): string | undefined =>
+      capturedOp?.stages.find((entry) => entry.id === id)?.state;
+
+    const deleteDeps: Partial<EnvironmentsDependencies> = {
+      discoverEnvironmentTarget: async () => ({
+        provider: "azure",
+        clientId: "app-xyz",
+        tenantId: "tenant-1",
+        repoId: 7
+      }),
+      createOperation: (input) =>
+        createOperation(input) as ReturnType<
+          NonNullable<EnvironmentsDependencies["createOperation"]>
+        >,
+      buildDeleteStages: (options) => buildDeleteStages(options),
+      startOperation: (op) => ({ ok: true as const, operation: op }),
+      toClientView: (op) => toClientView(op),
+      persistOperations: async () => {},
+      logError: () => {},
+      scheduleEnvironmentOperation: (_instanceId, op) => {
+        capturedOp = op as unknown as typeof capturedOp;
+        void runEnvironmentDeletion(op as never, {
+          deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
+          withCredentialProvenanceLock: (work) => work(),
+          runAz: async (args) => {
+            const credential = {
+              id: "credential-1",
+              name: "github-octo-app-dev-mutable",
+              issuer: "https://token.actions.githubusercontent.com",
+              subject: "repo:octo/app:environment:dev",
+              audiences: ["api://AzureADTokenExchange"]
+            };
+            return {
+              code: 0,
+              stdout:
+                args.includes("list") ? JSON.stringify([credential])
+                : args.includes("show") ? JSON.stringify(credential)
+                : "",
+              stderr: ""
+            };
+          },
+          readAzureIdentity: async () => ({
+            tenantId: "tenant-1",
+            applicationObjectId: "app-object-1"
+          }),
+          readCredentialProvenance: () => [
+            {
+              schemaVersion: 2,
+              repo: "octo/app",
+              repoId: 7,
+              environment: "dev",
+              tenantId: "tenant-1",
+              clientId: "app-xyz",
+              applicationObjectId: "app-object-1",
+              credentialId: "credential-1",
+              name: "github-octo-app-dev-mutable",
+              subject: "repo:octo/app:environment:dev",
+              issuer: "https://token.actions.githubusercontent.com",
+              audiences: ["api://AzureADTokenExchange"],
+              subjectConfig: { useDefault: true },
+              origin: "created",
+              operationId: "setup-op",
+              recordedAt: "2026-08-22T00:00:00.000Z"
+            }
+          ],
+          removeCredentialProvenance: async () => {},
+          clearEnvironmentCredentialProvenance: async () => {},
+          // The GitHub environment delete cannot be confirmed (403). The real
+          // primitive returns a `failed` outcome and never invalidates the
+          // listing cache, so the picker keeps offering the environment that
+          // may still exist.
+          deleteGitHubEnvironment: ({ repo, environment }) =>
+            deleteGitHubEnvironmentIdempotent(repo, environment, {
+              runGh: async (args) => {
+                harness.commands.push(["gh", ...args]);
+                return { code: 1, stderr: "HTTP 403: forbidden" };
+              },
+              invalidateEnvListCache: (repo) => {
+                harness.invalidate(repo);
+              }
+            }),
+          persist: async () => {},
+          errorMessage: (error) =>
+            error instanceof Error ? error.message : String(error)
+        })
+          .catch(() => {})
+          .finally(() => runnerFinished.resolve());
+        return true;
+      }
+    };
+    harness = await start(listingScript("7\tdev"), deleteDeps);
+
+    // Populate the cache with the environment before the failed deletion runs.
+    expect(names((await harness.list()).body)).toEqual(["dev"]);
+
+    const response = await fetch(`${harness.baseUrl}/api/delete-environment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repo: REPO, environment: "dev" })
+    });
+    expect(response.status).toBe(202);
+
+    await runnerFinished.promise;
+
+    // The operation ended as a retryable partial failure at the GitHub stage,
+    // with the completed earlier stages retained so a retry resumes there.
+    expect(capturedOp?.state).toBe("failed_partial");
+    expect(capturedOp?.failure?.code).toBe("github-env-delete-failed");
+    expect(stageState(STAGE_DELETE_RADIUS_ENV)).toBe("succeeded");
+    expect(stageState(STAGE_DELETE_CREDENTIAL)).toBe("succeeded");
+    expect(stageState(STAGE_DELETE_GITHUB_ENV)).toBe("failed");
+    expect(stageState(STAGE_REVIEW_APP_REGISTRATION)).not.toBe("succeeded");
+
+    // The runner really reached the GitHub stage and attempted the delete.
+    expect(harness.commands).toContainEqual([
+      "gh",
+      "api",
+      "--method",
+      "DELETE",
+      "/repos/octo/app/environments/dev"
+    ]);
+
+    // The failed delete did not invalidate the cache: even though the underlying
+    // data now reports no environments, the picker still serves the cached "dev".
+    harness.setScript(listingScript(""));
+    expect(names((await harness.list()).body)).toEqual(["dev"]);
   });
 });
 
