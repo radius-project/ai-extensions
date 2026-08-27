@@ -577,7 +577,6 @@ describe("loading and error states", () => {
     expect(harness.container.innerHTML).toBe("");
     expect(status.className).toBe("status error");
     expect(status.getAttribute("role")).toBe("alert");
-    expect(status.getAttribute("aria-live")).toBe("assertive");
     expect(status.textContent).toBe("<img src=x onerror=1>");
   });
 

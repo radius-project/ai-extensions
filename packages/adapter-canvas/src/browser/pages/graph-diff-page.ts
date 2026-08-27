@@ -98,7 +98,8 @@ export function initializeGraphDiffPage(
     controller?.destroy();
     controller = null;
     showGraphModelingFailure(context, setError, message, {
-      statusIds: "diff-status",
+      containerId: "graph-container",
+      statusIds: ["diff-status"],
       staleContentIds: ["graph-diff-summary"]
     });
     modelingFailureVisible = true;
@@ -154,6 +155,8 @@ export function initializeGraphDiffPage(
     if (modelingFailureVisible) {
       const graphContainer = context.dom.byId("graph-container");
       if (graphContainer) graphContainer.innerHTML = "";
+      const summary = context.dom.byId("graph-diff-summary");
+      if (summary) summary.style.display = "";
       modelingFailureVisible = false;
     }
     const requestGeneration = ++generation;

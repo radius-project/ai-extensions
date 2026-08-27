@@ -1,11 +1,5 @@
 import { readBoolean, readString } from "../json.js";
-import type { DomElement } from "../ports.js";
-
-type GraphModelingFailureContext = {
-  readonly dom: {
-    byId(elementId: string): Pick<DomElement, "style" | "textContent"> | null;
-  };
-};
+import type { BrowserContext } from "../ports.js";
 
 export type GraphErrorRenderer = (
   containerId: string,
@@ -13,7 +7,8 @@ export type GraphErrorRenderer = (
 ) => unknown;
 
 export interface GraphModelingFailureElements {
-  readonly statusIds: string | readonly string[];
+  readonly containerId: string;
+  readonly statusIds: readonly string[];
   readonly staleContentIds?: readonly string[];
 }
 
@@ -26,17 +21,13 @@ export function unsupportedGraphModelMessage(payload: unknown): string | null {
 }
 
 export function showGraphModelingFailure(
-  context: GraphModelingFailureContext,
+  context: BrowserContext,
   renderError: GraphErrorRenderer,
   message: string,
   elements: GraphModelingFailureElements
 ): void {
-  renderError("graph-container", message);
-  const ids =
-    typeof elements.statusIds === "string" ?
-      [elements.statusIds]
-    : elements.statusIds;
-  const status = ids
+  renderError(elements.containerId, message);
+  const status = elements.statusIds
     .map((statusId) => context.dom.byId(statusId))
     .find((element) => element !== null);
   if (status) {

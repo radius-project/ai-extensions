@@ -115,7 +115,8 @@ export function initializePlannedGraphPage(
     const wrapper = context.dom.byId("graph-container-wrapper");
     if (wrapper) wrapper.innerHTML = '<div id="graph-container"></div>';
     showGraphModelingFailure(context, setError, message, {
-      statusIds: "plan-status"
+      containerId: "graph-container",
+      statusIds: ["plan-status"]
     });
     if (button) {
       button.disabled = true;

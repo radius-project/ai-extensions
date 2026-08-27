@@ -772,7 +772,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await gotoCanvas(page, canvas, "graph");
 
     await expect(page.locator("#graph-container .status.error")).toHaveText(
-      refusal
+      `Unable to refresh the application graph: ${refusal}`
     );
     await expect(
       page.locator("#graph-container .status.error")

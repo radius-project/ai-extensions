@@ -566,12 +566,14 @@ describe("initializeGraphDiffPage", () => {
   it("shows the refusal verbatim when the skill cannot model the repo", async () => {
     const { browser, head, status } = fixture();
     const setError = vi.fn();
-    browser.net.handle("/api/diff-branches", () =>
-      jsonResponse({
+    let requests = 0;
+    browser.net.handle("/api/diff-branches", () => {
+      requests++;
+      return jsonResponse({
         error: "octo/app has no Dockerfile on feature/x.",
         appBicepUnsupported: true
-      })
-    );
+      });
+    });
     initializeGraphDiffPage(browser.context, {
       radiusRenderGraph: vi.fn(),
       radiusSetGraphError: setError
@@ -587,6 +589,9 @@ describe("initializeGraphDiffPage", () => {
       "octo/app has no Dockerfile on feature/x."
     );
     expect(status.style.display).toBe("none");
+    browser.clock.tick(DIFF_RETRY_MS * 2);
+    await flushPromises();
+    expect(requests).toBe(1);
   });
 
   it("falls back to a generic refusal message without an error string", async () => {
@@ -632,6 +637,30 @@ describe("initializeGraphDiffPage", () => {
     await flushPromises();
 
     expect(summary.style.display).toBe("none");
+  });
+
+  it("restores the diff summary when a new comparison starts", async () => {
+    const { browser, head, summary } = fixture({
+      resources: [{ id: "existing", diffStatus: "unchanged" }]
+    });
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({
+        error: "octo/app has no Dockerfile on feature/x.",
+        appBicepUnsupported: true
+      })
+    );
+    initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn()
+    });
+    await flushPromises();
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    expect(summary.style.display).toBe("none");
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+
+    expect(summary.style.display).toBe("");
   });
 
   it("surfaces a diff computation error", async () => {
@@ -814,23 +843,12 @@ describe("initializeGraphDiffPage", () => {
         `${GRAPH_STAGE_LABELS.comparing_graphs}:running`
       ]);
     });
-    it.each([
-      [
-        "the skill refuses the repository",
-        {
-          error: "octo/app has no Dockerfile on feature/x.",
-          appBicepUnsupported: true
-        }
-      ],
-      ["the comparison errors", { error: "invalid app.bicep" }]
-    ])("clears the panel when %s", async (_name, body) => {
+    it("clears the panel when the comparison errors", async () => {
       const { browser, head, progressHost, status } = fixture();
       const setError = vi.fn();
-      let requests = 0;
-      browser.net.handle("/api/diff-branches", () => {
-        requests++;
-        return jsonResponse(body);
-      });
+      browser.net.handle("/api/diff-branches", () =>
+        jsonResponse({ error: "invalid app.bicep" })
+      );
       browser.net.handle("/api/progress?view=diff", () =>
         jsonResponse({ events: [] })
       );
@@ -844,19 +862,8 @@ describe("initializeGraphDiffPage", () => {
       browser.clock.tick(DIFF_DEBOUNCE_MS);
       await flushPromises();
 
-      if ("appBicepUnsupported" in body) {
-        expect(setError).toHaveBeenCalledWith(
-          "graph-container",
-          "octo/app has no Dockerfile on feature/x."
-        );
-        expect(status.style.display).toBe("none");
-        browser.clock.tick(DIFF_RETRY_MS * 2);
-        await flushPromises();
-        expect(requests).toBe(1);
-      } else {
-        expect(setError).not.toHaveBeenCalled();
-        expect(status.textContent).not.toBe("");
-      }
+      expect(setError).not.toHaveBeenCalled();
+      expect(status.textContent).not.toBe("");
       expect(stageText(progressHost)).toEqual([]);
     });
 

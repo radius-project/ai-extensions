@@ -93,6 +93,7 @@ export function initializeGraphPage(
   // area, so writing there also clears whatever loading state was showing.
   const showFailure = (message: string): void => {
     showGraphModelingFailure(context, setError, message, {
+      containerId: "graph-container",
       statusIds: ["graph-status", "graph-refresh-status"],
       staleContentIds: ["graph-guidance"]
     });
@@ -353,14 +354,6 @@ export function initializeGraphPage(
           hasLoadedGraph = true;
           return;
         }
-        const unsupported = unsupportedGraphModelMessage(payload);
-        if (unsupported) {
-          modelState = "failed";
-          syncPrimaryButton();
-          stopProgress();
-          showFailure(unsupported);
-          return;
-        }
         // The work continues off-page while Copilot authors the model, so the
         // panel keeps running rather than being torn down and rebuilt. The
         // server owns how long that wait may last and drops `needsAppBicep`
@@ -390,13 +383,14 @@ export function initializeGraphPage(
           return;
         }
         const error = readString(payload, "error");
+        const unsupported = unsupportedGraphModelMessage(payload);
         stopProgress();
-        if (error) {
-          if (readBoolean(payload, "modelingFailed")) {
+        if (error || unsupported) {
+          if (readBoolean(payload, "modelingFailed") || unsupported !== null) {
             modelState = "failed";
             syncPrimaryButton();
           }
-          showFailure(error);
+          showFailure(unsupported || error);
         } else {
           showFailure(
             "The application graph response did not include any resources."
@@ -467,7 +461,6 @@ export function initializeGraphPage(
         .then((response) => response.json())
         .then((payload) => {
           if (refreshGeneration !== generation) return;
-          const unsupported = unsupportedGraphModelMessage(payload);
           if (isRecord(payload) && Array.isArray(payload.resources)) {
             modelState = "ready";
             syncPrimaryButton();
@@ -478,12 +471,16 @@ export function initializeGraphPage(
               localSource: sourceProvenance(payload)
             });
             showGuidance();
-          } else if (unsupported) {
+            return;
+          }
+          const unsupported = unsupportedGraphModelMessage(payload);
+          if (unsupported) {
             modelState = "failed";
             syncPrimaryButton();
             stopProgress();
-            showFailure(unsupported);
-            return;
+            showFailure(
+              `Unable to refresh the application graph: ${unsupported}`
+            );
           } else if (readBoolean(payload, "needsAppBicep")) {
             // A preloaded graph refresh can discover that the model disappeared
             // just like the initial load can. The server owns how long that wait

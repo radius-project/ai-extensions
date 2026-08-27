@@ -1,43 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  createFakeBrowser,
+  createFakeElement
+} from "../../../test/support/browser/fakes.js";
+import {
   type GraphErrorRenderer,
   showGraphModelingFailure,
   unsupportedGraphModelMessage,
   UNSUPPORTED_GRAPH_MODEL_MESSAGE
 } from "./graph-modeling-failure.js";
-function context(): {
-  browser: {
-    dom: {
-      byId: (
-        id: string
-      ) => { style: { display: string }; textContent: string } | null;
-    };
-  };
-  status: { style: { display: string }; textContent: string };
-  staleContent: { style: { display: string }; textContent: string };
-  setError: GraphErrorRenderer;
-} {
-  const status = {
-    style: { display: "" },
-    textContent: "still loading"
-  };
-  const staleContent = {
-    style: { display: "" },
-    textContent: "No application graph changes."
-  };
-  const setError: GraphErrorRenderer = vi.fn(
-    (_containerId: string, _message: string): unknown => undefined
-  );
-  const browser = {
-    dom: {
-      byId: (id: string) =>
-        id === "graph-status" ? status
-        : id === "graph-summary" ? staleContent
-        : null
-    }
-  };
-  return { browser, status, staleContent, setError };
-}
 
 describe("unsupportedGraphModelMessage", () => {
   it("returns the server error for an unsupported model response", () => {
@@ -63,40 +34,57 @@ describe("unsupportedGraphModelMessage", () => {
 });
 
 describe("showGraphModelingFailure", () => {
-  it("renders the error and clears the graph status", () => {
-    const { browser, status, staleContent, setError } = context();
+  it.each([
+    ["modeled", "graph-status", "graph-guidance"],
+    ["diff", "diff-status", "graph-diff-summary"]
+  ])(
+    "renders the %s error and clears its real status and stale content elements",
+    (_page, statusId, staleContentId) => {
+      const browser = createFakeBrowser();
+      const status = createFakeElement(statusId);
+      status.textContent = "still loading";
+      const staleContent = createFakeElement(staleContentId);
+      staleContent.textContent = "stale context";
+      browser.document.add(status);
+      browser.document.add(staleContent);
+      const setError: GraphErrorRenderer = vi.fn(
+        (_containerId: string, _message: string): unknown => undefined
+      );
+
+      showGraphModelingFailure(
+        browser.context,
+        setError,
+        "No application Dockerfile was found.",
+        {
+          containerId: "graph-container",
+          statusIds: [statusId],
+          staleContentIds: [staleContentId]
+        }
+      );
+
+      expect(setError).toHaveBeenCalledWith(
+        "graph-container",
+        "No application Dockerfile was found."
+      );
+      expect(status.style.display).toBe("none");
+      expect(status.textContent).toBe("");
+      expect(staleContent.style.display).toBe("none");
+    }
+  );
+
+  it("does not fail when optional page elements are absent", () => {
+    const browser = createFakeBrowser();
+    const setError: GraphErrorRenderer = vi.fn(
+      (_containerId: string, _message: string): unknown => undefined
+    );
 
     showGraphModelingFailure(
-      browser,
+      browser.context,
       setError,
       "No application Dockerfile was found.",
       {
-        statusIds: "graph-status",
-        staleContentIds: ["graph-summary"]
-      }
-    );
-
-    expect(setError).toHaveBeenCalledWith(
-      "graph-container",
-      "No application Dockerfile was found."
-    );
-    expect(status.style.display).toBe("none");
-    expect(status.textContent).toBe("");
-    expect(staleContent.style.display).toBe("none");
-  });
-
-  it("does not fail when the page status element is absent", () => {
-    const { browser, setError } = context();
-
-    showGraphModelingFailure(
-      {
-        ...browser,
-        dom: { byId: () => null }
-      },
-      setError,
-      "No application Dockerfile was found.",
-      {
-        statusIds: "missing-status",
+        containerId: "graph-container",
+        statusIds: ["missing-status"],
         staleContentIds: ["missing-summary"]
       }
     );

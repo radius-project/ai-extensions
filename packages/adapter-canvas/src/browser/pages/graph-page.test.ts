@@ -35,6 +35,7 @@ interface FixtureOptions {
   withWrapper?: boolean;
   withBranchSelect?: boolean;
   withButton?: boolean;
+  withGuidance?: boolean;
   stateBranch?: string;
 }
 
@@ -47,6 +48,7 @@ function fixture(options: FixtureOptions = {}) {
     withWrapper = !loaded,
     withBranchSelect = true,
     withButton = true,
+    withGuidance = true,
     stateBranch = "feature"
   } = options;
   const browser = createFakeBrowser();
@@ -69,7 +71,8 @@ function fixture(options: FixtureOptions = {}) {
   const progressHost = createFakeElement("progress-steps");
   const guidance = createFakeElement("graph-guidance");
   guidance.textContent = "Click a node to view source code links.";
-  const elements = [state, app, container, progressHost, guidance];
+  const elements = [state, app, container, progressHost];
+  if (withGuidance) elements.push(guidance);
   if (withBranchSelect) elements.push(branch);
   if (withButton) elements.push(button);
   if (withWrapper) elements.push(wrapper);
@@ -1799,6 +1802,7 @@ describe("initializeGraphPage", () => {
 
     it("hides stale modeled graph guidance after a terminal refusal", async () => {
       const { browser, guidance } = fixture({ loaded: true });
+      const setError = vi.fn();
       browser.net.handle("/api/load-graph", () =>
         jsonResponse({
           error: "octo/app has no Dockerfile on main.",
@@ -1806,9 +1810,16 @@ describe("initializeGraphPage", () => {
         })
       );
 
-      initializeGraphPage(browser.context, globals());
+      initializeGraphPage(
+        browser.context,
+        globals({ radiusSetGraphError: setError })
+      );
       await flushPromises();
 
+      expect(setError).toHaveBeenCalledWith(
+        "graph-container",
+        "Unable to refresh the application graph: octo/app has no Dockerfile on main."
+      );
       expect(guidance.style.display).toBe("none");
     });
 
@@ -1836,6 +1847,18 @@ describe("initializeGraphPage", () => {
       await flushPromises();
 
       expect(guidance.style.display).toBe("");
+    });
+
+    it("renders a successful refresh when optional guidance is absent", async () => {
+      const { browser } = fixture({ loaded: true, withGuidance: false });
+      browser.net.handle("/api/load-graph", () =>
+        jsonResponse({ resources: [{ id: "app/web" }] })
+      );
+
+      expect(() =>
+        initializeGraphPage(browser.context, globals())
+      ).not.toThrow();
+      await flushPromises();
     });
 
     it.each([
