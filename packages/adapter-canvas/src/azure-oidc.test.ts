@@ -1160,6 +1160,19 @@ describe("discoverStatusText", () => {
     ).toBe("Discovery failed: token not acquirable");
   });
 
+  it("azure: surfaces a namespace error when resource enumeration succeeded", () => {
+    expect(
+      discoverStatusText(
+        {
+          clusters: [{}],
+          resourceGroups: [{}],
+          errors: { namespaces: "selected cluster unavailable" }
+        },
+        "azure"
+      )
+    ).toBe("Discovery failed: selected cluster unavailable");
+  });
+
   it("azure: top-level error wins", () => {
     expect(
       discoverStatusText(

@@ -12,7 +12,10 @@
 // packages, so its staging constants intentionally mirror core and are guarded
 // against drift by the runtime tests.
 
-import { execFileSync } from "node:child_process";
+import {
+  managedBicepEnv,
+  spawnRad
+} from "../../../../../packages/adapter-shared/src/rad-process.mjs";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -283,7 +286,7 @@ async function queryManagedRadiusIdentity({
   env = process.env,
   home = os.homedir(),
   processTimeoutMs = 10_000,
-  execFileSyncImpl = execFileSync
+  runRadImpl = spawnRad
 } = {}) {
   const binaries = managedBinaries(home);
   const rad =
@@ -292,15 +295,13 @@ async function queryManagedRadiusIdentity({
     throw new Error(`Extension-managed Radius binary not found at "${rad}".`);
   }
   try {
-    const stdout = execFileSyncImpl(
+    const { stdout } = await runRadImpl(
       rad,
       ["version", "--cli", "--output", "json"],
       {
-        env: { ...env, BICEP: binaries.bicep },
+        env: managedBicepEnv(env, binaries.bicep),
         timeout: processTimeoutMs,
-        maxBuffer: 1024 * 1024,
-        windowsHide: true,
-        encoding: "utf8"
+        label: "Managed Radius version query"
       }
     );
     return parseRadiusIdentity(stdout);
