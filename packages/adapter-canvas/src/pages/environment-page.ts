@@ -200,6 +200,8 @@ ${confirmDialogMarkup()}
 .env-progress__details { margin-top:12px; }
 .env-progress__details > summary { font-size:12px; color:var(--rad-text-tertiary); cursor:pointer; }
 .env-progress__steps { list-style:none; margin:8px 0 0; padding:0; display:flex; flex-direction:column; gap:4px; max-height:220px; overflow:auto; }
+.env-progress__diagnostics { margin-top:10px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.env-progress__diagnostics-note { font-size:12px; color:var(--rad-text-tertiary); line-height:1.45; }
 .env-progress__step { display:flex; gap:8px; font-size:12px; color:var(--rad-text-tertiary); line-height:1.45; }
 .env-progress__step--warning { color:var(--rad-text); }
 .env-progress__step--failed { color:var(--rad-danger); }

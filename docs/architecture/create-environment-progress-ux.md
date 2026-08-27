@@ -574,6 +574,14 @@ Success rules:
 - Error messages distinguish created, reused, removed, retained, and ambiguous resources.
 - A bare resource identifier is prefixed with its resource type.
 
+### Local diagnostic download
+
+**Download diagnostics** appears inside the operation's Details disclosure. It requests `GET /api/operations/{operationId}/diagnostics`, which returns a non-cached local JSON attachment. The browser follows the download URL but never reads, transforms, stores, or uploads the diagnostic content.
+
+The diagnostic builder is independent of both the persisted operation serializer and the browser projection. It selects each output field from a closed schema and emits only the generated operation ID, installed plugin and operation schema versions, lifecycle and stage states, timing, bounded counts, failure classification, cleanup outcomes, provider-recovery statuses, and verification-dispatch state. Unknown future enum values become the fixed value `unknown` and increment an omission count.
+
+Repository and environment names, cloud and GitHub resource identities, account and branch context, persisted inputs, labels, targets, URLs, command lines, environment variables, idempotency keys, stdout, stderr, logs, evidence, messages, and step text are never exported. Secret exclusion and prompt-injection fencing are tested as separate controls.
+
 ## Alignment guidance for other Radius progress experiences
 
 Other long-running Radius experiences should align with these rules:
@@ -607,6 +615,8 @@ Other long-running Radius experiences should align with these rules:
 - [`packages/adapter-canvas/src/operations.ts`](../../packages/adapter-canvas/src/operations.ts)
 - [`packages/adapter-canvas/src/server/routes/operations-control.ts`](../../packages/adapter-canvas/src/server/routes/operations-control.ts)
 - [`packages/adapter-canvas/src/server/services/cleanup-commands.ts`](../../packages/adapter-canvas/src/server/services/cleanup-commands.ts)
+- [`packages/adapter-canvas/src/server/services/operation-diagnostic-export.ts`](../../packages/adapter-canvas/src/server/services/operation-diagnostic-export.ts)
+- [`packages/adapter-canvas/src/server/routes/operations-status.ts`](../../packages/adapter-canvas/src/server/routes/operations-status.ts)
 - [`packages/adapter-canvas/src/server/services/workflow-rollback.ts`](../../packages/adapter-canvas/src/server/services/workflow-rollback.ts)
 - [`packages/adapter-canvas/src/server.ts`](../../packages/adapter-canvas/src/server.ts)
 - [`packages/adapter-canvas/src/pages/environment/environments-pane.ts`](../../packages/adapter-canvas/src/pages/environment/environments-pane.ts)

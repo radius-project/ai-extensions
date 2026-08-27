@@ -1,5 +1,6 @@
 import type { CanvasRequestContext } from "../request-context.js";
 import type { SelectionHandleClaim } from "../services/github-account-readiness.js";
+import { createOperationDiagnosticExport } from "../services/operation-diagnostic-export.js";
 import {
   templatePathParameters,
   type RouteHandlerRegistry
@@ -10,7 +11,7 @@ import {
 // they take the narrow functions they call and nothing else — no registry
 // object, no container, no global server map.
 //
-// The two read routes keep the original four ports. The three POST routes that
+// The read routes keep one narrow dependency set. The three POST routes that
 // register, resume, and abandon environment operations add their own seams below
 // rather than widening a single port object into a general-purpose registry
 // handle: each is a single function, and the test fakes throw on anything a
@@ -20,6 +21,8 @@ export interface OperationsStatusDependencies {
   latestAny(): unknown;
   get(operationId: string): unknown;
   toClientView(record: unknown): unknown;
+  productVersion(): string;
+  now(): number;
 }
 
 interface OperationRequest {
@@ -184,6 +187,8 @@ function assertOperationActionDependencies(
 }
 
 const OPERATIONS_PREFIX = "/api/operations/";
+export const OPERATION_DIAGNOSTICS_ROUTE =
+  "/api/operations/:operationId/diagnostics";
 export const RESUME_OPERATION_ROUTE =
   "/api/operations/:operationId/resume/:code";
 export const ABANDON_OPERATION_ROUTE = "/api/operations/:operationId/abandon";
@@ -273,6 +278,66 @@ export function handleOperationById(
       : { error: "Unknown operation." }
     )
   );
+}
+
+export function handleOperationDiagnostics(
+  context: CanvasRequestContext,
+  dependencies: OperationsStatusDependencies
+): void {
+  const rawOperationId =
+    templatePathParameters(OPERATION_DIAGNOSTICS_ROUTE, context.pathname)
+      ?.operationId ?? "";
+  let operationId: string;
+  try {
+    operationId = decodeURIComponent(rawOperationId);
+  } catch {
+    context.response.setHeader("Content-Type", "application/json");
+    context.response.setHeader("Cache-Control", "no-store");
+    context.response.writeHead(400);
+    context.response.end(
+      JSON.stringify({
+        error: "Invalid operation identifier.",
+        code: "invalid-operation-id"
+      })
+    );
+    return;
+  }
+
+  const operation = dependencies.get(operationId);
+  context.response.setHeader("Content-Type", "application/json");
+  context.response.setHeader("Cache-Control", "no-store");
+  if (!operation) {
+    context.response.writeHead(404);
+    context.response.end(
+      JSON.stringify({
+        error: "Unknown operation.",
+        code: "unknown-operation"
+      })
+    );
+    return;
+  }
+
+  try {
+    const diagnostic = createOperationDiagnosticExport({
+      operation,
+      version: dependencies.productVersion(),
+      now: dependencies.now()
+    });
+    context.response.setHeader(
+      "Content-Disposition",
+      'attachment; filename="radius-environment-operation-diagnostics.json"'
+    );
+    context.response.writeHead(200);
+    context.response.end(`${JSON.stringify(diagnostic, null, 2)}\n`);
+  } catch {
+    context.response.writeHead(500);
+    context.response.end(
+      JSON.stringify({
+        error: "Radius could not create operation diagnostics.",
+        code: "operation-diagnostics-failed"
+      })
+    );
+  }
 }
 
 function jsonError(
@@ -745,6 +810,8 @@ export function createOperationsStatusRoutes(
   return {
     "GET /api/operations": (context) =>
       handleLatestOperation(context, dependencies),
+    [`GET ${OPERATION_DIAGNOSTICS_ROUTE}`]: (context) =>
+      handleOperationDiagnostics(context, dependencies),
     "GET /api/operations/": (context) =>
       handleOperationById(context, dependencies),
     "POST /api/operations": (context) =>

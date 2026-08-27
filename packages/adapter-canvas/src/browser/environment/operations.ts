@@ -61,6 +61,8 @@ export const PROGRESS_IDS = {
   stages: "env-progress-stages",
   steps: "env-progress-steps",
   details: "env-progress-details",
+  diagnostics: "env-progress-diagnostics",
+  diagnosticsDownload: "env-progress-diagnostics-download",
   actions: "env-progress-actions",
   bottomButtons: "env-progress-bottom-buttons",
   dismiss: "env-progress-dismiss",
@@ -1683,7 +1685,25 @@ export function initializeEnvironmentOperations(
     noteEl.style.display = message === "" ? "none" : "";
   }
 
+  function renderDiagnostics(op: OperationRecord | null): boolean {
+    const container = dom.byId(PROGRESS_IDS.diagnostics);
+    const download = dom.byId(PROGRESS_IDS.diagnosticsDownload);
+    if (!container || !download) return false;
+    if (op === null) {
+      download.setAttribute("href", "");
+      container.style.display = "none";
+      return false;
+    }
+    download.setAttribute(
+      "href",
+      `${OPERATIONS_PATH}/${encodeURIComponent(op.operationId)}/diagnostics`
+    );
+    container.style.display = "flex";
+    return true;
+  }
+
   function renderProgress(op: OperationRecord | null): void {
+    const hasDiagnostics = renderDiagnostics(op);
     // An exited setup renders as nothing at all. The record survives for the
     // history, but the customer closed it, and a poll or a page reload that put
     // the panel back would undo the one thing Exit setup promised.
@@ -1754,7 +1774,8 @@ export function initializeEnvironmentOperations(
     renderCommands(op);
 
     if (detailsElement) {
-      detailsElement.style.display = op.steps.length > 0 ? "" : "none";
+      detailsElement.style.display =
+        op.steps.length > 0 || hasDiagnostics ? "" : "none";
     }
   }
 

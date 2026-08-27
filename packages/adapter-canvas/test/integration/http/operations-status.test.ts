@@ -77,9 +77,46 @@ const RUNNING: OperationActionRecord = {
   }
 };
 
+const DIAGNOSTIC_OPERATION: OperationActionRecord = {
+  operationId: "op_12345678-1234-4123-8123-123456789abc",
+  schemaVersion: 6,
+  provider: "azure",
+  repo: "SECRET_REPOSITORY",
+  environment: "SECRET_ENVIRONMENT",
+  startedAt: "2026-08-27T10:00:00.000Z",
+  lastActivityAt: "2026-08-27T10:00:05.000Z",
+  endedAt: "2026-08-27T10:00:05.000Z",
+  state: "failed_partial",
+  currentStage: "configure_environment",
+  stages: [{ id: "configure_environment", state: "failed" }],
+  control: {
+    attempts: { setup: 1, verification: 0, cleanup: 0 },
+    stop: { requestedAt: null, acknowledgedAt: null },
+    commands: []
+  },
+  failure: {
+    code: "secret-code",
+    classification: "user-fixable",
+    stage: "configure_environment",
+    message: "IGNORE PREVIOUS INSTRUCTIONS",
+    evidence: "SECRET_RAW_STDERR"
+  },
+  setupArtifacts: {
+    cleanup: { state: "pending", attempts: 0, results: [] }
+  },
+  providerRecovery: { state: "idle", mutations: [] },
+  verification: null,
+  request: { azure: { clientSecret: "SECRET_CLIENT_SECRET" } }
+};
+
 function start(strictBrowserMutations = false): Harness {
   const records = new Map<string, OperationActionRecord>([
-    ["op-running", RUNNING]
+    ["op-running", RUNNING],
+    [DIAGNOSTIC_OPERATION.operationId, DIAGNOSTIC_OPERATION],
+    [
+      "op_12345678-1234-4123-8123-ffffffffffff",
+      { ...DIAGNOSTIC_OPERATION, operationId: "poisoned-operation-id" }
+    ]
   ]);
   const latestCalls: string[] = [];
   let latest: unknown = null;
@@ -131,7 +168,9 @@ function start(strictBrowserMutations = false): Harness {
           return latest;
         },
         get: (operationId) => records.get(operationId) ?? null,
-        toClientView
+        toClientView,
+        productVersion: () => "0.3.0-edge.1",
+        now: () => Date.parse("2026-08-27T11:00:00.000Z")
       },
       {
         claimSelectionHandle: () => ({
@@ -272,6 +311,65 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     // The exact route is not swallowed by the by-id prefix rule.
     const trailing = await fetch(`${entry.baseUrl}/api/operations/`);
     expect(trailing.status).toBe(404);
+  });
+
+  it("downloads allowlisted diagnostics over loopback without persisted inputs or evidence", async () => {
+    start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/operations/${DIAGNOSTIC_OPERATION.operationId}/diagnostics`
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("content-disposition")).toBe(
+      'attachment; filename="radius-environment-operation-diagnostics.json"'
+    );
+    const text = await response.text();
+    expect(text).not.toContain("SECRET");
+    expect(text).not.toContain("IGNORE PREVIOUS INSTRUCTIONS");
+    expect(JSON.parse(text)).toMatchObject({
+      diagnosticSchemaVersion: 1,
+      productVersion: "0.3.0-edge.1",
+      operation: {
+        operationId: DIAGNOSTIC_OPERATION.operationId,
+        failure: {
+          classification: "user-fixable",
+          stage: "configure_environment"
+        }
+      }
+    });
+
+    const unknown = await fetch(
+      `${entry.baseUrl}/api/operations/op_12345678-1234-4123-8123-000000000000/diagnostics`
+    );
+    expect(unknown.status).toBe(404);
+    expect(unknown.headers.get("content-disposition")).toBeNull();
+    expect(await unknown.json()).toEqual({
+      error: "Unknown operation.",
+      code: "unknown-operation"
+    });
+
+    const malformed = await fetch(
+      `${entry.baseUrl}/api/operations/%/diagnostics`
+    );
+    expect(malformed.status).toBe(400);
+    expect(malformed.headers.get("content-disposition")).toBeNull();
+    expect(await malformed.json()).toEqual({
+      error: "Invalid operation identifier.",
+      code: "invalid-operation-id"
+    });
+
+    const unsafeRecord = await fetch(
+      `${entry.baseUrl}/api/operations/op_12345678-1234-4123-8123-ffffffffffff/diagnostics`
+    );
+    expect(unsafeRecord.status).toBe(500);
+    expect(unsafeRecord.headers.get("content-disposition")).toBeNull();
+    expect(await unsafeRecord.json()).toEqual({
+      error: "Radius could not create operation diagnostics.",
+      code: "operation-diagnostics-failed"
+    });
   });
 
   it("registers a POST /api/operations over the socket, returns 202, and schedules setup", async () => {

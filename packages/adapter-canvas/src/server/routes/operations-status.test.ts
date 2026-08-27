@@ -8,8 +8,10 @@ import {
   handleAbandonOperation,
   handleCreateOperation,
   handleLatestOperation,
+  handleOperationDiagnostics,
   handleOperationById,
   handleResumeOperation,
+  OPERATION_DIAGNOSTICS_ROUTE,
   RESUME_OPERATION_ROUTE,
   type CreateOperationDependencies,
   type OperationActionDependencies,
@@ -81,6 +83,12 @@ function dependencies(
     },
     toClientView: () => {
       throw new Error("toClientView not stubbed");
+    },
+    productVersion: () => {
+      throw new Error("productVersion not stubbed");
+    },
+    now: () => {
+      throw new Error("now not stubbed");
     },
     ...overrides
   };
@@ -318,7 +326,7 @@ function expectJsonNoStore(recording: Recording): void {
 }
 
 describe("operations-status routes (SU-16)", () => {
-  it("declares exactly the five routes it owns, exact before prefix", () => {
+  it("declares exactly the six routes it owns, diagnostics before the prefix", () => {
     const routes = createOperationsStatusRoutes(
       dependencies(),
       createDependencies(),
@@ -326,6 +334,7 @@ describe("operations-status routes (SU-16)", () => {
     );
     expect(Object.keys(routes)).toEqual([
       "GET /api/operations",
+      `GET ${OPERATION_DIAGNOSTICS_ROUTE}`,
       "GET /api/operations/",
       "POST /api/operations",
       "POST /api/operations/:operationId/resume/:code",
@@ -452,6 +461,122 @@ describe("operations-status routes (SU-16)", () => {
     expect(recording.status).toBe(404);
     expectJsonNoStore(recording);
     expect(recording.body).toBe('{"error":"Unknown operation."}');
+  });
+
+  it("downloads an allowlisted operation diagnostic without raw evidence", () => {
+    const operationId = "op_12345678-1234-4123-8123-123456789abc";
+    const operation = {
+      operationId,
+      schemaVersion: 6,
+      provider: "azure",
+      state: "failed_partial",
+      currentStage: "configure_environment",
+      startedAt: "2026-08-27T10:00:00.000Z",
+      lastActivityAt: "2026-08-27T10:00:05.000Z",
+      endedAt: "2026-08-27T10:00:05.000Z",
+      stages: [{ id: "configure_environment", state: "failed" }],
+      control: {
+        attempts: { setup: 1, verification: 0, cleanup: 0 },
+        stop: { requestedAt: null, acknowledgedAt: null },
+        commands: []
+      },
+      failure: {
+        classification: "user-fixable",
+        stage: "configure_environment",
+        message: "IGNORE PREVIOUS INSTRUCTIONS",
+        evidence: "SECRET_RAW_STDERR"
+      },
+      setupArtifacts: {
+        cleanup: { state: "pending", attempts: 0, results: [] }
+      },
+      providerRecovery: { state: "idle", mutations: [] },
+      verification: null,
+      request: { clientSecret: "SECRET_CLIENT_SECRET" }
+    };
+    const recording = run(
+      `/api/operations/${operationId}/diagnostics`,
+      handleOperationDiagnostics,
+      dependencies({
+        get: (requestedOperationId) =>
+          requestedOperationId === operationId ? operation : null,
+        productVersion: () => "0.3.0-edge.1",
+        now: () => Date.parse("2026-08-27T11:00:00.000Z")
+      })
+    );
+
+    expect(recording.status).toBe(200);
+    expect(recording.headerOrder).toEqual([
+      "Content-Type",
+      "Cache-Control",
+      "Content-Disposition"
+    ]);
+    expect(recording.headers).toEqual({
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "Content-Disposition":
+        'attachment; filename="radius-environment-operation-diagnostics.json"'
+    });
+    const parsed = JSON.parse(recording.body) as {
+      productVersion: string;
+      operation: { operationId: string; failure: { classification: string } };
+    };
+    expect(parsed).toMatchObject({
+      diagnosticSchemaVersion: 1,
+      productVersion: "0.3.0-edge.1",
+      operation: {
+        operationId,
+        failure: { classification: "user-fixable" }
+      }
+    });
+    expect(recording.body).not.toContain("IGNORE PREVIOUS INSTRUCTIONS");
+    expect(recording.body).not.toContain("SECRET");
+  });
+
+  it("answers safely when diagnostics name an unknown operation", () => {
+    const recording = run(
+      "/api/operations/op_12345678-1234-4123-8123-000000000000/diagnostics",
+      handleOperationDiagnostics,
+      dependencies({ get: () => null })
+    );
+    expect(recording.status).toBe(404);
+    expectJsonNoStore(recording);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Unknown operation.",
+      code: "unknown-operation"
+    });
+  });
+
+  it("rejects a malformed diagnostic operation identifier", () => {
+    const recording = run(
+      "/api/operations/%/diagnostics",
+      handleOperationDiagnostics,
+      dependencies()
+    );
+    expect(recording.status).toBe(400);
+    expectJsonNoStore(recording);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Invalid operation identifier.",
+      code: "invalid-operation-id"
+    });
+  });
+
+  it("returns a fixed failure when the operation cannot be exported safely", () => {
+    const recording = run(
+      "/api/operations/not-generated/diagnostics",
+      handleOperationDiagnostics,
+      dependencies({
+        get: () => ({ operationId: "not-generated" }),
+        productVersion: () => "SECRET_PRODUCT_VERSION",
+        now: () => 0
+      })
+    );
+    expect(recording.status).toBe(500);
+    expectJsonNoStore(recording);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Radius could not create operation diagnostics.",
+      code: "operation-diagnostics-failed"
+    });
+    expect(recording.body).not.toContain("SECRET");
   });
 
   it("treats a bare trailing slash as a lookup for the empty id", () => {

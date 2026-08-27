@@ -124,6 +124,9 @@ describe("environmentsPaneMarkup", () => {
     expect(html).toContain(
       'role="region" aria-label="Environment setup progress" tabindex="-1"'
     );
+    expect(html).toContain(
+      'id="env-progress-elapsed" class="env-progress__elapsed" role="timer" aria-label="Elapsed time"'
+    );
   });
 
   it("associates the environment label with its input", () => {
@@ -148,6 +151,20 @@ describe("environmentsPaneMarkup", () => {
     );
     expect(html).toContain(
       '<div id="env-progress-command-error" class="env-progress__command-error" role="alert"></div>'
+    );
+  });
+
+  it("renders a local diagnostic download inside operation details", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html.indexOf('id="env-progress-diagnostics"')).toBeGreaterThan(
+      html.indexOf('id="env-progress-details"')
+    );
+    expect(html).toContain(
+      'id="env-progress-diagnostics-download" class="rad-btn rad-btn--secondary" href="" download="radius-environment-operation-diagnostics.json"'
+    );
+    expect(html).toContain('aria-describedby="env-progress-diagnostics-note"');
+    expect(html).toContain(
+      "Creates a local, redacted JSON file. Radius does not upload it."
     );
   });
 

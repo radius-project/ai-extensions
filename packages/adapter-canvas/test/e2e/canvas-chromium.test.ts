@@ -1269,7 +1269,7 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBe(false);
   });
 
-  test("keeps server-owned setup durable across navigation without reporting browser cancellation @safety", async ({
+  test("keeps server-owned setup durable across navigation and downloads redacted diagnostics by keyboard @safety", async ({
     page,
     canvas
   }) => {
@@ -1356,6 +1356,34 @@ test.describe("Radius Canvas in Chromium", () => {
     );
     await expect(page.locator("body")).not.toContainText("cancelled");
     await expect(page.locator("body")).not.toContainText("Cancelled");
+    await resumedPanel.locator("#env-progress-details > summary").click();
+    const diagnosticLink = page.getByRole("link", {
+      name: "Download diagnostics"
+    });
+    await diagnosticLink.focus();
+    await expect(diagnosticLink).toBeFocused();
+    await expectNoWcagViolations(page);
+    const downloadStarted = page.waitForEvent("download");
+    await page.keyboard.press("Enter");
+    const download = await downloadStarted;
+    expect(download.suggestedFilename()).toBe(
+      "radius-environment-operation-diagnostics.json"
+    );
+    const diagnosticPath = await download.path();
+    if (diagnosticPath === null) {
+      throw new Error("Playwright did not retain the diagnostic download.");
+    }
+    const diagnosticText = await fs.readFile(diagnosticPath, "utf8");
+    expect(diagnosticText).not.toContain(REPOSITORY);
+    expect(diagnosticText).not.toContain("fixture-environment");
+    expect(diagnosticText).not.toContain(PLACEHOLDER_SECRET);
+    expect(JSON.parse(diagnosticText)).toMatchObject({
+      diagnosticSchemaVersion: 1,
+      operation: {
+        operationId: result.operationId,
+        lifecycle: { state: "failed" }
+      }
+    });
     expect(bodyFor(canvas, "/api/operations")).toMatchObject({
       repo: REPOSITORY,
       environment: "fixture-environment",
