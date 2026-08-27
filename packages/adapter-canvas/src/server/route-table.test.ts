@@ -153,6 +153,10 @@ const productionHandlers = {
     runAz: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
     runCli: () => Promise.resolve(""),
     isUuid: () => false,
+    createTemporaryKubeconfig: () => ({
+      path: "/tmp/radius-kubeconfig-test",
+      remove: () => {}
+    }),
     parseServedReposFromSubjects: () => []
   }),
   ...createAzureAutoSetupRoutes(createAzureAutoSetupTestDependencies()),
@@ -234,6 +238,7 @@ const productionHandlers = {
     settleDeployStatuses: () => {},
     errorMessage: (error) => String(error),
     repoMatchesWorkspace: () => false,
+    observeModelingRun: () => Promise.resolve(null),
     now: () => 0
   }),
   ...createGraphsPlanningStreamRoutes({
@@ -287,6 +292,7 @@ const productionHandlers = {
         removeDirectory: () => {}
       }),
       triggerAppBicepHandoff: () => {},
+      observeModelingRun: () => Promise.resolve(null),
       triggerGraphRepairHandoff: () => ({
         attempt: 1,
         maxAttempts: 3,

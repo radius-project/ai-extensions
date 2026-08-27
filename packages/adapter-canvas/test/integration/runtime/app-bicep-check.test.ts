@@ -625,6 +625,89 @@ test("checks source references inside local modules", () => {
   assert.match(result.stderr, /module\.queue\.properties\.codeReference/u);
 });
 
+test.each([
+  "Dockerfile",
+  "services/api/Dockerfile",
+  "Dockerfile.prod",
+  "api.Dockerfile",
+  "docker-compose.yml",
+  "docker-compose.override.yaml",
+  "compose.yaml",
+  "deploy/chart.yaml",
+  "deploy/values.yaml",
+  "services/api/dockerfile#L3",
+  "https://github.com/acme/app/blob/main/services/api/Dockerfile",
+  "https://github.com/acme/app/blob/main/Docker%66ile",
+  "https://github.com/acme/app/blob/main/services/api/docker-compose%2Eyml",
+  "https://github.com/acme/app/blob/main/bad%ZZdir/Dockerfile"
+])(
+  "rejects a packaging file as a container source reference: %s",
+  (codeReference) => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
+        codeReference
+      })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /is a packaging file/u);
+    assert.match(result.stderr, /web\.properties\.codeReference/u);
+  }
+);
+
+test("accepts the Dockerfile a containerImages resource builds from", () => {
+  // The image resource exists to build that file, so it is the definition site.
+  // Only the workload that runs the image must point past it at the entrypoint.
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    image: radiusResource(containerImageType, {
+      build: {
+        source: `git::https://github.com/example/app.git?ref=${fullSha}`
+      },
+      codeReference: "services/api/Dockerfile"
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test.each([
+  "src/server.ts",
+  "cmd/api/main.go#L12",
+  "src/dockerfile-generator.ts",
+  "src/compose-loader.ts"
+])(
+  "accepts a container entrypoint that is not a packaging file: %s",
+  (codeReference) => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: radiusResource("Radius.Compute/containers@2025-08-01-preview", {
+        codeReference
+      })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  }
+);
+
 test("fails and surfaces a Bicep warning even when Bicep exits successfully", () => {
   const directory = temporaryDirectory();
   const result = runChecker(

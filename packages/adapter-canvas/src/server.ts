@@ -107,6 +107,7 @@ import {
   resolveWorkspaceBicep,
   fetchWorkspaceFile,
   isWorkspaceSelection,
+  modelingRunLastActivityAtMs,
   resolveSessionId,
   toSafeRepoRelPath,
   uncommittedGeneratedPaths,
@@ -264,6 +265,7 @@ import {
 import type { WorkflowRollbackCommand } from "./server/services/workflow-rollback-ports.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
+import { createTemporaryKubeconfig } from "./server/temporary-kubeconfig.js";
 import { createAzureAutoSetupRoutes } from "./server/routes/azure-auto-setup.js";
 import { composeAzureAutoSetupDependencies } from "./server/azure-auto-setup-dependencies.js";
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
@@ -535,6 +537,10 @@ interface AppBicepHandoffInput {
   repo: string;
   branches: string[];
   page: string;
+  // The instance's state, so the runtime can resolve each branch's model
+  // against the same workspace context the route just rendered from, and so it
+  // can deduplicate against the handoff it last performed for this panel.
+  state?: CanvasState;
 }
 
 export interface DeployRepairHandoffInput {
@@ -874,6 +880,7 @@ const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
   runAz: (command, args) => runCliCommand(command, args),
   runCli: (command, args, options) => runCommand(command, args, options),
   isUuid,
+  createTemporaryKubeconfig,
   parseServedReposFromSubjects: (subjects) =>
     parseServedReposFromSubjects(subjects as Iterable<unknown>)
 });
@@ -1111,6 +1118,29 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
 // route modules free of it. The pure helpers (`defaultBranchForState`,
 // `computeGraphDiff`, `record`, …) are injected rather than imported by the
 // workflows, matching how the sibling families inject `repoMatchesWorkspace`.
+// Observe on-disk modeling activity, but only when the modeling target is the
+// workspace itself. Local staging directories say nothing about a remote branch
+// or a different repository, so probing outside that match would let unrelated
+// activity extend a wait that should have expired.
+//
+// Shared by both graph route families on purpose: this is the gate that keeps a
+// wait honest, and two copies of it could drift apart.
+function observeWorkspaceModelingRun(
+  state: CanvasState,
+  repo: string,
+  branches: string[]
+): Promise<number | null> {
+  if (
+    !repo ||
+    !state.workspaceRepo ||
+    state.workspaceRepo !== repo ||
+    !branches.some((branch) => branch === state.workspaceBranch)
+  ) {
+    return Promise.resolve(null);
+  }
+  return modelingRunLastActivityAtMs(state.workspacePath);
+}
+
 const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   pipeline: createGraphPipeline<CanvasServerEntry>({
@@ -1152,6 +1182,7 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     resolveRecipeOutputs(github, resources, recipes, provider),
   computeGraphDiff: (baseResources, headResources) =>
     computeGraphDiff(baseResources, headResources),
+  observeModelingRun: observeWorkspaceModelingRun,
   record,
   optionalString,
   errorMessage,
@@ -1214,6 +1245,7 @@ const graphsPlanningRoutes = createGraphsPlanningRoutes({
   settleDeployStatuses,
   errorMessage,
   repoMatchesWorkspace,
+  observeModelingRun: observeWorkspaceModelingRun,
   now: () => Date.now()
 });
 
@@ -2229,8 +2261,15 @@ export function azureCliAssistMessage(
   return remediationSessionMessage(azureCliAssistRemediation(input));
 }
 
-// Fire the app.bicep handoff at most once per repo+branch(es) for a given
-// instance. Fire-and-forget so it never blocks the HTTP response.
+// Report a graph view's application model to the runtime, which decides whether
+// it needs authoring, a refresh, the user's agreement, or only a note.
+//
+// Deliberately unconditional: a route calls this on every render, whether or not
+// the model exists, because a model that is present can still be stale. The
+// runtime owns the dedupe — its key covers what is wrong with the model, not
+// merely which branches were looked at, so re-reporting an unchanged situation
+// stays silent while a model that changes from stale to hand-edited is still
+// reported. Fire-and-forget so it never blocks the HTTP response.
 function triggerAppBicepHandoff(
   entry: { state: CanvasState } | undefined,
   repo: string,
@@ -2243,15 +2282,9 @@ function triggerAppBicepHandoff(
     const list = (Array.isArray(branches) ? branches : [branches]).filter(
       (branch): branch is string => Boolean(branch)
     );
-    const state = entry?.state;
-    const key = `${repo}::${list.join(",")}`;
-    if (state) {
-      if (state.appBicepHandoffKey === key) return; // already handed off
-      state.appBicepHandoffKey = key;
-    }
-    Promise.resolve(appBicepHandoff({ repo, branches: list, page })).catch(
-      () => {}
-    );
+    Promise.resolve(
+      appBicepHandoff({ repo, branches: list, page, state: entry?.state })
+    ).catch(() => {});
   } catch {
     /* never let a handoff failure break the response */
   }

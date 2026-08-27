@@ -28,7 +28,7 @@ Before invoking this skill:
 
 Open the canvas hub and use the deployed-application view:
 
-1. `open_canvas({ canvasId: "radius", instanceId: "radius-panel", input: { page: "environment", repo: "<owner/repo>" } })`
+1. Reuse the existing Radius canvas instanceId when one is open; otherwise use `radius-panel`: `open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "environment", repo: "<owner/repo>" } })`
 2. Select the environment (and, for a deployment delete, the deployed application).
 3. Click **Delete Deployment** to tear down the app, or use **Delete Env** to run the tracked environment cleanup. Live status streams until success / failure / timeout.
 

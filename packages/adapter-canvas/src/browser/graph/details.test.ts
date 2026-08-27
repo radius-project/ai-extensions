@@ -141,6 +141,68 @@ describe("detail rows", () => {
     expect(rows[0]).toContain("View source code");
   });
 
+  // A worktree branch that was never pushed has no github.com URL that
+  // resolves, so on the diff page each node is routed by its own branch.
+  it("routes the head-branch rows of a diff to the editor canvas", () => {
+    const rows = buildDetailRows(
+      settings({
+        diffMode: true,
+        branch: "feature-x",
+        baseBranch: "main",
+        workspaceBranch: "feature-x"
+      }),
+      node({
+        sourceBranch: "feature-x",
+        diffStatus: "added",
+        sourceUrl: "https://github.test/o/r/blob/feature-x/src/web.ts#L4"
+      })
+    );
+    expect(rows[0]).toContain('data-local-src="src/web.ts"');
+    expect(rows[0]).toContain('data-local-line="4"');
+    expect(rows[0]).toContain(
+      'data-fallback-url="https://github.test/o/r/blob/feature-x/src/web.ts#L4"'
+    );
+    expect(rows[1]).toContain('data-local-src=".radius/app.bicep"');
+  });
+
+  it("keeps a removed node in a diff pointing at the base branch remotely", () => {
+    const rows = buildDetailRows(
+      settings({
+        diffMode: true,
+        branch: "feature-x",
+        baseBranch: "main",
+        workspaceBranch: "feature-x"
+      }),
+      node({
+        sourceBranch: "main",
+        diffStatus: "removed",
+        sourceUrl: "https://github.test/o/r/blob/main/src/web.ts#L4"
+      })
+    );
+    expect(rows[0]).toContain(
+      'data-external-url="https://github.test/o/r/blob/main/src/web.ts#L4"'
+    );
+    expect(rows[0]).not.toContain("data-local-src");
+    expect(rows[1]).toContain(
+      'href="https://github.test/o/r/blob/main/.radius/app.bicep#L12"'
+    );
+    expect(rows[1]).not.toContain("data-local-src");
+  });
+
+  it("keeps every diff row remote when the worktree is on neither branch", () => {
+    const rows = buildDetailRows(
+      settings({
+        diffMode: true,
+        branch: "feature-x",
+        baseBranch: "main",
+        workspaceBranch: "unrelated"
+      }),
+      node({ sourceBranch: "feature-x" })
+    );
+    expect(rows[0]).toContain("data-external-url");
+    expect(rows[0]).not.toContain("data-local-src");
+  });
+
   it("keeps the definition row usable without a repository URL", () => {
     const rows = buildDetailRows(
       resolveGraphSettings({ localSource: true }),

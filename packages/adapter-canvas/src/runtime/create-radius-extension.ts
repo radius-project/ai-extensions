@@ -15,14 +15,18 @@
 import { createRadiusCanvas } from "./create-radius-canvas.js";
 import { createRadiusTools } from "./create-radius-tools.js";
 import { createGraphContextHelpers } from "./graph-context.js";
-import { RADIUS_SESSION_START_CONTEXT } from "./declarations.js";
+import { createAppModelHandoff } from "./app-model-handoff.js";
 import {
-  evaluateAppBicepHook,
-  appBicepHandoffMessage,
+  RADIUS_CANVAS_INSTANCE_ID,
+  RADIUS_SESSION_START_CONTEXT
+} from "./declarations.js";
+import {
   deployRepairHandoffMessage,
   deployFailureNoticeMessage
 } from "./hooks.js";
 import { createPullRequestGraphDiffGuard } from "./pr-graph-diff-guard.js";
+import { sourceEditorInstanceId } from "./canvas-lifecycle.js";
+import { createRadiusCanvasInstanceRegistry } from "./canvas-instance-registry.js";
 import { errorMessage } from "./util.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { SessionPort } from "./session.js";
@@ -87,6 +91,38 @@ export function createRadiusExtension(
 ): RadiusExtension {
   const { workspaceState, resolveAppModelStatus, evaluateAppSourceForBranch } =
     createGraphContextHelpers(deps);
+  const canvasInstances = createRadiusCanvasInstanceRegistry();
+
+  const selectedCanvasInstanceId = (): string =>
+    canvasInstances.current() ?? RADIUS_CANVAS_INSTANCE_ID;
+
+  const reserveCanvasInstance = (): string =>
+    canvasInstances.claim(selectedCanvasInstanceId());
+
+  // Staleness signals already handed to the agent, so a refresh that does not
+  // clear the drift cannot re-prompt on every later render. Scoped to this
+  // extension instance rather than the module, and outliving any one canvas
+  // instance's state.
+  //
+  // Bounded because the key includes the commit the record names, so every
+  // regeneration produces a new one and the set would otherwise grow for as
+  // long as the process runs. Set preserves insertion order, so dropping the
+  // oldest evicts the least recently seen problem. Re-asking about a signal
+  // that fell out is harmless: the point is to stop a tight loop, not to
+  // remember forever.
+  const REFRESH_MEMO_LIMIT = 100;
+  const requestedRefreshes = new Set<string>();
+
+  function shouldRequestRefresh(key: string): boolean {
+    if (requestedRefreshes.has(key)) return false;
+    requestedRefreshes.add(key);
+    if (requestedRefreshes.size > REFRESH_MEMO_LIMIT) {
+      const oldest = requestedRefreshes.values().next().value;
+      if (oldest !== undefined) requestedRefreshes.delete(oldest);
+    }
+    return true;
+  }
+
   const pullRequestGraphDiffGuard = createPullRequestGraphDiffGuard({
     hasRadiusApplicationModel: (workspacePath) =>
       deps.workspace.hasRadiusApplicationModel(workspacePath),
@@ -98,12 +134,19 @@ export function createRadiusExtension(
       };
     },
     getDefaultBranch: (repo) => deps.github.getDefaultBranch(repo),
-    openGraphDiff: ({ repo, baseBranch, headBranch }) =>
-      deps.session.get().rpc.canvas.open({
-        canvasId: "radius",
-        instanceId: "radius-panel",
-        input: { page: "graph-diff", repo, baseBranch, headBranch }
-      })
+    openGraphDiff: async ({ repo, baseBranch, headBranch }) => {
+      const instanceId = reserveCanvasInstance();
+      try {
+        return await deps.session.get().rpc.canvas.open({
+          canvasId: "radius",
+          instanceId,
+          input: { page: "graph-diff", repo, baseBranch, headBranch }
+        });
+      } catch (error) {
+        if (!deps.servers.has(instanceId)) canvasInstances.release(instanceId);
+        throw error;
+      }
+    }
   });
   let pendingStartupDiagnostic = "";
 
@@ -124,10 +167,32 @@ export function createRadiusExtension(
   // Registered immediately (no session required yet): each callback only
   // reads deps.session.get() when the host actually invokes it, which is
   // always after attachSession() has run.
-  deps.hostCallbacks.setAppBicepHandoff(({ repo, branches, page }) =>
-    Promise.resolve(
-      deps.session.get().send(appBicepHandoffMessage(repo, page, branches))
-    )
+  //
+  // Every graph render reaches this callback through the HTTP routes, which is
+  // why it, and no hook or canvas-open fallback, decides whether the model needs
+  // authoring, refreshing, confirming, or only a note.
+  const handOffAppModel = createAppModelHandoff({
+    resolveContext: () => workspaceState(),
+    resolveStatus: (repo, branch, state) =>
+      resolveAppModelStatus(repo, branch, state),
+    evaluateSource: (repo, branch, state) =>
+      evaluateAppSourceForBranch(repo, branch, state),
+    send: (message) =>
+      Promise.resolve(deps.session.get().send(message)).then(() => undefined),
+    log: (message) => {
+      try {
+        deps.session.get().log?.(message);
+      } catch {
+        /* session.log unavailable → drop the notice */
+      }
+    },
+    shouldRequestRefresh,
+    releaseRefreshMemo: (key: string) => {
+      requestedRefreshes.delete(key);
+    }
+  });
+  deps.hostCallbacks.setAppBicepHandoff(({ repo, branches, page, state }) =>
+    handOffAppModel({ repo, branches, page, state })
   );
   deps.hostCallbacks.setDeployRepairHandoff(
     ({ repo, branch, error, deployRunUrl, attemptId }) =>
@@ -179,7 +244,9 @@ export function createRadiusExtension(
       }
       await session.rpc.canvas.open({
         canvasId: "editor",
-        instanceId: "radius-source",
+        // Per-file handle: a shared instanceId would make the host focus the
+        // panel already showing the first file instead of opening this one.
+        instanceId: sourceEditorInstanceId(safe),
         input: {
           scope: "repo",
           path: safe,
@@ -389,62 +456,70 @@ export function createRadiusExtension(
     startKeepalive();
   }
 
-  // Staleness signals already handed to the agent, so a refresh that does not
-  // clear the drift cannot block every later graph open. Scoped to this
-  // extension instance rather than the module.
-  //
-  // Bounded because the key includes the commit the record names, so every
-  // regeneration produces a new one and the set would otherwise grow for as
-  // long as the process runs. Set preserves insertion order, so dropping the
-  // oldest evicts the least recently seen problem. Re-asking about a signal
-  // that fell out is harmless: the point is to stop a tight loop, not to
-  // remember forever.
-  const REFRESH_MEMO_LIMIT = 100;
-  const requestedRefreshes = new Set<string>();
-
   return {
-    canvases: [createRadiusCanvas(deps)],
+    canvases: [createRadiusCanvas(deps, canvasInstances)],
     tools: createRadiusTools(deps),
     hooks: {
-      // Guards the graph-generating tool calls: denies the call and instructs
-      // the agent to author + SAVE .radius/app.bicep via the radius-app-bicep
-      // skill first when no bicep exists. It fails open on any hook error.
+      // Nothing here inspects the application model any more. Opening a graph
+      // page used to be denied until .radius/app.bicep existed, but every graph
+      // render already passes through the HTTP routes, which report the missing
+      // model in the page and drive the authoring turn themselves. Keeping the
+      // deny as well produced two authoring prompts for one open.
       onPreToolUse: async (input) => {
-        try {
-          const graphDecision = await evaluateAppBicepHook(
-            { toolName: input.toolName, toolArgs: input.toolArgs },
-            {
-              workspaceState,
-              defaultBranchForState: deps.workspace.defaultBranchForState,
-              appModelStatus: resolveAppModelStatus,
-              appSource: evaluateAppSourceForBranch,
-              shouldRequestRefresh: (key: string) => {
-                if (requestedRefreshes.has(key)) return false;
-                requestedRefreshes.add(key);
-                if (requestedRefreshes.size > REFRESH_MEMO_LIMIT) {
-                  const oldest = requestedRefreshes.values().next().value;
-                  if (oldest !== undefined) requestedRefreshes.delete(oldest);
-                }
-                return true;
-              }
+        if (input.toolName === "open_canvas") {
+          const canvasId =
+            input.toolArgs !== null && typeof input.toolArgs === "object" ?
+              Reflect.get(input.toolArgs, "canvasId")
+            : undefined;
+          const instanceId =
+            input.toolArgs !== null && typeof input.toolArgs === "object" ?
+              Reflect.get(input.toolArgs, "instanceId")
+            : undefined;
+          if (canvasId === "radius") {
+            const guarded = await pullRequestGraphDiffGuard.onPreToolUse(input);
+            if (guarded) return guarded;
+            const requestedInstanceId =
+              typeof instanceId === "string" && instanceId ?
+                instanceId
+              : RADIUS_CANVAS_INSTANCE_ID;
+            const selectedInstanceId =
+              canvasInstances.claim(requestedInstanceId);
+            if (requestedInstanceId === selectedInstanceId) {
+              return undefined;
             }
-          );
-          if (graphDecision) {
-            pullRequestGraphDiffGuard.recordDeniedGraphDiff(
-              input,
-              graphDecision.permissionDecisionReason
-            );
-            return graphDecision;
+            return {
+              permissionDecision: "deny",
+              permissionDecisionReason:
+                "A Radius canvas is already open in this session.",
+              additionalContext: `Retry open_canvas with the existing instanceId \`${selectedInstanceId}\`. Reopening that exact instance refreshes its server and client connections; do not create another Radius panel.`
+            };
           }
-        } catch {
-          // Graph generation remains fail-open; the PR guard below owns its
-          // own fail-closed diagnostics once a Radius model is active.
         }
-        return pullRequestGraphDiffGuard.onPreToolUse(input);
+        return await pullRequestGraphDiffGuard.onPreToolUse(input);
       },
       onPostToolUse: (input) => pullRequestGraphDiffGuard.onPostToolUse(input),
-      onPostToolUseFailure: (input) =>
-        pullRequestGraphDiffGuard.onPostToolUseFailure(input),
+      onPostToolUseFailure: async (input) => {
+        const canvasId =
+          input.toolArgs !== null && typeof input.toolArgs === "object" ?
+            Reflect.get(input.toolArgs, "canvasId")
+          : undefined;
+        const instanceId =
+          input.toolArgs !== null && typeof input.toolArgs === "object" ?
+            Reflect.get(input.toolArgs, "instanceId")
+          : undefined;
+        const failedInstanceId =
+          typeof instanceId === "string" && instanceId ?
+            instanceId
+          : RADIUS_CANVAS_INSTANCE_ID;
+        if (
+          input.toolName === "open_canvas" &&
+          canvasId === "radius" &&
+          !deps.servers.has(failedInstanceId)
+        ) {
+          canvasInstances.release(failedInstanceId);
+        }
+        return await pullRequestGraphDiffGuard.onPostToolUseFailure(input);
+      },
       onSessionStart: async (input) => {
         let active = false;
         try {

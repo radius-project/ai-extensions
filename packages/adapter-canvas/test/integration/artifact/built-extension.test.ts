@@ -1,10 +1,12 @@
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
   type Dirent
 } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -190,11 +192,34 @@ describe("P0-C built Radius extension artifact", () => {
       "THIRD-PARTY-NOTICES.txt",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
+      "skills/radius-app-bicep/scripts/show-radius-type.mjs",
       "skills/radius-app-graph/references/source-code-references.md"
     ];
     if (existsSync(SOURCE_CHANGELOG)) packagedPaths.push("CHANGELOG.md");
     for (const packagedPath of packagedPaths) {
       expect(existsSync(join(DIST, ...packagedPath.split("/")))).toBe(true);
+    }
+    const radiusTypeResolver = readFileSync(
+      join(
+        DIST,
+        "skills",
+        "radius-app-bicep",
+        "scripts",
+        "show-radius-type.mjs"
+      ),
+      "utf8"
+    );
+    expect(radiusTypeResolver).not.toContain("@radius-project/adapter-shared");
+    expect(radiusTypeResolver).not.toContain("packages/adapter-shared");
+    expect(radiusTypeResolver).toContain("Managed Radius version query");
+    // The installed plugin has no workspace packages beside it, so every
+    // surviving import must be a Node builtin or the script fails at runtime.
+    const specifiers = [
+      ...radiusTypeResolver.matchAll(/\bfrom\s*"([^"]+)"/gu)
+    ].map((match) => match[1]);
+    expect(specifiers.length).toBeGreaterThan(0);
+    for (const specifier of specifiers) {
+      expect(specifier).toMatch(/^node:/u);
     }
     if (existsSync(SOURCE_CHANGELOG)) {
       expect(readFileSync(join(DIST, "CHANGELOG.md"), "utf8")).toBe(
@@ -283,14 +308,20 @@ describe("P0-C built Radius extension artifact", () => {
       const relative = sourceSkill.slice(
         join(REPO_ROOT, "plugins", "radius").length + 1
       );
+      if (
+        relative.replaceAll("\\", "/") ===
+        "skills/radius-app-bicep/scripts/show-radius-type.mjs"
+      ) {
+        continue;
+      }
       expect(readFileSync(join(DIST, relative), "utf8")).toBe(
         readFileSync(sourceSkill, "utf8")
       );
     }
     const notices = readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8");
     for (const marker of [
-      "===== react@18.3.1 =====",
-      "===== react-dom@18.3.1 =====",
+      "===== react@19.2.8 =====",
+      "===== react-dom@19.2.8 =====",
       "===== reactflow@11.11.4 =====",
       "===== dagre@0.8.5 =====",
       "===== @reactflow/core@11.11.4 =====",
@@ -463,6 +494,42 @@ describe("P0-C built Radius extension artifact", () => {
       expect(
         readFileSync(join(installDir, "THIRD-PARTY-NOTICES.txt"), "utf8")
       ).toBe(readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8"));
+    } finally {
+      rmSync(installDir, { recursive: true, force: true });
+    }
+  });
+
+  it("installs every skill file, not just the scripts", () => {
+    const installDir = mkdtempSync(join(tmpdir(), "radius-canvas-install-"));
+    const installPath = join(installDir, "extension.mjs");
+    try {
+      // Seed a file that no longer exists upstream. A merging copy would leave
+      // it behind for the agent to read.
+      const staleDir = join(installDir, "skills", "radius-app-graph");
+      mkdirSync(staleDir, { recursive: true });
+      writeFileSync(join(staleDir, "REMOVED.md"), "stale", "utf8");
+
+      execFileSync(process.execPath, ["build.mjs", "--install"], {
+        cwd: join(REPO_ROOT, "packages", "adapter-canvas"),
+        env: { ...process.env, RADIUS_CANVAS_INSTALL_PATH: installPath },
+        stdio: "pipe"
+      });
+
+      // SKILL.md and its references are the instructions the agent follows, so
+      // an install that refreshes only the bundle runs stale guidance against a
+      // fresh extension.
+      const skillsRoot = join(DIST, "skills");
+      const skillFiles = filesUnder(skillsRoot);
+      expect(skillFiles.some((path) => path.endsWith("SKILL.md"))).toBe(true);
+      for (const source of skillFiles) {
+        const relative = source.slice(skillsRoot.length + 1);
+        const installed = join(installDir, "skills", relative);
+        expect(existsSync(installed)).toBe(true);
+        expect(readFileSync(installed, "utf8")).toBe(
+          readFileSync(source, "utf8")
+        );
+      }
+      expect(existsSync(join(staleDir, "REMOVED.md"))).toBe(false);
     } finally {
       rmSync(installDir, { recursive: true, force: true });
     }

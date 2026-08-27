@@ -36,14 +36,16 @@ import type {
 } from "../../../src/browser/graph/layout.js";
 import type { GraphEdge, GraphNode } from "../../../src/browser/graph/build.js";
 
-export type RenderedElement = ReactElement;
+// React 19 types `ReactElement["props"]` as `unknown`, so the prop bag is named
+// here rather than re-asserted at every read.
+export type RenderedElement = ReactElement<Record<string, unknown>>;
 
 export function isRenderedElement(value: unknown): value is RenderedElement {
   return isValidElement(value);
 }
 
 export function elementProps(value: RenderedElement): Record<string, unknown> {
-  return value.props as Record<string, unknown>;
+  return value.props;
 }
 
 // React 18 lifts `ref` out of props onto the element itself, and the public

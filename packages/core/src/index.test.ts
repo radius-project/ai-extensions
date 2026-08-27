@@ -17,6 +17,7 @@ const EXPECTED_FUNCTIONS = [
   "computeGraphDiff",
   "deployStatusKeys",
   "filterGraphVisualizationResources",
+  "isStagingDirName",
   "lookupDeployStatus",
   "mergeDeployedGraphMetadata",
   "projectDeployedGraph",
