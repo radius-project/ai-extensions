@@ -131,14 +131,20 @@ export interface EnvironmentsDependencies {
   getSelectedGitHubExecutor(
     operationId: string
   ): SelectedGhExecutor | null | undefined;
+  isSelectedGitHubAuthorizationError(error: unknown): boolean;
   hasCompleteVerificationIdentity(operation: unknown): boolean;
   findWorkflowRun(
     repo: string,
     workflowFile: string,
     sinceMs: number,
     knownId?: number | string | null,
-    executor?: SelectedGhExecutor
+    executor?: SelectedGhExecutor,
+    afterRunId?: number | string | null
   ): Promise<number | string | null>;
+  settleVerificationDispatchRecovery(
+    operation: unknown,
+    runId: number | string
+  ): void;
   getRunDetail(
     repo: string,
     runId: number | string,

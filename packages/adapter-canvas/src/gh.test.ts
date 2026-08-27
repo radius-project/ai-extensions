@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { providerMutationOutcomeUnknown } from "./server/services/provider-mutation-recovery.js";
 
 const childProcess = vi.hoisted(() => ({
   execFile: vi.fn(),
@@ -1083,6 +1084,37 @@ describe.sequential("selected GitHub executor", () => {
       ["api", "--method", "PUT", "repos/octo/app/environments/dev"],
       ["api", "repos/octo/app"]
     ]);
+  });
+
+  it("preserves timeout state from selected-account commands", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      apiLogin: "tokuser"
+    });
+    const executor = await gh.createSelectedGhExecutor("tokuser");
+    await executor.verifyIdentity();
+    const timeout = Object.assign(new Error("terminated"), {
+      code: null,
+      killed: true,
+      signal: "SIGTERM"
+    });
+    childProcess.execFile.mockImplementationOnce(
+      (_file, _args, _options, callback) => {
+        callback(timeout, "", "terminated");
+        return { stdin: { end() {} } };
+      }
+    );
+
+    const result = await executor.run(["api", "/repos/octo/app"]);
+    expect(result).toEqual({
+      code: 1,
+      stdout: "",
+      stderr: "terminated",
+      timedOut: true
+    });
+    expect(providerMutationOutcomeUnknown(result)).toBe(true);
   });
 
   it("redacts a materialized non-prefixed keyring token from results and errors", async () => {

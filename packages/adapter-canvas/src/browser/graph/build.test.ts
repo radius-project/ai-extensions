@@ -8,6 +8,7 @@
 import { describe, it, expect } from "vitest";
 import {
   buildGraph,
+  isLocalSourceNode,
   nodeColors,
   RADIUS_DEPLOY_STATUS_COLORS,
   radiusMapLineType,
@@ -42,6 +43,83 @@ const db: GraphResource = {
   ]
 };
 
+// A diff compares two branches and a worktree holds at most one of them, so
+// "is this file on disk?" is a per-node question there. Getting it wrong is
+// silent: the node renders a github.com URL for a branch that was never pushed,
+// and clicking it does nothing at all.
+describe("per-node source locality", () => {
+  it("falls back to the page flag when no workspace branch is supplied", () => {
+    expect(
+      isLocalSourceNode(settings({ localSource: true }), { sourceBranch: "" })
+    ).toBe(true);
+    expect(
+      isLocalSourceNode(settings({ localSource: false }), {
+        sourceBranch: "anything"
+      })
+    ).toBe(false);
+  });
+
+  it("ignores the page flag once a workspace branch is supplied", () => {
+    const resolved = settings({
+      localSource: false,
+      branch: "feature-x",
+      workspaceBranch: "feature-x"
+    });
+    expect(isLocalSourceNode(resolved, { sourceBranch: "feature-x" })).toBe(
+      true
+    );
+  });
+
+  it("keeps a node from the other compared branch remote", () => {
+    const resolved = settings({
+      diffMode: true,
+      branch: "feature-x",
+      baseBranch: "main",
+      workspaceBranch: "feature-x"
+    });
+    expect(isLocalSourceNode(resolved, { sourceBranch: "main" })).toBe(false);
+    expect(isLocalSourceNode(resolved, { sourceBranch: "feature-x" })).toBe(
+      true
+    );
+  });
+
+  it("treats a node with no branch of its own as the page's branch", () => {
+    expect(
+      isLocalSourceNode(
+        settings({ branch: "feature-x", workspaceBranch: "feature-x" }),
+        { sourceBranch: undefined }
+      )
+    ).toBe(true);
+    expect(
+      isLocalSourceNode(
+        settings({ branch: "main", workspaceBranch: "feature-x" }),
+        { sourceBranch: undefined }
+      )
+    ).toBe(false);
+  });
+
+  it("resolves locality against the worktree branch even when it is the base", () => {
+    const resolved = settings({
+      diffMode: true,
+      branch: "main",
+      baseBranch: "feature-x",
+      workspaceBranch: "feature-x"
+    });
+    expect(isLocalSourceNode(resolved, { sourceBranch: "feature-x" })).toBe(
+      true
+    );
+    expect(isLocalSourceNode(resolved, { sourceBranch: "main" })).toBe(false);
+  });
+
+  it("never matches an empty workspace branch against an empty node branch", () => {
+    expect(
+      isLocalSourceNode(settings({ branch: "", workspaceBranch: "" }), {
+        sourceBranch: ""
+      })
+    ).toBe(false);
+  });
+});
+
 describe("options", () => {
   it.each([
     ["straight", "straight"],
@@ -67,6 +145,7 @@ describe("options", () => {
       branch: "main",
       baseBranch: "main",
       localSource: false,
+      workspaceBranch: "",
       edgeType: "default",
       showLegend: false,
       enablePopup: true

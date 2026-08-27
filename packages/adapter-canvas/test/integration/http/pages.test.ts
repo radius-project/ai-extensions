@@ -15,6 +15,7 @@ import { plannedGraphPage } from "../../../src/pages/planned-graph-page.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
 import type { CanvasState } from "../../../src/shared.js";
 import { browserEntryMarker } from "../../../src/browser/scripts.js";
+import { readBrowserPageState } from "../../support/pages/browser-state.js";
 import {
   HOSTILE_STATE,
   expectSafeInlineScripts
@@ -163,6 +164,34 @@ describe("canvas pages over real loopback HTTP", () => {
     }
   });
 
+  // The diff page carries the worktree branch to the browser so each node can be
+  // routed to a local file or a github.com URL; through the real server this is
+  // the only place that value is produced.
+  it.each([
+    ["the workspace repository matches", "octo/app", "feature/x"],
+    ["it belongs to another repository", "other/app", ""]
+  ])(
+    "serves the graph diff workspace branch when %s",
+    async (_label, workspaceRepo, expected) => {
+      resetState({
+        contextRepo: "octo/app",
+        diffTargetRepo: "octo/app",
+        diffBase: "main",
+        diffHead: "feature/x",
+        workspacePath: "C:\\work\\app",
+        workspaceRepo,
+        workspaceBranch: "feature/x"
+      });
+
+      const response = await get("/?page=graph-diff");
+
+      expect(response.status).toBe(200);
+      expect(
+        readBrowserPageState(response.body, "radius-graph-diff-state")
+      ).toMatchObject({ workspaceBranch: expected });
+    }
+  );
+
   it("falls back to the environment page for a page value it does not know", async () => {
     resetState({ contextRepo: "octo/app" });
 
@@ -236,7 +265,9 @@ describe("canvas pages over real loopback HTTP", () => {
     const response = await get("/?page=graph");
 
     expect(response.body).not.toMatch(/<script[^>]+src=/);
-    expect(response.body).not.toContain('rel="stylesheet"');
+    // Matched as an element, not a substring: the inlined React bundle carries
+    // a `link[rel="stylesheet"]` query selector of its own.
+    expect(response.body).not.toMatch(/<link[^>]+rel="stylesheet"/);
     expect(response.body).not.toContain("unpkg.com");
   });
 

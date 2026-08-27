@@ -12,7 +12,7 @@ Start with an explicit request or scenario contract, then inspect primary eviden
 4. Entrypoints and source: environment/config reads, defaults, client constructors, URL assembly, protocol options, listener address/port, migrations, and worker-versus-web behavior.
 5. Example configuration and documentation: use these to confirm source behavior, not to override pinned source or an explicit compatible profile.
 
-`EXPOSE`, a compose port mapping, or a health endpoint alone is not proof that the process listens correctly or can reach its dependencies.
+`EXPOSE`, a Compose port mapping, or a health endpoint alone is not proof that the process listens correctly or can reach its dependencies. For external-client ingress, follow the route authoring rule in [app.bicep Structure](../SKILL.md#appbicep-structure-mandatory-order).
 
 ## Select the deployment profile
 
@@ -144,5 +144,5 @@ Before returning the model:
 9. Confirm every connection is consumed by source or intentionally retained because the selected profile requires Radius relationship metadata.
 10. Confirm the complete dependency tuple for every edge, including provider-specific endpoint transformations, TLS, auth, URL encoding, and final client syntax.
 11. Confirm each workload's primary feature is ready and every selected typed resource is both mandatory and used by that feature.
-12. Confirm external ingress has explicit request, manifest, or pinned-source evidence; a listener, `EXPOSE`, health check, or local-only mapping alone is insufficient.
+12. Confirm every route follows the authoring rule in [app.bicep Structure](../SKILL.md#appbicep-structure-mandatory-order).
 13. Confirm no required binding or dependency was deleted to satisfy stale mutable extension metadata or obtain a clean compile.

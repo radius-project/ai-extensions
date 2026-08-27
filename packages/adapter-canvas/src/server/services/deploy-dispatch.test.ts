@@ -54,6 +54,7 @@ function dependencies(
     ensureWorkflowsCurrent: () => Promise.resolve({ created: [], failed: [] }),
     latestWorkflowRunId: () => Promise.resolve(null),
     classifyDeployDispatchFailure: () => "run-unconfirmed",
+    uncommittedGeneratedPaths: () => Promise.resolve([]),
     invalidateDeployListCache: () => {},
     errorMessage: (error) =>
       error instanceof Error ? error.message : String(error),
@@ -237,6 +238,7 @@ describe("deploy dispatch construction", () => {
     "ensureWorkflowsCurrent",
     "latestWorkflowRunId",
     "classifyDeployDispatchFailure",
+    "uncommittedGeneratedPaths",
     "invalidateDeployListCache",
     "errorMessage",
     "now"
@@ -391,6 +393,57 @@ describe("deploy dispatch environment and branch preflight", () => {
     ]);
     // Nothing may be dispatched, because the run would be doomed.
     expect(gh.calls).toEqual([]);
+  });
+
+  it("tells the user to commit the generated model before pushing it", async () => {
+    const { input, state, logs } = request({ workspaceBranch: "feat" });
+    const gh = recordingGh();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        getBranchHeadSha: () => Promise.resolve(null),
+        getDefaultBranch: () => Promise.resolve("main"),
+        uncommittedGeneratedPaths: () =>
+          Promise.resolve([".radius", "app.bicep"])
+      })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(state.deployErrorPaths).toBe(".radius,app.bicep");
+    // The staging and commit steps must precede the push, or the pushed branch
+    // arrives on GitHub without the model the workflow reads.
+    expect(state.deployError).toContain("git add -- .radius app.bicep");
+    expect(state.deployError).toContain(
+      'git commit -m "Add Radius application model" -- .radius app.bicep'
+    );
+    expect(state.deployError).toContain("git push -u origin feat");
+    expect(state.deployError).toContain("pushing on its own would not publish");
+    expect(logs).toEqual([
+      "━━ Deploying Radius application ━━",
+      '❌ Branch "feat" has not been pushed to acme/widgets.',
+      "   Generated files are not committed yet: .radius, app.bicep — pushing alone would not publish them.",
+      '   Commit and push, then redeploy:  git add -- .radius app.bicep\ngit commit -m "Add Radius application model" -- .radius app.bicep\ngit push -u origin feat'
+    ]);
+    expect(gh.calls).toEqual([]);
+  });
+
+  it("reports no uncommitted generated paths when the worktree is clean", async () => {
+    const { input, state } = request();
+    const service = createDeployDispatchService(
+      dependencies({
+        ...recordingGh(),
+        getBranchHeadSha: () => Promise.resolve(null),
+        getDefaultBranch: () => Promise.resolve("main"),
+        uncommittedGeneratedPaths: () => Promise.resolve([])
+      })
+    );
+
+    await service.prepareAndDispatch(input);
+
+    expect(state.deployErrorPaths).toBe("");
+    expect(state.deployError).not.toContain("git add");
   });
 
   it("does not blame the branch when the repository itself is unreachable", async () => {
@@ -1651,6 +1704,55 @@ describe("deploy dispatch workflow publication and dispatch", () => {
     expect(state.deployStatus).toBe("failed");
     expect(state.deployError).toContain("git push -u origin feat");
     expect(logs).toContain("   Push it and redeploy:  git push -u origin feat");
+  });
+
+  it("also asks for a commit when an unresolvable ref meets an uncommitted model", async () => {
+    const { input, state, logs } = request({ workspaceBranch: "feat" });
+    const gh = recordingGh([
+      { code: 1, stderr: "no ref found for: feat", stdout: "" }
+    ]);
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        classifyDeployDispatchFailure: () => "branch-not-pushed",
+        uncommittedGeneratedPaths: () => Promise.resolve([".radius"])
+      })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    // Both branch-not-pushed paths share one reporter, so the dispatch-failure
+    // route cannot drift back into offering a bare push.
+    expect(state.deployErrorPaths).toBe(".radius");
+    expect(state.deployError).toContain("git add -- .radius");
+    expect(logs).toContain(
+      "   Generated files are not committed yet: .radius — pushing alone would not publish them."
+    );
+  });
+
+  it("does not offer to commit generated files onto a different selected branch", async () => {
+    const { input, state, logs } = request({
+      workspaceBranch: "feature/worktree"
+    });
+    const service = createDeployDispatchService(
+      dependencies({
+        getBranchHeadSha: () => Promise.resolve(null),
+        getDefaultBranch: () => Promise.resolve("main"),
+        uncommittedGeneratedPaths: () => Promise.resolve([".radius"])
+      })
+    );
+
+    expect(await service.prepareAndDispatch(input)).toEqual({
+      dispatched: false
+    });
+    expect(state.deployError).not.toContain("git add");
+    expect(state.deployError).toContain(
+      "checked-out branch feature/worktree, not the selected branch feat"
+    );
+    expect(logs).toContain(
+      "   The generated files are in the checked-out branch feature/worktree, not the selected branch feat. Select feature/worktree or commit the files yourself before pushing feat."
+    );
   });
 
   it("hints at the missing workflow scope for a scope failure", async () => {

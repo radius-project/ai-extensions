@@ -6,7 +6,11 @@ import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { IGNORED_SOURCE_DIRS } from "@radius-project/core";
+import {
+  GENERATED_MODEL_PATHS,
+  IGNORED_SOURCE_DIRS,
+  isStagingDirName
+} from "@radius-project/core";
 import type { CanvasState } from "./shared.js";
 
 export interface CanvasSessionWorkspace {
@@ -257,6 +261,20 @@ export function isWorkspaceSelection(
   );
 }
 
+// The branch this workspace has checked out for `repo`, or "" when there is no
+// worktree for it. A page that renders one branch can ask isWorkspaceSelection
+// directly; the graph diff renders two branches at once and only the checked-out
+// one has on-disk files, so it needs the name itself to decide per node. Empty
+// is fail-closed in the same way: an unknown workspace branch never matches a
+// node's branch, so the node keeps its remote link.
+export function workspaceBranchForRepo(
+  state: CanvasState | null | undefined,
+  repo: string | null | undefined
+): string {
+  if (!state?.workspacePath || !repoMatches(state, repo)) return "";
+  return state.workspaceBranch || "";
+}
+
 export function defaultBranchForState(
   state: CanvasState | null | undefined
 ): string {
@@ -373,6 +391,64 @@ function isLegacyRadiusAppModel(content: string): boolean {
   );
 }
 
+// The newest filesystem activity from a modeling run in the workspace checkout.
+//
+// A run creates `.radius/.staging-<runId>/` before it writes anything and
+// removes it when it finishes. The newest mtime proves that the run existed and
+// may provide a newer observation, but callers must not treat an unchanged mtime
+// as proof that source analysis or recipe publishing stopped.
+//
+// Any read failure answers null. This decides whether to keep waiting, so an
+// unreadable `.radius/` must let the wait end rather than renew it forever.
+export async function modelingRunLastActivityAtMs(
+  workspacePath: string | null | undefined
+): Promise<number | null> {
+  if (!workspacePath) return null;
+  try {
+    const dir = safeWorkspacePath(workspacePath, ".radius");
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const stagingDirs = entries.filter(
+      (entry) => entry.isDirectory() && isStagingDirName(entry.name)
+    );
+    const activityTimes = await Promise.all(
+      stagingDirs.map(async (entry): Promise<number | null> => {
+        const stagingDir = path.join(dir, entry.name);
+        try {
+          const [stagingStat, stagedEntries] = await Promise.all([
+            fs.stat(stagingDir),
+            fs.readdir(stagingDir, { withFileTypes: true })
+          ]);
+          const stagedStats = await Promise.all(
+            stagedEntries
+              .filter((stagedEntry) => !stagedEntry.isSymbolicLink())
+              .map(async (stagedEntry) => {
+                try {
+                  return await fs.stat(path.join(stagingDir, stagedEntry.name));
+                } catch {
+                  return null;
+                }
+              })
+          );
+          return Math.max(
+            stagingStat.mtimeMs,
+            ...stagedStats.flatMap((stat) => (stat ? [stat.mtimeMs] : []))
+          );
+        } catch {
+          // The run may have published between listing `.radius/` and probing
+          // its staging directory. That completed run is no longer activity.
+          return null;
+        }
+      })
+    );
+    const observed = activityTimes.filter(
+      (activityAtMs): activityAtMs is number => activityAtMs !== null
+    );
+    return observed.length > 0 ? Math.max(...observed) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function hasRadiusApplicationModel(
   workspacePath: string | null | undefined
 ): Promise<boolean> {
@@ -441,7 +517,45 @@ export async function workspaceHeadCommit(
 // model and origin record that an older layout keeps beside it. Changes confined
 // to these are not application-source changes, so committing a regenerated model
 // does not read as a reason to regenerate it again.
-const GENERATED_PATHS = [".radius", "app.bicep", "app.origin.json"];
+//
+// Shared with the remediation registry, which stages exactly this set when it
+// has to commit a generated model before pushing. One list means the paths a
+// push commits can never drift from the paths a freshness check discounts.
+const GENERATED_PATHS: readonly string[] = GENERATED_MODEL_PATHS;
+
+/**
+ * Which generator-owned paths have changes that are not committed yet — staged,
+ * unstaged, or untracked.
+ *
+ * Returns allowlisted tokens from `GENERATED_MODEL_PATHS`, never raw git output,
+ * so the result can be handed straight to the `git-push-branch` remediation.
+ * Resolves to an empty list when there is no workspace, no git, or nothing
+ * pending; callers treat that as "a plain push publishes everything it needs".
+ */
+export async function uncommittedGeneratedPaths(
+  workspacePath: string | null | undefined
+): Promise<readonly string[]> {
+  const pending: string[] = [];
+  for (const generated of GENERATED_PATHS) {
+    // Asked one path at a time on purpose. Porcelain lines are `XY <path>` with
+    // a significant leading space for an unstaged change, and `runGitResult`
+    // trims, so parsing a combined listing by column silently loses the first
+    // entry's path prefix. A per-path question needs no parsing at all: any
+    // output means that root has something uncommitted.
+    //
+    // `git status` also tolerates a pathspec matching nothing, unlike `git add`,
+    // so an absent member of the allowlist is simply empty rather than an error.
+    const result = await runGitResult(workspacePath, [
+      "status",
+      "--porcelain",
+      "-uall",
+      "--",
+      generated
+    ]);
+    if (result.ok && result.stdout) pending.push(generated);
+  }
+  return pending;
+}
 
 // Whether application source changed between `sinceCommit` and the current
 // working tree, ignoring paths the generator owns. This includes committed,

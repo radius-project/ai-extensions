@@ -709,7 +709,8 @@ export function discoverStatusText(
       (data.vpcs || []).length
     } VPC(s)`;
   }
-  const errMsg = data.error || errs.resourceGroups || errs.clusters || "";
+  const errMsg =
+    data.error || errs.resourceGroups || errs.clusters || errs.namespaces || "";
   if (errMsg) return "Discovery failed: " + errMsg;
   return `Found ${(data.clusters || []).length} cluster(s), ${
     (data.resourceGroups || []).length

@@ -6,8 +6,366 @@ import {
   explainRepoAccessForEnvSetup,
   isRepoNotFoundError,
   extractErrorLines,
-  extractGitHubActionsStepLog
+  extractGitHubActionsStepLog,
+  fetchRunLog,
+  findWorkflowRun,
+  getRunDetail,
+  isSelectedGhAuthorizationError,
+  selectedCommandAuthorizationError
 } from "./deploy.js";
+import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
+
+describe("selected-account workflow reads", () => {
+  it("classifies direct selected-account command authorization failures", async () => {
+    const executor = successfulSelectedGhExecutor({ login: "alice" });
+
+    await expect(
+      selectedCommandAuthorizationError(executor, "contoso/store", {
+        code: 1,
+        stdout: "",
+        stderr: "gh: Forbidden (HTTP 403)"
+      })
+    ).resolves.toMatchObject({
+      name: "SelectedGhAuthorizationError",
+      login: "alice",
+      status: 403
+    });
+    await expect(
+      selectedCommandAuthorizationError(executor, "contoso/store", {
+        code: 1,
+        stdout: "",
+        stderr: "gh: Too Many Requests (HTTP 429)"
+      })
+    ).resolves.toBeNull();
+  });
+
+  it.each([
+    ["run discovery", 401, "gh: Unauthorized (HTTP 401)", "list"],
+    ["run detail", 403, "gh: Forbidden (HTTP 403)", "detail"]
+  ])(
+    "surfaces %s HTTP %i instead of degrading to pending",
+    async (_label, status, stderr, operation) => {
+      const calls: string[][] = [];
+      const executor = successfulSelectedGhExecutor({
+        login: "alice",
+        run: async (args) => {
+          calls.push(args);
+          return { code: 1, stdout: "", stderr };
+        }
+      });
+
+      const attempt =
+        operation === "list" ?
+          findWorkflowRun(
+            "contoso/store",
+            "verify.yml",
+            Date.now(),
+            null,
+            executor
+          )
+        : getRunDetail("contoso/store", "41", executor);
+
+      const error = await attempt.catch((reason: unknown) => reason);
+      expect(error).toMatchObject({
+        name: "SelectedGhAuthorizationError",
+        login: "alice",
+        status
+      });
+      expect(isSelectedGhAuthorizationError(error)).toBe(true);
+      expect(calls).toHaveLength(1);
+    }
+  );
+
+  it("keeps transient selected-account run discovery pollable", async () => {
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "gh: Service Unavailable (HTTP 503)"
+      })
+    });
+
+    await expect(
+      findWorkflowRun("contoso/store", "verify.yml", Date.now(), null, executor)
+    ).resolves.toBeNull();
+  });
+
+  it.each([
+    ["retry-after", "gh: Forbidden (HTTP 403)\nRetry-After: 60"],
+    [
+      "exhausted primary limit",
+      "gh: API rate limit exceeded (HTTP 403)\nX-RateLimit-Remaining: 0"
+    ],
+    [
+      "secondary limit",
+      "gh: You have exceeded a secondary rate limit (HTTP 403)"
+    ],
+    [
+      "reset guidance",
+      "gh: rate limit reached (HTTP 403); retry when the limit resets"
+    ],
+    ["too many requests", "gh: Too Many Requests (HTTP 429)"]
+  ])("keeps selected-account %s responses pollable", async (_label, stderr) => {
+    let calls = 0;
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async () => {
+        calls += 1;
+        return { code: 1, stdout: "", stderr };
+      }
+    });
+
+    await expect(
+      findWorkflowRun("contoso/store", "verify.yml", Date.now(), null, executor)
+    ).resolves.toBeNull();
+    expect(calls).toBe(1);
+  });
+
+  it("terminalizes a masked private-repository 404 after the selected account loses repository access", async () => {
+    const calls: string[][] = [];
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async (args) => {
+        calls.push(args);
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "gh: Not Found (HTTP 404)"
+        };
+      }
+    });
+
+    await expect(
+      findWorkflowRun("contoso/store", "verify.yml", Date.now(), null, executor)
+    ).rejects.toMatchObject({
+      name: "SelectedGhAuthorizationError",
+      login: "alice",
+      status: 404
+    });
+    expect(calls.map((args) => args[0])).toEqual(["run", "api"]);
+    expect(calls[1]).toEqual([
+      "api",
+      "repos/contoso/store",
+      "--jq",
+      ".full_name"
+    ]);
+  });
+
+  it("keeps a not-yet-visible run detail pending when the selected account still reads the repository", async () => {
+    const calls: string[][] = [];
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async (args) => {
+        calls.push(args);
+        return args[0] === "api" ?
+            { code: 0, stdout: "contoso/store", stderr: "" }
+          : { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+      }
+    });
+
+    await expect(
+      getRunDetail("contoso/store", "41", executor)
+    ).resolves.toBeNull();
+    expect(calls.map((args) => args[0])).toEqual(["run", "api"]);
+  });
+
+  it("keeps a masked run 404 pending when its repository probe is rate-limited", async () => {
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async (args) =>
+        args[0] === "api" ?
+          {
+            code: 1,
+            stdout: "",
+            stderr:
+              "gh: You have exceeded a secondary rate limit (HTTP 403)\nRetry-After: 60"
+          }
+        : { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" }
+    });
+
+    await expect(
+      findWorkflowRun("contoso/store", "verify.yml", Date.now(), null, executor)
+    ).resolves.toBeNull();
+  });
+
+  it.each([
+    ["run discovery", 401, "list"],
+    ["run detail", 403, "detail"]
+  ])(
+    "surfaces rejected selected-account %s identity check HTTP %i",
+    async (_label, status, operation) => {
+      const executor = successfulSelectedGhExecutor({
+        login: "alice",
+        run: () =>
+          Promise.reject(
+            new Error(
+              `GitHub identity verification failed for @alice: gh: access rejected (HTTP ${status})`
+            )
+          )
+      });
+
+      const attempt =
+        operation === "list" ?
+          findWorkflowRun(
+            "contoso/store",
+            "verify.yml",
+            Date.now(),
+            null,
+            executor
+          )
+        : getRunDetail("contoso/store", "41", executor);
+      const error = await attempt.catch((reason: unknown) => reason);
+
+      expect(error).toMatchObject({
+        name: "SelectedGhAuthorizationError",
+        login: "alice",
+        status
+      });
+    }
+  );
+
+  it("leaves a rejected transient selected-account identity check pollable", async () => {
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: () =>
+        Promise.reject(
+          new Error(
+            "GitHub identity verification failed for @alice: gh: Service Unavailable (HTTP 503)"
+          )
+        )
+    });
+
+    await expect(
+      findWorkflowRun("contoso/store", "verify.yml", Date.now(), null, executor)
+    ).rejects.toThrow("HTTP 503");
+  });
+
+  it("keeps transient selected-account run detail pollable after its fallback", async () => {
+    let calls = 0;
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async () => {
+        calls += 1;
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "gh: Service Unavailable (HTTP 503)"
+        };
+      }
+    });
+
+    await expect(
+      getRunDetail("contoso/store", "41", executor)
+    ).resolves.toBeNull();
+    expect(calls).toBe(2);
+  });
+
+  it("surfaces selected-account authorization failure while reading a failed run log", async () => {
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "gh: Unauthorized (HTTP 401)"
+      })
+    });
+
+    await expect(
+      fetchRunLog("contoso/store", "41", executor)
+    ).rejects.toMatchObject({
+      name: "SelectedGhAuthorizationError",
+      login: "alice",
+      status: 401
+    });
+  });
+
+  it("does not read workflow log stdout as a GitHub authorization failure", async () => {
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async () => ({
+        code: 1,
+        stdout: "curl failed against a service endpoint (HTTP 403)",
+        stderr: "gh: could not retrieve the workflow log"
+      })
+    });
+
+    await expect(
+      fetchRunLog("contoso/store", "41", executor)
+    ).resolves.toBeNull();
+  });
+
+  it("keeps transient selected-account run log failure pollable", async () => {
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "gh: Service Unavailable (HTTP 503)"
+      })
+    });
+
+    await expect(
+      fetchRunLog("contoso/store", "41", executor)
+    ).resolves.toBeNull();
+  });
+
+  it("terminalizes a selected-account log 404 when the repository probe also loses access", async () => {
+    const calls: string[][] = [];
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async (args) => {
+        calls.push(args);
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "gh: Not Found (HTTP 404)"
+        };
+      }
+    });
+
+    await expect(
+      fetchRunLog("contoso/store", "41", executor)
+    ).rejects.toMatchObject({
+      name: "SelectedGhAuthorizationError",
+      login: "alice",
+      status: 404
+    });
+    expect(calls.map((args) => args[0])).toEqual(["run", "api"]);
+  });
+
+  it("keeps a missing selected-account log ordinary when the repository probe succeeds", async () => {
+    const calls: string[][] = [];
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async (args) => {
+        calls.push(args);
+        return args[0] === "api" ?
+            { code: 0, stdout: "contoso/store", stderr: "" }
+          : { code: 1, stdout: "", stderr: "gh: Not Found (HTTP 404)" };
+      }
+    });
+
+    await expect(
+      fetchRunLog("contoso/store", "41", executor)
+    ).resolves.toBeNull();
+    expect(calls.map((args) => args[0])).toEqual(["run", "api"]);
+  });
+
+  it.each([
+    ["returns the selected-account run log", "workflow log", "workflow log"],
+    ["treats an empty selected-account run log as unavailable", "", null]
+  ])("%s", async (_label, stdout, expected) => {
+    const executor = successfulSelectedGhExecutor({
+      login: "alice",
+      run: async () => ({ code: 0, stdout, stderr: "" })
+    });
+
+    await expect(fetchRunLog("contoso/store", "41", executor)).resolves.toBe(
+      expected
+    );
+  });
+});
 
 // The exact rejection surfaced by GitHub Actions' "Azure Login (OIDC)" step when
 // a personal-account repo hits a tenant that enforces the enterprise claim.

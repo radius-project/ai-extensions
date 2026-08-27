@@ -31,6 +31,46 @@ on:
 permissions: {}
 
 jobs:
+  static-checks:
+    name: Static checks
+    runs-on: ubuntu-latest
+    # Deliberately a separate job rather than a `parallel` step group inside
+    # the build job. These checks are CPU-bound and single-threaded, and the
+    # runner only has two cores, so sharing them buys nothing; a second runner
+    # is what actually removes this work from the critical path.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check derived versions
+        run: pnpm run version:check
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Check formatting
+        run: pnpm run format:check
+
   windows-process-integration:
     name: Windows process integration
     runs-on: windows-latest
@@ -59,9 +99,16 @@ jobs:
         run: pnpm run test:integration:windows-process
 
   canvas-chromium:
-    name: Canvas Chromium
+    name: Canvas Chromium (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Playwright pins workers to 1 because the canvas server module keeps
+    # process-global listing caches and shared credentials. Shards are separate
+    # processes on separate runners, so they parallelize without that hazard.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     container:
       image: mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
     permissions:
@@ -85,17 +132,22 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Vitest browser mode, not Playwright, so `--shard` does not apply. Run it
+      # once instead of duplicating it in every shard.
       - name: Run Canvas browser component tests
+        if: matrix.shard == 1
         run: pnpm run test:component
 
+      # No `--` before the flag: pnpm v11 consumes that separator instead of
+      # forwarding it, which silently runs the whole suite in every shard.
       - name: Run Chromium Canvas tests
-        run: pnpm run test:chromium
+        run: pnpm run test:chromium --shard=${{ matrix.shard }}/${{ strategy.job-total }}
 
       - name: Upload Chromium diagnostics and retry-only reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: canvas-playwright-artifacts
+          name: canvas-playwright-artifacts-shard-${{ matrix.shard }}
           path: |
             packages/adapter-canvas/test-results
             packages/adapter-canvas/playwright-report
@@ -107,7 +159,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read # @changesets/changelog-github resolves each entry's PR
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -132,20 +183,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      # Must run before the version is resolved below, which rewrites
-      # plugins/radius/package.json in the workspace.
-      - name: Check derived versions
-        run: pnpm run version:check
-
-      - name: Typecheck
-        run: pnpm run typecheck
-
-      - name: Lint
-        run: pnpm run lint
-
-      - name: Check formatting
-        run: pnpm run format:check
 
       - name: Run Node tests with coverage
         id: coverage
@@ -175,24 +212,29 @@ jobs:
       #          in .changeset/config.json) with an `edge` prerelease tag, e.g.
       #          0.1.0-edge-20260807014054. That sorts below the release it
       #          precedes and above anything already shipped. This rewrites
-      #          plugins/radius/package.json in the CI workspace only — nothing
-      #          is committed. An ephemeral patch changeset makes documentation-
-      #          only pushes snapshot the next patch when no package changeset is
-      #          pending; an existing minor or major changeset still takes precedence.
+      #          plugins/radius/package.json and .changeset/config.json in the
+      #          CI workspace only — nothing is committed. An ephemeral patch
+      #          changeset makes documentation-only pushes snapshot the next
+      #          patch when no package changeset is pending; an existing minor
+      #          or major changeset still takes precedence.
       # release: `changeset version` already committed the version to main, so
       #          ship it verbatim. The release workflow tags it after checks.
       - name: Resolve version
         id: version
         env:
           CHANNEL: ${{ inputs.channel || 'edge' }}
-          # `changelog: @changesets/changelog-github` turns every entry into a
-          # GraphQL lookup, and it reads the token from the environment only.
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "$CHANNEL" = "release" ]; then
             version="$(node scripts/version.mjs)"
           elif [ "$CHANNEL" = "edge" ]; then
+            # Only the version is read back, so drop the changelog generator:
+            # @changesets/changelog-github costs one GitHub GraphQL lookup per
+            # pending changeset and fails the publish whenever that call does.
+            config="$(mktemp)"
+            jq '.changelog = false' .changeset/config.json >"$config"
+            mv "$config" .changeset/config.json
+
             pnpm exec changeset add --patch radius \
               --message 'Publish the current commit to the rolling edge channel.'
             pnpm exec changeset version --snapshot edge
@@ -211,7 +253,11 @@ jobs:
 
       # Runs against the exact bundle uploaded below. This intentionally stays
       # after Build rather than relying on a pre-existing workspace artifact.
+      # It reruns the build itself, so it needs the same stamp to leave dist/
+      # byte-identical to what Build produced.
       - name: Run built-artifact smoke tests
+        env:
+          PLUGIN_VERSION: ${{ steps.version.outputs.version }}
         run: pnpm run test:integration:artifact
       - name: Verify Bicep checker is packaged
         run: test -f plugins/radius/dist/skills/radius-app-bicep/scripts/validate-bicep.mjs

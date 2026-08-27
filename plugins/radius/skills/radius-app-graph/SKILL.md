@@ -46,16 +46,16 @@ The renderer ports the production improvements from `radius-project/github-exten
 
 ## Source-code references
 
-The optional `codeReference` on each resource is what makes a graph node link back to its definition/initialization site in the source (e.g. the file that opens the MySQL connection). It is normally hand-added metadata, but since the app model here is generated, this skill locates it automatically:
+The `codeReference` on each non-application resource is what makes a graph node link back to its definition/initialization site in the source (e.g. the file that opens the MySQL connection). Generated models store it durably in `app.bicep` as either a current-worktree-relative path or an exact GitHub branch/file URL; the graph consumes that authored metadata.
 
-- Prefer authoring `codeReference` into `.radius/app.bicep` (the `radius-app-bicep` skill) so the link is durable and high quality.
-- Any resource still missing one is discovered by this skill's AI agent at graph-build time, using the heuristics in [source-code-references.md](references/source-code-references.md).
+- The `radius-app-bicep` skill discovers and authors `codeReference` into `.radius/app.bicep` before publishing the model.
+- If a generated graph lacks a reference, repair the model through that skill. Do not treat the instance-scoped `update_source_refs` compatibility action as completion because its changes do not survive rebuilding the graph.
 
 For the per-resource discovery methodology — categorization, filename/initialization patterns, skip rules, line pinpointing, and output format — follow [source-code-references.md](references/source-code-references.md).
 
-### Agent-driven discovery workflow
+### Missing-reference repair workflow
 
-After the graph canvas is opened and the graph has been built, discover source-code references for resources that lack them:
+After the graph canvas is opened and the graph has been built, inspect whether a generated model is missing source-code references:
 
 1. **Get resources needing references** — call the `get_graph_resources` canvas action to retrieve resources missing `codeReference`:
 
@@ -69,28 +69,10 @@ invoke_canvas_action({
 
 If `ready` is `false`, the graph hasn't built yet — wait and retry. The response includes the exact graph context (`repo`, branch fields, `view`, and `contextToken`) plus resources (each with `name`, `type`, `id`). Keep the returned `contextToken`; it prevents references discovered for one repo, branch, or graph view from being applied to another.
 
-1. **Categorize each resource** by its `type` using the category mapping in [source-code-references.md](references/source-code-references.md) (e.g. `mysql`, `postgres`, `redis`, `mongo`, `rabbitmq`, `neo4j`, `container`, `secret`).
-2. **Search the repository** for each resource's definition/initialization site using `grep` and `glob` tools, following the file-name patterns and initialization/content patterns from [source-code-references.md](references/source-code-references.md). Skip test/spec/mock/vendor directories and files.
-3. **Pinpoint the line** — when a candidate file is found, search within it for the initialization pattern and note the 1-based line number.
-4. **Push discovered references** to the canvas via the `update_source_refs` action:
-
-```javascript
-invoke_canvas_action({
-  instanceId: "radius-panel",
-  actionName: "update_source_refs",
-  input: {
-    contextToken: "<contextToken returned by get_graph_resources>",
-    refs: [
-      { id: "<database resource id>", codeReference: "src/db.js#L14" },
-      { id: "<cache resource id>", codeReference: "src/redis.js#L8" }
-    ]
-  }
-})
-```
-
-Always use the stable `id` and `contextToken` returned by `get_graph_resources`; do not reconstruct them from resource names or types. The action refreshes the active graph URL after applying references. If it reports a stale context, fetch resources again and repeat the search against the newly returned repo/branch context.
-
-Only attach a reference when confident it points to the real initialization/definition site. An empty reference is better than a wrong one.
+1. If the action returns any resources, run the `radius-app-bicep` skill as a repair of the existing model.
+2. Categorize each missing resource by its `type` and search the selected branch using the methodology in [source-code-references.md](references/source-code-references.md), which owns the per-category rules — including the entrypoint-resolution order for containers and the packaging files that are never a container's destination. Pinpoint the verified initialization line.
+3. Author each reference into that resource's `properties.codeReference` in staged `app.bicep`, validate the complete model, write a matching origin record, and publish through the skill's promote script.
+4. Rebuild the graph and call `get_graph_resources` again. Completion requires an empty missing-resource list from the rebuilt `app.bicep`.
 
 ## How to invoke
 
@@ -129,7 +111,7 @@ When the selected branch has no committed `.radius/app.bicep` (or `app.bicep`), 
 - **Selected branch is the current workspace branch:** writing `.radius/app.bicep` to the working tree is enough — the graph, planned, and PR-diff-preview views render straight from the on-disk worktree checkout, so no commit or push is required to preview the graph.
 - **Selected branch is a different branch:** the skill must model that branch's code (not the current worktree's), and the resulting `.radius/app.bicep` must be committed and pushed to that branch before the graph can render there. Prefer opening a pull request into the target branch rather than committing directly to it, and never push a generated model straight to a protected branch such as `main` without the user's explicit confirmation.
 
-Once `.radius/app.bicep` is committed on the target branch, reopen the view — nodes then deep-link to `https://github.com/<owner>/<repo>/blob/<branch>/<file>` for that branch's source.
+For the current graph view, keep the Canvas open while `.radius/app.bicep` is generated; it detects the model and renders in place. Planned and diff views still need to be reopened after the model is committed on a non-workspace target branch.
 
 ## Prerequisites
 
@@ -140,7 +122,7 @@ Once `.radius/app.bicep` is committed on the target branch, reopen the view — 
 ## Troubleshooting
 
 - **Empty graph**: no committed app definition on the branch. Author `.radius/app.bicep` with the `radius-app-bicep` skill and commit it, then refresh.
-- **Graph build fails**: inspect the Radius extension log and verify that its managed binary under `~/.radius/ai-extensions/bin` was checked, downloaded or upgraded as needed, and is executable. Never run `rad app graph` locally to reproduce the failure. Do not add `--preview` to this modeled command. On Windows, the extension runs its managed `rad.exe` detached to avoid a known `rad`/Bicep hang under Node's default job object.
+- **Graph build fails**: inspect the Radius extension log and verify that its managed binary under `~/.radius/ai-extensions/bin` was checked, downloaded or upgraded as needed, and is executable. Never run `rad app graph` locally to reproduce the failure. Do not add `--preview` to this modeled command. On Windows, the extension keeps its managed `rad.exe` attached and hidden, then terminates the process tree after a valid graph artifact or timeout.
 - **Stale graph**: Click Refresh to rebuild from the selected branch's current app definition.
 - **PR diff doesn't appear**: verify both base and head branches have a committed `app.bicep` that can be fetched. Branches without one are reported as missing — the diff no longer generates a model for an empty branch, and it no longer requires both branches to have deployed first.
 

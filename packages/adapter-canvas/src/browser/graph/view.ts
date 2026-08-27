@@ -20,6 +20,8 @@ import type {
   ReactRoot
 } from "./vendor.js";
 import { safeExternalUrl } from "./details.js";
+import { isLocalSourceNode } from "./build.js";
+import { githubSourceReferenceUrl } from "./model.js";
 
 const TYPE_LABEL_MAX_PX = 13;
 const TYPE_LABEL_MIN_PX = 7;
@@ -60,6 +62,9 @@ export function fitTypeLabel(element: unknown): number | null {
 }
 
 export interface NodeCardDeps {
+  // Opens a validated external URL through the host. Native iframe navigation
+  // is not reliable in the Canvas webview.
+  openExternal(url: string): void;
   // Opens a repo-relative worktree file in the editor canvas, with the node's
   // remote URL as the fallback.
   openLocalSource(relPath: string, line: number, fallbackUrl: string): void;
@@ -117,11 +122,12 @@ export function createNodeComponent(
 
     // "View source code" behaviour depends on where the graph was resolved
     // from: a local-workspace graph opens the on-disk file in the editor canvas
-    // (with the remote URL as the fallback), a remote graph is a native anchor
-    // the host opens in the system browser, and a local graph with no reference
-    // for this node shows a disabled row.
+    // (with the remote URL as the fallback), a remote graph asks the host to
+    // open its URL, and a local graph with no reference for this node shows a
+    // disabled row.
     let sourceRow: unknown;
-    if (settings.localSource && data.srcPath) {
+    const localSource = isLocalSourceNode(settings, data);
+    if (localSource && data.srcPath) {
       sourceRow = h(
         "a",
         {
@@ -139,7 +145,30 @@ export function createNodeComponent(
         glyph,
         label
       );
-    } else if (settings.localSource) {
+    } else if (
+      data.sourceUrl &&
+      (!localSource || githubSourceReferenceUrl(data.codeRef))
+    ) {
+      sourceRow = h(
+        "a",
+        {
+          className: "rad-node__source nodrag nopan nokey",
+          href: data.sourceUrl,
+          target: "_blank",
+          rel: "noopener noreferrer",
+          onClick: (event: {
+            preventDefault(): void;
+            stopPropagation(): void;
+          }) => {
+            event.preventDefault();
+            event.stopPropagation();
+            deps.openExternal(data.sourceUrl);
+          }
+        },
+        glyph,
+        label
+      );
+    } else if (localSource) {
       sourceRow = h(
         "span",
         {
@@ -148,21 +177,6 @@ export function createNodeComponent(
           "aria-disabled": "true",
           title: "No source reference found",
           style: { opacity: 0.5, cursor: "default" }
-        },
-        glyph,
-        label
-      );
-    } else if (data.sourceUrl) {
-      sourceRow = h(
-        "a",
-        {
-          className: "rad-node__source nodrag nopan nokey",
-          href: data.sourceUrl,
-          target: "_blank",
-          rel: "noopener noreferrer",
-          onClick: (event: { stopPropagation(): void }) => {
-            event.stopPropagation();
-          }
         },
         glyph,
         label
@@ -215,9 +229,16 @@ export function createNodeComponent(
       settings.deployMode ? safeExternalUrl(data.portalUrl) : null;
     const head = h(
       "div",
-      { className: "rad-node__head" },
+      {
+        className:
+          badge ? "rad-node__head rad-node__head--with-badge" : "rad-node__head"
+      },
       icon,
-      h("span", { className: "rad-node__title" }, data.nodeName)
+      h(
+        "span",
+        { className: "rad-node__title", title: data.nodeName },
+        data.nodeName
+      )
     );
     const type = h(
       "div",

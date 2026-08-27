@@ -17,6 +17,7 @@ const EXPECTED_FUNCTIONS = [
   "computeGraphDiff",
   "deployStatusKeys",
   "filterGraphVisualizationResources",
+  "isStagingDirName",
   "lookupDeployStatus",
   "mergeDeployedGraphMetadata",
   "projectDeployedGraph",
@@ -38,6 +39,10 @@ const EXPECTED_FUNCTIONS = [
   "buildOidcSubject",
   "buildEnvironmentSuffix",
   "buildFederatedCredentialName",
+  "buildRemediation",
+  "isRemediationId",
+  "remediationSessionMessage",
+  "remediationView",
   "generateVerifyWorkflow",
   "verifyTemplateFile",
   "generateDeployWorkflow",
@@ -68,7 +73,9 @@ const EXPECTED_VALUES = [
   "DELETE_RADIUS_REF",
   "DELETE_APP_DISPATCHER_FILE",
   "DELETE_AZURE_FILE",
-  "DELETE_AWS_FILE"
+  "DELETE_AWS_FILE",
+  "REMEDIATION_IDS",
+  "GENERATED_MODEL_PATHS"
 ] as const;
 
 // Helpers that live inside core and are deliberately not part of the package's

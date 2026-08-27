@@ -14,9 +14,16 @@ name: Live upstream tests
 # non-hermetic: they depend on an external repo's moving `main` ref and on
 # network access to raw.githubusercontent.com.
 #
-# They run on every pull request and every push to `main` so an upstream
-# template regression is flagged immediately as a failed check, plus nightly as a
-# catch-all in case no PR lands between an upstream change and the next run.
+# The generated Radius definition compatibility job is more isolated still: it
+# runs only nightly or by manual dispatch. It downloads the latest stable rad
+# release, verifies its published checksum, and resolves real generated
+# definitions from the exact source commit reported by that binary. This catches
+# release/schema drift without adding a mutable release dependency to PR checks.
+#
+# The workflow-template suites run on every pull request and every push to `main`
+# so an upstream template regression is flagged immediately as a failed check,
+# plus nightly as a catch-all in case no PR lands between an upstream change and
+# the next run.
 #
 # Tradeoff to be aware of: because they fetch from radius-project/radius@main, a
 # regression pushed upstream can turn an otherwise-good ai-extensions PR red until
@@ -43,8 +50,14 @@ jobs:
       contents: read
     env:
       # Enables the `describe.skipIf(!LIVE)` blocks in the workflow live tests
-      # (workflow-yaml.live.test.ts and oidc-environment-contract.live.test.ts).
+      # (workflow-yaml.live.test.ts, oidc-environment-contract.live.test.ts,
+      # and verify-marker.live.test.ts).
       RUN_LIVE_WORKFLOW_TESTS: "1"
+      # The Canvas template fetcher shells out to `gh` rather than fetching raw
+      # URLs, and `gh` requires an explicit token under Actions. Read-only, and
+      # scoped by the job's `contents: read` permission. Set at the job level
+      # because the recursive `pnpm test` step also runs the Canvas live test.
+      GH_TOKEN: ${{ github.token }}
       # Enables the `az` argument-contract test for the Azure OIDC deploy
       # preflight (deploy-dispatch-az-contract.live.test.ts). The Azure CLI is
       # preinstalled on GitHub-hosted ubuntu runners; the test only checks that
@@ -72,6 +85,59 @@ jobs:
       - name: Run live upstream workflow tests
         run: pnpm test -- src/workflows/workflow-yaml.live.test.ts src/workflows/oidc-environment-contract.live.test.ts
 
+      - name: Run live verify marker round trip
+        working-directory: packages/adapter-canvas
+        run: pnpm exec vitest run src/verify-marker.live.test.ts
+
       - name: Run live Azure CLI contract test
         working-directory: packages/adapter-canvas
         run: pnpm exec vitest run src/server/services/deploy-dispatch-az-contract.live.test.ts
+
+  radius-type-compatibility:
+    name: Latest Radius definition compatibility
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install latest stable Radius CLI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          install_dir="$RUNNER_TEMP/radius-cli"
+          mkdir -p "$install_dir"
+          gh release download \
+            --repo radius-project/radius \
+            --pattern rad_linux_amd64 \
+            --pattern rad_linux_amd64.sha256 \
+            --dir "$install_dir"
+          cd "$install_dir"
+          sha256sum --check rad_linux_amd64.sha256
+          chmod +x rad_linux_amd64
+          mv rad_linux_amd64 rad
+          echo "RADIUS_RAD_BINARY=$install_dir/rad" >> "$GITHUB_ENV"
+
+      - name: Resolve real generated Radius definitions
+        working-directory: packages/adapter-canvas
+        env:
+          RUN_LIVE_RADIUS_TYPE_DEFINITION_TESTS: "1"
+        run: pnpm exec vitest run test/integration/runtime/radius-type-definition.live.test.ts

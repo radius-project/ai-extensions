@@ -135,16 +135,6 @@ ${confirmDialogMarkup()}
   </div>
 </div>
 
-<div id="azure-cli-assist-modal" role="dialog" aria-modal="true" aria-labelledby="azure-cli-assist-title" style="display:none; position:fixed; inset:0; z-index:1003; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
-  <div style="background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:440px; width:90%;">
-    <div id="azure-cli-assist-title" style="font-size:16px; font-weight:600; line-height:1.4; margin-bottom:8px;"></div>
-    <div id="azure-cli-assist-message" style="font-size:13px; color:var(--rad-text-tertiary); line-height:1.5;"></div>
-    <div style="display:flex; justify-content:flex-end; gap:8px; margin-top:20px;">
-      <button id="azure-cli-assist-cancel" type="button" class="rad-btn rad-btn--neutral" style="margin:0;">Cancel</button>
-      <button id="azure-cli-assist-confirm" type="button" class="rad-btn rad-btn--primary" style="margin:0;"></button>
-    </div>
-  </div>
-</div>
 <style>@keyframes spin{to{transform:rotate(360deg)}}
 /* Match Figma: the environments/credentials table's ACTIONS column is left-aligned. */
 #env-landing .rad-table thead th:last-child,

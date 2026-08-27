@@ -36,13 +36,16 @@ import {
 // (commit, blob and content digests) so a rollback after the workflow commit
 // point can prove the files it would revert are still exactly what Radius wrote.
 // Version 4 distinguishes a path proven absent before setup from an older record
-// that never observed the previous path state. Versions 1 through 3 still load:
+// that never observed the previous path state. Version 5 adds the provider
+// mutation recovery journal. Versions 1 through 4 still load:
 // `readOperationControl` and
 // `readSetupArtifactLedger` fill the new fields with safe defaults rather than
 // discarding the operation, and a default of "no provenance" fails a
 // post-commit rollback closed instead of guessing.
-export const OPERATION_SCHEMA_VERSION = 4;
-export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([1, 2, 3, 4]);
+export const OPERATION_SCHEMA_VERSION = 5;
+export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([
+  1, 2, 3, 4, 5
+]);
 
 // `deleted` is written only after a cleanup attempt proved the resource is gone
 // (removed by Radius, or already absent). It keeps a rolled-back artifact out of
@@ -105,9 +108,13 @@ export type ServicePrincipalArtifact = {
 export type FederatedCredentialArtifact = {
   name: string;
   subject: string;
+  // The credential's own object id. A name is the customer's to reuse, so the
+  // id is what a delete has to match before it removes anything.
+  providerId: string | null;
 };
 
 export type RoleAssignmentArtifact = {
+  assignmentId: string | null;
   role: string;
   scope: string;
   principalObjectId: string | null;
@@ -118,6 +125,10 @@ export type GitHubEnvironmentArtifact = {
   origin: SetupArtifactOrigin;
   repo: string | null;
   name: string | null;
+  // GitHub's own id for the environment. Environment names are reused freely —
+  // deleting and recreating "dev" is routine — so the id is the only thing that
+  // says the environment answering to this name is still the one Radius made.
+  providerId: string | null;
 };
 
 // `state` keeps a reverted file in the ledger instead of deleting the entry:
@@ -258,6 +269,405 @@ export type OperationControlRecord = {
   commands: OperationCommandRecord[];
   outcomes: OperationOutcomeRecord[];
 };
+
+export type ProviderMutationStatus =
+  | "prepared"
+  | "confirmed"
+  | "not_applied"
+  | "outcome_unknown"
+  | "manual_required";
+
+export type ProviderMutationRecord = {
+  mutationId: string;
+  kind: string;
+  target: string;
+  status: ProviderMutationStatus;
+  preparedAt: string;
+  updatedAt: string;
+  providerIdempotencyKey: string | null;
+  // The provider's own immutable id for the resource this mutation wrote,
+  // captured in the same write that settled the mutation. A restart that finds
+  // a confirmed entry compares this against what the name answers for now, so
+  // a resource deleted and recreated under that name is never adopted.
+  providerId?: string | null;
+  intent?: Record<string, string | number | boolean | null>;
+  // How many times reconciliation has failed to read this mutation's provider
+  // state. Bounded so an unreadable resource becomes a named hand-off instead
+  // of an endlessly rescheduled reconciliation.
+  reconcileAttempts?: number;
+  // Whether an acknowledged create actually made a resource rather than finding
+  // the exact target already present. Persisted with confirmation so recovery
+  // never promotes a reused resource into cleanup ownership.
+  createdByOperation?: boolean;
+  evidence: string | null;
+};
+
+export type ProviderRecoveryRecord = {
+  state:
+    | "idle"
+    | "reconciling"
+    | "rollback_pending"
+    | "manual_required"
+    // A record written before the mutation journal existed and caught
+    // mid-flight. There is no evidence of what it had started, so neither a
+    // forward attempt nor a deletion can be justified from it.
+    | "unrecoverable_legacy"
+    | "complete";
+  guidance: string | null;
+  mutations: ProviderMutationRecord[];
+};
+
+// The first schema version whose records carry a provider mutation journal. A
+// nonterminal record older than this cannot say what it had in flight.
+export const PROVIDER_JOURNAL_SCHEMA_VERSION = 5;
+
+const PROVIDER_MUTATION_STATUSES = Object.freeze([
+  "prepared",
+  "confirmed",
+  "not_applied",
+  "outcome_unknown",
+  "manual_required"
+]);
+
+export function createProviderRecovery(): ProviderRecoveryRecord {
+  return { state: "idle", guidance: null, mutations: [] };
+}
+
+function readProviderRecovery(value: any): ProviderRecoveryRecord {
+  const source = value && typeof value === "object" ? value : {};
+  const mutations =
+    Array.isArray(source.mutations) ?
+      source.mutations
+        .filter(
+          (entry: any) =>
+            entry &&
+            typeof entry.mutationId === "string" &&
+            entry.mutationId &&
+            typeof entry.kind === "string" &&
+            entry.kind &&
+            typeof entry.target === "string" &&
+            entry.target &&
+            PROVIDER_MUTATION_STATUSES.includes(entry.status)
+        )
+        .map((entry: any) => ({
+          mutationId: entry.mutationId,
+          kind: entry.kind,
+          target: entry.target,
+          status: entry.status,
+          preparedAt: isoOrNull(entry.preparedAt) || nowIso(),
+          updatedAt: isoOrNull(entry.updatedAt) || nowIso(),
+          providerIdempotencyKey:
+            (
+              typeof entry.providerIdempotencyKey === "string" &&
+              entry.providerIdempotencyKey
+            ) ?
+              entry.providerIdempotencyKey
+            : null,
+          providerId: optionalIdentityString(entry.providerId),
+          ...(typeof entry.createdByOperation === "boolean" ?
+            { createdByOperation: entry.createdByOperation }
+          : {}),
+          ...(entry.intent && typeof entry.intent === "object" ?
+            {
+              intent: Object.fromEntries(
+                Object.entries(entry.intent).filter(
+                  ([key, field]) =>
+                    key &&
+                    (typeof field === "string" ||
+                      typeof field === "number" ||
+                      typeof field === "boolean" ||
+                      field === null)
+                )
+              )
+            }
+          : {}),
+          ...((
+            Number.isFinite(Number(entry.reconcileAttempts)) &&
+            Number(entry.reconcileAttempts) > 0
+          ) ?
+            {
+              reconcileAttempts: Math.floor(Number(entry.reconcileAttempts))
+            }
+          : {}),
+          evidence:
+            typeof entry.evidence === "string" && entry.evidence ?
+              entry.evidence
+            : null
+        }))
+    : [];
+  const state =
+    (
+      [
+        "idle",
+        "reconciling",
+        "rollback_pending",
+        "manual_required",
+        "unrecoverable_legacy",
+        "complete"
+      ].includes(source.state)
+    ) ?
+      source.state
+    : "idle";
+  return {
+    state,
+    guidance:
+      typeof source.guidance === "string" && source.guidance ?
+        source.guidance
+      : null,
+    mutations
+  };
+}
+
+export function providerMutationId(
+  operationId: string,
+  kind: string,
+  target: string
+): string {
+  return `pm_${createHash("sha256")
+    .update(`${operationId}\0${kind}\0${target}`)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
+export function prepareProviderMutation(
+  op: any,
+  {
+    kind,
+    target,
+    providerIdempotencyKey = null,
+    intent = null
+  }: {
+    kind: string;
+    target: string;
+    providerIdempotencyKey?: string | null;
+    intent?: Record<string, string | number | boolean | null> | null;
+  }
+): ProviderMutationRecord {
+  const recovery = readProviderRecovery(op?.providerRecovery);
+  const mutationId = providerMutationId(op.operationId, kind, target);
+  const existing = recovery.mutations.find(
+    (entry) => entry.mutationId === mutationId
+  );
+  if (existing) {
+    op.providerRecovery = recovery;
+    return existing;
+  }
+  const timestamp = nowIso();
+  const mutation: ProviderMutationRecord = {
+    mutationId,
+    kind,
+    target,
+    status: "prepared",
+    preparedAt: timestamp,
+    updatedAt: timestamp,
+    providerIdempotencyKey:
+      typeof providerIdempotencyKey === "string" && providerIdempotencyKey ?
+        providerIdempotencyKey
+      : null,
+    ...(intent ? { intent: structuredClone(intent) } : {}),
+    evidence: null
+  };
+  if (
+    recovery.state !== "rollback_pending" &&
+    // A legacy quarantine says Radius cannot know what the old record started.
+    // Journalling a new mutation does not answer that question, and the
+    // quarantine cannot be re-armed once entries exist, so clearing it here
+    // would drop the customer's only account of what to review.
+    recovery.state !== "unrecoverable_legacy"
+  ) {
+    recovery.state = "reconciling";
+    recovery.guidance = null;
+  }
+  recovery.mutations.push(mutation);
+  op.providerRecovery = recovery;
+  op.lastActivityAt = timestamp;
+  return mutation;
+}
+
+export function settleProviderMutation(
+  op: any,
+  mutationId: string,
+  status: ProviderMutationStatus,
+  evidence: string | null = null,
+  providerId: string | null = null,
+  createdByOperation?: boolean
+): boolean {
+  if (!PROVIDER_MUTATION_STATUSES.includes(status)) return false;
+  const recovery = readProviderRecovery(op?.providerRecovery);
+  const rollbackPending = recovery.state === "rollback_pending";
+  const mutation = recovery.mutations.find(
+    (entry) => entry.mutationId === mutationId
+  );
+  if (!mutation) return false;
+  mutation.status = status;
+  mutation.updatedAt = nowIso();
+  // Written here rather than by a follow-up call, so a crash can never land
+  // between "the provider acknowledged this" and "here is what it made".
+  const settledProviderId = optionalIdentityString(providerId);
+  if (settledProviderId) mutation.providerId = settledProviderId;
+  else if (status !== "confirmed") {
+    // Any other status says this mutation did not leave that resource behind,
+    // so the id it once carried is not evidence for anything a later pass
+    // would match against.
+    mutation.providerId = null;
+  }
+  if (typeof createdByOperation === "boolean") {
+    mutation.createdByOperation = createdByOperation;
+  }
+  mutation.evidence =
+    typeof evidence === "string" && evidence.trim() ? evidence.trim() : null;
+  if (rollbackPending) {
+    recovery.state = "rollback_pending";
+    recovery.guidance = null;
+  } else if (status === "manual_required") {
+    recovery.state = "manual_required";
+    recovery.guidance = mutation.evidence;
+  } else if (
+    recovery.mutations.some(
+      (entry) =>
+        entry.status === "prepared" || entry.status === "outcome_unknown"
+    )
+  ) {
+    recovery.state = "reconciling";
+  } else if (
+    recovery.mutations.some((entry) => entry.status === "manual_required")
+  ) {
+    recovery.state = "manual_required";
+  } else {
+    recovery.state = "complete";
+    recovery.guidance = null;
+  }
+  op.providerRecovery = recovery;
+  op.lastActivityAt = mutation.updatedAt;
+  return true;
+}
+
+export function unresolvedProviderMutations(
+  op: any,
+  kinds?: readonly string[]
+): ProviderMutationRecord[] {
+  const wanted = kinds ? new Set(kinds) : null;
+  return readProviderRecovery(op?.providerRecovery).mutations.filter(
+    (entry) =>
+      (entry.status === "prepared" || entry.status === "outcome_unknown") &&
+      (!wanted || wanted.has(entry.kind))
+  );
+}
+
+export function providerMutationRecord(
+  op: any,
+  kind: string,
+  target: string
+): ProviderMutationRecord | null {
+  if (!op?.operationId) return null;
+  const mutationId = providerMutationId(op.operationId, kind, target);
+  return (
+    readProviderRecovery(op.providerRecovery).mutations.find(
+      (entry) => entry.mutationId === mutationId
+    ) || null
+  );
+}
+
+/**
+ * Every journal entry of one kind, whatever its status.
+ *
+ * A mutation whose target embeds provider state that can move — the commit a
+ * branch was cut from, say — cannot be looked up by recomputing that target,
+ * because the second attempt would compute a different one and journal a
+ * second entry the first could never be settled from. Reading back by kind is
+ * how a recovery finds the identity the interrupted attempt actually used.
+ */
+export function providerMutationsByKind(
+  op: any,
+  kind: string
+): ProviderMutationRecord[] {
+  return readProviderRecovery(op?.providerRecovery).mutations.filter(
+    (entry) => entry.kind === kind
+  );
+}
+
+export function providerRecoveryManualGuidance(op: any): string | null {
+  const recovery = readProviderRecovery(op?.providerRecovery);
+  const manualMutation = recovery.mutations.find(
+    (entry) => entry.status === "manual_required"
+  );
+  if (recovery.state !== "manual_required" && !manualMutation) return null;
+  return (
+    recovery.guidance ||
+    manualMutation?.evidence ||
+    "Radius could not prove the identity or ownership of a provider resource. Review the operation recovery details before making another attempt."
+  );
+}
+
+const UNRECOVERABLE_LEGACY_GUIDANCE =
+  "This setup was recorded by an older version of Radius that did not journal the provider requests it had in flight, and the extension restarted before it finished. " +
+  "Radius cannot tell which cloud or GitHub resources that attempt had already created, so it will neither continue the setup nor delete anything on its guess. " +
+  "Review the App Registration, federated credentials, role assignments, GitHub environment, and setup workflow files for this repository, remove anything you do not want, then start a new setup.";
+
+/**
+ * The reason a record predating the mutation journal cannot be acted on.
+ *
+ * Kept separate from `providerRecoveryManualGuidance` because the two refusals
+ * have different shapes: manual-required names a specific resource whose
+ * ownership is unproven, while this one admits Radius does not know what the
+ * attempt touched at all.
+ */
+export function legacyRecoveryQuarantine(op: any): string | null {
+  const recovery = readProviderRecovery(op?.providerRecovery);
+  if (recovery.state !== "unrecoverable_legacy") return null;
+  return recovery.guidance || UNRECOVERABLE_LEGACY_GUIDANCE;
+}
+
+/**
+ * Move a pre-journal record into durable quarantine.
+ *
+ * Answers whether it did, so the caller can stop reconciling: no later branch
+ * can improve on "Radius does not know what this attempt started".
+ *
+ * A terminal record keeps the verdict it already reported. Rewriting a
+ * cancellation into a failure would erase what the customer was told, and the
+ * quarantine's job is not to change the story but to withdraw the destructive
+ * and forward commands that story would otherwise offer.
+ */
+export function quarantineUnrecoverableLegacy(op: any): boolean {
+  if (!op) return false;
+  const recovery = readProviderRecovery(op.providerRecovery);
+  // A record that carries journal entries described its own work, however old
+  // its stamp is, and the journal branches above already handled it.
+  if (recovery.mutations.length > 0) return false;
+  if (recovery.state === "unrecoverable_legacy") return false;
+  const restored = Number(op.restoredSchemaVersion);
+  if (
+    !Number.isFinite(restored) ||
+    restored >= PROVIDER_JOURNAL_SCHEMA_VERSION
+  ) {
+    return false;
+  }
+  const now = nowIso();
+  op.providerRecovery = {
+    state: "unrecoverable_legacy",
+    guidance: UNRECOVERABLE_LEGACY_GUIDANCE,
+    mutations: []
+  };
+  op.recoveryState = "manual_required";
+  if (isTerminalState(op.state)) return true;
+  op.state = "failed_partial";
+  op.endedAt = now;
+  op.lastActivityAt = now;
+  op.executionActive = false;
+  op.failure = {
+    code: "operation-legacy-unrecoverable",
+    stage: op.currentStage,
+    stepSeq: null,
+    message: UNRECOVERABLE_LEGACY_GUIDANCE,
+    classification: "user-fixable"
+  };
+  for (const stage of op.stages || []) {
+    if (stage.state === "running") stage.state = "failed";
+    else if (stage.state === "pending") stage.state = "skipped";
+  }
+  return true;
+}
 
 const MAX_RETAINED_COMMANDS = 20;
 const MAX_RETAINED_OUTCOMES = 20;
@@ -485,7 +895,8 @@ export function createSetupArtifactLedger(): SetupArtifactLedger {
       state: "not_started",
       origin: "unknown",
       repo: null,
-      name: null
+      name: null,
+      providerId: null
     },
     commit: {
       mode: "not_started",
@@ -551,6 +962,15 @@ export function readWorkflowCommitArtifact(value: any): WorkflowCommitArtifact {
   };
 }
 
+function readRoleAssignmentArtifact(value: any): RoleAssignmentArtifact {
+  return {
+    assignmentId: optionalShaString(value && value.assignmentId),
+    role: String((value && value.role) || ""),
+    scope: String((value && value.scope) || ""),
+    principalObjectId: optionalShaString(value && value.principalObjectId)
+  };
+}
+
 /**
  * Restore a saved artifact ledger onto the current shape.
  *
@@ -582,15 +1002,29 @@ export function readSetupArtifactLedger(value: any): SetupArtifactLedger {
     },
     federatedCredentials:
       Array.isArray(source.federatedCredentials) ?
-        source.federatedCredentials
+        source.federatedCredentials.map((entry: any) => ({
+          ...entry,
+          name: String(entry?.name || ""),
+          subject: String(entry?.subject || ""),
+          providerId: optionalIdentityString(entry?.providerId)
+        }))
       : [],
     roleAssignments:
-      Array.isArray(source.roleAssignments) ? source.roleAssignments : [],
+      Array.isArray(source.roleAssignments) ?
+        source.roleAssignments.map((entry: any) =>
+          readRoleAssignmentArtifact(entry)
+        )
+      : [],
     githubEnvironment: {
       ...ledger.githubEnvironment,
       ...(source.githubEnvironment || {}),
       origin: readArtifactOrigin(
         source.githubEnvironment && source.githubEnvironment.origin
+      ),
+      // Records written before the id was captured normalize to null, which is
+      // what refuses their automated deletion rather than deleting by name.
+      providerId: optionalIdentityString(
+        source.githubEnvironment && source.githubEnvironment.providerId
       )
     },
     commit: {
@@ -670,7 +1104,8 @@ export function createOperation({
     terminal: null,
     failure: null,
     stopRequested: false,
-    control: createOperationControl()
+    control: createOperationControl(),
+    providerRecovery: createProviderRecovery()
   };
 }
 
@@ -766,7 +1201,10 @@ export function canResumeInput(
     op.executionActive ||
     // A stop saved before this answer wins the race. Continuing here would
     // resume an operation the customer already asked Radius to end.
-    shouldStop(op)
+    shouldStop(op) ||
+    // A prompt is a forward step. An attempt whose provider work Radius cannot
+    // account for must not take one, whatever the customer typed into it.
+    ambiguousProviderMutation(op) !== null
   )
     return false;
   if (
@@ -983,6 +1421,29 @@ function strongerOrigin(current: any, next: any): SetupArtifactOrigin {
  * that patch on its own would read as a different resource and discard the
  * first call's state.
  */
+/**
+ * The identity a patch is judged against.
+ *
+ * A saved record that does not carry the provider's own id yet is not a
+ * different resource from the same record once that id arrives — the Service
+ * Principal's object id turns up in a second call, after the create recorded
+ * only the application it belongs to. Judging that patch on the full identity
+ * would read the new id as a replacement and throw away the provenance the
+ * first call proved. So the comparison drops whichever id the saved record does
+ * not have; once it has one, a different id really is a different resource.
+ */
+function provenanceComparisonIdentity(
+  artifactType: SetupCleanupArtifactType | string,
+  current: any,
+  candidate: any
+): string {
+  const compared: Record<string, unknown> = { ...(candidate || {}) };
+  for (const field of ["providerId", "objectId"]) {
+    if (!normalizeIdentityPart(current?.[field])) compared[field] = null;
+  }
+  return cleanupArtifactIdentity(artifactType, compared);
+}
+
 export function reconcileArtifactProvenance(
   artifactType: SetupCleanupArtifactType | string,
   current: any,
@@ -997,7 +1458,11 @@ export function reconcileArtifactProvenance(
     merged[key] = value;
   }
   const currentIdentity = cleanupArtifactIdentity(artifactType, current);
-  const mergedIdentity = cleanupArtifactIdentity(artifactType, merged);
+  const mergedIdentity = provenanceComparisonIdentity(
+    artifactType,
+    current,
+    merged
+  );
   if (currentIdentity && currentIdentity !== mergedIdentity) {
     // A different resource occupies the slot now. Nothing the previous one
     // proved transfers to it, so the record is rebuilt from the patch alone
@@ -1042,17 +1507,23 @@ export function recordServicePrincipal(op: any, patch: any): any {
 export function recordCreatedFederatedCredential(op: any, entry: any): any {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger || !entry) return op;
-  const next = {
+  const next: FederatedCredentialArtifact = {
     name: String(entry.name || ""),
-    subject: String(entry.subject || "")
+    subject: String(entry.subject || ""),
+    providerId: optionalIdentityString(entry.providerId)
   };
   if (!next.name || !next.subject) return op;
-  if (
-    !ledger.federatedCredentials.some(
-      (item) => item.name === next.name && item.subject === next.subject
-    )
-  ) {
+  const existing = ledger.federatedCredentials.find(
+    (item) => item.name === next.name && item.subject === next.subject
+  );
+  if (!existing) {
     ledger.federatedCredentials.push(next);
+    return op;
+  }
+  // A later read that finally learned the id upgrades the record it belongs to,
+  // because a credential with no id is one Radius will refuse to delete.
+  if (!existing.providerId && next.providerId) {
+    existing.providerId = next.providerId;
   }
   return op;
 }
@@ -1061,6 +1532,10 @@ export function recordCreatedRoleAssignment(op: any, entry: any): any {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger || !entry) return op;
   const next = {
+    assignmentId:
+      entry.assignmentId == null || entry.assignmentId === "" ?
+        null
+      : String(entry.assignmentId),
     role: String(entry.role || ""),
     scope: String(entry.scope || ""),
     principalObjectId:
@@ -1069,14 +1544,20 @@ export function recordCreatedRoleAssignment(op: any, entry: any): any {
       : String(entry.principalObjectId)
   };
   if (!next.role || !next.scope) return op;
-  if (
-    !ledger.roleAssignments.some(
-      (item) =>
-        item.role === next.role &&
-        item.scope === next.scope &&
-        item.principalObjectId === next.principalObjectId
-    )
-  ) {
+  const existing = ledger.roleAssignments.find(
+    (item) =>
+      item.role === next.role &&
+      item.scope === next.scope &&
+      item.principalObjectId === next.principalObjectId &&
+      (item.assignmentId === next.assignmentId ||
+        item.assignmentId == null ||
+        next.assignmentId == null)
+  );
+  if (existing) {
+    if (existing.assignmentId == null && next.assignmentId != null) {
+      existing.assignmentId = next.assignmentId;
+    }
+  } else {
     ledger.roleAssignments.push(next);
   }
   return op;
@@ -1125,7 +1606,11 @@ export function promoteCreatedGitHubEnvironment(
   if (!provenRepo || !provenName) return false;
   const provenIdentity = cleanupArtifactIdentity("github_environment", {
     repo: provenRepo,
-    name: provenName
+    name: provenName,
+    // The proof is the repo and name this request wrote, so it is compared
+    // against the same record's own id rather than against no id at all —
+    // otherwise capturing GitHub's id would make every promotion refuse.
+    providerId: artifact.providerId
   });
   if (
     provenIdentity !== cleanupArtifactIdentity("github_environment", artifact)
@@ -1303,6 +1788,71 @@ function hasTrackedSetupArtifacts(ledger: SetupArtifactLedger | null): boolean {
   );
 }
 
+export function markVerificationRetryAcquisition(
+  op: any,
+  commandId: string,
+  classification?: string | null,
+  provisionalToken?: string
+): any {
+  if (!op) return op;
+  const reuseProvisional =
+    typeof provisionalToken === "string" &&
+    provisionalToken.length > 0 &&
+    op.verification?.acquisitionProvisional === true &&
+    op.verification?.acquisitionProvisionalToken === provisionalToken;
+  const acquisitionDeadline = ensureVerificationRetryAcquisitionDeadline(
+    op,
+    !reuseProvisional
+  );
+  op.verification = {
+    ...(op.verification || {}),
+    acquisitionPending: true,
+    retryCommandId: commandId,
+    retryClassification: classification || null,
+    acquisitionDeadline
+  };
+  delete op.verification.acquisitionProvisional;
+  delete op.verification.acquisitionProvisionalToken;
+  return op;
+}
+
+export function ensureVerificationRetryAcquisitionDeadline(
+  op: any,
+  forceNew = false
+): number {
+  if (!op) return 0;
+  const existing = Number(op.verification?.acquisitionDeadline);
+  const deadline =
+    !forceNew && Number.isFinite(existing) && existing > 0 ?
+      existing
+    : Date.now() + 45 * 60 * 1000;
+  op.verification = {
+    ...(op.verification || {}),
+    acquisitionDeadline: deadline
+  };
+  return deadline;
+}
+
+export function markVerificationRetryPrecondition(
+  op: any,
+  token: string
+): number {
+  if (!op) return 0;
+  const deadline = ensureVerificationRetryAcquisitionDeadline(op, true);
+  op.verification.acquisitionProvisional = true;
+  op.verification.acquisitionProvisionalToken = token;
+  return deadline;
+}
+
+export function hasPendingVerificationAcquisition(op: any): boolean {
+  return Boolean(
+    op?.currentStage === STAGE_VERIFY &&
+    op?.verification?.acquisitionPending === true &&
+    typeof op.verification.retryCommandId === "string" &&
+    op.verification.retryCommandId
+  );
+}
+
 export function hasReachedSetupCommitPoint(op: any): boolean {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return false;
@@ -1404,6 +1954,24 @@ function normalizeIdentityPart(value: any): string {
 }
 
 /** The stable key for one cleanup-capable artifact, or "" when unidentifiable. */
+/** A provider id as the ledger stores it: a non-empty string, or nothing. */
+export function optionalIdentityString(value: unknown): string | null {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/**
+ * Put the provider's own id in front of a name the customer can reuse.
+ *
+ * A record written before the id was captured keeps the identity it already
+ * had, so the results and journal entries an earlier version wrote still match
+ * the artifact they were written for after an upgrade.
+ */
+function identityLedBy(providerId: any, rest: string): string {
+  const id = normalizeIdentityPart(providerId);
+  return id ? `${id}|${rest}` : rest;
+}
+
 export function cleanupArtifactIdentity(
   artifactType: any,
   artifact: any
@@ -1412,23 +1980,41 @@ export function cleanupArtifactIdentity(
   switch (artifactType) {
     case "azure_app":
       return normalizeIdentityPart(artifact.appId);
-    case "service_principal":
-      return (
-        normalizeIdentityPart(artifact.appId) ||
-        normalizeIdentityPart(artifact.objectId)
-      );
+    case "service_principal": {
+      // The object id leads. An application's principal can be removed and a
+      // new one made for the same application, and that replacement answers to
+      // the same appId — so a delete keyed on the appId would reach it.
+      const objectId = normalizeIdentityPart(artifact.objectId);
+      const appId = normalizeIdentityPart(artifact.appId);
+      if (objectId && appId) return `${objectId}|${appId}`;
+      return objectId || appId;
+    }
     case "federated_credential":
-      return `${normalizeIdentityPart(artifact.name)}@${normalizeIdentityPart(
-        artifact.subject
-      )}`;
+      // The provider id leads, so a credential recreated under the same name
+      // and subject is a different identity to the journal and to a delete.
+      return identityLedBy(
+        artifact.providerId,
+        `${normalizeIdentityPart(artifact.name)}@${normalizeIdentityPart(
+          artifact.subject
+        )}`
+      );
     case "role_assignment":
-      return `${normalizeIdentityPart(artifact.role)}@${normalizeIdentityPart(
-        artifact.scope
-      )}`;
+      return (
+        normalizeIdentityPart(artifact.assignmentId) ||
+        `${normalizeIdentityPart(artifact.role)}@${normalizeIdentityPart(
+          artifact.scope
+        )}`
+      );
     case "github_environment":
-      return `${normalizeIdentityPart(artifact.repo)}:${normalizeIdentityPart(
-        artifact.name
-      )}`;
+      // The provider id leads for the same reason it does for a credential: an
+      // environment deleted and recreated under the same name is somebody
+      // else's resource, and the identity has to say so.
+      return identityLedBy(
+        artifact.providerId,
+        `${normalizeIdentityPart(artifact.repo)}:${normalizeIdentityPart(
+          artifact.name
+        )}`
+      );
     // Path plus branch, because the same workflow path on a setup branch and on
     // the default branch are two different files with two different provenances.
     case "workflow_file":
@@ -1958,6 +2544,9 @@ const VERIFICATION_RETRY_CLASSIFICATIONS: Record<string, string> = {
   "verify-run-rbac-failed": "azure-rbac-propagation",
   "verify-run-failed": "verification-run-failed",
   "verification-tracking-expired": "verification-tracking-expired",
+  "verification-retry-github-account-unavailable": "github-account-unavailable",
+  "verification-retry-persist-failed": "verification-persist-failed",
+  "verify-dispatch-baseline-failed": "verification-baseline-failed",
   // The dispatch call itself failed, so no run was ever created: nothing was
   // verified, nothing was written, and asking GitHub again is the whole fix.
   "verify-dispatch-failed": "verification-dispatch-failed"
@@ -1997,6 +2586,8 @@ export function hasVerificationProvenance(op: any): boolean {
   return Boolean(
     op.repo &&
     op.environment &&
+    typeof op.context?.githubLogin === "string" &&
+    op.context.githubLogin.trim() &&
     typeof verification?.workflow === "string" &&
     verification.workflow &&
     typeof verification?.ref === "string" &&
@@ -2062,6 +2653,49 @@ export function ambiguousSetupOwnership(ledger: any): string | null {
       "A recorded resource could not be identified precisely enough to act on."
     );
   return null;
+}
+
+export function ambiguousProviderMutation(op: any): string | null {
+  const legacy = legacyRecoveryQuarantine(op);
+  if (legacy) return legacy;
+  const manual = providerRecoveryManualGuidance(op);
+  if (manual) return manual;
+  const unresolved = unresolvedProviderMutations(op);
+  if (unresolved.length === 0) return null;
+  const mutation = unresolved[0];
+  return `Radius has not confirmed the outcome of ${mutation.kind} for ${mutation.target}.`;
+}
+
+/**
+ * The single refusal every destructive command shares.
+ *
+ * Rollback, retry-rollback, and exit all delete. They differ only in the
+ * sentence the customer reads, so they must not differ in when they refuse: a
+ * mutation whose outcome is unproven names a resource that may exist without a
+ * ledger entry, and any of the three would then delete around it and report a
+ * cleanup it did not do. The check runs before the ledger is consulted on
+ * purpose — an empty selection is exactly the shape an unjournaled resource
+ * produces, so "nothing is owned" is not permission to proceed.
+ */
+function providerDestructiveRefusal(
+  op: any,
+  prefix: "rollback" | "exit" | "cleanup-retry"
+): { ok: false; code: string; detail: string } | null {
+  const legacy = legacyRecoveryQuarantine(op);
+  if (legacy) {
+    return {
+      ok: false,
+      code: `${prefix}-legacy-unrecoverable`,
+      detail: legacy
+    };
+  }
+  const ambiguous = ambiguousProviderMutation(op);
+  if (!ambiguous) return null;
+  return {
+    ok: false,
+    code: `${prefix}-provider-outcome-unknown`,
+    detail: ambiguous
+  };
 }
 
 export const SETUP_RESUME_STEPS = Object.freeze([
@@ -2238,6 +2872,13 @@ function setupForwardEligibility(
   const request = op.resumeRequest || op.request;
   if (!request || !request.environment)
     return { ok: false, code: `${prefix}-request-missing` };
+  const providerAmbiguous = ambiguousProviderMutation(op);
+  if (providerAmbiguous)
+    return {
+      ok: false,
+      code: `${prefix}-provider-outcome-unknown`,
+      detail: providerAmbiguous
+    };
   const ledger = getSetupArtifactLedger(op);
   const ambiguous = ambiguousSetupOwnership(ledger);
   if (ambiguous)
@@ -2465,6 +3106,8 @@ export function canStartRollback(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
+  const refused = providerDestructiveRefusal(op, "rollback");
+  if (refused) return refused;
   // Successful verification is the completion boundary, so a verified
   // environment is never rolled back through the setup record.
   if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
@@ -2592,6 +3235,8 @@ export function canExitSetup(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
+  const refused = providerDestructiveRefusal(op, "exit");
+  if (refused) return refused;
   // A verified environment is finished work, not an abandoned attempt. It is
   // removed with Delete Environment, exactly as a rollback is refused for it.
   if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
@@ -2610,6 +3255,34 @@ export function canExitSetup(op: any): any {
   };
 }
 
+/**
+ * The kinds whose identity is led by a provider id, so a record written before
+ * that id was captured still names the same artifact by its trailing form.
+ */
+const PROVIDER_ID_LED_ARTIFACTS: ReadonlySet<string> = new Set([
+  "service_principal",
+  "federated_credential",
+  "github_environment"
+]);
+
+/**
+ * The identity an earlier version wrote for this artifact, before the provider
+ * id led it, or "" when the kind is not led by one.
+ *
+ * A retry has to recognize a target its own earlier pass recorded, or the
+ * artifact stays claimed and can never be removed. Matching the older form is
+ * safe because it only decides which target a retry names: the delete still
+ * reads the resource back and refuses unless the recorded provider id answers.
+ */
+function legacyCleanupArtifactIdentity(
+  artifactType: string,
+  identity: string
+): string {
+  if (!PROVIDER_ID_LED_ARTIFACTS.has(artifactType)) return "";
+  const separator = identity.indexOf("|");
+  return separator === -1 ? "" : identity.slice(separator + 1);
+}
+
 function findProvenOwnedCleanupTarget(
   ledger: any,
   result: any
@@ -2625,11 +3298,11 @@ function findProvenOwnedCleanupTarget(
     ledgerArtifacts(ledger, ["created"]).find((entry) => {
       if (entry.kind !== result.artifactType) return false;
       if (!hasRecordedIdentity && singularKinds.has(entry.kind)) return true;
-      return artifactMatchKeys(
-        entry.kind,
-        cleanupArtifactIdentity(entry.kind, entry.artifact),
-        [entry.target]
-      ).has(key);
+      const identity = cleanupArtifactIdentity(entry.kind, entry.artifact);
+      return artifactMatchKeys(entry.kind, identity, [
+        entry.target,
+        legacyCleanupArtifactIdentity(entry.kind, identity)
+      ]).has(key);
     }) ?? null
   );
 }
@@ -2671,10 +3344,22 @@ export function unresolvedCleanupTargets(op: any): any[] {
     .filter((entry: any) => entry !== null);
 }
 
+/**
+ * The sentence a cleanup deletion writes when its outcome could not be settled.
+ *
+ * Defined here, at the lowest module that needs it, because a destructive gate
+ * keys on it: rewording a second copy elsewhere would silently open that gate.
+ * Every producer imports this rather than retyping it.
+ */
+export const UNKNOWN_CLEANUP_OUTCOME =
+  "Outcome unknown after provider timeout; Radius will not repeat this delete blindly.";
+
 export function canRetryCleanup(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
+  const refused = providerDestructiveRefusal(op, "cleanup-retry");
+  if (refused) return refused;
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return { ok: false, code: "cleanup-retry-ledger-missing" };
   if (hasReachedSetupCommitPoint(op)) {
@@ -2688,6 +3373,18 @@ export function canRetryCleanup(op: any): any {
   }
   if (ledger.cleanup.state !== "succeeded_with_warnings")
     return { ok: false, code: "cleanup-retry-not-retryable" };
+  const unknownDelete = ledger.cleanup.results.find(
+    (entry) =>
+      entry.outcome === "warning" &&
+      entry.detail?.includes(UNKNOWN_CLEANUP_OUTCOME)
+  );
+  if (unknownDelete) {
+    return {
+      ok: false,
+      code: "cleanup-retry-outcome-unknown",
+      detail: unknownDelete.detail
+    };
+  }
   const targets = unresolvedCleanupTargets(op);
   if (targets.length === 0)
     return { ok: false, code: "cleanup-retry-nothing-unresolved" };
@@ -2753,6 +3450,14 @@ function isExecutableCleanupTarget(op: any, target: RollbackTarget): boolean {
  */
 export function hasUnfinishedCleanupAuthority(op: any): boolean {
   if (!op || !isTerminalState(op.state)) return false;
+  // An unproven mutation is the one claim that has no ledger entry behind it:
+  // the resource it may have created is precisely the one Radius could not
+  // record. Releasing the repository here would let a second setup start
+  // against it, which is the collision the journal exists to prevent. A
+  // mutation reconciliation could only hand to the customer is deliberately not
+  // held: its guidance ends by telling them to start a new setup, and a lock
+  // no command can clear would make that impossible.
+  if (unresolvedProviderMutations(op).length > 0) return true;
   const rollback = canStartRollback(op);
   if (
     rollback.ok &&
@@ -2787,8 +3492,14 @@ const VERIFICATION_RETRY_DESCRIPTIONS: Record<string, string> = {
     "The verification workflow failed for a reason other than Azure role propagation. Review the run, correct the problem, then Radius starts the same verification workflow again.",
   "verification-tracking-expired":
     "Radius stopped following the previous verification run. It starts the same workflow again on the same branch.",
+  "verification-baseline-failed":
+    "Radius could not read a trustworthy workflow-run baseline, so it did not dispatch verification. It checks GitHub again before retrying.",
+  "verification-persist-failed":
+    "Radius could not save the previous retry before contacting GitHub. It tries the same verification again after storage is available.",
   "verification-dispatch-failed":
-    "GitHub refused the request that starts the verification workflow, so nothing ran. Radius asks GitHub to start the same workflow again."
+    "GitHub refused the request that starts the verification workflow, so nothing ran. Radius asks GitHub to start the same workflow again.",
+  "github-account-unavailable":
+    "Radius could not use the GitHub account selected for this setup. Re-check that account, then retry verification."
 };
 
 const SETUP_STEP_LABELS: Record<string, string> = {
@@ -2900,6 +3611,16 @@ const UNAVAILABLE_GUIDANCE_MESSAGES: Record<string, string> = {
     "Radius rolled back what this attempt created. Start a new environment setup when you are ready."
 };
 
+// Refusals whose sentence is the reconciliation's own guidance rather than a
+// fixed line. The detail names the exact resource Radius could not account for,
+// so a generic replacement would be strictly less useful.
+const DETAIL_GUIDANCE_CODES = Object.freeze([
+  "rollback-legacy-unrecoverable",
+  "rollback-provider-outcome-unknown",
+  "setup-continue-provider-outcome-unknown",
+  "setup-retry-provider-outcome-unknown"
+]);
+
 export function projectActionGuidance(op: any): any[] {
   if (!op || !isTerminalState(op.state)) return [];
   if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
@@ -2910,12 +3631,14 @@ export function projectActionGuidance(op: any): any[] {
   const notes: Array<{ code: string; message: string }> = [];
   const rollback = canStartRollback(op);
   const forward = canContinueSetup(op).ok || canRetrySetup(op).ok;
-  const explain = (code: string) => {
-    const message = UNAVAILABLE_GUIDANCE_MESSAGES[code];
-    if (message) notes.push({ code, message });
+  const explain = (refusal: { code: string; detail?: string }) => {
+    const message =
+      UNAVAILABLE_GUIDANCE_MESSAGES[refusal.code] ||
+      (DETAIL_GUIDANCE_CODES.includes(refusal.code) ? refusal.detail : "");
+    if (message) notes.push({ code: refusal.code, message });
   };
-  if (!rollback.ok) explain(rollback.code);
-  if (!forward) explain(canContinueSetup(op).code);
+  if (!rollback.ok) explain(rollback);
+  if (!forward) explain(canContinueSetup(op));
   return notes;
 }
 
@@ -3727,6 +4450,8 @@ export function rollbackRetryAttempt(op: any, snapshot: any): any {
   else op.resumeFrom = snapshot.resumeFrom;
   if (snapshot.inputRequired === undefined) delete op.inputRequired;
   else op.inputRequired = structuredClone(snapshot.inputRequired);
+  if (snapshot.verification === undefined) delete op.verification;
+  else op.verification = structuredClone(snapshot.verification);
   // `finish` opens cleanup on the way out, so a rolled-back terminal transition
   // has to put the ledger's cleanup record back too or the next projection
   // reports a rollback that never happened.
@@ -3753,6 +4478,10 @@ export function snapshotRetryState(op: any): any {
     executionActive: op.executionActive,
     resumeFrom: op.resumeFrom,
     inputRequired: op.inputRequired,
+    verification:
+      op.verification === undefined ?
+        undefined
+      : structuredClone(op.verification),
     cleanup: ledger?.cleanup ? structuredClone(ledger.cleanup) : undefined,
     notifiedAt: op.journey?.notifiedAt ?? null
   };
@@ -3905,6 +4634,9 @@ export function hasCompleteVerificationIdentity(op: any): boolean {
   const verification = op?.verification;
   return Boolean(
     op?.currentStage === STAGE_VERIFY &&
+    verification?.acquisitionPending !== true &&
+    typeof op?.context?.githubLogin === "string" &&
+    op.context.githubLogin.trim() &&
     Number.isFinite(Number(verification?.dispatchedAt)) &&
     Number(verification.dispatchedAt) > 0 &&
     typeof verification?.workflow === "string" &&
@@ -4008,7 +4740,8 @@ const PERSISTED_OPERATION_KEYS = new Set([
   "resumeRequest",
   "resumeFrom",
   "verification",
-  "control"
+  "control",
+  "providerRecovery"
 ]);
 
 function persistedFailure(failure: any): any {
@@ -4034,6 +4767,7 @@ export function toPersistedOperation(op: any): any {
   }
   record.failure = persistedFailure(op.failure);
   record.control = readOperationControl(op.control);
+  record.providerRecovery = readProviderRecovery(op.providerRecovery);
   // Written through the same normalizer the restore path uses, so a saved
   // ledger always carries the current provenance shape.
   record.setupArtifacts = readSetupArtifactLedger(op.setupArtifacts);
@@ -4079,11 +4813,17 @@ export function fromPersistedOperation(value: any): any {
     throw new Error("Invalid persisted operation stages or steps.");
   }
   record.control = readOperationControl(value.control);
+  record.providerRecovery = readProviderRecovery(value.providerRecovery);
   // Versions 1 and 2 have no workflow provenance, and version 3 does not say
   // whether a null previous blob means "absent" or "unknown". Normalizing here
   // gives every reader the current shape; the missing proof refuses rollback.
   record.setupArtifacts = readSetupArtifactLedger(value.setupArtifacts);
   record.stopRequested = Boolean(record.control.stop.requestedAt);
+  // Kept off the persisted key set on purpose: it describes this load, not the
+  // record. `reconcileRestoredOperation` reads it once and, when the record is
+  // too old to have journaled what it was doing, writes a durable quarantine
+  // that outlives the stamp below.
+  record.restoredSchemaVersion = record.schemaVersion;
   record.schemaVersion = OPERATION_SCHEMA_VERSION;
   if (record.verification?.runId != null) {
     record.verification.runId = String(record.verification.runId);
@@ -4092,7 +4832,39 @@ export function fromPersistedOperation(value: any): any {
 }
 
 export function reconcileRestoredOperation(op: any): any {
-  if (!op || isTerminalState(op.state)) return op;
+  if (!op) return op;
+  if (op.verification?.acquisitionProvisional === true) {
+    delete op.verification.acquisitionProvisional;
+    delete op.verification.acquisitionProvisionalToken;
+    delete op.verification.acquisitionDeadline;
+  }
+  if (unresolvedProviderMutations(op).length > 0) {
+    const rollbackPending = op.providerRecovery?.state === "rollback_pending";
+    // Reopened so the recovery scheduler, which skips ended records, can
+    // reconcile the outstanding mutation. The verdict this record already
+    // reported is remembered first: an exit-setup delete is only ever
+    // journalled on a terminal record, and finishing the reconciliation pass
+    // must not rewrite a cancellation the customer was already shown.
+    if (isTerminalState(op.state) && !op.reconciliationPriorOutcome) {
+      op.reconciliationPriorOutcome = { state: op.state, endedAt: op.endedAt };
+    }
+    op.state = RUNNING_STATE;
+    op.endedAt = null;
+    op.executionActive = false;
+    op.recoveryState = "provider_reconciliation_pending";
+    op.providerRecovery.state =
+      rollbackPending ? "rollback_pending" : "reconciling";
+    return op;
+  }
+  // A record written before the journal existed. Its ledger says what Radius
+  // had finished, and nothing at all says what it had started: the mutation
+  // that was in the air when the process died left no trace. So a retry could
+  // create a second App Registration and a rollback could delete a resource
+  // this attempt never made. Quarantine it durably and say why — before the
+  // terminal shortcut below, because a record that already reached a terminal
+  // state still offers rollback, retry-rollback, and exit from that state.
+  if (quarantineUnrecoverableLegacy(op)) return op;
+  if (isTerminalState(op.state)) return op;
   // A stop the customer already paid for outlives the process that was going to
   // honor it. Nothing is mid-flight after a restart, so the boundary is here.
   if (shouldStop(op)) {
@@ -4107,8 +4879,79 @@ export function reconcileRestoredOperation(op: any): any {
       return op;
     }
   }
+  if (hasPendingVerificationAcquisition(op)) {
+    op.recoveryState = "verification_acquisition_pending";
+    return op;
+  }
+  const currentDispatchTarget =
+    typeof op.verification?.dispatchMutationTarget === "string" ?
+      op.verification.dispatchMutationTarget
+    : "";
+  const rejectedVerificationDispatch =
+    currentDispatchTarget ?
+      op.providerRecovery?.mutations?.find(
+        (mutation: ProviderMutationRecord) =>
+          mutation.kind === "github_workflow.dispatch_retry" &&
+          mutation.target === currentDispatchTarget &&
+          mutation.status === "not_applied"
+      )
+    : undefined;
+  if (rejectedVerificationDispatch) {
+    const now = nowIso();
+    op.state = "failed_partial";
+    op.endedAt = now;
+    op.lastActivityAt = now;
+    op.failure = {
+      code: "verify-dispatch-failed",
+      stage: STAGE_VERIFY,
+      stepSeq: null,
+      message:
+        "GitHub rejected the credential verification retry before the previous process stopped. Correct the problem and retry verification.",
+      classification: "user-fixable",
+      evidence: rejectedVerificationDispatch.evidence || null
+    };
+    op.recoveryState = "verification_retry_rejected";
+    return op;
+  }
+  if (
+    op.currentStage === STAGE_VERIFY &&
+    op.verification &&
+    (typeof op.context?.githubLogin !== "string" ||
+      !op.context.githubLogin.trim())
+  ) {
+    const now = nowIso();
+    op.state = "failed_partial";
+    op.endedAt = now;
+    op.lastActivityAt = now;
+    op.failure = {
+      code: "verification-retry-github-account-missing",
+      stage: STAGE_VERIFY,
+      stepSeq: null,
+      message:
+        "Radius cannot resume credential verification because this operation does not name the GitHub account that started it. Start a new environment setup after re-checking the account.",
+      classification: "user-fixable"
+    };
+    op.recoveryState = "manual_required";
+    return op;
+  }
   if (hasCompleteVerificationIdentity(op)) {
     op.recoveryState = "verification_pending";
+    return op;
+  }
+  const manualGuidance = providerRecoveryManualGuidance(op);
+  if (manualGuidance) {
+    const now = nowIso();
+    op.state = "failed_partial";
+    op.endedAt = now;
+    op.lastActivityAt = now;
+    op.failure = {
+      code: "provider-reconciliation-manual-required",
+      stage: op.currentStage,
+      stepSeq: null,
+      message: manualGuidance,
+      classification: "user-fixable"
+    };
+    op.recoveryState = "manual_required";
     return op;
   }
   const activeCommand = latestCommand(op);
@@ -4118,6 +4961,23 @@ export function reconcileRestoredOperation(op: any): any {
     (activeCommand.kind === "rollback" ||
       activeCommand.kind === "retry_cleanup" ||
       activeCommand.kind === "exit_setup");
+  if (cleanupInterrupted) {
+    // A deletion pass the customer asked for and Radius had started. Ending the
+    // record here would hide that command from every scheduler — a terminal
+    // operation owns no active command — and the pass would never be picked up
+    // again, leaving the resources it was removing in place with the
+    // repository still reserved for them. It stays open so the recovery
+    // scheduler can resume the command it already has an identity for.
+    op.state = RUNNING_STATE;
+    op.endedAt = null;
+    op.executionActive = false;
+    op.recoveryState = "provider_reconciliation_pending";
+    const ledger = getSetupArtifactLedger(op);
+    // `running` is what tells a later read this pass was interrupted rather
+    // than finished, so the remaining proven-owned artifacts stay claimed.
+    if (ledger) ledger.cleanup.state = "running";
+    return op;
+  }
   const now = nowIso();
   op.state = "failed_partial";
   op.endedAt = now;
@@ -4131,12 +4991,14 @@ export function reconcileRestoredOperation(op: any): any {
     classification: "user-fixable"
   };
   const ledger = getSetupArtifactLedger(op);
-  if (ledger) {
-    // A cleanup runner cannot survive the process that owned it. Keeping the
-    // state as running makes hasAttemptedCleanup treat the pass as interrupted,
-    // so the terminal record offers Rollback again against the ledger's remaining
-    // proven-owned artifacts. Results checkpointed before the restart stay put.
-    ledger.cleanup.state = cleanupInterrupted ? "running" : "not_needed";
+  if (ledger && !hasAttemptedCleanup(op)) {
+    // No pass was in flight, so nothing is left half-done for this record.
+    // A cleanup that already finished is a different thing: its verdict is
+    // what `canRetryCleanup` and `canStartRollback` read, so overwriting a
+    // `succeeded_with_warnings` here would refuse both while the artifacts it
+    // could not remove are still listed as proven-owned — unremovable, and
+    // with the repository lock released underneath them.
+    ledger.cleanup.state = "not_needed";
   }
   for (const stage of op.stages || []) {
     if (stage.state === "running") stage.state = "failed";
@@ -4477,6 +5339,7 @@ export function toClientView(op: any): any {
   const cleanup = projectCleanupSummary(op);
   const control = op.control || createOperationControl();
   const command = latestCommand(op);
+  const providerRecovery = readProviderRecovery(op.providerRecovery);
   return {
     operationId: op.operationId,
     schemaVersion: op.schemaVersion,
@@ -4502,6 +5365,18 @@ export function toClientView(op: any): any {
     terminalState: isTerminalState(op.state) ? op.state : null,
     hasWarnings: hasWarnings(op),
     cleanup,
+    providerRecovery: {
+      state: providerRecovery.state,
+      guidance: providerRecovery.guidance,
+      mutations: providerRecovery.mutations.map((mutation) => ({
+        mutationId: mutation.mutationId,
+        kind: mutation.kind,
+        target: mutation.target,
+        status: mutation.status,
+        preparedAt: mutation.preparedAt,
+        updatedAt: mutation.updatedAt
+      }))
+    },
     stop: {
       requested: Boolean(control.stop.requestedAt),
       requestedAt: control.stop.requestedAt,

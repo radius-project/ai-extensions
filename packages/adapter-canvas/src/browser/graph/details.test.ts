@@ -65,7 +65,13 @@ describe("detail rows", () => {
   it("uses inert safe links for invalid direct and local destinations", () => {
     expect(
       linkRow(ICON_LINK, "<label>", "javascript:alert(1)", true)
-    ).toContain('<a href="#"');
+    ).toContain('<span aria-disabled="true"');
+    expect(
+      linkRow(ICON_LINK, "<label>", "javascript:alert(1)", true)
+    ).not.toContain("data-external-url");
+    expect(
+      linkRow(ICON_LINK, "<label>", "javascript:alert(1)", true)
+    ).not.toContain('href="#"');
     expect(
       linkRow(ICON_LINK, "label", "https://example.test", false)
     ).not.toContain("word-break:break-all");
@@ -81,6 +87,9 @@ describe("detail rows", () => {
     expect(rows[0]).toContain(ICON_SRC);
     expect(rows[0]).toContain(
       'href="https://github.test/o/r/blob/main/src/web.ts#L4"'
+    );
+    expect(rows[0]).toContain(
+      'data-external-url="https://github.test/o/r/blob/main/src/web.ts#L4"'
     );
     expect(rows[0]).toContain('target="_blank" rel="noopener noreferrer"');
     expect(rows[0]).toContain("View source code");
@@ -102,6 +111,18 @@ describe("detail rows", () => {
     expect(rows[1]).toContain('data-local-line="12"');
   });
 
+  it("keeps an exact GitHub source URL external for a local-workspace graph", () => {
+    const sourceUrl =
+      "https://github.com/acme/widgets/blob/release/src/web.ts#L4";
+    const rows = buildDetailRows(
+      settings({ localSource: true }),
+      node({ codeRef: sourceUrl, sourceUrl, srcPath: "", srcLine: 0 })
+    );
+    expect(rows[0]).toContain(`href="${sourceUrl}"`);
+    expect(rows[0]).toContain('target="_blank" rel="noopener noreferrer"');
+    expect(rows[0]).not.toContain("data-local-src");
+  });
+
   it("omits the source row for a local node with no code reference", () => {
     const rows = buildDetailRows(
       settings({ localSource: true }),
@@ -118,6 +139,68 @@ describe("detail rows", () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0]).toContain("View source code");
+  });
+
+  // A worktree branch that was never pushed has no github.com URL that
+  // resolves, so on the diff page each node is routed by its own branch.
+  it("routes the head-branch rows of a diff to the editor canvas", () => {
+    const rows = buildDetailRows(
+      settings({
+        diffMode: true,
+        branch: "feature-x",
+        baseBranch: "main",
+        workspaceBranch: "feature-x"
+      }),
+      node({
+        sourceBranch: "feature-x",
+        diffStatus: "added",
+        sourceUrl: "https://github.test/o/r/blob/feature-x/src/web.ts#L4"
+      })
+    );
+    expect(rows[0]).toContain('data-local-src="src/web.ts"');
+    expect(rows[0]).toContain('data-local-line="4"');
+    expect(rows[0]).toContain(
+      'data-fallback-url="https://github.test/o/r/blob/feature-x/src/web.ts#L4"'
+    );
+    expect(rows[1]).toContain('data-local-src=".radius/app.bicep"');
+  });
+
+  it("keeps a removed node in a diff pointing at the base branch remotely", () => {
+    const rows = buildDetailRows(
+      settings({
+        diffMode: true,
+        branch: "feature-x",
+        baseBranch: "main",
+        workspaceBranch: "feature-x"
+      }),
+      node({
+        sourceBranch: "main",
+        diffStatus: "removed",
+        sourceUrl: "https://github.test/o/r/blob/main/src/web.ts#L4"
+      })
+    );
+    expect(rows[0]).toContain(
+      'data-external-url="https://github.test/o/r/blob/main/src/web.ts#L4"'
+    );
+    expect(rows[0]).not.toContain("data-local-src");
+    expect(rows[1]).toContain(
+      'href="https://github.test/o/r/blob/main/.radius/app.bicep#L12"'
+    );
+    expect(rows[1]).not.toContain("data-local-src");
+  });
+
+  it("keeps every diff row remote when the worktree is on neither branch", () => {
+    const rows = buildDetailRows(
+      settings({
+        diffMode: true,
+        branch: "feature-x",
+        baseBranch: "main",
+        workspaceBranch: "unrelated"
+      }),
+      node({ sourceBranch: "feature-x" })
+    );
+    expect(rows[0]).toContain("data-external-url");
+    expect(rows[0]).not.toContain("data-local-src");
   });
 
   it("keeps the definition row usable without a repository URL", () => {
@@ -324,6 +407,7 @@ describe("panel position", () => {
 interface PanelHarness {
   browser: ReturnType<typeof createFakeBrowser>;
   container: ReturnType<typeof createFakeElement>;
+  external: string[];
   opened: Array<[string, number, string]>;
   panel: ReturnType<typeof createDetailsPanel>;
   panelElement: ReturnType<typeof createFakeElement>;
@@ -332,19 +416,23 @@ interface PanelHarness {
 function setup(options: GraphOptions = {}): PanelHarness {
   const browser = createFakeBrowser();
   const container = createFakeElement("graph-container");
+  const external: string[] = [];
   const opened: Array<[string, number, string]> = [];
   const panel = createDetailsPanel(
     browser.context,
     container,
     settings(options),
     {
+      openExternal: (url) => {
+        external.push(url);
+      },
       openLocalSource: (path, line, fallback) => {
         opened.push([path, line, fallback]);
       }
     }
   );
   const panelElement = container.appended[0];
-  return { browser, container, opened, panel, panelElement };
+  return { browser, container, external, opened, panel, panelElement };
 }
 
 function measurable(element: DomElement, rect: Record<string, number>) {
@@ -477,6 +565,37 @@ describe("details panel", () => {
     expect(harness.opened).toEqual([
       ["src/web.ts", 4, "https://github.test/o/r/blob/x"]
     ]);
+  });
+
+  it("delegates an external row click to the Canvas host", () => {
+    const harness = setup({ localSource: true });
+    const row = createFakeElement("row");
+    const url = "https://github.com/acme/widgets/blob/release/src/web.ts#L4";
+    row.setAttribute("data-external-url", url);
+    row.ancestors.set("[data-external-url]", row);
+    let prevented = 0;
+
+    harness.container.dispatch("click", {
+      target: row,
+      preventDefault: () => {
+        prevented += 1;
+      }
+    });
+
+    expect(prevented).toBe(1);
+    expect(harness.external).toEqual([url]);
+    expect(harness.opened).toEqual([]);
+  });
+
+  it("rejects an unsafe delegated external URL", () => {
+    const harness = setup();
+    const row = createFakeElement("row");
+    row.setAttribute("data-external-url", "javascript:alert(1)");
+    row.ancestors.set("[data-external-url]", row);
+
+    harness.container.dispatch("click", { target: row });
+
+    expect(harness.external).toEqual([]);
   });
 
   it("treats a row with unreadable attributes as an open with no line", () => {

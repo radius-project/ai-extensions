@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { CanvasRequestContext } from "../request-context.js";
 import {
   templatePathParameters,
@@ -16,8 +17,10 @@ import {
   canRetryVerification,
   canStartRollback,
   enterStage,
+  markVerificationRetryPrecondition,
   findActiveCommand,
   finish,
+  markVerificationRetryAcquisition,
   rollbackRetryAttempt,
   setCommandState,
   setStageState,
@@ -120,10 +123,14 @@ export interface OperationsControlDependencies {
   // beside a fresh setup for the same repository.
   acquireForRetry(operation: OperationRecord): RepositoryLockResult;
   persistOperations(): Promise<void>;
-  isPullRequestMerged(
+  checkPullRequestMerge(
     operation: OperationRecord,
     pullRequestUrl: string | null
-  ): Promise<boolean>;
+  ): Promise<
+    | { state: "merged" }
+    | { state: "open" }
+    | { state: "unavailable"; login: string; detail: string }
+  >;
   // Returns whether a runner actually accepted the work. Scheduling is
   // per-instance closure state, so the instance that received the request is
   // passed through and the composition root resolves the right runner; a miss
@@ -168,6 +175,8 @@ interface CommandRequest {
   operationId: string;
   operation: OperationRecord;
   eligibility: RetryEligibility;
+  rollbackSnapshot: unknown;
+  provisionalToken?: string;
 }
 
 // Everything that differs between the five commands. The handler order, the
@@ -192,6 +201,12 @@ interface CommandSpec {
   activeKinds?: readonly OperationCommandKind[];
   // Where the record must be positioned for the work to resume.
   prepare?: (operation: OperationRecord, eligibility: RetryEligibility) => void;
+  prepareAccepted?: (
+    operation: OperationRecord,
+    eligibility: RetryEligibility,
+    commandId: string,
+    provisionalToken?: string
+  ) => void;
   // Checked after eligibility, for a command that needs proof from outside the
   // saved record. Resolves false when it has already answered the request.
   precondition?: (request: CommandRequest) => Promise<boolean>;
@@ -430,20 +445,59 @@ export async function handleStopOperation(
  * repeating verification before then would burn the retry on a run that cannot
  * pass.
  */
-async function requireMergedSetupPullRequest({
-  context,
-  dependencies,
-  operationId,
-  operation,
-  eligibility
-}: CommandRequest): Promise<boolean> {
+async function requireMergedSetupPullRequest(
+  request: CommandRequest
+): Promise<boolean> {
+  const { context, dependencies, operationId, operation, eligibility } =
+    request;
   if (!eligibility.requiresMergedPullRequest) return true;
+  const previousVerification = structuredClone(operation.verification);
+  const provisionalToken = randomUUID();
+  request.provisionalToken = provisionalToken;
+  markVerificationRetryPrecondition(operation, provisionalToken);
+  const restoreProvisionalDeadline = (): void => {
+    const current = operation.verification as
+      { acquisitionProvisionalToken?: unknown } | undefined;
+    if (current?.acquisitionProvisionalToken !== provisionalToken) return;
+    operation.verification = structuredClone(previousVerification);
+    // Do not persist this restoration: a concurrent request may already have
+    // accepted and durably written a newer retry. The abandoned provisional
+    // marker is harmless on disk and is removed during hydration.
+  };
+  try {
+    await dependencies.persistOperations();
+  } catch (error) {
+    restoreProvisionalDeadline();
+    sendJson(context, 500, {
+      error:
+        "Radius could not save the verification retry deadline, so it did not contact GitHub.",
+      code: "verification-retry-persist-failed",
+      operationId,
+      detail: errorMessage(error),
+      operation: clientView(operation)
+    });
+    return false;
+  }
   const pullRequestUrl = eligibility.pullRequestUrl ?? null;
-  const merged = await dependencies.isPullRequestMerged(
+  const merge = await dependencies.checkPullRequestMerge(
     operation,
     pullRequestUrl
   );
-  if (!merged) {
+  if (merge.state === "unavailable") {
+    restoreProvisionalDeadline();
+    const account = merge.login ? `@${merge.login}` : "the selected account";
+    sendJson(context, 409, {
+      error: `Radius could not verify the setup pull request with ${account}. Re-check that GitHub account and try again.`,
+      code: "verification-retry-github-account-unavailable",
+      operationId,
+      pullRequestUrl,
+      detail: merge.detail,
+      operation: clientView(operation)
+    });
+    return false;
+  }
+  if (merge.state === "open") {
+    restoreProvisionalDeadline();
     sendJson(context, 409, {
       error:
         "The setup pull request has not merged yet, so the verification workflow is not installed on the target branch.",
@@ -591,6 +645,14 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     attemptKind: "verification",
     eligibility: canRetryVerification,
     prepare: enterVerifyStage,
+    prepareAccepted: (operation, eligibility, commandId, provisionalToken) => {
+      markVerificationRetryAcquisition(
+        operation,
+        commandId,
+        eligibility.classification || null,
+        provisionalToken
+      );
+    },
     precondition: requireMergedSetupPullRequest,
     scheduleKind: "verification_retry",
     schedulerMiss: "close-operation",
@@ -645,7 +707,9 @@ async function runAcceptedCommand(
     dependencies,
     operationId,
     operation,
-    eligibility
+    eligibility,
+    rollbackSnapshot,
+    provisionalToken
   }: CommandRequest,
   spec: CommandSpec
 ): Promise<void> {
@@ -659,7 +723,7 @@ async function runAcceptedCommand(
     return;
   }
 
-  const snapshot: unknown = snapshotRetryState(operation);
+  const snapshot = rollbackSnapshot;
   const attempt = beginRetryAttempt(operation, spec.attemptKind);
   const accepted = acceptOperationCommand(operation, {
     kind: spec.commandKind,
@@ -682,6 +746,7 @@ async function runAcceptedCommand(
     return;
   }
   spec.prepare?.(operation, eligibility);
+  spec.prepareAccepted?.(operation, eligibility, commandId, provisionalToken);
   try {
     await dependencies.persistOperations();
   } catch (error) {
@@ -818,7 +883,8 @@ async function runCommandRoute(
     dependencies,
     operationId,
     operation,
-    eligibility
+    eligibility,
+    rollbackSnapshot: snapshotRetryState(operation)
   };
   if (spec.precondition && !(await spec.precondition(request))) return;
   if (spec.settleWithoutWork && (await spec.settleWithoutWork(request))) return;

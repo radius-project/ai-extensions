@@ -150,9 +150,20 @@ export interface GraphProgressRecord {
   graphProgressActive: boolean;
   graphProgressView: GraphProgressView;
   graphProgressKey: string;
+  graphProgressRepo?: string;
+  graphProgressBranches?: string[];
   graphProgressOwner: number;
   graphProgressAwaitingModel: boolean;
-  graphProgressDeadlineAtMs?: number;
+  // Accounting for the app.bicep wait, owned by the graph workflow that answers
+  // the request. `graphProgressLastActivityAtMs` stays absent until a modeling
+  // run is actually observed, because "never seen" and "seen a while ago" fail
+  // the wait with different explanations.
+  graphProgressWaitStartedAtMs?: number;
+  graphProgressLastActivityAtMs?: number;
+  // A terminal wait verdict retained for this exact graphProgressKey. The
+  // browser may already have one retry in flight when progress polling expires
+  // the wait; retaining the verdict prevents that request from restarting it.
+  graphProgressWaitExpiredMessage?: string;
 }
 
 // Append one event to the instance's build record.
@@ -189,6 +200,24 @@ export function recordGraphBuildEvent(
   events.push({ sequence: events.length + 1, ...event });
 }
 
+export function expireGraphProgressWait(
+  record: GraphProgressRecord,
+  message: string
+): void {
+  if (record.graphProgressWaitExpiredMessage !== message) {
+    recordGraphBuildEvent(record, {
+      stage: "creating_model",
+      state: "failed",
+      detail: message
+    });
+  }
+  record.graphProgressActive = false;
+  record.graphProgressAwaitingModel = false;
+  record.graphProgressWaitExpiredMessage = message;
+  delete record.graphProgressWaitStartedAtMs;
+  delete record.graphProgressLastActivityAtMs;
+}
+
 export interface CanvasState {
   [key: string]: unknown;
   graphResources?: CanvasGraphResource[] | null;
@@ -206,6 +235,7 @@ export interface CanvasState {
   plannedResources?: CanvasGraphResource[] | null;
   plannedBranch?: string;
   plannedEnvironment?: string;
+  plannedDefinitionHash?: string;
   plannedRequestGeneration?: number;
   plannedFromWorkspace?: boolean;
   deployProvider?: string;
@@ -254,6 +284,11 @@ export interface CanvasState {
   graphDefinitionHash?: string;
   graphBuildGeneration?: number;
   progressMessages?: string[];
+  canvasInstanceId?: string;
+  // Delivered model handoffs by repo+branch target. A same-instance reopen can
+  // change targets while the old iframe still polls, so one latest key cannot
+  // deduplicate both targets.
+  appBicepHandoffKeys?: Record<string, string>;
   appBicepHandoffKey?: string;
   graphRepairAttempts?: Partial<
     Record<
@@ -271,6 +306,11 @@ export interface CanvasState {
   deployRunUrl?: string | null;
   deployErrorKind?: DeployErrorKind | null;
   deployErrorBranch?: string | null;
+  // Generator-owned paths that were uncommitted when a branch-not-pushed failure
+  // was reported, as a comma-joined allowlist token list. Drives the push
+  // action's commit steps, so a push can never be offered that would publish the
+  // branch without the model it needs.
+  deployErrorPaths?: string | null;
   deployRepairing?: boolean;
   deployHandoffState?: string;
   deployHandoffAttempts?: number;
