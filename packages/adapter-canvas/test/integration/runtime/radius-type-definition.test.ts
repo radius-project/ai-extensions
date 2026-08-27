@@ -85,12 +85,17 @@ function stagingDirectory(root = temporaryDirectory()): string {
 
 function managedIdentityOptions({
   radiusIdentity = managedVersion,
-  execFileSyncImpl = () => JSON.stringify(radiusIdentity)
+  runRadImpl = vi.fn(() =>
+    Promise.resolve({
+      stdout: JSON.stringify(radiusIdentity),
+      stderr: ""
+    })
+  )
 } = {}) {
   return {
     env: { ...process.env, RADIUS_RAD_BINARY: process.execPath },
     home: temporaryDirectory(),
-    execFileSyncImpl
+    runRadImpl
   };
 }
 
@@ -1067,8 +1072,10 @@ describe("command boundary", () => {
   it("queries managed identity through the injected process boundary", async () => {
     const cacheRoot = temporaryDirectory();
     seedCache(cacheRoot);
-    const execFileSyncImpl = vi.fn(() => JSON.stringify(identity));
-    const identityOptions = managedIdentityOptions({ execFileSyncImpl });
+    const runRadImpl = vi.fn(() =>
+      Promise.resolve({ stdout: JSON.stringify(identity), stderr: "" })
+    );
+    const identityOptions = managedIdentityOptions({ runRadImpl });
 
     const contract = await resolver.resolveRadiusTypes(
       ["Radius.Core/applications"],
@@ -1082,11 +1089,12 @@ describe("command boundary", () => {
     );
 
     expect(contract.extension).toBe(identity.extension);
-    expect(execFileSyncImpl).toHaveBeenCalledExactlyOnceWith(
+    expect(runRadImpl).toHaveBeenCalledExactlyOnceWith(
       process.execPath,
       ["version", "--cli", "--output", "json"],
       expect.objectContaining({
-        encoding: "utf8",
+        label: "Managed Radius version query",
+        timeout: 10_000,
         env: expect.objectContaining({
           BICEP: path.join(
             identityOptions.home,
@@ -1098,6 +1106,34 @@ describe("command boundary", () => {
         })
       })
     );
+  });
+
+  it("propagates a managed-runner timeout without fetching definitions", async () => {
+    const cacheRoot = temporaryDirectory();
+    seedCache(cacheRoot);
+    const runRadImpl = vi.fn(() =>
+      Promise.reject(
+        new Error("Managed Radius version query timed out after 1ms")
+      )
+    );
+    const fetchImpl = vi.fn();
+
+    await expect(
+      resolver.resolveRadiusTypes(["Radius.Core/applications"], {
+        ...managedIdentityOptions({ runRadImpl }),
+        cacheRoot,
+        processTimeoutMs: 1,
+        fetchImpl
+      })
+    ).rejects.toThrow(
+      /Managed Radius version query failed: Managed Radius version query timed out after 1ms/u
+    );
+    expect(runRadImpl).toHaveBeenCalledWith(
+      process.execPath,
+      ["version", "--cli", "--output", "json"],
+      expect.objectContaining({ timeout: 1 })
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("queries the configured managed binary through the importable resolver seam", async () => {
@@ -1162,7 +1198,9 @@ describe("command boundary", () => {
           home: failingHome,
           cacheRoot: path.join(failingHome, "cache")
         })
-      ).rejects.toThrow(/Managed Radius version query failed: Command failed/u);
+      ).rejects.toThrow(
+        /Managed Radius version query failed: Managed Radius version query exited with/u
+      );
     } finally {
       process.chdir(previousDirectory);
     }

@@ -16,6 +16,8 @@ Generate a custom type only when ALL of these hold:
 - No type in the predefined allow-list fits that need. Do not stretch a predefined type to cover a different service.
 - The service is provisionable on Azure.
 
+A predefined type that fits the service but exposes a credential in a shape the client cannot consume is NOT a reason to generate a custom type. Redefining a service Radius already models, to obtain a different secret shape, forks the contract and hides the gap. Report it instead, per [Credential shape](secrets-handling.md#credential-shape).
+
 Otherwise, do not generate a type. Report the gap to the user.
 
 ## Namespace and naming

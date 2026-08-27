@@ -192,11 +192,34 @@ describe("P0-C built Radius extension artifact", () => {
       "THIRD-PARTY-NOTICES.txt",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
+      "skills/radius-app-bicep/scripts/show-radius-type.mjs",
       "skills/radius-app-graph/references/source-code-references.md"
     ];
     if (existsSync(SOURCE_CHANGELOG)) packagedPaths.push("CHANGELOG.md");
     for (const packagedPath of packagedPaths) {
       expect(existsSync(join(DIST, ...packagedPath.split("/")))).toBe(true);
+    }
+    const radiusTypeResolver = readFileSync(
+      join(
+        DIST,
+        "skills",
+        "radius-app-bicep",
+        "scripts",
+        "show-radius-type.mjs"
+      ),
+      "utf8"
+    );
+    expect(radiusTypeResolver).not.toContain("@radius-project/adapter-shared");
+    expect(radiusTypeResolver).not.toContain("packages/adapter-shared");
+    expect(radiusTypeResolver).toContain("Managed Radius version query");
+    // The installed plugin has no workspace packages beside it, so every
+    // surviving import must be a Node builtin or the script fails at runtime.
+    const specifiers = [
+      ...radiusTypeResolver.matchAll(/\bfrom\s*"([^"]+)"/gu)
+    ].map((match) => match[1]);
+    expect(specifiers.length).toBeGreaterThan(0);
+    for (const specifier of specifiers) {
+      expect(specifier).toMatch(/^node:/u);
     }
     if (existsSync(SOURCE_CHANGELOG)) {
       expect(readFileSync(join(DIST, "CHANGELOG.md"), "utf8")).toBe(
@@ -267,6 +290,12 @@ describe("P0-C built Radius extension artifact", () => {
       const relative = sourceSkill.slice(
         join(REPO_ROOT, "plugins", "radius").length + 1
       );
+      if (
+        relative.replaceAll("\\", "/") ===
+        "skills/radius-app-bicep/scripts/show-radius-type.mjs"
+      ) {
+        continue;
+      }
       expect(readFileSync(join(DIST, relative), "utf8")).toBe(
         readFileSync(sourceSkill, "utf8")
       );
