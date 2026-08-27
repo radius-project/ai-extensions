@@ -276,6 +276,13 @@ export function initializePlannedGraphPage(
           return;
         }
         plan.requestFailed = true;
+        if (readBoolean(payload, "appBicepUnsupported")) {
+          showModelingFailure(
+            readString(payload, "error") ||
+              "The Radius app-bicep skill cannot model this repository."
+          );
+          return;
+        }
         if (readBoolean(payload, "needsAppBicep")) {
           nextRequestRefresh = refresh;
           status(

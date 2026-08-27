@@ -844,6 +844,34 @@ describe("initializePlannedGraphPage", () => {
     );
   });
 
+  it("stops retrying and shows the server refusal when the skill cannot model the repository", async () => {
+    const setError = vi.fn();
+    const { browser, status } = fixture();
+    let calls = 0;
+    browser.net.handle("/api/plan-graph", () => {
+      calls++;
+      return jsonResponse({
+        error: "I could not find a Dockerfile in this repository.",
+        appBicepUnsupported: true
+      });
+    });
+    initializePlannedGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
+    await flushPromises();
+
+    browser.clock.tick(PLAN_RETRY_MS * 5);
+    await flushPromises();
+
+    expect(calls).toBe(1);
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "I could not find a Dockerfile in this repository."
+    );
+    expect(status.textContent).toBe("");
+  });
+
   // Nothing announces the model's arrival, so a page that reported the wait
   // once and then stopped asking never recovered — even after the model landed.
   it("keeps asking until the model lands, then renders the planned graph", async () => {
