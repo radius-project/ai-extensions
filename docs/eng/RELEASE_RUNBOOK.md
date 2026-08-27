@@ -4,10 +4,10 @@ The short version, for whoever is cutting the release. [`RELEASING.md`](./RELEAS
 
 ## The two channels
 
-| Channel    | Moves when                              | Version looks like          | Users install                  |
-|------------|-----------------------------------------|-----------------------------|--------------------------------|
-| **edge**   | automatically, on every merge to `main` | `0.2.0-edge-20260810161038` | `radius` (the default for now) |
-| **latest** | only when you cut a release             | `0.2.0`                     | `radius` (after stable launch) |
+| Channel    | Moves when                              | Version looks like   | Users install                  |
+|------------|-----------------------------------------|----------------------|--------------------------------|
+| **edge**   | automatically, on every merge to `main` | `0.2.0-edge-0b33186` | `radius` (the default for now) |
+| **latest** | only when you cut a release             | `0.2.0`              | `radius` (after stable launch) |
 
 Edge is the rolling preview: it exists so a change can be tried the moment it lands, and it is never the recommendation for real use. `latest` is the supported channel. The marketplace exposes one plugin identity, `radius`, and its `source.ref` on `main` selects the default channel. It points to `edge` for now; after the first stable release, change that one field to `latest`. Generated edge catalogs continue to point to edge, so the switch does not retire the preview channel. Both channels are moving refs, and every release is also frozen at `releases/radius/v<version>` for anyone who needs to pin an exact version.
 
