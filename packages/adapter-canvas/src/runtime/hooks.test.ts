@@ -69,13 +69,39 @@ describe("appBicepHandoffPrompt", () => {
     ).toContain("open the Radius planned view again");
   });
 
+  it("makes generation conditional on a re-check, because a queued handoff can arrive after the model exists", () => {
+    const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
+    expect(msg).toContain("Generate it if it is still missing");
+    expect(msg).toContain("may have waited behind a turn that was already");
+    expect(msg).toContain("check whether .radius/app.bicep is now present");
+    expect(msg).toContain("on branch `feat`");
+    expect(msg).toContain("generate nothing");
+    expect(msg).toContain("Only generate the model if it is genuinely still");
+  });
+
+  it("tells an in-place view to stand down rather than reopen when the model already arrived", () => {
+    expect(appBicepHandoffPrompt("acme/widgets", "graph", ["feat"])).toContain(
+      "picks the model up on its own"
+    );
+  });
+
+  it("tells a reopening view to open itself rather than regenerate when the model already arrived", () => {
+    const msg = appBicepHandoffPrompt("acme/widgets", "planned", ["feat"]);
+    expect(msg).toContain("open the planned view again so it loads");
+    expect(msg).not.toContain("picks the model up on its own");
+  });
+
+  it("falls back to naming the selected branch when no branch is given", () => {
+    expect(appBicepHandoffPrompt("acme/widgets", "graph")).toContain(
+      "now present on the selected branch"
+    );
+  });
+
   it("includes the repo suffix only when a repo is provided", () => {
     expect(appBicepHandoffPrompt("acme/widgets")).toContain(
       "view for acme/widgets"
     );
-    expect(appBicepHandoffPrompt("")).toContain(
-      "Radius graph view can't render"
-    );
+    expect(appBicepHandoffPrompt("")).toContain("Radius graph view could not");
   });
 
   it("forbids fabricating singleton recipes", () => {

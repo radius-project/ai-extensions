@@ -275,6 +275,13 @@ export interface ProcessDependencies {
 // the branch it sits on. Grouped into one narrow port so the freshness check has
 // a single seam: a graph open reads an origin record, a head commit, and the installed
 // generator version, and nothing else.
+// Time, injected so the runtime owns no ambient clock and no test has to spend
+// real seconds waiting for a window to close.
+export interface ClockDependencies {
+  now(): number;
+  wait(ms: number): Promise<void>;
+}
+
 export interface AppModelDependencies {
   // Installed generator (radius-app-bicep) version, or "" when unresolvable.
   generatorVersion(): string;
@@ -296,6 +303,13 @@ export interface AppModelDependencies {
   ): Promise<boolean | undefined>;
   // Head commit of a branch on GitHub. "" when it cannot be resolved.
   branchHeadCommit(repo: string, branch: string): Promise<string>;
+  // Newest filesystem activity from a modeling run staging into the workspace
+  // checkout, or null when none is observable. A run creates
+  // `.radius/.staging-<runId>/` before it writes anything and removes it when
+  // it publishes or aborts, so this is what proves a run is under way.
+  modelingRunLastActivityAtMs(
+    workspacePath: string | null | undefined
+  ): Promise<number | null>;
   // Repo-relative file read from the local worktree, when the selection is it.
   fetchWorkspaceFile(
     state: CanvasState,
@@ -328,6 +342,7 @@ export interface OperationsDependencies {
 export interface RadiusExtensionDependencies {
   logError(message: string): void;
   session: SessionHolder;
+  clock: ClockDependencies;
   servers: Map<string, CanvasServerEntry>;
   getOrCreateServer(
     instanceId: string,

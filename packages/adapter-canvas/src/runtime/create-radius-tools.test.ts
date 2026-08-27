@@ -23,8 +23,12 @@ function findTool(
 function setup(options?: Parameters<typeof createFakeDependencies>[0]) {
   const fake = createFakeDependencies(options);
   fake.sessionHolder.set(createFakeSession());
-  const tools = createRadiusTools(fake.deps);
-  return { ...fake, tools };
+  const modelingActivity = {
+    announce: vi.fn(),
+    inFlight: vi.fn(async () => false)
+  };
+  const tools = createRadiusTools(fake.deps, modelingActivity);
+  return { ...fake, tools, modelingActivity };
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -81,6 +85,68 @@ describe("RU-07: radius_generate_app", () => {
 
     expect(result).toBe("SKILL.md content for /workspace");
     expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+  });
+
+  it("announces the run it is about to start, so a graph render defers instead of asking for it again", async () => {
+    const { tools, modelingActivity } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "services/api/Dockerfile"]
+      }
+    });
+
+    await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(modelingActivity.announce).toHaveBeenCalledWith({
+      repo: "acme/widgets",
+      branch: "main"
+    });
+  });
+
+  it("announces the run when the agent is briefed about several candidate directories", async () => {
+    const { tools, modelingActivity } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": [
+          "services/api/Dockerfile",
+          "services/web/Dockerfile"
+        ]
+      }
+    });
+
+    await findTool(tools, "radius_generate_app").handler({});
+
+    expect(modelingActivity.announce).toHaveBeenCalledWith({
+      repo: "acme/widgets",
+      branch: "main"
+    });
+  });
+
+  it("announces nothing for a repository it refuses to model", async () => {
+    const { tools, modelingActivity } = setup({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "package.json"]
+      }
+    });
+
+    await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(modelingActivity.announce).not.toHaveBeenCalled();
+  });
+
+  it("announces nothing when the workspace context cannot be resolved", async () => {
+    const { tools, deps, modelingActivity } = setup();
+    (
+      deps.workspace.detectWorkspaceContext as ReturnType<typeof vi.fn>
+    ).mockRejectedValueOnce(new Error("no session"));
+
+    await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(modelingActivity.announce).not.toHaveBeenCalled();
   });
 
   it("hands over the skill when the repository cannot be listed", async () => {

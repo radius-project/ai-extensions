@@ -16,6 +16,7 @@ import { createRadiusCanvas } from "./create-radius-canvas.js";
 import { createRadiusTools } from "./create-radius-tools.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import { createAppModelHandoff } from "./app-model-handoff.js";
+import { createModelingActivity } from "./modeling-activity.js";
 import {
   RADIUS_CANVAS_INSTANCE_ID,
   RADIUS_SESSION_START_CONTEXT
@@ -123,6 +124,30 @@ export function createRadiusExtension(
     return true;
   }
 
+  // Modeling runs already under way, so a render that finds no model does not
+  // ask the agent to generate one that something else is mid-way through
+  // generating. Extension-scoped, because a run outlives the canvas instance
+  // whose render observed it.
+  //
+  // Staging directories only ever describe the workspace checkout, so the probe
+  // is refused for any other target: local activity says nothing about a remote
+  // branch or a different repository, and reading it as evidence would let
+  // unrelated work silence a handoff that should have been sent.
+  const modelingActivity = createModelingActivity({
+    now: () => deps.clock.now(),
+    observeStagedRun: async (repo, branches) => {
+      const state = await workspaceState();
+      if (
+        !state.workspaceRepo ||
+        state.workspaceRepo !== repo ||
+        !branches.some((branch) => branch === state.workspaceBranch)
+      ) {
+        return null;
+      }
+      return deps.appModel.modelingRunLastActivityAtMs(state.workspacePath);
+    }
+  });
+
   const pullRequestGraphDiffGuard = createPullRequestGraphDiffGuard({
     hasRadiusApplicationModel: (workspacePath) =>
       deps.workspace.hasRadiusApplicationModel(workspacePath),
@@ -179,6 +204,9 @@ export function createRadiusExtension(
       evaluateAppSourceForBranch(repo, branch, state),
     send: (message) =>
       Promise.resolve(deps.session.get().send(message)).then(() => undefined),
+    modelingInFlight: (repo, branches) =>
+      modelingActivity.inFlight(repo, branches),
+    wait: (ms) => deps.clock.wait(ms),
     log: (message) => {
       try {
         deps.session.get().log?.(message);
@@ -458,7 +486,7 @@ export function createRadiusExtension(
 
   return {
     canvases: [createRadiusCanvas(deps, canvasInstances)],
-    tools: createRadiusTools(deps),
+    tools: createRadiusTools(deps, modelingActivity),
     hooks: {
       // Nothing here inspects the application model any more. Opening a graph
       // page used to be denied until .radius/app.bicep existed, but every graph

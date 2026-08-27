@@ -54,6 +54,16 @@ export interface AppModelHandoffDependencies {
     state: CanvasState
   ): Promise<AppSourceEvaluation>;
   send(message: HandoffMessage): Promise<void>;
+  // True when a modeling run targeting these branches is already under way. The
+  // handoff is abandoned rather than deferred when it is: the routes re-report
+  // on every render, so a run that dies is asked about again.
+  modelingInFlight(
+    repo: string,
+    branches: ReadonlyArray<string>
+  ): Promise<boolean>;
+  // Injected so the grace window below is driven by a fake clock in tests, and
+  // so nothing here owns a timer.
+  wait(ms: number): Promise<void>;
   log(message: string): void;
   // False once the same staleness evidence has already been handed off. Owned by
   // the caller so the memo outlives any single canvas instance.
@@ -66,6 +76,23 @@ export interface AppModelHandoffDependencies {
 export type AppModelHandoff = (
   request: AppModelHandoffRequest
 ) => Promise<void>;
+
+// How long a render that found no model waits to see whether something else is
+// already generating one before it asks the agent to.
+//
+// The render that raises the handoff usually happens BEFORE either in-flight
+// signal exists: the agent opens the canvas, the graph route reports the model
+// missing, and only then does the agent reach for radius_generate_app. Probing
+// once at that instant would therefore observe nothing and ask anyway, which is
+// exactly the duplicate this gate exists to prevent. The window spans the gap
+// between the render and the tool call, which is one agent decision long.
+//
+// Waiting costs nothing that the user sees. The handoff is fire-and-forget and
+// never blocks the HTTP response, the view keeps polling and renders the model
+// in place whenever it appears, and a handoff is only ever a request for work
+// that has not started.
+export const MODELING_GRACE_WINDOW_MS = 15000;
+export const MODELING_GRACE_POLL_MS = 1000;
 
 // Identifies one repo+branches situation *including what is wrong with it*, not
 // merely which branches were looked at. A model that changes from stale to
@@ -99,6 +126,20 @@ export function createAppModelHandoff(
 ): AppModelHandoff {
   const targetKey = (repo: string, branches: ReadonlyArray<string>): string =>
     `${repo}::${branches.join(",")}`;
+
+  // Polls for an in-flight modeling run across the grace window. Answers true
+  // as soon as one is observed, so the common case where the agent starts
+  // generating immediately costs one extra poll rather than the whole window.
+  async function modelingClaimedIt(
+    repo: string,
+    branches: ReadonlyArray<string>
+  ): Promise<boolean> {
+    for (let waitedMs = 0; ; waitedMs += MODELING_GRACE_POLL_MS) {
+      if (await deps.modelingInFlight(repo, branches)) return true;
+      if (waitedMs >= MODELING_GRACE_WINDOW_MS) return false;
+      await deps.wait(MODELING_GRACE_POLL_MS);
+    }
+  }
 
   return async function handOffAppModel({
     repo,
@@ -169,6 +210,41 @@ export function createAppModelHandoff(
         return;
       }
       if (!ownsReservation()) return;
+
+      // Nobody is generating this model yet as far as one probe can tell, but
+      // the agent that just opened this view may be about to start. Watch for
+      // that before speaking, and abandon the handoff if it happens.
+      let claimed: boolean;
+      try {
+        claimed = await modelingClaimedIt(repo, targets);
+      } catch (error) {
+        releaseReservation();
+        throw error;
+      }
+      if (claimed || !ownsReservation()) {
+        // Deliberately does NOT consume the key: if the run it deferred to dies
+        // without publishing, the next render must be free to ask again.
+        releaseReservation();
+        return;
+      }
+
+      // The window is long enough for a run to have both started and finished
+      // inside it, so the classification this handoff was built from has to be
+      // re-read before it is acted on.
+      let settled: AppModelStatus[];
+      try {
+        settled = await Promise.all(
+          targets.map((branch) => deps.resolveStatus(repo, branch, context))
+        );
+      } catch (error) {
+        releaseReservation();
+        throw error;
+      }
+      if (settled.some((status) => status.freshness.status !== "missing")) {
+        releaseReservation();
+        return;
+      }
+
       try {
         await deps.send(
           appBicepHandoffMessage(repo, page, targets, state?.canvasInstanceId)

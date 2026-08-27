@@ -999,6 +999,13 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       }
     });
 
+    // The graph asks for a model: this repository is modelable. Asserted before
+    // the tool runs, because handing the skill over starts a run the handoff is
+    // then right to defer to.
+    const handedOff = await handOff(harness);
+    expect(handedOff).toContain("radius_generate_app");
+    expect(handedOff).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+
     const generated = String(await generateApp(harness));
 
     // Not a refusal: the skill is still handed over so the services are modeled
@@ -1017,9 +1024,51 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     expect(generated).toContain("`pnpm-workspace.yaml`");
 
     // And the graph still asks for a model: this repository is modelable.
-    const handedOff = await handOff(harness);
+    expect(harness.deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
+
+    await harness.extension.shutdown("test");
+  });
+
+  it("stops asking for a model the tool it just handed over is already generating", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "services/api/Dockerfile"]
+      }
+    });
+
+    // The graph render that finds no model comes first and legitimately asks.
+    expect(await handOff(harness)).toContain("radius_generate_app");
+
+    // Then the agent acts on it, which is the run the next render must defer to
+    // rather than ask for a second time. Panel state carries no dedupe key
+    // here, so silence can only come from the run being observed.
+    await generateApp(harness);
+
+    expect(await handOff(harness)).toBe("");
+
+    await harness.extension.shutdown("test");
+  });
+
+  it("keeps asking for a model on a branch nothing is generating", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "services/api/Dockerfile"]
+      },
+      remoteTreeByRepoBranch: {
+        "acme/widgets@release": ["src/index.ts", "services/api/Dockerfile"]
+      }
+    });
+
+    await generateApp(harness);
+
+    // A run against the worktree's `main` says nothing about `release`.
+    const handedOff = await handOff(harness, {
+      repo: "acme/widgets",
+      branches: ["release"],
+      page: "graph"
+    });
+
     expect(handedOff).toContain("radius_generate_app");
-    expect(handedOff).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
 
     await harness.extension.shutdown("test");
   });
@@ -1096,11 +1145,13 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       harness.deps.workspace.fetchWorkspaceTree as ReturnType<typeof vi.fn>
     ).mockRejectedValue(new Error("permission denied"));
 
+    // Asked before the tool runs: handing the skill over starts a run the
+    // handoff is then right to defer to.
+    expect(await handOff(harness)).toContain("radius_generate_app");
+
     const generated = await generateApp(harness);
     expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
     expect(harness.deps.radiusAppBicepSkill).toHaveBeenCalledWith("/workspace");
-
-    expect(await handOff(harness)).toContain("radius_generate_app");
 
     await harness.extension.shutdown("test");
   });
