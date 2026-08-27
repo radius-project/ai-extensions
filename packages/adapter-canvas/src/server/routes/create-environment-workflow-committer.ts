@@ -483,6 +483,7 @@ export function createWorkflowFileCommitter(
     branch = ""
   ): Promise<
     CreateEnvironmentCommandResult & {
+      changed?: boolean;
       previousBlobSha: string | null;
       previousBlobKnown: boolean;
       commitSha: string | null;
@@ -495,9 +496,26 @@ export function createWorkflowFileCommitter(
       "api",
       "/repos/" + target.targetRepo + "/contents/" + path + refQ,
       "--jq",
-      ".sha"
+      "{sha: .sha, content: .content}"
     ]);
-    const sha = shaRes.code === 0 ? shaRes.stdout.trim() : "";
+    let sha = "";
+    let currentContentB64 = "";
+    if (shaRes.code === 0 || shaRes.code === "0") {
+      try {
+        const current: unknown = JSON.parse(shaRes.stdout);
+        if (current && typeof current === "object") {
+          const fields = current as { sha?: unknown; content?: unknown };
+          sha = typeof fields.sha === "string" ? fields.sha : "";
+          currentContentB64 =
+            typeof fields.content === "string" ?
+              fields.content.replace(/\s+/g, "")
+            : "";
+        }
+      } catch {
+        // Keep accepting the legacy SHA-only response used by older adapters.
+        sha = shaRes.stdout.trim();
+      }
+    }
     const previousBlobKnown =
       sha !== "" ||
       /(?:HTTP\s+404|\bNot Found\b)/i.test(
@@ -511,6 +529,28 @@ export function createWorkflowFileCommitter(
       recoveryOperation ?
         providerMutationRecord(recoveryOperation, mutationKind, mutationTarget)
       : null;
+    const recoveringExistingMutation =
+      existingMutation?.status === "prepared" ||
+      existingMutation?.status === "outcome_unknown" ||
+      existingMutation?.status === "confirmed";
+    if (
+      !recoveringExistingMutation &&
+      sha &&
+      currentContentB64 &&
+      workflowContentDigest(currentContentB64) ===
+        workflowContentDigest(contentB64)
+    ) {
+      return {
+        code: 0,
+        stdout: "",
+        stderr: "",
+        changed: false,
+        previousBlobSha: sha,
+        previousBlobKnown: true,
+        commitSha: null,
+        blobSha: sha
+      };
+    }
     if (
       mutationRecovery &&
       !atomicFallbackWrite &&
@@ -797,6 +837,7 @@ export function createWorkflowFileCommitter(
     viaPr: boolean
   ): WorkflowCommitOutcome => ({
     ok: true,
+    ...(result.changed === false ? { changed: false } : {}),
     stderr: result.stderr,
     viaPr,
     commitSha: result.commitSha,

@@ -455,6 +455,33 @@ describe("publishWorkflowFiles", () => {
     });
   });
 
+  it("does not record workflows that were already up to date", async () => {
+    const recorder = publisherRecorder({
+      commits: {
+        [VERIFY_WORKFLOW_PATH]: {
+          ok: true,
+          changed: false,
+          viaPr: false
+        },
+        ".github/workflows/run-rad-commands.yml": {
+          ok: true,
+          changed: false,
+          viaPr: false
+        },
+        ".github/workflows/radius-delete.yml": {
+          ok: true,
+          changed: false,
+          viaPr: false
+        }
+      }
+    });
+
+    await expect(
+      publishWorkflowFiles(recorder.ports, recorder.target)
+    ).resolves.toEqual({ outcome: "published" });
+    expect(recorder.committed).toEqual([]);
+  });
+
   it("records the pull-request branch when the commits fell back to one", async () => {
     const recorder = publisherRecorder({ viaPr: true });
 

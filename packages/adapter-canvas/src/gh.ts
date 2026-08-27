@@ -1548,29 +1548,60 @@ export const github = {
   getDefaultBranch: (repo: string) => getDefaultBranch(repo)
 };
 
-// Look up a file's blob SHA on a branch; resolves '' when the file is absent.
-function getRepoFileSha(
+interface RepoFileState {
+  sha: string;
+  content: string;
+}
+
+// Look up a file's blob SHA and decoded content on a branch.
+function getRepoFileState(
   repo: string,
   path: string,
   branch: string,
   timeout = 10000
-): Promise<string> {
+): Promise<RepoFileState | null> {
   return new Promise((resolve) => {
     cliExec(
       "gh",
-      ["api", `/repos/${repo}/contents/${path}?ref=${branch}`, "--jq", ".sha"],
+      ["api", `/repos/${repo}/contents/${path}?ref=${branch}`],
       { timeout },
       (err, stdout) => {
-        resolve(err ? "" : (stdout || "").trim());
+        if (err) {
+          resolve(null);
+          return;
+        }
+        try {
+          const value: unknown = JSON.parse(stdout || "null");
+          if (value && typeof value === "object") {
+            const fields = value as { sha?: unknown; content?: unknown };
+            if (
+              typeof fields.sha === "string" &&
+              typeof fields.content === "string"
+            ) {
+              resolve({
+                sha: fields.sha,
+                content: Buffer.from(
+                  fields.content.replace(/\s+/g, ""),
+                  "base64"
+                ).toString("utf8")
+              });
+              return;
+            }
+          }
+        } catch {
+          // Fall through to the unknown-state result.
+        }
+        resolve(null);
       }
     );
   });
 }
 
 // Create or update a Radius workflow file on a repo branch via the GitHub
-// contents API. Reuses the existing blob SHA so a re-commit is an update rather
-// than a rejected create. Radius-authored workflow commits skip push-triggered
-// CI; the explicitly dispatched Radius workflow still runs normally.
+// contents API. Identical content is a no-op; drift reuses the existing blob SHA
+// so the write is an update rather than a rejected create. Radius-authored
+// workflow commits skip push-triggered CI; the explicitly dispatched Radius
+// workflow still runs normally.
 export async function commitWorkflowFileToRepo(
   repo: string,
   path: string,
@@ -1579,12 +1610,13 @@ export async function commitWorkflowFileToRepo(
   message: string,
   timeout = 30000
 ): Promise<boolean> {
-  const sha = await getRepoFileSha(repo, path, branch);
+  const current = await getRepoFileState(repo, path, branch);
+  if (current?.content === content) return false;
   const body = JSON.stringify({
     message: workflowCommitMessage(message, true),
     content: Buffer.from(content, "utf8").toString("base64"),
     branch,
-    ...(sha ? { sha } : {})
+    ...(current?.sha ? { sha: current.sha } : {})
   });
   return new Promise((resolve, reject) => {
     const child = cliExec(

@@ -166,6 +166,38 @@ describe("isProtectedBranchFailure", () => {
 });
 
 describe("committing a workflow file", () => {
+  it("does not write when the workflow already matches generated content", async () => {
+    const h = harness({
+      runGh: [
+        {
+          code: 0,
+          stdout: JSON.stringify({ sha: "existing-blob", content: CONTENT })
+        }
+      ]
+    });
+    const committer = createWorkflowFileCommitter(h.ports, target);
+
+    await expect(
+      committer.commitWorkflowFileSmart(
+        ".github/workflows/a.yml",
+        CONTENT,
+        "Add a"
+      )
+    ).resolves.toEqual({
+      ok: true,
+      changed: false,
+      stderr: "",
+      viaPr: false,
+      commitSha: null,
+      blobSha: "existing-blob",
+      contentSha256: CONTENT_DIGEST,
+      previousBlobSha: "existing-blob",
+      previousBlobKnown: true
+    });
+    expect(h.calls.filter((call) => call.kind === "runGhWorkflow")).toEqual([]);
+    expect(h.tempWrites).toEqual([]);
+  });
+
   it("adopts an unchanged workflow write from branch history after a timed-out response", async () => {
     const h = harness({
       runGh: [
@@ -259,7 +291,10 @@ describe("committing a workflow file", () => {
     const restored = fromPersistedOperation(toPersistedOperation(operation));
     const second = harness({
       runGh: [
-        { code: 0, stdout: "blob-recovered" },
+        {
+          code: 0,
+          stdout: JSON.stringify({ sha: "blob-recovered", content: CONTENT })
+        },
         {
           code: 0,
           stdout: JSON.stringify({ sha: "blob-recovered", content: CONTENT })

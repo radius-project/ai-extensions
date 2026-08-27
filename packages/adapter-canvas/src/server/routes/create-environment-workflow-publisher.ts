@@ -374,10 +374,12 @@ export async function publishWorkflowFiles(
     };
   }
   ports.pushStep("✅ Verify workflow committed.");
-  ports.recordCommittedWorkflowFile(
-    operation,
-    commitRecord(VERIFY_WORKFLOW_PATH, verifyCommit)
-  );
+  if (verifyCommit.changed !== false) {
+    ports.recordCommittedWorkflowFile(
+      operation,
+      commitRecord(VERIFY_WORKFLOW_PATH, verifyCommit)
+    );
+  }
   if (!(await ports.gate())) return { outcome: "cancelled" };
 
   // Step 4: Also commit the deploy workflows (dispatcher + both provider
@@ -415,10 +417,12 @@ export async function publishWorkflowFiles(
         ghError: deployCommit.stderr || ""
       };
     }
-    ports.recordCommittedWorkflowFile(
-      operation,
-      commitRecord(deployPath, deployCommit)
-    );
+    if (deployCommit.changed !== false) {
+      ports.recordCommittedWorkflowFile(
+        operation,
+        commitRecord(deployPath, deployCommit)
+      );
+    }
     if (!(await ports.gate())) return { outcome: "cancelled" };
   }
   // Best-effort: remove the legacy monolithic deploy workflow so it does not
@@ -466,7 +470,7 @@ export async function publishWorkflowFiles(
         );
         if (!(await ports.gate())) return { outcome: "cancelled" };
       }
-      if (delCommit.ok) {
+      if (delCommit.ok && delCommit.changed !== false) {
         ports.recordCommittedWorkflowFile(
           operation,
           commitRecord(delPath, delCommit)
