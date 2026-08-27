@@ -22,7 +22,6 @@ import {
   branchRefReadArgs,
   proveBranchAbsent
 } from "../services/branch-absence.js";
-import { workflowCommitMessage } from "../../workflow-commit-message.js";
 
 // Seam 3 of the `POST /api/create-environment` slice: committing workflow files.
 //
@@ -596,13 +595,10 @@ export function createWorkflowFileCommitter(
       typeof existingIntent?.previousBlobKnown === "boolean" ?
         existingIntent.previousBlobKnown
       : previousBlobKnown;
-    // Workflow publication is an implementation detail of environment setup;
-    // it must not run the customer's push or pull-request CI on any branch.
-    const messageWithCiPolicy = workflowCommitMessage(message, true);
     const commitMessage =
       operationMarker ?
-        `${messageWithCiPolicy}\n\nRadius-Operation: ${operationMarker}`
-      : messageWithCiPolicy;
+        `${message}\n\nRadius-Operation: ${operationMarker}`
+      : message;
     const bodyObj = {
       message: commitMessage,
       content: contentB64,

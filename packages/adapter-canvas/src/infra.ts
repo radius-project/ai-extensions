@@ -31,7 +31,7 @@ import {
   fetchFileFromRepo,
   getDefaultBranch,
   getBranchHeadSha,
-  commitWorkflowFileToRepo
+  commitFileToRepo
 } from "./gh.js";
 
 interface ManagedEnvironment {
@@ -796,7 +796,7 @@ export async function syncRepoWorkflows(
         }
         const choice = candidates[0];
         try {
-          await commitWorkflowFileToRepo(
+          await commitFileToRepo(
             repo,
             path,
             choice.content,
@@ -832,7 +832,7 @@ export async function syncRepoWorkflows(
           candidates.find((c) => c.provider === committedProvider)) ||
         candidates[0];
       try {
-        await commitWorkflowFileToRepo(
+        await commitFileToRepo(
           repo,
           path,
           choice.content,

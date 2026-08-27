@@ -61,7 +61,7 @@ import {
   github,
   cliExec,
   runCommand,
-  commitWorkflowFileToRepo,
+  commitFileToRepo,
   getDefaultBranch,
   getBranchHeadSha,
   createBranchRef,
@@ -5351,7 +5351,7 @@ async function ensureDeployWorkflowsOnBranch(
   for (const file of missing) {
     const content = generated && generated[file];
     if (!content) continue;
-    await commitWorkflowFileToRepo(
+    await commitFileToRepo(
       repo,
       ".github/workflows/" + file,
       content,

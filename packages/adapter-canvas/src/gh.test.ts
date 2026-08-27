@@ -930,7 +930,7 @@ describe.sequential("cliExec", () => {
   });
 });
 
-describe.sequential("commitWorkflowFileToRepo", () => {
+describe.sequential("commitFileToRepo", () => {
   beforeEach(() => {
     childProcess.execFile.mockReset();
     childProcess.execFileSync.mockReset();
@@ -940,8 +940,8 @@ describe.sequential("commitWorkflowFileToRepo", () => {
     restorePlatform();
   });
 
-  it("commits workflows without triggering push CI", async () => {
-    const { commitWorkflowFileToRepo } = await loadGh("linux");
+  it("commits missing files", async () => {
+    const { commitFileToRepo } = await loadGh("linux");
     let requestBody = "";
     childProcess.execFile.mockImplementation((_file, args, _opts, callback) => {
       const readingFile = !args?.includes("--method");
@@ -960,7 +960,7 @@ describe.sequential("commitWorkflowFileToRepo", () => {
     });
 
     await expect(
-      commitWorkflowFileToRepo(
+      commitFileToRepo(
         "octo/app",
         ".github/workflows/radius.yml",
         "on: workflow_dispatch",
@@ -970,45 +970,14 @@ describe.sequential("commitWorkflowFileToRepo", () => {
     ).resolves.toBe(true);
 
     expect(JSON.parse(requestBody)).toEqual({
-      message: "Update Radius workflow [skip ci]",
+      message: "Update Radius workflow",
       content: Buffer.from("on: workflow_dispatch").toString("base64"),
       branch: "main"
     });
   });
 
-  it("suppresses CI for workflow commits on a feature branch", async () => {
-    const { commitWorkflowFileToRepo } = await loadGh("linux");
-    let requestBody = "";
-    childProcess.execFile.mockImplementation((_file, args, _opts, callback) => {
-      callback(
-        args?.includes("--method") ? null : new Error("not found"),
-        "",
-        ""
-      );
-      return {
-        stdin: {
-          end(value?: string) {
-            if (value) requestBody = value;
-          }
-        }
-      };
-    });
-
-    await commitWorkflowFileToRepo(
-      "octo/app",
-      ".github/workflows/radius.yml",
-      "on: workflow_dispatch",
-      "feature",
-      "Update Radius workflow"
-    );
-
-    expect(JSON.parse(requestBody).message).toBe(
-      "Update Radius workflow [skip ci]"
-    );
-  });
-
   it("does not commit a workflow whose content already matches", async () => {
-    const { commitWorkflowFileToRepo } = await loadGh("linux");
+    const { commitFileToRepo } = await loadGh("linux");
     const content = "on: workflow_dispatch";
     const bytes = Buffer.from(content);
     const sha = createHash("sha1")
@@ -1023,7 +992,7 @@ describe.sequential("commitWorkflowFileToRepo", () => {
     );
 
     await expect(
-      commitWorkflowFileToRepo(
+      commitFileToRepo(
         "octo/app",
         ".github/workflows/radius.yml",
         content,
@@ -1035,7 +1004,7 @@ describe.sequential("commitWorkflowFileToRepo", () => {
   });
 
   it("updates a workflow when its existing content has drifted", async () => {
-    const { commitWorkflowFileToRepo } = await loadGh("linux");
+    const { commitFileToRepo } = await loadGh("linux");
     let requestBody = "";
     childProcess.execFile.mockImplementation((_file, args, _opts, callback) => {
       if (!args?.includes("--method")) {
@@ -1053,7 +1022,7 @@ describe.sequential("commitWorkflowFileToRepo", () => {
     });
 
     await expect(
-      commitWorkflowFileToRepo(
+      commitFileToRepo(
         "octo/app",
         ".github/workflows/radius.yml",
         "current",

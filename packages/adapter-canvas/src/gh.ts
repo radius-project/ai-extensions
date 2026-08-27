@@ -14,7 +14,6 @@ import type {
   ExecFileOptionsWithStringEncoding
 } from "node:child_process";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
-import { workflowCommitMessage } from "./workflow-commit-message.js";
 
 export interface GhAccount {
   login: string;
@@ -1576,12 +1575,11 @@ function gitBlobSha(content: string): string {
     .digest("hex");
 }
 
-// Create or update a Radius workflow file on a repo branch via the GitHub
+// Create or update a single UTF-8 text file on a repo branch via the GitHub
 // contents API. Identical content is a no-op; drift reuses the existing blob SHA
-// so the write is an update rather than a rejected create. Radius-authored
-// workflow commits skip push-triggered CI; the explicitly dispatched Radius
-// workflow still runs normally.
-export async function commitWorkflowFileToRepo(
+// so the write is an update rather than a rejected create. The commit body is
+// fed over stdin (never argv) so the base64 payload cannot collide with parsing.
+export async function commitFileToRepo(
   repo: string,
   path: string,
   content: string,
@@ -1592,7 +1590,7 @@ export async function commitWorkflowFileToRepo(
   const sha = await getRepoFileSha(repo, path, branch);
   if (sha && sha === gitBlobSha(content)) return false;
   const body = JSON.stringify({
-    message: workflowCommitMessage(message, true),
+    message,
     content: Buffer.from(content, "utf8").toString("base64"),
     branch,
     ...(sha ? { sha } : {})
