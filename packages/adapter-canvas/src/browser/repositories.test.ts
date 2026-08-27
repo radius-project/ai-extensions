@@ -910,9 +910,9 @@ describe("planned selectors", () => {
     expect(created["planned-app"].value).toBe("cart");
   });
 
-  it("honours ?env= ahead of a persisted environment when the requested environment exists", async () => {
+  it("decodes and honours ?env= ahead of a persisted environment when the requested environment exists", async () => {
     const { browser, created } = plannedPage();
-    browser.nav.search = "?page=planned&env=prod";
+    browser.nav.search = "?page=planned&env=dev%2Fteam%20east";
     browser.net.handle(`${APPLICATIONS_PATH}?repo=octo%2Fapp`, () =>
       jsonResponse({ applications: [{ name: "store" }] })
     );
@@ -921,7 +921,7 @@ describe("planned selectors", () => {
       jsonResponse({
         environments: [
           { name: "dev", provider: "azure" },
-          { name: "prod", provider: "azure" }
+          { name: "dev/team east", provider: "azure" }
         ]
       })
     );
@@ -932,7 +932,7 @@ describe("planned selectors", () => {
       defaultEnvironment: "dev"
     });
 
-    expect(created["planned-env"].value).toBe("prod");
+    expect(created["planned-env"].value).toBe("dev/team east");
   });
 
   it("ignores ?env= when the requested environment does not exist", async () => {

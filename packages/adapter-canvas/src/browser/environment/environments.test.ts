@@ -694,7 +694,7 @@ describe("environment list behavior", () => {
     expect(page.browser.net.calls).toHaveLength(0);
   });
 
-  it("renders records, wires planned-row navigation, and polls pending state", async () => {
+  it("renders records, wires Plan Deployment navigation, and polls pending state", async () => {
     const page = renderPage();
     const rows = addRowButtons(page.browser);
     page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
