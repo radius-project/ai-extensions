@@ -172,7 +172,7 @@ export function environmentsPaneMarkup(
   </div>
 </div>
 
-<!-- Create Environment wizard (revealed by New Environment / Deploy Apps / edit).
+<!-- Create Environment wizard (revealed by New Environment / edit).
      Two steps, because a credential profile only ever exists in service of an
      environment: pick or create the cloud credential first, then describe the
      environment that uses it. -->

@@ -120,7 +120,7 @@ function addRowButtons(browser: FakeBrowser, name = "dev") {
   const edit = createFakeInput("edit-row");
   edit.setAttribute("data-env", name);
   browser.document.addSelectorAll(".js-edit-env", [edit]);
-  browser.document.addSelectorAll(".js-deploy-apps", [deploy]);
+  browser.document.addSelectorAll(".js-plan-deployment", [deploy]);
   browser.document.addSelectorAll(".js-delete-env", [remove]);
   return { deploy, remove, edit };
 }
@@ -266,6 +266,17 @@ describe("environment records and markup", () => {
     // a button rather than an external link.
     expect(markup).not.toContain("href=");
     expect(markup).toContain("js-edit-env");
+    expect(markup).toContain(
+      '<button class="rad-btn rad-btn--neutral js-plan-deployment"'
+    );
+    expect(markup).toContain(">Plan Deployment</button>");
+    expect(markup).not.toContain("Deploy Apps");
+    expect(markup.indexOf("js-edit-env")).toBeLessThan(
+      markup.indexOf("js-plan-deployment")
+    );
+    expect(markup.indexOf("js-plan-deployment")).toBeLessThan(
+      markup.indexOf("js-delete-env")
+    );
   });
 });
 
@@ -733,7 +744,7 @@ describe("environment list behavior", () => {
     const page = renderPage();
     const deploy = createFakeInput("deploy-row");
     const remove = createFakeInput("delete-row");
-    page.browser.document.addSelectorAll(".js-deploy-apps", [deploy]);
+    page.browser.document.addSelectorAll(".js-plan-deployment", [deploy]);
     page.browser.document.addSelectorAll(".js-delete-env", [remove]);
     page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
       jsonResponse({
