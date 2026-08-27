@@ -15,6 +15,8 @@ export {
   MANAGED_RAD_PATH,
   resolveExistingRadBinary,
   ensureRadBinary,
+  managedBicepEnv,
+  spawnRad,
   runRadAppGraph,
   runRadBicepPublishExtension,
   runRadBicepPublish,
