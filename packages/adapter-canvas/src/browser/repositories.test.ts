@@ -910,6 +910,56 @@ describe("planned selectors", () => {
     expect(created["planned-app"].value).toBe("cart");
   });
 
+  it("honours ?env= ahead of a persisted environment when the requested environment exists", async () => {
+    const { browser, created } = plannedPage();
+    browser.nav.search = "?page=planned&env=prod";
+    browser.net.handle(`${APPLICATIONS_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({ applications: [{ name: "store" }] })
+    );
+    browser.net.handle(BRANCHES_PATH, () => jsonResponse({ branches: [] }));
+    browser.net.handle(`${ENVIRONMENTS_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({
+        environments: [
+          { name: "dev", provider: "azure" },
+          { name: "prod", provider: "azure" }
+        ]
+      })
+    );
+
+    await populatePlannedSelectors(browser.context, createPlanState(), {
+      repo: "octo/app",
+      environmentProviders: {},
+      defaultEnvironment: "dev"
+    });
+
+    expect(created["planned-env"].value).toBe("prod");
+  });
+
+  it("ignores ?env= when the requested environment does not exist", async () => {
+    const { browser, created } = plannedPage();
+    browser.nav.search = "?page=planned&env=stale";
+    browser.net.handle(`${APPLICATIONS_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({ applications: [{ name: "store" }] })
+    );
+    browser.net.handle(BRANCHES_PATH, () => jsonResponse({ branches: [] }));
+    browser.net.handle(`${ENVIRONMENTS_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({
+        environments: [
+          { name: "dev", provider: "azure" },
+          { name: "prod", provider: "azure" }
+        ]
+      })
+    );
+
+    await populatePlannedSelectors(browser.context, createPlanState(), {
+      repo: "octo/app",
+      environmentProviders: {},
+      defaultEnvironment: "dev"
+    });
+
+    expect(created["planned-env"].value).toBe("dev");
+  });
+
   it("reads an app query without a leading question mark and skips empty pairs", async () => {
     const { browser, created } = plannedPage();
     browser.nav.search = "&&app=store";
