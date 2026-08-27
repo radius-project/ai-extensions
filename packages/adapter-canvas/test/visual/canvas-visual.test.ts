@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import {
+  azureDiscoveryCommands,
   baseCanvasState,
   defaultFakeCliScenario,
   expect,
@@ -136,65 +137,19 @@ async function seed(
   );
   const fakeCli = defaultFakeCliScenario();
   fakeCli.commands.push(
-    {
-      tool: "az",
-      args: ["account", "set", "--subscription", AZURE_SUBSCRIPTION_ID],
-      stdout: ""
-    },
-    {
-      tool: "az",
-      args: [
-        "aks",
-        "list",
-        "--query",
-        "[].{id:name, name:name, resourceGroup:resourceGroup}",
-        "-o",
-        "json",
-        "--subscription",
-        AZURE_SUBSCRIPTION_ID
-      ],
-      stdout: JSON.stringify([
+    ...azureDiscoveryCommands({
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      clusters: [
         {
           id: AZURE_CLUSTER,
           name: AZURE_CLUSTER,
           resourceGroup: AZURE_RESOURCE_GROUP
         }
-      ])
-    },
-    {
-      tool: "az",
-      args: [
-        "group",
-        "list",
-        "--query",
-        "[].{id:name, name:name}",
-        "-o",
-        "json",
-        "--subscription",
-        AZURE_SUBSCRIPTION_ID
       ],
-      stdout: JSON.stringify([
-        { id: AZURE_RESOURCE_GROUP, name: AZURE_RESOURCE_GROUP }
-      ])
-    },
-    {
-      tool: "az",
-      args: [
-        "aks",
-        "get-credentials",
-        "--name",
-        AZURE_CLUSTER,
-        "--resource-group",
-        AZURE_RESOURCE_GROUP,
-        "--overwrite-existing"
-      ],
-      stdout: ""
-    },
-    {
-      tool: "kubectl",
-      args: ["get", "namespaces", "-o", "jsonpath={.items[*].metadata.name}"],
-      stdout: "default radius-system"
-    }
+      cluster: AZURE_CLUSTER,
+      resourceGroup: AZURE_RESOURCE_GROUP,
+      namespaces: ["default", "radius-system"]
+    })
   );
   await canvas.setScenario(fakeCli);
   await canvas.seedState({

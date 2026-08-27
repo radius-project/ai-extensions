@@ -645,6 +645,94 @@ export function defaultFakeCliScenario(): FakeCliScenario {
   };
 }
 
+export interface AzureDiscoveryCluster {
+  id: string;
+  name: string;
+  resourceGroup: string;
+}
+
+export interface AzureDiscoveryFixture {
+  subscriptionId: string;
+  clusters: AzureDiscoveryCluster[];
+  resourceGroups?: string[];
+  cluster: string;
+  resourceGroup: string;
+  namespaces: string[];
+}
+
+// Single source of truth for the Azure discovery CLI contract implemented by
+// `src/server/services/discovery.ts`. Namespace discovery writes credentials to a
+// temporary kubeconfig, so the last two stubs must match on a prefix: the generated
+// temp path and the trailing `--overwrite-existing` / `--subscription` arguments
+// cannot be spelled out. Every suite that exercises discovery builds its stubs here
+// so a change to that contract cannot drift out of sync with one of them.
+export function azureDiscoveryCommands(
+  fixture: AzureDiscoveryFixture
+): FakeCliCommand[] {
+  const resourceGroups =
+    fixture.resourceGroups ??
+    Array.from(new Set(fixture.clusters.map((entry) => entry.resourceGroup)));
+  return [
+    {
+      tool: "az",
+      args: ["account", "set", "--subscription", fixture.subscriptionId],
+      stdout: ""
+    },
+    {
+      tool: "az",
+      args: [
+        "aks",
+        "list",
+        "--query",
+        "[].{id:name, name:name, resourceGroup:resourceGroup}",
+        "-o",
+        "json",
+        "--subscription",
+        fixture.subscriptionId
+      ],
+      stdout: JSON.stringify(
+        fixture.clusters.map((entry) => ({
+          id: entry.id,
+          name: entry.name,
+          resourceGroup: entry.resourceGroup
+        }))
+      )
+    },
+    {
+      tool: "az",
+      args: [
+        "group",
+        "list",
+        "--query",
+        "[].{id:name, name:name}",
+        "-o",
+        "json",
+        "--subscription",
+        fixture.subscriptionId
+      ],
+      stdout: JSON.stringify(resourceGroups.map((name) => ({ id: name, name })))
+    },
+    {
+      tool: "az",
+      argsPrefix: [
+        "aks",
+        "get-credentials",
+        "--name",
+        fixture.cluster,
+        "--resource-group",
+        fixture.resourceGroup,
+        "--file"
+      ],
+      stdout: ""
+    },
+    {
+      tool: "kubectl",
+      argsPrefix: ["--kubeconfig"],
+      stdout: fixture.namespaces.join(" ")
+    }
+  ];
+}
+
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  azureDiscoveryCommands,
   FAKE_CLI_TOOLS,
   removeDirectoryWithRetries,
   replaceSharedCredentials,
@@ -10,6 +11,101 @@ import {
 describe("fake CLI isolation", () => {
   it("intercepts every cloud command used by environment discovery", () => {
     expect(FAKE_CLI_TOOLS).toEqual(["gh", "rad", "az", "aws", "kubectl"]);
+  });
+});
+
+describe("azureDiscoveryCommands", () => {
+  const fixture = {
+    subscriptionId: "sub-1",
+    clusters: [
+      { id: "aks-first", name: "AKS First", resourceGroup: "rg-first" },
+      { id: "aks-selected", name: "AKS Selected", resourceGroup: "rg-selected" }
+    ],
+    cluster: "aks-selected",
+    resourceGroup: "rg-selected",
+    namespaces: ["default", "selected-team"]
+  };
+
+  it("matches the temporary kubeconfig arguments discovery generates", () => {
+    const commands = azureDiscoveryCommands(fixture);
+
+    expect(commands.at(-2)).toEqual({
+      tool: "az",
+      argsPrefix: [
+        "aks",
+        "get-credentials",
+        "--name",
+        "aks-selected",
+        "--resource-group",
+        "rg-selected",
+        "--file"
+      ],
+      stdout: ""
+    });
+    expect(commands.at(-1)).toEqual({
+      tool: "kubectl",
+      argsPrefix: ["--kubeconfig"],
+      stdout: "default selected-team"
+    });
+  });
+
+  it("lists the fixture clusters and derives resource groups from them", () => {
+    const commands = azureDiscoveryCommands(fixture);
+
+    expect(commands[0]).toEqual({
+      tool: "az",
+      args: ["account", "set", "--subscription", "sub-1"],
+      stdout: ""
+    });
+    expect(commands[1].args).toEqual([
+      "aks",
+      "list",
+      "--query",
+      "[].{id:name, name:name, resourceGroup:resourceGroup}",
+      "-o",
+      "json",
+      "--subscription",
+      "sub-1"
+    ]);
+    expect(JSON.parse(commands[1].stdout ?? "")).toEqual(fixture.clusters);
+    expect(commands[2].args).toEqual([
+      "group",
+      "list",
+      "--query",
+      "[].{id:name, name:name}",
+      "-o",
+      "json",
+      "--subscription",
+      "sub-1"
+    ]);
+    expect(JSON.parse(commands[2].stdout ?? "")).toEqual([
+      { id: "rg-first", name: "rg-first" },
+      { id: "rg-selected", name: "rg-selected" }
+    ]);
+  });
+
+  it("honors an explicit resource group list", () => {
+    const commands = azureDiscoveryCommands({
+      ...fixture,
+      resourceGroups: ["rg-only"]
+    });
+
+    expect(JSON.parse(commands[2].stdout ?? "")).toEqual([
+      { id: "rg-only", name: "rg-only" }
+    ]);
+  });
+
+  it("returns independent commands so a suite can fail one stub in place", () => {
+    const first = azureDiscoveryCommands(fixture);
+    const second = azureDiscoveryCommands(fixture);
+
+    const credentials = first.at(-2);
+    if (!credentials) throw new Error("missing get-credentials stub");
+    credentials.exitCode = 1;
+    credentials.stderr = "selected cluster unavailable";
+
+    expect(second.at(-2)).not.toHaveProperty("exitCode");
+    expect(second.at(-2)?.stderr).toBeUndefined();
   });
 });
 

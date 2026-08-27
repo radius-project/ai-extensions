@@ -2,6 +2,7 @@ import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import {
+  azureDiscoveryCommands,
   baseCanvasState,
   CREDENTIAL_SENTINEL,
   defaultFakeCliScenario,
@@ -928,69 +929,20 @@ test.describe("Radius Canvas in Chromium", () => {
     canvas
   }) => {
     const scenario = defaultFakeCliScenario();
-    const resourceCommands: FakeCliCommand[] = [
-      {
-        tool: "az",
-        args: ["account", "set", "--subscription", VALID_SUBSCRIPTION_ID],
-        stdout: ""
-      },
-      {
-        tool: "az",
-        args: [
-          "aks",
-          "list",
-          "--query",
-          "[].{id:name, name:name, resourceGroup:resourceGroup}",
-          "-o",
-          "json",
-          "--subscription",
-          VALID_SUBSCRIPTION_ID
-        ],
-        stdout: JSON.stringify([
-          { id: "aks-first", name: "AKS First", resourceGroup: "rg-first" },
-          {
-            id: "aks-selected",
-            name: "AKS Selected",
-            resourceGroup: "rg-selected"
-          }
-        ])
-      },
-      {
-        tool: "az",
-        args: [
-          "group",
-          "list",
-          "--query",
-          "[].{id:name, name:name}",
-          "-o",
-          "json",
-          "--subscription",
-          VALID_SUBSCRIPTION_ID
-        ],
-        stdout: JSON.stringify([
-          { id: "rg-first", name: "rg-first" },
-          { id: "rg-selected", name: "rg-selected" }
-        ])
-      },
-      {
-        tool: "az",
-        argsPrefix: [
-          "aks",
-          "get-credentials",
-          "--name",
-          "aks-selected",
-          "--resource-group",
-          "rg-selected",
-          "--file"
-        ],
-        stdout: ""
-      },
-      {
-        tool: "kubectl",
-        argsPrefix: ["--kubeconfig"],
-        stdout: "default selected-team"
-      }
-    ];
+    const resourceCommands: FakeCliCommand[] = azureDiscoveryCommands({
+      subscriptionId: VALID_SUBSCRIPTION_ID,
+      clusters: [
+        { id: "aks-first", name: "AKS First", resourceGroup: "rg-first" },
+        {
+          id: "aks-selected",
+          name: "AKS Selected",
+          resourceGroup: "rg-selected"
+        }
+      ],
+      cluster: "aks-selected",
+      resourceGroup: "rg-selected",
+      namespaces: ["default", "selected-team"]
+    });
     scenario.commands.push(...resourceCommands);
     await canvas.setScenario(scenario);
     await gotoCanvas(page, canvas, "environment");
