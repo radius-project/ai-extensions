@@ -71,7 +71,7 @@ const pluginSources = ["plugin.json", "package.json", "README.md", "skills"];
 // build but not in a plain local one.
 const optionalPluginSources = ["CHANGELOG.md"];
 
-// CI stamps an edge version (e.g. 0.1.0-edge-20260807020902) so a published
+// CI stamps an edge version (e.g. 0.1.0-edge-0b33186) so a published
 // build is distinguishable from a release. A local build leaves the version in
 // the source manifests alone.
 const stampedVersion = process.env.PLUGIN_VERSION?.trim();
