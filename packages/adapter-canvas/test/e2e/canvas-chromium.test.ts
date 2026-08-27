@@ -1759,37 +1759,152 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }) => {
-    let pings = 0;
+    let pingStatus = 200;
     let navigations = 0;
     page.on("framenavigated", (frame) => {
       if (frame === page.mainFrame()) navigations += 1;
     });
-    await gotoCanvas(page, canvas, "planned");
-    await expectNoWcagViolations(page);
-    await page.route("**/api/ping", async (route) => {
-      pings += 1;
+    const heartbeatUrl = `${canvas.baseUrl}/api/ping`;
+    await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    // Counting pings at the Playwright route handler is what made this test
+    // flaky (#541): route.fulfill() resolves once Chromium has been handed the
+    // response, not once the page has finished handling it, so the next focus
+    // could still hit the in-flight guard (heartbeat.ts:61) and be dropped.
+    // These browser-side counters bracket the real promise chain instead.
+    await page.addInitScript((url: string) => {
+      const originalFetch = globalThis.fetch;
+      let startedPings = 0;
+      let observedPings = 0;
+      let completedPings = 0;
+      const publish = (name: string, read: () => number): void => {
+        Object.defineProperty(globalThis, name, { get: read });
+      };
+      publish("__radiusStartedHeartbeatPings", () => startedPings);
+      publish("__radiusObservedHeartbeatPings", () => observedPings);
+      publish("__radiusCompletedHeartbeatPings", () => completedPings);
+      globalThis.fetch = async (...args): Promise<Response> => {
+        const input = args[0];
+        // A Request input stringifies to "[object Request]", which resolves
+        // against the base instead of throwing, so the wrapper would silently
+        // stop matching and every counter would flatline. Read the URL off
+        // each input shape explicitly.
+        const rawUrl =
+          typeof input === "string" ? input
+          : input instanceof URL ? input.href
+          : input.url;
+        if (new URL(rawUrl, url).href !== url) return originalFetch(...args);
+
+        startedPings += 1;
+        const response = await originalFetch(...args);
+        const ok = response.ok;
+        let observed = false;
+        Object.defineProperty(response, "ok", {
+          configurable: true,
+          get() {
+            if (!observed) {
+              observed = true;
+              observedPings += 1;
+              // `ok` is read first by isHttpResponse (context.ts:142) and again
+              // by heartbeat.ts:82. Everything left in the chain after those
+              // reads -- the .then, the .catch, and the .finally that clears
+              // the in-flight guard (heartbeat.ts:107-111) -- is a microtask,
+              // so a macrotask queued here cannot run before the guard is
+              // clear. If either reader stops touching `ok`, this counter stays
+              // at 0 and the polls below time out instead of passing by luck.
+              setTimeout(() => {
+                completedPings += 1;
+              }, 0);
+            }
+            return ok;
+          }
+        });
+        return response;
+      };
+    }, heartbeatUrl);
+    await page.route(heartbeatUrl, async (route) => {
       await route.fulfill({
-        status: pings <= 2 ? 503 : 200,
+        status: pingStatus,
         contentType: "application/json",
         body: "{}"
       });
     });
+    await gotoCanvas(page, canvas, "planned");
+    await expectNoWcagViolations(page);
+    // Load-bearing, not a duplicated line: the first load and the axe scan run
+    // on a live clock and consume an unpredictable share of the 5s heartbeat
+    // interval, so a ping can still be outstanding here. Reloading restarts the
+    // interval from a known point before the clock is frozen.
+    await gotoCanvas(page, canvas, "planned");
+    const currentTime = await page.evaluate<number>("Date.now()");
+    // pauseAt rejects a non-future time ("Cannot fast-forward to the past")
+    // because real time advances between the read above and this call, so the
+    // offset cannot be dropped. pauseAt also runs the timers it crosses, which
+    // can start an interval ping; settleHeartbeat below drains it before any
+    // baseline is read.
+    await page.clock.pauseAt(currentTime + 1_000);
+
+    const readCounter = async (name: string): Promise<number> =>
+      page.evaluate<number>(`window.${name}`);
+    // Quiescent means every started ping has also completed, i.e. heartbeat.ts
+    // has cleared `inFlight`. Pumping the paused clock lets the completion
+    // markers, which are macrotasks, run.
+    const settleHeartbeat = async (): Promise<void> => {
+      await expect
+        .poll(async () => {
+          await page.clock.runFor(0);
+          const started = await readCounter("__radiusStartedHeartbeatPings");
+          const completed = await readCounter(
+            "__radiusCompletedHeartbeatPings"
+          );
+          return started - completed;
+        })
+        .toBe(0);
+    };
+    await settleHeartbeat();
+
+    const overlay = page.locator("#radius-reconnect-overlay");
     const initialNavigations = navigations;
-    await page.evaluate("window.dispatchEvent(new Event('focus'))");
-    await expect.poll(() => pings).toBe(1);
-    await expect(page.locator("#radius-reconnect-overlay")).toBeHidden();
-    await page.evaluate("window.dispatchEvent(new Event('focus'))");
-    await expect.poll(() => pings).toBe(2);
-    await expect(page.locator("#radius-reconnect-overlay")).toBeVisible();
-    const recoveryNavigation = page.waitForNavigation({
-      waitUntil: "domcontentloaded"
-    });
+    const baselinePings = await readCounter("__radiusStartedHeartbeatPings");
+    const focusForPing = async (): Promise<void> => {
+      const beforeObserved = await readCounter(
+        "__radiusObservedHeartbeatPings"
+      );
+      const beforeCompleted = await readCounter(
+        "__radiusCompletedHeartbeatPings"
+      );
+      await page.evaluate("window.dispatchEvent(new Event('focus'))");
+      await expect
+        .poll(() => readCounter("__radiusObservedHeartbeatPings"))
+        .toBe(beforeObserved + 1);
+      await settleHeartbeat();
+      expect(await readCounter("__radiusCompletedHeartbeatPings")).toBe(
+        beforeCompleted + 1
+      );
+    };
+
+    pingStatus = 503;
+    await focusForPing();
+    await expect(overlay).toBeHidden();
+    await focusForPing();
+    await expect(overlay).toBeVisible();
+    expect(navigations - initialNavigations).toBe(0);
+    // Absolute, not a delta: with the clock paused these two focus pings are
+    // the only ones that may exist. A delta check absorbs a ping the test never
+    // asked for, which is the class of failure #541 started as.
+    expect(await readCounter("__radiusStartedHeartbeatPings")).toBe(
+      baselinePings + 2
+    );
+
+    pingStatus = 200;
+    // Dispatching from a timer keeps page.evaluate from racing the execution
+    // context teardown that the recovery reload causes. The clock is paused, so
+    // the runFor(0) on the next line is what actually fires that timer; the two
+    // lines have to stay together.
     await page.evaluate(
       "setTimeout(() => window.dispatchEvent(new Event('focus')), 0)"
     );
-    await recoveryNavigation;
-    await expect.poll(() => pings).toBe(3);
+    await page.clock.runFor(0);
+    await page.waitForURL(`${canvas.baseUrl}/?page=planned`);
     await expect.poll(() => navigations - initialNavigations).toBe(1);
-    await expect(page).toHaveURL(/page=planned/);
   });
 });
