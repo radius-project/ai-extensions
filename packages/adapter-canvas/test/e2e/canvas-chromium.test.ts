@@ -11,7 +11,8 @@ import {
   REPOSITORY,
   test,
   WORKTREE_BRANCH,
-  type CanvasHarness
+  type CanvasHarness,
+  type FakeCliCommand
 } from "./support/canvas-harness.js";
 import type { Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
@@ -24,6 +25,8 @@ const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const VALID_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
 const SOURCE_FILE = "src/web/app.ts";
 const SOURCE_LINE = 12;
+const REMOVED_SOURCE_FILE = "src/web/worker.ts";
+const DIFF_BASE_BRANCH = "main";
 
 async function filesContainingText(
   directory: string,
@@ -509,6 +512,74 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator(".rad-node")).toHaveCount(3);
   });
 
+  test("routes each graph diff source link by the branch that node lives on @safety", async ({
+    page,
+    canvas
+  }) => {
+    // The worktree is checked out on the head branch, so a head-side node must
+    // reach the real open-source route while a removed node -- whose file lives
+    // on the base branch and may not exist locally at all -- stays external.
+    await canvas.seedState({
+      ...baseCanvasState(canvas.workspacePath),
+      diffTargetRepo: REPOSITORY,
+      diffBase: DIFF_BASE_BRANCH,
+      diffHead: WORKTREE_BRANCH,
+      branches: [DIFF_BASE_BRANCH, WORKTREE_BRANCH],
+      diffResources: [
+        {
+          id: "app/web",
+          name: "web",
+          type: "Radius.Compute/containers",
+          codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
+          diffStatus: "added"
+        },
+        {
+          id: "app/old-worker",
+          name: "old-worker",
+          type: "Radius.Compute/containers",
+          codeReference: `${REMOVED_SOURCE_FILE}#L${SOURCE_LINE}`,
+          diffStatus: "removed"
+        }
+      ]
+    });
+    await gotoCanvas(page, canvas, "graph-diff");
+    await expect(page.locator(".rad-node")).toHaveCount(2);
+
+    const removedLink = page
+      .locator(".rad-node")
+      .filter({ hasText: "old-worker" })
+      .first()
+      .getByRole("link", { name: "View source code" });
+    await expect(removedLink).toHaveAttribute(
+      "href",
+      `https://github.com/${REPOSITORY}/blob/${DIFF_BASE_BRANCH}/${REMOVED_SOURCE_FILE}#L${SOURCE_LINE}`
+    );
+    // A remote link is a real target="_blank" anchor the host opens.
+    await expect(removedLink).toHaveAttribute("target", "_blank");
+
+    const headLink = page
+      .locator(".rad-node")
+      .filter({ hasText: "web" })
+      .first()
+      .getByRole("link", { name: "View source code" });
+    await expect(headLink).not.toHaveAttribute("target", "_blank");
+
+    // Activating the remote link is deliberately not exercised here: it is a real
+    // target="_blank" anchor, so the host would open github.com and the harness
+    // must stay offline. The component suite clicks it against the real DOM and
+    // asserts it reaches openExternal rather than the workspace opener.
+    expect(bodyFor(canvas, "/api/open-source")).toBeUndefined();
+
+    await headLink.focus();
+    await expect(headLink).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    await expect
+      .poll(() => bodyFor(canvas, "/api/open-source"))
+      .toEqual({ path: SOURCE_FILE, line: SOURCE_LINE });
+    await expect(page.locator(".rad-node")).toHaveCount(2);
+  });
+
   test("does not let a late real graph response mutate a page that was already torn down @safety", async ({
     page,
     canvas
@@ -736,6 +807,46 @@ test.describe("Radius Canvas in Chromium", () => {
     await canvas.expectCliInvoked("gh");
   });
 
+  test("plans a deployment for an existing environment from its row", async ({
+    page,
+    canvas
+  }) => {
+    await page.route("**/api/list-environments**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          environments: [
+            {
+              name: "fixture-environment",
+              provider: "azure",
+              status: "success"
+            }
+          ]
+        })
+      });
+    });
+    await gotoCanvas(page, canvas, "environment");
+
+    const row = page
+      .getByRole("row")
+      .filter({ hasText: "fixture-environment" });
+    const plan = row.getByRole("button", { name: "Plan Deployment" });
+    await expect(plan).toBeVisible();
+    await expect(row.getByRole("button", { name: "Deploy Apps" })).toHaveCount(
+      0
+    );
+    await expectNoWcagViolations(page);
+
+    await plan.focus();
+    await page.keyboard.press("Enter");
+
+    await expect(page).toHaveURL(/page=planned&env=fixture-environment(?:&|$)/);
+    await expect(page.locator("#planned-env")).toHaveValue(
+      "fixture-environment"
+    );
+  });
+
   test("recovers from the scope warning when Re-check is activated by keyboard", async ({
     page,
     canvas
@@ -810,6 +921,148 @@ test.describe("Radius Canvas in Chromium", () => {
       )
     ).toBe(false);
     await expectNoWcagViolations(page);
+  });
+
+  test("queries namespaces from the selected AKS cluster and surfaces refresh failure", async ({
+    page,
+    canvas
+  }) => {
+    const scenario = defaultFakeCliScenario();
+    const resourceCommands: FakeCliCommand[] = [
+      {
+        tool: "az",
+        args: ["account", "set", "--subscription", VALID_SUBSCRIPTION_ID],
+        stdout: ""
+      },
+      {
+        tool: "az",
+        args: [
+          "aks",
+          "list",
+          "--query",
+          "[].{id:name, name:name, resourceGroup:resourceGroup}",
+          "-o",
+          "json",
+          "--subscription",
+          VALID_SUBSCRIPTION_ID
+        ],
+        stdout: JSON.stringify([
+          { id: "aks-first", name: "AKS First", resourceGroup: "rg-first" },
+          {
+            id: "aks-selected",
+            name: "AKS Selected",
+            resourceGroup: "rg-selected"
+          }
+        ])
+      },
+      {
+        tool: "az",
+        args: [
+          "group",
+          "list",
+          "--query",
+          "[].{id:name, name:name}",
+          "-o",
+          "json",
+          "--subscription",
+          VALID_SUBSCRIPTION_ID
+        ],
+        stdout: JSON.stringify([
+          { id: "rg-first", name: "rg-first" },
+          { id: "rg-selected", name: "rg-selected" }
+        ])
+      },
+      {
+        tool: "az",
+        argsPrefix: [
+          "aks",
+          "get-credentials",
+          "--name",
+          "aks-selected",
+          "--resource-group",
+          "rg-selected",
+          "--file"
+        ],
+        stdout: ""
+      },
+      {
+        tool: "kubectl",
+        argsPrefix: ["--kubeconfig"],
+        stdout: "default selected-team"
+      }
+    ];
+    scenario.commands.push(...resourceCommands);
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "environment");
+    await openEnvironmentWizard(page);
+
+    const resourceGroup = page.getByLabel("Resource Group", { exact: true });
+    const cluster = page.getByLabel("Cluster", { exact: true });
+    const namespace = page.locator("#azure-namespace-select");
+    await expect(resourceGroup).toContainText("rg-selected");
+    await resourceGroup.selectOption("rg-selected");
+    await expect(cluster.locator("option")).toHaveText([
+      "Select AKS cluster…",
+      "AKS Selected",
+      "+ Enter custom..."
+    ]);
+    await expect(cluster).toHaveValue("aks-selected");
+    await expect(namespace).toBeDisabled();
+    await expect(namespace).toContainText("selected-team");
+    await expect(namespace).toBeEnabled();
+    await expect(namespace).toHaveValue("default");
+    await namespace.selectOption("selected-team");
+
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "az" &&
+            call.args.includes("get-credentials") &&
+            call.args.includes("aks-selected") &&
+            call.args.includes("rg-selected") &&
+            call.args.includes("--file") &&
+            call.args.includes("--overwrite-existing") &&
+            call.args.includes(VALID_SUBSCRIPTION_ID)
+        )
+      )
+      .toBe(true);
+    expect(
+      (await canvas.cliCalls()).some(
+        (call) =>
+          call.tool === "az" &&
+          call.args.includes("get-credentials") &&
+          call.args.includes("aks-first")
+      )
+    ).toBe(false);
+
+    const credentials = resourceCommands.find(
+      (command) =>
+        command.tool === "az" &&
+        (command.args?.includes("get-credentials") ||
+          command.argsPrefix?.includes("get-credentials"))
+    );
+    if (credentials) {
+      credentials.exitCode = 1;
+      credentials.stderr = "selected cluster unavailable";
+    }
+    await canvas.setScenario(scenario);
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expect(namespace).toBeDisabled();
+    await expect(namespace).toHaveValue("");
+    await expect(namespace.locator("option")).toHaveText(
+      "Discovering namespaces…"
+    );
+
+    await expect(page.locator("#azure-discover-status")).toContainText(
+      "Discovery failed: selected cluster unavailable"
+    );
+    await expect(namespace).toBeEnabled();
+    await expect(namespace.locator("option")).toHaveCount(2);
+    await expect(namespace).not.toContainText("default");
+    await expect(namespace).not.toContainText("selected-team");
+    await namespace.selectOption("__custom__");
+    await expect(page.locator("#azure-namespace-custom")).toBeVisible();
   });
 
   test("verifies Azure credentials through the fake az boundary and keeps secret-shaped stderr out of the page @safety", async ({

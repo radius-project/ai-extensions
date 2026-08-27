@@ -641,12 +641,22 @@ export function populatePlannedSelectors(
               environment.provider;
             state.environmentStatuses[environment.name] = environment.status;
           }
+          const requestedEnvironment = readQueryParameter(
+            context.nav.search,
+            "env"
+          );
+          const requestedEnvironmentExists =
+            requestedEnvironment !== "" &&
+            listing.environments.some(
+              (environment) => environment.name === requestedEnvironment
+            );
+          let defaultEnvironment = options.defaultEnvironment ?? "";
+          if (requestedEnvironmentExists) {
+            defaultEnvironment = requestedEnvironment;
+          }
           dom.setOptions(
             envSelect,
-            buildEnvironmentOptions(
-              listing.environments,
-              options.defaultEnvironment ?? ""
-            )
+            buildEnvironmentOptions(listing.environments, defaultEnvironment)
           );
           hasEnvironments = true;
         })

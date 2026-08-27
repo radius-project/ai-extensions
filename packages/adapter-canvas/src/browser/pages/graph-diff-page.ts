@@ -29,6 +29,7 @@ interface DiffState {
   repo: string;
   base: string;
   head: string;
+  workspaceBranch: string;
   resources: unknown[];
   modelingError: string;
 }
@@ -39,6 +40,7 @@ function parseState(context: BrowserContext): DiffState {
     repo: readString(state, "repo"),
     base: readString(state, "base") || "main",
     head: readString(state, "head"),
+    workspaceBranch: readString(state, "workspaceBranch"),
     resources: readArray(state, "resources"),
     modelingError: readString(state, "modelingError")
   };
@@ -286,7 +288,12 @@ export function initializeGraphDiffPage(
         diffMode: true,
         repoUrl: githubRepositoryUrl(state.repo),
         branch: state.head,
-        baseBranch: state.base
+        baseBranch: state.base,
+        // A diff renders two branches at once and the worktree holds at most
+        // one of them, so locality is decided per node rather than for the
+        // page. Without this every node links to github.com, which resolves to
+        // nothing when the compared branch was never pushed.
+        workspaceBranch: state.workspaceBranch
       })
     );
   }

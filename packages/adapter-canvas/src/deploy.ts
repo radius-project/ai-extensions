@@ -293,37 +293,8 @@ async function selectedWorkflowJson(
 export function ghJson(
   args: string[],
   fallback: unknown = null,
-  timeout = 15000,
-  executor?: SelectedGhExecutor
+  timeout = 15000
 ): Promise<unknown> {
-  if (executor) {
-    return executor
-      .run(args, { timeout })
-      .then((result) => {
-        if (Number(result.code) !== 0) {
-          const authorizationError = selectedAuthorizationError(
-            executor,
-            result.stdout,
-            result.stderr
-          );
-          if (authorizationError) throw authorizationError;
-          return { state: "fallback" };
-        }
-        try {
-          return JSON.parse(result.stdout.trim());
-        } catch {
-          return fallback;
-        }
-      })
-      .catch((error: unknown) => {
-        const authorizationError = rejectedSelectedAuthorizationError(
-          executor,
-          error
-        );
-        if (authorizationError) throw authorizationError;
-        throw error;
-      });
-  }
   return new Promise((resolve) => {
     cliExec("gh", args, { timeout }, (err, stdout) => {
       if (err) {
@@ -332,7 +303,7 @@ export function ghJson(
       }
       try {
         resolve(JSON.parse(stdout.trim()));
-      } catch (e) {
+      } catch {
         resolve(fallback);
       }
     });

@@ -60,12 +60,18 @@ function mount(
   options: {
     localSource?: boolean;
     deployMode?: boolean;
+    diffMode?: boolean;
+    baseBranch?: string;
+    workspaceBranch?: string;
     resources?: GraphResource[];
   } = {}
 ): Mounted {
   const settings = resolveGraphSettings({
     localSource: options.localSource ?? true,
     deployMode: options.deployMode,
+    diffMode: options.diffMode,
+    baseBranch: options.baseBranch,
+    workspaceBranch: options.workspaceBranch,
     repoUrl: "https://github.test/o/r",
     branch: "feature-branch"
   });
@@ -297,6 +303,78 @@ describe("graph view in a real browser", () => {
     expect(recorded.external).toEqual([sourceUrl]);
     expect(recorded.local).toEqual([]);
     expect(document.body.contains(link)).toBe(true);
+  });
+
+  it("routes each diff node's source link by the branch that node lives on", async () => {
+    // The worktree can only have one of the two compared branches checked out,
+    // so a head-branch node must open locally while a removed node, whose file
+    // lives on the base branch, must still go out to the host.
+    const { recorded } = mount({
+      diffMode: true,
+      baseBranch: "main",
+      workspaceBranch: "feature-branch",
+      resources: [
+        {
+          id: "app/web",
+          name: "web",
+          type: "Radius.Compute/containers",
+          codeReference: "src/web.ts#L4",
+          diffStatus: "added"
+        },
+        {
+          id: "app/old-worker",
+          name: "old-worker",
+          type: "Radius.Compute/containers",
+          codeReference: "src/worker.ts#L9",
+          diffStatus: "removed"
+        }
+      ]
+    });
+
+    const web = await card("web");
+    await userEvent.click(
+      await within(web).findByRole("link", { name: /View source code/ })
+    );
+
+    expect(recorded.local).toEqual([["src/web.ts", 4, expect.any(String)]]);
+    expect(recorded.external).toEqual([]);
+
+    const worker = await card("old-worker");
+    await userEvent.click(
+      await within(worker).findByRole("link", { name: /View source code/ })
+    );
+
+    expect(recorded.local).toHaveLength(1);
+    expect(recorded.external).toEqual([
+      "https://github.test/o/r/blob/main/src/worker.ts#L9"
+    ]);
+  });
+
+  it("keeps every diff node remote when the worktree is on neither compared branch", async () => {
+    const { recorded } = mount({
+      diffMode: true,
+      baseBranch: "main",
+      workspaceBranch: "unrelated-branch",
+      resources: [
+        {
+          id: "app/web",
+          name: "web",
+          type: "Radius.Compute/containers",
+          codeReference: "src/web.ts#L4",
+          diffStatus: "added"
+        }
+      ]
+    });
+
+    const web = await card("web");
+    await userEvent.click(
+      await within(web).findByRole("link", { name: /View source code/ })
+    );
+
+    expect(recorded.local).toEqual([]);
+    expect(recorded.external).toEqual([
+      "https://github.test/o/r/blob/feature-branch/src/web.ts#L4"
+    ]);
   });
 
   it("marks the source row disabled when the node has no reference", async () => {
