@@ -1,3 +1,7 @@
+// Hand-written declarations for rad-process.mjs. `allowJs` is off and this
+// package's tsconfig only includes `src/**/*.ts`, so tsc cannot verify this file
+// against the implementation — keep the two in sync by hand when either changes.
+
 import type { ChildProcess } from "node:child_process";
 
 export interface ProcessResult {

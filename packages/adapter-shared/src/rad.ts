@@ -44,7 +44,7 @@ import {
 } from "./rad-process.mjs";
 import type { ProcessResult, SpawnRadOptions } from "./rad-process.mjs";
 
-export { RadProcessError, spawnRad };
+export { killChildTree, RadProcessError, spawnRad };
 export type { ProcessResult, SpawnRadOptions };
 
 // --- Shared named types -----------------------------------------------------

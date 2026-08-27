@@ -1,9 +1,30 @@
+// @ts-check
+
+// The process-handling core shared by every managed rad/bicep invocation.
+//
+// This lives in plain `.mjs` rather than TypeScript because the application-
+// modeling skill script runs as a bare `node <script>` process from the
+// installed plugin, where the TypeScript sources and workspace package
+// resolution are both unavailable. `packages/adapter-canvas/build.mjs` bundles
+// it into the shipped standalone script, while the TypeScript packages consume
+// it directly through `rad-process.d.mts`.
+//
+// `allowJs` is off and adapter-shared/tsconfig.json only includes `src/**/*.ts`,
+// so `tsc` never checks this file against its hand-written declaration. The
+// `// @ts-check` above keeps editors verifying it, but any signature change here
+// must be mirrored in `rad-process.d.mts` by hand.
+
 import { spawn } from "node:child_process";
 
 export function managedBicepEnv(env = {}, bicepPath) {
   return { ...env, BICEP: bicepPath };
 }
 
+/**
+ * Thrown by a managed rad/bicep process invocation, carrying the captured
+ * stdout/stderr so callers can surface rad's actual diagnostic output (rad
+ * prints Bicep compile errors like BCP* to stdout, not stderr).
+ */
 export class RadProcessError extends Error {
   constructor(message, stdout, stderr) {
     super(message);
@@ -13,6 +34,10 @@ export class RadProcessError extends Error {
   }
 }
 
+// Terminates rad and any bicep child it spawned. On Windows, `taskkill /t` kills
+// the whole process tree; on POSIX, rad is a process-group leader (spawned
+// detached), so signalling the group (-pid) stops rad and its children together.
+// Best-effort — any failure is swallowed.
 export function killChildTree(child) {
   if (!child || child.pid == null) return;
   try {
@@ -33,6 +58,16 @@ export function killChildTree(child) {
   }
 }
 
+/**
+ * spawnRad - the process-handling core every managed-rad invocation needs:
+ * spawn `radPath args`, capture stdout/stderr (capped at 32MB), and resolve
+ * { stdout, stderr } on a zero exit or reject (with both streams attached) on a
+ * non-zero exit, timeout, or spawn error. rad shells out to bicep as a
+ * grandchild, so it spawns detached (rad leads its own process group), kills the
+ * whole tree on timeout, and uses an exit/close grace window because that
+ * grandchild can inherit and hold the stdio pipes open. `label` only names the
+ * command in timeout/exit error messages; `env` is merged over process.env.
+ */
 export function spawnRad(
   radPath,
   args,
@@ -92,6 +127,8 @@ export function spawnRad(
       if (code === 0) {
         resolve({ stdout, stderr });
       } else {
+        // rad prints Bicep compile errors (BCP*) to stdout, not stderr, so keep
+        // both streams on the error for callers to surface.
         reject(
           new RadProcessError(
             `${label} exited with code ${code}${signal ? ` (signal ${signal})` : ""}`,

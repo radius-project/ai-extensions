@@ -17,6 +17,7 @@ export {
   ensureRadBinary,
   managedBicepEnv,
   spawnRad,
+  killChildTree,
   runRadAppGraph,
   runRadBicepPublishExtension,
   runRadBicepPublish,
