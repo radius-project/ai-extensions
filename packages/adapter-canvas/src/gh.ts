@@ -13,6 +13,7 @@ import type {
   ExecFileOptionsWithStringEncoding
 } from "node:child_process";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
+import { workflowCommitMessage } from "./workflow-commit-message.js";
 
 export interface GhAccount {
   login: string;
@@ -1566,11 +1567,11 @@ function getRepoFileSha(
   });
 }
 
-// Create or update a single UTF-8 text file on a repo branch via the GitHub
+// Create or update a Radius workflow file on a repo branch via the GitHub
 // contents API. Reuses the existing blob SHA so a re-commit is an update rather
-// than a rejected create. The commit body is fed over stdin (never argv) so the
-// base64 payload can't collide with shell/CLI parsing. Rejects on failure.
-export async function commitFileToRepo(
+// than a rejected create. Radius-authored workflow commits skip push-triggered
+// CI; the explicitly dispatched Radius workflow still runs normally.
+export async function commitWorkflowFileToRepo(
   repo: string,
   path: string,
   content: string,
@@ -1580,7 +1581,7 @@ export async function commitFileToRepo(
 ): Promise<boolean> {
   const sha = await getRepoFileSha(repo, path, branch);
   const body = JSON.stringify({
-    message,
+    message: workflowCommitMessage(message, true),
     content: Buffer.from(content, "utf8").toString("base64"),
     branch,
     ...(sha ? { sha } : {})

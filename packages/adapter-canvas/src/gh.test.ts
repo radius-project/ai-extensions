@@ -929,6 +929,53 @@ describe.sequential("cliExec", () => {
   });
 });
 
+describe.sequential("commitWorkflowFileToRepo", () => {
+  beforeEach(() => {
+    childProcess.execFile.mockReset();
+    childProcess.execFileSync.mockReset();
+  });
+
+  afterEach(() => {
+    restorePlatform();
+  });
+
+  it("commits workflows without triggering push CI", async () => {
+    const { commitWorkflowFileToRepo } = await loadGh("linux");
+    let requestBody = "";
+    childProcess.execFile.mockImplementation((_file, args, _opts, callback) => {
+      const readingSha = args?.includes("--jq");
+      callback(
+        readingSha ? new Error("not found") : null,
+        "",
+        readingSha ? "HTTP 404: Not Found" : ""
+      );
+      return {
+        stdin: {
+          end(value?: string) {
+            if (value) requestBody = value;
+          }
+        }
+      };
+    });
+
+    await expect(
+      commitWorkflowFileToRepo(
+        "octo/app",
+        ".github/workflows/radius.yml",
+        "on: workflow_dispatch",
+        "main",
+        "Update Radius workflow"
+      )
+    ).resolves.toBe(true);
+
+    expect(JSON.parse(requestBody)).toEqual({
+      message: "Update Radius workflow [skip ci]",
+      content: Buffer.from("on: workflow_dispatch").toString("base64"),
+      branch: "main"
+    });
+  });
+});
+
 describe.sequential("ghApiJson", () => {
   beforeEach(() => {
     childProcess.execFile.mockReset();

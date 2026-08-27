@@ -13,8 +13,8 @@ interface InfraMockState {
   commits: RecordedCommit[];
   fetches: Array<{ repo: string; path: string; ref: string }>;
   upstream: Record<string, string>;
-  // When true, commitFileToRepo rejects (mirrors gh.ts, which throws on a failed
-  // PUT — e.g. a protected branch) so tests can exercise the `failed` path.
+  // When true, commitWorkflowFileToRepo rejects (mirrors gh.ts, which throws on
+  // a failed PUT — e.g. a protected branch) so tests can exercise `failed`.
   failCommits: boolean;
 }
 
@@ -51,9 +51,9 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
     BASE_UPSTREAM,
     h: {
       committed: {}, // branch -> { path -> committed body } (absent = file missing)
-      commits: [], // recorded commitFileToRepo calls
+      commits: [], // recorded commitWorkflowFileToRepo calls
       fetches: [],
-      failCommits: false, // when true, commitFileToRepo rejects
+      failCommits: false, // when true, commitWorkflowFileToRepo rejects
       upstream: { ...BASE_UPSTREAM }
     }
   };
@@ -96,7 +96,7 @@ vi.mock("./gh.js", () => ({
     const files = h.committed[branch];
     return files && path in files ? files[path] : null;
   },
-  commitFileToRepo: async (
+  commitWorkflowFileToRepo: async (
     _repo: string,
     path: string,
     content: string,

@@ -181,7 +181,7 @@ describe("committing a workflow file", () => {
               sha: "a".repeat(40),
               commit: {
                 message:
-                  "Add a\n\nRadius-Operation: radius-operation:op_workflow:workflow:fff71b97a5a94949"
+                  "Add a [skip ci]\n\nRadius-Operation: radius-operation:op_workflow:workflow:fff71b97a5a94949"
               }
             }
           ])
@@ -266,7 +266,7 @@ describe("committing a workflow file", () => {
               sha: "b".repeat(40),
               commit: {
                 message:
-                  "Add a\n\nRadius-Operation: radius-operation:op_workflow:workflow:fff71b97a5a94949"
+                  "Add a [skip ci]\n\nRadius-Operation: radius-operation:op_workflow:workflow:fff71b97a5a94949"
               }
             }
           ])
@@ -393,7 +393,7 @@ describe("committing a workflow file", () => {
       "/tmp/body-1.json"
     ]);
     expect(JSON.parse(h.tempWrites[0] ?? "{}")).toEqual({
-      message: "Add a",
+      message: "Add a [skip ci]",
       content: CONTENT
     });
   });
@@ -411,7 +411,7 @@ describe("committing a workflow file", () => {
       "Update a"
     );
     expect(JSON.parse(h.tempWrites[0] ?? "{}")).toEqual({
-      message: "Update a",
+      message: "Update a [skip ci]",
       content: CONTENT,
       sha: "abc123"
     });
@@ -742,7 +742,8 @@ describe("the protected-branch pull-request fallback", () => {
       "/repos/octo/app/contents/p?ref=radius%2Fsetup-dev-workflows-1700000000000"
     );
     expect(JSON.parse(h.tempWrites[1] ?? "{}")).toMatchObject({
-      branch: "radius/setup-dev-workflows-1700000000000"
+      branch: "radius/setup-dev-workflows-1700000000000",
+      message: "m"
     });
   });
 
@@ -1015,7 +1016,7 @@ describe("the predecessor blob a workflow retry records", () => {
       sha: "b".repeat(40),
       commit: {
         message:
-          "Add a\n\nRadius-Operation: radius-operation:op_workflow:workflow:fff71b97a5a94949"
+          "Add a [skip ci]\n\nRadius-Operation: radius-operation:op_workflow:workflow:fff71b97a5a94949"
       }
     }
   ]);

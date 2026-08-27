@@ -22,6 +22,7 @@ import {
   branchRefReadArgs,
   proveBranchAbsent
 } from "../services/branch-absence.js";
+import { workflowCommitMessage } from "../../workflow-commit-message.js";
 
 // Seam 3 of the `POST /api/create-environment` slice: committing workflow files.
 //
@@ -565,10 +566,14 @@ export function createWorkflowFileCommitter(
       typeof existingIntent?.previousBlobKnown === "boolean" ?
         existingIntent.previousBlobKnown
       : previousBlobKnown;
+    // Direct writes are implementation details of environment setup and should
+    // not run the customer's push CI. PR fallback commits keep CI enabled so
+    // required checks can complete before the customer merges the workflows.
+    const messageWithCiPolicy = workflowCommitMessage(message, branch === "");
     const commitMessage =
       operationMarker ?
-        `${message}\n\nRadius-Operation: ${operationMarker}`
-      : message;
+        `${messageWithCiPolicy}\n\nRadius-Operation: ${operationMarker}`
+      : messageWithCiPolicy;
     const bodyObj = {
       message: commitMessage,
       content: contentB64,
