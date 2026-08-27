@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import {
   createOperation,
   fromPersistedOperation,
@@ -167,13 +168,13 @@ describe("isProtectedBranchFailure", () => {
 
 describe("committing a workflow file", () => {
   it("does not write when the workflow already matches generated content", async () => {
+    const bytes = Buffer.from(CONTENT, "base64");
+    const blobSha = createHash("sha1")
+      .update(`blob ${bytes.length}\0`)
+      .update(bytes)
+      .digest("hex");
     const h = harness({
-      runGh: [
-        {
-          code: 0,
-          stdout: JSON.stringify({ sha: "existing-blob", content: CONTENT })
-        }
-      ]
+      runGh: [{ code: 0, stdout: blobSha }]
     });
     const committer = createWorkflowFileCommitter(h.ports, target);
 
@@ -189,9 +190,9 @@ describe("committing a workflow file", () => {
       stderr: "",
       viaPr: false,
       commitSha: null,
-      blobSha: "existing-blob",
+      blobSha,
       contentSha256: CONTENT_DIGEST,
-      previousBlobSha: "existing-blob",
+      previousBlobSha: blobSha,
       previousBlobKnown: true
     });
     expect(h.calls.filter((call) => call.kind === "runGhWorkflow")).toEqual([]);
@@ -208,8 +209,17 @@ describe("committing a workflow file", () => {
         },
         {
           code: 0,
+          stdout: JSON.stringify(
+            Array.from({ length: 100 }, () => ({
+              sha: "d".repeat(40),
+              commit: { message: "Unrelated commit" }
+            }))
+          )
+        },
+        {
+          code: 0,
           // GitHub excludes an unchanged-content commit from path-filtered
-          // history, but the branch history still returns its marker.
+          // history, but paginated branch history still returns its marker.
           stdout: JSON.stringify([
             {
               sha: "a".repeat(40),
@@ -248,8 +258,13 @@ describe("committing a workflow file", () => {
       h.calls.filter((call) => call.kind === "runGhWorkflow")
     ).toHaveLength(1);
     expect(
-      h.calls.find((call) => call.args[1]?.includes("/commits?"))?.args[1]
-    ).toBe("/repos/octo/app/commits?per_page=100");
+      h.calls
+        .filter((call) => call.args[1]?.includes("/commits?"))
+        .map((call) => call.args[1])
+    ).toEqual([
+      "/repos/octo/app/commits?per_page=100&page=1",
+      "/repos/octo/app/commits?per_page=100&page=2"
+    ]);
     expect(operation.providerRecovery.mutations[0]).toMatchObject({
       status: "confirmed",
       intent: {
@@ -291,10 +306,7 @@ describe("committing a workflow file", () => {
     const restored = fromPersistedOperation(toPersistedOperation(operation));
     const second = harness({
       runGh: [
-        {
-          code: 0,
-          stdout: JSON.stringify({ sha: "blob-recovered", content: CONTENT })
-        },
+        { code: 0, stdout: "blob-recovered" },
         {
           code: 0,
           stdout: JSON.stringify({ sha: "blob-recovered", content: CONTENT })
@@ -1295,7 +1307,7 @@ describe("recovering a setup branch after the default branch moved", () => {
     expect(
       h.calls.find((call) => call.args[1]?.includes("/commits?"))?.args[1]
     ).toBe(
-      "/repos/octo/app/commits?sha=radius%2Fsetup-dev-workflows-workflow&per_page=100"
+      "/repos/octo/app/commits?sha=radius%2Fsetup-dev-workflows-workflow&per_page=100&page=1"
     );
   });
 

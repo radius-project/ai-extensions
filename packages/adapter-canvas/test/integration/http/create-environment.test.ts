@@ -186,7 +186,7 @@ function recoveredVerifyWorkflowRules(): GhRule[] {
       }
     },
     {
-      match: /^api \/repos\/octo\/app\/commits\?path=/,
+      match: /^api \/repos\/octo\/app\/commits\?.*per_page=100&page=1$/,
       result: {
         code: 0,
         stdout: JSON.stringify([

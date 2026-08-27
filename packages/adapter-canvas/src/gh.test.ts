@@ -11,6 +11,7 @@ import {
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { providerMutationOutcomeUnknown } from "./server/services/provider-mutation-recovery.js";
 
 const childProcess = vi.hoisted(() => ({
@@ -1009,16 +1010,14 @@ describe.sequential("commitWorkflowFileToRepo", () => {
   it("does not commit a workflow whose content already matches", async () => {
     const { commitWorkflowFileToRepo } = await loadGh("linux");
     const content = "on: workflow_dispatch";
+    const bytes = Buffer.from(content);
+    const sha = createHash("sha1")
+      .update(`blob ${bytes.length}\0`)
+      .update(bytes)
+      .digest("hex");
     childProcess.execFile.mockImplementation(
       (_file, _args, _opts, callback) => {
-        callback(
-          null,
-          JSON.stringify({
-            sha: "existing-sha",
-            content: Buffer.from(content).toString("base64")
-          }),
-          ""
-        );
+        callback(null, sha, "");
         return { stdin: { end: vi.fn() } };
       }
     );
@@ -1040,14 +1039,7 @@ describe.sequential("commitWorkflowFileToRepo", () => {
     let requestBody = "";
     childProcess.execFile.mockImplementation((_file, args, _opts, callback) => {
       if (!args?.includes("--method")) {
-        callback(
-          null,
-          JSON.stringify({
-            sha: "existing-sha",
-            content: Buffer.from("stale").toString("base64")
-          }),
-          ""
-        );
+        callback(null, "existing-sha", "");
       } else {
         callback(null, "", "");
       }
@@ -1070,29 +1062,6 @@ describe.sequential("commitWorkflowFileToRepo", () => {
       )
     ).resolves.toBe(true);
     expect(JSON.parse(requestBody)).toMatchObject({ sha: "existing-sha" });
-  });
-
-  it("still writes when the existing workflow response is unreadable", async () => {
-    const { commitWorkflowFileToRepo } = await loadGh("linux");
-    let calls = 0;
-    childProcess.execFile.mockImplementation(
-      (_file, _args, _opts, callback) => {
-        calls += 1;
-        callback(null, calls === 1 ? "not-json" : "", "");
-        return { stdin: { end: vi.fn() } };
-      }
-    );
-
-    await expect(
-      commitWorkflowFileToRepo(
-        "octo/app",
-        ".github/workflows/radius.yml",
-        "current",
-        "main",
-        "Update Radius workflow"
-      )
-    ).resolves.toBe(true);
-    expect(childProcess.execFile).toHaveBeenCalledTimes(2);
   });
 });
 

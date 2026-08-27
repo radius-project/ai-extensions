@@ -100,6 +100,14 @@ export function workflowContentDigest(contentB64: string): string {
     .digest("hex");
 }
 
+function workflowBlobSha(contentB64: string): string {
+  const bytes = Buffer.from(contentB64, "base64");
+  return createHash("sha1")
+    .update(`blob ${bytes.length}\0`)
+    .update(bytes)
+    .digest("hex");
+}
+
 class WorkflowCommitCancelledError extends Error {}
 
 /**
@@ -496,26 +504,10 @@ export function createWorkflowFileCommitter(
       "api",
       "/repos/" + target.targetRepo + "/contents/" + path + refQ,
       "--jq",
-      "{sha: .sha, content: .content}"
+      ".sha"
     ]);
-    let sha = "";
-    let currentContentB64 = "";
-    if (shaRes.code === 0 || shaRes.code === "0") {
-      try {
-        const current: unknown = JSON.parse(shaRes.stdout);
-        if (current && typeof current === "object") {
-          const fields = current as { sha?: unknown; content?: unknown };
-          sha = typeof fields.sha === "string" ? fields.sha : "";
-          currentContentB64 =
-            typeof fields.content === "string" ?
-              fields.content.replace(/\s+/g, "")
-            : "";
-        }
-      } catch {
-        // Keep accepting the legacy SHA-only response used by older adapters.
-        sha = shaRes.stdout.trim();
-      }
-    }
+    const sha =
+      shaRes.code === 0 || shaRes.code === "0" ? shaRes.stdout.trim() : "";
     const previousBlobKnown =
       sha !== "" ||
       /(?:HTTP\s+404|\bNot Found\b)/i.test(
@@ -536,9 +528,7 @@ export function createWorkflowFileCommitter(
     if (
       !recoveringExistingMutation &&
       sha &&
-      currentContentB64 &&
-      workflowContentDigest(currentContentB64) ===
-        workflowContentDigest(contentB64)
+      sha === workflowBlobSha(contentB64)
     ) {
       return {
         code: 0,
@@ -731,22 +721,41 @@ export function createWorkflowFileCommitter(
               // GitHub omits empty commits from path-filtered history. A PUT of
               // unchanged workflow content can still create such a commit, so
               // recover it by its unique marker in the branch history instead.
-              const commitsPath =
-                `/repos/${target.targetRepo}/commits?` +
-                `${branch ? `sha=${encodeURIComponent(branch)}&` : ""}per_page=100`;
-              const commits = await ports.runGh(["api", commitsPath]);
-              if (commits.code !== 0 && commits.code !== "0") {
-                throw new Error(
-                  commits.stderr ||
-                    commits.stdout ||
-                    "GitHub workflow commit history could not be read."
-                );
-              }
               let matchingCommits: Array<{ sha: string }> = [];
-              try {
-                const parsed: unknown = JSON.parse(commits.stdout);
-                if (Array.isArray(parsed)) {
-                  matchingCommits = parsed.filter(
+              for (let page = 1; page <= 100; page += 1) {
+                const commitsPath =
+                  `/repos/${target.targetRepo}/commits?` +
+                  `${branch ? `sha=${encodeURIComponent(branch)}&` : ""}` +
+                  `per_page=100&page=${page}`;
+                const commits = await ports.runGh(["api", commitsPath]);
+                if (commits.code !== 0 && commits.code !== "0") {
+                  throw new Error(
+                    commits.stderr ||
+                      commits.stdout ||
+                      "GitHub workflow commit history could not be read."
+                  );
+                }
+                let parsed: unknown;
+                try {
+                  parsed = JSON.parse(commits.stdout);
+                } catch {
+                  return {
+                    state: "manual_required" as const,
+                    guidance:
+                      `GitHub returned unreadable commit history for "${path}" on "${branch || "the default branch"}". ` +
+                      "Radius will not accept, overwrite, or remove that workflow."
+                  };
+                }
+                if (!Array.isArray(parsed)) {
+                  return {
+                    state: "manual_required" as const,
+                    guidance:
+                      `GitHub returned unreadable commit history for "${path}" on "${branch || "the default branch"}". ` +
+                      "Radius will not accept, overwrite, or remove that workflow."
+                  };
+                }
+                matchingCommits.push(
+                  ...parsed.filter(
                     (
                       candidate
                     ): candidate is {
@@ -766,15 +775,17 @@ export function createWorkflowFileCommitter(
                       candidate.commit.message.includes(
                         `Radius-Operation: ${operationMarker}`
                       )
-                  );
+                  )
+                );
+                if (parsed.length < 100) break;
+                if (page === 100) {
+                  return {
+                    state: "manual_required" as const,
+                    guidance:
+                      `Radius could not finish searching commit history for "${path}" on "${branch || "the default branch"}". ` +
+                      "It will not accept, overwrite, or remove that workflow."
+                  };
                 }
-              } catch {
-                return {
-                  state: "manual_required" as const,
-                  guidance:
-                    `GitHub returned unreadable commit history for "${path}" on "${branch || "the default branch"}". ` +
-                    "Radius will not accept, overwrite, or remove that workflow."
-                };
               }
               if (matchingCommits.length !== 1) {
                 return {
