@@ -13,12 +13,12 @@ Match by **wire protocol, not only a library or type name**: MariaDB clients can
 
 ## Compute
 
-| Component                           | Detection cues                                                                                           | Radius type                        |
-|-------------------------------------|----------------------------------------------------------------------------------------------------------|------------------------------------|
-| Long-running service / worker / job | app entry point; executable service in Dockerfile/compose; actual lifecycle                              | `Radius.Compute/containers`        |
-| Build image from source             | the application's own code with a complete practical Dockerfile/build context                            | `Radius.Compute/containerImages`   |
-| External-client ingress             | follow the route authoring rule in [app.bicep Structure](../SKILL.md#appbicep-structure-mandatory-order) | `Radius.Compute/routes`            |
-| Persistent volume                   | source writes durable data; compose volume; writable path and access mode                                | `Radius.Compute/persistentVolumes` |
+| Component                           | Detection cues                                                                                                                                                                                      | Radius type                        |
+|-------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------|
+| Long-running service / worker / job | app entry point; executable service in Dockerfile/compose; actual lifecycle                                                                                                                         | `Radius.Compute/containers`        |
+| Build image from source             | the application's own code with a complete practical Dockerfile/build context                                                                                                                       | `Radius.Compute/containerImages`   |
+| External-client ingress             | explicit request; declared Ingress or Gateway API resource; external DNS or load balancer; follow the route authoring rule in [app.bicep Structure](../SKILL.md#appbicep-structure-mandatory-order) | `Radius.Compute/routes`            |
+| Persistent volume                   | source writes durable data; compose volume; writable path and access mode                                                                                                                           | `Radius.Compute/persistentVolumes` |
 
 ## Backing services (Radius type available)
 

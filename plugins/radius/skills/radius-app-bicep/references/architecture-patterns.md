@@ -14,7 +14,7 @@ Request/response web applications (monolith or MVC).
 
 - **Signals**: HTTP framework (Express, Django, Rails, Flask, Spring MVC, ASP.NET); server-rendered or REST; usually one primary database.
 - **Typical components**: container + a relational or document database + optional cache.
-- **Radius types**: `Radius.Compute/containers` (+ `Radius.Compute/containerImages` for a complete source build) + `Radius.Data/*`. Credentials follow the data type's schema; a developer-supplied `@secure()` credential goes directly to container `env.value`, while `Radius.Security/secrets` is reserved for schema-required `secretName` inputs or genuine app secrets/config files.
+- **Radius types**: `Radius.Compute/containers` (+ `Radius.Compute/containerImages` for a complete source build) + `Radius.Data/*` + `Radius.Compute/routes` when external-client ingress is required. Credentials follow the data type's schema; a developer-supplied `@secure()` credential goes directly to container `env.value`, while `Radius.Security/secrets` is reserved for schema-required `secretName` inputs or genuine app secrets/config files.
 
 ### Microservices
 
@@ -22,7 +22,7 @@ Distributed services communicating via APIs or messages.
 
 - **Signals**: multiple app services (e.g. several services in compose); inter-service HTTP/gRPC; messaging clients (Kafka, RabbitMQ).
 - **Typical components**: multiple containers + a message broker + shared databases/caches.
-- **Radius types**: multiple `Radius.Compute/containers` + `Radius.Messaging/kafka` or `Radius.Messaging/rabbitMQ` + `Radius.Data/*`.
+- **Radius types**: multiple `Radius.Compute/containers` + `Radius.Messaging/kafka` or `Radius.Messaging/rabbitMQ` + `Radius.Data/*` + `Radius.Compute/routes` when external-client ingress is required.
 - **Runtime check**: model each web, worker, producer, consumer, and init role separately; verify inter-service names, ports, protocols, and startup behavior from source. Address a peer container by referencing an entry of its `hosts` output with indexed access (`http://${<peer>.properties.hosts['<containerKey>']}:<containerPort>`) — see service-to-service addressing in [connection-conventions.md](connection-conventions.md).
 
 ### Data Pipeline
@@ -42,7 +42,7 @@ Low-latency event processing, WebSockets, live updates.
 
 - **Signals**: WebSocket/SSE servers (`ws`, `socket.io`); Redis pub/sub; live-update patterns.
 - **Typical components**: container + Redis.
-- **Radius types**: `Radius.Compute/containers` + `Radius.Data/redisCaches`.
+- **Radius types**: `Radius.Compute/containers` + `Radius.Data/redisCaches` + `Radius.Compute/routes` when external-client ingress is required.
 
 ### Enterprise
 

@@ -12,7 +12,7 @@ Start with an explicit request or scenario contract, then inspect primary eviden
 4. Entrypoints and source: environment/config reads, defaults, client constructors, URL assembly, protocol options, listener address/port, migrations, and worker-versus-web behavior.
 5. Example configuration and documentation: use these to confirm source behavior, not to override pinned source or an explicit compatible profile.
 
-`EXPOSE`, a Compose port mapping, or a health endpoint alone is not proof that the process listens correctly or can reach its dependencies. A browser-facing workload, single application entrypoint, app-owned reverse proxy, localhost documentation, listener, or component name such as `ingress` or `gateway` also does not establish external-client ingress.
+`EXPOSE`, a Compose port mapping, or a health endpoint alone is not proof that the process listens correctly or can reach its dependencies. For external-client ingress, follow the route authoring rule in [app.bicep Structure](../SKILL.md#appbicep-structure-mandatory-order).
 
 ## Select the deployment profile
 
