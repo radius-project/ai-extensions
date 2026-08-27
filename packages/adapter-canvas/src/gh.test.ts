@@ -964,8 +964,7 @@ describe.sequential("commitWorkflowFileToRepo", () => {
         ".github/workflows/radius.yml",
         "on: workflow_dispatch",
         "main",
-        "Update Radius workflow",
-        true
+        "Update Radius workflow"
       )
     ).resolves.toBe(true);
 
@@ -976,7 +975,7 @@ describe.sequential("commitWorkflowFileToRepo", () => {
     });
   });
 
-  it("keeps CI enabled for workflow commits on a pull request branch", async () => {
+  it("suppresses CI for workflow commits on a feature branch", async () => {
     const { commitWorkflowFileToRepo } = await loadGh("linux");
     let requestBody = "";
     childProcess.execFile.mockImplementation((_file, args, _opts, callback) => {
@@ -995,11 +994,12 @@ describe.sequential("commitWorkflowFileToRepo", () => {
       ".github/workflows/radius.yml",
       "on: workflow_dispatch",
       "feature",
-      "Update Radius workflow",
-      false
+      "Update Radius workflow"
     );
 
-    expect(JSON.parse(requestBody).message).toBe("Update Radius workflow");
+    expect(JSON.parse(requestBody).message).toBe(
+      "Update Radius workflow [skip ci]"
+    );
   });
 });
 

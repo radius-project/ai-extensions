@@ -566,10 +566,9 @@ export function createWorkflowFileCommitter(
       typeof existingIntent?.previousBlobKnown === "boolean" ?
         existingIntent.previousBlobKnown
       : previousBlobKnown;
-    // Direct writes are implementation details of environment setup and should
-    // not run the customer's push CI. PR fallback commits keep CI enabled so
-    // required checks can complete before the customer merges the workflows.
-    const messageWithCiPolicy = workflowCommitMessage(message, branch === "");
+    // Workflow publication is an implementation detail of environment setup;
+    // it must not run the customer's push or pull-request CI on any branch.
+    const messageWithCiPolicy = workflowCommitMessage(message, true);
     const commitMessage =
       operationMarker ?
         `${messageWithCiPolicy}\n\nRadius-Operation: ${operationMarker}`

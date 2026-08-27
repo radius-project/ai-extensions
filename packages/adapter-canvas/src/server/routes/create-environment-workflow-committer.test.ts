@@ -748,7 +748,7 @@ describe("the protected-branch pull-request fallback", () => {
     );
     expect(JSON.parse(h.tempWrites[1] ?? "{}")).toMatchObject({
       branch: "radius/setup-dev-workflows-1700000000000",
-      message: "m"
+      message: "m [skip ci]"
     });
   });
 

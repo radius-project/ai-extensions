@@ -6,7 +6,6 @@ interface RecordedCommit {
   content: string;
   branch: string;
   message: string;
-  suppressCi: boolean;
 }
 
 interface InfraMockState {
@@ -102,11 +101,10 @@ vi.mock("./gh.js", () => ({
     path: string,
     content: string,
     branch: string,
-    message: string,
-    suppressCi: boolean
+    message: string
   ) => {
     if (h.failCommits) throw new Error("protected branch");
-    h.commits.push({ path, content, branch, message, suppressCi });
+    h.commits.push({ path, content, branch, message });
     (h.committed[branch] ||= {})[path] = content;
     return true;
   }
@@ -783,12 +781,6 @@ describe("syncRepoWorkflows", () => {
     expect(res.updated).toEqual([VERIFY_PATH]); // de-duped across branches
     const branches = h.commits.map((c) => c.branch).sort();
     expect(branches).toEqual(["feature", "main"]);
-    expect(
-      h.commits.map(({ branch, suppressCi }) => ({ branch, suppressCi }))
-    ).toEqual([
-      { branch: "main", suppressCi: true },
-      { branch: "feature", suppressCi: false }
-    ]);
     for (const c of h.commits) {
       expect(c.content).toBe(await generateVerifyWorkflow("dev", "azure"));
     }
