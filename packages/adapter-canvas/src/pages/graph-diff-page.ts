@@ -137,9 +137,9 @@ ${GRAPH_DIFF_SUBTITLE}
 <div id="graph-diff-summary">
 <div style="margin-top:12px; font-size:13px;">
   <strong>Changes:</strong>
-  <span style="color:var(--rad-success)">+${added} added</span>,
-  <span style="color:var(--rad-danger)">-${removed} removed</span>,
-  <span style="color:var(--rad-warning)">~${modified} modified</span>,
+  <span style="color:var(--rad-diff-added)">+${added} added</span>,
+  <span style="color:var(--rad-diff-removed)">-${removed} removed</span>,
+  <span style="color:var(--rad-diff-modified)">~${modified} modified</span>,
   ${unchanged} unchanged
 </div>
 ${

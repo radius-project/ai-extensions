@@ -67,6 +67,15 @@ describe("graphDiffPage", () => {
     expect(html).toContain("~1 modified");
     expect(html).toContain("1 unchanged");
     expect(html).toContain('id="graph-diff-summary"');
+    expect(html).toContain(
+      'style="color:var(--rad-diff-added)">+1 added</span>'
+    );
+    expect(html).toContain(
+      'style="color:var(--rad-diff-removed)">-1 removed</span>'
+    );
+    expect(html).toContain(
+      'style="color:var(--rad-diff-modified)">~1 modified</span>'
+    );
     expect(readBrowserPageState(html, "radius-graph-diff-state")).toEqual({
       repo: "octo/app",
       base: "main",

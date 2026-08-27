@@ -57,9 +57,9 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     --rad-diff-added: color-mix(in srgb, var(--text-color-success, #1a7f37) 78%, var(--rad-text));
     --rad-diff-modified: color-mix(in srgb, var(--text-color-warning, #9a6700) 78%, var(--rad-text));
     --rad-diff-removed: color-mix(in srgb, var(--text-color-danger, #cf222e) 78%, var(--rad-text));
-    --rad-diff-added-bg: color-mix(in srgb, var(--rad-diff-added) 24%, var(--rad-surface));
-    --rad-diff-modified-bg: color-mix(in srgb, var(--rad-diff-modified) 24%, var(--rad-surface));
-    --rad-diff-removed-bg: color-mix(in srgb, var(--rad-diff-removed) 24%, var(--rad-surface));
+    --rad-diff-added-bg: color-mix(in srgb, var(--rad-diff-added) 8%, var(--rad-surface));
+    --rad-diff-modified-bg: color-mix(in srgb, var(--rad-diff-modified) 8%, var(--rad-surface));
+    --rad-diff-removed-bg: color-mix(in srgb, var(--rad-diff-removed) 8%, var(--rad-surface));
     --rad-success-solid: #1a7f37;
     --rad-warning-solid: #9a6700;
     --rad-danger-text: var(--rad-danger);

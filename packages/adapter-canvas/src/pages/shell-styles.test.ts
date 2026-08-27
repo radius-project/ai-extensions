@@ -74,8 +74,18 @@ function diffToken(name: string): {
 // colors in a dark canvas, so both host palettes are checked against both
 // canvases.
 const palettes = {
-  light: { bg: "#ffffff", text: "#1f2328" },
-  dark: { bg: "#0d1117", text: "#e6edf3" }
+  light: {
+    bg: "#ffffff",
+    text: "#1f2328",
+    tertiary: "#656d76",
+    link: "#0969da"
+  },
+  dark: {
+    bg: "#0d1117",
+    text: "#e6edf3",
+    tertiary: "#8b949e",
+    link: "#58a6ff"
+  }
 } as const;
 
 const hostStatusColors = {
@@ -200,9 +210,15 @@ describe("status color tokens", () => {
           3
         );
         expect(contrast(fill, parseHex(palette.bg))).toBeGreaterThanOrEqual(
-          1.25
+          1.05
         );
         expect(contrast(parseHex(palette.text), fill)).toBeGreaterThanOrEqual(
+          4.5
+        );
+        expect(
+          contrast(parseHex(palette.tertiary), fill)
+        ).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(parseHex(palette.link), fill)).toBeGreaterThanOrEqual(
           4.5
         );
       }
