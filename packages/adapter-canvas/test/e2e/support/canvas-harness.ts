@@ -77,6 +77,8 @@ export interface FakeCliScenario {
   commands: FakeCliCommand[];
 }
 
+export const FAKE_CLI_TOOLS = ["gh", "rad", "az", "aws", "kubectl"] as const;
+
 export interface RecordedRequest {
   method: string;
   path: string;
@@ -268,14 +270,14 @@ process.exit(command.exitCode || 0);
 
   if (process.platform === "win32") {
     await createWindowsShim(fakeBin);
-    for (const tool of ["gh", "rad", "az", "aws"]) {
+    for (const tool of FAKE_CLI_TOOLS) {
       await writeExecutable(
         path.join(fakeBin, `${tool}.cmd`),
         `@echo off\r\nnode "%RADIUS_FAKE_CLI_SCRIPT%" ${tool} %*\r\n`
       );
     }
   } else {
-    for (const tool of ["gh", "rad", "az", "aws"]) {
+    for (const tool of FAKE_CLI_TOOLS) {
       await writeExecutable(
         path.join(fakeBin, tool),
         `#!/usr/bin/env sh\nexec node "$RADIUS_FAKE_CLI_SCRIPT" ${tool} "$@"\n`

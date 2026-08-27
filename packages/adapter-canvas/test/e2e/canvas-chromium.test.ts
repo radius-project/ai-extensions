@@ -11,7 +11,8 @@ import {
   REPOSITORY,
   test,
   WORKTREE_BRANCH,
-  type CanvasHarness
+  type CanvasHarness,
+  type FakeCliCommand
 } from "./support/canvas-harness.js";
 import type { Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
@@ -880,6 +881,148 @@ test.describe("Radius Canvas in Chromium", () => {
       )
     ).toBe(false);
     await expectNoWcagViolations(page);
+  });
+
+  test("queries namespaces from the selected AKS cluster and surfaces refresh failure", async ({
+    page,
+    canvas
+  }) => {
+    const scenario = defaultFakeCliScenario();
+    const resourceCommands: FakeCliCommand[] = [
+      {
+        tool: "az",
+        args: ["account", "set", "--subscription", VALID_SUBSCRIPTION_ID],
+        stdout: ""
+      },
+      {
+        tool: "az",
+        args: [
+          "aks",
+          "list",
+          "--query",
+          "[].{id:name, name:name, resourceGroup:resourceGroup}",
+          "-o",
+          "json",
+          "--subscription",
+          VALID_SUBSCRIPTION_ID
+        ],
+        stdout: JSON.stringify([
+          { id: "aks-first", name: "AKS First", resourceGroup: "rg-first" },
+          {
+            id: "aks-selected",
+            name: "AKS Selected",
+            resourceGroup: "rg-selected"
+          }
+        ])
+      },
+      {
+        tool: "az",
+        args: [
+          "group",
+          "list",
+          "--query",
+          "[].{id:name, name:name}",
+          "-o",
+          "json",
+          "--subscription",
+          VALID_SUBSCRIPTION_ID
+        ],
+        stdout: JSON.stringify([
+          { id: "rg-first", name: "rg-first" },
+          { id: "rg-selected", name: "rg-selected" }
+        ])
+      },
+      {
+        tool: "az",
+        argsPrefix: [
+          "aks",
+          "get-credentials",
+          "--name",
+          "aks-selected",
+          "--resource-group",
+          "rg-selected",
+          "--file"
+        ],
+        stdout: ""
+      },
+      {
+        tool: "kubectl",
+        argsPrefix: ["--kubeconfig"],
+        stdout: "default selected-team"
+      }
+    ];
+    scenario.commands.push(...resourceCommands);
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "environment");
+    await openEnvironmentWizard(page);
+
+    const resourceGroup = page.getByLabel("Resource Group", { exact: true });
+    const cluster = page.getByLabel("Cluster", { exact: true });
+    const namespace = page.locator("#azure-namespace-select");
+    await expect(resourceGroup).toContainText("rg-selected");
+    await resourceGroup.selectOption("rg-selected");
+    await expect(cluster.locator("option")).toHaveText([
+      "Select AKS cluster…",
+      "AKS Selected",
+      "+ Enter custom..."
+    ]);
+    await expect(cluster).toHaveValue("aks-selected");
+    await expect(namespace).toBeDisabled();
+    await expect(namespace).toContainText("selected-team");
+    await expect(namespace).toBeEnabled();
+    await expect(namespace).toHaveValue("default");
+    await namespace.selectOption("selected-team");
+
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "az" &&
+            call.args.includes("get-credentials") &&
+            call.args.includes("aks-selected") &&
+            call.args.includes("rg-selected") &&
+            call.args.includes("--file") &&
+            call.args.includes("--overwrite-existing") &&
+            call.args.includes(VALID_SUBSCRIPTION_ID)
+        )
+      )
+      .toBe(true);
+    expect(
+      (await canvas.cliCalls()).some(
+        (call) =>
+          call.tool === "az" &&
+          call.args.includes("get-credentials") &&
+          call.args.includes("aks-first")
+      )
+    ).toBe(false);
+
+    const credentials = resourceCommands.find(
+      (command) =>
+        command.tool === "az" &&
+        (command.args?.includes("get-credentials") ||
+          command.argsPrefix?.includes("get-credentials"))
+    );
+    if (credentials) {
+      credentials.exitCode = 1;
+      credentials.stderr = "selected cluster unavailable";
+    }
+    await canvas.setScenario(scenario);
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expect(namespace).toBeDisabled();
+    await expect(namespace).toHaveValue("");
+    await expect(namespace.locator("option")).toHaveText(
+      "Discovering namespaces…"
+    );
+
+    await expect(page.locator("#azure-discover-status")).toContainText(
+      "Discovery failed: selected cluster unavailable"
+    );
+    await expect(namespace).toBeEnabled();
+    await expect(namespace.locator("option")).toHaveCount(2);
+    await expect(namespace).not.toContainText("default");
+    await expect(namespace).not.toContainText("selected-team");
+    await namespace.selectOption("__custom__");
+    await expect(page.locator("#azure-namespace-custom")).toBeVisible();
   });
 
   test("verifies Azure credentials through the fake az boundary and keeps secret-shaped stderr out of the page @safety", async ({
