@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  type GraphErrorRenderer,
   showGraphModelingFailure,
   unsupportedGraphModelMessage,
   UNSUPPORTED_GRAPH_MODEL_MESSAGE
@@ -13,19 +14,29 @@ function context(): {
     };
   };
   status: { style: { display: string }; textContent: string };
-  setError: ReturnType<typeof vi.fn>;
+  staleContent: { style: { display: string }; textContent: string };
+  setError: GraphErrorRenderer;
 } {
   const status = {
     style: { display: "" },
     textContent: "still loading"
   };
-  const setError = vi.fn();
+  const staleContent = {
+    style: { display: "" },
+    textContent: "No application graph changes."
+  };
+  const setError: GraphErrorRenderer = vi.fn(
+    (_containerId: string, _message: string): unknown => undefined
+  );
   const browser = {
     dom: {
-      byId: (id: string) => (id === "graph-status" ? status : null)
+      byId: (id: string) =>
+        id === "graph-status" ? status
+        : id === "graph-summary" ? staleContent
+        : null
     }
   };
-  return { browser, status, setError };
+  return { browser, status, staleContent, setError };
 }
 
 describe("unsupportedGraphModelMessage", () => {
@@ -53,13 +64,16 @@ describe("unsupportedGraphModelMessage", () => {
 
 describe("showGraphModelingFailure", () => {
   it("renders the error and clears the graph status", () => {
-    const { browser, status, setError } = context();
+    const { browser, status, staleContent, setError } = context();
 
     showGraphModelingFailure(
       browser,
-      { radiusSetGraphError: setError },
+      setError,
       "No application Dockerfile was found.",
-      "graph-status"
+      {
+        statusIds: "graph-status",
+        staleContentIds: ["graph-summary"]
+      }
     );
 
     expect(setError).toHaveBeenCalledWith(
@@ -68,6 +82,7 @@ describe("showGraphModelingFailure", () => {
     );
     expect(status.style.display).toBe("none");
     expect(status.textContent).toBe("");
+    expect(staleContent.style.display).toBe("none");
   });
 
   it("does not fail when the page status element is absent", () => {
@@ -78,9 +93,12 @@ describe("showGraphModelingFailure", () => {
         ...browser,
         dom: { byId: () => null }
       },
-      { radiusSetGraphError: setError },
+      setError,
       "No application Dockerfile was found.",
-      "missing-status"
+      {
+        statusIds: "missing-status",
+        staleContentIds: ["missing-summary"]
+      }
     );
 
     expect(setError).toHaveBeenCalledTimes(1);

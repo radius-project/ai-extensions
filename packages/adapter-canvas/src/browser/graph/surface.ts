@@ -397,6 +397,8 @@ export function createGraphSurface(
       container.innerHTML = "";
       const status = context.dom.createElement("div");
       status.className = "status error";
+      status.setAttribute("role", "alert");
+      status.setAttribute("aria-live", "assertive");
       status.textContent = message;
       container.appendChild(status);
     },

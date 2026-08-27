@@ -19,6 +19,7 @@ import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 // Bound to the production constants so the retry cadence is exercised at the
 // value the compiled browser bundle actually schedules, not a copy of it.
 import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
+import { GRAPH_RETRY_MS } from "../../src/browser/pages/graph-page.js";
 import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
@@ -742,6 +743,156 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.clock.fastForward(DIFF_RETRY_MS);
     await expect.poll(() => requests).toBe(2);
     await expect(status).toContainText("The graph comparison is current.");
+  });
+
+  test("stops the modeled graph after a terminal modeling refusal @safety", async ({
+    page,
+    canvas
+  }) => {
+    await canvas.seedState({
+      ...baseCanvasState(canvas.workspacePath),
+      graphLoaded: true,
+      graphResources: [{ id: "app/web" }]
+    });
+    await page.clock.install();
+    let requests = 0;
+    const refusal = `${REPOSITORY} has no Dockerfile on ${WORKTREE_BRANCH}.`;
+    await page.route("**/api/load-graph", async (route) => {
+      requests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          appBicepUnsupported: true,
+          error: refusal
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+
+    await expect(page.locator("#graph-container .status.error")).toHaveText(
+      refusal
+    );
+    await expect(
+      page.locator("#graph-container .status.error")
+    ).toHaveAttribute("role", "alert");
+    await expect(page.locator("#graph-refresh-status")).toBeHidden();
+    await expect(page.locator("#graph-guidance")).toBeHidden();
+    await expect(page.locator("#deploy-app-btn")).toBeDisabled();
+    await expect(page.locator("#progress-steps")).toHaveCount(0);
+    await page.clock.fastForward(GRAPH_RETRY_MS * 2);
+    expect(requests).toBe(1);
+  });
+
+  test("clears active modeled progress when a terminal refusal arrives @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let releaseRefusal!: () => void;
+    const refusalGate = new Promise<void>((resolve) => {
+      releaseRefusal = resolve;
+    });
+    let reportRequestReached!: () => void;
+    const requestReached = new Promise<void>((resolve) => {
+      reportRequestReached = resolve;
+    });
+    await page.route("**/api/load-graph", async (route) => {
+      reportRequestReached();
+      await refusalGate;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          appBicepUnsupported: true,
+          error: `${REPOSITORY} has no Dockerfile on ${WORKTREE_BRANCH}.`
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+    await requestReached;
+    await expect(page.locator("#graph-status")).toBeVisible();
+    await expect(page.locator("#progress-steps")).toBeVisible();
+    await expect(page.locator("#progress-steps")).toContainText(
+      "Check for an application model"
+    );
+
+    releaseRefusal();
+    await expect(page.locator("#graph-container .status.error")).toBeVisible();
+    await expect(page.locator("#graph-status")).toBeHidden();
+    await expect(page.locator("#progress-steps")).toHaveCount(0);
+  });
+
+  test("stops the planned graph after a terminal modeling refusal @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let requests = 0;
+    const refusal = `${REPOSITORY} has no Dockerfile on ${WORKTREE_BRANCH}.`;
+    await page.route("**/api/plan-graph", async (route) => {
+      requests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          appBicepUnsupported: true,
+          error: refusal
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "planned");
+
+    await expect(page.locator("#graph-container .status.error")).toHaveText(
+      refusal
+    );
+    await expect(page.locator("#plan-status")).toBeHidden();
+    await expect(page.locator("#plan-btn")).toBeDisabled();
+    await expect(page.locator("#progress-steps")).toHaveCount(0);
+    await page.clock.fastForward(PLAN_RETRY_MS * 2);
+    expect(requests).toBe(1);
+  });
+
+  test("stops the graph diff and hides stale summaries after a terminal modeling refusal @safety", async ({
+    page,
+    canvas
+  }) => {
+    await canvas.seedState({
+      ...baseCanvasState(canvas.workspacePath),
+      diffTargetRepo: REPOSITORY,
+      diffBase: DIFF_BASE_BRANCH,
+      diffHead: WORKTREE_BRANCH,
+      diffResources: [{ id: "app/web", diffStatus: "unchanged" }],
+      branches: [DIFF_BASE_BRANCH, WORKTREE_BRANCH]
+    });
+    await page.clock.install();
+    let requests = 0;
+    const refusal = `${REPOSITORY} has no Dockerfile on ${WORKTREE_BRANCH}.`;
+    await page.route("**/api/diff-branches", async (route) => {
+      requests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          appBicepUnsupported: true,
+          error: refusal
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph-diff");
+
+    await expect(page.locator("#graph-container .status.error")).toHaveText(
+      refusal
+    );
+    await expect(page.locator("#diff-status")).toBeHidden();
+    await expect(page.locator("#graph-diff-summary")).toBeHidden();
+    await expect(page.locator("#diff-progress-steps")).toBeEmpty();
+    await page.clock.fastForward(DIFF_RETRY_MS * 2);
+    expect(requests).toBe(1);
   });
 
   // A retry that re-armed the expired wait would loop forever, so the request

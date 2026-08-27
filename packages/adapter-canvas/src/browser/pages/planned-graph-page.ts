@@ -85,6 +85,7 @@ export function initializePlannedGraphPage(
     globalScope,
     "radiusSetGraphLoading"
   );
+  const setError = requireBrowserFunction(globalScope, "radiusSetGraphError");
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
   const app = context.dom.selectById("planned-app");
@@ -113,7 +114,9 @@ export function initializePlannedGraphPage(
     controller = null;
     const wrapper = context.dom.byId("graph-container-wrapper");
     if (wrapper) wrapper.innerHTML = '<div id="graph-container"></div>';
-    showGraphModelingFailure(context, globalScope, message, "plan-status");
+    showGraphModelingFailure(context, setError, message, {
+      statusIds: "plan-status"
+    });
     if (button) {
       button.disabled = true;
       button.setAttribute(

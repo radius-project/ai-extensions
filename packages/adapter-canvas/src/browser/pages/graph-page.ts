@@ -88,13 +88,14 @@ export function initializeGraphPage(
     globalScope,
     "radiusSetGraphLoading"
   );
+  const setError = requireBrowserFunction(globalScope, "radiusSetGraphError");
   // Report a failure once, on the graph surface. The surface owns the content
   // area, so writing there also clears whatever loading state was showing.
   const showFailure = (message: string): void => {
-    showGraphModelingFailure(context, globalScope, message, [
-      "graph-status",
-      "graph-refresh-status"
-    ]);
+    showGraphModelingFailure(context, setError, message, {
+      statusIds: ["graph-status", "graph-refresh-status"],
+      staleContentIds: ["graph-guidance"]
+    });
   };
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
@@ -230,12 +231,18 @@ export function initializeGraphPage(
       payload.fromWorkspace
     : page.localSource;
 
+  const showGuidance = (): void => {
+    const guidance = context.dom.byId("graph-guidance");
+    if (guidance) guidance.style.display = "";
+  };
+
   const showLoadedGraph = (): void => {
     const wrapper = context.dom.byId("graph-container-wrapper");
     if (wrapper) {
       const container = context.dom.createElement("div");
       container.id = "graph-container";
       const hint = context.dom.createElement("div");
+      hint.id = "graph-guidance";
       hint.setAttribute(
         "style",
         "margin-top:8px; font-size:12px; color:var(--rad-text-tertiary);"
@@ -243,6 +250,7 @@ export function initializeGraphPage(
       hint.textContent = "Click a node to view source code links.";
       wrapper.replaceChildren(container, hint);
     }
+    showGuidance();
     const status =
       context.dom.byId("graph-status") ??
       context.dom.byId("graph-refresh-status");
@@ -469,6 +477,7 @@ export function initializeGraphPage(
               ...graphOptions,
               localSource: sourceProvenance(payload)
             });
+            showGuidance();
           } else if (unsupported) {
             modelState = "failed";
             syncPrimaryButton();

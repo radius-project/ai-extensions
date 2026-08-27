@@ -73,6 +73,7 @@ export function initializeGraphDiffPage(
     state.resources.length > 0 ?
       requireBrowserFunction(globalScope, "radiusRenderGraph")
     : null;
+  const setError = requireBrowserFunction(globalScope, "radiusSetGraphError");
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
   const baseSelect = context.dom.selectById("base-branch");
@@ -96,7 +97,10 @@ export function initializeGraphDiffPage(
   const showModelingFailure = (message: string): void => {
     controller?.destroy();
     controller = null;
-    showGraphModelingFailure(context, globalScope, message, "diff-status");
+    showGraphModelingFailure(context, setError, message, {
+      statusIds: "diff-status",
+      staleContentIds: ["graph-diff-summary"]
+    });
     modelingFailureVisible = true;
   };
   if (state.modelingError) showModelingFailure(state.modelingError);

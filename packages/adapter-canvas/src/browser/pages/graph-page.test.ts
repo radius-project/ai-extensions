@@ -67,7 +67,9 @@ function fixture(options: FixtureOptions = {}) {
   // The real loading surface mounts this host; the fake render globals do not,
   // so the fixture provides it for the shared progress panel to render into.
   const progressHost = createFakeElement("progress-steps");
-  const elements = [state, app, container, progressHost];
+  const guidance = createFakeElement("graph-guidance");
+  guidance.textContent = "Click a node to view source code links.";
+  const elements = [state, app, container, progressHost, guidance];
   if (withBranchSelect) elements.push(branch);
   if (withButton) elements.push(button);
   if (withWrapper) elements.push(wrapper);
@@ -104,7 +106,8 @@ function fixture(options: FixtureOptions = {}) {
     container,
     wrapper,
     status,
-    progressHost
+    progressHost,
+    guidance
   };
 }
 
@@ -1792,6 +1795,47 @@ describe("initializeGraphPage", () => {
         "octo/app has no Dockerfile on main."
       );
       expect(status?.textContent).toBe("");
+    });
+
+    it("hides stale modeled graph guidance after a terminal refusal", async () => {
+      const { browser, guidance } = fixture({ loaded: true });
+      browser.net.handle("/api/load-graph", () =>
+        jsonResponse({
+          error: "octo/app has no Dockerfile on main.",
+          appBicepUnsupported: true
+        })
+      );
+
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      expect(guidance.style.display).toBe("none");
+    });
+
+    it("restores modeled graph guidance after a successful branch change", async () => {
+      const { browser, branch, guidance } = fixture({ loaded: true });
+      let requests = 0;
+      browser.net.handle("/api/load-graph", () => {
+        requests++;
+        return jsonResponse(
+          requests === 1 ?
+            {
+              error: "octo/app has no Dockerfile on main.",
+              appBicepUnsupported: true
+            }
+          : { resources: [{ id: "app/web" }] }
+        );
+      });
+
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+      expect(guidance.style.display).toBe("none");
+
+      branch.value = "release";
+      branch.dispatch("change");
+      await flushPromises();
+
+      expect(guidance.style.display).toBe("");
     });
 
     it.each([
