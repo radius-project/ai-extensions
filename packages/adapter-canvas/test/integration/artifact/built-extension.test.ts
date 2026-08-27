@@ -104,10 +104,22 @@ function prepareBuildWorkspace(
     recursive: true
   });
   symlinkSync(
+    join(REPO_ROOT, "node_modules"),
+    join(workspaceRoot, "node_modules"),
+    "junction"
+  );
+  symlinkSync(
     join(sourceAdapter, "node_modules"),
     join(workspaceAdapter, "node_modules"),
     "junction"
   );
+  for (const packageName of ["adapter-shared", "core"]) {
+    symlinkSync(
+      join(REPO_ROOT, "packages", packageName),
+      join(workspaceRoot, "packages", packageName),
+      "junction"
+    );
+  }
 
   const sourcePlugin = join(REPO_ROOT, "plugins", "radius");
   const workspacePlugin = join(workspaceRoot, "plugins", "radius");
@@ -616,7 +628,8 @@ describe("P0-C built Radius extension artifact", () => {
     {
       asset: "radius-app-bicep skill",
       missingAsset: ["radius-app-bicep"],
-      expectedPath: "radius-app-bicep"
+      expectedError: "Could not resolve",
+      expectedPath: "show-radius-type.mjs"
     },
     {
       asset: "app-graph source reference",
@@ -625,11 +638,13 @@ describe("P0-C built Radius extension artifact", () => {
         "references",
         "source-code-references.md"
       ],
+      expectedError:
+        "[canvas] install copy failed: Missing required local-install asset:",
       expectedPath: "source-code-references.md"
     }
   ])(
     "fails before installing when the $asset is absent",
-    ({ missingAsset, expectedPath }) => {
+    ({ missingAsset, expectedError, expectedPath }) => {
       const workspaceRoot = mkdtempSync(
         join(tmpdir(), "radius-canvas-missing-install-asset-")
       );
@@ -652,9 +667,7 @@ describe("P0-C built Radius extension artifact", () => {
         expect(result.error).toBeUndefined();
         expect(result.signal).toBeNull();
         expect(result.status).not.toBe(0);
-        expect(result.stderr).toContain(
-          "[canvas] install copy failed: Missing required local-install asset:"
-        );
+        expect(result.stderr).toContain(expectedError);
         expect(result.stderr).toContain(expectedPath);
         expect(result.stdout).not.toContain("[canvas] installed");
         expect(existsSync(installDir)).toBe(false);
