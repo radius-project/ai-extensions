@@ -209,9 +209,11 @@ jobs:
       # edge:    Changesets owns versioning, so ask it what the next release
       #          will be instead of guessing from the manifest. --snapshot
       #          stamps the calculated version (see snapshot.useCalculatedVersion
-      #          in .changeset/config.json) with an `edge` prerelease tag, e.g.
-      #          0.1.0-edge-20260807014054. That sorts below the release it
-      #          precedes and above anything already shipped. This rewrites
+      #          in .changeset/config.json) with an `edge` prerelease tag and the
+      #          short SHA of the commit being built (snapshot.prereleaseTemplate),
+      #          e.g. 0.1.0-edge-0b33186. That sorts below the release it
+      #          precedes and above anything already shipped, and names the
+      #          source commit so a published build is traceable. This rewrites
       #          plugins/radius/package.json and .changeset/config.json in the
       #          CI workspace only — nothing is committed. An ephemeral patch
       #          changeset makes documentation-only pushes snapshot the next

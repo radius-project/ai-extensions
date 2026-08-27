@@ -12,7 +12,8 @@
     "tag": true
   },
   "snapshot": {
-    "useCalculatedVersion": true
+    "useCalculatedVersion": true,
+    "prereleaseTemplate": "{tag}-{commit-short}"
   },
   "ignore": [
     "@radius-project/core",

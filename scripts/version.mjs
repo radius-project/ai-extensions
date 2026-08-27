@@ -38,7 +38,7 @@ const SOURCE = "plugins/radius/package.json";
 const CHANGELOG = "plugins/radius/CHANGELOG.md";
 const PLUGIN_NAME = "radius";
 
-// CI stamps prerelease versions such as 0.1.0-edge-20260807014054, so this must
+// CI stamps prerelease versions such as 0.1.0-edge-0b33186, so this must
 // accept the full semver grammar rather than a bare MAJOR.MINOR.PATCH.
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
