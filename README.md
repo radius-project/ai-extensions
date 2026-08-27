@@ -9,10 +9,9 @@ developers and platform engineers build and manage applications together.
 
 ## Install the plugin
 
-The Radius canvas runs only in the
-[GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app),
-so install the plugin from the app: open app settings, click **Plugins**, add the
-`radius-project/ai-extensions` marketplace, and install the `radius` plugin.
+The Radius canvas runs only in the [GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app). Open the app, select **Customize** in the side menu, and then select **Plugins**. Search for `radius` and install the plugin.
+
+Restart your Copilot session after installing so the skills and canvas become available. Use the plugin's three-dot menu to update or uninstall it.
 
 The canvas extension is a compiled bundle that is not committed to `main`. CI builds it on every merge and publishes it — together with the skills and manifest — to generated `releases/*` branches, and the marketplace manifest points each channel at its matching artifact, so installing from the app pulls the skills and canvas automatically. See [`docs/architecture/plugin-packaging-and-publishing.md`](./docs/architecture/plugin-packaging-and-publishing.md) for how this works.
 

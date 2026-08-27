@@ -8,14 +8,9 @@ which is the only host that can display it, so the plugin is installed from the 
 
 ## Installation
 
-Install the plugin from the GitHub Copilot app: open app settings, click
-**Plugins**, add the `radius-project/ai-extensions` marketplace, then browse to and
-install the `radius` plugin. See
-[Adding plugins](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-plugins)
-for details.
+Open the GitHub Copilot app, select **Customize** in the side menu, and then select **Plugins**. Search for `radius` and install the plugin. See [Adding plugins](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-plugins) for details.
 
-Restart your Copilot session after installing so the skills and the canvas
-extension become available.
+Restart your Copilot session after installing so the skills and the canvas extension become available. Use the plugin's three-dot menu to update or uninstall it.
 
 > **NOTE:** Due to a GitHub Copilot app bug, the canvas may not appear after installing or updating the plugin, even though the skills load. If the Radius canvas is missing, run the bundled `radius-fix-canvas-installation` skill (ask Copilot to "fix radius canvas") and then reload extensions or restart the app. This is a temporary workaround that will be removed once the upstream bug is fixed.
 
