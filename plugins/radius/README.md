@@ -2,9 +2,7 @@
 
 Model, visualize, and deploy applications with [Radius](https://radapp.io) directly from the GitHub Copilot app. The plugin bundles six skills and Radius Canvas, which turn Copilot into a Radius application-modeling and deployment assistant.
 
-Radius Canvas runs only in the
-[GitHub Copilot app](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-plugins),
-which is the only host that can display it, so the plugin is installed from the app.
+Radius Canvas runs only in the [GitHub Copilot app](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-plugins), which is the only host that can display it, so the plugin is installed from the app.
 
 ## Installation
 

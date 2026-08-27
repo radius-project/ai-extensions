@@ -1,7 +1,6 @@
 # Radius Canvas
 
-Radius Canvas is bundled with the `radius` plugin for the
-[GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app).
+Radius Canvas is bundled with the `radius` plugin for the [GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app).
 It lets you define, visualize, and deploy an
 application with [Radius](https://github.com/radius-project/radius) without
 leaving Copilot. Radius is a cloud-native application platform that helps
