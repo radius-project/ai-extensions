@@ -433,6 +433,9 @@ describe("GHCR verification probe", () => {
     expect(workflow).toContain("/blobs/uploads/");
     expect(workflow).toContain('status}" != "202"');
     expect(workflow).toContain("| node -e");
+    expect(workflow).toContain(
+      'curl() { command curl --connect-timeout 10 --max-time 30 "$@"; }'
+    );
     expect(workflow).not.toContain("| jq ");
     expect(workflow).not.toContain("uses: action");
     expect(workflow).toContain("- name: Summary");

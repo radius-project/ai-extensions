@@ -405,6 +405,7 @@ ${indent}    GHCR_TOKEN: \${{ secrets.GITHUB_TOKEN }}
 ${indent}    STATE_REGISTRY: \${{ vars.RADIUS_STATE_REGISTRY }}
 ${indent}  run: |
 ${indent}    set -euo pipefail
+${indent}    curl() { command curl --connect-timeout 10 --max-time 30 "$@"; }
 ${indent}    repo_path="\${STATE_REGISTRY#ghcr.io/}"
 ${indent}    bearer="$(curl -fsS -u "\${GH_ACTOR}:\${GHCR_TOKEN}" "https://ghcr.io/token?service=ghcr.io&scope=repository:\${repo_path}:pull,push" | node -e 'let input=""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input).token || ""));')"
 ${indent}    if [[ -z "\${bearer}" ]]; then

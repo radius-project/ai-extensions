@@ -856,6 +856,7 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
   });
 
   it.each([
+    ["empty output", ""],
     ["a non-object entry", JSON.stringify([null])],
     ["an entry without a subject", JSON.stringify([{ name: "dev" }])]
   ])("fails closed on %s in the credential list", async (_label, stdout) => {

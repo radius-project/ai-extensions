@@ -26,6 +26,7 @@ interface HarnessOptions {
   initialMetadata?: unknown;
   finalVisibility?: string;
   finalRepository?: string | null;
+  finalMetadata?: unknown;
   metadataDelay?: number;
   ownerFailures?: Array<Error | { status: number; retryAfter?: string }>;
   tokenStatus?: number;
@@ -91,6 +92,7 @@ function createHarness({
   initialMetadata = null,
   finalVisibility = "private",
   finalRepository = "acme/app",
+  finalMetadata,
   metadataDelay = 0,
   ownerFailures = [],
   tokenStatus = 200,
@@ -148,10 +150,12 @@ function createHarness({
       if (packageReadsAfterPush <= metadataDelay) {
         return json({}, { status: 404 });
       }
-      return json({
-        visibility: finalVisibility,
-        repository: finalRepository ? { full_name: finalRepository } : null
-      });
+      return finalMetadata !== undefined ?
+          json(finalMetadata)
+        : json({
+            visibility: finalVisibility,
+            repository: finalRepository ? { full_name: finalRepository } : null
+          });
     }
     if (url.origin === "https://registry.test" && url.pathname === "/v2/") {
       return new Response("", {
@@ -198,6 +202,7 @@ function createHarness({
         uploadLocation === null ? undefined : (
           (uploadLocation || "").replace("{id}", String(uploadID))
         );
+
       return new Response("", {
         status: 202,
         headers: location ? { Location: location } : {}
@@ -255,6 +260,7 @@ function createHarness({
       const parsedManifest: BootstrapManifest = JSON.parse(
         body.toString("utf8")
       );
+
       if (
         manifestPushes === 1 &&
         manifestAmbiguity === "conflict-before-write"
@@ -567,6 +573,28 @@ test.each([
     );
   }
 );
+
+test("retries a rate-limited GitHub 403 with Retry-After", async () => {
+  const sleeps: number[] = [];
+  const harness = createHarness({
+    ownerFailures: [{ status: 403, retryAfter: "2" }]
+  });
+
+  await bootstrapGHCRStatePackage({
+    ...baseOptions,
+    fetchImpl: harness.fetchImpl,
+    sleep: async (milliseconds) => {
+      sleeps.push(milliseconds);
+    }
+  });
+
+  assert.equal(sleeps[0], 2000);
+  assert.equal(
+    harness.calls.filter((call) => new URL(call.url).pathname === "/users/acme")
+      .length,
+    2
+  );
+});
 
 test("accepts the OCI access_token token response shape", async () => {
   const harness = createHarness({ tokenBody: { access_token: "bearer" } });
@@ -929,6 +957,20 @@ test("rejects malformed successful package metadata", async () => {
   );
   assert.equal(harness.manifestPushes, 0);
 });
+
+test.each([null, false, 0, ""])(
+  "rejects malformed successful package metadata %#",
+  async (finalMetadata) => {
+    const harness = createHarness({ finalMetadata });
+    await assert.rejects(
+      bootstrapGHCRStatePackage({
+        ...baseOptions,
+        fetchImpl: harness.fetchImpl
+      }),
+      /invalid response/
+    );
+  }
+);
 
 test("rejects successful package metadata without visibility", async () => {
   const harness = createHarness({

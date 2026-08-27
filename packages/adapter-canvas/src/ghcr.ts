@@ -269,6 +269,10 @@ function retryDelay(
     const retryAt = Date.parse(retryAfter);
     if (Number.isFinite(retryAt)) return Math.max(0, retryAt - now);
   }
+  const reset = Number(response.headers.get("x-ratelimit-reset"));
+  if (Number.isFinite(reset) && reset > 0) {
+    return Math.max(0, reset * 1000 - now);
+  }
   return Math.min(500 * 2 ** attempt, 4000);
 }
 
@@ -284,8 +288,15 @@ async function sleepWithinBudget(
   ensureBudget(requests);
 }
 
-function isRetryableStatus(status: number): boolean {
-  return status === 429 || status >= 500;
+function isRetryableResponse(response: HttpResponse): boolean {
+  return (
+    response.status === 429 ||
+    response.status >= 500 ||
+    (response.status === 403 &&
+      (response.headers.get("retry-after") !== null ||
+        response.headers.get("x-ratelimit-remaining") === "0" ||
+        response.headers.get("x-ratelimit-reset") !== null))
+  );
 }
 
 async function request(
@@ -315,7 +326,7 @@ async function request(
       continue;
     }
     ensureBudget(requests);
-    if (!isRetryableStatus(response.status) || attempt + 1 === attempts) {
+    if (!isRetryableResponse(response) || attempt + 1 === attempts) {
       return response;
     }
     await sleepWithinBudget(
@@ -737,13 +748,15 @@ async function pushBootstrapManifest({
   );
 }
 
+const GITHUB_NOT_FOUND = Symbol("github-not-found");
+
 async function githubJson(
   requests: RequestContext,
   url: string,
   token: string,
   allowNotFound = false,
   ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
-): Promise<unknown | null> {
+): Promise<unknown | typeof GITHUB_NOT_FOUND> {
   const response = await request(requests, url, {
     headers: {
       Accept: "application/vnd.github+json",
@@ -752,7 +765,7 @@ async function githubJson(
     },
     redirect: "error"
   });
-  if (allowNotFound && response.status === 404) return null;
+  if (allowNotFound && response.status === 404) return GITHUB_NOT_FOUND;
   if (response.status === 401 || response.status === 403) {
     throw packageAuthError(
       `GitHub Packages API rejected access (HTTP ${response.status})`,
@@ -789,6 +802,9 @@ async function packageEndpoint({
     false,
     ghCommandPresentation
   );
+  if (ownerMetadata === GITHUB_NOT_FOUND) {
+    throw new Error(`GitHub account "${owner}" was not found.`);
+  }
   const ownerType =
     isRecord(ownerMetadata) && typeof ownerMetadata.type === "string" ?
       ownerMetadata.type
@@ -951,7 +967,7 @@ export async function bootstrapGHCRStatePackage({
     true,
     ghCommandPresentation
   );
-  if (existingValue)
+  if (existingValue !== GITHUB_NOT_FOUND)
     validatePackage(
       parsePackageMetadata(existingValue),
       canonicalTargetRepository,
@@ -983,7 +999,7 @@ export async function bootstrapGHCRStatePackage({
       true,
       ghCommandPresentation
     );
-    metadata = value ? parsePackageMetadata(value) : null;
+    metadata = value === GITHUB_NOT_FOUND ? null : parsePackageMetadata(value);
     // validatePackage fails fast on public visibility and on a wrong repository
     // link; a not-yet-propagated (missing) link returns false so we keep retrying.
     if (

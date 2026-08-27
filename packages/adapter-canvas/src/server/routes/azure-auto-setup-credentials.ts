@@ -70,7 +70,7 @@ function parseFederatedCredentialInventory(stdout: string): {
   nameToSubject: Map<string, string>;
 } | null {
   try {
-    const parsed: unknown = JSON.parse(stdout || "[]");
+    const parsed: unknown = JSON.parse(stdout);
     if (!Array.isArray(parsed)) return null;
     const credentials: FederatedCredential[] = [];
     for (const value of parsed) {
