@@ -89,7 +89,10 @@ import {
 } from "./azure-oidc.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage } from "./ghcr.js";
-import { classifyProvider } from "./provider-classification.js";
+import {
+  classifyProvider,
+  parseGitHubEnvironmentVariables
+} from "./provider-classification.js";
 import {
   appParams,
   resolveDeployParams,
@@ -1252,15 +1255,7 @@ async function discoverEnvironmentTarget(
     ],
     { timeout: 15000 }
   );
-  const vars: Record<string, string> = {};
-  for (const line of (out || "").split("\n").filter(Boolean)) {
-    const tab = line.indexOf("\t");
-    if (tab === -1) {
-      vars[line] = "";
-      continue;
-    }
-    vars[line.slice(0, tab)] = line.slice(tab + 1);
-  }
+  const vars = parseGitHubEnvironmentVariables(out);
   // Classify the provider by the presence of a canonical, exact-named
   // configuration variable (see classifyProvider) rather than a regex over
   // every variable name, and share that logic with the environment listing so

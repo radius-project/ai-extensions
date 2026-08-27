@@ -24,3 +24,26 @@ export function classifyProvider(
   if (Object.prototype.hasOwnProperty.call(vars, AWS_MARKER)) return "aws";
   return "";
 }
+
+// Parses the tab-delimited `name\tvalue` lines emitted by the environment
+// variables `gh api --jq` query into a variable map for classifyProvider and
+// the delete flow. Splits on `\r?\n` rather than `\n` because the `gh` process'
+// stdout is consumed verbatim: a Windows host can terminate lines with CRLF, and
+// a stray trailing carriage return would otherwise be captured as part of the
+// final variable's value and corrupt an id (e.g. AZURE_TENANT_ID) passed on to
+// downstream `az` commands.
+export function parseGitHubEnvironmentVariables(
+  out: string
+): Record<string, string> {
+  const vars: Record<string, string> = {};
+  for (const line of (out || "").split(/\r?\n/)) {
+    if (!line) continue;
+    const tab = line.indexOf("\t");
+    if (tab === -1) {
+      vars[line] = "";
+      continue;
+    }
+    vars[line.slice(0, tab)] = line.slice(tab + 1);
+  }
+  return vars;
+}
