@@ -18,6 +18,7 @@ Trigger the `Radius - Run rad Commands` workflow which spins up an ephemeral k3d
 ## Prerequisites
 
 Before invoking this skill, all of these must exist:
+
 1. A GitHub Environment configured with cloud credentials → use the `radius-environment` skill if missing.
 2. A `.radius/app.bicep` file → use the `radius-app-bicep` skill if missing.
 3. The user's PAT in the extension's storage (auto-seeded from `gh auth token`).
@@ -64,7 +65,7 @@ The workflow checks the branch out **from GitHub**. A fix that exists only in th
 
 The workflow can also be dispatched straight from the GitHub API:
 
-```
+```http
 POST /repos/{owner}/{repo}/actions/workflows/run-rad-commands.yml/dispatches
 { "ref": "<branch>", "inputs": { "environment": "<env-name>" } }
 ```
@@ -73,7 +74,7 @@ Use this only for a one-off deploy outside the canvas. It does not populate canv
 
 ## What the workflow does
 
-1. Commits/updates the deploy workflow files if they've changed — the `run-rad-commands.yml` dispatcher plus the `run-rad-commands-azure.yml` / `run-rad-commands-aws.yml` provider workflows (fetched from `radius-project/radius@main` at commit time, with a bundled fallback).
+1. Commits/updates the deploy workflow files if they've changed — the `run-rad-commands.yml` dispatcher plus the `run-rad-commands-azure.yml` / `run-rad-commands-aws.yml` provider workflows fetched from `radius-project/radius@main` at commit time. A fetch failure is surfaced; there is no bundled fallback.
 2. The dispatcher detects the environment's provider (from `AZURE_CLIENT_ID` / `AWS_ROLE_ARN`) and calls the matching provider workflow, which authenticates to that cloud via OIDC.
 3. Fetches a kubeconfig for the target cluster into `RADIUS_TARGET_KUBECONFIG` (EKS via `aws eks describe-cluster` + a static bearer-token kubeconfig; AKS via `az aks get-credentials`).
 4. Installs `k3d`, creates the ephemeral `radius-cp` cluster, and installs the `rad` CLI (edge) and Terraform.
@@ -81,7 +82,14 @@ Use this only for a one-off deploy outside the canvas. It does not populate canv
 6. Projects GitHub OIDC tokens into the pods and registers the cloud identity with `rad credential register` (`aws irsa` / `azure wi`), then refreshes the (short-lived EKS) target token, updates the `target-kubeconfig` secret, and restarts the recipe-executing pods so they re-read it.
 7. Authenticates to GHCR with the repository `GITHUB_TOKEN`, exports environment-scoped `RADIUS_STATE_BACKEND`, `RADIUS_STATE_REGISTRY`, and `RADIUS_STATE_ARCHIVE`, creates the CLI workspace/group, then runs `rad startup` to restore the control-plane databases and Terraform recipe-state Secrets saved by the previous run (a no-op on the first run). The `Radius.Compute/containerImages` type ships with the published `radius` Bicep extension, so no resource-type registration or local Bicep-extension build happens at deploy time.
 8. Deploys a `Radius.Core/environments` resource and recipe pack from the app file's directory (e.g. `.radius/`) so the repo's own `bicepconfig.json` resolves the `radius` extension. **Azure** downloads the `azure-avm` pack from `radius-project/resource-types-contrib`; **AWS** generates an inline pack bundling the Kubernetes recipes (`containers`, `containerImages`, `persistentVolumes`, `routes`, `postgreSqlDatabases`, `secrets`) plus a provider-gated `mySqlDatabases` recipe (AWS RDS).
-9. Creates registry credentials for image builds, then runs `rad deploy` on `.radius/app.bicep` (passing the `image` parameter, and any application parameters from the `RADIUS_DEPLOY_PARAMS` secret when set). Afterwards `rad shutdown` (`if: always()`) backs the control-plane databases and Terraform recipe-state Secrets up to the GHCR repository in `RADIUS_STATE_REGISTRY` under the default `radius-state` tag. On failure, logs are uploaded as the `radius-logs` artifact; the k3d cluster is always deleted.
+9. When the compiled app declares `Radius.Compute/routes` and the effective route recipe is Radius's default Kubernetes recipe, validates or prepares Gateway API infrastructure on the **target cluster**. An explicitly configured `RADIUS_ROUTES_GATEWAY_NAME` / `RADIUS_ROUTES_GATEWAY_NAMESPACE` is treated as user-managed and validated without being modified. Otherwise the workflow idempotently installs the Radius-managed Gateway API CRDs, Contour controller, GatewayClass, and shared Gateway. The managed Envoy Service defaults to `ClusterIP`, so no public IP is created.
+10. Creates registry credentials for image builds, then runs `rad deploy` on `.radius/app.bicep` (passing the `image` parameter, and any application parameters from the `RADIUS_DEPLOY_PARAMS` secret when set). Afterwards `rad shutdown` (`if: always()`) backs the control-plane databases and Terraform recipe-state Secrets up to the GHCR repository in `RADIUS_STATE_REGISTRY` under the default `radius-state` tag. On failure, logs are uploaded as the `radius-logs` artifact; the k3d cluster is always deleted.
+
+### Route Gateway exposure
+
+The managed shared Gateway is private by default. An absent `RADIUS_ROUTES_EXPOSURE` value and the explicit value `private` both configure Envoy as `ClusterIP`; source evidence such as a Kubernetes `LoadBalancer` Service may justify modeling a `Radius.Compute/routes` resource, but it never authorizes the workflow to allocate a public IP.
+
+Set the GitHub Environment variable `RADIUS_ROUTES_EXPOSURE=public` only after the user explicitly asks for public exposure. The next deploy upgrades the managed Envoy Service to `LoadBalancer`. Because the current default recipe attaches every routes app in the Radius Environment to one shared Gateway, this makes **all of those apps public**; the workflow warns with the affected applications before changing the Service. Set the variable back to `private` and redeploy to remove the managed public load balancer. Do not set `RADIUS_ROUTES_EXPOSURE` for a user-managed Gateway; its exposure is owned outside Radius.
 
 ## When a deploy fails
 
@@ -113,6 +121,12 @@ A deploy started from the canvas Deploy button hands its failure to you automati
 - **`OCI archive repository is not configured` or GHCR authentication/visibility errors**
   → Recreate or update the GitHub Environment so `RADIUS_STATE_BACKEND=oci`, package-only `RADIUS_STATE_REGISTRY`, and `RADIUS_STATE_ARCHIVE=radius-state` are present. Confirm the run workflow logs in to `ghcr.io` before `rad startup`, has `packages: write`, and that the state package is private or internal.
 
+- **Gateway API validation or setup fails before `rad deploy`**
+  → Read the named missing or conflicting CRD, controller, GatewayClass, or Gateway from the workflow error. For a user-managed Gateway, repair that installation or correct `RADIUS_ROUTES_GATEWAY_NAME` / `RADIUS_ROUTES_GATEWAY_NAMESPACE`; Radius never replaces an explicit user choice. For the managed path, resolve the reported ownership, Helm, or readiness conflict. Do not work around the failure by deleting the route unless the application no longer needs ingress.
+
+- **`RADIUS_ROUTES_EXPOSURE` is invalid or conflicts with a user-managed Gateway**
+  → Use `private` (the safe default) or `public` only for the Radius-managed Gateway. Remove the exposure variable when `RADIUS_ROUTES_GATEWAY_NAME` selects infrastructure managed outside Radius.
+
 ## After a successful deploy
 
 - Tell the user the deploy succeeded and include the workflow run URL.
@@ -122,4 +136,4 @@ A deploy started from the canvas Deploy button hands its failure to you automati
 
 - `plugins/radius/dist/extension.mjs` — deploy workflow template generation (`generateDeployWorkflow`) and repo commit of the dispatcher + provider workflows to `.github/workflows/`.
 - `plugins/radius/dist/extension.mjs` — deploy dispatch + run polling (uses `gh workflow run run-rad-commands.yml` and `gh run list`).
-- The deploy workflow templates are canonical in `radius-project/radius` at `.github/extension/` — `run-rad-commands.yml` (dispatcher), `run-rad-commands-{azure,aws}.yml` (provider `workflow_call` workflows), and `actions/*` (shared composite actions: `setup-control-plane`, `restore-state`, `run-rad-commands`, `teardown`). The extension fetches these from `radius-project/radius@main` at commit time (with a bundled fallback) and commits the dispatcher + provider workflows into the user repo at `.github/workflows/`; the composite actions are referenced in place from `radius-project/radius`, not copied.
+- The deploy workflow templates are canonical in `radius-project/radius` at `.github/extension/` — `run-rad-commands.yml` (dispatcher), `run-rad-commands-{azure,aws}.yml` (provider `workflow_call` workflows), and `actions/*` (shared composite actions including `setup-control-plane`, `restore-state`, Gateway lifecycle management, `run-rad-commands`, and `teardown`). The extension fetches these from `radius-project/radius@main` at commit time with no bundled fallback and commits the dispatcher + provider workflows into the user repo at `.github/workflows/`; the composite actions are referenced in place from `radius-project/radius`, not copied.
