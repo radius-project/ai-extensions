@@ -234,7 +234,7 @@ describe("RU-07: radius_generate_app", () => {
   // The listing the check can obtain describes the workspace, so it is not
   // evidence about some other directory the caller named.
   it("does not refuse a target outside the workspace on the workspace's contents", async () => {
-    const { tools, deps } = setup({
+    const { tools, deps, modelingActivity } = setup({
       workspaceTreeByRepoBranch: {
         "acme/widgets@main": ["src/index.ts", "package.json"]
       }
@@ -248,6 +248,7 @@ describe("RU-07: radius_generate_app", () => {
     expect(deps.radiusAppBicepSkill).toHaveBeenCalledWith(
       "/elsewhere/other-repo"
     );
+    expect(modelingActivity.announce).not.toHaveBeenCalled();
   });
 
   it.each([

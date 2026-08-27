@@ -369,6 +369,43 @@ describe("createAppModelHandoff", () => {
     expect(state.appBicepHandoffKeys?.["a/b::feat"]).toBeUndefined();
   });
 
+  it("does not send after a newer reservation replaces it during the status re-read", async () => {
+    const state: CanvasState = {};
+    let reads = 0;
+    let finishReRead!: (status: AppModelStatus) => void;
+    const resolveStatus = vi.fn(
+      async (repo: string, branch: string): Promise<AppModelStatus> => {
+        reads += 1;
+        if (reads === 1) {
+          return modelStatus(repo, branch, { status: "missing" });
+        }
+        return new Promise<AppModelStatus>((resolve) => {
+          finishReRead = resolve;
+        });
+      }
+    );
+    const { handOff, sent } = harness({ resolveStatus });
+    const pending = handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state
+    });
+    await vi.waitFor(() => expect(resolveStatus).toHaveBeenCalledTimes(2));
+    state.appBicepHandoffKeys = {
+      ...state.appBicepHandoffKeys,
+      "a/b::feat": "newer-request"
+    };
+    state.appBicepHandoffKey = "newer-request";
+
+    finishReRead(modelStatus("a/b", "feat", { status: "missing" }));
+    await pending;
+
+    expect(sent).toEqual([]);
+    expect(state.appBicepHandoffKeys?.["a/b::feat"]).toBe("newer-request");
+    expect(state.appBicepHandoffKey).toBe("newer-request");
+  });
+
   it("does not watch for a run at all when the repository cannot be modeled", async () => {
     const { handOff, sent, waits, modelingInFlight } = harness({
       statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },

@@ -134,7 +134,7 @@ export function createRadiusTools(
             return `${deps.radiusAppBicepSkill(repoPath)}\n---\n\n${brief}\n`;
           }
         }
-        announceModelingRun(state);
+        if (targetsWorkspace) announceModelingRun(state);
         return deps.radiusAppBicepSkill(repoPath);
       }
     },

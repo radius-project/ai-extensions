@@ -240,6 +240,7 @@ export function createAppModelHandoff(
         releaseReservation();
         throw error;
       }
+      if (!ownsReservation()) return;
       if (settled.some((status) => status.freshness.status !== "missing")) {
         releaseReservation();
         return;
