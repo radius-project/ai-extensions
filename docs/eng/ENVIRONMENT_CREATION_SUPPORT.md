@@ -41,7 +41,7 @@ After an extension restart, Radius pauses the restored operation instead of resu
 
 ## Download a diagnostic snapshot
 
-Expand **Show details**, then activate **Download diagnostic snapshot**. The link is available while setup is active because a stuck, waiting, retrying, or reconciling operation may need support before it finishes. Radius creates a point-in-time local JSON file named `radius-environment-operation-diagnostics.json`; it is not a final report, and support may ask for a newer snapshot. The browser does not upload it, and Radius does not create a second retained diagnostic record.
+Expand **Show details**, then activate **Download diagnostic snapshot**. The link appears only after Stop is requested, while Radius is waiting for input, or after a terminal outcome such as success, failure, cancellation, or external action required. It stays hidden during normal forward progress, retry, reconciliation, and cleanup. For support during a long-running operation, request Stop first; Radius records the request and exposes the snapshot without interrupting an in-flight provider mutation. Radius creates a local JSON file named `radius-environment-operation-diagnostics.json`. The browser does not upload it, and Radius does not create a second retained diagnostic record.
 
 The export contains the installed plugin version, generated operation ID, schema version, lifecycle and stage states, timestamps and duration, attempt and command counts, failure classification, cleanup outcome counts, provider-recovery status counts, whether verification was dispatched, and the allowlisted state of its saved verification workflow.
 

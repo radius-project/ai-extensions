@@ -99,7 +99,7 @@ export function environmentsPaneMarkup(
       <ol id="env-progress-steps" class="env-progress__steps"></ol>
       <div id="env-progress-diagnostics" class="env-progress__diagnostics" style="display:none;">
         <a id="env-progress-diagnostics-download" class="rad-btn rad-btn--secondary" href="" download="radius-environment-operation-diagnostics.json" aria-describedby="env-progress-diagnostics-note">Download diagnostic snapshot</a>
-        <span id="env-progress-diagnostics-note" class="env-progress__diagnostics-note">Captures the operation’s current state in a local, redacted JSON file. Radius does not upload it. Support may ask for a newer snapshot.</span>
+        <span id="env-progress-diagnostics-note" class="env-progress__diagnostics-note">Captures this paused or completed state in a local, redacted JSON file. Radius does not upload it.</span>
       </div>
       <!-- Resource inventory stays inside Details while work is active. The
            renderer exposes it only for a terminal decision state — a stopped or

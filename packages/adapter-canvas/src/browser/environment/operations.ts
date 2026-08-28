@@ -1689,7 +1689,14 @@ export function initializeEnvironmentOperations(
     const container = dom.byId(PROGRESS_IDS.diagnostics);
     const download = dom.byId(PROGRESS_IDS.diagnosticsDownload);
     if (!container || !download) return false;
-    if (op === null) {
+    const available =
+      op !== null &&
+      (op.terminalState !== null ||
+        op.state === "input_required" ||
+        op.actions.some(
+          (action) => action.kind === "stop" && action.pending === true
+        ));
+    if (!available) {
       download.setAttribute("href", "");
       container.style.display = "none";
       return false;

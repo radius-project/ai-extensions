@@ -1323,6 +1323,9 @@ test.describe("Radius Canvas in Chromium", () => {
       `${canvas.baseUrl}/?page=environment&operationId=${result.operationId}`
     );
     await expect(page.locator("#env-progress-panel")).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Download diagnostic snapshot" })
+    ).toBeHidden();
     const activity = page.locator("#env-progress-activity");
     await expect(activity).toHaveAttribute("aria-live", "polite");
     await gotoCanvas(page, canvas, "credentials");
@@ -1360,6 +1363,7 @@ test.describe("Radius Canvas in Chromium", () => {
     const diagnosticLink = page.getByRole("link", {
       name: "Download diagnostic snapshot"
     });
+    await expect(diagnosticLink).toBeVisible();
     await diagnosticLink.focus();
     await expect(diagnosticLink).toBeFocused();
     await expectNoWcagViolations(page);

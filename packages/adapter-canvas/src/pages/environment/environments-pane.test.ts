@@ -165,7 +165,7 @@ describe("environmentsPaneMarkup", () => {
     expect(html).toContain(">Download diagnostic snapshot</a>");
     expect(html).toContain('aria-describedby="env-progress-diagnostics-note"');
     expect(html).toContain(
-      "Captures the operation’s current state in a local, redacted JSON file. Radius does not upload it. Support may ask for a newer snapshot."
+      "Captures this paused or completed state in a local, redacted JSON file. Radius does not upload it."
     );
   });
 
