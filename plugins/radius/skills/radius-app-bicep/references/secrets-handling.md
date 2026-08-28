@@ -102,21 +102,28 @@ For a non-URL format, the pattern can look like:
 
 ```bicep
 env: {
-  APP_DATABASE_CREDENTIAL: {
-    value: password // developer-supplied @secure() parameter
-  }
   APP_DATABASE_OPTIONS: {
-    // mysql is the database resource symbol; substitute your actual resource
-    value: 'host=${mysql.properties.host};password=$(APP_DATABASE_CREDENTIAL)'
+    // cache is the resource symbol; substitute your actual resource
+    value: 'host=${cache.properties.host};******'
+  }
+  DB_PASSWORD: {
+    valueFrom: {
+      secretKeyRef: {
+        secretName: cache.properties.secrets.name
+        key: 'password'
+      }
+    }
   }
 }
 ```
 
-The helper's name is yours to choose, and here it has to sort before `APP_DATABASE_OPTIONS`, which the application dictates. A helper named `DB_PASSWORD` would sort after it and never expand.
+`DB_PASSWORD` sorts after the value that reads it, and still resolves: the recipe emits every `secretKeyRef` variable ahead of every plain value, so a recipe-generated credential is bound under the exact name the application reads and ordering never enters into it.
 
 Kubernetes expands `$(VAR_NAME)` only from variables earlier in the container's environment list, and the recipe decides that order, not the order you write the `env` map in. The containers recipe builds the list with `items()`, which sorts by key, so authored order is discarded — writing the helper first buys nothing.
 
-What the Kubernetes recipe does guarantee is that `secretKeyRef` variables are emitted before plain `value` variables. So a composed value can always read a secret-backed helper, whatever the two keys are called, and that is the form to prefer. Two plain values are sorted against each other by name, so a helper supplied as a plain value — a `@secure()` parameter assigned to `env.value` — is visible only to a consumer whose key sorts after it. The helper's name is yours to choose, so choose one that sorts first; `validate-bicep.mjs` fails the model when a plain value reads a plain helper that cannot reach it.
+What the Kubernetes recipe does guarantee is that `secretKeyRef` variables are emitted before plain `value` variables. So a composed value can always read a secret-backed helper, whatever the two keys are called, and that is the form to prefer.
+
+Two plain values are sorted against each other by name, which only matters for a developer-supplied credential: a `@secure()` parameter reaches the container through `env.value` and must not be routed through `secretKeyRef` or an authored secret, so `secretKeyRef` is not available to it and the helper is a plain value like its consumer. If the application dictates both names and the helper's does not sort first, this composition cannot be expressed — report that rather than renaming a key the application reads. `validate-bicep.mjs` fails the model when a plain value reads a plain helper that cannot reach it.
 
 Verify this against the exact target recipe rather than carrying it over: the Azure ACI recipe emits every variable in one name-sorted list with no such separation, and `$(VAR_NAME)` expansion is a Kubernetes container behavior to begin with, so this composition pattern does not hold on every platform.
 

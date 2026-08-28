@@ -565,7 +565,7 @@ test("fails when a plain value reads a plain helper that does not sort before it
   assert.match(result.stderr, /runtime-variable/u);
   assert.match(result.stderr, /web\.properties\.containers\.web\.env\./u);
   assert.match(result.stderr, /\$\(DB_PASSWORD\)/u);
-  assert.match(result.stderr, /sorts before/u);
+  assert.match(result.stderr, /valueFrom\.secretKeyRef/u);
 });
 
 test("accepts a plain helper whose key sorts before its consumer", () => {

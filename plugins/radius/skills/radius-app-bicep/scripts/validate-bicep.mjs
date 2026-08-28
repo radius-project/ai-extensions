@@ -693,7 +693,7 @@ function checkRuntimeVariableExpansion(
           const advice =
             referenced === name ?
               "a variable cannot read itself"
-            : `rename the helper so its key sorts before ${JSON.stringify(name)}, or supply it through valueFrom.secretKeyRef, which the recipe emits ahead of every plain value`;
+            : `bind it with valueFrom.secretKeyRef, which the recipe emits ahead of every plain value, if it is a recipe-generated credential; a developer-supplied @secure() value has to stay a plain value, so its key must sort before ${JSON.stringify(name)} — report the conflict when the application dictates both names`;
           report(
             `${app}: error runtime-variable: ${resourcePath}.properties.containers.${containerKey}.env.${name}: reads $(${referenced}), which the containers recipe emits at or after it, so it is never substituted; ${advice}.`
           );
