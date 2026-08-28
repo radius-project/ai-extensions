@@ -11,8 +11,12 @@
 import { setChildren } from "../dom.js";
 import { createCommandAction } from "../command-action.js";
 import type { CommandActionHandle } from "../command-action.js";
-import { remediationView } from "@radius-project/core/remediations";
 import type { RemediationView } from "@radius-project/core/remediations";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  presentedRemediationView,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
 import { beginEntry } from "../lifecycle.js";
 import { formatElapsed, stageGlyph } from "../progress-format.js";
 import {
@@ -401,6 +405,7 @@ export interface EnvironmentOperationsDeps {
 export interface EnvironmentOperationsOptions {
   readonly repo: string;
   readonly mutationNonce?: string;
+  readonly ghCommandPresentation?: GhCommandPresentation;
   readonly deps: EnvironmentOperationsDeps;
 }
 
@@ -433,15 +438,24 @@ function parseStageList(value: unknown): OperationStageOrStep[] {
   return list;
 }
 
-function parseFailure(value: unknown): OperationFailure | null {
+function parseFailure(
+  value: unknown,
+  ghCommandPresentation: GhCommandPresentation
+): OperationFailure | null {
   if (!isRecord(value)) return null;
   return {
     message: readString(value, "message"),
-    remediation: parseFailureRemediation(value["remediation"])
+    remediation: parseFailureRemediation(
+      value["remediation"],
+      ghCommandPresentation
+    )
   };
 }
 
-function parseFailureRemediation(value: unknown): RemediationView | null {
+function parseFailureRemediation(
+  value: unknown,
+  ghCommandPresentation: GhCommandPresentation
+): RemediationView | null {
   if (!isRecord(value)) return null;
   const id = readString(value, "id");
   const rawParams = value["params"];
@@ -454,7 +468,7 @@ function parseFailureRemediation(value: unknown): RemediationView | null {
   // A refused build still yields a view -- an unknown id and refused params both
   // come back unrunnable -- so `runnable` is the single gate. An unrunnable one
   // must fall back to the prose, never to an empty callout.
-  const view = remediationView(id, params);
+  const view = presentedRemediationView(id, params, ghCommandPresentation);
   return view.runnable ? view : null;
 }
 
@@ -677,7 +691,8 @@ function parseTerminalState(value: string): TerminalState | null {
 }
 
 function parseOperationRecord(
-  raw: Record<string, unknown>
+  raw: Record<string, unknown>,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): OperationRecord | null {
   const operationId = readString(raw, "operationId");
   if (operationId === "") return null;
@@ -692,7 +707,7 @@ function parseOperationRecord(
     currentStage: readString(raw, "currentStage"),
     stages: parseStageList(raw["stages"]),
     steps: parseStageList(raw["steps"]),
-    failure: parseFailure(raw["failure"]),
+    failure: parseFailure(raw["failure"], ghCommandPresentation),
     cleanup: parseCleanup(raw["cleanup"]),
     actions: parseActions(raw["actions"]),
     guidance: parseGuidance(raw["guidance"]),
@@ -715,10 +730,11 @@ function parseOperationRecord(
  * identity across polls, resumes, and page navigation.
  */
 export function parseOperationResponse(
-  payload: unknown
+  payload: unknown,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): OperationRecord | null {
   const raw = readRecord(payload, "operation");
-  return raw ? parseOperationRecord(raw) : null;
+  return raw ? parseOperationRecord(raw, ghCommandPresentation) : null;
 }
 
 /**
@@ -929,6 +945,8 @@ export function initializeEnvironmentOperations(
   options: EnvironmentOperationsOptions
 ): EnvironmentOperationsController | null {
   const dom = context.dom;
+  const parseResponse = (payload: unknown): OperationRecord | null =>
+    parseOperationResponse(payload, options.ghCommandPresentation);
   const maybePanel = dom.byId(PROGRESS_IDS.panel);
   if (!maybePanel) return null;
   // Rebound to a variable whose declared type already excludes `null`: the
@@ -1378,7 +1396,7 @@ export function initializeEnvironmentOperations(
     void fetchTracked(operationUrl(operationId), { cache: "no-store" })
       .then((response) => (response.ok ? response.json() : null))
       .then((payload) => {
-        const op = parseOperationResponse(payload);
+        const op = parseResponse(payload);
         if (op) renderProgress(op);
       })
       .catch(() => {
@@ -1428,7 +1446,7 @@ export function initializeEnvironmentOperations(
       .then((result) => {
         if (!commandIsActive()) return;
         setCommandBusy(false);
-        const updated = parseOperationResponse(result.payload);
+        const updated = parseResponse(result.payload);
         if (!result.ok) {
           setCommandStatus("");
           setCommandError(
@@ -1740,7 +1758,7 @@ export function initializeEnvironmentOperations(
     return fetchTracked(operationUrl(operationId))
       .then((response) => (response.ok ? response.json() : null))
       .then((payload) => {
-        const op = parseOperationResponse(payload);
+        const op = parseResponse(payload);
         if (!op) return false;
         renderProgress(op);
         focusPanel();
@@ -2012,7 +2030,10 @@ export function initializeEnvironmentOperations(
               isOperationInputExpired(error.operation)
             ) {
               stopProgress();
-              const expired = parseOperationRecord(error.operation);
+              const expired = parseOperationRecord(
+                error.operation,
+                options.ghCommandPresentation
+              );
               if (expired) onTerminal(expired);
               return;
             }
@@ -2030,7 +2051,7 @@ export function initializeEnvironmentOperations(
         .then((response) => response.json())
         .then((payload) => {
           if (!active()) return;
-          const op = parseOperationResponse(payload);
+          const op = parseResponse(payload);
           // The registry retains the latest terminal operation for this
           // repository. During the short gap before a new POST registers,
           // that record belongs to the previous environment and must not
@@ -2116,7 +2137,7 @@ export function initializeEnvironmentOperations(
       .then((response) => response.json())
       .then((payload) => {
         if (!scope.active || mySession !== session) return;
-        const op = parseOperationResponse(payload);
+        const op = parseResponse(payload);
         if (!op) return;
         // A closed record is rebuilt too: its stop, retry, and partial-state
         // controls come from the saved operation, so a reload after a failure

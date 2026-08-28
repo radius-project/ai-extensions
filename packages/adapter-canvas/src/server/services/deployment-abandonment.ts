@@ -1,6 +1,11 @@
 import type { CanvasState } from "../../shared.js";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
 import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
+import {
   ABANDONED_DEPLOYMENT_DESCRIPTION,
   type DeploymentRow
 } from "./deployment-resolver.js";
@@ -14,6 +19,7 @@ export interface DeploymentAbandonmentReservation {
 }
 
 export interface DeploymentAbandonmentDependencies {
+  ghCommandPresentation?: GhCommandPresentation;
   isValidRepoSlug(value: unknown): boolean;
   readInstanceState(instanceId: string): CanvasState | undefined;
   activeDeploymentMutation(
@@ -252,12 +258,28 @@ export function createDeploymentAbandonmentService(
         try {
           await dependencies.ghOrThrow(args);
         } catch (error) {
+          const ghCommandPresentation =
+            dependencies.ghCommandPresentation || BARE_GH_COMMAND_PRESENTATION;
+          const refreshCommand = displayGhCommand(ghCommandPresentation, [
+            "auth",
+            "refresh",
+            "-h",
+            "github.com",
+            "-s",
+            "repo"
+          ]);
+          const installation =
+            ghCommandPresentation.installationNote ?
+              ` ${ghCommandPresentation.installationNote}`
+            : "";
           return {
             status: 502,
             body: {
               error:
                 isGitHubScopeFailure(error) ?
-                  "Could not stop tracking the deployment on GitHub because the active GitHub token lacks permission to update deployments. Run `gh auth refresh -h github.com -s repo` in a terminal, then retry. Cloud resources were not changed."
+                  refreshCommand ?
+                    `Could not stop tracking the deployment on GitHub because the active GitHub token lacks permission to update deployments. Run \`${refreshCommand}\` in a terminal, then retry.${installation} Cloud resources were not changed.`
+                  : `Could not stop tracking the deployment on GitHub because the active GitHub token lacks permission to update deployments. ${ghCommandPresentation.installationNote} Cloud resources were not changed.`
                 : "Could not stop tracking the deployment on GitHub. Cloud resources were not changed."
             }
           };

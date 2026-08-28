@@ -1,4 +1,9 @@
 import type { SelectedGhExecutor } from "../../gh.js";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
 
 export interface GitHubAccountCoordinatorPorts {
   createExecutor(login: string): Promise<SelectedGhExecutor>;
@@ -28,6 +33,7 @@ export interface GitHubAccountLeaseResult<T> {
 }
 
 export interface GitHubAccountCoordinatorOptions {
+  ghCommandPresentation?: GhCommandPresentation;
   setTimer?(
     callback: () => void,
     milliseconds: number
@@ -52,8 +58,21 @@ interface Waiter {
   reject(error: Error): void;
 }
 
-function manualRecoveryGuidance(login: string): string {
-  return `Restore the original GitHub CLI account with: gh auth switch --hostname github.com --user ${login}`;
+function manualRecoveryGuidance(
+  login: string,
+  presentation: GhCommandPresentation
+): string {
+  const command = displayGhCommand(presentation, [
+    "auth",
+    "switch",
+    "--hostname",
+    "github.com",
+    "--user",
+    login
+  ]);
+  return command ?
+      `Restore the original GitHub CLI account with: ${command}. ${presentation.installationNote}`.trim()
+    : presentation.installationNote;
 }
 
 export function createGitHubAccountCoordinator(
@@ -62,6 +81,8 @@ export function createGitHubAccountCoordinator(
 ): GitHubAccountCoordinator {
   const setTimer = options.setTimer || setTimeout;
   const clearTimer = options.clearTimer || clearTimeout;
+  const ghCommandPresentation =
+    options.ghCommandPresentation || BARE_GH_COMMAND_PRESENTATION;
   const waiters: Waiter[] = [];
   let held = false;
   let blockedRestoration: GitHubAccountRestoration | null = null;
@@ -132,7 +153,7 @@ export function createGitHubAccountCoordinator(
           state: "changed_externally",
           originalLogin,
           currentLogin,
-          guidance: manualRecoveryGuidance(originalLogin)
+          guidance: manualRecoveryGuidance(originalLogin, ghCommandPresentation)
         };
       }
       const switched = await ports.switchKeyringAccount(originalLogin);
@@ -143,7 +164,8 @@ export function createGitHubAccountCoordinator(
           originalLogin,
           currentLogin,
           guidance: `${switched.error || "GitHub account restoration failed."} ${manualRecoveryGuidance(
-            originalLogin
+            originalLogin,
+            ghCommandPresentation
           )}`
         };
       }
@@ -153,7 +175,7 @@ export function createGitHubAccountCoordinator(
           state: "failed",
           originalLogin,
           currentLogin,
-          guidance: manualRecoveryGuidance(originalLogin)
+          guidance: manualRecoveryGuidance(originalLogin, ghCommandPresentation)
         };
       }
       return {
@@ -169,7 +191,7 @@ export function createGitHubAccountCoordinator(
         currentLogin: currentLogin || null,
         guidance: `${
           error instanceof Error ? error.message : String(error)
-        } ${manualRecoveryGuidance(originalLogin)}`
+        } ${manualRecoveryGuidance(originalLogin, ghCommandPresentation)}`
       };
     }
   };

@@ -304,6 +304,7 @@ ${confirmDialogMarkup()}
         repo: ctxRepo,
         branch: ctxBranch,
         activeSubtab,
+        ghCommandPresentation: state.ghCommandPresentation,
         mutationNonce:
           typeof state.browserMutationNonce === "string" ?
             state.browserMutationNonce

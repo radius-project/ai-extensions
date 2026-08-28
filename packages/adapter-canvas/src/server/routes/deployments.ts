@@ -6,6 +6,11 @@ import type { DeployRequestService } from "../services/deploy-request.js";
 import type { DeploymentRow } from "../services/deployment-resolver.js";
 import { shouldRetryWithKeyringCredential } from "../services/workflow-credential-fallback.js";
 import { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE } from "../../infra.js";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
 
 // What the webview needs to decide whether to keep polling after a failed
 // deploy. Shaped to match `deployHandoffStatus` in `server.ts`, which is
@@ -77,6 +82,7 @@ export interface DeploymentsInstanceEntry {
 }
 
 export interface DeploymentsDependencies {
+  ghCommandPresentation?: GhCommandPresentation;
   isValidRepoSlug(value: unknown): boolean;
   readInstanceEntry(instanceId: string): DeploymentsInstanceEntry | undefined;
   triggerDeployRepairHandoff(
@@ -661,9 +667,25 @@ export async function handleDeleteDeployment(
       const de = (dispatch.stderr || "").trim();
       // `{0,20}` vs `{1,20}` differs only for the literal "workflowscope" with
       // no separator, which no real `gh` diagnostic emits; left alive.
+      const ghCommandPresentation =
+        dependencies.ghCommandPresentation || BARE_GH_COMMAND_PRESENTATION;
+      const refreshCommand = displayGhCommand(ghCommandPresentation, [
+        "auth",
+        "refresh",
+        "-h",
+        "github.com",
+        "-s",
+        "workflow"
+      ]);
+      const installation =
+        ghCommandPresentation.installationNote ?
+          ` ${ghCommandPresentation.installationNote}`
+        : "";
       const hint =
         /workflow.{0,20}scope/i.test(de) ?
-          ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
+          refreshCommand ?
+            ` Your GitHub token is missing the "workflow" scope. Run \`${refreshCommand}\` in a terminal, then retry.${installation}`
+          : ` Your GitHub token is missing the "workflow" scope. ${ghCommandPresentation.installationNote}`
         : " The delete workflow is committed to the default branch" +
           " automatically before dispatch, so a persistent failure usually" +
           " means GitHub Actions is disabled for " +

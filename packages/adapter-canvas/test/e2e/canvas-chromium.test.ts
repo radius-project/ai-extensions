@@ -926,6 +926,15 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }) => {
+    await canvas.seedState({
+      ...baseCanvasState(canvas.workspacePath),
+      ghCommandPresentation: {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/opt/Copilot Tools/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    });
     // No account can supply the workflow scope, so the injected token stays in
     // effect and the acting account is the one the warning must name.
     await canvas.setGitHubKeyringScopes(["repo"]);
@@ -951,7 +960,8 @@ test.describe("Radius Canvas in Chromium", () => {
     // disclosure, and it is reachable by keyboard.
     const repair = page.locator("#env-gh-repair");
     await expect(repair).toBeVisible();
-    await expect(repair).toContainText("gh auth switch");
+    await expect(repair).toContainText("'/opt/Copilot Tools/gh' auth switch");
+    await expect(note).toContainText("Install GitHub CLI system-wide.");
     const runButton = repair.getByRole("button", { name: COMMAND_RUN_LABEL });
     await expect(repair.getByRole("button", { name: "Copy" })).toBeVisible();
     await runButton.focus();
