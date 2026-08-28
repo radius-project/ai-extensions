@@ -240,6 +240,22 @@ describe("createEnvironmentConfirmDialog", () => {
     expect(elements["env-confirm-modal"].style.display).toBe("none");
   });
 
+  it("closes without error when confirmed with no onConfirm handler", () => {
+    const { dialog, elements } = openDialog();
+    // A pure acknowledgement dialog (e.g. the "Environment deleted" notice)
+    // supplies no onConfirm: confirming simply closes it.
+    dialog.show({
+      title: "Environment deleted",
+      message: "The environment was deleted.",
+      confirmLabel: "Done",
+      hideCancel: true
+    });
+
+    expect(elements["env-confirm-modal"].style.display).toBe("flex");
+    expect(() => elements["env-confirm-ok"].dispatch("click")).not.toThrow();
+    expect(elements["env-confirm-modal"].style.display).toBe("none");
+  });
+
   it.each([
     [
       "cancel",

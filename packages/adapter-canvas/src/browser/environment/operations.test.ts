@@ -5336,7 +5336,7 @@ describe("acknowledging a finished deletion pass", () => {
     expect(browser.net.calls).toHaveLength(0);
   });
 
-  it("dismissDisplayed persists the dismissal and hides the panel", async () => {
+  it("persists the dismissal and hides the panel from the OK button", async () => {
     const browser = setup();
     browser.net.handle(dismissUrl("op-1"), () =>
       jsonResponse({ operationId: "op-1" })
@@ -5344,7 +5344,7 @@ describe("acknowledging a finished deletion pass", () => {
     const controller = controllerFor(browser);
     controller?.renderProgress(completedRollback());
 
-    controller?.dismissDisplayed();
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
     await flushPromises();
 
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
@@ -5360,11 +5360,11 @@ describe("acknowledging a finished deletion pass", () => {
     ]);
   });
 
-  it("dismissDisplayed does nothing when no operation is displayed", () => {
+  it("does nothing when the dismiss button is clicked with no operation displayed", () => {
     const browser = setup();
-    const controller = controllerFor(browser);
+    controllerFor(browser);
 
-    controller?.dismissDisplayed();
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
 
     expect(browser.net.calls).toHaveLength(0);
   });

@@ -1638,7 +1638,7 @@ describe("initializeEnvironmentPage", () => {
     teardown();
   });
 
-  it("dismisses a clean azure delete on acknowledgement so it stays gone after navigation", async () => {
+  it("keeps a clean azure delete panel on acknowledgement and dismisses it from the panel's own button so it stays gone after navigation", async () => {
     const page = fixture();
     const remove = createFakeInput("delete-row");
     remove.setAttribute("data-env", "dev");
@@ -1698,9 +1698,19 @@ describe("initializeEnvironmentPage", () => {
     // The succeeded panel is on screen alongside the acknowledgement dialog.
     expect(page.elements[PROGRESS_IDS.panel].style.display).not.toBe("none");
 
-    // Confirming the acknowledgement dismisses the operation and hides the
-    // panel — the single click a user expects to close a finished deletion.
+    // Acknowledging the notice ("Done") only closes the dialog. It must NOT
+    // dismiss the operation or tear the panel down — the panel keeps its own
+    // "OK" button as the single control that ends a finished deletion.
     page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+    expect(dismissed).toBe(false);
+    expect(page.elements["env-confirm-modal"].style.display).toBe("none");
+    expect(page.elements[PROGRESS_IDS.panel].style.display).not.toBe("none");
+    expect(page.elements[PROGRESS_IDS.dismiss].textContent).toBe("OK");
+    expect(page.elements[PROGRESS_IDS.dismiss].style.display).toBe("");
+
+    // Clicking the panel's own OK button dismisses the operation and hides it.
+    page.elements[PROGRESS_IDS.dismiss].dispatch("click");
     await flushPromises();
     expect(dismissed).toBe(true);
     expect(page.elements[PROGRESS_IDS.panel].style.display).toBe("none");

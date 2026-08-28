@@ -423,7 +423,6 @@ export interface EnvironmentOperationsController {
   renderProgress(op: OperationRecord | null): void;
   stopProgress(): void;
   hideProgress(): void;
-  dismissDisplayed(): void;
   focusPanel(): void;
   syncFailureOperation(data: unknown): Promise<boolean>;
   trackProgress(
@@ -2318,9 +2317,6 @@ export function initializeEnvironmentOperations(
     renderProgress,
     stopProgress,
     hideProgress,
-    dismissDisplayed() {
-      submitDismissal(displayedOperationId);
-    },
     focusPanel,
     syncFailureOperation,
     trackProgress,

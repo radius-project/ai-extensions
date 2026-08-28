@@ -242,14 +242,13 @@ export function initializeEnvironmentPage(
       },
       confirmLabel: "Done",
       confirmVariant: "primary",
-      hideCancel: true,
-      // Acknowledging a clean deletion is also the dismissal: without this the
-      // operation stays undismissed and its progress panel reappears when the
-      // user navigates away and returns. A warning outcome keeps its panel so
-      // the offered retry is still reachable, so only a clean success dismisses.
-      onConfirm: () => {
-        if (!withWarnings) operations.dismissDisplayed();
-      }
+      hideCancel: true
+      // "Done" only acknowledges this notice. It must NOT dismiss the progress
+      // panel — the panel carries its own dismiss button ("OK" for a clean
+      // delete, "Exit" for a warning outcome), and that button is the single
+      // action that persists the dismissal server-side. Dismissing from here as
+      // well would tear the panel down behind the user's back the moment they
+      // acknowledge the Entra-app notice.
     });
   };
   const credentials = initializeCredentialsPane(

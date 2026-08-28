@@ -18,7 +18,9 @@ export interface EnvironmentConfirmOptions {
   readonly confirmLabel: string;
   readonly cancelLabel?: string;
   readonly confirmVariant?: "danger" | "primary";
-  readonly onConfirm: () => void;
+  // Optional: a pure acknowledgement dialog (e.g. an informational "Environment
+  // deleted" notice) confirms with no side effect and simply closes.
+  readonly onConfirm?: () => void;
   readonly onCancel?: () => void;
   // Hide the secondary/cancel button so the dialog reads as a single-action
   // acknowledgement (e.g. an informational "Environment deleted" notice) rather
@@ -126,7 +128,7 @@ export function createEnvironmentConfirmDialog(
   return {
     show(options) {
       if (!isOpen()) restoreFocusTo = context.focus.active();
-      pendingConfirm = options.onConfirm;
+      pendingConfirm = options.onConfirm ?? null;
       pendingCancel = options.onCancel ?? null;
       title.textContent = options.title;
       if (options.messageLink) {
