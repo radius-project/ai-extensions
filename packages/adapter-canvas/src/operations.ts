@@ -222,6 +222,7 @@ export type OperationCommandKind =
   | "stop"
   | "resume_input"
   | "continue_setup"
+  | "cancel_workflow"
   | "retry_setup"
   | "retry_verification"
   | "rollback"
@@ -694,6 +695,7 @@ const COMMAND_KINDS = Object.freeze([
   "stop",
   "resume_input",
   "continue_setup",
+  "cancel_workflow",
   "retry_setup",
   "retry_verification",
   "rollback",
@@ -804,6 +806,84 @@ export const TERMINAL_STATES = Object.freeze([
 
 export const RUNNING_STATE = "running";
 export const INPUT_REQUIRED_STATE = "input_required";
+export const PROVIDER_RESTART_DECISION_REASON = "provider-restart-decision";
+
+export type VerificationWorkflowState =
+  "active" | "inactive" | "cancelling" | "unknown";
+
+export function isProviderRestartDecision(op: any): boolean {
+  return (
+    op?.state === "action_required" &&
+    op?.terminal?.reason === PROVIDER_RESTART_DECISION_REASON
+  );
+}
+
+export function verificationWorkflowState(
+  op: any
+): VerificationWorkflowState | null {
+  const state = op?.verification?.workflowState;
+  return (
+      state === "active" ||
+        state === "inactive" ||
+        state === "cancelling" ||
+        state === "unknown"
+    ) ?
+      state
+    : null;
+}
+
+export function setVerificationWorkflowState(
+  op: any,
+  state: VerificationWorkflowState
+): any {
+  if (!op) return op;
+  op.verification = { ...(op.verification || {}), workflowState: state };
+  op.lastActivityAt = nowIso();
+  return op;
+}
+
+export function pauseForProviderRestart(op: any): any {
+  if (!op || isTerminalState(op.state)) return op;
+  const now = nowIso();
+  op.state = "action_required";
+  op.endedAt = now;
+  op.lastActivityAt = now;
+  op.executionActive = false;
+  op.failure = null;
+  op.terminal = {
+    reason: PROVIDER_RESTART_DECISION_REASON,
+    interruptedStage: op.currentStage || null
+  };
+  if (
+    op.currentStage === STAGE_VERIFY &&
+    Number.isFinite(Number(op.verification?.dispatchedAt))
+  ) {
+    setVerificationWorkflowState(op, "unknown");
+  }
+  op.recoveryState = "provider_restart_decision";
+  return op;
+}
+
+export function stopProviderRestartDecision(op: any): boolean {
+  if (!isProviderRestartDecision(op)) return false;
+  const now = nowIso();
+  const control = getOperationControl(op);
+  if (control) {
+    control.stop.requestedAt ||= now;
+    control.stop.acknowledgedAt ||= now;
+    control.stop.boundary ||= "restart_recovery";
+  }
+  op.stopRequested = true;
+  op.state = "cancelled";
+  op.endedAt = now;
+  op.lastActivityAt = now;
+  op.terminal = { reason: "provider-restart-stopped" };
+  op.recoveryState = "stopped";
+  for (const stage of op.stages || []) {
+    if (stage.state === "running") stage.state = "warning";
+  }
+  return true;
+}
 
 export function isTerminalState(state: any): boolean {
   return TERMINAL_STATES.includes(state);
@@ -2835,6 +2915,7 @@ export function applySetupResumePoint(
  */
 export function setupForwardIntent(op: any): "continue" | "retry" | null {
   if (!op || !isTerminalState(op.state)) return null;
+  if (isProviderRestartDecision(op)) return "continue";
   if (op.state === "cancelled") return "continue";
   if (op.state !== "failed_partial" && op.state !== "failed") return null;
   const command = latestCommand(op);
@@ -2895,7 +2976,9 @@ function setupForwardEligibility(
   return {
     ok: true,
     code: `${prefix}-allowed`,
-    resumeFrom: nextIncompleteSetupStep(op)
+    resumeFrom: nextIncompleteSetupStep(op),
+    recoveredVerification:
+      isProviderRestartDecision(op) && op.currentStage === STAGE_VERIFY
   };
 }
 
@@ -3106,6 +3189,16 @@ export function canStartRollback(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
+  const workflowState = verificationWorkflowState(op);
+  if (
+    workflowState === "active" ||
+    workflowState === "cancelling" ||
+    workflowState === "unknown"
+  )
+    return {
+      ok: false,
+      code: "rollback-verification-workflow-active"
+    };
   const refused = providerDestructiveRefusal(op, "rollback");
   if (refused) return refused;
   // Successful verification is the completion boundary, so a verified
@@ -3235,6 +3328,16 @@ export function canExitSetup(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
+  const workflowState = verificationWorkflowState(op);
+  if (
+    workflowState === "active" ||
+    workflowState === "cancelling" ||
+    workflowState === "unknown"
+  )
+    return {
+      ok: false,
+      code: "exit-verification-workflow-active"
+    };
   const refused = providerDestructiveRefusal(op, "exit");
   if (refused) return refused;
   // A verified environment is finished work, not an abandoned attempt. It is
@@ -3651,6 +3754,14 @@ export function projectActionGuidance(op: any): any[] {
  */
 export function projectOperationHeadline(op: any): any {
   if (!op) return null;
+  if (isProviderRestartDecision(op)) {
+    return {
+      code: "setup-interrupted",
+      title: "Environment setup was interrupted",
+      message:
+        "Radius found an unfinished setup after restarting. External work may still be running. Review the current state before deciding whether to continue."
+    };
+  }
   const activeCleanup = activeCommandKind(op);
   if (!isTerminalState(op.state)) {
     if (activeCleanup === "rollback" || activeCleanup === "retry_cleanup") {
@@ -3717,11 +3828,14 @@ export function projectOperationHeadline(op: any): any {
           "Radius removed the resources it created during this attempt. Anything it reused was left alone."
       };
     }
+    const workflowState = verificationWorkflowState(op);
     return {
       code: "stopped",
       title: "Environment setup stopped",
       message:
-        "Radius stopped before the next setup step. Review what exists, then roll it back or continue setup."
+        workflowState === "active" || workflowState === "cancelling" ?
+          "Radius stopped this setup, but its GitHub Actions workflow may still be running. Cancel it or wait for it to finish before rolling back or exiting."
+        : "Radius stopped before the next setup step. Review what exists, then roll it back or continue setup."
     };
   }
   if (op.state === "failed_partial" && cleanupCommand) {
@@ -3762,6 +3876,36 @@ export function projectOperationActions(op: any): any[] {
   if (!op) return [];
   const base = `/api/operations/${encodeURIComponent(op.operationId)}`;
   const control = op.control || createOperationControl();
+  if (isProviderRestartDecision(op)) {
+    return [
+      {
+        id: "continue-setup",
+        kind: "continue_setup",
+        label: "Continue setup",
+        placement: "row",
+        tone: "primary",
+        requiresConfirmation: false,
+        description:
+          "Radius continues the interrupted setup without dispatching another verification workflow.",
+        method: "POST",
+        path: `${base}/continue`,
+        pending: false
+      },
+      {
+        id: "stop",
+        kind: "stop",
+        label: "Stop setup",
+        placement: "row",
+        tone: "neutral",
+        requiresConfirmation: false,
+        description:
+          "Radius stops this setup. If its exact GitHub Actions run is still active, you can cancel it next.",
+        method: "POST",
+        path: `${base}/stop`,
+        pending: false
+      }
+    ];
+  }
   if (!isTerminalState(op.state)) {
     // A confirmed rollback is one cooperative server-owned command: cleanup has
     // no pause control, so offering Stop mid-deletion would promise a boundary
@@ -3793,6 +3937,39 @@ export function projectOperationActions(op: any): any[] {
   // is about finishing or undoing an attempt they have already left, and the
   // resources those choices act on may have just been removed.
   if (isSetupExited(op)) return actions;
+  if (
+    op.state === "cancelled" &&
+    (verificationWorkflowState(op) === "active" ||
+      verificationWorkflowState(op) === "cancelling" ||
+      verificationWorkflowState(op) === "unknown") &&
+    op.verification?.runId
+  ) {
+    const workflowState = verificationWorkflowState(op);
+    const checking =
+      workflowState === "cancelling" || workflowState === "unknown";
+    actions.push({
+      id: "cancel-workflow",
+      kind: "cancel_workflow",
+      label: checking ? "Check workflow status" : "Cancel workflow",
+      placement: "row",
+      tone: "danger",
+      requiresConfirmation: !checking,
+      ...(checking ?
+        {}
+      : {
+          confirmTitle: "Cancel the verification workflow?",
+          confirmLabel: "Cancel workflow",
+          cancelLabel: "Keep workflow running"
+        }),
+      description:
+        checking ?
+          "Radius checks whether the exact workflow run has finished cancelling."
+        : "Radius cancels only the exact GitHub Actions run recorded for this setup.",
+      method: "POST",
+      path: `${base}/cancel-workflow`,
+      pending: false
+    });
+  }
   const verification = canRetryVerification(op);
   if (verification.ok) {
     actions.push({
@@ -4526,6 +4703,8 @@ export function summarize(op: any): string {
       }.`;
     }
     case "action_required":
+      if (isProviderRestartDecision(op))
+        return `Environment setup for "${env}" was interrupted.`;
       return (
         (op.terminal && op.terminal.userMessage) ||
         `Environment "${env}" needs one more step from you.`
@@ -4935,8 +5114,7 @@ export function reconcileRestoredOperation(op: any): any {
     return op;
   }
   if (hasCompleteVerificationIdentity(op)) {
-    op.recoveryState = "verification_pending";
-    return op;
+    return pauseForProviderRestart(op);
   }
   const manualGuidance = providerRecoveryManualGuidance(op);
   if (manualGuidance) {
@@ -4978,18 +5156,7 @@ export function reconcileRestoredOperation(op: any): any {
     if (ledger) ledger.cleanup.state = "running";
     return op;
   }
-  const now = nowIso();
-  op.state = "failed_partial";
-  op.endedAt = now;
-  op.lastActivityAt = now;
-  op.failure = {
-    code: "operation-interrupted",
-    stage: op.currentStage,
-    stepSeq: null,
-    message:
-      "The Radius extension restarted before this operation reached a durable terminal state. Existing resources were retained for a safe retry.",
-    classification: "user-fixable"
-  };
+  pauseForProviderRestart(op);
   const ledger = getSetupArtifactLedger(op);
   if (ledger && !hasAttemptedCleanup(op)) {
     // No pass was in flight, so nothing is left half-done for this record.
@@ -5001,8 +5168,7 @@ export function reconcileRestoredOperation(op: any): any {
     ledger.cleanup.state = "not_needed";
   }
   for (const stage of op.stages || []) {
-    if (stage.state === "running") stage.state = "failed";
-    else if (stage.state === "pending") stage.state = "skipped";
+    if (stage.state === "running") stage.state = "warning";
   }
   op.recoveryState = "interrupted";
   return op;
@@ -5357,8 +5523,14 @@ export function toClientView(op: any): any {
     journey: op.journey,
     terminal: op.terminal,
     verification:
-      typeof op.verification?.dispatchedAt === "number" ?
-        { dispatchedAt: op.verification.dispatchedAt }
+      op.verification ?
+        {
+          dispatchedAt:
+            typeof op.verification.dispatchedAt === "number" ?
+              op.verification.dispatchedAt
+            : null,
+          workflowState: verificationWorkflowState(op)
+        }
       : null,
     inputRequired: op.inputRequired || null,
     summary: summarize(op),

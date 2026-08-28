@@ -14,7 +14,7 @@ graph TD
     Panel --> Commands["Contextual command row"]
     Panel --> Details["Collapsed Show details"]
     Panel --> Bottom["Bottom completion or exit action"]
-    Commands --> Controls["Stop / Continue / Retry / Rollback"]
+    Commands --> Controls["Stop / Continue / Cancel workflow / Retry / Rollback"]
     Details --> Timeline["Chronological steps"]
     Details --> Inventory["Terminal resource inventory"]
     Bottom --> Exit["Exit setup"]
@@ -24,7 +24,8 @@ graph TD
 ## Key components
 
 - [`operations.ts`](../../packages/adapter-canvas/src/operations.ts) owns the durable operation model, lifecycle transitions, server-projected actions, headline text, guidance, resource provenance, and browser-safe client view.
-- [`operations-control.ts`](../../packages/adapter-canvas/src/server/routes/operations-control.ts) owns the typed Stop, Continue, Rollback, Exit, and Retry HTTP routes.
+- [`operations-control.ts`](../../packages/adapter-canvas/src/server/routes/operations-control.ts) owns the typed Stop, Continue, Cancel workflow, Rollback, Exit, and Retry HTTP routes.
+- [`verification-workflow-cancellation.ts`](../../packages/adapter-canvas/src/server/services/verification-workflow-cancellation.ts) reads and cancels only the exact GitHub Actions run recorded by the operation, through the GitHub account that started setup.
 - [`server.ts`](../../packages/adapter-canvas/src/server.ts) owns the per-instance executors that continue setup, monitor or retry verification, and run rollback or exit cleanup.
 - [`cleanup-commands.ts`](../../packages/adapter-canvas/src/server/services/cleanup-commands.ts) defines which proven-owned resources each rollback, rollback retry, or exit command may remove.
 - [`workflow-rollback.ts`](../../packages/adapter-canvas/src/server/services/workflow-rollback.ts) verifies and reverses workflow changes before a post-commit rollback deletes dependent resources.
@@ -133,6 +134,7 @@ The command row sits above **Show details** and contains choices that continue o
 - **Roll back environment setup**
 - **Roll back created resources**
 - **Retry rollback**
+- **Cancel workflow**, after an interrupted setup has been stopped and the exact saved verification run is still active
 
 The row also contains short explanatory copy and any guidance explaining why an expected path is unavailable.
 
@@ -185,6 +187,12 @@ stateDiagram-v2
     Running --> FailedPartial: Step or verification fails
     Running --> ActionRequired: Setup PR must merge
     Running --> Succeeded: Verification succeeds
+    Running --> Interrupted: Canvas provider restarts
+
+    Interrupted --> Running: Continue setup
+    Interrupted --> Cancelled: Stop setup
+    Cancelled --> CancellingWorkflow: Cancel exact active workflow
+    CancellingWorkflow --> Cancelled: Workflow becomes inactive
 
     Cancelled --> Running: Continue setup
     Cancelled --> RollingBack: Roll back
@@ -220,6 +228,19 @@ The page sends one complete request to `POST /api/operations`. The server:
 6. Schedules the server-owned executor.
 
 The browser immediately switches from the form to the progress panel and follows the saved operation.
+
+## Recovery after Refresh Canvas or application restart
+
+Refresh Canvas and restarting the GitHub Copilot application both restart the Radius provider. The durable operation and any external GitHub Actions run survive that boundary. Radius therefore restores unfinished setup as `action_required` with reason `provider-restart-decision` instead of silently resuming work.
+
+The panel presents **Environment setup was interrupted** and offers exactly two initial choices:
+
+- **Continue setup** resumes from the saved phase. When verification was already dispatched, Radius resolves or reuses the exact recorded run and continues monitoring it; it does not dispatch another workflow.
+- **Stop setup** durably closes Radius's setup attempt, then reads the status of the exact recorded verification run.
+
+If the run is still active after Stop, the panel offers **Cancel workflow**. Cancellation uses the saved repository, run ID, and GitHub account; it never searches by workflow name, branch, environment, or latest run. If GitHub has accepted cancellation but the run is still settling, the control changes to **Check workflow status**.
+
+Rollback and Exit remain unavailable while the run is active, cancelling, or has an unknown status. Once Radius proves the run is inactive, the ordinary provenance-based cleanup controls become available. This ordering prevents cleanup from deleting an environment or identity while the workflow may still be using it.
 
 ### An earlier rollback is incomplete
 

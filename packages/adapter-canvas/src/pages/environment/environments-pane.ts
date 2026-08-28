@@ -65,7 +65,7 @@ export function environmentsPaneMarkup(
         <div id="env-progress-headline-note" class="env-progress__headline-note" style="display:none;"></div>
         <div id="env-progress-activity" class="env-progress__activity" role="status" aria-live="polite"></div>
       </div>
-      <div id="env-progress-elapsed" class="env-progress__elapsed" aria-label="Elapsed time"></div>
+      <div id="env-progress-elapsed" class="env-progress__elapsed" role="timer" aria-label="Elapsed time"></div>
     </div>
     <ol id="env-progress-stages" class="env-progress__stages"></ol>
     <div id="env-progress-failure" class="env-progress__failure" style="display:none;" role="alert">

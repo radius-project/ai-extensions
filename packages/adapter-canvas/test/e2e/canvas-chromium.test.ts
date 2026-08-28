@@ -1391,6 +1391,93 @@ test.describe("Radius Canvas in Chromium", () => {
     await expectNoWcagViolations(page);
   });
 
+  test("stops an interrupted setup before offering exact-run cancellation by keyboard @safety", async ({
+    page,
+    canvas
+  }) => {
+    const operationId = await canvas.seedInterruptedVerification();
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      {
+        tool: "gh",
+        args: ["run", "view", "39", "--json", "status", "--repo", REPOSITORY],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: '{"status":"in_progress"}'
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          "--method",
+          "POST",
+          `repos/${REPOSITORY}/actions/runs/39/cancel`
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: ""
+      }
+    );
+    await canvas.setScenario(scenario);
+    await page.goto(
+      `${canvas.baseUrl}/?page=environment&operationId=${operationId}`
+    );
+
+    await expect(page.locator("#env-progress-title")).toContainText(
+      "Environment setup was interrupted"
+    );
+    await expect(
+      page.getByRole("button", { name: "Continue setup" })
+    ).toBeVisible();
+    const stop = page.getByRole("button", { name: "Stop setup" });
+    await expect(stop).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Cancel workflow" })
+    ).toHaveCount(0);
+    await stop.focus();
+    await page.keyboard.press("Enter");
+
+    const cancelWorkflow = page.getByRole("button", {
+      name: "Cancel workflow"
+    });
+    await expect(cancelWorkflow).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Roll back created resources" })
+    ).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Exit setup" })).toHaveCount(
+      0
+    );
+    await cancelWorkflow.focus();
+    await page.keyboard.press("Enter");
+
+    const dialog = page.locator("#env-rollback-modal");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAccessibleName(
+      "Cancel the verification workflow?"
+    );
+    await expectNoWcagViolations(page);
+    const confirm = dialog.getByRole("button", { name: "Cancel workflow" });
+    await confirm.focus();
+    await page.keyboard.press("Enter");
+
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "gh" &&
+            JSON.stringify(call.args) ===
+              JSON.stringify([
+                "api",
+                "--method",
+                "POST",
+                `repos/${REPOSITORY}/actions/runs/39/cancel`
+              ])
+        )
+      )
+      .toBe(true);
+    await expect(
+      page.getByRole("button", { name: "Check workflow status" })
+    ).toBeVisible({ timeout: 15_000 });
+  });
+
   test("sends the worktree branch the page selected when Deploy is activated @safety", async ({
     page,
     canvas

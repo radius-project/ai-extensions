@@ -78,6 +78,7 @@ import {
   projectNextTransition,
   projectOperationActions,
   projectOperationHeadline,
+  pauseForProviderRestart,
   pendingWorkflowCommits,
   provenOwnedCleanupTargets,
   readOperationControl,
@@ -86,9 +87,11 @@ import {
   reconcileOperationLifecycle,
   rollbackRetryAttempt,
   setCommandState,
+  setVerificationWorkflowState,
   rollbackArtifactIdentity,
   setupForwardIntent,
   snapshotRetryState,
+  stopProviderRestartDecision,
   stopAtBoundary,
   unresolvedCleanupTargets,
   workflowProvenanceGap,
@@ -1772,7 +1775,10 @@ describe("client projection", () => {
       runUrl: "https://github.com/contoso/store/actions/runs/777"
     };
 
-    expect(toClientView(op).verification).toEqual({ dispatchedAt: 1234 });
+    expect(toClientView(op).verification).toEqual({
+      dispatchedAt: 1234,
+      workflowState: null
+    });
     const projected = JSON.stringify(toClientView(op));
     expect(projected).not.toContain("radius-verify-credentials");
     expect(projected).not.toContain("actions/runs");
@@ -2713,7 +2719,7 @@ describe("startup reconciliation", () => {
     expect(isStale(op)).toBe(false);
   });
 
-  it("keeps dispatched verification pending", () => {
+  it("pauses dispatched verification for a recovery decision", () => {
     const op = newOp();
     op.context = { githubLogin: "alice" };
     enterStage(op, STAGE_VERIFY);
@@ -2728,8 +2734,14 @@ describe("startup reconciliation", () => {
       runUrl: null
     };
     reconcileRestoredOperation(op);
-    expect(op.state).toBe("running");
-    expect(op.recoveryState).toBe("verification_pending");
+    expect(op.state).toBe("action_required");
+    expect(op.recoveryState).toBe("provider_restart_decision");
+    expect(op.terminal.reason).toBe("provider-restart-decision");
+    expect(op.verification.workflowState).toBe("unknown");
+    expect(projectOperationActions(op).map((action) => action.id)).toEqual([
+      "continue-setup",
+      "stop"
+    ]);
   });
 
   it("fails a restored verification closed when no selected account was saved", () => {
@@ -2881,12 +2893,12 @@ describe("startup reconciliation", () => {
 
     reconcileRestoredOperation(op);
 
-    expect(op.state).toBe("running");
-    expect(op.recoveryState).toBe("verification_pending");
+    expect(op.state).toBe("action_required");
+    expect(op.recoveryState).toBe("provider_restart_decision");
     expect(op.failure).toBeNull();
   });
 
-  it("recovers a pre-dispatch checkpoint by monitoring instead of redispatching", () => {
+  it("pauses a pre-dispatch checkpoint instead of redispatching", () => {
     const op = newOp();
     op.context = { githubLogin: "alice" };
     enterStage(op, STAGE_VERIFY);
@@ -2904,11 +2916,11 @@ describe("startup reconciliation", () => {
     reconcileRestoredOperation(op);
 
     expect(hasPendingVerificationAcquisition(op)).toBe(false);
-    expect(op.state).toBe("running");
-    expect(op.recoveryState).toBe("verification_pending");
+    expect(op.state).toBe("action_required");
+    expect(op.recoveryState).toBe("provider_restart_decision");
   });
 
-  it("latches interrupted work without scheduling automatic cleanup", () => {
+  it("pauses interrupted work without scheduling automatic cleanup", () => {
     const op = newOp();
     recordAzureApp(op, {
       state: "created",
@@ -2916,9 +2928,46 @@ describe("startup reconciliation", () => {
       displayName: "radius-app"
     });
     reconcileRestoredOperation(op);
-    expect(op.state).toBe("failed_partial");
+    expect(op.state).toBe("action_required");
     expect(op.setupArtifacts.cleanup.state).toBe("not_needed");
-    expect(op.failure.code).toBe("operation-interrupted");
+    expect(op.terminal.reason).toBe("provider-restart-decision");
+    expect(projectOperationHeadline(op)).toMatchObject({
+      code: "setup-interrupted",
+      title: "Environment setup was interrupted"
+    });
+  });
+
+  it("blocks cleanup until the interrupted verification run is inactive", () => {
+    const op = addSafeResumeRequest(newOp());
+    op.context = { githubLogin: "alice" };
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: "42"
+    };
+    pauseForProviderRestart(op);
+    stopProviderRestartDecision(op);
+    setVerificationWorkflowState(op, "active");
+
+    expect(canStartRollback(op)).toMatchObject({
+      ok: false,
+      code: "rollback-verification-workflow-active"
+    });
+    expect(canExitSetup(op)).toMatchObject({
+      ok: false,
+      code: "exit-verification-workflow-active"
+    });
+    expect(projectOperationActions(op).map((action) => action.id)).toContain(
+      "cancel-workflow"
+    );
+
+    setVerificationWorkflowState(op, "inactive");
+    expect(canStartRollback(op).ok).toBe(true);
+    expect(canExitSetup(op).ok).toBe(true);
   });
 });
 
@@ -5362,9 +5411,7 @@ describe("a partially written ledger still describes itself truthfully", () => {
       })
     );
     restored.resumeRequest = op.resumeRequest;
-    finish(restored, "cancelled", {
-      terminal: { reason: "stopped-at-boundary" }
-    });
+    stopProviderRestartDecision(restored);
 
     const targets = provenOwnedCleanupTargets(restored);
     expect(targets.map((entry) => entry.target)).toEqual([
@@ -5436,9 +5483,10 @@ describe("a closed operation never looks like work in progress", () => {
     expect(findActiveCommand(restored, ["continue_setup", "retry_setup"])).toBe(
       null
     );
-    expect(
-      projectOperationActions(restored).map((entry) => entry.id)
-    ).toContain("retry-setup");
+    expect(projectOperationActions(restored).map((entry) => entry.id)).toEqual([
+      "continue-setup",
+      "stop"
+    ]);
   });
 });
 
@@ -5492,8 +5540,8 @@ describe("an interrupted rollback still offers a way out", () => {
       fromPersistedOperation(toPersistedOperation(op))
     );
 
-    // History, not work. Nothing is left to resume, so the record ends.
-    expect(restored.state).toBe("failed_partial");
+    // History, not work. The interrupted setup still waits for a decision.
+    expect(restored.state).toBe("action_required");
     expect(findActiveCommand(restored)).toBeNull();
   });
 
