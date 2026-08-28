@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { isUuid } from "../../azure-oidc.js";
+import {
+  azureDiscoveryContract,
+  temporaryKubeconfigDouble,
+  TEST_KUBECONFIG_PATH
+} from "../../../test/support/azure-discovery-contract.js";
 import { discoverResources, type DiscoveryDependencies } from "./discovery.js";
 
 describe("discovery service (SU-08)", () => {
@@ -7,10 +12,7 @@ describe("discovery service (SU-08)", () => {
     DiscoveryDependencies,
     "createTemporaryKubeconfig"
   > = {
-    createTemporaryKubeconfig: () => ({
-      path: "/tmp/radius-kubeconfig-test",
-      remove: () => {}
-    })
+    createTemporaryKubeconfig: () => temporaryKubeconfigDouble()
   };
 
   it("can reject unsafe subscription input without an HTTP context or CLI call", async () => {
@@ -137,17 +139,9 @@ describe("discovery service (SU-08)", () => {
         dependencies
       )
     ).resolves.toMatchObject({ namespaces: [] });
-    expect(calls).toContainEqual([
-      "aks",
-      "get-credentials",
-      "--name",
-      cluster,
-      "--resource-group",
-      resourceGroup,
-      "--file",
-      "/tmp/radius-kubeconfig-test",
-      "--overwrite-existing"
-    ]);
+    expect(calls).toContainEqual(
+      azureDiscoveryContract({ cluster, resourceGroup }).getCredentials?.args
+    );
   });
 
   it("queries namespaces from the explicitly selected Azure target", async () => {
@@ -183,30 +177,17 @@ describe("discovery service (SU-08)", () => {
     );
 
     expect(result.namespaces).toEqual(["default", "selected-team"]);
+    const contract = azureDiscoveryContract({
+      cluster: "aks-selected",
+      resourceGroup: "rg-selected"
+    });
     expect(calls.at(-2)).toEqual({
-      command: "az",
-      args: [
-        "aks",
-        "get-credentials",
-        "--name",
-        "aks-selected",
-        "--resource-group",
-        "rg-selected",
-        "--file",
-        "/tmp/radius-kubeconfig-test",
-        "--overwrite-existing"
-      ]
+      command: contract.getCredentials?.tool,
+      args: contract.getCredentials?.args
     });
     expect(calls.at(-1)).toEqual({
-      command: "kubectl",
-      args: [
-        "--kubeconfig",
-        "/tmp/radius-kubeconfig-test",
-        "get",
-        "namespaces",
-        "-o",
-        "jsonpath={.items[*].metadata.name}"
-      ]
+      command: contract.namespaces?.tool,
+      args: contract.namespaces?.args
     });
   });
 
@@ -294,7 +275,7 @@ describe("discovery service (SU-08)", () => {
     const dependencies: DiscoveryDependencies = {
       isUuid,
       createTemporaryKubeconfig: () => ({
-        path: "/tmp/radius-kubeconfig-test",
+        path: TEST_KUBECONFIG_PATH,
         remove: () => {
           throw new Error("cleanup failed");
         }
