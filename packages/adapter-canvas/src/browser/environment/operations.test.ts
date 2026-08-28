@@ -364,6 +364,53 @@ async function tickClock(
 }
 
 describe("parseOperationResponse", () => {
+  it("renders a bundled path for a GitHub remediation", () => {
+    const parsed = parseOperationResponse(
+      op({
+        failure: {
+          message: "GitHub access is missing.",
+          remediation: {
+            id: "github-workflow-scope",
+            params: {}
+          }
+        }
+      }),
+      {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/opt/Copilot Tools/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(parsed?.failure?.remediation?.command).toBe(
+      "'/opt/Copilot Tools/gh' auth refresh -h github.com -s workflow"
+    );
+  });
+
+  it("keeps only string remediation parameters", () => {
+    const parsed = parseOperationResponse(
+      op({
+        failure: {
+          message: "GitHub access is missing.",
+          remediation: {
+            id: "github-account-scopes",
+            params: {
+              login: "octocat",
+              workflow: "true",
+              packages: 1
+            }
+          }
+        }
+      })
+    );
+
+    expect(parsed?.failure?.remediation?.params).toEqual({
+      login: "octocat",
+      workflow: "true"
+    });
+  });
+
   it.each([
     ["null", null],
     ["a string", "running"],
@@ -801,6 +848,87 @@ describe("trackProgress rendering", () => {
     controller?.renderProgress(record({ stages: [], steps: [] }));
     expect(browser.els[PROGRESS_IDS.stages].children).toHaveLength(0);
     expect(browser.els[PROGRESS_IDS.steps].children).toHaveLength(0);
+  });
+
+  it("follows the latest step until the user scrolls up and resumes at the bottom", () => {
+    const browser = setup();
+    const steps = browser.els[PROGRESS_IDS.steps];
+    const details = browser.els[PROGRESS_IDS.details];
+    steps.scrollHeight = 200;
+    steps.clientHeight = 50;
+    const controller = controllerFor(browser);
+
+    controller?.renderProgress(
+      record({ steps: [{ state: "running", label: "Step one" }] })
+    );
+    expect(steps.scrollTop).toBe(200);
+
+    steps.scrollTop = 40;
+    steps.dispatch("scroll");
+    steps.scrollHeight = 240;
+    controller?.renderProgress(
+      record({
+        steps: [
+          { state: "succeeded", label: "Step one" },
+          { state: "running", label: "Step two" }
+        ]
+      })
+    );
+    expect(steps.scrollTop).toBe(40);
+
+    steps.scrollHeight = 260;
+    controller?.renderProgress(
+      record({
+        operationId: "op-2",
+        steps: [{ state: "running", label: "New operation step" }]
+      })
+    );
+    expect(steps.scrollTop).toBe(260);
+
+    steps.scrollTop = 210;
+    steps.dispatch("scroll");
+    steps.scrollHeight = 280;
+    controller?.renderProgress(
+      record({
+        operationId: "op-2",
+        steps: [
+          { state: "succeeded", label: "Step one" },
+          { state: "succeeded", label: "Step two" },
+          { state: "running", label: "Step three" }
+        ]
+      })
+    );
+    expect(steps.scrollTop).toBe(280);
+
+    steps.scrollTop = 0;
+    details.setAttribute("open", "");
+    details.dispatch("toggle");
+    expect(steps.scrollTop).toBe(280);
+
+    controller?.teardown();
+    expect(steps.listenerCount("scroll")).toBe(0);
+    expect(details.listenerCount("toggle")).toBe(0);
+  });
+
+  it("does not scroll when details close or tail following is paused", () => {
+    const browser = setup();
+    const steps = browser.els[PROGRESS_IDS.steps];
+    const details = browser.els[PROGRESS_IDS.details];
+    steps.scrollHeight = 200;
+    steps.clientHeight = 50;
+    const controller = controllerFor(browser);
+
+    steps.scrollTop = 17;
+    details.dispatch("toggle");
+    expect(steps.scrollTop).toBe(17);
+
+    steps.scrollTop = 40;
+    steps.dispatch("scroll");
+    details.setAttribute("open", "");
+    details.dispatch("toggle");
+    expect(steps.scrollTop).toBe(40);
+
+    controller?.teardown();
   });
 
   it("falls back to a default glyph for an unrecognized stage or step state", () => {

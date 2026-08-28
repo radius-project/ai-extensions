@@ -7,6 +7,11 @@ import {
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createAzureDiscoveryRoutes } from "../../../src/server/routes/azure-discovery.js";
+import {
+  azureDiscoveryContract,
+  commandLine,
+  temporaryKubeconfigDouble
+} from "../../support/azure-discovery-contract.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 
@@ -34,8 +39,15 @@ interface AzResult {
 }
 
 const CLI = {
-  aks: "az aks list --query [].{id:name, name:name, resourceGroup:resourceGroup} -o json",
-  groups: "az group list --query [].{id:name, name:name} -o json",
+  aks: commandLine(azureDiscoveryContract().aksList),
+  groups: commandLine(azureDiscoveryContract().groupList),
+  credentials: (cluster: string, rg: string) =>
+    commandLine(
+      azureDiscoveryContract({ cluster, resourceGroup: rg }).getCredentials!
+    ),
+  namespaces: commandLine(
+    azureDiscoveryContract({ cluster: "c", resourceGroup: "rg" }).namespaces!
+  ),
   eks: "aws eks list-clusters --query clusters --output json",
   vpcs: "aws ec2 describe-vpcs --query Vpcs[].{id:VpcId, name:VpcId} --output json",
   subnets:
@@ -79,10 +91,7 @@ function start(): {
         return Promise.resolve(scripted);
       },
       isUuid,
-      createTemporaryKubeconfig: () => ({
-        path: "/tmp/radius-kubeconfig-test",
-        remove: () => {}
-      }),
+      createTemporaryKubeconfig: () => temporaryKubeconfigDouble(),
       parseServedReposFromSubjects: (subjects) =>
         parseServedReposFromSubjects(subjects as Iterable<unknown>)
     })
@@ -224,14 +233,8 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
         { id: "rg-selected", name: "rg-selected" }
       ])
     );
-    cli.set(
-      "az aks get-credentials --name aks-selected --resource-group rg-selected --file /tmp/radius-kubeconfig-test --overwrite-existing",
-      ""
-    );
-    cli.set(
-      "kubectl --kubeconfig /tmp/radius-kubeconfig-test get namespaces -o jsonpath={.items[*].metadata.name}",
-      '"default" "radius-system"'
-    );
+    cli.set(CLI.credentials("aks-selected", "rg-selected"), "");
+    cli.set(CLI.namespaces, '"default" "radius-system"');
     const entry = await container!.getOrCreate("panel-a");
 
     const response = await fetch(`${entry.baseUrl}/api/discover`, {

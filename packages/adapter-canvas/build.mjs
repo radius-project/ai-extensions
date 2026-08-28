@@ -71,7 +71,7 @@ const pluginSources = ["plugin.json", "package.json", "README.md", "skills"];
 // build but not in a plain local one.
 const optionalPluginSources = ["CHANGELOG.md"];
 
-// CI stamps an edge version (e.g. 0.1.0-edge-20260807020902) so a published
+// CI stamps an edge version (e.g. 0.1.0-edge-0b33186) so a published
 // build is distinguishable from a release. A local build leaves the version in
 // the source manifests alone.
 const stampedVersion = process.env.PLUGIN_VERSION?.trim();
@@ -229,6 +229,22 @@ const installPath =
 
 function installToLocal() {
   try {
+    const skillFrom = join(distDir, "skills", "radius-app-bicep");
+    const sourceReferencesFrom = join(
+      distDir,
+      "skills",
+      "radius-app-graph",
+      "references",
+      "source-code-references.md"
+    );
+    for (const requiredAsset of [skillFrom, sourceReferencesFrom]) {
+      if (!existsSync(requiredAsset)) {
+        throw new Error(
+          `Missing required local-install asset: ${requiredAsset}`
+        );
+      }
+    }
+
     const installDir = dirname(installPath);
     mkdirSync(installDir, { recursive: true });
     // Write atomically: copy to a temp file in the same dir, then rename over the
@@ -252,9 +268,10 @@ function installToLocal() {
     // skill, reference, or script added later is installed without touching
     // this list. SKILL.md and its references are the instructions the agent
     // actually follows, so installing only the scripts leaves a dev install
-    // running stale guidance against a fresh bundle. The skill also resolves
-    // <loaded-skill-base> by probing for its scripts, so a file missing here
-    // resolves to a path that does not exist.
+    // running stale guidance against a fresh bundle. The handoff accepts a
+    // skill directory only when SKILL.md, its validation script, and its
+    // cross-skill reference are present, then tries the other supported
+    // locations before reporting that no usable skill exists.
     const skillsFrom = join(distDir, "skills");
     if (existsSync(skillsFrom)) {
       const skillsTo = join(installDir, "skills");
@@ -285,6 +302,7 @@ function installToLocal() {
     console.log(`[canvas] installed → ${installPath}`);
   } catch (e) {
     console.error(`[canvas] install copy failed: ${e?.message || e}`);
+    throw e;
   }
 }
 
@@ -396,10 +414,6 @@ const options = {
   sourcemap: true,
   // The SDK is resolved by the loader at runtime — never bundle it.
   external: ["@github/copilot-sdk", "@github/copilot-sdk/extension"],
-  // Inline the radius-app-bicep skill Markdown (SKILL.md + references) as text
-  // so the extension ships the authoritative skill content even when installed
-  // without the sibling plugins/radius/skills/ tree. See src/skill.ts.
-  loader: { ".md": "text" },
   legalComments: "none",
   logLevel: "info",
   banner: {

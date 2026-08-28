@@ -33,10 +33,15 @@ export interface ArtifactRegistrationSnapshot {
     handlerCallable: boolean;
   }>;
   hooks: Array<{ name: string; callable: boolean }>;
-  bundledSkill: {
-    hasSkill: boolean;
-    hasCustomTypes: boolean;
-    hasSourceReferences: boolean;
+  bootstrap: {
+    fields: string[];
+    skill: string;
+    repoPathMatchesWorkspace: boolean;
+    skillBaseRelativeToArtifact: string;
+    skillVersionMatchesPackage: boolean;
+    instruction: string;
+    requiredFiles: string[];
+    containsLegacyInlinedHeading: boolean;
   };
 }
 

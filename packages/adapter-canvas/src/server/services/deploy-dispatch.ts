@@ -7,6 +7,11 @@ import {
 import type { CanvasState, DeployErrorKind } from "../../shared.js";
 import { buildEnvironmentSuffix } from "@radius-project/core/platforms";
 import { remediationView } from "@radius-project/core/remediations";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
 import {
   needsWorkflowScope,
@@ -44,6 +49,7 @@ export interface DeployCommandOptions {
 }
 
 export interface DeployDispatchDependencies {
+  ghCommandPresentation?: GhCommandPresentation;
   // The workflow that actually runs `rad` commands, injected so the file name
   // stays owned by `server.ts`.
   deployWorkflowFile: string;
@@ -986,11 +992,27 @@ export function createDeployDispatchService(
           );
           return { dispatched: false };
         }
+        const ghCommandPresentation =
+          dependencies.ghCommandPresentation || BARE_GH_COMMAND_PRESENTATION;
+        const refreshCommand = displayGhCommand(ghCommandPresentation, [
+          "auth",
+          "refresh",
+          "-h",
+          "github.com",
+          "-s",
+          "workflow"
+        ]);
+        const installation =
+          ghCommandPresentation.installationNote ?
+            ` ${ghCommandPresentation.installationNote}`
+          : "";
         const scopeHint =
           needsWorkflowScope(de) && dispatchCredentialSource === "injected" ?
             ' The Copilot session token is missing the "workflow" scope and `gh auth refresh` cannot change it. Authenticate a stored GitHub CLI account with the workflow scope, or restart with a session token that includes it, then retry.'
           : needsWorkflowScope(de) ?
-            ' Your stored GitHub CLI credential is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
+            refreshCommand ?
+              ` Your stored GitHub CLI credential is missing the "workflow" scope. Run \`${refreshCommand}\` in a terminal, then retry.${installation}`
+            : ` Your stored GitHub CLI credential is missing the "workflow" scope. ${ghCommandPresentation.installationNote}`
           : " Ensure " +
             deployWorkflowFile +
             ' exists on branch "' +

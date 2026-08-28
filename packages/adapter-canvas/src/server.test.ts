@@ -42,7 +42,6 @@ import {
   resolveCleanupGitHubContext,
   releaseDeploymentMutation,
   reopenProviderReconciliation,
-  resolveAcknowledgedVerificationRun,
   reserveDeploymentMutation,
   resolveDeploymentEnvironment,
   resolveDeployStatus,
@@ -118,64 +117,6 @@ describe("DEPLOY_RAD_COMMANDS_STEP", () => {
 });
 
 describe("verification dispatch recovery", () => {
-  it("adopts an exact marked run after an acknowledged retry dispatch", async () => {
-    const pauses: number[] = [];
-
-    await expect(
-      resolveAcknowledgedVerificationRun({
-        operationMarker: "op_retry",
-        pause: async (milliseconds) => {
-          pauses.push(milliseconds);
-        },
-        discover: async () => ({ state: "applied", value: "4242" }),
-        actionsUrl:
-          "https://github.com/octo/app/actions/workflows/radius-verify.yml"
-      })
-    ).resolves.toEqual({ state: "applied", runId: "4242" });
-    expect(pauses).toEqual([5000]);
-  });
-
-  it("fails closed when an acknowledged retry cannot expose an exact run", async () => {
-    await expect(
-      resolveAcknowledgedVerificationRun({
-        operationMarker: "op_retry",
-        pause: async () => {},
-        discover: async () => {
-          throw new Error("run list unavailable");
-        },
-        actionsUrl:
-          "https://github.com/octo/app/actions/workflows/radius-verify.yml"
-      })
-    ).resolves.toMatchObject({
-      state: "manual_required",
-      guidance: expect.stringContaining(
-        "could not confirm the exact marked run"
-      )
-    });
-  });
-
-  it("does not inspect or adopt runs for an acknowledged legacy retry", async () => {
-    let inspected = false;
-    await expect(
-      resolveAcknowledgedVerificationRun({
-        operationMarker: "",
-        pause: async () => {
-          throw new Error("legacy retries must not wait for adoption");
-        },
-        discover: async () => {
-          inspected = true;
-          return { state: "applied", value: "unrelated" };
-        },
-        actionsUrl:
-          "https://github.com/octo/app/actions/workflows/radius-verify.yml"
-      })
-    ).resolves.toMatchObject({
-      state: "manual_required",
-      guidance: expect.stringContaining("does not expose")
-    });
-    expect(inspected).toBe(false);
-  });
-
   describe("in-process provider reconciliation", () => {
     it("atomically reopens a terminalized unknown outcome for the scheduler", () => {
       const operation = createOperation({ operationId: "op_recovery" });
@@ -271,6 +212,29 @@ describe("preflightGhcrPackageWriteAccess", () => {
     reason: "user-selected-keyring-account",
     accounts: [],
     ...overrides
+  });
+
+  it("uses the bundled GitHub CLI path when package credentials are unavailable", async () => {
+    const result = await preflightGhcrPackageWriteAccess(
+      async () => {
+        throw new Error("No GitHub account is available.");
+      },
+      async () => identity(),
+      undefined,
+      {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/Applications/GitHub Copilot/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected GHCR preflight to fail");
+    expect(result.error).toContain(
+      "'/Applications/GitHub Copilot/gh' auth login -h github.com -s read:packages -s write:packages"
+    );
+    expect(result.error).toContain("Install GitHub CLI system-wide.");
   });
 
   it("fails closed when the package credential username is blank", async () => {

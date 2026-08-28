@@ -158,7 +158,7 @@ The full plan is complete when every requirement in the appendices has a passing
 
 | ID    | Tool                                   | Required contract                                                                                        |
 |-------|----------------------------------------|----------------------------------------------------------------------------------------------------------|
-| TL-02 | `radius_generate_app`                  | Workspace analysis and authoritative bundled skill content, including standalone installs                |
+| TL-02 | `radius_generate_app`                  | Workspace analysis; compact skill handoff; packaged, source-checkout, and repaired-plugin discovery      |
 | TL-05 | `radius_generate_pr_diff_markdown`     | Repository/base/head mapping, fetch failure, Mermaid and summary result/error                            |
 | TL-07 | `radius_publish_custom_type_extension` | Workspace confinement, managed Radius command, defaults, output/error                                    |
 | TL-08 | `radius_publish_recipe`                | Workspace confinement, GHCR target validation, publish output/error                                      |
@@ -301,7 +301,7 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 | RU-04 | Removed action/tool declarations absent; prior shape recorded                                             |
 | RU-05 | Graph-resources not-ready, active/explicit view, missing/all, filtering, context                          |
 | RU-06 | Source-reference missing/stale input, update/queue/skip, page, reload                                     |
-| RU-07 | Generate-app workspace analysis and bundled skill, including standalone fallback                          |
+| RU-07 | Generate-app workspace analysis; compact handoff; candidate order, required assets, and failure           |
 | RU-08 | PR-diff repository/base/head mapping, fetch failure, Markdown result                                      |
 | RU-09 | Custom-type publish confinement, defaults, invocation, errors                                             |
 | RU-10 | Recipe publish confinement, GHCR validation, errors                                                       |
