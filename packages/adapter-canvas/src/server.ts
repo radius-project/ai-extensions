@@ -147,6 +147,7 @@ import {
   recordCreatedFederatedCredential,
   recordCreatedRoleAssignment,
   recordGitHubEnvironment,
+  recordGitHubEnvironmentVariable,
   promoteCreatedGitHubEnvironment,
   recordCommitState,
   recordCommittedWorkflowFile,
@@ -175,6 +176,7 @@ import {
   providerRecoveryManualGuidance,
   settleProviderMutation,
   unresolvedProviderMutations,
+  githubEnvironmentVariableRollbackTargets,
   workflowRollbackCommitState,
   workflowRollbackTargets,
   INPUT_REQUIRED_STATE,
@@ -261,6 +263,10 @@ import {
   createSelectedWorkflowRollbackCommand
 } from "./server/services/workflow-rollback-ports.js";
 import type { WorkflowRollbackCommand } from "./server/services/workflow-rollback-ports.js";
+import {
+  rollbackGitHubEnvironmentVariables,
+  type GitHubVariableCommand
+} from "./server/services/github-environment-variable-rollback.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createTemporaryKubeconfig } from "./server/temporary-kubeconfig.js";
@@ -1420,6 +1426,9 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   },
   recordGitHubEnvironment: (operation, patch) => {
     recordGitHubEnvironment(operation, patch);
+  },
+  recordGitHubEnvironmentVariable: (operation, entry) => {
+    recordGitHubEnvironmentVariable(operation, entry);
   },
   promoteCreatedGitHubEnvironment: (operation, identity) =>
     promoteCreatedGitHubEnvironment(operation, identity),
@@ -2878,6 +2887,7 @@ export async function resolveCleanupGitHubContext({
   const needsGitHub = targets.some(
     (entry) =>
       entry.artifactType === "workflow_file" ||
+      entry.artifactType === "github_environment_variable" ||
       entry.artifactType === "github_environment"
   );
   let executor: SelectedGhExecutor | null = null;
@@ -3884,6 +3894,59 @@ function sanitizeFailureExtra(extra: Record<string, unknown> = {}) {
   return safe;
 }
 
+export async function rollbackGitHubEnvironmentVariableArtifacts(
+  op: any,
+  {
+    attempt,
+    run,
+    persist,
+    only,
+    steps
+  }: {
+    attempt: number;
+    run: GitHubVariableCommand;
+    persist(): Promise<void>;
+    only?: Set<string> | null;
+    steps?: string[];
+  }
+): Promise<{
+  results: SetupCleanupResult[];
+  warnings: string[];
+  blocked: boolean;
+  attempted: boolean;
+}> {
+  const variables = githubEnvironmentVariableRollbackTargets(op, only ?? null);
+  if (variables.length === 0) {
+    return { results: [], warnings: [], blocked: false, attempted: false };
+  }
+  const outcome = await rollbackGitHubEnvironmentVariables({
+    attempt,
+    operation: op,
+    persist,
+    variables,
+    run
+  });
+  for (const entry of outcome.results) {
+    if (
+      entry.outcome === "deleted" ||
+      entry.outcome === "restored" ||
+      entry.outcome === "not_found"
+    ) {
+      recordCleanupDeletion(op, {
+        artifactType: "github_environment_variable",
+        identity: entry.identity ?? undefined
+      });
+    }
+  }
+  steps?.push(...outcome.steps);
+  return {
+    results: outcome.results,
+    warnings: outcome.warnings,
+    blocked: outcome.blocked,
+    attempted: true
+  };
+}
+
 /**
  * Remove the GitHub environment this attempt created, or explain why it stays.
  *
@@ -4209,6 +4272,7 @@ export async function finalizeSetupFailure(
     extra = {},
     steps,
     runAz,
+    runGitHubVariable,
     runDeleteEnvironment,
     readEnvironment
   }: {
@@ -4222,6 +4286,7 @@ export async function finalizeSetupFailure(
     extra?: Record<string, unknown>;
     steps?: string[];
     runAz?: ((args: string[]) => Promise<Partial<CommandResult>>) | null;
+    runGitHubVariable?: GitHubVariableCommand | null;
     runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
     readEnvironment?: ((args: string[]) => Promise<CommandResult>) | null;
   }
@@ -4284,7 +4349,29 @@ export async function finalizeSetupFailure(
       let cleanupState: "not_needed" | "succeeded" | "succeeded_with_warnings" =
         "not_needed";
 
-      if (runAz) {
+      const variableCleanup = await rollbackGitHubEnvironmentVariableArtifacts(
+        op,
+        {
+          attempt,
+          run:
+            runGitHubVariable ??
+            (async () => ({
+              code: 1,
+              stdout: "",
+              stderr: "The selected GitHub account is unavailable."
+            })),
+          persist: () => operations.persist(),
+          steps
+        }
+      );
+      warnings.push(...variableCleanup.warnings);
+      results = [...results, ...variableCleanup.results];
+      if (variableCleanup.results.length > 0) {
+        cleanupState =
+          variableCleanup.blocked ? "succeeded_with_warnings" : "succeeded";
+      }
+
+      if (!variableCleanup.blocked && runAz) {
         const azureCleanup = await cleanupAzureSetupArtifacts(op, {
           runAz,
           steps,
@@ -4292,30 +4379,37 @@ export async function finalizeSetupFailure(
         });
         warnings.push(...azureCleanup.warnings);
         results = [...results, ...azureCleanup.results];
-        cleanupState = azureCleanup.state;
-      } else {
+        if (
+          azureCleanup.state === "succeeded_with_warnings" ||
+          (cleanupState === "not_needed" && azureCleanup.state === "succeeded")
+        ) {
+          cleanupState = azureCleanup.state;
+        }
+      } else if (!variableCleanup.blocked) {
         recordCleanupState(op, { attempts: attempt, state: "not_needed" });
       }
 
-      const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
-        attempt,
-        runDeleteEnvironment,
-        readEnvironment,
-        persistJournal: () => operations.persist(),
-        invalidateEnvironmentListing: (repo) => {
-          envListCache.invalidate(repo);
-        },
-        steps
-      });
-      warnings.push(...environmentCleanup.warnings);
-      results = [...results, ...environmentCleanup.results];
-      if (environmentCleanup.warnings.length > 0) {
-        cleanupState = "succeeded_with_warnings";
-      } else if (
-        environmentCleanup.results.length > 0 &&
-        cleanupState === "not_needed"
-      ) {
-        cleanupState = "succeeded";
+      if (!variableCleanup.blocked) {
+        const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
+          attempt,
+          runDeleteEnvironment,
+          readEnvironment,
+          persistJournal: () => operations.persist(),
+          invalidateEnvironmentListing: (repo) => {
+            envListCache.invalidate(repo);
+          },
+          steps
+        });
+        warnings.push(...environmentCleanup.warnings);
+        results = [...results, ...environmentCleanup.results];
+        if (environmentCleanup.warnings.length > 0) {
+          cleanupState = "succeeded_with_warnings";
+        } else if (
+          environmentCleanup.results.length > 0 &&
+          cleanupState === "not_needed"
+        ) {
+          cleanupState = "succeeded";
+        }
       }
 
       // Same reason as the rollback runner: this record is about to be terminal,
@@ -5588,6 +5682,56 @@ function createInstanceRequestCoordinator(
       }
     }
 
+    const variablePass = await rollbackGitHubEnvironmentVariableArtifacts(op, {
+      attempt,
+      run: async (args) => {
+        const result = await cleanupGitHub.rollbackCommand({ args });
+        return {
+          code: result.ok ? 0 : 1,
+          stdout: result.stdout,
+          stderr: result.stderr
+        };
+      },
+      persist,
+      only: new Set<string>(
+        selected
+          .filter(
+            (entry: { artifactType: string }) =>
+              entry.artifactType === "github_environment_variable"
+          )
+          .map((entry: { key: string }) => entry.key)
+      ),
+      steps
+    });
+    if (variablePass.attempted) {
+      warnings.push(...variablePass.warnings);
+      results = [...results, ...variablePass.results];
+      recordCleanupState(op, { state: "running", results: carriedResults() });
+      await persist();
+      if (variablePass.blocked) {
+        for (const step of steps) addLegacyStep(op, step);
+        recordCleanupState(op, {
+          attempts: attempt,
+          state: "succeeded_with_warnings",
+          results: carriedResults()
+        });
+        setCommandState(op, commandId, "finished", "blocked");
+        finish(op, "failed_partial", {
+          failure: {
+            code: "setup-variable-rollback-blocked",
+            stage: op.currentStage,
+            stepSeq: null,
+            message:
+              "Radius could not safely restore every GitHub environment variable, so it left the environment and credentials in place.",
+            classification: "user-fixable",
+            evidence: null
+          }
+        });
+        await persist();
+        return;
+      }
+    }
+
     // A GitHub environment can be one of the selected targets, and skipping it
     // here would report a clean removal while the environment survived.
     if (
@@ -5625,7 +5769,8 @@ function createInstanceRequestCoordinator(
         selected
           .filter(
             (entry: { artifactType: string }) =>
-              entry.artifactType !== "github_environment"
+              entry.artifactType !== "github_environment" &&
+              entry.artifactType !== "github_environment_variable"
           )
           .map((entry: { key: string }) => entry.key)
       ),
