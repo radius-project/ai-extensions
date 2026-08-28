@@ -68,6 +68,7 @@ const STAGING_RUN_RECORD = "run.json";
 // Writing it here rather than into `.radius/.gitignore` at `--begin` is what
 // keeps the byte-identical guarantee intact: it lives INSIDE the directory the
 // failure paths already delete, so no failure path has to remember to undo it.
+const STAGING_SELF_IGNORE_FILE = ".gitignore";
 const STAGING_SELF_IGNORE = "*\n";
 const REQUIRED_STAGED_FILES = [
   "app.bicep",
@@ -409,7 +410,7 @@ function begin() {
   // Written before anything else the run produces, so there is no window in
   // which the directory holds model files git can see.
   writeFileSync(
-    path.join(stagingDir, ".gitignore"),
+    path.join(stagingDir, STAGING_SELF_IGNORE_FILE),
     STAGING_SELF_IGNORE,
     "utf8"
   );

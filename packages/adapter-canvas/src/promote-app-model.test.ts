@@ -14,6 +14,8 @@ import {
   STAGING_DIR_PREFIX,
   STAGING_IGNORE_PATTERN,
   STAGING_RUN_RECORD,
+  STAGING_SELF_IGNORE,
+  STAGING_SELF_IGNORE_FILE,
   evaluateStagedRun,
   publishableFiles
 } from "@radius-project/core/modeling";
@@ -187,9 +189,9 @@ describe("--begin", () => {
   it("gives the staging directory an ignore file that excludes everything", () => {
     const target = repo();
     const stagingDir = begin(target);
-    expect(fs.readFileSync(path.join(stagingDir, ".gitignore"), "utf8")).toBe(
-      "*\n"
-    );
+    expect(
+      fs.readFileSync(path.join(stagingDir, STAGING_SELF_IGNORE_FILE), "utf8")
+    ).toBe(STAGING_SELF_IGNORE);
   });
 
   it("leaves git with nothing to report for a run in flight", () => {
