@@ -268,9 +268,10 @@ function installToLocal() {
     // skill, reference, or script added later is installed without touching
     // this list. SKILL.md and its references are the instructions the agent
     // actually follows, so installing only the scripts leaves a dev install
-    // running stale guidance against a fresh bundle. The skill also resolves
-    // <loaded-skill-base> by probing for its scripts, so a file missing here
-    // resolves to a path that does not exist.
+    // running stale guidance against a fresh bundle. The handoff accepts a
+    // skill directory only when SKILL.md, its validation script, and its
+    // cross-skill reference are present, then tries the other supported
+    // locations before reporting that no usable skill exists.
     const skillsFrom = join(distDir, "skills");
     if (existsSync(skillsFrom)) {
       const skillsTo = join(installDir, "skills");

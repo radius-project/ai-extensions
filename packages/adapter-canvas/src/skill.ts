@@ -1,15 +1,27 @@
 // Compact bootstrap for the radius-app-bicep skill packaged beside the Canvas.
 
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveGeneratorVersion } from "./generator-version.js";
 
+const REQUIRED_SKILL_FILES = [
+  "SKILL.md",
+  path.join("scripts", "validate-bicep.mjs"),
+  path.join(
+    "..",
+    "radius-app-graph",
+    "references",
+    "source-code-references.md",
+  ),
+];
 const SKILL_INSTRUCTION =
   "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.";
 
 export interface RadiusAppBicepSkillDependencies {
   moduleDir: string;
+  homeDir: string;
   pathExists(filePath: string): boolean;
   generatorVersion(): string;
 }
@@ -35,20 +47,49 @@ function sanitizeRepoPath(repoPath: unknown): string {
   return cleaned || FALLBACK;
 }
 
+function skillBaseCandidates(
+  moduleDir: string,
+  homeDir: string,
+): readonly string[] {
+  return [
+    path.join(moduleDir, "skills", "radius-app-bicep"),
+    path.resolve(moduleDir, "../../../plugins/radius/skills/radius-app-bicep"),
+    path.join(
+      homeDir,
+      ".copilot",
+      "installed-plugins",
+      "radius-plugins",
+      "radius",
+      "skills",
+      "radius-app-bicep",
+    ),
+  ];
+}
+
 export function createRadiusAppBicepSkill(
-  dependencies: RadiusAppBicepSkillDependencies
+  dependencies: RadiusAppBicepSkillDependencies,
 ): (repoPath?: string, brief?: string) => string {
-  const skillBase = path.join(
+  const candidates = skillBaseCandidates(
     dependencies.moduleDir,
-    "skills",
-    "radius-app-bicep"
+    dependencies.homeDir,
   );
-  const skillEntry = path.join(skillBase, "SKILL.md");
 
   return (repoPath?: string, brief?: string): string => {
-    if (!dependencies.pathExists(skillEntry)) {
+    const skillBase = candidates.find((candidate) =>
+      REQUIRED_SKILL_FILES.every((requiredFile) =>
+        dependencies.pathExists(path.join(candidate, requiredFile)),
+      ),
+    );
+    if (!skillBase) {
       throw new Error(
-        `The packaged radius-app-bicep skill is missing ${skillEntry}. Reinstall or rebuild the Radius extension.`
+        [
+          "Unable to locate a usable radius-app-bicep skill.",
+          "Checked candidates:",
+          ...candidates.map((candidate) => `- ${candidate}`),
+          "Each candidate must include:",
+          ...REQUIRED_SKILL_FILES.map((requiredFile) => `- ${requiredFile}`),
+          "Repair the Radius plugin installation or run the extension from its source checkout.",
+        ].join("\n"),
       );
     }
 
@@ -59,7 +100,7 @@ export function createRadiusAppBicepSkill(
       skillBase,
       ...(skillVersion ? { skillVersion } : {}),
       instruction: SKILL_INSTRUCTION,
-      ...(brief ? { brief } : {})
+      ...(brief ? { brief } : {}),
     };
     return JSON.stringify(handoff);
   };
@@ -67,8 +108,11 @@ export function createRadiusAppBicepSkill(
 
 const defaultRadiusAppBicepSkill = createRadiusAppBicepSkill({
   moduleDir: path.dirname(fileURLToPath(import.meta.url)),
+  homeDir: homedir(),
   pathExists: existsSync,
-  generatorVersion: resolveGeneratorVersion
+  generatorVersion: resolveGeneratorVersion,
 });
 
-export const radiusAppBicepSkill = defaultRadiusAppBicepSkill;
+export function radiusAppBicepSkill(repoPath?: string, brief?: string): string {
+  return defaultRadiusAppBicepSkill(repoPath, brief);
+}
