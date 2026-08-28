@@ -134,6 +134,7 @@ ${GRAPH_DIFF_SUBTITLE}
     }</div>
 <div id="diff-progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>
 <div id="graph-container"></div>
+<div id="graph-diff-summary">
 <div style="margin-top:12px; font-size:13px;">
   <strong>Changes:</strong>
   <span style="color:var(--rad-success)">+${added} added</span>,
@@ -148,6 +149,7 @@ ${
     )}</strong> and <strong>${escapeHtml(headBranch)}</strong>.</div>`
   : ""
 }
+</div>
 
 <div hidden id="radius-graph-diff-state">${escapeHtml(
       inlineJson({

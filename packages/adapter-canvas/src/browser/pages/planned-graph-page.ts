@@ -17,6 +17,10 @@ import type { GraphProgressView } from "../graph/progress.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
+import {
+  showGraphModelingFailure,
+  unsupportedGraphModelMessage
+} from "./graph-modeling-failure.js";
 
 const ENTRY_KEY = "planned-graph-page";
 export const PLANNED_GRAPH_STATE_ID = "radius-planned-graph-state";
@@ -81,6 +85,7 @@ export function initializePlannedGraphPage(
     globalScope,
     "radiusSetGraphLoading"
   );
+  const setError = requireBrowserFunction(globalScope, "radiusSetGraphError");
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
   const app = context.dom.selectById("planned-app");
@@ -109,12 +114,10 @@ export function initializePlannedGraphPage(
     controller = null;
     const wrapper = context.dom.byId("graph-container-wrapper");
     if (wrapper) wrapper.innerHTML = '<div id="graph-container"></div>';
-    requireBrowserFunction(globalScope, "radiusSetGraphError")(
-      "graph-container",
-      message
-    );
-    const statusElement = context.dom.byId("plan-status");
-    if (statusElement) statusElement.style.display = "none";
+    showGraphModelingFailure(context, setError, message, {
+      containerId: "graph-container",
+      statusIds: ["plan-status"]
+    });
     if (button) {
       button.disabled = true;
       button.setAttribute(
@@ -276,6 +279,11 @@ export function initializePlannedGraphPage(
           return;
         }
         plan.requestFailed = true;
+        const unsupported = unsupportedGraphModelMessage(payload);
+        if (unsupported) {
+          showModelingFailure(unsupported);
+          return;
+        }
         if (readBoolean(payload, "needsAppBicep")) {
           nextRequestRefresh = refresh;
           status(

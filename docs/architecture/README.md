@@ -1,6 +1,6 @@
 # Architecture documentation
 
-This folder holds **living architecture documentation**: explanations of how the Radius AI Extension actually works today. These docs are descriptive reference material derived from the current codebase, not proposals for future work.
+This folder holds **living architecture documentation**: explanations of how Radius Canvas actually works today. These docs are descriptive reference material derived from the current codebase, not proposals for future work.
 
 ## Architecture docs vs. design docs
 

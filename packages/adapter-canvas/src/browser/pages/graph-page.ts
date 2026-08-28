@@ -23,6 +23,10 @@ import type { GraphResource } from "../graph/model.js";
 import type { GraphController } from "../graph/surface.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import { readPageState } from "./state.js";
+import {
+  showGraphModelingFailure,
+  unsupportedGraphModelMessage
+} from "./graph-modeling-failure.js";
 
 const ENTRY_KEY = "graph-page";
 export const GRAPH_PAGE_STATE_ID = "radius-graph-page-state";
@@ -71,16 +75,6 @@ function showStatus(
   status.textContent = message;
 }
 
-// The status strip sits directly above the graph surface, so a failure written
-// to both renders as two identical error boxes. Clearing the strip leaves the
-// surface itself as the single place a failure is reported.
-function hideStatus(context: BrowserContext): void {
-  const status = statusElement(context);
-  if (!status) return;
-  status.style.display = "none";
-  status.textContent = "";
-}
-
 export function initializeGraphPage(
   context: BrowserContext,
   globalScope: unknown
@@ -98,8 +92,11 @@ export function initializeGraphPage(
   // Report a failure once, on the graph surface. The surface owns the content
   // area, so writing there also clears whatever loading state was showing.
   const showFailure = (message: string): void => {
-    setError("graph-container", message);
-    hideStatus(context);
+    showGraphModelingFailure(context, setError, message, {
+      containerId: "graph-container",
+      statusIds: ["graph-status", "graph-refresh-status"],
+      staleContentIds: ["graph-guidance"]
+    });
   };
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
@@ -235,12 +232,18 @@ export function initializeGraphPage(
       payload.fromWorkspace
     : page.localSource;
 
+  const showGuidance = (): void => {
+    const guidance = context.dom.byId("graph-guidance");
+    if (guidance) guidance.style.display = "";
+  };
+
   const showLoadedGraph = (): void => {
     const wrapper = context.dom.byId("graph-container-wrapper");
     if (wrapper) {
       const container = context.dom.createElement("div");
       container.id = "graph-container";
       const hint = context.dom.createElement("div");
+      hint.id = "graph-guidance";
       hint.setAttribute(
         "style",
         "margin-top:8px; font-size:12px; color:var(--rad-text-tertiary);"
@@ -248,6 +251,7 @@ export function initializeGraphPage(
       hint.textContent = "Click a node to view source code links.";
       wrapper.replaceChildren(container, hint);
     }
+    showGuidance();
     const status =
       context.dom.byId("graph-status") ??
       context.dom.byId("graph-refresh-status");
@@ -379,13 +383,14 @@ export function initializeGraphPage(
           return;
         }
         const error = readString(payload, "error");
+        const unsupported = unsupportedGraphModelMessage(payload);
         stopProgress();
-        if (error) {
-          if (readBoolean(payload, "modelingFailed")) {
+        if (error || unsupported) {
+          if (readBoolean(payload, "modelingFailed") || unsupported !== null) {
             modelState = "failed";
             syncPrimaryButton();
           }
-          showFailure(error);
+          showFailure(unsupported || error);
         } else {
           showFailure(
             "The application graph response did not include any resources."
@@ -465,6 +470,17 @@ export function initializeGraphPage(
               ...graphOptions,
               localSource: sourceProvenance(payload)
             });
+            showGuidance();
+            return;
+          }
+          const unsupported = unsupportedGraphModelMessage(payload);
+          if (unsupported) {
+            modelState = "failed";
+            syncPrimaryButton();
+            stopProgress();
+            showFailure(
+              `Unable to refresh the application graph: ${unsupported}`
+            );
           } else if (readBoolean(payload, "needsAppBicep")) {
             // A preloaded graph refresh can discover that the model disappeared
             // just like the initial load can. The server owns how long that wait
