@@ -16,25 +16,28 @@ This note builds on [Progress UX for credential and environment creation](./2026
 
 ## Terms and definitions
 
-| Term                       | Definition                                                                                                                                          |
-|----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Operation**              | One durable attempt to create and verify a Radius environment for a repository.                                                                     |
-| **Command**                | A persisted user decision such as Stop, Continue, Retry, Rollback, or Exit.                                                                         |
-| **Safe boundary**          | A point before or after an external mutation where Radius may stop without interrupting that mutation or losing its provenance.                     |
-| **Artifact ledger**        | The server-only record of Azure, GitHub, and workflow artifacts created, reused, removed, or left ambiguous by the operation.                       |
-| **Proven-owned**           | An artifact whose saved identity and origin prove that the current operation created it and may delete it.                                          |
-| **Created candidate**      | An artifact that appeared during the operation but whose API semantics or failed create response do not prove ownership. Radius leaves it in place. |
-| **Completion boundary**    | Successful credential verification. Before it, setup controls apply. After it, Delete Environment applies.                                          |
-| **Attempt**                | A numbered setup, verification, or cleanup pass within the same operation.                                                                          |
-| **Command identity**       | The deterministic key for one accepted user command, derived from the operation, command kind, attempt, and logical target.                         |
-| **Mutation journal**       | A durable record written before an external provider request and settled only after an acknowledged result or exact provider-state reconciliation.  |
-| **Pinned GitHub executor** | A GitHub command runner bound to the account and credential selected for the operation.                                                             |
-| **Terminal latching**      | The rule that the first terminal outcome remains authoritative and later errors cannot replace it.                                                  |
-| **Action projection**      | The server-built list of controls, guidance, previews, and next transitions that the browser renders.                                               |
+| Term                          | Definition                                                                                                                                           |
+|-------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Operation**                 | One durable attempt to create and verify a Radius environment for a repository.                                                                      |
+| **Command**                   | A persisted user decision such as Stop, Continue, Retry, Rollback, or Exit.                                                                          |
+| **Safe boundary**             | A point before or after an external mutation where Radius may stop without interrupting that mutation or losing its provenance.                      |
+| **Artifact ledger**           | The server-only record of Azure, GitHub, and workflow artifacts created, reused, removed, or left ambiguous by the operation.                        |
+| **Proven-owned**              | An artifact whose saved identity and origin prove that the current operation created it and may delete it.                                           |
+| **Created candidate**         | An artifact that appeared during the operation but whose API semantics or failed create response do not prove ownership. Radius leaves it in place.  |
+| **Completion boundary**       | Successful credential verification. Before it, setup controls apply. After it, Delete Environment applies.                                           |
+| **Attempt**                   | A numbered setup, verification, or cleanup pass within the same operation.                                                                           |
+| **Command identity**          | The deterministic key for one accepted user command, derived from the operation, command kind, attempt, and logical target.                          |
+| **Mutation journal**          | A durable record written before an external provider request and settled only after an acknowledged result or exact provider-state reconciliation.   |
+| **Pinned GitHub executor**    | A GitHub command runner bound to the account and credential selected for the operation.                                                              |
+| **Provider restart decision** | A durable pause after the Radius provider restarts, requiring the user to continue or stop before setup resumes.                                     |
+| **Exact workflow run**        | The GitHub Actions run identified by the immutable run ID and URL returned by dispatch or recovered from operation-specific evidence.                |
+| **Diagnostic export**         | A local, allowlisted JSON summary of operation state and counts that excludes resource identities, inputs, labels, targets, URLs, logs, and secrets. |
+| **Terminal latching**         | The rule that the first terminal outcome remains authoritative and later errors cannot replace it.                                                   |
+| **Action projection**         | The server-built list of controls, guidance, previews, and next transitions that the browser renders.                                                |
 
 ## Objectives
 
-> **Issue Reference:** [#306: Environment Creation Hardening: Add cancellation, resume, and retry controls](https://github.com/radius-project/ai-extensions/issues/306). Native stack 517 ordered the replacement implementation as [PR #508](https://github.com/radius-project/ai-extensions/pull/508), [PR #511](https://github.com/radius-project/ai-extensions/pull/511), [PR #515](https://github.com/radius-project/ai-extensions/pull/515), and [PR #516](https://github.com/radius-project/ai-extensions/pull/516). All four implementation pull requests are merged.
+> **Issue Reference:** [#306: Environment Creation Hardening: Add cancellation, resume, and retry controls](https://github.com/radius-project/ai-extensions/issues/306). Native stack 517 ordered the merged implementation as [PR #508](https://github.com/radius-project/ai-extensions/pull/508), [PR #511](https://github.com/radius-project/ai-extensions/pull/511), [PR #515](https://github.com/radius-project/ai-extensions/pull/515), and [PR #516](https://github.com/radius-project/ai-extensions/pull/516). Follow-on work is in [PR #544](https://github.com/radius-project/ai-extensions/pull/544) for integration boundaries, [PR #580](https://github.com/radius-project/ai-extensions/pull/580) for diagnostics and readiness evidence, [PR #599](https://github.com/radius-project/ai-extensions/pull/599) for restart decisions and workflow cancellation, and [PR #600](https://github.com/radius-project/ai-extensions/pull/600) for verification dispatch identity. These follow-on pull requests are still in review.
 
 ### Goals
 
@@ -52,20 +55,24 @@ This note builds on [Progress UX for credential and environment creation](./2026
 12. Make duplicate clicks converge on saved command identities, and make lost provider responses converge through durable mutation journals and exact reconciliation rather than blind replay.
 13. Keep deployment user-initiated after environment creation and verification.
 14. Present progress and recovery controls in an accessible inline panel that survives navigation and reload.
+15. Validate external response shapes, retry only bounded transient failures, and reject generated workflows that violate the expected trigger and composition contract.
+16. Pause after a provider restart so the user explicitly chooses whether to continue setup or stop it.
+17. Track the exact verification run and block destructive cleanup while that run is active or its status is unknown.
+18. Let the user download a local allowlisted diagnostic summary without exposing resource identities, request values, logs, or secrets.
 
 The design succeeds when a user can stop at any safe point, return after a reload or extension restart, choose a valid forward or cleanup path, and reach a terminal result without waiting for stale-record expiry. It also succeeds when Radius refuses destructive work whenever identity, ownership, repository access, workflow provenance, or provider mutation outcome is uncertain. This durability guarantee currently depends on a writable operation store; [issue #506](https://github.com/radius-project/ai-extensions/issues/506) tracks the unresolved no-op store fallback.
 
 ### Non-goals
 
 - **Killing an external command midway.** Stop is cooperative. Radius finishes the active mutation and stops before the next one.
-- **The complete external-integration fault matrix from issue #307.** This design handles the failures required by the control paths but does not classify every GitHub, Azure, GHCR, network, or host fault.
-- **Release-readiness work from issue #308.** Packaging, qualification, and release policy remain separate.
+- **Production-readiness approval from issue #308.** PR #580 adds the repository-owned diagnostic, support, and evidence surfaces, but it deliberately leaves live, human, and release gates blocked or not run.
 - **Automatic application deployment.** Create Environment controls never dispatch a deployment.
 - **Deleting an established environment.** A verified environment follows the existing Delete Environment flow, which starts from current state rather than creation provenance.
 - **Deleting reused or ambiguous resources.** Radius preserves them and explains why.
 - **A general workflow engine for every Radius operation.** This design establishes patterns that later operations may reuse, but it changes only Create Environment.
 - **New providers or cloud resource types.** The control model remains provider-neutral, but this work does not add a provider.
 - **Percentage-complete estimates.** Create Environment has conditional stages and no fixed denominator.
+- **AWS environment creation.** Boundary validation remains provider-aware, but the implemented Create Environment path and diagnostic provider vocabulary are Azure-only.
 
 ### User scenarios
 
@@ -83,7 +90,7 @@ Radius commits workflows to a setup branch and asks the developer to merge a pul
 
 #### User story 4: Roll back partial setup
 
-Setup fails after Radius creates Azure identity resources and a GitHub environment. The developer reviews the rollback preview and confirms. Radius removes workflow changes first when they exist, then deletes the GitHub environment, role assignments, federated credentials, Service Principal, and App Registration in reverse dependency order. Reused resources remain.
+Setup fails after Radius creates Azure identity resources, a GitHub environment, and environment variables. The developer reviews the rollback preview and confirms. Radius removes workflow changes first when they exist, restores or deletes unchanged environment variables, then deletes the GitHub environment, role assignments, federated credentials, Service Principal, and App Registration in reverse dependency order. Reused resources and user-modified variables remain.
 
 #### User story 5: Leave an incomplete setup
 
@@ -92,6 +99,14 @@ The developer no longer wants to finish the environment. **Exit setup** appears 
 #### User story 6: Recover from reload, restart, or duplicate input
 
 The developer reloads the Canvas, the extension restarts, or a command response is lost. The browser reloads the same operation. The registry restores persisted state, reopens unresolved provider or cleanup journals for reconciliation, keeps proven cleanup results, and terminalizes only after it can state what happened or hand the ambiguity to the user. A repeated command resolves to the saved command rather than scheduling a second mutation.
+
+#### User story 7: Choose what happens after a provider restart
+
+The Radius provider restarts while Create Environment or verification is unfinished. The restored operation becomes `action_required` with reason `provider-restart-decision` rather than silently resuming. **Continue setup** resumes from the saved owner and monitors the exact saved verification run without dispatching another one. **Stop setup** closes the Radius attempt, then reads that exact run through the saved GitHub account. If it is active, the panel offers **Cancel workflow**; Rollback and Exit remain unavailable until the run is proved inactive.
+
+#### User story 8: Download safe diagnostics
+
+The user or support engineer expands **Show details** and downloads `radius-environment-operation-diagnostics.json`. The server builds the file from closed allowlists and aggregate counts rather than serializing the operation record. The file names lifecycle state, stages, attempt counts, command counts, cleanup outcomes, recovery status, timing, and whether verification was dispatched, while excluding repository and environment names, provider identities, persisted inputs, resource labels and targets, URLs, commands, raw evidence, logs, and secrets. The browser downloads the file locally and does not upload or retain another copy.
 
 ## User experience
 
@@ -151,6 +166,7 @@ Roll back this environment setup?
 
 Radius will remove
 - Workflow file: .github/workflows/radius-verify-credentials.yml on main
+- Environment variable: contoso/store:dev variable RADIUS_STATE_REGISTRY
 - GitHub environment: contoso/store:dev
 - Role assignment: Contributor @ /subscriptions/.../resourceGroups/rg-prod
 - Federated credential: radius-dev @ repo:contoso/store:environment:dev
@@ -170,9 +186,9 @@ The server supplies every action and preview. The browser submits the projected 
 
 ### High-level design
 
-The durable operation record is the source of truth for setup progress and control. It stores lifecycle state, attempts, the latest 20 commands, input prompts, verification identity, provider-mutation journals, resource provenance, cleanup results, and bounded terminal history. The registry treats a non-terminal record as active admission and also retains admission for a terminal record that can still execute cleanup against a proven-owned artifact.
+The durable operation record is the source of truth for setup progress and control. It stores lifecycle state, attempts, the latest 20 commands, input prompts, verification and external-work state, provider-mutation journals, resource provenance, cleanup results, and bounded terminal history. The registry treats a non-terminal record as active admission and also retains admission for a terminal record that can still execute cleanup against a proven-owned artifact.
 
-A control route loads the record, checks eligibility, records a deterministic command, changes the operation state, persists the record, and then schedules an instance-owned executor. The executor performs one setup, verification, reconciliation, or cleanup pass. Before each external mutation it persists a journal entry containing the operation-scoped mutation identity, logical target, intended provider state, and provider idempotency key when supported. It settles the entry only after an acknowledged result or exact provider-state reconciliation. The browser polls the record and renders the server's action projection.
+A control route loads the record, checks eligibility, records a deterministic command, changes the operation state, persists the record, and then schedules an instance-owned executor. The executor performs one setup, verification, reconciliation, or cleanup pass. Before each external mutation it persists a journal entry containing the operation-scoped mutation identity, logical target, intended provider state, and provider idempotency key when supported. The integration adapter validates current provider identity immediately before the request and records artifact provenance in the same durable settle that confirms success. It settles uncertain responses only after exact provider-state reconciliation. The browser polls the record and renders the server's action projection.
 
 Rollback reads the artifact ledger and selects only proven-owned artifacts. Workflow rollback gates all later deletion. The GitHub rollback runner uses the account saved on the operation, proves repository access, verifies workflow blobs and content, and rechecks access after a 404 before it treats an artifact as absent. Each provider deletion verifies the current immutable identity, journals one delete, and reconciles an uncertain response without replaying the delete. Azure cleanup runs only after the workflow gate passes.
 
@@ -193,9 +209,10 @@ flowchart TD
     Commands --> Store["Operation store"]
     Store --> Scheduler["Instance-owned scheduler"]
     Scheduler --> Setup["Setup executor"]
-    Scheduler --> Verify["Verification executor"]
+    Scheduler --> Verify["Verification and restart recovery"]
     Scheduler --> Cleanup["Cleanup executor"]
-    Setup --> Ledger["Artifact ledger"]
+    Setup --> Boundaries["Validated Azure, GitHub, GHCR, workflow boundaries"]
+    Boundaries --> Ledger["Artifact ledger"]
     Verify --> Ledger
     Cleanup --> WorkflowGate["Workflow provenance and rollback"]
     WorkflowGate -->|"safe"| GitHubCleanup["Pinned GitHub cleanup"]
@@ -204,6 +221,7 @@ flowchart TD
     AzureCleanup --> Ledger
     Ledger --> Projection["Browser-safe action and status projection"]
     Projection --> Browser
+    Projection --> Diagnostics["Local allowlisted diagnostic download"]
 ```
 
 ### Detailed design
@@ -252,19 +270,19 @@ This option costs more code because it models the real states instead of hiding 
 
 #### Operation record and schema
 
-[`packages/adapter-canvas/src/operations.ts`](../../packages/adapter-canvas/src/operations.ts) owns the schema. Schema version 5 stores:
+[`packages/adapter-canvas/src/operations.ts`](../../packages/adapter-canvas/src/operations.ts) owns the schema. Merged `main` uses schema version 5. PR #544 advances the target schema to version 6 and still reads versions 1 through 5. The target schema stores:
 
 - Setup, verification, and cleanup attempt counters.
 - Stop request and honored boundary.
 - The latest 20 commands with accepted, running, and finished states.
 - Input-required prompt and safe resume request.
-- Verification workflow, ref, environment, event, operation marker, baseline run ID, exact run ID, run URL, acquisition deadline, and tracking deadline.
+- Verification workflow, ref, environment, event, operation marker, baseline run ID, exact run ID, run URL, workflow activity state, acquisition deadline, and tracking deadline.
 - Provider-mutation journal entries with deterministic mutation ID, kind, target, status, intent, provider idempotency key when supported, immutable provider ID, reconciliation attempts, and safe evidence.
-- Artifact ledger and cleanup results.
+- Artifact ledger and cleanup results, including GitHub environment variable predecessor state introduced by PR #544.
 - Workflow commit, blob, content digest, previous blob, and proof that the previous path state was observed.
 - Terminal outcomes and prior attempt history.
 
-Versions 1 through 4 load into the version 5 shape. Missing provenance remains missing. A legacy null previous blob does not become permission to delete a workflow merely because a later retry writes the file again. A non-null prior blob still proves that the path existed. A pre-version-5 non-terminal record interrupted without a mutation journal cannot prove what external request was in flight, so restart recovery quarantines it as `unrecoverable_legacy` and disables automatic forward or destructive work.
+Versions 1 through 5 load into the target version 6 shape. Missing provenance remains missing. A legacy null previous blob does not become permission to delete a workflow merely because a later retry writes the file again. A non-null prior blob still proves that the path existed. A pre-version-5 non-terminal record interrupted without a mutation journal cannot prove what external request was in flight, so restart recovery quarantines it as `unrecoverable_legacy` and disables automatic forward or destructive work. Records upgraded from version 5 have no GitHub environment variable predecessor entries, so rollback never invents them.
 
 #### Command acceptance and idempotency
 
@@ -299,6 +317,17 @@ Reconciliation compares the saved intent and immutable provider identity with cu
 
 Cleanup deletion uses the same journal through [`cleanup-deletion-journal.ts`](../../packages/adapter-canvas/src/server/services/cleanup-deletion-journal.ts). The journal keys a delete by exact immutable identity, verifies that a reusable name still resolves to that identity before sending one delete, and reconciles an uncertain response by reading the exact target. A present or unreadable target after an uncertain delete requires manual action rather than a second delete.
 
+PR #544 tightens the journal boundary in two places. `validateBeforeMutation` rechecks provider identity after the intent is durable but immediately before the request; a failed recheck settles the journal as `not_applied`. `onConfirmed` records artifact provenance before the confirmed journal entry is persisted, so a crash cannot save provider success without the ledger entry needed for recovery or rollback.
+
+#### Integration boundary validation
+
+PR #544 treats every Azure, GitHub, GHCR, and generated-workflow response as untrusted input:
+
+- Azure account, App Registration, Service Principal, federated credential, and role-assignment reads must match their expected JSON or identifier shape. Authorization and other terminal failures are not retried. Recognized propagation, `429`, and transient `5xx` or network failures use bounded attempts and honor short `Retry-After` values; a delay beyond the remaining budget fails rather than sleeping indefinitely.
+- GitHub environment and variable reads validate the requested identity and response fields. Variable writes save the environment provider ID, value digest, and predecessor value before they can become rollback authority.
+- GHCR requests have per-request and total bootstrap deadlines. Redirect locations stay on the expected registry origin, digest headers must be valid SHA-256 values, and a manifest or blob is reused only when its exact digest matches. Idempotent reads retry a bounded number of transient or rate-limited responses; non-idempotent uploads are not blindly repeated.
+- Generated verification, deployment, and deletion workflows must parse as YAML, contain no unresolved template placeholders, expose only their required manual or reusable trigger, include the expected jobs and workflow references, and omit unsupported AWS paths and unsafe automatic triggers.
+
 #### Cooperative Stop
 
 The Stop route never kills a child process. It returns `200` when it can cancel an idle input prompt immediately or the operation is already stopped, `202` when active setup or verification must reach a safe boundary, `409 operation-cleanup-not-stoppable` while Rollback, Retry rollback, or Exit cleanup is active, `409 operation-already-terminal` after another terminal result, and `500 operation-stop-persist-failed` when the request cannot be saved.
@@ -307,17 +336,37 @@ Setup checks Stop before every external mutation and after the checkpoint that r
 
 Rollback, Retry rollback, and Exit cleanup are different. Each runs as one durable cleanup pass with no Stop boundary between deletions. The UI therefore offers no Stop action while cleanup runs, and the Stop route returns `409 operation-cleanup-not-stoppable` without recording a request. The customer waits for cleanup to finish; warnings then offer Retry rollback or manual guidance.
 
+#### Recovery after a provider restart
+
+PR #599 changes restart from automatic continuation to an explicit user decision. An unfinished restored operation becomes terminal `action_required` with reason `provider-restart-decision`. The panel shows **Environment setup was interrupted** and initially projects only **Continue setup** and **Stop setup**.
+
+Continue reopens the same operation and resumes from the saved owner. If verification was already dispatched, it monitors the exact saved run instead of dispatching another workflow. Stop closes Radius's setup attempt, then resolves the state of the saved run. An active run produces **Cancel workflow**; an accepted cancellation that is still settling produces **Check workflow status**. Both controls use `POST /api/operations/{operationId}/cancel-workflow`.
+
+Workflow status and cancellation use only the saved repository, immutable run ID, and selected GitHub account. They never infer a run from workflow filename, branch, environment, recency, or “latest” ordering. Cancellation persistence must succeed before GitHub is contacted. The route returns `200 workflow-cancelled` when the run is inactive, `202 workflow-cancellation-pending` while cancellation settles, `500 workflow-cancel-persist-failed` when the request cannot be saved, and `502` for unreadable status or an unconfirmed cancellation.
+
+Rollback and Exit remain unavailable while the exact verification run is active, cancelling, or unknown. They become eligible only after Radius durably proves the run inactive. This prevents cleanup from deleting an environment or identity that a surviving GitHub Actions job may still use.
+
+The restart decision does not turn an unresolved dispatch into a resumable run. Under PR #600, a restored dispatch journal in `prepared` or `outcome_unknown`, or a confirmed dispatch without both persisted run ID and URL, terminalizes as `failed_partial` with manual GitHub Actions guidance. Radius neither guesses a run nor dispatches another one. When the run identity is complete, PR #599 can safely offer Continue, Stop, status, and cancellation against that exact run.
+
 #### Input resume
 
 An input-required operation persists the prompt code, checkpoint, candidates, default selection, request time, and safe resume request. The browser submits the answer to the prompt-specific resume route with the operation ID, repository, environment, provider, and checkpoint. The server rejects stale prompts and answers for terminal operations.
 
 The operation does not hold the host process alive while waiting for a person. It retains active admission because a second setup would race the paused artifacts. After 60 minutes without an answer, stale reconciliation ends the operation as `failed_partial` with `operation-input-expired`, releases active admission, and retains cleanup admission only when removable proven-owned artifacts remain.
 
+#### Canonical environment identity
+
+PR #462 resolves the GitHub environment before Azure identity setup. GitHub may canonicalize the requested environment name; Radius persists the returned name on the operation and uses it for OIDC subjects, App Registration provenance, environment variables, verification, and cleanup. A continuation or prompt answer must match that canonical identity. This prevents one operation from creating Azure credentials for one spelling while configuring or deleting another GitHub environment.
+
 #### Targeted retries
 
 Setup retry resumes from `nextIncompleteSetupStep`. It reuses ledger-confirmed resources and routes first to any outstanding mutation owner. It refuses unrelated forward writes while provider reconciliation or rollback is pending.
 
 Verification retry uses the saved workflow, ref, environment, event, operation marker, and GitHub login. Before contacting GitHub, the route persists a 45-minute selected-executor acquisition deadline. The selected account is retained through pull-request merge proof, workflow-run baseline, dispatch, exact-run discovery, and monitoring; missing or unavailable identity fails closed with account-specific guidance. The retry covers a merged setup pull request, positive Azure access propagation evidence, expired tracking, and a failed dispatch. A failed OIDC claim, workflow syntax problem, or runner fault keeps its own classification and copy.
+
+PR #600 replaces separate initial and retry dispatch logic with one `verification-dispatch.ts` service. It raises the GitHub CLI prerequisite to 2.87 because `gh workflow run` can then return the created run URL directly. Radius validates that the output contains exactly one HTTPS run URL for the expected host and repository and persists its run ID and URL in the same confirmed journal transition. A malformed success response becomes an uncertain outcome rather than success.
+
+Only explicit workflow-registration rejections may be retried, at most twice, and only when the operation proves it just committed that exact workflow and ref. Timeouts, thrown transports, malformed success output, and other ambiguous outcomes are never redispatched. The service first tries bounded exact-marker reconciliation; if no single exact run appears, it records separate initial and final bounded diagnostics, terminalizes the operation as `failed_partial`, and directs the user to GitHub Actions.
 
 Cleanup retry selects warning results from the latest cleanup attempt that still map to proven-owned ledger artifacts. It excludes successful deletion, restoration, `not_found`, skipped ambiguity, and reused resources.
 
@@ -342,18 +391,25 @@ Stale-record reconciliation never terminalizes an in-memory operation while its 
 
 The ledger distinguishes presence from origin. `state` answers whether this operation may remove the artifact. `origin` explains where the artifact came from.
 
-| Artifact             | Saved cleanup identity                             | Ownership and deletion rule                                                                                                                 |
-|----------------------|----------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
-| App Registration     | App ID                                             | Delete only when this operation created it and the current App ID still matches.                                                            |
-| Service Principal    | Provider object ID with App ID context             | Delete only when creation succeeded, was journaled, and the current provider object still matches. A create race remains a candidate.       |
-| Federated credential | Provider object ID with App ID, name, and subject  | Delete only a journaled creation whose current provider ID still matches.                                                                   |
-| Role assignment      | Assignment resource ID, role, scope, principal     | Delete only a journaled creation whose exact assignment resource ID still matches.                                                          |
-| GitHub environment   | GitHub environment ID, repository, and name        | Promote after bounded creation inference; delete only when the current environment ID still matches and the selected account proves access. |
-| Workflow file        | Branch, path, blob, content digest, and prior blob | Revert only with complete commit and previous-state provenance and an unchanged current file.                                               |
+| Artifact                    | Saved cleanup identity                                                       | Ownership and deletion rule                                                                                                                 |
+|-----------------------------|------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| App Registration            | App ID                                                                       | Delete only when this operation created it and the current App ID still matches.                                                            |
+| Service Principal           | Provider object ID with App ID context                                       | Delete only when creation succeeded, was journaled, and the current provider object still matches. A create race remains a candidate.       |
+| Federated credential        | Provider object ID with App ID, name, and subject                            | Delete only a journaled creation whose current provider ID still matches.                                                                   |
+| Role assignment             | Assignment resource ID, role, scope, principal                               | Delete only a journaled creation whose exact assignment resource ID still matches.                                                          |
+| GitHub environment          | GitHub environment ID, repository, and name                                  | Promote after bounded creation inference; delete only when the current environment ID still matches and the selected account proves access. |
+| GitHub environment variable | Environment ID, repository, environment, name, value digest, and predecessor | Restore or delete only when the environment ID and configured value still match and the predecessor state was saved.                        |
+| Workflow file               | Branch, path, blob, content digest, and prior blob                           | Revert only with complete commit and previous-state provenance and an unchanged current file.                                               |
 
 Provenance is monotonic for the same identity. A later lookup that finds a created resource does not downgrade it to reused. A different identity does not inherit ownership.
 
 GitHub environment creation needs special handling because the PUT API is idempotent. Radius records a candidate, requires a preflight absence result, compares the returned creation time with the request, captures GitHub's environment ID, promotes a matching candidate, and persists that promotion in the mutation checkpoint before it honors Stop. This is bounded inference rather than perfect ownership proof: another actor can create the same environment name between the lookup and PUT and still fall inside the timestamp tolerance. The design accepts this low-likelihood residual race, while cleanup independently refuses deletion if the current environment ID differs or repository access cannot be proved.
+
+#### GitHub environment variable provenance
+
+PR #544 advances the artifact ledger to schema version 6 so setup can undo GitHub environment variable writes without deleting the whole environment. For each variable Radius saves the repository, canonical environment name, GitHub environment provider ID, variable name, SHA-256 digest of the value it wrote, predecessor value, and whether the predecessor lookup was conclusive. The ledger stores the predecessor value server-side because GitHub's variable API offers no immutable version ID.
+
+Rollback verifies that the environment provider ID still matches and the variable still contains the digest Radius wrote. It restores a known prior value or deletes a path proved absent before setup. If the environment was replaced, the prior state is unknown, the variable changed, or the read is malformed or inaccessible, Radius leaves the current value untouched and reports manual guidance. The restoration or deletion is itself journaled and is never blindly repeated after an uncertain response.
 
 #### Workflow provenance
 
@@ -367,11 +423,12 @@ Rollback is available only before successful credential verification. The server
 
 Pre-commit rollback removes:
 
-1. GitHub environment.
-2. Azure role assignments.
-3. Federated credentials.
-4. Service Principal.
-5. App Registration.
+1. GitHub environment variables.
+2. GitHub environment.
+3. Azure role assignments.
+4. Federated credentials.
+5. Service Principal.
+6. App Registration.
 
 Post-commit rollback first removes workflow changes:
 
@@ -381,9 +438,10 @@ Post-commit rollback first removes workflow changes:
 4. Recheck repository access after any file, branch, or deletion 404 before treating it as absence.
 5. Refuse the whole workflow pass if one file changed or cannot be verified.
 6. Delete an unchanged unmerged setup branch, or commit per-file deletes and restores.
-7. Before every provider deletion, prove that the current immutable identity still matches the ledger and persist one cleanup-journal entry.
-8. Record `deleted`, `restored`, `not_found`, `warning`, or `skipped`.
-9. Delete the GitHub environment and Azure identity only after the workflow pass succeeds.
+7. Restore or delete unchanged GitHub environment variables before deleting their environment.
+8. Before every provider deletion, prove that the current immutable identity still matches the ledger and persist one cleanup-journal entry.
+9. Record `deleted`, `restored`, `not_found`, `warning`, or `skipped`.
+10. Delete the GitHub environment and Azure identity only after the workflow and variable passes succeed.
 
 This order prevents an installed workflow from losing the credentials and environment it references.
 
@@ -397,7 +455,7 @@ Exit appears at the bottom of the panel. It confirms destructive cleanup when ne
 
 Create Environment pins one [`SelectedGhExecutor`](../../packages/adapter-canvas/src/gh.ts) to the selected login and credential source. The executor verifies the acting login before it runs commands. Setup, workflow publication, GHCR credential reporting, verification retry and monitoring, workflow rollback, and GitHub environment deletion use that identity.
 
-The credential resolver distinguishes `GH_TOKEN` and `GITHUB_TOKEN` from stored `oauth_token` and keyring entries by exact source. It reads scopes from the credential it selected, even when the same login appears twice. A whitespace-only `GH_TOKEN` does not hide a valid `GITHUB_TOKEN`. Account-qualified keyring lookup uses GitHub CLI multi-account support and a bounded timeout. The GitHub CLI 2.40 prerequisite is checked when Radius first needs account-specific token resolution, not at extension startup, so an older client can begin setup and encounter the version error only when that lookup becomes necessary.
+The credential resolver distinguishes `GH_TOKEN` and `GITHUB_TOKEN` from stored `oauth_token` and keyring entries by exact source. It reads scopes from the credential it selected, even when the same login appears twice. A whitespace-only `GH_TOKEN` does not hide a valid `GITHUB_TOKEN`. Account-qualified keyring lookup uses GitHub CLI multi-account support and a bounded timeout. Merged `main` checks the GitHub CLI 2.40 prerequisite when Radius first needs account-specific token resolution. PR #600 moves the target check to selected-executor creation and requires 2.87 so verification dispatch returns its run identity directly.
 
 Workflow-scope fallback runs only after a positive missing-scope response and never after a timeout with unknown outcome. User guidance names the credential that actually failed. Radius does not tell a user to refresh an injected session token that GitHub CLI cannot change.
 
@@ -413,10 +471,19 @@ Workflow-scope fallback runs only after a positive missing-scope response and ne
 - Confirmation copy and rollback preview.
 - Guidance for unavailable paths.
 - The next automatic transition.
+- Exact verification workflow activity as `active`, `inactive`, `cancelling`, or `unknown` when restart recovery needs a decision.
 
 [`packages/adapter-canvas/src/browser/environment/operations.ts`](../../packages/adapter-canvas/src/browser/environment/operations.ts) parses this narrow contract. It does not receive tokens, secret values, raw CLI output, workflow logs, or private failure evidence.
 
-The browser keeps the high-level headline separate from detailed steps. It rebuilds projected controls as state changes while preserving keyboard focus when the same action remains. Live-region status changes only when the message changes. Every terminal path releases the page's Create Environment latch, including verification fallback and timeout paths.
+The browser keeps the high-level headline separate from detailed steps. It rebuilds projected controls as state changes while preserving keyboard focus when the same action remains. Live-region status changes only when the message changes. A provider-restart decision displays its own interrupted headline and does not reuse failure copy. Every terminal path releases the page's Create Environment latch, including verification fallback and timeout paths.
+
+#### Local diagnostic download
+
+PR #580 adds **Download diagnostics** inside **Show details**. `GET /api/operations/{operationId}/diagnostics` returns a non-cached attachment named `radius-environment-operation-diagnostics.json`. The browser follows the local download URL but never reads, transforms, uploads, or separately stores the file.
+
+The diagnostic builder uses closed allowlists rather than the persisted serializer or browser projection. Schema version 1 contains product and diagnostic versions, operation ID, recognized lifecycle and stage state, timing, attempt counts, Stop flags, aggregate command counts, aggregate cleanup outcome counts, recovery mutation-status counts, verification-dispatched state, and an `unrecognizedValueCount`. Unknown enum values become `unknown`; malformed operation IDs fail the export.
+
+The export deliberately excludes repository and environment names, provider resource identities, operation requests and resume inputs, artifact labels and targets, URLs, command IDs, journal diagnostics and evidence, raw CLI output, logs, tokens, and secrets. It creates no remote telemetry sink and no second retained diagnostic record.
 
 #### Environment-list consistency
 
@@ -424,19 +491,22 @@ Rollback and Exit invalidate the repository-scoped environment-list cache before
 
 ### API design
 
-These routes are loopback Canvas APIs. Mutation routes require `X-Radius-Mutation-Nonce`. The retry handler is registered as one template route, `/api/operations/{operationId}/retry/{retryKind}`, where `retryKind` is `setup`, `verification`, or `cleanup`.
+These routes are loopback Canvas APIs. Mutation routes require `X-Radius-Mutation-Nonce`. The retry handler is registered as one template route, `/api/operations/{operationId}/retry/{retryKind}`, where `retryKind` is `setup`, `verification`, or `cleanup`. The workflow-cancellation route is proposed by PR #599, and the diagnostic route is proposed by PR #580.
 
-| Method | Path                                              | Purpose                                                      |
-|--------|---------------------------------------------------|--------------------------------------------------------------|
-| `POST` | `/api/operations`                                 | Start and persist a server-owned environment operation.      |
-| `GET`  | `/api/operations?repo={repo}`                     | Read the current operation for a repository.                 |
-| `GET`  | `/api/operations/{operationId}`                   | Read one operation.                                          |
-| `POST` | `/api/operations/{operationId}/stop`              | Persist a cooperative Stop request.                          |
-| `POST` | `/api/operations/{operationId}/continue`          | Continue an intentionally stopped setup.                     |
-| `POST` | `/api/operations/{operationId}/resume/{code}`     | Supply input for a persisted prompt.                         |
-| `POST` | `/api/operations/{operationId}/retry/{retryKind}` | Retry setup, verification, or cleanup.                       |
-| `POST` | `/api/operations/{operationId}/rollback`          | Start proven-owned cleanup.                                  |
-| `POST` | `/api/operations/{operationId}/exit`              | Close incomplete setup and clean disposable owned artifacts. |
+| Method | Path                                              | Purpose                                                             |
+|--------|---------------------------------------------------|---------------------------------------------------------------------|
+| `POST` | `/api/operations`                                 | Start and persist a server-owned environment operation.             |
+| `GET`  | `/api/operations?repo={repo}`                     | Read the current operation for a repository.                        |
+| `GET`  | `/api/operations/{operationId}`                   | Read one operation.                                                 |
+| `POST` | `/api/operations/{operationId}/stop`              | Persist a cooperative Stop request.                                 |
+| `POST` | `/api/operations/{operationId}/continue`          | Continue an intentionally stopped setup.                            |
+| `POST` | `/api/operations/{operationId}/resume/{code}`     | Supply input for a persisted prompt.                                |
+| `POST` | `/api/operations/{operationId}/abandon`           | Legacy input-required cancellation; current browser flows use Stop. |
+| `POST` | `/api/operations/{operationId}/retry/{retryKind}` | Retry setup, verification, or cleanup.                              |
+| `POST` | `/api/operations/{operationId}/cancel-workflow`   | Cancel or recheck the exact saved verification run after Stop.      |
+| `POST` | `/api/operations/{operationId}/rollback`          | Start proven-owned cleanup.                                         |
+| `POST` | `/api/operations/{operationId}/exit`              | Close incomplete setup and clean disposable owned artifacts.        |
+| `GET`  | `/api/operations/{operationId}/diagnostics`       | Download the local allowlisted diagnostic attachment.               |
 
 Example accepted command response:
 
@@ -463,23 +533,30 @@ N/A. The controls govern Canvas orchestration and external adapter mutations. No
 
 #### Canvas adapter: packages/adapter-canvas
 
-- [`src/operations.ts`](../../packages/adapter-canvas/src/operations.ts) owns schema version 5, commands, attempts, lifecycle rules, provider-recovery state, artifact provenance, rollback selection, action projection, persistence normalization, restart reconciliation, and session-scoped repository admission.
+- [`src/operations.ts`](../../packages/adapter-canvas/src/operations.ts) owns the operation schema, commands, attempts, lifecycle rules, provider-recovery state, artifact provenance, rollback selection, action projection, persistence normalization, restart reconciliation, and session-scoped repository admission. PR #544 advances the schema from version 5 to version 6.
 - [`src/operation-store.ts`](../../packages/adapter-canvas/src/operation-store.ts) persists operation envelopes.
-- [`src/server/routes/operations-control.ts`](../../packages/adapter-canvas/src/server/routes/operations-control.ts) owns Stop, Continue, Rollback, Exit, and Retry routes.
+- [`src/server/routes/operations-control.ts`](../../packages/adapter-canvas/src/server/routes/operations-control.ts) owns Stop, Continue, Rollback, Exit, Retry, and PR #599's exact-run cancellation route.
 - [`src/server/routes/create-environment.ts`](../../packages/adapter-canvas/src/server/routes/create-environment.ts) orchestrates GitHub setup, provider journals, provenance checkpoints, reconciliation routing, and safe boundaries.
 - [`src/server/routes/azure-auto-setup-application.ts`](../../packages/adapter-canvas/src/server/routes/azure-auto-setup-application.ts) and [`azure-auto-setup-credentials.ts`](../../packages/adapter-canvas/src/server/routes/azure-auto-setup-credentials.ts) record identity origin and stop between Azure mutations.
 - [`src/server/routes/create-environment-workflow-committer.ts`](../../packages/adapter-canvas/src/server/routes/create-environment-workflow-committer.ts) records commit and previous-path provenance.
+- [`src/server/routes/operations-status.ts`](../../packages/adapter-canvas/src/server/routes/operations-status.ts) owns operation reads, creation, prompt resume, legacy prompt abandonment, and PR #580's diagnostic download route.
 - [`src/server/services/cleanup-commands.ts`](../../packages/adapter-canvas/src/server/services/cleanup-commands.ts) defines cleanup command selections.
 - [`src/server/services/provider-mutation-recovery.ts`](../../packages/adapter-canvas/src/server/services/provider-mutation-recovery.ts) journals external writes and reconciles lost or uncertain responses.
 - [`src/server/services/cleanup-deletion-journal.ts`](../../packages/adapter-canvas/src/server/services/cleanup-deletion-journal.ts) journals one exact-identity provider deletion and prevents destructive replay.
+- `src/server/services/github-environment-variable-rollback.ts` in PR #544 verifies and restores or deletes environment variables without overwriting later user changes.
 - [`src/server/services/verification-retry.ts`](../../packages/adapter-canvas/src/server/services/verification-retry.ts) owns selected-account acquisition and tracking deadlines.
 - [`src/server/services/verification-retry-runner.ts`](../../packages/adapter-canvas/src/server/services/verification-retry-runner.ts) keeps the selected executor through merge proof, dispatch, exact run discovery, and monitoring.
+- `src/server/services/verification-dispatch.ts` in PR #600 shares exact-run dispatch, bounded registration retry, and uncertain-outcome handling between initial setup and verification retry.
+- `src/server/services/verification-workflow-cancellation.ts` in PR #599 reads and cancels only the exact saved verification run.
+- `src/server/services/operation-diagnostic-export.ts` in PR #580 builds the allowlisted local support artifact.
 - [`src/server/services/workflow-provenance.ts`](../../packages/adapter-canvas/src/server/services/workflow-provenance.ts) verifies workflow and branch identity.
 - [`src/server/services/workflow-rollback.ts`](../../packages/adapter-canvas/src/server/services/workflow-rollback.ts) chooses branch deletion or per-file reversion.
 - [`src/server/services/workflow-rollback-ports.ts`](../../packages/adapter-canvas/src/server/services/workflow-rollback-ports.ts) maps pinned GitHub commands into fail-closed reads and mutations.
 - [`src/server/services/github-environment.ts`](../../packages/adapter-canvas/src/server/services/github-environment.ts) classifies GitHub environment creation evidence and captures the provider ID.
 - [`src/server/services/environment-absence.ts`](../../packages/adapter-canvas/src/server/services/environment-absence.ts) distinguishes proved absence from an access-hidden GitHub 404.
 - [`src/server/services/environment-listing-cache.ts`](../../packages/adapter-canvas/src/server/services/environment-listing-cache.ts) prevents stale listings after cleanup.
+- [`src/ghcr.ts`](../../packages/adapter-canvas/src/ghcr.ts) is hardened by PR #544 with bounded requests, rate-limit handling, origin checks, and digest verification.
+- [`src/infra.ts`](../../packages/adapter-canvas/src/infra.ts) is hardened by PR #544 with structural validation of generated workflows before repository writes.
 - [`src/gh.ts`](../../packages/adapter-canvas/src/gh.ts) selects, verifies, pins, and describes the effective GitHub credential.
 - [`src/server.ts`](../../packages/adapter-canvas/src/server.ts) composes per-instance executors and runs ordered cleanup.
 - [`src/server/services/operation-stop-boundary.ts`](../../packages/adapter-canvas/src/server/services/operation-stop-boundary.ts) centralizes persist-and-honor Stop behavior between provider mutations.
@@ -497,7 +574,7 @@ The plugin manifest, Canvas ID, action surface, and tool surface do not change. 
 
 #### Build and packaging
 
-The build continues to emit one loadable extension bundle with the Copilot SDK externalized. Changesets describe operation controls, GitHub credential selection, post-commit rollback, selected-account verification recovery, provider journals, and Stop hardening. No runtime dependency or lockfile change is required.
+The build continues to emit one loadable extension bundle with the Copilot SDK externalized. Each behavior slice carries a patch changeset. The follow-on work adds no runtime dependency; PR #544 uses the repository's existing YAML parser and PRs #580, #599, and #600 use existing runtime and browser facilities.
 
 ### Error handling
 
@@ -508,6 +585,9 @@ The build continues to emit one loadable extension bundle with the Copilot SDK e
 | Command persistence fails                                | Restore the preceding terminal snapshot.                                                                                                                                            |
 | Provider journal persistence fails before mutation       | Do not contact the provider.                                                                                                                                                        |
 | Provider journal persistence fails after mutation        | Stop further provider work; keep the operation reserved and report the unresolved recovery record.                                                                                  |
+| Provider response is malformed                           | Reject the response; do not derive ownership, identity, or success from partial fields.                                                                                             |
+| Transient Azure, GitHub, or GHCR read fails              | Retry only recognized transient or rate-limited failures within the operation-specific attempt and time budget.                                                                     |
+| Generated workflow violates its trusted shape            | Refuse the repository write and report the exact trigger, placeholder, job, or workflow-reference violation.                                                                        |
 | Command scheduling fails                                 | Restore or terminalize explicitly; leave no active record without a runner.                                                                                                         |
 | Stop arrives during mutation                             | Persist Stop, finish and journal the mutation, then honor Stop at the next boundary.                                                                                                |
 | Stop arrives with provider outcome unresolved            | Keep reconciliation non-terminal; do not cancel or replay until exact provider state is known or handed off.                                                                        |
@@ -517,6 +597,12 @@ The build continues to emit one loadable extension bundle with the Copilot SDK e
 | Setup ownership is ambiguous                             | Refuse setup retry or automatic deletion.                                                                                                                                           |
 | Verification pull request has not merged                 | Keep `action_required`; retry only after merge.                                                                                                                                     |
 | Selected GitHub account cannot be acquired               | Fail closed with account-specific guidance; a rate-limited acquisition retries within its persisted 45-minute deadline.                                                             |
+| Provider restarts during unfinished setup                | Pause as `action_required` with `provider-restart-decision`; do not silently resume provider work.                                                                                  |
+| Saved verification run remains active after Stop         | Offer exact-run cancellation and block Rollback and Exit until the run is proved inactive.                                                                                          |
+| Workflow cancellation cannot be saved                    | Do not contact GitHub; return `500 workflow-cancel-persist-failed`.                                                                                                                 |
+| Workflow status or cancellation is unconfirmed           | Keep cleanup blocked and return a retryable `502` response rather than assuming the run stopped.                                                                                    |
+| Verification dispatch returns no valid run URL           | Treat the result as uncertain; use bounded exact-marker reconciliation and never redispatch an ambiguous outcome.                                                                   |
+| Verification workflow registration is not ready          | Retry only a recognized `404` or `422` registration rejection, at most twice, and only with fresh exact workflow provenance.                                                        |
 | Azure access may not be effective                        | Offer classified verification retry with accurate guidance.                                                                                                                         |
 | OIDC, syntax, or runner verification failure             | Keep the actual failure classification and exact run URL.                                                                                                                           |
 | Workflow provenance is incomplete                        | Refuse post-commit rollback.                                                                                                                                                        |
@@ -531,6 +617,7 @@ The build continues to emit one loadable extension bundle with the Copilot SDK e
 | Cleanup is interrupted by restart                        | Reopen journal reconciliation, preserve proven results, and recompute survivors before any further delete.                                                                          |
 | Browser poll fails                                       | Keep the current panel and retry polling.                                                                                                                                           |
 | Verification tracking expires                            | Stop local tracking, preserve truthful expiry evidence and exact run identity when known, and release or retain admission according to cleanup state.                               |
+| Diagnostic operation ID or state is malformed            | Return a safe export error or substitute `unknown`; never serialize the raw operation as a fallback.                                                                                |
 
 ## Test plan
 
@@ -540,17 +627,23 @@ Every external system sits behind a controlled port or fake. Pull-request tests 
 
 - Operation state transitions, terminal latching, session-scoped admission, retained-cleanup blocking, command identity, 20-command retention, migration, restart, stale input expiry, and action projection.
 - Provider-mutation journal transitions, provider-specific idempotency keys, strict failure classification, bounded reconciliation, immutable provider-ID matching, legacy quarantine, and fail-closed persistence.
-- Artifact provenance for Azure identity, Service Principals, GitHub environments, workflows, cleanup journals, and cleanup results.
+- Schema-version-6 GitHub environment variable provenance, predecessor restoration, user-change refusal, environment replacement detection, uncertain rollback reconciliation, and compatibility loading.
+- Azure and GitHub response-shape validation, transient versus terminal failure classification, `Retry-After` budgets, GHCR digest and redirect checks, and generated-workflow trust validation.
+- Artifact provenance for Azure identity, Service Principals, GitHub environments and variables, workflows, cleanup journals, and cleanup results.
 - Workflow commit chains, intervening customer edits, legacy unknown previous state, branch identity, atomic fallback writes, file digest verification, and restore versus delete.
 - Pinned GitHub credential selection, duplicate login entries, injected-token precedence, keyring lookup, scope reporting, bounded selected-executor acquisition, exact verification-run identity, timeout handling, restart recovery, and error redaction.
-- Browser parsing, command submission, focus preservation, live-region stability, terminal reset, confirmation, preview rendering, and environment-list refresh.
+- Provider-restart decision projection, exact-run status and cancellation, cancellation persistence failure, active-run cleanup blocking, and recovered verification monitoring without redispatch.
+- Diagnostic allowlists, aggregate counts, malformed and hostile input, unknown enum handling, forbidden fields, and stable schema version.
+- Browser parsing, command submission, focus preservation, live-region stability, terminal reset, confirmation, diagnostic download, preview rendering, and environment-list refresh.
 - Route template matching and shadow rejection in either declaration order.
 
 ### HTTP integration
 
 - Start, every Stop response class, Continue, input resume, setup retry, selected-account verification retry, Rollback, rollback retry, and Exit through a real loopback server.
+- Provider-restart Continue and Stop decisions, exact-run cancellation and status recheck, cancellation failures, and cleanup refusal while external work may still be active.
+- Local diagnostic download response headers, filename, unknown operation, malformed operation ID, safe failure, and hostile-record redaction.
 - Mutation nonce enforcement, malformed input, duplicate commands, store and journal persistence failure, scheduling failure, active-operation conflict, and retained-cleanup conflict.
-- GitHub environment creation inference, provider-ID checks, proved absence, access-hidden 404 handling, and cache invalidation.
+- GitHub environment and variable creation inference, provider-ID checks, predecessor rollback, proved absence, access-hidden 404 handling, and cache invalidation.
 - Provider response loss, restart reconciliation, reconciliation exhaustion, cleanup replay refusal, and post-commit rollback acceptance or refusal.
 
 ### Runtime and artifact integration
@@ -562,11 +655,11 @@ Every external system sits behind a controlled port or fake. Pull-request tests 
 
 - Importable browser modules retain full statement, function, and line coverage.
 - Browser component tests run the extracted browser behavior in Chromium.
-- Canvas Chromium tests cover server-owned setup across navigation, GitHub identity selection, keyboard focus, destructive confirmation, branch selection, and heartbeat recovery.
+- Canvas Chromium tests cover server-owned setup across navigation, GitHub identity selection, keyboard focus, destructive confirmation, branch selection, provider-restart decisions, exact workflow cancellation, diagnostic download, redaction, and heartbeat recovery.
 
 ### Validation gates
 
-The implementation stack runs frozen install, typecheck, lint, formatting, Markdown lint, full Vitest coverage, build, runtime integration, HTTP integration, artifact integration, browser component tests, and Canvas Chromium. Merged PR #516 reported 7,225 Vitest tests passed with 19 skipped, 129 runtime integration tests, 248 HTTP integration tests, 6 artifact integration tests, 9 browser component tests, and 25 Canvas Chromium tests with no retries.
+The merged control stack ran frozen install, typecheck, lint, formatting, Markdown lint, full Vitest coverage, build, runtime integration, HTTP integration, artifact integration, browser component tests, and Canvas Chromium. Each follow-on pull request carries its own evidence while in review. PR #544 reports the complete repository gates. PR #580 reports focused diagnostic and Chromium coverage but keeps live and human readiness gates blocked or not run. PR #599 reports the complete repository gates for restart recovery. PR #600 reports 850 focused tests, 141 dispatch-focused tests, and the build and artifact gates; its local full-coverage and Chromium notes distinguish pre-existing environment failures from the new dispatch behavior. No draft evidence is treated as production approval.
 
 ## Security
 
@@ -618,14 +711,33 @@ The implementation stack runs frozen install, typecheck, lint, formatting, Markd
 
 **Mitigation:** Each hydrated session prevents conflicts within its own registry and retains cleanup admission until removable targets are resolved. There is no distributed repository lock across independent sessions. Exact provider identities and workflow provenance reduce destructive risk, but they do not prevent concurrent setup. This remains a documented residual risk.
 
+### Diagnostic privacy
+
+**Threat:** A support artifact exposes repository names, environment names, resource identities, workflow URLs, provider diagnostics, raw logs, or secrets.
+
+**Mitigation:** The diagnostic export has an independent schema and closed allowlists. It emits aggregate states and counts rather than serializing or redacting the operation record. The browser downloads it locally and Radius does not upload or retain a second copy.
+
+### External workflow still running
+
+**Threat:** Rollback deletes an environment or identity while an interrupted verification workflow is still using it.
+
+**Mitigation:** Restart recovery pauses for an explicit decision. Stop resolves the exact saved run through the saved GitHub account. Rollback and Exit remain blocked while the run is active, cancelling, or unknown; cancellation targets only the saved run ID and must become durably inactive first.
+
+### Untrusted integration output
+
+**Threat:** A malformed, redirected, stale, or partial provider response is mistaken for success or ownership.
+
+**Mitigation:** Boundary adapters parse closed response shapes, verify provider IDs and digests, constrain redirects, distinguish terminal failures from bounded transient reads, and validate generated workflow structure before any repository write.
+
 ## Compatibility
 
-- Operation schema version 5 reads versions 1 through 4 and fills missing fields with safe defaults.
+- Merged `main` uses operation schema version 5. PR #544 advances the target to version 6 and reads versions 1 through 5 with safe defaults.
 - Older records without workflow or previous-state proof remain visible but refuse unsafe post-commit rollback.
 - A pre-version-5 record interrupted without provider journal evidence is quarantined as `unrecoverable_legacy`; Radius does not infer the missing mutation outcome.
+- A version-5 record has no GitHub environment variable predecessor ledger. Upgrade leaves that list empty and never invents rollback authority.
 - The control routes add loopback API paths without changing public Canvas actions, tools, or plugin metadata.
 - The browser accepts missing optional projection fields and falls back to safe empty values.
-- GitHub CLI 2.40 or later is required for account-qualified multi-account token lookup. The version check happens when selected-account token resolution is first needed, not at extension startup. Older clients receive a specific error rather than falling through to the active account.
+- Merged `main` requires GitHub CLI 2.40 for account-qualified multi-account token lookup. PR #600 raises the target prerequisite to 2.87 so `gh workflow run` returns the created run URL. The check occurs when Radius creates the selected-account executor, not at extension startup, and fails before that executor performs GitHub setup mutations.
 - Existing final states and stage names remain available to the progress design.
 - The extension still builds as one `plugins/radius/dist/extension.mjs`.
 
@@ -636,11 +748,12 @@ The implementation stack runs frozen install, typecheck, lint, formatting, Markd
 - **Session-scoped admission:** one-active-operation and retained-cleanup admission apply within one hydrated Copilot App session and process. Independent sessions do not coordinate.
 - **Repository rename or deletion:** the operation persists the repository slug it started with and does not adopt a renamed repository automatically. Reads and mutations continue against the saved slug. If GitHub does not resolve it under the selected account, Radius treats the resource as unreadable or unresolved and provides manual guidance rather than interpreting a bare 404 as absence.
 - **Bounded command history:** the operation keeps the latest 20 command records. Attempt outcomes and artifact or provider journals retain the safety facts needed for recovery, but the operation is not an unbounded audit log.
-- **Delayed GitHub CLI prerequisite:** the 2.40 version check occurs during account-specific token resolution. A user can begin setup on an older client and encounter the prerequisite after earlier durable work has completed.
+- **GitHub CLI prerequisite timing:** the target 2.87 check happens when the selected executor is created, not when the extension starts. Read-only Canvas use can begin on an older client, but selected-account environment execution fails before its GitHub mutations.
+- **Follow-on integration:** PRs #544, #580, #599, and #600 are still in review and do not yet share one merged head. This design records their intended combined contract; any rebase that changes schema, routes, exact-run handling, or diagnostic vocabulary must update this note before approval.
 
 ## Monitoring and logging
 
-The operation record is the primary diagnostic. It carries timestamps, stage and step history, attempts, the latest 20 commands, input prompt identity, verification acquisition and tracking deadlines, safe resource identifiers, provider journals, cleanup results, terminal outcome, and recovery state.
+The operation record remains the primary internal diagnostic. It carries timestamps, stage and step history, attempts, the latest 20 commands, input prompt identity, verification acquisition and tracking deadlines, safe resource identifiers, provider journals, cleanup results, terminal outcome, and recovery state. PR #580 adds a separate customer-downloadable diagnostic schema that reveals only allowlisted aggregate facts.
 
 The server reports operation-store diagnostics and best-effort announcement or recovery-snapshot failures through the existing diagnostic reporter. Provider and cleanup journal writes are required safety gates: failure before a request prevents the mutation, and failure after a request stops further mutations while preserving an unresolved recovery state when possible. Cleanup persists each meaningful result before the next deletion. The browser shows safe summaries and links to exact GitHub runs but never raw logs or private evidence.
 
@@ -650,7 +763,7 @@ No new telemetry service, metric backend, or trace exporter is part of this desi
 
 ## Delivery status
 
-The work was split into native stack 517 so each safety layer could be reviewed and merged independently:
+The core work was split into native stack 517 so each safety layer could be reviewed and merged independently:
 
 1. **[PR #508](https://github.com/radius-project/ai-extensions/pull/508), merged.** Durable commands, action projection, artifact provenance, workflow-first rollback, selected credential fixes, cleanup Stop rejection, retained-cleanup admission, and browser recovery UX.
 2. **[PR #511](https://github.com/radius-project/ai-extensions/pull/511), merged.** Schema version 5, provider and cleanup journals, exact immutable identity and absence proof, bounded reconciliation, fail-closed journal persistence, and restart recovery.
@@ -658,6 +771,28 @@ The work was split into native stack 517 so each safety layer could be reviewed 
 4. **[PR #516](https://github.com/radius-project/ai-extensions/pull/516), merged.** Cooperative per-mutation Stop boundaries, direct recovery routing, `provider-reconciliation-pending`, bounded prerequisite failures, and atomic workflow fallback behavior.
 
 The original [PR #358](https://github.com/radius-project/ai-extensions/pull/358) is closed and superseded. Issue #306 is closed. Issue #506 is a separate required follow-up for unavailable durable storage.
+
+### Follow-on work in review
+
+| Pull request                                                     | State at this review             | Design effect                                                                                                                                                                           |
+|------------------------------------------------------------------|----------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| [#544](https://github.com/radius-project/ai-extensions/pull/544) | Open                             | Advances the operation schema to version 6, journals GitHub environment variable predecessors, validates Azure/GitHub/GHCR/generated-workflow boundaries, and bounds transient retries. |
+| [#580](https://github.com/radius-project/ai-extensions/pull/580) | Draft, stacked with #544 content | Adds the local allowlisted diagnostic download, support guidance, and readiness evidence without claiming production approval.                                                          |
+| [#599](https://github.com/radius-project/ai-extensions/pull/599) | Draft                            | Pauses restored setup for an explicit Continue or Stop decision, monitors the exact saved run, and gates cleanup on exact-run inactivity or cancellation.                               |
+| [#600](https://github.com/radius-project/ai-extensions/pull/600) | Draft                            | Raises the GitHub CLI prerequisite to 2.87, captures the returned run ID and URL, centralizes initial and retry dispatch, and narrows redispatch to proved registration failures.       |
+
+Before these branches merge, they must be rebased into one coherent contract. PR #580 must retain schema-version-6 environment variable outcomes and add PR #599's `cancel_workflow` command to its diagnostic allowlist. PRs #599 and #600 must combine direct run identity with the provider-restart decision so only a complete saved run becomes resumable or cancellable. All three must preserve PR #544's boundary validation, variable rollback, and journal hooks rather than restoring schema-version-5 assumptions.
+
+### Other recent related pull requests reviewed
+
+- [PR #333](https://github.com/radius-project/ai-extensions/pull/333) established server-owned environment execution.
+- [PR #391](https://github.com/radius-project/ai-extensions/pull/391) made credential verification, rather than workflow commit or dispatch, the completion boundary.
+- [PR #418](https://github.com/radius-project/ai-extensions/pull/418) pinned the selected GitHub account.
+- [PR #455](https://github.com/radius-project/ai-extensions/pull/455) clarified retained and reused Entra applications.
+- [PR #462](https://github.com/radius-project/ai-extensions/pull/462) canonicalized GitHub environment identity before Azure setup.
+- PRs #387 and #404 changed Windows argument and test portability without changing the operation contract.
+- PRs #465 and #514 concern deployment teardown and deployment recovery, outside Create Environment control scope.
+- PR #543 removed a dead deployment-discovery fallback; PRs #562 and #569 restored and aligned the environment planning action. None changes the Create Environment operation state machine or cleanup authority.
 
 ## Open questions
 
@@ -671,7 +806,7 @@ The current store retains the latest 20 commands per operation and a bounded set
 
 ### Should the Canvas add a dedicated critical journey for Stop, Continue, Rollback, and Exit?
 
-Unit and HTTP tests cover the state machine and destructive boundaries, and the current Chromium gate covers related environment behavior. A dedicated browser-and-server journey would test the full visible recovery sequence and focus movement in one scenario.
+The merged tests cover the state machine and destructive boundaries. PR #599 adds restart-functional and Chromium journeys for the interrupted Continue or Stop decision, exact-run cancellation, cleanup gating, keyboard focus, and accessibility. PR #580 adds a separate Chromium journey for keyboard diagnostic download and downloaded-file redaction. Live provider qualification remains part of the readiness evidence rather than browser automation.
 
 ### Should created candidates support later ownership proof?
 
@@ -679,7 +814,7 @@ The current design leaves an ambiguous Service Principal or GitHub environment i
 
 ### Should verification retry expose more failure classes?
 
-The design recognizes the production cases required by issue #306. Issue #307 may add a wider fault vocabulary. New classes should remain closed and evidence-based.
+PR #544 expands the integration fault vocabulary for malformed provider output, authorization failures, bounded transient reads, rate limits, GHCR integrity, and generated-workflow trust. PR #600 narrows dispatch retries to explicit workflow-registration failures with fresh provenance. New classes should remain closed, evidence-based, and tied to a distinct recovery action.
 
 ## Alternatives considered
 
@@ -717,4 +852,4 @@ Rejected when the blob chain breaks. Another actor may have edited the file betw
 
 ## Design review notes
 
-Draft for review. Native stack 517 supersedes the closed PR #358, and PRs #508, #511, #515, and #516 are merged. The design accepts the narrow concurrent GitHub environment creator race and records the session-scoped admission limit. Issue #506 remains a difficult unresolved safety gap because the disabled operation store can acknowledge writes that will not survive restart.
+Draft for review. Native stack 517 supersedes the closed PR #358, and PRs #508, #511, #515, and #516 are merged. This revision also records the in-review contracts from PRs #544, #580, #599, and #600; those branches must converge before their combined behavior can be treated as shipped. The design accepts the narrow concurrent GitHub environment creator race and records the session-scoped admission limit. Issue #506 remains a difficult unresolved safety gap because the disabled operation store can acknowledge writes that will not survive restart.
