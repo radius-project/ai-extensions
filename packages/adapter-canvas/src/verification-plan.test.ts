@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildVerifyWorkflowDispatchArgs,
   hasWorkflowRunTrigger,
+  parseVerifyWorkflowRunUrl,
   planCredentialVerification
 } from "./verification-plan.js";
 
@@ -35,7 +36,7 @@ describe("workflow parsing", () => {
 describe("credential verification planning", () => {
   const base = {
     targetRepo: "octo/app",
-    resolveDefaultBranch: async () => "main"
+    defaultBranch: "main"
   };
 
   it("dispatches directly when there is no PR fallback", async () => {
@@ -46,20 +47,24 @@ describe("credential verification planning", () => {
         "on:\n  workflow_dispatch:\n    inputs:\n      radius_operation:\n        required: false\nrun-name: ${{ inputs.radius_operation }}\n"
     });
     expect(plan.shouldDispatch).toBe(true);
-    expect(plan.ref).toBe("");
+    expect(plan.ref).toBe("main");
+    expect(plan.defaultBranch).toBe("main");
     expect(plan.supportsOperationMarker).toBe(true);
   });
 
-  it("claims no marker support on the direct path when the workflow cannot be read", async () => {
+  it("uses the confirmed non-main branch when the direct workflow cannot be read", async () => {
     // Assuming support would send `-f radius_operation` to a workflow that may
     // not declare it, and GitHub answers that with a 422 the journal reads as a
     // conclusive refusal, failing setup for the wrong stated reason.
     const plan = await planCredentialVerification({
       ...base,
+      defaultBranch: "trunk",
       prState: null,
       fetchFile: async () => null
     });
     expect(plan.shouldDispatch).toBe(true);
+    expect(plan.ref).toBe("trunk");
+    expect(plan.defaultBranch).toBe("trunk");
     expect(plan.supportsOperationMarker).toBe(false);
   });
 
@@ -157,5 +162,42 @@ describe("dispatch arguments", () => {
         operationMarker: "op_verify"
       })
     ).toContain("radius_operation=op_verify");
+  });
+});
+
+describe("workflow run URL parsing", () => {
+  it("extracts the immutable run identity from gh workflow run output", () => {
+    expect(
+      parseVerifyWorkflowRunUrl(
+        "  https://github.com/octo/app/actions/runs/12345\n",
+        { targetRepo: "octo/app" }
+      )
+    ).toEqual({
+      runId: "12345",
+      runUrl: "https://github.com/octo/app/actions/runs/12345"
+    });
+  });
+
+  it.each([
+    "",
+    "created\nhttps://github.com/octo/app/actions/runs/1",
+    "not a URL",
+    "http://github.com/octo/app/actions/runs/1",
+    "https://example.test/octo/app/actions/runs/1",
+    "https://github.com/other/app/actions/runs/1",
+    "https://github.com/octo/app/actions/runs/0",
+    "https://github.com/octo/app/actions/runs/1?check=true"
+  ])("rejects ambiguous or unexpected output %j", (stdout) => {
+    expect(() =>
+      parseVerifyWorkflowRunUrl(stdout, { targetRepo: "octo/app" })
+    ).toThrow();
+  });
+
+  it("rejects an invalid repository identity", () => {
+    expect(() =>
+      parseVerifyWorkflowRunUrl("https://github.com/octo/app/actions/runs/1", {
+        targetRepo: "octo/app/extra"
+      })
+    ).toThrow("target GitHub repository is invalid");
   });
 });

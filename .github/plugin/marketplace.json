@@ -17,7 +17,7 @@
         "path": "plugins/radius/dist",
         "ref": "edge"
       },
-      "description": "Model, visualize, and deploy applications with Radius from the GitHub Copilot app and CLI. Analyze your source code, build and diff the application graph, configure cloud environments, and deploy through GitHub Actions.",
+      "description": "Model, visualize, and deploy applications with Radius from the GitHub Copilot app and CLI.",
       "version": "0.0.0",
       "repository": "https://github.com/radius-project/ai-extensions",
       "license": "Apache-2.0",

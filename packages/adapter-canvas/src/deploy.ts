@@ -119,17 +119,25 @@ function selectedAuthorizationStatus(
   stdout: string,
   stderr: string
 ): 401 | 403 | null {
-  const match = /\bHTTP\s+(401|403)\b/i.exec(`${stderr}\n${stdout}`);
-  if (!match) return null;
+  const detail = `${stderr}\n${stdout}`;
+  const match = /\bHTTP\s+(401|403)\b/i.exec(detail);
+  if (!match) return isSamlAuthorizationFailure(detail) ? 403 : null;
   return match[1] === "401" ? 401 : 403;
+}
+
+function isSamlAuthorizationFailure(detail: string): boolean {
+  return /Resource protected by organization SAML enforcement|grant your OAuth token access/i.test(
+    detail
+  );
 }
 
 function selectedFailureStatus(
   stdout: string,
   stderr: string
 ): 401 | 403 | 404 | 429 | null {
-  const match = /\bHTTP\s+(401|403|404|429)\b/i.exec(`${stderr}\n${stdout}`);
-  if (!match) return null;
+  const detail = `${stderr}\n${stdout}`;
+  const match = /\bHTTP\s+(401|403|404|429)\b/i.exec(detail);
+  if (!match) return isSamlAuthorizationFailure(detail) ? 403 : null;
   const status = Number(match[1]);
   if (status === 401 || status === 403 || status === 404 || status === 429) {
     return status;

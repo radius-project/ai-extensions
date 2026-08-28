@@ -385,6 +385,11 @@ export function defaultFakeCliScenario(): FakeCliScenario {
     commands: [
       {
         tool: "gh",
+        args: ["--version"],
+        stdout: "gh version 2.87.0 (2026-02-19)"
+      },
+      {
+        tool: "gh",
         args: ["auth", "status", "--hostname", "github.com"],
         env: { GH_TOKEN: "present" },
         stdout: authStatus("acting-user", "GH_TOKEN", ["repo"])
@@ -441,6 +446,12 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         tool: "gh",
         args: ["api", "user", "--jq", ".login"],
         env: { GH_TOKEN: "fixture-acting-token" },
+        stdout: "acting-user"
+      },
+      {
+        tool: "gh",
+        args: ["api", "user", "--jq", ".login"],
+        env: { GH_TOKEN: PLACEHOLDER_SECRET },
         stdout: "acting-user"
       },
       {

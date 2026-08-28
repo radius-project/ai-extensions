@@ -1404,7 +1404,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
   });
 
-  test("retries restored verification through the selected account and exact run identity @safety", async ({
+  test("retries verification through the selected account and returned run URL @safety", async ({
     page,
     canvas
   }) => {
@@ -1420,7 +1420,7 @@ test.describe("Radius Canvas in Chromium", () => {
           "list",
           "--workflow=radius-verify-credentials.yml",
           "--limit",
-          "10",
+          "1",
           "--json",
           "databaseId",
           "--repo",
@@ -1445,7 +1445,7 @@ test.describe("Radius Canvas in Chromium", () => {
           WORKTREE_BRANCH
         ],
         env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: ""
+        stdout: `https://github.com/${REPOSITORY}/actions/runs/41`
       },
       {
         tool: "gh",
@@ -1538,6 +1538,16 @@ test.describe("Radius Canvas in Chromium", () => {
         })
       ]
     });
+    expect(
+      (await canvas.cliCalls()).filter(
+        (call) =>
+          call.tool === "gh" &&
+          call.args[0] === "run" &&
+          call.args.includes(
+            "databaseId,createdAt,displayTitle,event,headBranch"
+          )
+      )
+    ).toEqual([]);
     await expect(page.locator("body")).toContainText("Environment created");
     await expectNoWcagViolations(page);
   });
