@@ -133,3 +133,56 @@ export function buildVerifyWorkflowDispatchArgs({
     ...(ref ? ["--ref", ref] : [])
   ];
 }
+
+export interface VerifyWorkflowRunIdentity {
+  runId: string;
+  runUrl: string;
+}
+
+export function parseVerifyWorkflowRunUrl(
+  stdout: string,
+  {
+    targetRepo,
+    host = "github.com"
+  }: {
+    targetRepo: string;
+    host?: string;
+  }
+): VerifyWorkflowRunIdentity {
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length !== 1) {
+    throw new Error("GitHub CLI did not return exactly one workflow run URL.");
+  }
+  const [owner, repo, extra] = targetRepo.split("/");
+  if (!owner || !repo || extra) {
+    throw new Error("The target GitHub repository is invalid.");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(lines[0]);
+  } catch {
+    throw new Error("GitHub CLI returned a malformed workflow run URL.");
+  }
+  const expectedPath = `/${owner}/${repo}/actions/runs/`;
+  const runId =
+    parsed.pathname.startsWith(expectedPath) ?
+      parsed.pathname.slice(expectedPath.length)
+    : "";
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.hostname.toLowerCase() !== host.toLowerCase() ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    !/^[1-9]\d*$/.test(runId)
+  ) {
+    throw new Error(
+      "GitHub CLI returned a workflow run URL for an unexpected location."
+    );
+  }
+  return { runId, runUrl: parsed.toString() };
+}

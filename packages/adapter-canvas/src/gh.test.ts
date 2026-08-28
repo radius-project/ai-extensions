@@ -840,6 +840,18 @@ describe("GitHub CLI multi-account compatibility", () => {
     expect(version).toEqual(parsed);
     if (version) expect(supportsGhMultiAccount(version)).toBe(supported);
   });
+
+  it.each([
+    [[2, 86], false],
+    [[2, 87], true],
+    [[3, 0], true]
+  ] as const)(
+    "classifies workflow dispatch support for %j",
+    async (version, supported) => {
+      const { supportsWorkflowDispatchRunDetails } = await import("./gh.js");
+      expect(supportsWorkflowDispatchRunDetails([...version])).toBe(supported);
+    }
+  );
 });
 
 describe.sequential("selected GitHub executor", () => {
@@ -938,16 +950,28 @@ describe.sequential("selected GitHub executor", () => {
     );
   });
 
-  it("reports an actionable error when GitHub CLI predates multi-account token lookup", async () => {
+  it("reports an actionable error when GitHub CLI predates dispatch run details", async () => {
     const gh = await loadGh("linux", {
       token: "selected-injected-token",
       withToken: STATUS.tokenWithWorkflow,
       keyring: STATUS.keyringWithWorkflow,
-      ghVersion: "gh version 2.39.1"
+      ghVersion: "gh version 2.86.1"
     });
 
     await expect(gh.createSelectedGhExecutor("keyuser")).rejects.toThrow(
-      "GitHub CLI 2.40 or newer"
+      "GitHub CLI 2.87 or newer"
+    );
+  });
+
+  it("fails closed when the GitHub CLI version is unreadable", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      ghVersion: "unexpected output"
+    });
+
+    await expect(gh.createSelectedGhExecutor("tokuser")).rejects.toThrow(
+      "could not determine the installed GitHub CLI version"
     );
   });
 
