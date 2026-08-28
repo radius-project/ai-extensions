@@ -31,20 +31,20 @@ export function hasWorkflowRunTrigger(workflow: unknown): boolean {
 
 export async function planCredentialVerification({
   targetRepo,
+  defaultBranch,
   prState,
   pullRequestUrl = "",
   verifyWorkflowPath = ".github/workflows/radius-verify-credentials.yml",
   dispatcherWorkflowPath = ".github/workflows/run-rad-commands.yml",
-  fetchFile,
-  resolveDefaultBranch
+  fetchFile
 }: {
   targetRepo: string;
+  defaultBranch: string;
   prState: PullRequestState | null;
   pullRequestUrl?: string;
   verifyWorkflowPath?: string;
   dispatcherWorkflowPath?: string;
   fetchFile: FetchFile;
-  resolveDefaultBranch: (repo: string) => Promise<string | null | undefined>;
 }): Promise<CredentialVerificationPlan> {
   if (!prState) {
     // The dispatch runs against the default branch here, so the workflow that
@@ -53,24 +53,21 @@ export async function planCredentialVerification({
     // declare it, and GitHub answers that with a 422 the journal reads as a
     // conclusive refusal — failing setup with a message about the dispatch
     // rather than the template.
-    const directBranch = (await resolveDefaultBranch(targetRepo)) || "main";
     const directWorkflow = await fetchFile(
       targetRepo,
       verifyWorkflowPath,
-      directBranch
+      defaultBranch
     );
     return {
       shouldDispatch: true,
-      ref: directBranch,
-      defaultBranch: directBranch,
+      ref: defaultBranch,
+      defaultBranch,
       pullRequestUrl: "",
       skipReason: "",
       supportsOperationMarker: hasVerificationOperationMarker(directWorkflow)
     };
   }
 
-  const defaultBranch =
-    (await resolveDefaultBranch(targetRepo)) || prState.base || "main";
   // `verifyExists` and `dispatcherChains` are questions about the default
   // branch: whether the workflow has landed, and whether merging would chain a
   // deploy off it. Marker support is a question about the ref the dispatch

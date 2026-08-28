@@ -1076,6 +1076,18 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     ).toContain("--ref main");
   });
 
+  it("dispatches against the confirmed non-main default branch", async () => {
+    const harness = start({ defaultBranch: "trunk" });
+
+    const response = await post({ repo: "octo/app", environment: "dev" });
+
+    expect(response.status).toBe(200);
+    expect(
+      harness.ghCalls.find((call) => call.startsWith("workflow run "))
+    ).toContain("--ref trunk");
+    expect(harness.operation.verification).toMatchObject({ ref: "trunk" });
+  });
+
   it("skips verification and finishes action_required when cloud credentials are incomplete", async () => {
     // Issue #219: the shared Azure credential is missing a subscription ID, so
     // dispatching verify would only produce a run that fails at the cloud-login

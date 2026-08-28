@@ -36,7 +36,7 @@ describe("workflow parsing", () => {
 describe("credential verification planning", () => {
   const base = {
     targetRepo: "octo/app",
-    resolveDefaultBranch: async () => "main"
+    defaultBranch: "main"
   };
 
   it("dispatches directly when there is no PR fallback", async () => {
@@ -52,19 +52,19 @@ describe("credential verification planning", () => {
     expect(plan.supportsOperationMarker).toBe(true);
   });
 
-  it("uses main explicitly when the direct-path default branch cannot be resolved", async () => {
+  it("uses the confirmed non-main branch when the direct workflow cannot be read", async () => {
     // Assuming support would send `-f radius_operation` to a workflow that may
     // not declare it, and GitHub answers that with a 422 the journal reads as a
     // conclusive refusal, failing setup for the wrong stated reason.
     const plan = await planCredentialVerification({
       ...base,
-      resolveDefaultBranch: async () => null,
+      defaultBranch: "trunk",
       prState: null,
       fetchFile: async () => null
     });
     expect(plan.shouldDispatch).toBe(true);
-    expect(plan.ref).toBe("main");
-    expect(plan.defaultBranch).toBe("main");
+    expect(plan.ref).toBe("trunk");
+    expect(plan.defaultBranch).toBe("trunk");
     expect(plan.supportsOperationMarker).toBe(false);
   });
 

@@ -220,6 +220,7 @@ export interface CreateEnvironmentDependencies
   // --- verification ---
   planCredentialVerification(input: {
     targetRepo: string;
+    defaultBranch: string;
     prState: { branch: string; base: string } | null;
     pullRequestUrl: string;
     fetchFile: (
@@ -227,7 +228,6 @@ export interface CreateEnvironmentDependencies
       path: string,
       branch: string
     ) => Promise<string | null | undefined>;
-    resolveDefaultBranch: (repo: string) => Promise<string | null | undefined>;
   }): Promise<CredentialVerificationPlanResult>;
   fetchFileFromRepo(
     repo: string,
@@ -992,12 +992,11 @@ export async function handleCreateEnvironment(
     let baselineRunId: number | null = null;
     const verifyPlan = await dependencies.planCredentialVerification({
       targetRepo,
+      defaultBranch,
       prState: prState || null,
       pullRequestUrl,
       fetchFile: (repo, path, branch) =>
-        dependencies.fetchFileFromRepo(repo, path, branch, selectedExecutor),
-      resolveDefaultBranch: (repo) =>
-        dependencies.getDefaultBranch(repo, selectedExecutor)
+        dependencies.fetchFileFromRepo(repo, path, branch, selectedExecutor)
     });
     pullRequestUrl = verifyPlan.pullRequestUrl;
     if (prState && verifyPlan.shouldDispatch) {
