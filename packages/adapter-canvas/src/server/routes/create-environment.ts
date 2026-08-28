@@ -25,6 +25,7 @@ import {
   providerCredentialStatus,
   type ProviderCredentialStatus
 } from "./create-environment-workflow-publisher.js";
+import type { GhCommandPresentation } from "../../gh-command-display.js";
 import {
   ensureGitHubEnvironment,
   GitHubEnvironmentEnsureCancelled,
@@ -71,6 +72,7 @@ export interface CreateEnvironmentInstanceEntry {
 
 export interface CreateEnvironmentDependencies
   extends AdmissionPorts, WorkflowScopeGhRunnerPorts {
+  ghCommandPresentation?: GhCommandPresentation;
   // --- request scope ---
   // Evaluated per request against this instance's server-owned token. Never a
   // construction-time value: the token is a per-instance randomUUID().
@@ -738,6 +740,7 @@ export async function handleCreateEnvironment(
     // responds, so `fail` is still called from here alone.
     const published = await publishWorkflowFiles(
       {
+        ghCommandPresentation: dependencies.ghCommandPresentation,
         generateVerifyWorkflow: (environment, workflowProvider) =>
           dependencies.generateVerifyWorkflow(environment, workflowProvider),
         generateDeployWorkflow: (environment, appFile) =>

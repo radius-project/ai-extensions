@@ -27,6 +27,7 @@ import { createTestRouteTable } from "../../support/server/route-table.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
+import type { GhCommandPresentation } from "../../../src/gh-command-display.js";
 import type {
   CreateEnvironmentDependencies,
   CreateEnvironmentInstanceEntry
@@ -55,6 +56,7 @@ interface GhRule {
 }
 
 interface Script {
+  ghCommandPresentation?: GhCommandPresentation;
   gh?: GhRule[];
   runListResults?: Array<Partial<CreateEnvironmentCommandResult>>;
   repoAdminRefusal?: string;
@@ -365,6 +367,7 @@ function start(script: Script = {}): Harness {
   const entry: CreateEnvironmentInstanceEntry = { state };
 
   const dependencies: CreateEnvironmentDependencies = {
+    ghCommandPresentation: script.ghCommandPresentation,
     // --- request scope: read per request, exactly as server.ts does ---
     isServerOwnedRequest: (_instanceId, request) =>
       request.headers["x-radius-server-owned"] === SERVER_OWNED_TOKEN,
@@ -1890,6 +1893,12 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
 
   it("fails 400 with the workflow-scope hint when the verify workflow cannot be committed", async () => {
     const harness = start({
+      ghCommandPresentation: {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/opt/Copilot Tools/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      },
       gh: [
         {
           match: /^api --method PUT \/repos\/octo\/app\/contents\//,
@@ -1908,8 +1917,9 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     const payload = (await response.json()) as { error: string; code: string };
     expect(payload.code).toBe("verify-workflow-commit-failed");
     expect(payload.error).toContain(
-      "gh auth refresh -h github.com -s workflow"
+      "'/opt/Copilot Tools/gh' auth refresh -h github.com -s workflow"
     );
+    expect(payload.error).toContain("Install GitHub CLI system-wide.");
     expect(harness.committedFiles).toEqual([]);
   });
 

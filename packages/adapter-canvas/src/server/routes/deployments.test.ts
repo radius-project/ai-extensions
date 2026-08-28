@@ -1610,6 +1610,12 @@ describe("deployments routes (SU-06)", () => {
       await handleDeleteDeployment(
         ctx,
         deleteDependencies({
+          ghCommandPresentation: {
+            kind: "absolute",
+            shell: "posix",
+            executablePath: "/opt/Copilot Tools/gh",
+            installationNote: "Install GitHub CLI system-wide."
+          },
           readProcessEnv: () => ({}),
           runGh: () => {
             calls += 1;
@@ -1625,7 +1631,7 @@ describe("deployments routes (SU-06)", () => {
       expect(calls).toBe(1);
       expect(recording.status).toBe(400);
       expect(JSON.parse(recording.body).error).toContain(
-        'missing the "workflow" scope'
+        "'/opt/Copilot Tools/gh' auth refresh -h github.com -s workflow"
       );
     });
 

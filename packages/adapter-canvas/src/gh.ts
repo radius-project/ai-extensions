@@ -467,7 +467,7 @@ function ensurePackageCredential(): Promise<GhPackageCredentialResolution> {
       return {
         ok: false,
         error:
-          "No GitHub account is available for package setup. Sign in with: gh auth login"
+          "No GitHub account is available for package setup. Sign in with GitHub CLI, then retry."
       };
     }
     const hasKeyringEntry = snapshot.keyringAccts.some(
@@ -496,7 +496,7 @@ function ensurePackageCredential(): Promise<GhPackageCredentialResolution> {
     }
     return {
       ok: false,
-      error: `Could not obtain a GitHub token for @${login}. Sign in with: gh auth login`
+      error: `Could not obtain a GitHub token for @${login}. Sign in with GitHub CLI, then retry.`
     };
   })();
   return _ghPackageCredentialPromise;

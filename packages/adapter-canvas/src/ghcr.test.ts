@@ -342,16 +342,57 @@ test("reports package-scope guidance when GHCR rejects token exchange", async ()
   );
 });
 
+test("uses the bundled GitHub CLI path in package-scope guidance", async () => {
+  const harness = createHarness({ tokenStatus: 403 });
+
+  await assert.rejects(
+    bootstrapGHCRStatePackage({
+      ...baseOptions,
+      fetchImpl: harness.fetchImpl,
+      ghCommandPresentation: {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/Applications/GitHub Copilot/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(
+        error.message,
+        /'\/Applications\/GitHub Copilot\/gh' auth refresh/
+      );
+      assert.match(error.message, /Install GitHub CLI system-wide/);
+      return true;
+    }
+  );
+});
+
 test("requires a stored gh keyring credential", async () => {
   const calls = [];
   await assert.rejects(
     loadGhKeyringCredentials({
+      ghCommandPresentation: {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/Applications/GitHub Copilot/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      },
       runKeyringCommand: async (args) => {
         calls.push(args);
         throw new Error("not logged in");
       }
     }),
-    /stored GitHub CLI login/
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /stored GitHub CLI login/);
+      assert.match(
+        error.message,
+        /'\/Applications\/GitHub Copilot\/gh' auth switch/
+      );
+      assert.match(error.message, /Install GitHub CLI system-wide/);
+      return true;
+    }
   );
   assert.equal(calls.length, 2);
 });

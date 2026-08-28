@@ -427,6 +427,32 @@ describe("parseGithubReadiness", () => {
     expect(view?.command).toContain("write:packages");
   });
 
+  it("renders a bundled GitHub CLI path in readiness remediation", () => {
+    const view = parseGithubReadiness(
+      {
+        readiness: {
+          repairRemediation: {
+            id: "github-account-scopes",
+            params: { login: "octocat", workflow: "true" }
+          }
+        }
+      },
+      {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/Applications/GitHub Copilot/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(view.repairRemediation?.command).toContain(
+      "'/Applications/GitHub Copilot/gh' auth switch"
+    );
+    expect(view.repairRemediation?.warning).toContain(
+      "Install GitHub CLI system-wide."
+    );
+  });
+
   it("drops a repair remediation that is missing, unknown, or not runnable", () => {
     const parse = (repairRemediation: unknown): unknown =>
       parseGithubReadiness({ readiness: { repairRemediation } })
@@ -642,6 +668,7 @@ describe("githubIdentityNote", () => {
       packagesHasWrite: false,
       packagesCredentialSource: "injected-token"
     });
+
     // The workflow scope lives on a different credential, so its fix must not
     // disappear with the packages warning.
     expect(note.specs[0].text).toContain(
@@ -650,6 +677,29 @@ describe("githubIdentityNote", () => {
     expect(note.specs[0].text).toContain(
       "gh auth refresh -h github.com -s workflow"
     );
+  });
+
+  it("uses the bundled path in injected-token workflow guidance", () => {
+    const note = githubIdentityNote(
+      {
+        ...base,
+        actingHasWorkflow: false,
+        actingHasPackages: true,
+        packagesHasWrite: false,
+        packagesCredentialSource: "injected-token"
+      },
+      {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/opt/Copilot Tools/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(note.specs[0].text).toContain(
+      "'/opt/Copilot Tools/gh' auth refresh"
+    );
+    expect(note.specs[0].text).toContain("Install GitHub CLI system-wide.");
   });
 
   it("names the acting login when an injected token reports no publisher", () => {
