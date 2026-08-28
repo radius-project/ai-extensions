@@ -1,15 +1,243 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  discoverResources,
+  type DiscoveryDependencies
+} from "../../../src/server/services/discovery.js";
+import { isUuid } from "../../../src/azure-oidc.js";
+import {
+  azureDiscoveryContract,
+  temporaryKubeconfigDouble,
+  TEST_KUBECONFIG_PATH
+} from "../../support/azure-discovery-contract.js";
+import {
+  azureDiscoveryCommands,
+  fakeCliArgsMatch,
   FAKE_CLI_TOOLS,
   removeDirectoryWithRetries,
   replaceSharedCredentials,
   stopHarnessServer,
-  unwindHarnessConstruction
+  unwindHarnessConstruction,
+  type FakeCliCommand
 } from "./canvas-harness.js";
 
 describe("fake CLI isolation", () => {
   it("intercepts every cloud command used by environment discovery", () => {
     expect(FAKE_CLI_TOOLS).toEqual(["gh", "rad", "az", "aws", "kubectl"]);
+  });
+});
+
+describe("fakeCliArgsMatch", () => {
+  it("requires an exact list when one is given", () => {
+    expect(fakeCliArgsMatch({ args: ["a", "b"] }, ["a", "b"])).toBe(true);
+    expect(fakeCliArgsMatch({ args: ["a", "b"] }, ["a", "b", "c"])).toBe(false);
+  });
+
+  it("anchors both ends around an unpredictable span", () => {
+    const command = { argsPrefix: ["--file"], argsSuffix: ["--overwrite"] };
+
+    expect(fakeCliArgsMatch(command, ["--file", "/tmp/x", "--overwrite"])).toBe(
+      true
+    );
+    expect(fakeCliArgsMatch(command, ["--file", "/tmp/x", "--other"])).toBe(
+      false
+    );
+  });
+
+  it("rejects a list too short to satisfy both ends without overlapping", () => {
+    expect(
+      fakeCliArgsMatch({ argsPrefix: ["get"], argsSuffix: ["get"] }, ["get"])
+    ).toBe(false);
+  });
+
+  it("still matches a prefix-only stub and an argument-free command", () => {
+    expect(fakeCliArgsMatch({ argsPrefix: ["app"] }, ["app", "graph"])).toBe(
+      true
+    );
+    expect(fakeCliArgsMatch({}, [])).toBe(true);
+    expect(fakeCliArgsMatch({}, ["version"])).toBe(false);
+  });
+});
+
+describe("azureDiscoveryCommands", () => {
+  const SUBSCRIPTION = "22222222-2222-2222-2222-222222222222";
+  const first = { id: "aks-first", name: "AKS First", resourceGroup: "rg-1" };
+  const selected = {
+    id: "aks-selected",
+    name: "AKS Selected",
+    resourceGroup: "rg-2"
+  };
+
+  // Drives the production discovery service and records what it actually ran,
+  // so these assertions fail when `discovery.ts` changes rather than restating
+  // the factory back to itself.
+  async function recordRealInvocations(
+    namespaces: string
+  ): Promise<Array<{ tool: string; args: string[] }>> {
+    const calls: Array<{ tool: string; args: string[] }> = [];
+    const dependencies: DiscoveryDependencies = {
+      isUuid,
+      createTemporaryKubeconfig: () => temporaryKubeconfigDouble(),
+      async runCli(tool, args) {
+        calls.push({ tool, args });
+        if (tool === "kubectl") return namespaces;
+        if (args[0] === "aks" && args[1] === "list") {
+          return JSON.stringify([first, selected]);
+        }
+        if (args[0] === "group") return JSON.stringify([]);
+        return "";
+      }
+    };
+    await discoverResources(
+      {
+        provider: "azure",
+        subscriptionId: SUBSCRIPTION,
+        cluster: selected.id,
+        resourceGroup: selected.resourceGroup
+      },
+      dependencies
+    );
+    return calls;
+  }
+
+  function matching(
+    commands: FakeCliCommand[],
+    call: { tool: string; args: string[] }
+  ): FakeCliCommand[] {
+    return commands.filter(
+      (command) =>
+        command.tool === call.tool && fakeCliArgsMatch(command, call.args)
+    );
+  }
+
+  it("models every command the discovery service actually issues", async () => {
+    const calls = await recordRealInvocations("default selected-team");
+    const commands = azureDiscoveryCommands({
+      subscriptionId: SUBSCRIPTION,
+      clusters: [first, selected],
+      selected,
+      namespaces: ["default", "selected-team"]
+    });
+
+    expect(calls).toHaveLength(commands.length);
+    for (const call of calls) {
+      expect(
+        matching(commands, call),
+        `no stub models ${call.tool} ${call.args.join(" ")}`
+      ).toHaveLength(1);
+    }
+  });
+
+  it("stops modeling a namespace command whose output format changed", async () => {
+    const calls = await recordRealInvocations("default selected-team");
+    const commands = azureDiscoveryCommands({
+      subscriptionId: SUBSCRIPTION,
+      clusters: [first, selected],
+      selected,
+      namespaces: ["default"]
+    });
+    const namespaceCall = calls.at(-1);
+    if (!namespaceCall) throw new Error("discovery ran no commands");
+    const drifted = {
+      ...namespaceCall,
+      args: namespaceCall.args.map((value) =>
+        value.startsWith("jsonpath=") ? "-o=name" : value
+      )
+    };
+
+    expect(matching(commands, namespaceCall)).toHaveLength(1);
+    expect(matching(commands, drifted)).toHaveLength(0);
+  });
+
+  it("stops at the listing steps when no cluster is selected", () => {
+    const commands = azureDiscoveryCommands({
+      subscriptionId: SUBSCRIPTION,
+      clusters: [first, selected]
+    });
+
+    expect(commands.map((command) => command.tool)).toEqual(["az", "az", "az"]);
+    expect(commands.at(-1)?.args).toEqual(
+      azureDiscoveryContract({ subscriptionId: SUBSCRIPTION }).groupList.args
+    );
+  });
+
+  it("omits the subscription context call when no subscription is given", () => {
+    const commands = azureDiscoveryCommands({ clusters: [first] });
+
+    expect(commands[0].args?.slice(0, 2)).toEqual(["aks", "list"]);
+    expect(
+      commands.every((command) => !command.args?.includes("--subscription"))
+    ).toBe(true);
+  });
+
+  it("serves the listing the fixture declares and derives its resource groups", () => {
+    const commands = azureDiscoveryCommands({
+      clusters: [first, selected],
+      selected,
+      namespaces: ["default"]
+    });
+
+    expect(JSON.parse(commands[0].stdout ?? "")).toEqual([first, selected]);
+    expect(JSON.parse(commands[1].stdout ?? "")).toEqual([
+      { id: "rg-1", name: "rg-1" },
+      { id: "rg-2", name: "rg-2" }
+    ]);
+  });
+
+  it("honors an explicit resource group list", () => {
+    const commands = azureDiscoveryCommands({
+      clusters: [first],
+      resourceGroups: ["rg-only"]
+    });
+
+    expect(JSON.parse(commands.at(-1)?.stdout ?? "")).toEqual([
+      { id: "rg-only", name: "rg-only" }
+    ]);
+  });
+
+  it("refuses a selection the cluster listing never offered", () => {
+    expect(() =>
+      azureDiscoveryCommands({ clusters: [first], selected })
+    ).toThrow(/not in the fixture listing/);
+  });
+
+  it("leaves the generated kubeconfig path unpinned and everything else pinned", () => {
+    const commands = azureDiscoveryCommands({
+      clusters: [selected],
+      selected,
+      namespaces: ["default"]
+    });
+    const contract = azureDiscoveryContract({
+      cluster: selected.id,
+      resourceGroup: selected.resourceGroup,
+      kubeconfigPath: "/tmp/some-other-path"
+    });
+
+    for (const command of commands.slice(-2)) {
+      expect(command.argsPrefix).not.toContain(TEST_KUBECONFIG_PATH);
+      expect(command.argsSuffix).not.toContain(TEST_KUBECONFIG_PATH);
+    }
+    expect(
+      fakeCliArgsMatch(commands.at(-2)!, contract.getCredentials!.args)
+    ).toBe(true);
+    expect(fakeCliArgsMatch(commands.at(-1)!, contract.namespaces!.args)).toBe(
+      true
+    );
+  });
+
+  it("returns independent commands so a suite can fail one stub in place", () => {
+    const fixture = {
+      clusters: [selected],
+      selected,
+      namespaces: ["default"]
+    };
+    const first = azureDiscoveryCommands(fixture);
+    const second = azureDiscoveryCommands(fixture);
+
+    const credentials = first.at(-2);
+    if (!credentials) throw new Error("missing get-credentials stub");
+    credentials.exitCode = 1;
+
+    expect(second.at(-2)).not.toHaveProperty("exitCode");
   });
 });
 
