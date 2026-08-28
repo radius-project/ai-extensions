@@ -4746,6 +4746,15 @@ const PERSISTED_OPERATION_KEYS = new Set([
 
 function persistedFailure(failure: any): any {
   if (!failure) return null;
+  const remediationParams =
+    (
+      failure.remediation &&
+      failure.remediation.params &&
+      typeof failure.remediation.params === "object" &&
+      !Array.isArray(failure.remediation.params)
+    ) ?
+      failure.remediation.params
+    : {};
   const remediation =
     (
       failure.remediation &&
@@ -4756,7 +4765,7 @@ function persistedFailure(failure: any): any {
       {
         id: failure.remediation.id,
         params: Object.fromEntries(
-          Object.entries(failure.remediation.params || {}).filter(
+          Object.entries(remediationParams).filter(
             (entry) => typeof entry[1] === "string"
           )
         )

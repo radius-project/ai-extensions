@@ -1722,6 +1722,35 @@ describe("client projection", () => {
     });
   });
 
+  it.each(["repo", ["repo"], 7])(
+    "treats non-record remediation params as empty when params=%j",
+    (params) => {
+      const op = newOp();
+      finish(op, "failed", {
+        failure: {
+          code: "github-scopes-missing",
+          message: "GitHub access is missing.",
+          classification: "user-fixable",
+          remediation: {
+            id: "github-account-scopes",
+            params
+          }
+        }
+      });
+
+      const restored = fromPersistedOperation(toPersistedOperation(op));
+
+      expect(restored.failure.remediation).toEqual({
+        id: "github-account-scopes",
+        params: {}
+      });
+      expect(toClientView(restored).failure.remediation).toEqual({
+        id: "github-account-scopes",
+        params: {}
+      });
+    }
+  );
+
   it("names created resources with safe labels rather than the private ledger", () => {
     const op = newOp();
     recordAzureApp(op, {
