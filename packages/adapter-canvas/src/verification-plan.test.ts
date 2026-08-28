@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildVerifyWorkflowDispatchArgs,
+  describePullRequestNextStep,
   describeVerificationDispatch,
   hasWorkflowRunTrigger,
   parseVerifyWorkflowRunUrl,
@@ -188,6 +189,65 @@ describe("dispatch narration", () => {
       );
     }
   );
+});
+
+describe("pull request next step", () => {
+  it("tells the customer verification already started when it dispatches now", () => {
+    expect(
+      describePullRequestNextStep({
+        verifiesNow: true,
+        baseBranch: "main",
+        ref: "radius/setup-dev-workflows-abc"
+      })
+    ).toBe(
+      'Credential verification runs now against branch "radius/setup-dev-workflows-abc"; ' +
+        'merge the pull request above to finish setup and enable deploys from "main".'
+    );
+  });
+
+  it("tells the customer merging is what starts verification when it waits", () => {
+    expect(
+      describePullRequestNextStep({
+        verifiesNow: false,
+        baseBranch: "main",
+        ref: "radius/setup-dev-workflows-abc"
+      })
+    ).toBe(
+      "Merge the pull request above to finish setup; credential verification " +
+        'and deploys run once it lands on "main".'
+    );
+  });
+
+  // The two messages are the same claim with opposite answers, so the thing
+  // worth pinning is that they can never both be true of one operation.
+  it("never promises verification waits for the merge while it is running now", () => {
+    const waiting = /run once it lands/;
+    const running = /runs now against branch/;
+    for (const baseBranch of ["main", "trunk"]) {
+      const now = describePullRequestNextStep({
+        verifiesNow: true,
+        baseBranch,
+        ref: "setup"
+      });
+      const later = describePullRequestNextStep({
+        verifiesNow: false,
+        baseBranch,
+        ref: "setup"
+      });
+      expect(running.test(now) && waiting.test(now)).toBe(false);
+      expect(running.test(later) && waiting.test(later)).toBe(false);
+    }
+  });
+
+  it("names the branch verification runs against only when it runs now", () => {
+    expect(
+      describePullRequestNextStep({
+        verifiesNow: false,
+        baseBranch: "main",
+        ref: "radius/setup-dev-workflows-abc"
+      })
+    ).not.toContain("radius/setup-dev-workflows-abc");
+  });
 });
 
 describe("workflow run URL parsing", () => {

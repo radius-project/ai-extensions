@@ -50,7 +50,10 @@ import {
 } from "../services/provider-mutation-recovery.js";
 import { selectedEnvironmentReader } from "../services/github-environment.js";
 import { runVerificationDispatch } from "../services/verification-dispatch.js";
-import { describeVerificationDispatch } from "../../verification-plan.js";
+import {
+  describeVerificationDispatch,
+  describePullRequestNextStep
+} from "../../verification-plan.js";
 
 // Seam 4 of the `POST /api/create-environment` slice: the seven-step use case.
 //
@@ -868,6 +871,7 @@ export async function handleCreateEnvironment(
     // don't exist on the default branch, so we skip dispatching the verify run
     // (it would 404) and tell the user to merge first.
     let pullRequestUrl = "";
+    let pullRequestOpened = false;
     const prState = committer.pullRequestState();
     if (prState) {
       const prTitle = "Add Radius deploy workflows for environment " + envName;
@@ -1023,12 +1027,8 @@ export async function handleCreateEnvironment(
           };
       if (pr.ok) {
         pullRequestUrl = pr.url || "";
+        pullRequestOpened = true;
         steps.push("✅ Opened pull request #" + pr.number + ": " + pr.url);
-        steps.push(
-          '👉 Merge the pull request above to finish setup; credential verification and deploys run once it lands on "' +
-            prState.base +
-            '".'
-        );
       } else {
         steps.push(
           '⚠️ Committed workflows to branch "' +
@@ -1082,6 +1082,19 @@ export async function handleCreateEnvironment(
         baseBranch: prState.base,
         pullRequestUrl: null
       });
+    }
+    // The guidance waited for the plan: whether merging is what starts
+    // verification is exactly what `planCredentialVerification` and the
+    // credential check just decided, so it is stated once, here, instead of
+    // being predicted at pull-request time and patched afterwards.
+    if (prState && pullRequestOpened) {
+      steps.push(
+        `👉 ${describePullRequestNextStep({
+          verifiesNow: verifyPlan.shouldDispatch && credentialsComplete,
+          baseBranch: prState.base,
+          ref: verifyPlan.ref
+        })}`
+      );
     }
     if (!verifyPlan.shouldDispatch) {
       verifySkipReason =

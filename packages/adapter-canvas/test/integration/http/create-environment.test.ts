@@ -2544,6 +2544,59 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     ).toBe(true);
   });
 
+  // The guidance and the dispatch steps answer the same question, so the
+  // regression worth guarding is not the wording but the pair: the customer
+  // must never be told verification waits for the merge in the same run that
+  // dispatches it.
+  it("tells the customer verification already started when it dispatches from the branch", async () => {
+    const harness = start({
+      ...protectedScript,
+      files: {
+        ".github/workflows/radius-verify-credentials.yml":
+          "on: workflow_dispatch\njobs:\n"
+      }
+    });
+
+    await post({ repo: "octo/app" });
+
+    expect(harness.steps.filter((step) => step.startsWith("👉"))).toEqual([
+      '👉 Credential verification runs now against branch "radius/setup-dev-workflows-op-http"; ' +
+        'merge the pull request above to finish setup and enable deploys from "main".'
+    ]);
+    expect(
+      harness.steps.some((step) => step.includes("run once it lands"))
+    ).toBe(false);
+    expect(harness.steps).toContain("✅ Credentials verification dispatched.");
+  });
+
+  it("tells the customer merging starts verification when it does not dispatch", async () => {
+    const harness = start(protectedScript);
+
+    await post({ repo: "octo/app" });
+
+    expect(harness.steps.filter((step) => step.startsWith("👉"))).toEqual([
+      "👉 Merge the pull request above to finish setup; credential verification " +
+        'and deploys run once it lands on "main".'
+    ]);
+    expect(
+      harness.steps.some((step) => step.includes("runs now against branch"))
+    ).toBe(false);
+    expect(
+      harness.ghCalls.some((call) => call.startsWith("workflow run "))
+    ).toBe(false);
+  });
+
+  it("gives no merge guidance when the pull request was never opened", async () => {
+    const harness = start({
+      ...protectedScript,
+      pullRequest: { ok: false, stderr: "HTTP 422: already exists" }
+    });
+
+    await post({ repo: "octo/app" });
+
+    expect(harness.steps.filter((step) => step.startsWith("👉"))).toEqual([]);
+  });
+
   it("keeps the branch and asks the user to open the pull request manually when the API refuses", async () => {
     const harness = start({
       ...protectedScript,
