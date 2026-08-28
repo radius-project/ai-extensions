@@ -1358,7 +1358,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("body")).not.toContainText("Cancelled");
     await resumedPanel.locator("#env-progress-details > summary").click();
     const diagnosticLink = page.getByRole("link", {
-      name: "Download diagnostics"
+      name: "Download diagnostic snapshot"
     });
     await diagnosticLink.focus();
     await expect(diagnosticLink).toBeFocused();

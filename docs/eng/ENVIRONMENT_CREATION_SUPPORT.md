@@ -39,9 +39,9 @@ Radius never interrupts an in-flight provider mutation. If a response was lost, 
 
 After an extension restart, Radius pauses the restored operation instead of resuming cloud mutations automatically. **Continue setup** resumes the saved operation. **Stop setup** closes forward execution; if the exact saved verification workflow may still be active, cancel it or wait until **Check workflow status** reports it inactive before attempting destructive cleanup. **Abandon setup** is the non-destructive escape hatch when Radius cannot establish that cleanup is safe; retained resources remain the customer's responsibility.
 
-## Download diagnostics
+## Download a diagnostic snapshot
 
-Expand **Show details**, then activate **Download diagnostics**. Radius creates a local JSON file named `radius-environment-operation-diagnostics.json`. The browser does not upload it, and Radius does not create a second retained diagnostic record.
+Expand **Show details**, then activate **Download diagnostic snapshot**. The link is available while setup is active because a stuck, waiting, retrying, or reconciling operation may need support before it finishes. Radius creates a point-in-time local JSON file named `radius-environment-operation-diagnostics.json`; it is not a final report, and support may ask for a newer snapshot. The browser does not upload it, and Radius does not create a second retained diagnostic record.
 
 The export contains the installed plugin version, generated operation ID, schema version, lifecycle and stage states, timestamps and duration, attempt and command counts, failure classification, cleanup outcome counts, provider-recovery status counts, whether verification was dispatched, and the allowlisted state of its saved verification workflow.
 

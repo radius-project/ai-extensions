@@ -162,9 +162,10 @@ describe("environmentsPaneMarkup", () => {
     expect(html).toContain(
       'id="env-progress-diagnostics-download" class="rad-btn rad-btn--secondary" href="" download="radius-environment-operation-diagnostics.json"'
     );
+    expect(html).toContain(">Download diagnostic snapshot</a>");
     expect(html).toContain('aria-describedby="env-progress-diagnostics-note"');
     expect(html).toContain(
-      "Creates a local, redacted JSON file. Radius does not upload it."
+      "Captures the operation’s current state in a local, redacted JSON file. Radius does not upload it. Support may ask for a newer snapshot."
     );
   });
 

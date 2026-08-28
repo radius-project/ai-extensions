@@ -576,7 +576,7 @@ Success rules:
 
 ### Local diagnostic download
 
-**Download diagnostics** appears inside the operation's Details disclosure. It requests `GET /api/operations/{operationId}/diagnostics`, which returns a non-cached local JSON attachment. The browser follows the download URL but never reads, transforms, stores, or uploads the diagnostic content.
+**Download diagnostic snapshot** appears inside the operation's Details disclosure for active and terminal operations. Active access is intentional: a stuck, waiting, retrying, or reconciling operation may need support before it reaches a terminal state. Each click captures the operation's current state and generation time; it is not a final report, and support may request a newer snapshot. The link requests `GET /api/operations/{operationId}/diagnostics`, which returns a non-cached local JSON attachment. The browser follows the download URL but never reads, transforms, stores, or uploads the diagnostic content.
 
 The diagnostic builder is independent of both the persisted operation serializer and the browser projection. It selects each output field from a closed schema and emits only the generated operation ID, installed plugin and operation schema versions, lifecycle and stage states, timing, bounded counts, failure classification, cleanup outcomes, provider-recovery statuses, verification-dispatch state, and the allowlisted state of the saved verification workflow. Unknown future enum values become the fixed value `unknown` and increment an omission count.
 
