@@ -1,7 +1,6 @@
-# Radius AI Extension
+# Radius Canvas
 
-Radius AI Extension is a GitHub Copilot **plugin** for the
-[GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app).
+Radius Canvas is bundled with the `radius` plugin for the [GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app).
 It lets you define, visualize, and deploy an
 application with [Radius](https://github.com/radius-project/radius) without
 leaving Copilot. Radius is a cloud-native application platform that helps
@@ -9,7 +8,7 @@ developers and platform engineers build and manage applications together.
 
 ## Install the plugin
 
-The Radius canvas runs only in the
+Radius Canvas runs only in the
 [GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app),
 so install the plugin from the app: open app settings, click **Plugins**, add the
 `radius-project/ai-extensions` marketplace, and install the `radius` plugin.
@@ -19,7 +18,7 @@ The canvas extension is a compiled bundle that is not committed to `main`. CI bu
 See [`plugins/radius/README.md`](./plugins/radius/README.md) for what the plugin
 bundles and how to use it.
 
-> **NOTE:** Radius AI Extension is in preview. Send us your feedback:
+> **NOTE:** Radius Canvas is in preview. Send us your feedback:
 > [open an issue](https://github.com/radius-project/ai-extensions/issues/new/choose)
 > and tell us what you think.
 
@@ -41,7 +40,7 @@ controls for people with agent-callable capabilities. Each canvas extension is a
 small package (typically a `package.json` and an `extension.mjs` entry file) that
 defines the canvas behavior and its capabilities.
 
-The **Radius Canvas extension** turns your source code into a modeled Radius
+**Radius Canvas** turns your source code into a modeled Radius
 application, shows that application as a live graph across its lifecycle, and
 deploys it to your cloud environment, all from inside Copilot. It is organized
 into three areas:
@@ -78,7 +77,7 @@ actions and tools:
 | [`radius-environment`](./plugins/radius/skills/radius-environment/SKILL.md)                         | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions.                                                                          |
 | [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md)                                   | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.                                                                         |
 | [`radius-delete`](./plugins/radius/skills/radius-delete/SKILL.md)                                   | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or delete a deploy environment and clean up its cloud state.                             |
-| [`radius-fix-canvas-installation`](./plugins/radius/skills/radius-fix-canvas-installation/SKILL.md) | Repair a missing Radius canvas after install/update by copying the canvas files into the app's probed `extensions/` folder (temporary workaround for a GitHub Copilot app bug). |
+| [`radius-fix-canvas-installation`](./plugins/radius/skills/radius-fix-canvas-installation/SKILL.md) | Repair a missing Radius Canvas after install/update by copying the canvas files into the app's probed `extensions/` folder (temporary workaround for a GitHub Copilot app bug). |
 
 ## Architecture
 
@@ -112,7 +111,7 @@ adapters.
 - ⚠️ **Found an issue?** - [Open a bug report](https://github.com/radius-project/ai-extensions/issues/new/choose)
 - 💡 **Have a proposal?** - [Open a feature request](https://github.com/radius-project/ai-extensions/issues/new/choose)
 
-## Contributing to Radius AI Extension
+## Contributing to Radius Canvas
 
 Visit [Contributing](./CONTRIBUTING.md) for more information on how to build,
 test, and contribute to this repository.

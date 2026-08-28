@@ -37,11 +37,11 @@ describe("resolveGeneratorVersion", () => {
         readFile: reader({
           [installed]: JSON.stringify({
             name: "radius",
-            version: "0.1.0-edge-20260811053232"
+            version: "0.1.0-edge-0b33186"
           })
         })
       })
-    ).toBe("0.1.0-edge-20260811053232");
+    ).toBe("0.1.0-edge-0b33186");
   });
 
   it("falls back to the workspace source manifest when no bundle manifest exists", () => {

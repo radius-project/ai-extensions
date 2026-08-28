@@ -24,7 +24,7 @@ function origin(overrides: Partial<AppOrigin> = {}): AppOrigin {
   return {
     generatedAt: "2026-08-10T23:29:00Z",
     sourceCommit: "a".repeat(40),
-    skillVersion: "0.1.0-edge-20260811053232",
+    skillVersion: "0.1.0-edge-0b33186",
     appBicepHash: hashAppBicep(MODEL),
     ...overrides
   };
@@ -111,7 +111,7 @@ describe("serializeAppOrigin", () => {
     expect(serializeAppOrigin(origin())).toBe(
       `{\n  "generatedAt": "2026-08-10T23:29:00Z",\n  "sourceCommit": "${"a".repeat(
         40
-      )}",\n  "skillVersion": "0.1.0-edge-20260811053232",\n  "appBicepHash": "${hashAppBicep(
+      )}",\n  "skillVersion": "0.1.0-edge-0b33186",\n  "appBicepHash": "${hashAppBicep(
         MODEL
       )}"\n}\n`
     );
@@ -185,7 +185,7 @@ describe("freshnessIdentity", () => {
 describe("evaluateAppModelFreshness", () => {
   const current = {
     headCommit: "a".repeat(40),
-    generatorVersion: "0.1.0-edge-20260811053232",
+    generatorVersion: "0.1.0-edge-0b33186",
     hashAppBicep
   };
 
@@ -407,14 +407,14 @@ describe("evaluateAppModelFreshness", () => {
   it("reports a generator change when the source is unchanged", () => {
     const result = evaluateAppModelFreshness({
       ...current,
-      generatorVersion: "0.1.0-edge-20260901000000",
+      generatorVersion: "0.1.0-edge-9f2c4a1",
       model: MODEL,
       originText: serializeAppOrigin(origin())
     });
 
     expect(result.status).toBe("generator-changed");
     expect(result.stale).toBe(true);
-    expect(result.reason).toContain("0.1.0-edge-20260901000000");
+    expect(result.reason).toContain("0.1.0-edge-9f2c4a1");
   });
 
   it("prefers the edit signal over source and generator drift", () => {

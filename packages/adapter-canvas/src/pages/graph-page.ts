@@ -47,7 +47,7 @@ export function graphPage(state: CanvasState = {}): string {
     loaded ?
       `<div id="graph-container"></div>
 <div id="graph-refresh-status" class="status error" style="display:none;"></div>
-<div style="margin-top:8px; font-size:12px; color:var(--rad-text-tertiary);">
+<div id="graph-guidance" style="margin-top:8px; font-size:12px; color:var(--rad-text-tertiary);">
   Click a node to view source code links.
 </div>`
     : `<div id="graph-status" class="status info">Select a branch to generate the application graph. If no app.bicep exists, one will be generated from the repo structure.</div>

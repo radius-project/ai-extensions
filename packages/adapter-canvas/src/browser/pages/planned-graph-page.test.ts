@@ -15,15 +15,26 @@ import {
 } from "../../../test/support/browser/graph-progress.js";
 import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
-import type { HttpResponse } from "../ports.js";
+import type { BrowserTeardown } from "../lifecycle.js";
+import type { BrowserContext, HttpResponse } from "../ports.js";
 import {
-  initializePlannedGraphPage,
+  initializePlannedGraphPage as initializePlannedGraphPageEntry,
   PLANNED_GRAPH_STATE_ID,
   PLAN_DEBOUNCE_MS,
   PLAN_PROGRESS_MS,
   PLAN_RETRY_MS
 } from "./planned-graph-page.js";
 import { DEPLOYMENTS_PATH } from "../repositories.js";
+
+function initializePlannedGraphPage(
+  context: BrowserContext,
+  browserGlobals: Record<string, unknown>
+): BrowserTeardown {
+  return initializePlannedGraphPageEntry(context, {
+    radiusSetGraphError: vi.fn(),
+    ...browserGlobals
+  });
+}
 
 type EnvListing = "ok" | "empty" | "error";
 
@@ -143,6 +154,7 @@ function globals(overrides: Record<string, unknown> = {}) {
   return {
     radiusRenderGraph: vi.fn(),
     radiusSetGraphLoading: vi.fn(),
+    radiusSetGraphError: vi.fn(),
     ...overrides
   };
 }
@@ -152,6 +164,17 @@ describe("initializePlannedGraphPage", () => {
     const browser = createFakeBrowser();
     const teardown = initializePlannedGraphPage(browser.context, globals());
     expect(teardown).toBe(NOOP_TEARDOWN);
+  });
+
+  it("fails initialization when the graph error renderer is unavailable", () => {
+    const { browser } = fixture();
+
+    expect(() =>
+      initializePlannedGraphPageEntry(browser.context, {
+        radiusRenderGraph: vi.fn(),
+        radiusSetGraphLoading: vi.fn()
+      })
+    ).toThrow('Radius browser global "radiusSetGraphError" is not available.');
   });
 
   it("renders model compilation failures only on the graph and disables deployment", async () => {
@@ -842,6 +865,34 @@ describe("initializePlannedGraphPage", () => {
     expect(status.textContent).toContain(
       "Copilot is generating .radius/app.bicep"
     );
+  });
+
+  it("stops retrying and shows the server refusal when the skill cannot model the repository", async () => {
+    const setError = vi.fn();
+    const { browser, status } = fixture();
+    let calls = 0;
+    browser.net.handle("/api/plan-graph", () => {
+      calls++;
+      return jsonResponse({
+        error: "I could not find a Dockerfile in this repository.",
+        appBicepUnsupported: true
+      });
+    });
+    initializePlannedGraphPage(
+      browser.context,
+      globals({ radiusSetGraphError: setError })
+    );
+    await flushPromises();
+
+    browser.clock.tick(PLAN_RETRY_MS * 5);
+    await flushPromises();
+
+    expect(calls).toBe(1);
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "I could not find a Dockerfile in this repository."
+    );
+    expect(status.textContent).toBe("");
   });
 
   // Nothing announces the model's arrival, so a page that reported the wait
