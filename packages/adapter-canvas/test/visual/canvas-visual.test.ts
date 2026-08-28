@@ -12,11 +12,12 @@ import {
   type CanvasHarness
 } from "../e2e/support/canvas-harness.js";
 import type { Page } from "@playwright/test";
+import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
 
 type Theme = "dark" | "light";
 
-type GraphRequestBody = { branch: string; repo: string };
+type GraphRequestBody = { branch: string; repo: string; refresh?: boolean };
 
 type GraphRequests = {
   loadGraph: GraphRequestBody[];
@@ -70,14 +71,20 @@ const GRAPH_RESOURCES: CanvasGraphResource[] = [
 ];
 
 const DIFF_RESOURCES: CanvasGraphResource[] = [
-  { ...GRAPH_RESOURCES[0], diffStatus: "modified" },
+  {
+    ...GRAPH_RESOURCES[0],
+    connections: [{ id: "app/new-cache", direction: "Outbound" }],
+    diffStatus: "modified"
+  },
   { ...GRAPH_RESOURCES[1], id: "app/new-cache", diffStatus: "added" },
   { ...GRAPH_RESOURCES[2], diffStatus: "unchanged" },
   {
     id: "app/old-worker",
     name: "old-worker",
     type: "Radius.Compute/containers",
-    connections: [],
+    connections: [
+      { id: "app/web", direction: "Outbound", diffStatus: "removed" }
+    ],
     diffStatus: "removed"
   }
 ];
@@ -328,9 +335,16 @@ async function routeGraphControls(
   await page.route(`${canvas.baseUrl}/api/plan-graph`, async (route) => {
     const body: unknown = route.request().postDataJSON();
     if (isGraphRequestBody(body)) planGraph.push(body);
+    // The planned page reconciles freshness on mount by re-posting with
+    // `refresh`. The server answers that with `refreshed` when the cached graph
+    // is still current, so the fixture has to as well: replying with an error
+    // would drive the page down the failure path on every load.
+    const refresh = isGraphRequestBody(body) && body.refresh === true;
     await route.fulfill({
       contentType: "application/json",
-      body: JSON.stringify({ error: "Fixture request completed." })
+      body: JSON.stringify(
+        refresh ? { refreshed: true } : { error: "Fixture request completed." }
+      )
     });
   });
   await page.route(
@@ -518,6 +532,7 @@ test.describe("Radius Canvas visual baselines", () => {
       await routeGraphControls(page, canvas);
       await gotoVisual(page, canvas, "graph-diff", theme);
       await expect(page.locator(".rad-node")).toHaveCount(5);
+      await expect(page.locator(".react-flow__edge")).toHaveCount(3);
       await expect(page.locator("#base-branch")).toHaveValue("main");
       await expect(page.locator("#head-branch")).toHaveValue(WORKTREE_BRANCH);
       await expect(page.getByText("+1 added")).toBeVisible();
@@ -610,5 +625,72 @@ test.describe("Radius Canvas visual baselines", () => {
         await screenshot(page, `vi-07-deploy-${status}-${theme}.png`);
       });
     }
+  }
+
+  for (const theme of ["light", "dark"] as const) {
+    test(`VI-08 run-command callout in ${theme}`, async ({ page, canvas }) => {
+      test.setTimeout(45_000);
+      await seed(canvas, { activeSubtab: "credentials" });
+      // Drop write:packages from the keyring account. That is what turns the
+      // GitHub Packages row from a verified note into a run-command callout,
+      // which is the only state that renders the callout's styling.
+      await canvas.setGitHubKeyringScopes(["repo"]);
+      await gotoVisual(page, canvas, "credentials", theme);
+      await page
+        .getByRole("button", { name: "New Credential Profile" })
+        .click();
+      await expect(page.locator("#cred-form")).toBeVisible();
+
+      const row = page.locator("#cred-ghcr-command-row");
+      await expect(row).toBeVisible({ timeout: 15_000 });
+      await row.scrollIntoViewIfNeeded();
+
+      // Pin the callout itself: the command text, Copy, and Run with Copilot.
+      await expect(row).toContainText("gh auth refresh");
+      await expect(
+        row.getByRole("button", { name: COMMAND_RUN_LABEL })
+      ).toBeVisible();
+      await expect(row.getByRole("button", { name: "Copy" })).toBeVisible();
+      await expect(page.locator("#cred-ghcr-retry")).toBeVisible();
+
+      await screenshot(page, `vi-08-run-command-callout-${theme}.png`);
+    });
+
+    test(`VI-09 wizard github access callout in ${theme}`, async ({
+      page,
+      canvas
+    }) => {
+      test.setTimeout(45_000);
+      await seed(canvas, { activeSubtab: "environments" });
+      // The wizard reports its own readiness, so dropping the scopes here is
+      // what turns its GitHub access warning from prose into a callout. No
+      // other baseline covers this surface, which is how it shipped as plain
+      // text after the rest of the run-command work landed.
+      await canvas.setGitHubKeyringScopes(["repo"]);
+      await gotoVisual(page, canvas, "environment", theme);
+      await page.getByRole("button", { name: "New Environment" }).click();
+      await page.locator("#env-profile-button").click();
+      await page
+        .locator("#env-profile-menu")
+        .getByRole("option", { name: new RegExp(PROFILE_NAME) })
+        .click();
+      await page.locator("#env-step1-next").click();
+      await expect(page.locator("#env-step-details")).toBeVisible();
+
+      const repair = page.locator("#env-gh-repair");
+      await expect(repair).toBeVisible({ timeout: 15_000 });
+      await repair.scrollIntoViewIfNeeded();
+
+      // The command must be an actionable callout rather than a paragraph
+      // with the command buried in it.
+      await expect(repair).toContainText("gh auth switch");
+      await expect(repair).not.toContainText("In the terminal, run");
+      await expect(
+        repair.getByRole("button", { name: COMMAND_RUN_LABEL })
+      ).toBeVisible();
+      await expect(repair.getByRole("button", { name: "Copy" })).toBeVisible();
+
+      await screenshot(page, `vi-09-wizard-github-callout-${theme}.png`);
+    });
   }
 });

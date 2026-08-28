@@ -47,7 +47,7 @@
     "@babel/eslint-parser": "^8.0.1",
     "@babel/plugin-syntax-typescript": "^8.0.3",
     "@changesets/changelog-github": "1.0.0",
-    "@changesets/cli": "3.0.0",
+    "@changesets/cli": "3.0.1",
     "@eslint/js": "^10.0.1",
     "@playwright/test": "^1.62.1",
     "@types/node": "catalog:",

@@ -37,6 +37,7 @@ const RESOURCES = [
 ];
 
 interface Recorded {
+  external: string[];
   local: Array<[string, number, string]>;
   toggled: string[];
   opened: string[];
@@ -59,12 +60,19 @@ function mount(
   options: {
     localSource?: boolean;
     deployMode?: boolean;
+    diffMode?: boolean;
+    baseBranch?: string;
+    workspaceBranch?: string;
     resources?: GraphResource[];
   } = {}
 ): Mounted {
   const settings = resolveGraphSettings({
     localSource: options.localSource ?? true,
     deployMode: options.deployMode,
+    diffMode: options.diffMode,
+    baseBranch: options.baseBranch,
+    workspaceBranch: options.workspaceBranch,
+    repoUrl: "https://github.test/o/r",
     branch: "feature-branch"
   });
   const built = buildGraph(settings, options.resources ?? RESOURCES);
@@ -73,6 +81,7 @@ function mount(
 
   const { host, dispose } = createGraphHost();
   const recorded: Recorded = {
+    external: [],
     local: [],
     toggled: [],
     opened: [],
@@ -89,6 +98,7 @@ function mount(
       recorded.reloads += 1;
     },
     deps: {
+      openExternal: (url) => recorded.external.push(url),
       openLocalSource: (path, line, fallback) =>
         recorded.local.push([path, line, fallback]),
       toggleDetails: (data: GraphNodeData, card: DomElement | null) =>
@@ -110,7 +120,69 @@ async function card(name: string): Promise<HTMLElement> {
   return element;
 }
 
+function rgbChannels(color: string): number[] {
+  return color.match(/\d+/g)?.slice(0, 3).map(Number) ?? [];
+}
+
+function maximumChannelDelta(left: string, right: string): number {
+  const leftChannels = rgbChannels(left);
+  const rightChannels = rgbChannels(right);
+  if (leftChannels.length !== 3 || rightChannels.length !== 3) {
+    throw new Error(`expected RGB colors, received ${left} and ${right}`);
+  }
+  return Math.max(
+    ...leftChannels.map((channel, index) =>
+      Math.abs(channel - rightChannels[index])
+    )
+  );
+}
+
 describe("graph view in a real browser", () => {
+  it("renders changed diff states with distinct fills and borders", async () => {
+    const style = document.createElement("style");
+    style.textContent = SHELL_STYLE_CSS;
+    document.head.appendChild(style);
+    disposers.push(() => style.remove());
+
+    mount({
+      diffMode: true,
+      resources: [
+        { id: "added", name: "added", diffStatus: "added" },
+        { id: "removed", name: "removed", diffStatus: "removed" },
+        { id: "modified", name: "modified", diffStatus: "modified" },
+        { id: "unchanged", name: "unchanged", diffStatus: "unchanged" }
+      ]
+    });
+
+    const styles = await Promise.all(
+      ["added", "removed", "modified", "unchanged"].map(async (name) =>
+        getComputedStyle(await card(name))
+      )
+    );
+    const changed = styles.slice(0, 3);
+
+    expect(
+      new Set(changed.map(({ backgroundColor }) => backgroundColor))
+    ).toHaveLength(3);
+    expect(new Set(changed.map(({ borderColor }) => borderColor))).toHaveLength(
+      3
+    );
+    for (let left = 0; left < changed.length; left += 1) {
+      for (let right = left + 1; right < changed.length; right += 1) {
+        expect(
+          maximumChannelDelta(
+            changed[left].backgroundColor,
+            changed[right].backgroundColor
+          )
+        ).toBeGreaterThanOrEqual(4);
+      }
+    }
+    for (const changedStyle of changed) {
+      expect(changedStyle.backgroundColor).not.toBe(styles[3].backgroundColor);
+      expect(changedStyle.borderColor).not.toBe(styles[3].borderColor);
+    }
+  });
+
   it("renders a card per resource with the real libraries", async () => {
     mount();
 
@@ -253,6 +325,118 @@ describe("graph view in a real browser", () => {
     expect(document.body.contains(link)).toBe(true);
     // The card's own click handler must not also fire for a source click.
     expect(recorded.opened).toEqual([]);
+  });
+
+  it("opens a remote source link through the host without navigating the webview", async () => {
+    const { recorded } = mount({ localSource: false });
+    const web = await card("web");
+    const link = await within(web).findByRole("link", {
+      name: /View source code/
+    });
+
+    await userEvent.click(link);
+
+    expect(recorded.external).toEqual([
+      "https://github.test/o/r/blob/feature-branch/src/web.ts#L4"
+    ]);
+    expect(document.body.contains(link)).toBe(true);
+    expect(recorded.opened).toEqual([]);
+  });
+
+  it("opens an exact GitHub source URL externally from a worktree graph", async () => {
+    const sourceUrl =
+      "https://github.com/acme/widgets/blob/release/src/web.ts#L4";
+    const { recorded } = mount({
+      localSource: true,
+      resources: [
+        {
+          ...RESOURCES[0],
+          codeReference: sourceUrl
+        }
+      ]
+    });
+    const web = await card("web");
+    const link = await within(web).findByRole("link", {
+      name: /View source code/
+    });
+
+    await userEvent.click(link);
+
+    expect(recorded.external).toEqual([sourceUrl]);
+    expect(recorded.local).toEqual([]);
+    expect(document.body.contains(link)).toBe(true);
+  });
+
+  it("routes each diff node's source link by the branch that node lives on", async () => {
+    // The worktree can only have one of the two compared branches checked out,
+    // so a head-branch node must open locally while a removed node, whose file
+    // lives on the base branch, must still go out to the host.
+    const { recorded } = mount({
+      diffMode: true,
+      baseBranch: "main",
+      workspaceBranch: "feature-branch",
+      resources: [
+        {
+          id: "app/web",
+          name: "web",
+          type: "Radius.Compute/containers",
+          codeReference: "src/web.ts#L4",
+          diffStatus: "added"
+        },
+        {
+          id: "app/old-worker",
+          name: "old-worker",
+          type: "Radius.Compute/containers",
+          codeReference: "src/worker.ts#L9",
+          diffStatus: "removed"
+        }
+      ]
+    });
+
+    const web = await card("web");
+    await userEvent.click(
+      await within(web).findByRole("link", { name: /View source code/ })
+    );
+
+    expect(recorded.local).toEqual([["src/web.ts", 4, expect.any(String)]]);
+    expect(recorded.external).toEqual([]);
+
+    const worker = await card("old-worker");
+    await userEvent.click(
+      await within(worker).findByRole("link", { name: /View source code/ })
+    );
+
+    expect(recorded.local).toHaveLength(1);
+    expect(recorded.external).toEqual([
+      "https://github.test/o/r/blob/main/src/worker.ts#L9"
+    ]);
+  });
+
+  it("keeps every diff node remote when the worktree is on neither compared branch", async () => {
+    const { recorded } = mount({
+      diffMode: true,
+      baseBranch: "main",
+      workspaceBranch: "unrelated-branch",
+      resources: [
+        {
+          id: "app/web",
+          name: "web",
+          type: "Radius.Compute/containers",
+          codeReference: "src/web.ts#L4",
+          diffStatus: "added"
+        }
+      ]
+    });
+
+    const web = await card("web");
+    await userEvent.click(
+      await within(web).findByRole("link", { name: /View source code/ })
+    );
+
+    expect(recorded.local).toEqual([]);
+    expect(recorded.external).toEqual([
+      "https://github.test/o/r/blob/feature-branch/src/web.ts#L4"
+    ]);
   });
 
   it("marks the source row disabled when the node has no reference", async () => {

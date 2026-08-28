@@ -8,8 +8,10 @@
 import { describe, it, expect } from "vitest";
 import {
   buildGraph,
+  isLocalSourceNode,
   nodeColors,
   RADIUS_DEPLOY_STATUS_COLORS,
+  RADIUS_DIFF_STATUS_COLORS,
   radiusMapLineType,
   resolveGraphSettings
 } from "./build.js";
@@ -42,6 +44,83 @@ const db: GraphResource = {
   ]
 };
 
+// A diff compares two branches and a worktree holds at most one of them, so
+// "is this file on disk?" is a per-node question there. Getting it wrong is
+// silent: the node renders a github.com URL for a branch that was never pushed,
+// and clicking it does nothing at all.
+describe("per-node source locality", () => {
+  it("falls back to the page flag when no workspace branch is supplied", () => {
+    expect(
+      isLocalSourceNode(settings({ localSource: true }), { sourceBranch: "" })
+    ).toBe(true);
+    expect(
+      isLocalSourceNode(settings({ localSource: false }), {
+        sourceBranch: "anything"
+      })
+    ).toBe(false);
+  });
+
+  it("ignores the page flag once a workspace branch is supplied", () => {
+    const resolved = settings({
+      localSource: false,
+      branch: "feature-x",
+      workspaceBranch: "feature-x"
+    });
+    expect(isLocalSourceNode(resolved, { sourceBranch: "feature-x" })).toBe(
+      true
+    );
+  });
+
+  it("keeps a node from the other compared branch remote", () => {
+    const resolved = settings({
+      diffMode: true,
+      branch: "feature-x",
+      baseBranch: "main",
+      workspaceBranch: "feature-x"
+    });
+    expect(isLocalSourceNode(resolved, { sourceBranch: "main" })).toBe(false);
+    expect(isLocalSourceNode(resolved, { sourceBranch: "feature-x" })).toBe(
+      true
+    );
+  });
+
+  it("treats a node with no branch of its own as the page's branch", () => {
+    expect(
+      isLocalSourceNode(
+        settings({ branch: "feature-x", workspaceBranch: "feature-x" }),
+        { sourceBranch: undefined }
+      )
+    ).toBe(true);
+    expect(
+      isLocalSourceNode(
+        settings({ branch: "main", workspaceBranch: "feature-x" }),
+        { sourceBranch: undefined }
+      )
+    ).toBe(false);
+  });
+
+  it("resolves locality against the worktree branch even when it is the base", () => {
+    const resolved = settings({
+      diffMode: true,
+      branch: "main",
+      baseBranch: "feature-x",
+      workspaceBranch: "feature-x"
+    });
+    expect(isLocalSourceNode(resolved, { sourceBranch: "feature-x" })).toBe(
+      true
+    );
+    expect(isLocalSourceNode(resolved, { sourceBranch: "main" })).toBe(false);
+  });
+
+  it("never matches an empty workspace branch against an empty node branch", () => {
+    expect(
+      isLocalSourceNode(settings({ branch: "", workspaceBranch: "" }), {
+        sourceBranch: ""
+      })
+    ).toBe(false);
+  });
+});
+
 describe("options", () => {
   it.each([
     ["straight", "straight"],
@@ -67,6 +146,7 @@ describe("options", () => {
       branch: "main",
       baseBranch: "main",
       localSource: false,
+      workspaceBranch: "",
       edgeType: "default",
       showLegend: false,
       enablePopup: true
@@ -92,17 +172,16 @@ describe("options", () => {
 });
 
 describe("node colours", () => {
-  it("colours only the border by diff status and keeps the host surface", () => {
+  it("gives each changed diff status a matching tinted fill and stronger border", () => {
     const diff = settings({ diffMode: true });
-    expect(nodeColors(diff, { diffStatus: "added" })).toEqual({
-      bg: "var(--rad-node-bg)",
-      border: "var(--rad-success)"
-    });
-    expect(nodeColors(diff, { diffStatus: "removed" }).border).toBe(
-      "var(--rad-danger)"
+    expect(nodeColors(diff, { diffStatus: "added" })).toEqual(
+      RADIUS_DIFF_STATUS_COLORS.added
     );
-    expect(nodeColors(diff, { diffStatus: "modified" }).border).toBe(
-      "var(--rad-warning)"
+    expect(nodeColors(diff, { diffStatus: "removed" })).toEqual(
+      RADIUS_DIFF_STATUS_COLORS.removed
+    );
+    expect(nodeColors(diff, { diffStatus: "modified" })).toEqual(
+      RADIUS_DIFF_STATUS_COLORS.modified
     );
     expect(nodeColors(diff, { diffStatus: "unchanged" }).border).toBe(
       "var(--rad-node-border)"
@@ -148,7 +227,10 @@ describe("node colours", () => {
   });
 
   it("uses semantic tokens rather than literal colours", () => {
-    for (const colors of Object.values(RADIUS_DEPLOY_STATUS_COLORS)) {
+    for (const colors of Object.values({
+      ...RADIUS_DEPLOY_STATUS_COLORS,
+      ...RADIUS_DIFF_STATUS_COLORS
+    })) {
       expect(colors.bg).toMatch(/^var\(--rad-/);
       expect(colors.border).toMatch(/^var\(--rad-/);
     }
@@ -413,8 +495,8 @@ describe("diff graph", () => {
     const built = buildGraph(settings(base), resources);
     const stroke = (id: string) =>
       built.edges.find((edge) => edge.id === id)?.style.stroke;
-    expect(stroke("a-->b")).toBe("var(--rad-success)");
-    expect(stroke("a-->c")).toBe("var(--rad-danger)");
+    expect(stroke("a-->b")).toBe("var(--rad-diff-added)");
+    expect(stroke("a-->c")).toBe("var(--rad-diff-removed)");
     expect(stroke("a-->d")).toBe("var(--rad-edge-muted)");
   });
 
@@ -432,8 +514,8 @@ describe("diff graph", () => {
     ]);
     const stroke = (id: string) =>
       built.edges.find((edge) => edge.id === id)?.style.stroke;
-    expect(stroke("a-->b")).toBe("var(--rad-success)");
-    expect(stroke("c-->b")).toBe("var(--rad-danger)");
+    expect(stroke("a-->b")).toBe("var(--rad-diff-added)");
+    expect(stroke("c-->b")).toBe("var(--rad-diff-removed)");
     expect(stroke("d-->b")).toBe("var(--rad-edge-muted)");
   });
 

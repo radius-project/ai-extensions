@@ -9,6 +9,10 @@
 // landing's success/warning/error/action-required banners).
 
 import { setChildren } from "../dom.js";
+import { createCommandAction } from "../command-action.js";
+import type { CommandActionHandle } from "../command-action.js";
+import { remediationView } from "@radius-project/core/remediations";
+import type { RemediationView } from "@radius-project/core/remediations";
 import { beginEntry } from "../lifecycle.js";
 import { formatElapsed, stageGlyph } from "../progress-format.js";
 import {
@@ -59,6 +63,7 @@ export const PROGRESS_IDS = {
   failureCard: "env-progress-failure",
   failureTitle: "env-progress-failure-title",
   failureMessage: "env-progress-failure-message",
+  failureCommand: "env-progress-failure-command",
   cleanupStatus: "env-progress-cleanup-status",
   retry: "env-progress-retry",
   cleanupWarningsList: "env-progress-cleanup-warnings",
@@ -204,6 +209,13 @@ export interface OperationStageOrStep {
 
 export interface OperationFailure {
   readonly message: string;
+  /**
+   * The command that repairs this failure, when the registry will build one.
+   *
+   * Rebuilt here from the persisted id and params rather than transported as a
+   * string, so a stored record cannot introduce a command of its own.
+   */
+  readonly remediation: RemediationView | null;
 }
 
 export interface OperationCleanupEntry {
@@ -454,7 +466,27 @@ function parseStageList(value: unknown): OperationStageOrStep[] {
 
 function parseFailure(value: unknown): OperationFailure | null {
   if (!isRecord(value)) return null;
-  return { message: readString(value, "message") };
+  return {
+    message: readString(value, "message"),
+    remediation: parseFailureRemediation(value["remediation"])
+  };
+}
+
+function parseFailureRemediation(value: unknown): RemediationView | null {
+  if (!isRecord(value)) return null;
+  const id = readString(value, "id");
+  const rawParams = value["params"];
+  const params: Record<string, string> = {};
+  if (isRecord(rawParams)) {
+    for (const [key, raw] of Object.entries(rawParams)) {
+      if (typeof raw === "string") params[key] = raw;
+    }
+  }
+  // A refused build still yields a view -- an unknown id and refused params both
+  // come back unrunnable -- so `runnable` is the single gate. An unrunnable one
+  // must fall back to the prose, never to an empty callout.
+  const view = remediationView(id, params);
+  return view.runnable ? view : null;
 }
 
 function readOptionalBoolean(
@@ -1096,6 +1128,34 @@ export function initializeEnvironmentOperations(
     blockEl.style.display = "";
   }
 
+  // The failure card is re-rendered on every poll, so the callout it hosts is
+  // torn down and rebuilt with it rather than accumulating listeners.
+  let failureAction: CommandActionHandle | null = null;
+
+  function renderFailureCommand(remediation: RemediationView | null): void {
+    failureAction?.dispose();
+    failureAction = null;
+    const host = dom.byId(PROGRESS_IDS.failureCommand);
+    if (!host) return;
+    host.replaceChildren();
+    if (!remediation) {
+      host.style.display = "none";
+      return;
+    }
+    host.style.display = "";
+    failureAction = createCommandAction(context, {
+      host,
+      remediation,
+      mutationNonce: options.mutationNonce || "",
+      idPrefix: "env-progress-failure-command"
+    });
+  }
+
+  scope.onTeardown(() => {
+    failureAction?.dispose();
+    failureAction = null;
+  });
+
   function renderFailureCard(op: OperationRecord | null): void {
     const card = dom.byId(PROGRESS_IDS.failureCard);
     const messageEl = dom.byId(PROGRESS_IDS.failureMessage);
@@ -1113,6 +1173,7 @@ export function initializeEnvironmentOperations(
       messageEl.textContent = "";
       cleanupEl.textContent = "";
       retryEl.textContent = "";
+      renderFailureCommand(null);
       setFailureList(
         [],
         dom.byId(PROGRESS_IDS.cleanupWarningsList),
@@ -1136,6 +1197,7 @@ export function initializeEnvironmentOperations(
       op.failure && op.failure.message !== "" ?
         op.failure.message
       : "The setup request failed.";
+    renderFailureCommand(op.failure?.remediation ?? null);
     // The card names the outcome the customer actually reached. A rollback
     // that left resources behind is not a setup that failed to finish.
     const titleEl = dom.byId(PROGRESS_IDS.failureTitle);

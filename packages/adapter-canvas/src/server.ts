@@ -14,6 +14,7 @@ import { rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildRemediation,
   computeGraphDiff,
   deployStatusKeys,
   fetchBicepFromRepo,
@@ -23,8 +24,11 @@ import {
   resolveRecipeOutputs,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
+  remediationSessionMessage,
+  remediationView,
   stateRegistryForEnvironment
 } from "@radius-project/core";
+import type { Remediation, RemediationView } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/adapter-shared";
 import {
   sharedCredentials,
@@ -98,8 +102,10 @@ import {
   resolveWorkspaceBicep,
   fetchWorkspaceFile,
   isWorkspaceSelection,
+  modelingRunLastActivityAtMs,
   resolveSessionId,
   toSafeRepoRelPath,
+  uncommittedGeneratedPaths,
   workspaceGraphJsonPath
 } from "./workspace.js";
 import {
@@ -247,10 +253,15 @@ import {
 import type { WorkflowRollbackCommand } from "./server/services/workflow-rollback-ports.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
+import { createTemporaryKubeconfig } from "./server/temporary-kubeconfig.js";
 import { createAzureAutoSetupRoutes } from "./server/routes/azure-auto-setup.js";
 import { composeAzureAutoSetupDependencies } from "./server/azure-auto-setup-dependencies.js";
 import { createIdentityProfilesRoutes } from "./server/routes/identity-profiles.js";
 import { createIdentityAuthRoutes } from "./server/routes/identity-auth.js";
+import {
+  createRemediationRoutes,
+  productionRemediationDependencies
+} from "./server/routes/remediations.js";
 import {
   createGraphsPlanningRoutes,
   createGraphsPlanningStreamRoutes
@@ -330,6 +341,7 @@ import { createDeploymentAbandonmentService } from "./server/services/deployment
 import { resolveEnvironmentDeployment } from "./server/services/deployment-resolver.js";
 import type { DeploymentRow } from "./server/services/deployment-resolver.js";
 import { runEnvironmentOperationWorkflow } from "./server/services/environment-operation.js";
+import type { RemediationReference } from "./server/services/environment-operation.js";
 import {
   monitorVerificationWithSelectedAccount,
   verificationAcquisitionExpiredCopy,
@@ -496,6 +508,10 @@ interface AppBicepHandoffInput {
   repo: string;
   branches: string[];
   page: string;
+  // The instance's state, so the runtime can resolve each branch's model
+  // against the same workspace context the route just rendered from, and so it
+  // can deduplicate against the handoff it last performed for this panel.
+  state?: CanvasState;
 }
 
 export interface DeployRepairHandoffInput {
@@ -833,6 +849,7 @@ const azureDiscoveryRoutes = createAzureDiscoveryRoutes({
   runAz: (command, args) => runCliCommand(command, args),
   runCli: (command, args, options) => runCommand(command, args, options),
   isUuid,
+  createTemporaryKubeconfig,
   parseServedReposFromSubjects: (subjects) =>
     parseServedReposFromSubjects(subjects as Iterable<unknown>)
 });
@@ -1006,6 +1023,17 @@ const identityAuthRoutes = createIdentityAuthRoutes({
   errorMessage
 });
 
+// Suggested terminal commands are handed to the Copilot session, never run by
+// this server. The route rebuilds each command from the core registry, so the
+// only seams it needs are that same session hook and the error formatter.
+const remediationRoutes = createRemediationRoutes(
+  productionRemediationDependencies({
+    runSessionPrompt: (prompt) =>
+      invokeSessionPrompt(sessionPromptHandler, prompt),
+    errorMessage
+  })
+);
+
 const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   defaultBranchForState,
@@ -1047,6 +1075,29 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
 // route modules free of it. The pure helpers (`defaultBranchForState`,
 // `computeGraphDiff`, `record`, …) are injected rather than imported by the
 // workflows, matching how the sibling families inject `repoMatchesWorkspace`.
+// Observe on-disk modeling activity, but only when the modeling target is the
+// workspace itself. Local staging directories say nothing about a remote branch
+// or a different repository, so probing outside that match would let unrelated
+// activity extend a wait that should have expired.
+//
+// Shared by both graph route families on purpose: this is the gate that keeps a
+// wait honest, and two copies of it could drift apart.
+function observeWorkspaceModelingRun(
+  state: CanvasState,
+  repo: string,
+  branches: string[]
+): Promise<number | null> {
+  if (
+    !repo ||
+    !state.workspaceRepo ||
+    state.workspaceRepo !== repo ||
+    !branches.some((branch) => branch === state.workspaceBranch)
+  ) {
+    return Promise.resolve(null);
+  }
+  return modelingRunLastActivityAtMs(state.workspacePath);
+}
+
 const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   pipeline: createGraphPipeline<CanvasServerEntry>({
@@ -1088,6 +1139,7 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     resolveRecipeOutputs(github, resources, recipes, provider),
   computeGraphDiff: (baseResources, headResources) =>
     computeGraphDiff(baseResources, headResources),
+  observeModelingRun: observeWorkspaceModelingRun,
   record,
   optionalString,
   errorMessage,
@@ -1150,6 +1202,7 @@ const graphsPlanningRoutes = createGraphsPlanningRoutes({
   settleDeployStatuses,
   errorMessage,
   repoMatchesWorkspace,
+  observeModelingRun: observeWorkspaceModelingRun,
   now: () => Date.now()
 });
 
@@ -1414,6 +1467,7 @@ const serverRoutes = createServerRouteTable({
   ...azureAutoSetupRoutes,
   ...identityProfilesRoutes,
   ...identityAuthRoutes,
+  ...remediationRoutes,
   ...graphsPlanningRoutes,
   ...graphsPlanningStreamRoutes,
   ...graphsPlanningWritesRoutes,
@@ -2004,12 +2058,18 @@ export function azureLoginRequiredResponse({
   error: string;
   code: string;
   tenantId: string;
+  remediation: RemediationView;
 } {
   const error =
     activeTenantId ?
       `Active Azure session is tenant ${activeTenantId}, not ${tenantId}. Run "az login --use-device-code --tenant ${tenantId}" in your terminal, then click Verify Credentials again.`
     : 'No active Azure session. Run "az login --use-device-code" in your terminal, then click Verify Credentials again.';
-  return { error, code: "az-login-required", tenantId };
+  return {
+    error,
+    code: "az-login-required",
+    tenantId,
+    remediation: remediationView("azure-cli-login", { tenantId })
+  };
 }
 
 export async function invokeSessionPrompt(
@@ -2019,7 +2079,7 @@ export async function invokeSessionPrompt(
   if (typeof handler !== "function") {
     return {
       status: 503,
-      error: "Could not reach the Copilot session to start Azure CLI help."
+      error: "Could not reach the Copilot session to run this command."
     };
   }
   try {
@@ -2028,51 +2088,51 @@ export async function invokeSessionPrompt(
   } catch {
     return {
       status: 502,
-      error: "The Copilot session could not start Azure CLI help."
+      error: "The Copilot session could not run this command."
     };
   }
 }
 
-export function buildAzureCliAssistPrompt({
+// The Azure CLI assist prompts now come from the shared remediation registry in
+// core, so this route and /api/run-remediation cannot drift apart in wording,
+// command shape, or tenant handling. The registry reproduces the original text
+// exactly; `server.test.ts` pins that against the frozen legacy strings.
+function azureCliAssistRemediation({
   action = "login",
   tenantId = ""
-}: AzureCliAssistInput = {}): string {
-  const safeTenantId =
-    typeof tenantId === "string" && isUuid(tenantId.trim()) ?
-      tenantId.trim()
-    : "";
-  const loginCommand = `az login --use-device-code${
-    safeTenantId ? ` --tenant ${safeTenantId}` : ""
-  }`;
-  const loginInstructions = [
-    `Run \`${loginCommand}\` in this Copilot session.`,
-    "For that command, remove COPILOT_AGENT_SESSION_ID from the az process environment so Azure CLI does not inject it into the authentication request.",
-    "Use the shell-appropriate way to unset the variable only for the login invocation, and show me the device code and sign-in URL."
-  ].join(" ");
-  if (action === "install") {
-    return [
-      "Azure CLI is not installed in this environment, so the Radius canvas can't verify Azure credentials yet.",
-      `Please install Azure CLI, then ${loginInstructions}`,
-      "After the install and login finish, return to the Radius canvas and click Verify Credentials again."
-    ].join("\n\n");
+}: AzureCliAssistInput = {}): Remediation {
+  const id = action === "install" ? "azure-cli-install" : "azure-cli-login";
+  const requested = typeof tenantId === "string" ? tenantId.trim() : "";
+  const result = buildRemediation(
+    id,
+    isUuid(requested) ? { tenantId: requested } : {}
+  );
+  // Unreachable: both Azure ids build unconditionally, and the tenant is only
+  // passed once `isUuid` accepted it. Reaching here would mean the registry
+  // stopped offering an id this route names, which no test can stage without
+  // replacing the registry itself.
+  /* v8 ignore next 3 */
+  if (!result.ok) {
+    throw new Error(`Azure CLI assist is unavailable: ${result.reason}`);
   }
-  return [
-    "The Radius canvas needs an active Azure CLI session before it can verify these credentials.",
-    loginInstructions,
-    "After the login finishes, return to the Radius canvas and click Verify Credentials again."
-  ].join("\n\n");
+  return result.remediation;
+}
+
+export function buildAzureCliAssistPrompt(
+  input: AzureCliAssistInput = {}
+): string {
+  return remediationSessionMessage(azureCliAssistRemediation(input)).prompt;
 }
 
 // Timeline stand-in for buildAzureCliAssistPrompt. The canvas clicks Verify
 // Credentials on the user's behalf, so the turn it injects should read as a
 // status line, not as multi-paragraph instructions the user appears to have
 // typed. The agent still receives the full prompt.
-export function azureCliAssistDisplayPrompt({
-  action = "login"
-}: AzureCliAssistInput = {}): string {
-  return action === "install" ?
-      "Installing Azure CLI and signing in so the Radius canvas can verify these Azure credentials."
-    : "Signing in to Azure CLI so the Radius canvas can verify these Azure credentials.";
+export function azureCliAssistDisplayPrompt(
+  input: AzureCliAssistInput = {}
+): string {
+  return remediationSessionMessage(azureCliAssistRemediation(input))
+    .displayPrompt;
 }
 
 // Pairs the agent-facing Azure CLI prompt with its timeline stand-in so the two
@@ -2080,14 +2140,18 @@ export function azureCliAssistDisplayPrompt({
 export function azureCliAssistMessage(
   input: AzureCliAssistInput = {}
 ): SessionPromptMessage {
-  return {
-    prompt: buildAzureCliAssistPrompt(input),
-    displayPrompt: azureCliAssistDisplayPrompt(input)
-  };
+  return remediationSessionMessage(azureCliAssistRemediation(input));
 }
 
-// Fire the app.bicep handoff at most once per repo+branch(es) for a given
-// instance. Fire-and-forget so it never blocks the HTTP response.
+// Report a graph view's application model to the runtime, which decides whether
+// it needs authoring, a refresh, the user's agreement, or only a note.
+//
+// Deliberately unconditional: a route calls this on every render, whether or not
+// the model exists, because a model that is present can still be stale. The
+// runtime owns the dedupe — its key covers what is wrong with the model, not
+// merely which branches were looked at, so re-reporting an unchanged situation
+// stays silent while a model that changes from stale to hand-edited is still
+// reported. Fire-and-forget so it never blocks the HTTP response.
 function triggerAppBicepHandoff(
   entry: { state: CanvasState } | undefined,
   repo: string,
@@ -2100,15 +2164,9 @@ function triggerAppBicepHandoff(
     const list = (Array.isArray(branches) ? branches : [branches]).filter(
       (branch): branch is string => Boolean(branch)
     );
-    const state = entry?.state;
-    const key = `${repo}::${list.join(",")}`;
-    if (state) {
-      if (state.appBicepHandoffKey === key) return; // already handed off
-      state.appBicepHandoffKey = key;
-    }
-    Promise.resolve(appBicepHandoff({ repo, branches: list, page })).catch(
-      () => {}
-    );
+    Promise.resolve(
+      appBicepHandoff({ repo, branches: list, page, state: entry?.state })
+    ).catch(() => {});
   } catch {
     /* never let a handoff failure break the response */
   }
@@ -2283,6 +2341,7 @@ export function beginDeployAttempt(
   state.deployError = null;
   state.deployErrorKind = null;
   state.deployErrorBranch = null;
+  state.deployErrorPaths = null;
   state.deployRunUrl = null;
   state.deployRunId = null;
   // Concrete outputs belong to one deployment attempt. Keeping the previous
@@ -2656,6 +2715,10 @@ const deployDispatchService = createDeployDispatchService({
   ensureWorkflowsCurrent,
   latestWorkflowRunId,
   classifyDeployDispatchFailure,
+  uncommittedGeneratedPaths: (entry) =>
+    uncommittedGeneratedPaths(
+      (entry as CanvasServerEntry).state?.workspacePath
+    ),
   invalidateDeployListCache: (repo) => {
     deployListCache.delete(repo);
   },
@@ -4117,6 +4180,7 @@ export async function finalizeSetupFailure(
     stage,
     classification,
     evidence = null,
+    remediation = null,
     extra = {},
     steps,
     runAz,
@@ -4129,6 +4193,7 @@ export async function finalizeSetupFailure(
     stage?: string | null;
     classification?: string;
     evidence?: string | null;
+    remediation?: RemediationReference | null;
     extra?: Record<string, unknown>;
     steps?: string[];
     runAz?: ((args: string[]) => Promise<Partial<CommandResult>>) | null;
@@ -4269,7 +4334,10 @@ export async function finalizeSetupFailure(
         classification:
           classification ||
           (status === 403 ? "needs-someone-else" : "user-fixable"),
-        evidence
+        evidence,
+        // Only the id and params: the canvas rebuilds the command from the
+        // registry so a persisted record cannot carry one of its own.
+        ...(remediation ? { remediation } : {})
       }
     });
   }
@@ -4332,6 +4400,10 @@ type GhcrPackagePreflightResult =
       status: 403;
       code: "ghcr-auth-failed" | "ghcr-scope-required";
       error: string;
+      // The command the customer should run, when there is one the registry
+      // will build. Carried alongside the prose so the canvas can offer Copy /
+      // Run with Copilot instead of leaving a command to be retyped by hand.
+      remediation?: RemediationView | null;
     };
 
 // Resolve the exact GitHub Packages credential GHCR writes will use, then check
@@ -4429,15 +4501,17 @@ export async function preflightGhcrPackageWriteAccess(
     : ghPkgIdentity.actingLogin === ghPkgLogin ? ghPkgIdentity.actingHasPackages
     : false;
   if (!ghPkgHasPackages) {
+    const scope = explainMissingPackagesScope(
+      ghPkgLogin,
+      packageCredentials.source,
+      ghPkgIdentity.accounts || []
+    );
     return {
       ok: false,
       status: 403,
       code: "ghcr-scope-required",
-      error: explainMissingPackagesScope(
-        ghPkgLogin,
-        packageCredentials.source,
-        ghPkgIdentity.accounts || []
-      )
+      error: scope.message,
+      remediation: scope.remediation
     };
   }
 
@@ -4458,21 +4532,51 @@ export function explainMissingPackagesScope(
   login: string,
   source: GhcrPackageCredentials["source"],
   accounts: readonly GitHubIdentityAccount[]
-): string {
+): { message: string; remediation: RemediationView | null } {
   const missing = `The GitHub account @${login} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR.`;
   if (source === "injected-token") {
     const alternative =
       accounts.find(
         (a) => a.switchable && a.hasPackages && a.login !== login
       ) || null;
-    return (
-      `${missing} That credential is the Copilot session token, which overrides stored gh logins, so "gh auth refresh" cannot add the scope to it. ` +
-      (alternative ?
-        `Select the stored account @${alternative.login} in the Create Environment dialog, then retry.`
-      : `Run "gh auth login -h github.com -s read:packages -s write:packages" to sign in a stored account that can publish packages, then retry.`)
-    );
+    const preamble = `${missing} That credential is the Copilot session token, which overrides stored gh logins, so "gh auth refresh" cannot add the scope to it. `;
+    if (alternative) {
+      // Switching accounts happens in the dialog, so there is no command here.
+      return {
+        message: `${preamble}Select the stored account @${alternative.login} in the Create Environment dialog, then retry.`,
+        remediation: null
+      };
+    }
+    const login_ = remediationView("github-cli-login", { packages: "true" });
+    return {
+      message:
+        preamble +
+        (login_.runnable ?
+          "Run the command below to sign in a stored account that can publish packages, then retry."
+        : 'Run "gh auth login -h github.com -s read:packages -s write:packages" to sign in a stored account that can publish packages, then retry.'),
+      remediation: login_.runnable ? login_ : null
+    };
   }
-  return `${missing} Run "gh auth switch -h github.com -u ${login} && gh auth refresh -h github.com -s read:packages -s write:packages" (or switch to an account that has it in the Create Environment dialog), then retry. Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`;
+  // Build the command from the remediation registry rather than by hand. A
+  // hand-written copy drifts from what the Copy/Run buttons offer and misses
+  // registry-wide rules -- notably one command per line, because `&&` does not
+  // parse in Windows PowerShell 5.1.
+  const fix = remediationView("github-account-scopes", {
+    login,
+    packages: "true"
+  });
+  const grant =
+    fix.runnable ?
+      "Run the command below (or switch to an account that has it in the Create Environment dialog), then retry."
+    : `Grant @${login} the read:packages and write:packages scopes with GitHub CLI (or switch to an account that has them in the Create Environment dialog), then retry.`;
+  const accountSwitchWarning =
+    fix.runnable ?
+      ` This will make @${login} the active GitHub CLI account if it is not already active. Note: gh auth switch changes your machine's active GitHub account for every tool in this terminal until you switch back.`
+    : "";
+  return {
+    message: `${missing} ${grant}${accountSwitchWarning}`,
+    remediation: fix.runnable ? fix : null
+  };
 }
 
 // How many of an environment's newest deployment records to resolve

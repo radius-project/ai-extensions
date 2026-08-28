@@ -205,6 +205,7 @@ export function initializeEnvironmentPage(
     context,
     {
       repo: state.repo,
+      mutationNonce: state.mutationNonce,
       decisions: context.dialogs,
       ...(confirmDialog ? { confirmDialog } : {})
     },
@@ -356,18 +357,10 @@ export function initializeEnvironmentPage(
     const subscriptionId = (selectedProfile.subscriptionId ?? "").trim();
     const accountId = (selectedProfile.accountId ?? "").trim();
     const region = (selectedProfile.region ?? "").trim();
-    const combo = (selectId: string, customId: string): string =>
-      discovery.getComboValue(selectId, customId).trim();
-    const cluster =
-      provider === "azure" ?
-        combo("azure-cluster-select", "azure-cluster-custom")
-      : combo("aws-cluster-select", "aws-cluster-custom");
-    const namespace =
-      (provider === "azure" ?
-        combo("azure-namespace-select", "azure-namespace-custom")
-      : combo("aws-namespace-select", "aws-namespace-custom")) || "default";
-    const resourceGroup =
-      provider === "azure" ? combo("azure-rg-select", "azure-rg-custom") : "";
+    const infrastructure = discovery.currentInfraSelection(provider);
+    const cluster = (infrastructure.cluster ?? "").trim();
+    const namespace = (infrastructure.namespace ?? "").trim() || "default";
+    const resourceGroup = (infrastructure.resourceGroup ?? "").trim();
     if (provider === "azure" && resourceGroup === "") {
       showFormError("Please specify a resource group.");
       return;
@@ -434,8 +427,8 @@ export function initializeEnvironmentPage(
       body.roleArn = selectedProfile.roleArn ?? "";
       body.region = region;
       body.accountId = accountId;
-      body.vpcId = combo("aws-vpc-select", "aws-vpc-custom");
-      body.subnetIds = combo("aws-subnets-select", "aws-subnets-custom");
+      body.vpcId = (infrastructure.vpcId ?? "").trim();
+      body.subnetIds = (infrastructure.subnetIds ?? "").trim();
     }
 
     creating = true;

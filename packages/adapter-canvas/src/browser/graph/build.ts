@@ -52,6 +52,21 @@ export const RADIUS_DEPLOY_STATUS_COLORS: Readonly<Record<string, NodeColors>> =
     failed: { bg: "var(--rad-danger-bg)", border: "var(--rad-danger)" }
   };
 
+export const RADIUS_DIFF_STATUS_COLORS: Readonly<Record<string, NodeColors>> = {
+  added: {
+    bg: "var(--rad-diff-added-bg)",
+    border: "var(--rad-diff-added)"
+  },
+  modified: {
+    bg: "var(--rad-diff-modified-bg)",
+    border: "var(--rad-diff-modified)"
+  },
+  removed: {
+    bg: "var(--rad-diff-removed-bg)",
+    border: "var(--rad-diff-removed)"
+  }
+};
+
 // What a page asks for when it renders a graph. Every field is optional: the
 // modeled, planned, diff and deployed pages each set a different subset.
 export interface GraphOptions {
@@ -62,6 +77,7 @@ export interface GraphOptions {
   branch?: string;
   baseBranch?: string;
   localSource?: boolean;
+  workspaceBranch?: string;
   lineType?: string;
   curveStyle?: string;
   showLegend?: boolean;
@@ -79,6 +95,7 @@ export interface GraphSettings {
   readonly branch: string;
   readonly baseBranch: string;
   readonly localSource: boolean;
+  readonly workspaceBranch: string;
   readonly edgeType: string;
   readonly showLegend: boolean;
   readonly enablePopup: boolean;
@@ -180,29 +197,41 @@ export function resolveGraphSettings(
     // baseBranch while everything else points at the page's normal branch.
     baseBranch: options.baseBranch || branch,
     localSource: options.localSource === true,
+    workspaceBranch: options.workspaceBranch || "",
     edgeType: radiusMapLineType(options.lineType || options.curveStyle),
     showLegend: options.showLegend === true,
     enablePopup: options.enablePopup !== false
   };
 }
 
+// Whether this node's source file is on disk in the current worktree.
+//
+// The modeled and planned pages render a single branch, so they answer this
+// once at the page level and pass localSource. The diff page renders two
+// branches at the same time and a worktree can only have one of them checked
+// out, so it passes workspaceBranch instead and locality is decided per node
+// against that node's sourceBranch — a removed resource, whose file lives on
+// the base branch, correctly keeps its remote link while the head-branch nodes
+// beside it open locally. When no workspaceBranch is supplied the page-level
+// flag decides, so the single-branch pages are unaffected.
+export function isLocalSourceNode(
+  settings: GraphSettings,
+  data: Pick<GraphNodeData, "sourceBranch">
+): boolean {
+  if (!settings.workspaceBranch) return settings.localSource;
+  return (data.sourceBranch || settings.branch) === settings.workspaceBranch;
+}
+
 export function nodeColors(
   settings: GraphSettings,
   resource: GraphResource
 ): NodeColors {
-  // Diff mode keeps the same theme-aware card surface as the modeled graph.
-  // Only the border colour encodes diff status.
+  // Diff cards use paired theme-aware fills and borders so changed resources
+  // remain distinguishable without relying on a narrow border alone.
   if (settings.diffMode && resource.diffStatus) {
-    switch (resource.diffStatus) {
-      case "added":
-        return { bg: "var(--rad-node-bg)", border: "var(--rad-success)" };
-      case "removed":
-        return { bg: "var(--rad-node-bg)", border: "var(--rad-danger)" };
-      case "modified":
-        return { bg: "var(--rad-node-bg)", border: "var(--rad-warning)" };
-      default:
-        return { bg: "var(--rad-node-bg)", border: "var(--rad-node-border)" };
-    }
+    const colors = RADIUS_DIFF_STATUS_COLORS[resource.diffStatus];
+    if (colors) return colors;
+    return { bg: "var(--rad-node-bg)", border: "var(--rad-node-border)" };
   }
   // A managed-cluster node always stays gray — its overall status is conveyed
   // by the corner status badge, not the fill. Other resources take the live
@@ -287,16 +316,16 @@ export function buildGraph(
   // status (e.g. output-resource edges) fall back to the endpoints' own
   // statuses.
   function diffStroke(source: string, target: string, status: string): string {
-    if (status === "removed") return "var(--rad-danger)";
-    if (status === "added") return "var(--rad-success)";
+    if (status === "removed") return "var(--rad-diff-removed)";
+    if (status === "added") return "var(--rad-diff-added)";
     if (status === "unchanged") return "var(--rad-edge-muted)";
     const sourceStatus = diffStatusById[source] || "";
     const targetStatus = diffStatusById[target] || "";
     if (sourceStatus === "removed" || targetStatus === "removed") {
-      return "var(--rad-danger)";
+      return "var(--rad-diff-removed)";
     }
     if (sourceStatus === "added" || targetStatus === "added") {
-      return "var(--rad-success)";
+      return "var(--rad-diff-added)";
     }
     return "var(--rad-edge-muted)";
   }

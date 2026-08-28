@@ -576,6 +576,7 @@ describe("loading and error states", () => {
     const status = harness.container.appended[0] as FakeElement;
     expect(harness.container.innerHTML).toBe("");
     expect(status.className).toBe("status error");
+    expect(status.getAttribute("role")).toBe("alert");
     expect(status.textContent).toBe("<img src=x onerror=1>");
   });
 
@@ -593,6 +594,21 @@ describe("loading and error states", () => {
 });
 
 describe("node interactions", () => {
+  it("routes details-panel external links through the graph surface", () => {
+    const harness = setup();
+    harness.surface.render("graph-container", RESOURCES, {
+      repoUrl: "https://github.test/o/r"
+    });
+    const url = "https://github.test/o/r/blob/main/src/web.ts#L4";
+    const row = createFakeElement("row");
+    row.setAttribute("data-external-url", url);
+    row.ancestors.set("[data-external-url]", row);
+
+    harness.container.dispatch("click", { target: row });
+
+    expect(harness.browser.external.opened).toEqual([url]);
+  });
+
   it("wires a card click to the details panel", () => {
     const harness = setup();
     harness.surface.render("graph-container", RESOURCES, {

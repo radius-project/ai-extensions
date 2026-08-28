@@ -3,6 +3,7 @@ import type { ResourceOutput } from "./model.js";
 import {
   buildSourceUrl,
   githubRepositoryUrl,
+  githubSourceReferenceUrl,
   parseGraphResources,
   radiusDeployBadgeAlt,
   radiusDeployBadgeKind,
@@ -430,6 +431,41 @@ describe("buildSourceUrl", () => {
       buildSourceUrl("https://github.com/o/r", "main", "src/app.bicep#L12")
     ).toBe("https://github.com/o/r/blob/main/src/app.bicep#L12");
   });
+
+  it("preserves an exact GitHub branch and file URL without repo context", () => {
+    const reference =
+      "https://github.com/acme/widgets/blob/release/src/app.ts#L12";
+    expect(buildSourceUrl("", "", reference)).toBe(reference);
+    expect(githubSourceReferenceUrl(reference)).toBe(reference);
+    expect(srcPathFromRef(reference)).toBe("");
+    expect(srcLineFromRef(reference)).toBe(0);
+  });
+
+  it.each([
+    "http://github.com/acme/widgets/blob/main/src/app.ts",
+    "https://example.com/acme/widgets/blob/main/src/app.ts",
+    "https://github.com/acme/widgets/tree/main/src",
+    "https://github.com/acme/widgets/blob/main/src/app.ts?plain=1",
+    "https://github.com/acme/widgets/blob/main/src/app.ts#L0",
+    " https://github.com/acme/widgets/blob/main/src/app.ts",
+    "https://github.com/acme/widgets/blob/main/src/app.ts\nforged"
+  ])("rejects a non-canonical GitHub file URL: %s", (reference) => {
+    expect(githubSourceReferenceUrl(reference)).toBe("");
+  });
+
+  it.each([
+    "[parameters('sourceReference')]",
+    "src/app.ts\nforged",
+    "src/app.ts#L0",
+    "src/app.ts#section"
+  ])(
+    "falls back to the repository for an invalid local reference: %s",
+    (reference) => {
+      expect(
+        buildSourceUrl("https://github.com/acme/widgets", "main", reference)
+      ).toBe("https://github.com/acme/widgets/tree/main");
+    }
+  );
 
   it("omits the line fragment when the reference has none", () => {
     expect(

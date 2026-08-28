@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { CRITICAL_SHELL_STYLE_CSS, SHELL_STYLE_CSS } from "./shell-styles.js";
+import {
+  commandActionSpecs,
+  commandActionView
+} from "../browser/command-action.js";
+import type { ElementSpec } from "../browser/dom.js";
+import type { RemediationView } from "@radius-project/core/remediations";
 
 type Rgb = [number, number, number];
 
@@ -34,9 +40,12 @@ function contrast(a: Rgb, b: Rgb): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
-// Reads a status token straight out of the stylesheet, so the ratios below are
-// computed from the declaration that actually ships rather than a copy of it.
-function statusToken(name: string): { hostToken: string; portion: number } {
+// Reads a host color mix straight out of the stylesheet, so the ratios below
+// are computed from the declaration that actually ships rather than a copy.
+function hostColorMixToken(name: string): {
+  hostToken: string;
+  portion: number;
+} {
   const declaration = new RegExp(
     `--rad-${name}: color-mix\\(in srgb, var\\((--[a-z-]+), (#[0-9a-f]{6})\\) (\\d+)%, var\\(--rad-text\\)\\);`
   ).exec(SHELL_STYLE_CSS);
@@ -44,13 +53,44 @@ function statusToken(name: string): { hostToken: string; portion: number } {
   return { hostToken: declaration[1], portion: Number(declaration[3]) / 100 };
 }
 
+function diffToken(name: string): {
+  hostToken: string;
+  borderPortion: number;
+  fillPortion: number;
+} {
+  const border = hostColorMixToken(`diff-${name}`);
+  const fill = new RegExp(
+    `--rad-diff-${name}-bg: color-mix\\(in srgb, var\\(--rad-diff-${name}\\) (\\d+)%, var\\(--rad-surface\\)\\);`
+  ).exec(SHELL_STYLE_CSS);
+  if (!fill) throw new Error(`--rad-diff-${name} is incomplete`);
+  return {
+    hostToken: border.hostToken,
+    borderPortion: border.portion,
+    fillPortion: Number(fill[1]) / 100
+  };
+}
+
+function maximumChannelDelta(a: Rgb, b: Rgb): number {
+  return Math.max(...a.map((channel, index) => Math.abs(channel - b[index])));
+}
+
 // The host owns theme selection and injects the palette. The dark-canvas case
 // that motivated this (issue #214) is a host that keeps its *light* status
 // colors in a dark canvas, so both host palettes are checked against both
 // canvases.
 const palettes = {
-  light: { bg: "#ffffff", text: "#1f2328" },
-  dark: { bg: "#0d1117", text: "#e6edf3" }
+  light: {
+    bg: "#ffffff",
+    text: "#1f2328",
+    tertiary: "#656d76",
+    link: "#0969da"
+  },
+  dark: {
+    bg: "#0d1117",
+    text: "#e6edf3",
+    tertiary: "#8b949e",
+    link: "#58a6ff"
+  }
 } as const;
 
 const hostStatusColors = {
@@ -118,7 +158,7 @@ describe("status color tokens", () => {
   it.each(cases)(
     "%s text stays readable on a %s canvas with the host's %s",
     (status, _canvas, _host, palette, hostColor) => {
-      const { portion } = statusToken(status);
+      const { portion } = hostColorMixToken(status);
       const resolved = mix(
         parseHex(hostColor),
         parseHex(palette.text),
@@ -133,7 +173,7 @@ describe("status color tokens", () => {
   it.each(statuses)(
     "%s reads the host token with a light-mode fallback",
     (status) => {
-      const { hostToken } = statusToken(status);
+      const { hostToken } = hostColorMixToken(status);
       expect(SHELL_STYLE_CSS).toContain(`var(${hostToken},`);
     }
   );
@@ -143,6 +183,84 @@ describe("status color tokens", () => {
     // canvas, or its own label disappears.
     expect(SHELL_STYLE_CSS).toContain("--rad-warning-solid: #9a6700;");
     expect(SHELL_STYLE_CSS).toContain("--rad-success-solid: #1a7f37;");
+  });
+
+  describe("diff color tokens", () => {
+    const diffStatuses = [
+      ["added", "success"],
+      ["modified", "warning"],
+      ["removed", "danger"]
+    ] as const;
+    const cases = diffStatuses.flatMap(([diffStatus, status]) =>
+      Object.entries(palettes).flatMap(([canvas, palette]) =>
+        Object.entries(hostStatusColors).map(
+          ([host, colors]) =>
+            [diffStatus, canvas, host, palette, colors[status]] as const
+        )
+      )
+    );
+
+    it.each(cases)(
+      "%s stays distinct and readable on a %s canvas with the host's %s",
+      (diffStatus, _canvas, _host, palette, hostColor) => {
+        const { borderPortion, fillPortion } = diffToken(diffStatus);
+        const border = mix(
+          parseHex(hostColor),
+          parseHex(palette.text),
+          borderPortion
+        );
+        const fill = mix(border, parseHex(palette.bg), fillPortion);
+
+        expect(contrast(border, parseHex(palette.bg))).toBeGreaterThanOrEqual(
+          3
+        );
+        expect(contrast(parseHex(palette.text), fill)).toBeGreaterThanOrEqual(
+          4.5
+        );
+        expect(
+          contrast(parseHex(palette.tertiary), fill)
+        ).toBeGreaterThanOrEqual(4.5);
+        expect(contrast(parseHex(palette.link), fill)).toBeGreaterThanOrEqual(
+          4.5
+        );
+      }
+    );
+
+    it.each(
+      Object.entries(palettes).flatMap(([canvas, palette]) =>
+        Object.entries(hostStatusColors).map(
+          ([host, colors]) => [canvas, host, palette, colors] as const
+        )
+      )
+    )(
+      "keeps every fill visibly distinct on a %s canvas with the host's %s",
+      (_canvas, _host, palette, colors) => {
+        const fills = diffStatuses.map(([diffStatus, status]) => {
+          const { borderPortion, fillPortion } = diffToken(diffStatus);
+          const border = mix(
+            parseHex(colors[status]),
+            parseHex(palette.text),
+            borderPortion
+          );
+          return mix(border, parseHex(palette.bg), fillPortion);
+        });
+
+        for (let left = 0; left < fills.length; left += 1) {
+          for (let right = left + 1; right < fills.length; right += 1) {
+            expect(
+              maximumChannelDelta(fills[left], fills[right])
+            ).toBeGreaterThanOrEqual(4);
+          }
+        }
+      }
+    );
+
+    it.each(diffStatuses)(
+      "%s reads the host's %s token",
+      (diffStatus, status) => {
+        expect(diffToken(diffStatus).hostToken).toBe(`--text-color-${status}`);
+      }
+    );
   });
 
   it.each(statuses)("%s tints a background from the same token", (status) => {
@@ -155,5 +273,66 @@ describe("status color tokens", () => {
 describe("resource table status styles", () => {
   it("does not define decorative colored status circles", () => {
     expect(SHELL_STYLE_CSS).not.toContain(".rad-dot");
+  });
+});
+
+describe("run-command callout styles", () => {
+  // The callout builds its markup in the browser bundle while its styles live
+  // in this shell, so nothing in the type system connects the two. Deriving the
+  // class names from the real specs keeps that seam honest: a class the callout
+  // emits but the shell never styles renders as unstyled markup in the canvas.
+  function classesFrom(remediation: RemediationView): string[] {
+    const specs = commandActionSpecs(
+      commandActionView({
+        remediation,
+        phase: "confirming",
+        error: "",
+        copied: false
+      }),
+      "cmd"
+    );
+    const nodes: ElementSpec[] = [
+      specs.container,
+      ...(specs.container.children ?? []),
+      ...specs.buttons,
+      ...(specs.status === null ? [] : [specs.status])
+    ];
+    return [
+      ...new Set(nodes.flatMap((n) => (n.className ?? "").split(" ")))
+    ].filter((c) => c !== "");
+  }
+
+  const remediation: RemediationView = {
+    id: "git-push-branch",
+    params: { branch: "feature" },
+    title: "Push the branch",
+    command: "git push -u origin feature",
+    cwd: "workspace",
+    impact: "high",
+    runnable: true,
+    unsupportedReason: "",
+    warning: "",
+    confirmTitle: "Push this branch?",
+    confirmBody: "This writes to the remote.",
+    confirmLabel: "Push",
+    followUp: "Then choose Retry."
+  };
+
+  it.each(classesFrom(remediation))("styles .%s", (className) => {
+    expect(SHELL_STYLE_CSS).toContain(`.${className}`);
+  });
+
+  it("styles the buttons row and status shown only in later phases", () => {
+    // `cancel` and the status node appear only once the callout has a phase, so
+    // assert the container pieces the idle callout does not emit.
+    expect(SHELL_STYLE_CSS).toContain(".rad-command-action-buttons");
+    expect(SHELL_STYLE_CSS).toContain(".rad-command-action-status");
+    expect(SHELL_STYLE_CSS).toContain(".rad-command-action-warning");
+  });
+
+  it("keeps the command block readable verbatim", () => {
+    // A multi-command remediation is newline-joined, so collapsing whitespace
+    // would run `git add`, `git commit`, and `git push` together on one line.
+    expect(SHELL_STYLE_CSS).toContain("white-space: pre-wrap;");
   });
 });

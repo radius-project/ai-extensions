@@ -123,7 +123,7 @@ jobs:
       # default, so GitHub creates and signs the version commit; this is also why
       # the checkout above does not persist git credentials.
       - name: Version packages
-        uses: changesets/action/version@2d9f7af6402422be60d377f151c7618011bba45a # v2.0.0-next.4
+        uses: changesets/action/version@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.0.0-next.4
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: pnpm run version
@@ -305,7 +305,7 @@ jobs:
       # CLI pushes the tag Changesets created locally at HEAD, which this job
       # checked out at the exact source commit it built and attested.
       - name: Tag the release and publish its notes
-        uses: changesets/action@2d9f7af6402422be60d377f151c7618011bba45a # v2.0.0-next.4
+        uses: changesets/action@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.0.0-next.4
         with:
           publish-script: pnpm exec changeset git-tag
           push-with-git-cli: true

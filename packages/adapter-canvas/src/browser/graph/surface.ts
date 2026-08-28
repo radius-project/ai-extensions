@@ -299,7 +299,10 @@ export function createGraphSurface(
 
     const panel =
       settings.enablePopup ?
-        createDetailsPanel(context, container, settings, { openLocalSource })
+        createDetailsPanel(context, container, settings, {
+          openExternal,
+          openLocalSource
+        })
       : null;
     record.panel = panel;
 
@@ -321,7 +324,7 @@ export function createGraphSurface(
       clock: context.clock,
       host,
       settings,
-      deps: { openLocalSource, openDetails, toggleDetails },
+      deps: { openExternal, openLocalSource, openDetails, toggleDetails },
       reload: () => context.nav.reload(),
       nodes: built.nodes,
       edges: built.edges
@@ -394,6 +397,7 @@ export function createGraphSurface(
       container.innerHTML = "";
       const status = context.dom.createElement("div");
       status.className = "status error";
+      status.setAttribute("role", "alert");
       status.textContent = message;
       container.appendChild(status);
     },

@@ -158,6 +158,16 @@ describe("RU-03: tool declarations", () => {
     }
   });
 
+  it("documents both generate-app response shapes", () => {
+    const declaration = RADIUS_TOOL_DECLARATIONS.find(
+      (tool) => tool.name === "radius_generate_app"
+    )!;
+
+    expect(declaration.description).toContain("returns one JSON object");
+    expect(declaration.description).toContain("optional ambiguity brief");
+    expect(declaration.description).toContain("returns a Markdown refusal");
+  });
+
   it("requires repo/baseBranch/headBranch on radius_generate_pr_diff_markdown", () => {
     const decl = RADIUS_TOOL_DECLARATIONS.find(
       (t) => t.name === "radius_generate_pr_diff_markdown"
@@ -210,6 +220,30 @@ describe("RU-03: tool declarations", () => {
       );
       expect(RADIUS_SESSION_START_CONTEXT).toContain(
         "describe the change itself normally"
+      );
+    });
+
+    it("never requires publishing the current worktree for a graph diff", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "Do not commit or push the current worktree merely to compare it."
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "whichever side exactly matches the current workspace repo and branch"
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "report that the diff is unavailable rather than publishing the worktree"
+      );
+    });
+
+    it("uses the existing Radius instance in every concrete open example", () => {
+      expect(RADIUS_SESSION_START_CONTEXT).not.toContain(
+        'open_canvas({ canvasId: "radius", instanceId: "radius-panel"'
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        'instanceId: "<radius-instance>"'
+      );
+      expect(RADIUS_SESSION_START_CONTEXT).toContain(
+        "always use its actual instanceId"
       );
     });
 

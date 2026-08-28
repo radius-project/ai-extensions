@@ -17,11 +17,19 @@ import type { GraphProgressView } from "../graph/progress.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
+import {
+  showGraphModelingFailure,
+  unsupportedGraphModelMessage
+} from "./graph-modeling-failure.js";
 
 const ENTRY_KEY = "planned-graph-page";
 export const PLANNED_GRAPH_STATE_ID = "radius-planned-graph-state";
 export const PLAN_DEBOUNCE_MS = 150;
 export const PLAN_PROGRESS_MS = 800;
+// How long to wait before asking again while Copilot authors the model. The
+// server decides when the wait has run out and answers with an error instead of
+// `needsAppBicep`, which ends the loop.
+export const PLAN_RETRY_MS = 10_000;
 
 interface PlannedPageState {
   repo: string;
@@ -77,6 +85,7 @@ export function initializePlannedGraphPage(
     globalScope,
     "radiusSetGraphLoading"
   );
+  const setError = requireBrowserFunction(globalScope, "radiusSetGraphError");
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
   const app = context.dom.selectById("planned-app");
@@ -88,17 +97,27 @@ export function initializePlannedGraphPage(
   let controller: GraphController | null = null;
   let progressView: GraphProgressView | null = null;
   let selectionQueuedWhileLoading = false;
+  let appBicepRetry: ScopeTimer | null = null;
+  let nextRequestRefresh = page.resources.length > 0;
+  let restartWait = true;
+  // Re-issues the current selection. Assigned once the scheduler exists, since
+  // the retry must go through the same serialization as a user-driven request
+  // rather than starting a second overlapping compile.
+  let requeue: (() => void) | null = null;
+
+  const stopAppBicepRetry = (): void => {
+    if (appBicepRetry !== null) entry.cancel(appBicepRetry);
+    appBicepRetry = null;
+  };
   const showModelingFailure = (message: string): void => {
     controller?.destroy();
     controller = null;
     const wrapper = context.dom.byId("graph-container-wrapper");
     if (wrapper) wrapper.innerHTML = '<div id="graph-container"></div>';
-    requireBrowserFunction(globalScope, "radiusSetGraphError")(
-      "graph-container",
-      message
-    );
-    const statusElement = context.dom.byId("plan-status");
-    if (statusElement) statusElement.style.display = "none";
+    showGraphModelingFailure(context, setError, message, {
+      containerId: "graph-container",
+      statusIds: ["plan-status"]
+    });
     if (button) {
       button.disabled = true;
       button.setAttribute(
@@ -120,15 +139,20 @@ export function initializePlannedGraphPage(
 
   const run = (isCurrent: () => boolean): Promise<void> => {
     if (!entry.active) return Promise.resolve();
+    stopAppBicepRetry();
     const selectedBranch = branch?.value.trim() || page.branch;
     const selectedEnvironment = environment?.value ?? "";
     const selectedProvider =
       typeof providers[selectedEnvironment] === "string" ?
         providers[selectedEnvironment]
       : page.provider;
+    const refresh = nextRequestRefresh;
+    nextRequestRefresh = false;
+    const restartExpiredWait = restartWait;
+    restartWait = false;
     const current = (): boolean => entry.active && isCurrent();
 
-    if (plan.envsStale) {
+    if (plan.envsStale && !refresh) {
       status(
         context,
         page.resources.length > 0 ?
@@ -146,7 +170,7 @@ export function initializePlannedGraphPage(
       );
       return Promise.resolve();
     }
-    if (!plan.hasEnv || !selectedEnvironment) {
+    if ((!plan.hasEnv || !selectedEnvironment) && !refresh) {
       status(
         context,
         "Create an environment to preview the planned deployment for this application.",
@@ -158,12 +182,17 @@ export function initializePlannedGraphPage(
     }
 
     plan.requestFailed = false;
-    if (context.dom.byId("graph-container-wrapper")) {
-      controller?.destroy();
-      controller = null;
+    // A refresh validates the graph that is already on screen. Destroying the
+    // controller and swapping in the loading state would blank exactly the
+    // cached graph the refresh exists to confirm, and the `refreshed` reply
+    // returns without re-rendering because it assumes that graph is still up.
+    if (!refresh || controller === null) {
+      if (context.dom.byId("graph-container-wrapper")) {
+        controller?.destroy();
+        controller = null;
+      }
+      setLoading(graphContainer(context));
     }
-    const containerId = graphContainer(context);
-    setLoading(containerId);
     stopProgress();
     const abort = context.net.createAbort();
     requestAbort = abort;
@@ -217,7 +246,9 @@ export function initializePlannedGraphPage(
           repo: page.repo,
           branch: selectedBranch,
           provider: selectedProvider,
-          environment: selectedEnvironment
+          ...(selectedEnvironment ? { environment: selectedEnvironment } : {}),
+          refresh,
+          restartWait: restartExpiredWait
         }),
         signal: abort?.signal
       })
@@ -228,13 +259,45 @@ export function initializePlannedGraphPage(
           context.nav.reload();
           return;
         }
+        if (readBoolean(payload, "refreshed")) {
+          plan.requestFailed = false;
+          if (plan.envsStale) {
+            status(
+              context,
+              "Environments could not be loaded. The last planned graph is retained.",
+              "error"
+            );
+          } else if (!plan.hasEnv || !selectedEnvironment) {
+            status(
+              context,
+              "Create an environment to preview the planned deployment for this application.",
+              "info"
+            );
+          } else {
+            status(context, "The planned deployment is current.", "info");
+          }
+          return;
+        }
         plan.requestFailed = true;
+        const unsupported = unsupportedGraphModelMessage(payload);
+        if (unsupported) {
+          showModelingFailure(unsupported);
+          return;
+        }
         if (readBoolean(payload, "needsAppBicep")) {
+          nextRequestRefresh = refresh;
           status(
             context,
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill… the planned graph will appear once it is saved.",
             "info"
           );
+          // Nothing announces the model's arrival, so the planned graph only
+          // learns by asking again. Without this the page reported the wait once
+          // and then sat there permanently, even after the model landed.
+          appBicepRetry = entry.after(PLAN_RETRY_MS, () => {
+            appBicepRetry = null;
+            requeue?.();
+          });
           return;
         }
         const error = readString(payload, "error");
@@ -261,7 +324,7 @@ export function initializePlannedGraphPage(
         );
       })
       .then(() => {
-        stopProgress();
+        if (current()) stopProgress();
         if (requestAbort === abort) requestAbort = null;
       });
   };
@@ -280,10 +343,17 @@ export function initializePlannedGraphPage(
     },
     PLAN_DEBOUNCE_MS
   );
+  requeue = () => {
+    schedule(true);
+  };
 
   // Hold the deploy action closed while a plan is pending: the preview it would
   // deploy does not exist yet, and the request may still fail.
   const queue = (immediate = false): void => {
+    stopAppBicepRetry();
+    requestAbort?.abort();
+    requestAbort = null;
+    stopProgress();
     plan.requestFailed = false;
     plan.planPending = true;
     applyPlanEnvState(context, plan, plan.hasEnv, plan.envsStale);
@@ -297,6 +367,8 @@ export function initializePlannedGraphPage(
   for (const selector of [app, branch, environment]) {
     if (!selector) continue;
     entry.on(selector, "change", () => {
+      nextRequestRefresh = false;
+      restartWait = true;
       queue();
     });
   }
@@ -340,14 +412,10 @@ export function initializePlannedGraphPage(
     }
   }).then(() => {
     if (!entry.active) return;
-    if (page.resources.length === 0) queue(true);
-    else if (!plan.hasEnv && !plan.envsStale) {
-      const container = context.dom.byId("graph-container");
-      if (container) {
-        container.innerHTML =
-          '<div class="status info">Create an environment to preview the planned deployment for this application.</div>';
-      }
-    }
+    // Always invoke the plan workflow to reconcile freshness, even when
+    // preloaded resources are displayed. The visible cached graph is preserved
+    // while the HTTP workflow checks whether the model is missing or stale.
+    queue(true);
   });
 
   entry.onTeardown(() => {

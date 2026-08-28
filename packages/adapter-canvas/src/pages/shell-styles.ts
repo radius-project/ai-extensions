@@ -51,6 +51,16 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     --rad-success: color-mix(in srgb, var(--text-color-success, #1a7f37) 60%, var(--rad-text));
     --rad-warning: color-mix(in srgb, var(--text-color-warning, #9a6700) 60%, var(--rad-text));
     --rad-danger: color-mix(in srgb, var(--text-color-danger, #cf222e) 60%, var(--rad-text));
+    /* Diff cards need stronger state separation than status text. Their border
+       tokens retain more of the host hue, while the matching fills remain at 8%
+       so tertiary labels and source links keep WCAG AA contrast in every
+       supported host-palette/canvas-theme combination. */
+    --rad-diff-added: color-mix(in srgb, var(--text-color-success, #1a7f37) 78%, var(--rad-text));
+    --rad-diff-modified: color-mix(in srgb, var(--text-color-warning, #9a6700) 78%, var(--rad-text));
+    --rad-diff-removed: color-mix(in srgb, var(--text-color-danger, #cf222e) 78%, var(--rad-text));
+    --rad-diff-added-bg: color-mix(in srgb, var(--rad-diff-added) 8%, var(--rad-surface));
+    --rad-diff-modified-bg: color-mix(in srgb, var(--rad-diff-modified) 8%, var(--rad-surface));
+    --rad-diff-removed-bg: color-mix(in srgb, var(--rad-diff-removed) 8%, var(--rad-surface));
     --rad-success-solid: #1a7f37;
     --rad-warning-solid: #9a6700;
     --rad-danger-text: var(--rad-danger);
@@ -306,6 +316,40 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   button:disabled, .rad-btn:disabled { opacity: 0.6; cursor: default; }
   .rad-btn--primary:disabled { background: var(--rad-stroke, #d1d9e0); color: var(--rad-text-tertiary, #656d76); opacity: 1; }
   .resolved-name { font-weight: 400; color: var(--rad-primary); font-size: 12px; }
+
+  /* ─── Run-command callout ─────────────────────────────────────────────── */
+  .rad-command-action {
+    margin-top: 12px; padding: 12px 14px;
+    background: var(--rad-surface);
+    border: 1px solid var(--rad-stroke);
+    border-radius: var(--rad-radius);
+  }
+  .rad-command-action-title { margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--rad-text); }
+  /* The command is the point of the callout: it must be readable verbatim and
+     stay copyable, so it wraps on whitespace rather than being clipped, and a
+     multi-command remediation keeps its newlines. */
+  .rad-command-action-command {
+    display: block; padding: 8px 10px;
+    background: var(--rad-code-bg); color: var(--rad-code-text);
+    border-radius: var(--rad-radius);
+    font-family: var(--rad-mono); font-size: 12px; line-height: 1.5;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .rad-command-action-cwd { margin-top: 6px; font-size: 11px; color: var(--rad-text-tertiary); }
+  .rad-command-action-warning {
+    margin-top: 8px; font-size: 12px; line-height: 1.45; color: var(--rad-warning);
+  }
+  .rad-command-action-confirm {
+    margin-top: 10px; padding: 8px 10px;
+    background: var(--rad-warning-bg); color: var(--rad-text);
+    border: 1px solid var(--rad-warning);
+    border-radius: var(--rad-radius); font-size: 12px; line-height: 1.45;
+  }
+  .rad-command-action-buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+  /* The shared button rule carries a 16px top margin for form layouts; inside
+     the callout the row sets its own spacing. */
+  .rad-command-action-buttons .rad-btn { margin-top: 10px; }
+  .rad-command-action-status { margin-top: 8px; font-size: 12px; line-height: 1.45; }
 
   /* ─── Cards, sections, tables (Environments/Deployments) ──────────────── */
   .rad-card {

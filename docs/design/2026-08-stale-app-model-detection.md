@@ -45,7 +45,7 @@ The skill writes an **origin record**, `.radius/app.origin.json`, next to the ap
 
 `appBicepHash` is a SHA-256 of the app model text, ignoring line endings and trailing spaces so a different checkout of the same file does not look like an edit. Fingerprinting the file again later and comparing it to this value answers two questions. First, whether someone edited the app model after it was generated. Second, whether the file on disk is the one that passed the checker, since the record is only written once it does. That is how we know it compiles without compiling it again.
 
-`skillVersion` is the version of the Radius plugin that produced the app model, read from the plugin's own `package.json` when it runs. A local build reads `0.0.0`, and CI gives a published build a version like `0.1.0-edge-20260811053232`. Comparing it against the installed version is how we spot an app model an older skill generated.
+`skillVersion` is the version of the Radius plugin that produced the app model, read from the plugin's own `package.json` when it runs. A local build reads `0.0.0`, and CI gives a published build a version like `0.1.0-edge-0b33186`. Comparing it against the installed version is how we spot an app model an older skill generated.
 
 The file is JSON because only code reads and writes it, so `JSON.parse` is enough and there is no need to depend on a YAML parser. The keys are always written in the same order and format, so regenerating an unchanged app model does not show up as a diff.
 
@@ -159,4 +159,4 @@ A graph is only ever held back once. If the app model is not regenerated, becaus
 
 - **Compile the app model every time a graph opens.** This tells us whether the app model is valid, but says nothing about whether it matches the current source, and adds a compile to every open. The origin record answers both questions.
 - **Treat the app model as ours and always overwrite it.** The simplest rule, and it removes the need to ask the user anything. Rejected because people do edit these files, for custom types and recipe packs and tuned settings, and losing that work silently is worse than an occasional prompt.
-- **Only regenerate when the installed skill is newer.** Rejected because comparing versions like `0.1.0-edge-20260811053232` is easy to get wrong, and a downgrade is also a reason to distrust the app model.
+- **Only regenerate when the installed skill is newer.** Rejected because comparing versions like `0.1.0-edge-0b33186` is easy to get wrong, and a downgrade is also a reason to distrust the app model.

@@ -60,6 +60,7 @@ function node(overrides: Partial<GraphNodeData> = {}): GraphNodeData {
 }
 
 interface Recorded {
+  external: string[];
   local: Array<[string, number, string]>;
   toggled: Array<[string, DomElement | null]>;
   opened: Array<[string, DomElement | null]>;
@@ -75,11 +76,13 @@ function renderCard(
 } {
   const vendor = createGraphVendor();
   const recorded: Recorded = {
+    external: [],
     local: [],
     toggled: [],
     opened: []
   };
   const component = createNodeComponent(vendor, resolveGraphSettings(options), {
+    openExternal: (url) => recorded.external.push(url),
     openLocalSource: (path, line, fallback) =>
       recorded.local.push([path, line, fallback]),
     toggleDetails: (value, card) => recorded.toggled.push([value.id, card]),
@@ -316,18 +319,84 @@ describe("node card", () => {
     expect(props(row).onClick).toBeUndefined();
   });
 
-  it("uses a native anchor for a remote graph and lets the card keep its own click", () => {
+  it("opens a remote source link through the host without selecting the card", () => {
     const { tree, recorded } = renderCard(node());
     const row = findByClass(tree, "rad-node__source nodrag nopan nokey");
     expect(props(row).target).toBe("_blank");
     expect(props(row).rel).toBe("noopener noreferrer");
+    let prevented = 0;
     let stopped = 0;
     callHandler(row, "onClick", {
+      preventDefault: () => {
+        prevented += 1;
+      },
       stopPropagation: () => {
         stopped += 1;
       }
     });
+    expect(prevented).toBe(1);
     expect(stopped).toBe(1);
+    expect(recorded.external).toEqual([
+      "https://github.test/o/r/blob/main/src/web.ts#L4"
+    ]);
+    expect(recorded.local).toEqual([]);
+  });
+
+  it("opens an exact GitHub source URL through the host for a local graph", () => {
+    const sourceUrl =
+      "https://github.com/acme/widgets/blob/release/src/web.ts#L4";
+    const { tree, recorded } = renderCard(
+      node({ codeRef: sourceUrl, sourceUrl, srcPath: "", srcLine: 0 }),
+      { localSource: true }
+    );
+    const row = findByClass(tree, "rad-node__source nodrag nopan nokey");
+    callHandler(row, "onClick", {
+      preventDefault: () => undefined,
+      stopPropagation: () => undefined
+    });
+    expect(recorded.external).toEqual([sourceUrl]);
+    expect(recorded.local).toEqual([]);
+  });
+
+  // On the diff page the card is routed by the node's own branch, so the two
+  // sides of one comparison behave differently within the same render.
+  it("opens the on-disk file for a diff node on the checked-out branch", () => {
+    const { tree, recorded } = renderCard(
+      node({
+        sourceBranch: "feature-x",
+        sourceUrl: "https://github.test/o/r/blob/feature-x/src/web.ts#L4"
+      }),
+      {
+        diffMode: true,
+        branch: "feature-x",
+        baseBranch: "main",
+        workspaceBranch: "feature-x"
+      }
+    );
+    const row = findByClass(tree, "rad-node__source nodrag nopan nokey");
+    expect(props(row).target).toBeUndefined();
+    callHandler(row, "onClick");
+    expect(recorded.local).toEqual([
+      ["src/web.ts", 4, "https://github.test/o/r/blob/feature-x/src/web.ts#L4"]
+    ]);
+    expect(recorded.external).toEqual([]);
+  });
+
+  it("opens a removed diff node through the host on the base branch", () => {
+    const sourceUrl = "https://github.test/o/r/blob/main/src/web.ts#L4";
+    const { tree, recorded } = renderCard(
+      node({ sourceBranch: "main", diffStatus: "removed", sourceUrl }),
+      {
+        diffMode: true,
+        branch: "feature-x",
+        baseBranch: "main",
+        workspaceBranch: "feature-x"
+      }
+    );
+    const row = findByClass(tree, "rad-node__source nodrag nopan nokey");
+    expect(props(row).target).toBe("_blank");
+    callHandler(row, "onClick");
+    expect(recorded.external).toEqual([sourceUrl]);
     expect(recorded.local).toEqual([]);
   });
 
@@ -353,7 +422,10 @@ describe("node card", () => {
     "labels the %s badge for assistive technology",
     (kind, alt, progressClass) => {
       const { tree } = renderCard(
-        node({ deployBadge: "data:image/svg+xml,badge", deployBadgeKind: kind })
+        node({
+          deployBadge: "data:image/svg+xml,badge",
+          deployBadgeKind: kind
+        })
       );
       const badge = flattenElements(tree).find((element) =>
         String(element.props.className ?? "").startsWith("rad-node__badge")
@@ -554,6 +626,7 @@ describe("mountGraph", () => {
       host,
       settings: resolveGraphSettings(),
       deps: {
+        openExternal: () => undefined,
         openLocalSource: () => undefined,
         openDetails: () => undefined,
         toggleDetails: () => undefined

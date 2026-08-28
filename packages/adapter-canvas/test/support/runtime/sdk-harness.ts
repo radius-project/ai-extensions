@@ -162,8 +162,13 @@ export async function createRuntimeSdkHarness(
   const session = createFakeSession({
     rpc: {
       canvas: {
-        open: vi.fn(async ({ instanceId, input }) =>
-          host.open(instanceId, input)
+        // A canvas owned by another provider (the editor) is opened by the
+        // host, not by this extension, so it must not reach the Radius
+        // declaration or claim its single-instance registry.
+        open: vi.fn(async ({ canvasId, instanceId, input }) =>
+          canvasDeclaration && canvasId !== canvasDeclaration.id ?
+            undefined
+          : host.open(instanceId, input)
         )
       }
     }

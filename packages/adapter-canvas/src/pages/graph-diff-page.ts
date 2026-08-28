@@ -2,6 +2,7 @@
 // an explicit committed base branch and head branch.
 
 import { escapeHtml, type CanvasState } from "../shared.js";
+import { workspaceBranchForRepo } from "../workspace.js";
 import { pageShell } from "./shell.js";
 import { graphHeader, graphHeaderClose } from "./graph-header.js";
 import { GRAPH_DIFF_SUBTITLE } from "./fragments.js";
@@ -78,6 +79,7 @@ ${GRAPH_DIFF_SUBTITLE}
           repo: targetRepo,
           base: baseBranch,
           head: headBranch,
+          workspaceBranch: workspaceBranchForRepo(state, targetRepo),
           resources: [],
           modelingError:
             state?.diffModelingFailed && state.diffError ? state.diffError : ""
@@ -132,6 +134,7 @@ ${GRAPH_DIFF_SUBTITLE}
     }</div>
 <div id="diff-progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>
 <div id="graph-container"></div>
+<div id="graph-diff-summary">
 <div style="margin-top:12px; font-size:13px;">
   <strong>Changes:</strong>
   <span style="color:var(--rad-success)">+${added} added</span>,
@@ -146,12 +149,14 @@ ${
     )}</strong> and <strong>${escapeHtml(headBranch)}</strong>.</div>`
   : ""
 }
+</div>
 
 <div hidden id="radius-graph-diff-state">${escapeHtml(
       inlineJson({
         repo: targetRepo,
         base: baseBranch,
         head: headBranch,
+        workspaceBranch: workspaceBranchForRepo(state, targetRepo),
         resources,
         modelingError:
           state?.diffModelingFailed && state.diffError ? state.diffError : ""
