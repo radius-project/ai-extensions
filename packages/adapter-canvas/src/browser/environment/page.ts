@@ -308,6 +308,7 @@ export function initializeEnvironmentPage(
         );
       },
       startDeleteProgress(environment, provider) {
+        environments.hideTerminalBanners();
         operations.stopProgress();
         operations.renderProgress(
           optimisticOperation(

@@ -824,7 +824,12 @@ export function isTerminalState(state: any): boolean {
 
 export function canDismissOperation(op: any): boolean {
   if (!op || !isTerminalState(op.state)) return false;
-  if (projectOperationActions(op).length > 0) return false;
+  const actions = projectOperationActions(op);
+  const canExitCompletedDeletion =
+    op.kind === OPERATION_KIND_DELETE &&
+    op.state === "succeeded_with_warnings" &&
+    actions.every((action) => action.kind === "retry_deletion");
+  if (actions.length > 0 && !canExitCompletedDeletion) return false;
   if (op.state === "succeeded" || op.state === "succeeded_with_warnings") {
     return true;
   }
@@ -3956,7 +3961,7 @@ export function projectOperationActions(op: any): any[] {
       {
         id: "retry-deletion",
         kind: "retry_deletion",
-        label: "Retry deletion",
+        label: "Retry Deletion",
         placement: "row",
         tone: "primary",
         requiresConfirmation: false,

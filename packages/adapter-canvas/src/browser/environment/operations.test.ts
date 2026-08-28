@@ -945,7 +945,7 @@ describe("trackProgress rendering", () => {
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
   });
 
-  it("keeps Retry deletion instead of OK while deletion remains incomplete", () => {
+  it("offers Retry deletion and Exit when deletion completes with warnings", () => {
     const browser = setup();
     const controller = controllerFor(browser);
 
@@ -957,7 +957,7 @@ describe("trackProgress rendering", () => {
           {
             id: "retry-deletion",
             kind: "retry_deletion",
-            label: "Retry deletion",
+            label: "Retry Deletion",
             description: "Retry unfinished deletion steps.",
             path: "/api/operations/op-1/retry/deletion",
             pending: false
@@ -966,9 +966,10 @@ describe("trackProgress rendering", () => {
       })
     );
 
-    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("");
+    expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("Exit");
     expect(textOf(browser, PROGRESS_IDS.commandButtons)).toEqual([
-      "Retry deletion"
+      "Retry Deletion"
     ]);
   });
 
@@ -1685,7 +1686,7 @@ describe("operation commands", () => {
         {
           id: "retry-deletion",
           kind: "retry_deletion",
-          label: "Retry deletion",
+          label: "Retry Deletion",
           description: "Retry unfinished deletion steps.",
           path: "/api/operations/op-1/retry/deletion",
           pending: false
@@ -1696,7 +1697,7 @@ describe("operation commands", () => {
     );
 
     expect(buttons(browser)).toHaveLength(1);
-    expect(buttons(browser)[0].textContent).toBe("Retry deletion");
+    expect(buttons(browser)[0].textContent).toBe("Retry Deletion");
     expect(bottomButtons(browser)).toHaveLength(0);
   });
 
@@ -1708,7 +1709,7 @@ describe("operation commands", () => {
         {
           id: "retry-deletion",
           kind: "retry_deletion",
-          label: "Retry deletion",
+          label: "Retry Deletion",
           description: "Retry unfinished deletion steps.",
           path: "/api/operations/op-1/retry/deletion",
           pending: false
@@ -2129,7 +2130,7 @@ describe("operation commands", () => {
       {
         id: "retry-deletion",
         kind: "retry_deletion",
-        label: "Retry deletion",
+        label: "Retry Deletion",
         path: "/api/operations/op-1/retry/deletion"
       },
       "Retrying deletion…"
@@ -2165,7 +2166,7 @@ describe("operation commands", () => {
     const action = {
       id: "retry-deletion",
       kind: "retry_deletion",
-      label: "Retry deletion",
+      label: "Retry Deletion",
       path: "/api/operations/op-1/retry/deletion"
     };
 
@@ -2185,6 +2186,40 @@ describe("operation commands", () => {
 
     expect(browser.els[ERROR_BANNER_ID].style.display).toBe("none");
     expect(deps.reloadCount).toBe(1);
+  });
+
+  it("routes an immediately completed deletion retry to the delete terminal handler", async () => {
+    const browser = setup();
+    const deleteTerminals: OperationRecord[] = [];
+    const harness = createDeps({
+      onDeleteTerminal(op) {
+        deleteTerminals.push(op);
+      }
+    });
+    const action = {
+      id: "retry-deletion",
+      kind: "retry_deletion",
+      label: "Retry Deletion",
+      path: "/api/operations/op-1/retry/deletion"
+    };
+
+    await pressCommand(
+      browser,
+      () =>
+        jsonResponse(
+          op({
+            kind: "delete",
+            state: "succeeded_with_warnings",
+            terminalState: "succeeded_with_warnings",
+            actions: []
+          })
+        ),
+      { action, deps: harness.deps }
+    );
+
+    expect(deleteTerminals).toHaveLength(1);
+    expect(deleteTerminals[0].terminalState).toBe("succeeded_with_warnings");
+    expect(harness.successBanners).toEqual([]);
   });
 
   it("degrades quietly when the command region is not on the page", () => {

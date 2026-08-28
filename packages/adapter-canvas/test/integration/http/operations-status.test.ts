@@ -10,6 +10,7 @@ import {
 } from "../../../src/server/routes/operations-status.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import {
+  buildDeleteStages,
   buildStages,
   canResumeInput,
   canDismissOperation,
@@ -18,6 +19,7 @@ import {
   finish,
   INPUT_REQUIRED_STATE,
   isTerminalState,
+  OPERATION_KIND_DELETE,
   requireInput,
   resumeAfterInput,
   toClientView
@@ -502,6 +504,25 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     expect(await dismissed.json()).toEqual({
       operationId: dismissable.operationId
     });
+
+    const deletionStages = buildDeleteStages();
+    const completedDeletion = createOperation({
+      provider: "azure",
+      repo: "octo/delete",
+      environment: "dev",
+      kind: OPERATION_KIND_DELETE,
+      stages: deletionStages
+    }) as OperationActionRecord;
+    deletionStages[0].state = "succeeded";
+    deletionStages[1].state = "warning";
+    finish(completedDeletion, "succeeded_with_warnings");
+    harness.records.set(completedDeletion.operationId, completedDeletion);
+    const exitedDeletion = await fetch(
+      `${entry.baseUrl}/api/operations/${encodeURIComponent(completedDeletion.operationId)}/dismiss`,
+      { method: "POST", headers: browserHeaders }
+    );
+    expect(exitedDeletion.status).toBe(200);
+    expect(completedDeletion.dismissedAt).toEqual(expect.any(String));
 
     // The templates are anchored. An unknown POST subpath still falls through
     // exactly as before instead of being swallowed by a broad operations prefix.

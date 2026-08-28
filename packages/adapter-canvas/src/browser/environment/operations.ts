@@ -1455,6 +1455,14 @@ export function initializeEnvironmentOperations(
     sendCommand(action, op);
   }
 
+  function applyOperationTerminal(op: OperationRecord): void {
+    if (op.kind === "delete" && deps.onDeleteTerminal) {
+      deps.onDeleteTerminal(op);
+      return;
+    }
+    applyTerminal(op);
+  }
+
   function sendCommand(action: OperationAction, op: OperationRecord): void {
     if (commandInFlight) return;
     const commandSession = session;
@@ -1504,11 +1512,11 @@ export function initializeEnvironmentOperations(
         // result.
         if (updated && updated.terminalState !== null) {
           stopProgress();
-          applyTerminal(updated);
+          applyOperationTerminal(updated);
           return;
         }
         if (repo !== "") {
-          trackProgress(op.environment, op.provider, applyTerminal);
+          trackProgress(op.environment, op.provider, applyOperationTerminal);
           return;
         }
         pollOperation(op.operationId);
@@ -1583,9 +1591,12 @@ export function initializeEnvironmentOperations(
     const dismissEl = dom.byId(PROGRESS_IDS.dismiss);
     if (bottomEl) bottomEl.replaceChildren();
     const acknowledged = isAcknowledgedOutcome(op);
+    const canExitCompletedDeletion =
+      op?.kind === "delete" && op.terminalState === "succeeded_with_warnings";
     if (dismissEl) {
-      dismissEl.textContent = acknowledged ? "OK" : "Dismiss";
-      dismissEl.style.display = acknowledged ? "" : "none";
+      dismissEl.textContent = canExitCompletedDeletion ? "Exit" : "OK";
+      dismissEl.style.display =
+        acknowledged || canExitCompletedDeletion ? "" : "none";
     }
     const actions = visibleOperationActions(op);
     const bottomActions =
@@ -1599,7 +1610,9 @@ export function initializeEnvironmentOperations(
     }
     if (actionsEl) {
       actionsEl.style.display =
-        acknowledged || bottomActions.length > 0 ? "flex" : "none";
+        acknowledged || canExitCompletedDeletion || bottomActions.length > 0 ?
+          "flex"
+        : "none";
     }
   }
 
@@ -2196,11 +2209,7 @@ export function initializeEnvironmentOperations(
         // still offers the same actions.
         renderProgress(op);
         if (op.terminalState !== null) return;
-        const onTerminal =
-          op.kind === "delete" && deps.onDeleteTerminal ?
-            deps.onDeleteTerminal
-          : applyTerminal;
-        trackProgress(op.environment, op.provider, onTerminal);
+        trackProgress(op.environment, op.provider, applyOperationTerminal);
       })
       .catch(() => {
         /* nothing to resume */

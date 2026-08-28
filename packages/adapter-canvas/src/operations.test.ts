@@ -2588,11 +2588,22 @@ describe("registry", () => {
     );
   });
 
-  it("does not dismiss a terminal deletion that still offers retry", () => {
+  it("dismisses a completed deletion with warnings even when retry remains available", () => {
     const op = newDeleteOp();
     op.stages[0].state = "succeeded";
     op.stages[1].state = "warning";
     finish(op, "succeeded_with_warnings");
+
+    expect(canDismissOperation(op)).toBe(true);
+    dismissOperation(op);
+    expect(op.dismissedAt).toEqual(expect.any(String));
+  });
+
+  it("does not dismiss a failed partial deletion that still offers retry", () => {
+    const op = newDeleteOp();
+    finish(op, "failed_partial", {
+      failure: { code: "credential-delete-failed" }
+    });
 
     expect(canDismissOperation(op)).toBe(false);
     dismissOperation(op);
@@ -4961,7 +4972,7 @@ describe("action projection", () => {
       expect.objectContaining({
         id: "retry-deletion",
         kind: "retry_deletion",
-        label: "Retry deletion",
+        label: "Retry Deletion",
         path: `/api/operations/${failed.operationId}/retry/deletion`,
         requiresConfirmation: false,
         resumeFrom: failed.stages[0].id

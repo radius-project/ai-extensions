@@ -105,6 +105,10 @@ const REQUIRED_ELEMENTS = [
   "env-table-body",
   "env-error-banner",
   "env-error-banner-text",
+  "env-success-banner",
+  "env-success-banner-text",
+  "env-warning-banner",
+  "env-warning-banner-text",
   "cred-landing",
   "cred-form",
   "cred-panel-azure",
@@ -127,6 +131,12 @@ const REQUIRED_ELEMENTS = [
   "env-profile-value",
   "env-profile-options",
   PROGRESS_IDS.panel,
+  PROGRESS_IDS.commands,
+  PROGRESS_IDS.commandButtons,
+  PROGRESS_IDS.commandNote,
+  PROGRESS_IDS.actions,
+  PROGRESS_IDS.bottomButtons,
+  PROGRESS_IDS.dismiss,
   "deploy-status",
   "new-env-btn",
   "cancel-env-btn",
@@ -1588,9 +1598,13 @@ describe("initializeEnvironmentPage", () => {
     const teardown = initializeEnvironmentPage(page.browser.context);
     await flushPromises();
 
+    page.elements["env-success-banner"].style.display = "flex";
+    page.elements["env-success-banner-text"].textContent =
+      "Successfully configured Azure Environment windows";
     remove.dispatch("click");
     page.elements["env-confirm-ok"].dispatch("click");
     await flushPromises();
+    expect(page.elements["env-success-banner"].style.display).toBe("none");
     page.browser.clock.tick(1600);
     await flushPromises();
     await flushPromises();
@@ -1608,11 +1622,18 @@ describe("initializeEnvironmentPage", () => {
       "Microsoft Entra app registration was not deleted"
     );
 
-    // Acknowledging a warnings outcome must not dismiss the operation: the
-    // panel keeps offering the retry the warnings may warrant.
+    // Acknowledging the warning leaves both choices available in the panel:
+    // retry the unfinished cleanup or explicitly exit the completed deletion.
     page.elements["env-confirm-ok"].dispatch("click");
     await flushPromises();
     expect(dismissed).toBe(false);
+    expect(page.elements[PROGRESS_IDS.dismiss].textContent).toBe("Exit");
+    expect(page.elements[PROGRESS_IDS.dismiss].style.display).toBe("");
+
+    page.elements[PROGRESS_IDS.dismiss].dispatch("click");
+    await flushPromises();
+    expect(dismissed).toBe(true);
+    expect(page.elements[PROGRESS_IDS.panel].style.display).toBe("none");
 
     teardown();
   });
