@@ -505,8 +505,7 @@ export function createWorkflowFileCommitter(
       "--jq",
       ".sha"
     ]);
-    const sha =
-      shaRes.code === 0 || shaRes.code === "0" ? shaRes.stdout.trim() : "";
+    const sha = shaRes.code === 0 ? shaRes.stdout.trim() : "";
     const previousBlobKnown =
       sha !== "" ||
       /(?:HTTP\s+404|\bNot Found\b)/i.test(
@@ -580,7 +579,7 @@ export function createWorkflowFileCommitter(
       typeof existingIntent?.operationMarker === "string" ?
         existingIntent.operationMarker
       : recoveryOperation ?
-        `radius-operation:${recoveryOperation.operationId}:workflow:${workflowContentDigest(contentB64).slice(0, 16)}`
+        `radius-operation:${recoveryOperation.operationId}:workflow:${path}:${workflowContentDigest(contentB64).slice(0, 16)}`
       : "";
     const intendedPreviousBlobSha =
       (
@@ -717,6 +716,12 @@ export function createWorkflowFileCommitter(
               // GitHub omits empty commits from path-filtered history. A PUT of
               // unchanged workflow content can still create such a commit, so
               // recover it by its unique marker in the branch history instead.
+              const unreadableHistory = () => ({
+                state: "manual_required" as const,
+                guidance:
+                  `GitHub returned unreadable commit history for "${path}" on "${branch || "the default branch"}". ` +
+                  "Radius will not accept, overwrite, or remove that workflow."
+              });
               let matchingCommits: Array<{ sha: string }> = [];
               for (let page = 1; page <= 100; page += 1) {
                 const commitsPath =
@@ -735,20 +740,10 @@ export function createWorkflowFileCommitter(
                 try {
                   parsed = JSON.parse(commits.stdout);
                 } catch {
-                  return {
-                    state: "manual_required" as const,
-                    guidance:
-                      `GitHub returned unreadable commit history for "${path}" on "${branch || "the default branch"}". ` +
-                      "Radius will not accept, overwrite, or remove that workflow."
-                  };
+                  return unreadableHistory();
                 }
                 if (!Array.isArray(parsed)) {
-                  return {
-                    state: "manual_required" as const,
-                    guidance:
-                      `GitHub returned unreadable commit history for "${path}" on "${branch || "the default branch"}". ` +
-                      "Radius will not accept, overwrite, or remove that workflow."
-                  };
+                  return unreadableHistory();
                 }
                 matchingCommits.push(
                   ...parsed.filter(
@@ -773,6 +768,7 @@ export function createWorkflowFileCommitter(
                       )
                   )
                 );
+                if (matchingCommits.length === 1) break;
                 if (parsed.length < 100) break;
                 if (page === 100) {
                   return {
@@ -844,7 +840,7 @@ export function createWorkflowFileCommitter(
     viaPr: boolean
   ): WorkflowCommitOutcome => ({
     ok: true,
-    ...(result.changed === false ? { changed: false } : {}),
+    changed: result.changed !== false,
     stderr: result.stderr,
     viaPr,
     commitSha: result.commitSha,
@@ -883,16 +879,23 @@ export function createWorkflowFileCommitter(
         prState.branch
       );
       if (r.cancelled) {
-        return { ok: false, cancelled: true, stderr: r.stderr, viaPr: true };
+        return {
+          ok: false,
+          changed: false,
+          cancelled: true,
+          stderr: r.stderr,
+          viaPr: true
+        };
       }
       return r.code === 0 ?
           succeeded(r, contentB64, true)
-        : { ok: false, stderr: r.stderr, viaPr: true };
+        : { ok: false, changed: false, stderr: r.stderr, viaPr: true };
     }
     const direct = await putWorkflowContent(path, contentB64, message, "");
     if (direct.cancelled) {
       return {
         ok: false,
+        changed: false,
         cancelled: true,
         stderr: direct.stderr,
         viaPr: false
@@ -912,6 +915,7 @@ export function createWorkflowFileCommitter(
         if (e instanceof WorkflowCommitCancelledError) {
           return {
             ok: false,
+            changed: false,
             cancelled: true,
             stderr: e.message,
             viaPr: false
@@ -920,6 +924,7 @@ export function createWorkflowFileCommitter(
         if (e instanceof ProviderMutationRecoveryError) throw e;
         return {
           ok: false,
+          changed: false,
           stderr: `${direct.stderr} (PR fallback failed: ${ports.errorMessage(
             e
           )})`,
@@ -938,13 +943,24 @@ export function createWorkflowFileCommitter(
         atomicFallbackWrite = false;
       }
       if (r.cancelled) {
-        return { ok: false, cancelled: true, stderr: r.stderr, viaPr: true };
+        return {
+          ok: false,
+          changed: false,
+          cancelled: true,
+          stderr: r.stderr,
+          viaPr: true
+        };
       }
       return r.code === 0 ?
           succeeded(r, contentB64, true)
-        : { ok: false, stderr: r.stderr, viaPr: true };
+        : { ok: false, changed: false, stderr: r.stderr, viaPr: true };
     }
-    return { ok: false, stderr: direct.stderr, viaPr: false };
+    return {
+      ok: false,
+      changed: false,
+      stderr: direct.stderr,
+      viaPr: false
+    };
   };
 
   return {

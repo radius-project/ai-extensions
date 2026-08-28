@@ -16,6 +16,7 @@ interface InfraMockState {
   // When true, commitFileToRepo rejects (mirrors gh.ts, which throws on a failed
   // PUT — e.g. a protected branch) so tests can exercise the `failed` path.
   failCommits: boolean;
+  noopCommits: boolean;
 }
 
 // Shared mock state for the ./gh.ts stub. `vi.hoisted` runs before the module
@@ -54,6 +55,7 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
       commits: [], // recorded commitFileToRepo calls
       fetches: [],
       failCommits: false, // when true, commitFileToRepo rejects
+      noopCommits: false,
       upstream: { ...BASE_UPSTREAM }
     }
   };
@@ -104,6 +106,7 @@ vi.mock("./gh.js", () => ({
     message: string
   ) => {
     if (h.failCommits) throw new Error("protected branch");
+    if (h.noopCommits) return false;
     h.commits.push({ path, content, branch, message });
     (h.committed[branch] ||= {})[path] = content;
     return true;
@@ -628,6 +631,7 @@ describe("syncRepoWorkflows", () => {
     h.committed = {};
     h.commits = [];
     h.failCommits = false;
+    h.noopCommits = false;
     h.upstream = { ...BASE_UPSTREAM };
     expireTemplateCache();
   });
@@ -976,5 +980,20 @@ describe("syncRepoWorkflows", () => {
       ".github/workflows/delete-azure.yml"
     ]);
     expect(res.failed.every((f) => f.branch === "main")).toBe(true);
+  });
+
+  it("does not report a create when a concurrent writer made the same change", async () => {
+    h.committed.main = await expectedFilesFor("dev", "azure");
+    delete h.committed.main[".github/workflows/delete-application.yml"];
+    h.noopCommits = true;
+
+    const res = await syncRepoWorkflows(
+      "acme/app",
+      [{ name: "dev", provider: "azure" }],
+      { only: ["delete-application.yml"], create: true }
+    );
+
+    expect(res.created).toEqual([]);
+    expect(h.commits).toEqual([]);
   });
 });

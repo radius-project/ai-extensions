@@ -347,7 +347,7 @@ export async function publishWorkflowFiles(
   });
 
   // Step 3: Commit the verify-credentials workflow
-  ports.pushStep("Committing verify-credentials workflow...");
+  ports.pushStep("Checking verify-credentials workflow...");
   const verifyWorkflow = await ports.generateVerifyWorkflow(envName, provider);
   const verifyContent = Buffer.from(verifyWorkflow).toString("base64");
 
@@ -373,8 +373,12 @@ export async function publishWorkflowFiles(
       ghError: verifyCommit.stderr || ""
     };
   }
-  ports.pushStep("✅ Verify workflow committed.");
-  if (verifyCommit.changed !== false) {
+  ports.pushStep(
+    verifyCommit.changed ?
+      "✅ Verify workflow committed."
+    : "✅ Verify workflow already up to date."
+  );
+  if (verifyCommit.changed) {
     ports.recordCommittedWorkflowFile(
       operation,
       commitRecord(VERIFY_WORKFLOW_PATH, verifyCommit)
@@ -385,7 +389,8 @@ export async function publishWorkflowFiles(
   // Step 4: Also commit the deploy workflows (dispatcher + both provider
   // workflows). The dispatcher references both provider files by path, so all
   // three must exist in the target repo.
-  ports.pushStep("Committing deploy workflows...");
+  ports.pushStep("Checking deploy workflows...");
+  let deployChanges = 0;
   const deployWorkflows = await ports.generateDeployWorkflow(
     envName,
     ".radius/app.bicep"
@@ -417,7 +422,8 @@ export async function publishWorkflowFiles(
         ghError: deployCommit.stderr || ""
       };
     }
-    if (deployCommit.changed !== false) {
+    if (deployCommit.changed) {
+      deployChanges += 1;
       ports.recordCommittedWorkflowFile(
         operation,
         commitRecord(deployPath, deployCommit)
@@ -438,14 +444,19 @@ export async function publishWorkflowFiles(
     }
     if (!(await ports.gate())) return { outcome: "cancelled" };
   }
-  ports.pushStep("✅ Deploy workflows committed.");
+  ports.pushStep(
+    deployChanges > 0 ?
+      "✅ Deploy workflows committed."
+    : "✅ Deploy workflows already up to date."
+  );
 
   // Step 4b: Commit the application-delete workflows (dispatcher + Azure
   // provider workflow) so the Delete Deployment button can dispatch `rad app
   // delete`. Only Azure workflows are generated and committed; the AWS provider
   // file is never produced.
-  ports.pushStep("Committing delete workflows...");
+  ports.pushStep("Checking delete workflows...");
   try {
+    let deleteChanges = 0;
     const deleteWorkflows = await ports.generateDeleteWorkflow(envName);
     for (const [fileName, content] of Object.entries(deleteWorkflows)) {
       const delContent = Buffer.from(content).toString("base64");
@@ -468,17 +479,21 @@ export async function publishWorkflowFiles(
             ": " +
             ((delCommit.stderr || "").trim() || "GitHub API request failed.")
         );
-        if (!(await ports.gate())) return { outcome: "cancelled" };
       }
-      if (delCommit.ok && delCommit.changed !== false) {
+      if (delCommit.ok && delCommit.changed) {
+        deleteChanges += 1;
         ports.recordCommittedWorkflowFile(
           operation,
           commitRecord(delPath, delCommit)
         );
-        if (!(await ports.gate())) return { outcome: "cancelled" };
       }
+      if (!(await ports.gate())) return { outcome: "cancelled" };
     }
-    ports.pushStep("✅ Delete workflows committed.");
+    ports.pushStep(
+      deleteChanges > 0 ?
+        "✅ Delete workflows committed."
+      : "✅ Delete workflows already up to date."
+    );
   } catch (delErr) {
     if (delErr instanceof ProviderMutationRecoveryError) throw delErr;
     // Delete workflows are non-critical to environment creation, so surface the

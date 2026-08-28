@@ -796,15 +796,17 @@ export async function syncRepoWorkflows(
         }
         const choice = candidates[0];
         try {
-          await commitFileToRepo(
+          const changed = await commitFileToRepo(
             repo,
             path,
             choice.content,
             branch,
             `Add ${fileName} from upstream Radius workflow templates`
           );
-          created.add(path);
-          log(`created ${path} on "${branch}"`);
+          if (changed) {
+            created.add(path);
+            log(`created ${path} on "${branch}"`);
+          }
         } catch (e) {
           failed.push({ path, branch });
           log(`could not create ${path} on "${branch}": ${errorMessage(e)}`);
@@ -832,15 +834,17 @@ export async function syncRepoWorkflows(
           candidates.find((c) => c.provider === committedProvider)) ||
         candidates[0];
       try {
-        await commitFileToRepo(
+        const changed = await commitFileToRepo(
           repo,
           path,
           choice.content,
           branch,
           `Update ${fileName} to match upstream Radius workflow templates`
         );
-        updated.add(path);
-        log(`updated ${path} on "${branch}"`);
+        if (changed) {
+          updated.add(path);
+          log(`updated ${path} on "${branch}"`);
+        }
       } catch (e) {
         failed.push({ path, branch });
         log(`could not update ${path} on "${branch}": ${errorMessage(e)}`);

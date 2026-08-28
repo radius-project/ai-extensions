@@ -149,10 +149,17 @@ const MARKED_VERIFY_WORKFLOW = [
 // the recorded provenance digest from the bytes actually committed.
 const digestOf = (content: string): string =>
   createHash("sha256").update(content, "utf8").digest("hex");
+const gitBlobShaOf = (content: string): string => {
+  const bytes = Buffer.from(content, "utf8");
+  return createHash("sha1")
+    .update(`blob ${bytes.length}\0`)
+    .update(bytes)
+    .digest("hex");
+};
 const DEPLOY_WORKFLOW_BODY = "on: workflow_dispatch\njobs:\n";
 const WORKFLOW_CONTENT_DIGEST = digestOf(DEPLOY_WORKFLOW_BODY);
 const VERIFY_CONTENT_DIGEST = digestOf(MARKED_VERIFY_WORKFLOW);
-const VERIFY_OPERATION_MARKER = `radius-operation:op-http:workflow:${VERIFY_CONTENT_DIGEST.slice(0, 16)}`;
+const VERIFY_OPERATION_MARKER = `radius-operation:op-http:workflow:.github/workflows/radius-verify-credentials.yml:${VERIFY_CONTENT_DIGEST.slice(0, 16)}`;
 
 function prepareVerifyWorkflowRecovery(
   operation: CreateEnvironmentOperation
@@ -2122,6 +2129,34 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       }
     ]);
     expect(harness.journal).toContain("deleteLegacyDeployWorkflow");
+  });
+
+  it("does not commit or record cleanup artifacts for up-to-date workflows", async () => {
+    const workflowFiles = {
+      ".github/workflows/radius-verify-credentials.yml": MARKED_VERIFY_WORKFLOW,
+      ".github/workflows/run-rad-commands.yml": DEPLOY_WORKFLOW_BODY,
+      ".github/workflows/radius-delete.yml": DEPLOY_WORKFLOW_BODY
+    };
+    const harness = start({
+      files: workflowFiles,
+      gh: Object.entries(workflowFiles).map(([path, content]) => ({
+        match: new RegExp(
+          `^api /repos/octo/app/contents/${path.replaceAll(".", "\\.")}(?:\\?ref=main)? --jq \\.sha$`
+        ),
+        result: { code: 0, stdout: gitBlobShaOf(content) }
+      }))
+    });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(response.status).toBe(200);
+    expect(
+      harness.ghCalls.filter((call) =>
+        call.startsWith("api --method PUT /repos/octo/app/contents/")
+      )
+    ).toEqual([]);
+    expect(harness.committedFiles).toEqual([]);
+    expect(harness.operation.setupArtifacts.commit.workflowFiles).toEqual([]);
   });
 
   it("records the commit point only after the verify dispatch succeeded", async () => {

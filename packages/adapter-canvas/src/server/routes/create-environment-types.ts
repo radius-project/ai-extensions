@@ -65,7 +65,7 @@ export interface WorkflowCommitOutcome {
   ok: boolean;
   // False when the existing workflow already matched the generated content and
   // no repository mutation was needed.
-  changed?: boolean;
+  changed: boolean;
   cancelled?: boolean;
   stderr?: string;
   viaPr: boolean;

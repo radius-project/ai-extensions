@@ -199,6 +199,60 @@ describe("committing a workflow file", () => {
     expect(h.tempWrites).toEqual([]);
   });
 
+  it("does not treat a string command code as proven rollback provenance", async () => {
+    const h = harness({
+      runGh: [{ code: "0", stdout: "untrusted-blob" }],
+      runGhWorkflow: [{ code: 0, stdout: PUT_RESPONSE }]
+    });
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        ".github/workflows/a.yml",
+        CONTENT,
+        "Add a"
+      )
+    ).resolves.toMatchObject({
+      ok: true,
+      changed: true,
+      previousBlobSha: null,
+      previousBlobKnown: false
+    });
+    expect(JSON.parse(h.tempWrites[0] ?? "{}")).not.toHaveProperty("sha");
+  });
+
+  it("uses the workflow path to distinguish equal-content operation markers", async () => {
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        { code: 1, stderr: "HTTP 404: Not Found" }
+      ],
+      runGhWorkflow: [
+        { code: 0, stdout: PUT_RESPONSE },
+        { code: 0, stdout: PUT_RESPONSE }
+      ]
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    h.ports.mutationRecovery = { operation, persist: async () => {} };
+    const committer = createWorkflowFileCommitter(h.ports, target);
+
+    await committer.commitWorkflowFileSmart("first.yml", CONTENT, "Add first");
+    await committer.commitWorkflowFileSmart(
+      "second.yml",
+      CONTENT,
+      "Add second"
+    );
+
+    const messages = h.tempWrites.map(
+      (body) => JSON.parse(body).message as string
+    );
+    expect(messages[0]).toContain(
+      "radius-operation:op_workflow:workflow:first.yml:fff71b97a5a94949"
+    );
+    expect(messages[1]).toContain(
+      "radius-operation:op_workflow:workflow:second.yml:fff71b97a5a94949"
+    );
+  });
+
   it("adopts an unchanged workflow write from branch history after a timed-out response", async () => {
     const h = harness({
       runGh: [
@@ -225,7 +279,7 @@ describe("committing a workflow file", () => {
               sha: "a".repeat(40),
               commit: {
                 message:
-                  "Add a\n\nRadius-Operation: radius-operation:op_workflow:workflow:fff71b97a5a94949"
+                  "Add a\n\nRadius-Operation: radius-operation:op_workflow:workflow:.github/workflows/a.yml:fff71b97a5a94949"
               }
             }
           ])
@@ -277,6 +331,114 @@ describe("committing a workflow file", () => {
     });
   });
 
+  it("stops pagination once the exact commit is found on a full page", async () => {
+    const operationMarker =
+      "radius-operation:op_workflow:workflow:.github/workflows/a.yml:fff71b97a5a94949";
+    const history = [
+      {
+        sha: "a".repeat(40),
+        commit: { message: `Add a\n\nRadius-Operation: ${operationMarker}` }
+      },
+      ...Array.from({ length: 99 }, () => ({
+        sha: "d".repeat(40),
+        commit: { message: "Unrelated commit" }
+      }))
+    ];
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        {
+          code: 0,
+          stdout: JSON.stringify({ sha: "blob-recovered", content: CONTENT })
+        },
+        { code: 0, stdout: JSON.stringify(history) }
+      ],
+      runGhWorkflow: [{ code: 1, timedOut: true }]
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    h.ports.mutationRecovery = { operation, persist: async () => {} };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        ".github/workflows/a.yml",
+        CONTENT,
+        "Add a"
+      )
+    ).resolves.toMatchObject({ ok: true, commitSha: "a".repeat(40) });
+    expect(
+      h.calls.filter((call) => call.args[1]?.includes("/commits?"))
+    ).toHaveLength(1);
+  });
+
+  it.each([
+    ["invalid JSON", "not-json"],
+    ["a non-array response", JSON.stringify({ message: "unexpected" })]
+  ])("fails closed for %s in commit history", async (_label, history) => {
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        {
+          code: 0,
+          stdout: JSON.stringify({ sha: "blob-recovered", content: CONTENT })
+        },
+        { code: 0, stdout: history }
+      ],
+      runGhWorkflow: [{ code: 1, timedOut: true }]
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    h.ports.mutationRecovery = { operation, persist: async () => {} };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        ".github/workflows/a.yml",
+        CONTENT,
+        "Add a"
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-manual-required",
+      message: expect.stringContaining("unreadable commit history")
+    });
+  });
+
+  it("fails closed when commit history exceeds the pagination bound", async () => {
+    const fullPage = JSON.stringify(
+      Array.from({ length: 100 }, () => ({
+        sha: "d".repeat(40),
+        commit: { message: "Unrelated commit" }
+      }))
+    );
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        {
+          code: 0,
+          stdout: JSON.stringify({ sha: "blob-recovered", content: CONTENT })
+        },
+        ...Array.from({ length: 100 }, () => ({
+          code: 0,
+          stdout: fullPage
+        }))
+      ],
+      runGhWorkflow: [{ code: 1, timedOut: true }]
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    h.ports.mutationRecovery = { operation, persist: async () => {} };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        ".github/workflows/a.yml",
+        CONTENT,
+        "Add a"
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-manual-required",
+      message: expect.stringContaining("could not finish searching")
+    });
+    expect(
+      h.calls.filter((call) => call.args[1]?.includes("/commits?"))
+    ).toHaveLength(100);
+  });
+
   it("restores the pre-write blob and exact commit after a lost response and restart", async () => {
     const first = harness({
       runGh: [
@@ -304,12 +466,13 @@ describe("committing a workflow file", () => {
     ).rejects.toMatchObject({ code: "provider-mutation-outcome-unknown" });
 
     const restored = fromPersistedOperation(toPersistedOperation(operation));
+    const matchingBlobSha = "cafed2e87a7516e3d4276dc88252153ce38726ca";
     const second = harness({
       runGh: [
-        { code: 0, stdout: "blob-recovered" },
+        { code: 0, stdout: matchingBlobSha },
         {
           code: 0,
-          stdout: JSON.stringify({ sha: "blob-recovered", content: CONTENT })
+          stdout: JSON.stringify({ sha: matchingBlobSha, content: CONTENT })
         },
         {
           code: 0,
@@ -318,7 +481,7 @@ describe("committing a workflow file", () => {
               sha: "b".repeat(40),
               commit: {
                 message:
-                  "Add a\n\nRadius-Operation: radius-operation:op_workflow:workflow:fff71b97a5a94949"
+                  "Add a\n\nRadius-Operation: radius-operation:op_workflow:workflow:.github/workflows/a.yml:fff71b97a5a94949"
               }
             }
           ])
@@ -339,7 +502,7 @@ describe("committing a workflow file", () => {
     ).resolves.toMatchObject({
       ok: true,
       commitSha: "b".repeat(40),
-      blobSha: "blob-recovered",
+      blobSha: matchingBlobSha,
       previousBlobSha: null,
       previousBlobKnown: true
     });
@@ -430,6 +593,7 @@ describe("committing a workflow file", () => {
       )
     ).resolves.toEqual({
       ok: true,
+      changed: true,
       stderr: "",
       viaPr: false,
       ...KNOWN_ABSENT_PROVENANCE
@@ -497,6 +661,7 @@ describe("committing a workflow file", () => {
       )
     ).resolves.toEqual({
       ok: true,
+      changed: true,
       stderr: "",
       viaPr: false,
       commitSha: "commit-1",
@@ -541,7 +706,12 @@ describe("committing a workflow file", () => {
 
     await expect(
       committer.commitWorkflowFileSmart("p", CONTENT, "m")
-    ).resolves.toEqual({ ok: false, stderr: "HTTP 500", viaPr: false });
+    ).resolves.toEqual({
+      ok: false,
+      changed: false,
+      stderr: "HTTP 500",
+      viaPr: false
+    });
   });
 
   it("surfaces a non-permission failure verbatim without opening a pull request", async () => {
@@ -555,6 +725,7 @@ describe("committing a workflow file", () => {
       committer.commitWorkflowFileSmart("p", CONTENT, "m")
     ).resolves.toEqual({
       ok: false,
+      changed: false,
       stderr: "HTTP 500: server error",
       viaPr: false
     });
@@ -778,6 +949,7 @@ describe("the protected-branch pull-request fallback", () => {
       committer.commitWorkflowFileSmart("p", CONTENT, "m")
     ).resolves.toEqual({
       ok: true,
+      changed: true,
       stderr: "",
       viaPr: true,
       ...KNOWN_ABSENT_PROVENANCE
@@ -864,6 +1036,7 @@ describe("the protected-branch pull-request fallback", () => {
       committer.commitWorkflowFileSmart("p", CONTENT, "m")
     ).resolves.toEqual({
       ok: false,
+      changed: false,
       stderr:
         "protected branch (PR fallback failed: could not resolve the repository default branch)",
       viaPr: false
@@ -891,6 +1064,7 @@ describe("the protected-branch pull-request fallback", () => {
       committer.commitWorkflowFileSmart("p", CONTENT, "m")
     ).resolves.toEqual({
       ok: false,
+      changed: false,
       stderr: "HTTP 422: branch is behind",
       viaPr: true
     });
@@ -920,6 +1094,7 @@ describe("the protected-branch pull-request fallback", () => {
       committer.commitWorkflowFileSmart("second", CONTENT, "m")
     ).resolves.toEqual({
       ok: true,
+      changed: true,
       stderr: "",
       viaPr: true,
       ...KNOWN_ABSENT_PROVENANCE
@@ -946,7 +1121,12 @@ describe("the protected-branch pull-request fallback", () => {
     await committer.commitWorkflowFileSmart("first", CONTENT, "m");
     await expect(
       committer.commitWorkflowFileSmart("second", CONTENT, "m")
-    ).resolves.toEqual({ ok: false, stderr: "HTTP 422", viaPr: true });
+    ).resolves.toEqual({
+      ok: false,
+      changed: false,
+      stderr: "HTTP 422",
+      viaPr: true
+    });
   });
 
   it("keeps the original refusal and explains the fallback failure when the base head cannot be resolved", async () => {
@@ -962,6 +1142,7 @@ describe("the protected-branch pull-request fallback", () => {
       committer.commitWorkflowFileSmart("p", CONTENT, "m")
     ).resolves.toEqual({
       ok: false,
+      changed: false,
       stderr:
         'protected branch (PR fallback failed: could not resolve head of base branch "main")',
       viaPr: false
@@ -983,6 +1164,7 @@ describe("the protected-branch pull-request fallback", () => {
       committer.commitWorkflowFileSmart("p", CONTENT, "m")
     ).resolves.toEqual({
       ok: false,
+      changed: false,
       stderr:
         'protected branch (PR fallback failed: could not create branch "radius/setup-dev-workflows-1700000000000": name already exists)',
       viaPr: false
@@ -1067,7 +1249,7 @@ describe("the predecessor blob a workflow retry records", () => {
       sha: "b".repeat(40),
       commit: {
         message:
-          "Add a\n\nRadius-Operation: radius-operation:op_workflow:workflow:fff71b97a5a94949"
+          "Add a\n\nRadius-Operation: radius-operation:op_workflow:workflow:.github/workflows/a.yml:fff71b97a5a94949"
       }
     }
   ]);
@@ -1258,7 +1440,7 @@ describe("recovering a setup branch after the default branch moved", () => {
       "confirmed",
       "GitHub acknowledged the branch."
     );
-    const marker = "radius-operation:op_workflow:workflow:fff71b97a5a94949";
+    const marker = "radius-operation:op_workflow:workflow:p:fff71b97a5a94949";
     prepareProviderMutation(operation, {
       kind: "github_workflow.put",
       target: "octo/app:radius/setup-dev-workflows-workflow:p",

@@ -11,7 +11,6 @@ import {
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHash } from "node:crypto";
 import { providerMutationOutcomeUnknown } from "./server/services/provider-mutation-recovery.js";
 
 const childProcess = vi.hoisted(() => ({
@@ -979,11 +978,7 @@ describe.sequential("commitFileToRepo", () => {
   it("does not commit a workflow whose content already matches", async () => {
     const { commitFileToRepo } = await loadGh("linux");
     const content = "on: workflow_dispatch";
-    const bytes = Buffer.from(content);
-    const sha = createHash("sha1")
-      .update(`blob ${bytes.length}\0`)
-      .update(bytes)
-      .digest("hex");
+    const sha = "0ed39ed01473b7fb142b9b1d2fb06bb03b7791b2";
     childProcess.execFile.mockImplementation(
       (_file, _args, _opts, callback) => {
         callback(null, sha, "");
