@@ -18,6 +18,7 @@ import {
   createSetupArtifactLedger,
   prepareProviderMutation,
   promoteCreatedGitHubEnvironment,
+  recordCommittedWorkflowFile,
   recordGitHubEnvironment,
   setCanonicalEnvironment,
   settleProviderMutation
@@ -57,6 +58,7 @@ interface GhRule {
 interface Script {
   gh?: GhRule[];
   runListResults?: Array<Partial<CreateEnvironmentCommandResult>>;
+  dispatchResults?: Array<Partial<CreateEnvironmentCommandResult>>;
   repoAdminRefusal?: string;
   ghcrPreflight?: GhcrPreflightResult;
   defaultBranch?: string | null;
@@ -223,7 +225,13 @@ const DEFAULT_GH_RULES: GhRule[] = [
       })
     }
   },
-  { match: /^workflow run /, result: { code: 0 } },
+  {
+    match: /^workflow run /,
+    result: {
+      code: 0,
+      stdout: "https://github.com/octo/app/actions/runs/4242\n"
+    }
+  },
   {
     match: /^run list /,
     result: {
@@ -308,6 +316,7 @@ function start(script: Script = {}): Harness {
   let lastBodyBranch = "default";
   let defaultRunListCalls = 0;
   const runListResults = [...(script.runListResults || [])];
+  const dispatchResults = [...(script.dispatchResults || [])];
   const runGhArgs = (args: string[]): CreateEnvironmentCommandResult => {
     const key = args
       .map((arg) => (arg === TEMP_BODY_PATH ? `@${lastBodyBranch}` : arg))
@@ -315,6 +324,15 @@ function start(script: Script = {}): Harness {
     ghCalls.push(key);
     if (key.startsWith("workflow run ")) {
       journal.push("dispatchVerifyWorkflow");
+      if (dispatchResults.length > 0) {
+        const next = dispatchResults.shift() || {};
+        return {
+          code: next.code ?? 0,
+          stdout: next.stdout ?? "",
+          stderr: next.stderr ?? "",
+          ...(next.timedOut ? { timedOut: true } : {})
+        };
+      }
     }
     if (key.startsWith("run list ") && runListResults.length > 0) {
       const next = runListResults.shift() || {};
@@ -637,8 +655,9 @@ function start(script: Script = {}): Harness {
         "radius-delete.yml": "on: workflow_dispatch\njobs:\n"
       };
     },
-    recordCommittedWorkflowFile: (_operation, committed) => {
+    recordCommittedWorkflowFile: (target, committed) => {
       committedFiles.push(committed);
+      recordCommittedWorkflowFile(target, committed);
     },
     deleteLegacyDeployWorkflow: async () => {
       journal.push("deleteLegacyDeployWorkflow");
@@ -1052,6 +1071,21 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ])
     );
     expect(harness.steps).toContain("✅ Credentials verification dispatched.");
+    expect(
+      harness.ghCalls.find((call) => call.startsWith("workflow run "))
+    ).toContain("--ref main");
+  });
+
+  it("dispatches against the confirmed non-main default branch", async () => {
+    const harness = start({ defaultBranch: "trunk" });
+
+    const response = await post({ repo: "octo/app", environment: "dev" });
+
+    expect(response.status).toBe(200);
+    expect(
+      harness.ghCalls.find((call) => call.startsWith("workflow run "))
+    ).toContain("--ref trunk");
+    expect(harness.operation.verification).toMatchObject({ ref: "trunk" });
   });
 
   it("skips verification and finishes action_required when cloud credentials are incomplete", async () => {
@@ -1715,7 +1749,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(harness.finished).toEqual([]);
   });
 
-  it("adopts the exact operation-marked run after acknowledged dispatch", async () => {
+  it("persists the run URL returned by the dispatch without discovery polling", async () => {
     const harness = start();
 
     await post({ repo: "octo/app" });
@@ -1725,6 +1759,13 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       verifyRunId: "4242",
       verifyRunUrl: "https://github.com/octo/app/actions/runs/4242"
     });
+    expect(
+      harness.ghCalls.filter(
+        (call) =>
+          call.startsWith("run list ") &&
+          call.includes("databaseId,createdAt,displayTitle,event,headBranch")
+      )
+    ).toEqual([]);
     expect(harness.journal).toContain(`enterStage:${STAGE_VERIFY}`);
   });
 
@@ -1760,6 +1801,41 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       code: "verify-baseline-read-failed"
     });
     expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+  });
+
+  it("surfaces a conclusive SAML dispatch refusal without reconciliation", async () => {
+    const harness = start({
+      dispatchResults: [
+        {
+          code: 1,
+          stderr:
+            "Resource protected by organization SAML enforcement. You must grant your OAuth token access."
+        }
+      ]
+    });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      code: "verify-dispatch-failed",
+      error: expect.stringContaining("SAML enforcement")
+    });
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("run list "))
+    ).toHaveLength(1);
+    const operation = harness.operation as CreateEnvironmentOperation & {
+      providerRecovery?: {
+        mutations?: Array<{
+          status: string;
+          initialDiagnostic?: string | null;
+        }>;
+      };
+    };
+    expect(operation.providerRecovery?.mutations?.at(-1)).toMatchObject({
+      status: "not_applied",
+      initialDiagnostic: expect.stringContaining("SAML enforcement")
+    });
   });
 
   it("does not adopt concurrent environment runs after an uncertain verification dispatch", async () => {
@@ -1810,12 +1886,91 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     ).toMatchObject({ state: "manual_required" });
   });
 
-  it("adopts the run an interrupted dispatch created, using the identity it journalled", async () => {
-    // The restart this layer exists for. A dispatch landed, its answer was lost,
-    // and the entry carries the identity that dispatch actually sent. On resume
-    // `run list --limit 1` now returns the interrupted dispatch's own run, so a
-    // baseline re-derived here would be that run's id and would exclude the one
-    // run being looked for. The journalled identity is what makes it findable.
+  it("adopts one exact run after an ambiguous timeout without redispatch", async () => {
+    const harness = start({
+      dispatchResults: [
+        { code: 1, stderr: "request timed out", timedOut: true }
+      ],
+      runListResults: [
+        { code: 0, stdout: "[]" },
+        {
+          code: 0,
+          stdout: JSON.stringify([
+            {
+              databaseId: 4244,
+              createdAt: "2023-11-14T22:13:20.000Z",
+              displayTitle: "Radius verify dev [op-http]",
+              event: "workflow_dispatch",
+              headBranch: "main"
+            }
+          ])
+        }
+      ]
+    });
+
+    const response = await post({ repo: "octo/app", environment: "dev" });
+
+    expect(response.status).toBe(200);
+    expect(harness.operation.verification).toMatchObject({
+      runId: "4244",
+      runUrl: "https://github.com/octo/app/actions/runs/4244"
+    });
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("workflow run "))
+    ).toHaveLength(1);
+  });
+
+  it("terminalizes an ambiguous timeout when no exact run appears", async () => {
+    const harness = start({
+      dispatchResults: [
+        { code: 1, stderr: "request timed out", timedOut: true }
+      ],
+      runListResults: [
+        { code: 0, stdout: "[]" },
+        { code: 0, stdout: "[]" },
+        { code: 0, stdout: "[]" },
+        { code: 0, stdout: "[]" }
+      ]
+    });
+
+    const response = await post({ repo: "octo/app", environment: "dev" });
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(harness.operation).toMatchObject({
+      state: "failed_partial",
+      endedAt: expect.any(String),
+      recoveryState: "manual_required",
+      failure: { code: "provider-reconciliation-manual-required" }
+    });
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("workflow run "))
+    ).toHaveLength(1);
+  });
+
+  it("treats a successful dispatch without a run URL as ambiguous", async () => {
+    const harness = start({
+      dispatchResults: [{ code: 0, stdout: "" }],
+      runListResults: [
+        { code: 0, stdout: "[]" },
+        { code: 0, stdout: "[]" },
+        { code: 0, stdout: "[]" },
+        { code: 0, stdout: "[]" }
+      ]
+    });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(harness.operation).toMatchObject({
+      state: "failed_partial",
+      recoveryState: "manual_required"
+    });
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("workflow run "))
+    ).toHaveLength(1);
+  });
+
+  it("fails closed instead of resuming an interrupted dispatch", async () => {
     const markedVerifyWorkflow = [
       "on:",
       "  workflow_dispatch:",
@@ -1873,19 +2028,15 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
 
     await post({ repo: "octo/app", environment: "dev" });
 
-    // Adopted from the journalled identity, and never dispatched again.
     expect(
       operation.providerRecovery?.mutations?.find(
         (entry) => entry.kind === "github_workflow.dispatch"
       )
-    ).toMatchObject({ status: "confirmed" });
+    ).toMatchObject({ status: "manual_required" });
     expect(
       harness.ghCalls.filter((call) => call.startsWith("workflow run "))
     ).toEqual([]);
-    expect(harness.operation.verification).toMatchObject({
-      runId: "4242",
-      operationMarker: "op-http"
-    });
+    expect(harness.operation.verification).toBeUndefined();
   });
 
   it("fails 400 with the workflow-scope hint when the verify workflow cannot be committed", async () => {
@@ -1968,7 +2119,45 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(put?.status).not.toBe("not_applied");
   });
 
-  it("fails 400 when the verify workflow cannot be dispatched after every retry", async () => {
+  it("retries qualified workflow registration rejections and persists the returned run", async () => {
+    const harness = start({
+      dispatchResults: [
+        {
+          code: 1,
+          stderr:
+            "HTTP 404: workflow radius-verify-credentials.yml not found on branch main"
+        },
+        {
+          code: 1,
+          stderr: 'HTTP 422: Unexpected inputs provided: ["radius_operation"]'
+        },
+        {
+          code: 0,
+          stdout: "https://github.com/octo/app/actions/runs/4250\n"
+        }
+      ]
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const payload = await response.json();
+
+    expect(payload).toMatchObject({ success: true });
+    expect(response.status).toBe(200);
+    expect(harness.operation.verification).toMatchObject({
+      runId: "4250",
+      runUrl: "https://github.com/octo/app/actions/runs/4250"
+    });
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("workflow run "))
+    ).toHaveLength(3);
+    expect(
+      harness.ghCalls.filter(
+        (call) => call.startsWith("run list ") && call.includes("--limit 1")
+      )
+    ).toHaveLength(1);
+  });
+
+  it("does not retry a generic workflow dispatch rejection", async () => {
     const harness = start({
       gh: [
         {
@@ -1984,7 +2173,6 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(await response.json()).toMatchObject({
       code: "verify-dispatch-failed"
     });
-    // Three attempts: the immediate one plus the two backoff retries.
     expect(
       harness.ghCalls.filter((call) => call.startsWith("workflow run "))
     ).toHaveLength(1);
@@ -2144,7 +2332,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     ).toBe(true);
   });
 
-  it("makes an acknowledged legacy workflow dispatch action-required", async () => {
+  it("accepts a returned run URL for a legacy workflow without a marker", async () => {
     const harness = start({
       ...protectedScript,
       files: {
@@ -2156,24 +2344,15 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     const response = await post({ repo: "octo/app" });
 
     expect(await response.json()).toMatchObject({
-      actionRequired: true,
+      actionRequired: false,
       pullRequestUrl: "",
-      pullRequestBranch: "radius/setup-dev-workflows-op-http"
+      pullRequestBranch: null
     });
-    expect(harness.finished).toContainEqual(
-      expect.objectContaining({
-        state: "action_required",
-        options: expect.objectContaining({
-          terminal: expect.objectContaining({
-            reason: "verification-run-manual",
-            userMessage: expect.stringContaining("/actions/workflows/")
-          })
-        })
-      })
-    );
     expect(harness.operation.verification).toMatchObject({
       event: "workflow_dispatch",
-      operationMarker: "op-http"
+      operationMarker: "op-http",
+      runId: "4242",
+      runUrl: "https://github.com/octo/app/actions/runs/4242"
     });
     expect(
       harness.ghCalls.some((call) =>
@@ -2770,29 +2949,6 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     expect(harness.journal).not.toContain("createPullRequestApi");
   });
 
-  // The dispatch is issued once, so the boundary that matters is the one between
-  // the indexing wait plus the baseline read and the write itself.
-  it("checks Stop after the verification baseline read and before the dispatch", async () => {
-    const harness = start();
-    harness.setJournalHook((entry) => {
-      if (entry === "stopBoundary:before-verification-dispatch-attempt:1") {
-        harness.operation.stopRequested = true;
-      }
-    });
-
-    const response = await post({ repo: "octo/app" });
-    const body = (await response.json()) as Record<string, unknown>;
-
-    expect(body).toMatchObject({
-      code: "operation-stopped",
-      boundary: "before-verification-dispatch-attempt:1"
-    });
-    expect(harness.failures).toEqual([]);
-    expect(
-      harness.ghCalls.filter((call) => call.startsWith("workflow run "))
-    ).toHaveLength(0);
-  });
-
   it("honors Stop immediately after a failed verification dispatch attempt", async () => {
     const harness = start({
       gh: [
@@ -2805,7 +2961,7 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
       ]
     });
     harness.setJournalHook((entry) => {
-      if (entry === "stopBoundary:after-verification-dispatch-attempt:1") {
+      if (entry === "stopBoundary:after-verification-dispatch-attempt") {
         harness.operation.stopRequested = true;
       }
     });
@@ -2815,7 +2971,7 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
 
     expect(body).toMatchObject({
       code: "operation-stopped",
-      boundary: "after-verification-dispatch-attempt:1"
+      boundary: "after-verification-dispatch-attempt"
     });
     expect(harness.failures).toEqual([]);
     expect(

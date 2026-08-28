@@ -85,7 +85,8 @@ export interface GraphWorkflowDependencies<
     entry: TEntry | undefined,
     repo: string,
     branches: string | string[],
-    page: string
+    page: string,
+    progressView: GraphProgressView
   ): void;
   triggerGraphRepairHandoff(
     entry: TEntry,
@@ -495,6 +496,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     entry: TEntry,
     repo: string,
     branch: string,
+    progressView: Extract<GraphProgressView, "graph" | "planned">,
     reportRefusal: (detail: string) => void,
     isCurrent?: () => boolean
   ): Promise<GraphWorkflowOutcome> {
@@ -513,7 +515,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     // dedupe key no longer derives from the page, but the page still names the
     // view in the prompt, and the graph view is the one the user is told to
     // reopen from either route.
-    dependencies.triggerAppBicepHandoff(entry, repo, branch, "graph");
+    dependencies.triggerAppBicepHandoff(
+      entry,
+      repo,
+      branch,
+      "graph",
+      progressView
+    );
     return json(200, {
       error: GENERATING_APP_BICEP_MESSAGE,
       needsAppBicep: true,
@@ -604,7 +612,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         // A model that exists can still no longer describe its source. The
         // runtime classifies it and decides whether that is worth a refresh, the
         // user's agreement, or only a note; the graph itself still renders.
-        dependencies.triggerAppBicepHandoff(entry, repo, branch, "graph");
+        dependencies.triggerAppBicepHandoff(
+          entry,
+          repo,
+          branch,
+          "graph",
+          "graph"
+        );
       } else {
         addEvent(
           "checking_model",
@@ -616,8 +630,12 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "running",
           "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
         );
-        return await appBicepHandoffOutcome(entry, repo, branch, (detail) =>
-          addEvent("creating_model", "failed", detail)
+        return await appBicepHandoffOutcome(
+          entry,
+          repo,
+          branch,
+          "graph",
+          (detail) => addEvent("creating_model", "failed", detail)
         );
       }
 
@@ -861,6 +879,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           entry,
           repo,
           branch,
+          "planned",
           (detail) => addEvent("creating_model", "failed", detail),
           isCurrentPlan
         );
@@ -876,7 +895,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       // Same freshness reconcile as load-graph: the planned view renders from
       // the same model, so a drift it can see must not go unreported merely
       // because the user reached it from a different tab.
-      dependencies.triggerAppBicepHandoff(entry, repo, branch, "graph");
+      dependencies.triggerAppBicepHandoff(
+        entry,
+        repo,
+        branch,
+        "graph",
+        "planned"
+      );
 
       const staged = await pipeline.stageArtifacts({
         entry,
@@ -1176,7 +1201,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           entry,
           repo,
           [data.base, data.head],
-          "graph-diff"
+          "graph-diff",
+          "diff"
         );
         // No `branch` key here, unlike the other two routes: the diff spans two.
         return json(200, {
@@ -1204,7 +1230,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         entry,
         repo,
         [data.base, data.head],
-        "graph-diff"
+        "graph-diff",
+        "diff"
       );
 
       // Ordering is load-bearing and matches legacy exactly: BOTH sides are
