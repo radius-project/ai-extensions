@@ -71,6 +71,17 @@ export interface AppModelHandoffDependencies {
   // Releases an extension-scoped refresh memo entry. Called when delivery fails
   // so a later attempt can re-deliver the same staleness signal.
   releaseRefreshMemo(key: string): void;
+  // True when this call is the first, extension-wide, to observe this exact
+  // missing-model situation for this target. Closing and reopening the canvas
+  // during the grace window produces a second CanvasState with no reservation
+  // of its own, so per-state ownership alone cannot stop both instances from
+  // reaching send(); this is keyed by target+key rather than by CanvasState so
+  // it dedupes across instances, not just within one.
+  claimMissingModelHandoff(target: string, key: string): boolean;
+  // Releases an extension-scoped missing-model reservation so a later render
+  // (this instance or another) is free to claim the same target again — for a
+  // different key immediately, or for this same key once it no longer applies.
+  releaseMissingModelHandoff(target: string, key: string): void;
 }
 
 export type AppModelHandoff = (
@@ -189,6 +200,19 @@ export function createAppModelHandoff(
     );
 
     if (!present.length) {
+      // Per-state ownership above only dedupes calls sharing one CanvasState.
+      // Closing and reopening the canvas during the grace window produces a
+      // second, independent CanvasState for the same repo+branches, which
+      // would otherwise pass every check above and race this one to send().
+      // Claim the target+key extension-wide before doing anything else, and
+      // release it on every exit path so a situation that turns out not to
+      // warrant a handoff (unmodelable, superseded, run already started) does
+      // not permanently block a later, legitimate attempt.
+      if (!deps.claimMissingModelHandoff(target, key)) return;
+      const releaseMissingModelClaim = (): void => {
+        deps.releaseMissingModelHandoff(target, key);
+      };
+
       // Reserve the key before the asynchronous source probe. Modeled, Planned,
       // and Diff can all discover the same missing model together; without this
       // reservation they each pass the check above while the first probe is in
@@ -200,6 +224,7 @@ export function createAppModelHandoff(
         );
       } catch (error) {
         releaseReservation();
+        releaseMissingModelClaim();
         throw error;
       }
       // The modeling skill cannot author this repository at all. Deliberately
@@ -207,9 +232,13 @@ export function createAppModelHandoff(
       // render eligible for the handoff.
       if (sources.every((source) => source.status === "none")) {
         releaseReservation();
+        releaseMissingModelClaim();
         return;
       }
-      if (!ownsReservation()) return;
+      if (!ownsReservation()) {
+        releaseMissingModelClaim();
+        return;
+      }
 
       // Nobody is generating this model yet as far as one probe can tell, but
       // the agent that just opened this view may be about to start. Watch for
@@ -219,12 +248,14 @@ export function createAppModelHandoff(
         claimed = await modelingClaimedIt(repo, targets);
       } catch (error) {
         releaseReservation();
+        releaseMissingModelClaim();
         throw error;
       }
       if (claimed || !ownsReservation()) {
         // Deliberately does NOT consume the key: if the run it deferred to dies
         // without publishing, the next render must be free to ask again.
         releaseReservation();
+        releaseMissingModelClaim();
         return;
       }
 
@@ -238,11 +269,16 @@ export function createAppModelHandoff(
         );
       } catch (error) {
         releaseReservation();
+        releaseMissingModelClaim();
         throw error;
       }
-      if (!ownsReservation()) return;
+      if (!ownsReservation()) {
+        releaseMissingModelClaim();
+        return;
+      }
       if (settled.some((status) => status.freshness.status !== "missing")) {
         releaseReservation();
+        releaseMissingModelClaim();
         return;
       }
 
@@ -252,8 +288,17 @@ export function createAppModelHandoff(
         );
       } catch (sendError) {
         releaseReservation();
+        releaseMissingModelClaim();
         throw sendError;
       }
+      // Released after send completes, not held forever: the claim only needs
+      // to outlive the concurrent window where a second CanvasState for the
+      // same target could still be racing this one, and by the time send()
+      // resolves any such race was already decided by the claim above. Holding
+      // it forever would incorrectly block a later, distinct render that
+      // happens to recompute the same key from scratch (no panel state to
+      // remember it, or a fresh missing classification after a dropped run).
+      releaseMissingModelClaim();
       return;
     }
 

@@ -69,6 +69,7 @@ function harness(
   const logged: string[] = [];
   const waits: number[] = [];
   const requested = new Set<string>();
+  const claimedMissingModelHandoffs = new Set<string>();
   const resolveContext = vi.fn(async (): Promise<CanvasState> => ({
     workspaceRepo: "a/b",
     workspaceBranch: "feat"
@@ -105,6 +106,15 @@ function harness(
     },
     releaseRefreshMemo: (key: string) => {
       requested.delete(key);
+    },
+    claimMissingModelHandoff: (target: string, key: string) => {
+      const mapKey = `${target}::${key}`;
+      if (claimedMissingModelHandoffs.has(mapKey)) return false;
+      claimedMissingModelHandoffs.add(mapKey);
+      return true;
+    },
+    releaseMissingModelHandoff: (target: string, key: string) => {
+      claimedMissingModelHandoffs.delete(`${target}::${key}`);
     },
     ...overrides
   };
@@ -404,6 +414,39 @@ describe("createAppModelHandoff", () => {
     expect(sent).toEqual([]);
     expect(state.appBicepHandoffKeys?.["a/b::feat"]).toBe("newer-request");
     expect(state.appBicepHandoffKey).toBe("newer-request");
+  });
+
+  it("sends only once when the canvas is closed and reopened mid-grace-window, producing a second CanvasState for the same target", async () => {
+    // The per-CanvasState reservation only dedupes calls sharing one state
+    // object. Closing the panel and reopening it while the first handoff is
+    // still waiting out the grace window builds a brand-new CanvasState with
+    // no memory of the first's reservation — this is what a naive per-state
+    // fix misses. The extension-scoped claim is what has to catch it, so this
+    // test shares one harness (one claim map) across two independent states.
+    const stateA: CanvasState = {};
+    const stateB: CanvasState = {};
+    const { handOff, sent } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) }
+    });
+
+    const first = handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state: stateA
+    });
+    // Simulate the reopen landing after the first render already reserved its
+    // own state but before either has resolved: the closed instance's promise
+    // is still pending, exactly like a real orphaned poll loop.
+    const second = handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state: stateB
+    });
+    await Promise.all([first, second]);
+
+    expect(sent).toHaveLength(1);
   });
 
   it("does not watch for a run at all when the repository cannot be modeled", async () => {

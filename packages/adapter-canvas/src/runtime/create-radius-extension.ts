@@ -124,6 +124,43 @@ export function createRadiusExtension(
     return true;
   }
 
+  // Missing-model handoffs already claimed for a target+situation, so closing
+  // and reopening the canvas mid-grace-window cannot produce a second
+  // CanvasState that independently claims the same target and sends a
+  // duplicate authoring turn. Keyed by "target::key" (not just target) so a
+  // situation that changes — a Dockerfile appears, the model gets modeled by
+  // something else and then goes missing again with new evidence — is still
+  // eligible once its key changes; per-state reservation already relies on the
+  // same rule and this mirrors it at extension scope.
+  //
+  // Bounded like the refresh memo above: the key includes evidence such as the
+  // model's classification, so distinct situations keep producing distinct
+  // entries for as long as the process runs. Set preserves insertion order, so
+  // the oldest is evicted first; re-claiming a target that fell out is
+  // harmless because the point is to stop a close/reopen race, not to
+  // remember every target forever.
+  const MISSING_MODEL_HANDOFF_LIMIT = 100;
+  const claimedMissingModelHandoffs = new Set<string>();
+
+  function missingModelHandoffMapKey(target: string, key: string): string {
+    return `${target}::${key}`;
+  }
+
+  function claimMissingModelHandoff(target: string, key: string): boolean {
+    const mapKey = missingModelHandoffMapKey(target, key);
+    if (claimedMissingModelHandoffs.has(mapKey)) return false;
+    claimedMissingModelHandoffs.add(mapKey);
+    if (claimedMissingModelHandoffs.size > MISSING_MODEL_HANDOFF_LIMIT) {
+      const oldest = claimedMissingModelHandoffs.values().next().value;
+      if (oldest !== undefined) claimedMissingModelHandoffs.delete(oldest);
+    }
+    return true;
+  }
+
+  function releaseMissingModelHandoff(target: string, key: string): void {
+    claimedMissingModelHandoffs.delete(missingModelHandoffMapKey(target, key));
+  }
+
   // Modeling runs already under way, so a render that finds no model does not
   // ask the agent to generate one that something else is mid-way through
   // generating. Extension-scoped, because a run outlives the canvas instance
@@ -217,7 +254,9 @@ export function createRadiusExtension(
     shouldRequestRefresh,
     releaseRefreshMemo: (key: string) => {
       requestedRefreshes.delete(key);
-    }
+    },
+    claimMissingModelHandoff,
+    releaseMissingModelHandoff
   });
   deps.hostCallbacks.setAppBicepHandoff(({ repo, branches, page, state }) =>
     handOffAppModel({ repo, branches, page, state })
