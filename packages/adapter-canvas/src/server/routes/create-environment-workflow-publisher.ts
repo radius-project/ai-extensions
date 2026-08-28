@@ -373,11 +373,11 @@ export async function publishWorkflowFiles(
       ghError: verifyCommit.stderr || ""
     };
   }
-  ports.pushStep(
-    verifyCommit.changed ?
-      "✅ Verify workflow committed."
-    : "✅ Verify workflow already up to date."
-  );
+  if (verifyCommit.changed) {
+    ports.pushStep("✅ Verify workflow committed.");
+  } else {
+    ports.pushStep("✅ Verify workflow already up to date.");
+  }
   if (verifyCommit.changed) {
     ports.recordCommittedWorkflowFile(
       operation,
@@ -444,11 +444,11 @@ export async function publishWorkflowFiles(
     }
     if (!(await ports.gate())) return { outcome: "cancelled" };
   }
-  ports.pushStep(
-    deployChanges > 0 ?
-      "✅ Deploy workflows committed."
-    : "✅ Deploy workflows already up to date."
-  );
+  if (deployChanges > 0) {
+    ports.pushStep("✅ Deploy workflows committed.");
+  } else {
+    ports.pushStep("✅ Deploy workflows already up to date.");
+  }
 
   // Step 4b: Commit the application-delete workflows (dispatcher + Azure
   // provider workflow) so the Delete Deployment button can dispatch `rad app
@@ -489,11 +489,11 @@ export async function publishWorkflowFiles(
       }
       if (!(await ports.gate())) return { outcome: "cancelled" };
     }
-    ports.pushStep(
-      deleteChanges > 0 ?
-        "✅ Delete workflows committed."
-      : "✅ Delete workflows already up to date."
-    );
+    if (deleteChanges > 0) {
+      ports.pushStep("✅ Delete workflows committed.");
+    } else {
+      ports.pushStep("✅ Delete workflows already up to date.");
+    }
   } catch (delErr) {
     if (delErr instanceof ProviderMutationRecoveryError) throw delErr;
     // Delete workflows are non-critical to environment creation, so surface the
