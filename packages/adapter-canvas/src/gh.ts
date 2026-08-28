@@ -800,7 +800,7 @@ export async function createSelectedGhExecutor(
   const useInjected =
     injectedCredential !== null &&
     (keyringCredential === null ||
-      requiredScopeScore(injectedAccount) >
+      requiredScopeScore(injectedAccount) >=
         requiredScopeScore(keyringCredential.account));
   const selectedCredential =
     useInjected ? injectedCredential : keyringCredential;

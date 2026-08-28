@@ -416,6 +416,28 @@ describe("verification dispatch", () => {
     expect(test.sendDispatch).toHaveBeenCalledOnce();
   });
 
+  it("treats a SAML authorization refusal as conclusively not applied", async () => {
+    const rejected = command({
+      code: 1,
+      stderr:
+        "Resource protected by organization SAML enforcement. You must grant your OAuth token access."
+    });
+    const test = harness({ dispatches: [rejected] });
+
+    await expect(test.run()).resolves.toMatchObject({
+      state: "rejected",
+      result: rejected
+    });
+
+    expect(test.sendDispatch).toHaveBeenCalledOnce();
+    expect(test.runGh).toHaveBeenCalledOnce();
+    expect(test.op.providerRecovery.mutations[0]).toMatchObject({
+      status: "not_applied",
+      initialDiagnostic: expect.stringContaining("SAML enforcement"),
+      finalDiagnostic: expect.stringContaining("SAML enforcement")
+    });
+  });
+
   it("does not retry without fresh workflow provenance or retry permission", async () => {
     const rejection = command({
       code: 1,

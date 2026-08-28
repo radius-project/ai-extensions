@@ -88,6 +88,14 @@ const STATUS = {
   ✓ Logged in to github.com account pubuser (keyring)
     - Active account: true
     - Token scopes: 'gist', 'repo'`,
+  tokenPubFull: `github.com
+  ✓ Logged in to github.com account pubuser (GITHUB_TOKEN)
+    - Active account: true
+    - Token scopes: 'repo', 'workflow', 'write:packages'`,
+  keyringPubFull: `github.com
+  ✓ Logged in to github.com account pubuser (keyring)
+    - Active account: true
+    - Token scopes: 'repo', 'workflow', 'write:packages'`,
   // One login signed in TWICE: once as the host-injected session token and once
   // as a stored keyring credential, each with its own scopes. gh prints both
   // blocks under the same host, so the two credentials are indistinguishable by
@@ -1005,12 +1013,12 @@ describe.sequential("selected GitHub executor", () => {
     );
   });
 
-  it("prefers a same-login keyring credential when scope metadata ties", async () => {
+  it("prefers the injected credential when same-login scope metadata ties", async () => {
     const gh = await loadGh("linux", {
       token: "injected-token",
-      withToken: STATUS.tokenPubNoWorkflow,
-      keyring: STATUS.keyringPubNoWorkflow,
-      userTokens: { pubuser: "sso-authorized-keyring-token" },
+      withToken: STATUS.tokenPubFull,
+      keyring: STATUS.keyringPubFull,
+      userTokens: { pubuser: "same-scope-keyring-token" },
       apiLogin: "pubuser"
     });
 
@@ -1018,10 +1026,10 @@ describe.sequential("selected GitHub executor", () => {
     childProcess.execFile.mockClear();
     await executor.verifyIdentity();
 
-    expect(executor.credentialSource).toBe("keyring");
+    expect(executor.credentialSource).toBe("injected");
     expect(executor.requiresKeyringSwitch).toBe(false);
     expect(childProcess.execFile.mock.calls[0]?.[2].env.GH_TOKEN).toBe(
-      "sso-authorized-keyring-token"
+      "injected-token"
     );
   });
 
