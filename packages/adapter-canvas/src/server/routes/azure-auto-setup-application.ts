@@ -534,13 +534,26 @@ export async function resolveAzureAutoSetupApplication({
           target: applicationMutationTarget,
           persist: () => operations.persist(),
           beforeMutation: () => stopBoundary("before-app-registration-create"),
-          mutate: () =>
-            runAz(
+          mutate: async () => {
+            const result = await runAz(
               buildAppCreateArgs({
                 appName,
                 serviceManagementReference
               }).filter((arg): arg is string => typeof arg === "string")
-            ),
+            );
+            if (
+              (result.code === 0 || result.code === "0") &&
+              !isUuid(result.stdout.trim())
+            ) {
+              return {
+                ...result,
+                code: 1,
+                stderr:
+                  "Microsoft Entra acknowledged the App Registration create without a valid application id."
+              };
+            }
+            return result;
+          },
           accept: (result) => result.stdout.trim(),
           // `az ad app create --query appId` answers with the id itself, so the
           // acknowledgement carries the identity. Settling it here writes it in
