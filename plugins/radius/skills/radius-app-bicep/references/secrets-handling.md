@@ -95,24 +95,32 @@ Applications often require one URL or config value that embeds a secret. Bicep i
 
 1. Bind the secret into a helper environment variable: from the `@secure()` parameter via `env.value` for a developer-supplied credential, or via `secretKeyRef` from `<resource>.properties.secrets.name` for a recipe-generated output.
 2. Bind nonsecret host, port, database, and username values from verified outputs or literals.
-3. Declare the helper before dependent values when the runtime requires ordering.
+3. Make sure the helper actually reaches the container's environment before the value that reads it. Authoring order does not decide this — see below.
 4. Compose the final app-native value in the container runtime or let the application construct it. The final key and syntax must exactly match the selected pinned-source contract.
 
 For a non-URL format, the pattern can look like:
 
 ```bicep
 env: {
-  DB_PASSWORD: {
+  APP_DATABASE_CREDENTIAL: {
     value: password // developer-supplied @secure() parameter
   }
   APP_DATABASE_OPTIONS: {
     // mysql is the database resource symbol; substitute your actual resource
-    value: 'host=${mysql.properties.host};password=$(DB_PASSWORD)'
+    value: 'host=${mysql.properties.host};password=$(APP_DATABASE_CREDENTIAL)'
   }
 }
 ```
 
-Kubernetes expands `$(VAR_NAME)` only from variables declared earlier in the environment list. Confirm the exact container recipe preserves this order, and preserve escaping through Bicep and any shell/config layer. Confirm the image has every shell or utility used by an entrypoint wrapper. The inverse direction — the contract exposes one aggregate value and the application wants the parts — is governed by [Credential shape](#credential-shape); it is not symmetric with composition and is usually a contract gap to report.
+The helper's name is yours to choose, and here it has to sort before `APP_DATABASE_OPTIONS`, which the application dictates. A helper named `DB_PASSWORD` would sort after it and never expand.
+
+Kubernetes expands `$(VAR_NAME)` only from variables earlier in the container's environment list, and the recipe decides that order, not the order you write the `env` map in. The containers recipe builds the list with `items()`, which sorts by key, so authored order is discarded — writing the helper first buys nothing.
+
+What the Kubernetes recipe does guarantee is that `secretKeyRef` variables are emitted before plain `value` variables. So a composed value can always read a secret-backed helper, whatever the two keys are called, and that is the form to prefer. Two plain values are sorted against each other by name, so a helper supplied as a plain value — a `@secure()` parameter assigned to `env.value` — is visible only to a consumer whose key sorts after it. The helper's name is yours to choose, so choose one that sorts first; `validate-bicep.mjs` fails the model when a plain value reads a plain helper that cannot reach it.
+
+Verify this against the exact target recipe rather than carrying it over: the Azure ACI recipe emits every variable in one name-sorted list with no such separation, and `$(VAR_NAME)` expansion is a Kubernetes container behavior to begin with, so this composition pattern does not hold on every platform.
+
+Preserve escaping through Bicep and any shell/config layer, and confirm the image has every shell or utility used by an entrypoint wrapper. The inverse direction — the contract exposes one aggregate value and the application wants the parts — is governed by [Credential shape](#credential-shape); it is not symmetric with composition and is usually a contract gap to report.
 
 Credentials embedded in URLs must be URL-encoded. Kubernetes variable expansion does not encode them; use application logic or a verified runtime helper. If safe encoding cannot be guaranteed, do not generate a fragile connection string.
 
