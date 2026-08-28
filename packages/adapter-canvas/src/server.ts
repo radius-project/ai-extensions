@@ -261,6 +261,11 @@ import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
 import { checkSetupPullRequestMergeForOperation } from "./server/services/setup-pull-request.js";
+import {
+  cancelVerificationWorkflow,
+  requireVerificationWorkflowIdentity,
+  readVerificationWorkflowState
+} from "./server/services/verification-workflow-cancellation.js";
 import { honorStopBoundary } from "./server/services/operation-stop-boundary.js";
 import {
   CLEANUP_COMMANDS,
@@ -778,6 +783,35 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
 // the route module from `operations.ts`, which is independently tested; the
 // merge proof stays in its own service with a single GitHub port. What is
 // injected here is the genuine I/O the routes cannot decide alone.
+function requiredVerificationWorkflowContext(op: {
+  operationId: string;
+  repo?: unknown;
+  verification?: unknown;
+  context?: unknown;
+  [key: string]: unknown;
+}): {
+  identity: ReturnType<typeof requireVerificationWorkflowIdentity>;
+  login: string;
+} {
+  const identity = requireVerificationWorkflowIdentity(op);
+  const operationContext =
+    op.context && typeof op.context === "object" ? op.context : null;
+  const login =
+    (
+      operationContext &&
+      "githubLogin" in operationContext &&
+      typeof operationContext.githubLogin === "string"
+    ) ?
+      operationContext.githubLogin.trim()
+    : "";
+  if (!login) {
+    throw new Error(
+      "The interrupted setup does not record the GitHub account that started it."
+    );
+  }
+  return { identity, login };
+}
+
 const operationsControlRoutes = createOperationsControlRoutes({
   get: (operationId) => operations.get(operationId),
   acquireForRetry: (op) => operations.acquireForRetry(op),
@@ -792,6 +826,35 @@ const operationsControlRoutes = createOperationsControlRoutes({
       },
       errorMessage
     }),
+  inspectVerificationWorkflow: async (op) => {
+    const { identity, login } = requiredVerificationWorkflowContext(op);
+    const result = await githubAccountCoordinator.withSelectedAccount(
+      login,
+      { instanceId: "operations-control", operationId: op.operationId },
+      (executor) =>
+        readVerificationWorkflowState(executor, identity, {
+          run: (selected, args) => selected.run(args, { timeout: 30000 })
+        }),
+      30000
+    );
+    if (result.value !== "active" && result.value !== "inactive") {
+      throw new Error("GitHub returned an unsupported workflow state.");
+    }
+    return result.value;
+  },
+  cancelVerificationWorkflow: async (op) => {
+    const { identity, login } = requiredVerificationWorkflowContext(op);
+    const result = await githubAccountCoordinator.withSelectedAccount(
+      login,
+      { instanceId: "operations-control", operationId: op.operationId },
+      (executor) =>
+        cancelVerificationWorkflow(executor, identity, {
+          run: (selected, args) => selected.run(args, { timeout: 30000 })
+        }),
+      30000
+    );
+    return result.value;
+  },
   schedule: ({ kind, instanceId, operation, commandId }) => {
     const coordinator = resolveInstanceRunner(
       instanceId,
@@ -5896,6 +5959,7 @@ function createInstanceRequestCoordinator(
       await environmentOperationTestRunner(operationId, commandId);
       return;
     }
+
     const operation = operations.get(operationId);
     if (!operation) return;
     await runSelectedVerificationRetry(operation, commandId, {
@@ -5934,6 +5998,28 @@ function createInstanceRequestCoordinator(
       errorMessage
     });
     return;
+  }
+
+  async function runRecoveredVerificationContinuation(
+    operationId: string,
+    commandId: string
+  ): Promise<void> {
+    if (environmentOperationTestRunner) {
+      await environmentOperationTestRunner(operationId, commandId);
+      return;
+    }
+    const operation = operations.get(operationId);
+    if (!operation) return;
+    await monitorVerificationAsSelectedAccount(operation, (executor) =>
+      resolveRecoveredVerificationRun(operation, executor)
+    );
+    setCommandState(
+      operation,
+      commandId,
+      "finished",
+      isTerminalState(operation.state) ? operation.state : "monitoring"
+    );
+    await saveOperation(operation);
   }
 
   /**
@@ -6736,12 +6822,19 @@ function createInstanceRequestCoordinator(
   // control routes are composed once at module init and hand the accepted
   // command back to the instance that received the request.
   const scheduleCommandTask = (
-    kind: "verification_retry" | "cleanup_retry" | "rollback" | "exit_setup",
+    kind:
+      | "verification_monitor"
+      | "verification_retry"
+      | "cleanup_retry"
+      | "rollback"
+      | "exit_setup",
     op: { operationId: string },
     commandId: string
   ): void => {
     scheduleServerOwnedTask(op.operationId, () =>
-      kind === "verification_retry" ?
+      kind === "verification_monitor" ?
+        runRecoveredVerificationContinuation(op.operationId, commandId)
+      : kind === "verification_retry" ?
         runVerificationRetry(op.operationId, commandId)
       : runCleanupCommand(kind, op.operationId, commandId)
     );

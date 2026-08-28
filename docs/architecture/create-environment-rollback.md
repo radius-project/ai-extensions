@@ -24,6 +24,7 @@ graph TD
 
 - [`operations.ts`](../../packages/adapter-canvas/src/operations.ts) defines the artifact ledger, stable artifact identity, rollback target selection, eligibility, browser-safe preview, cleanup results, and retry state.
 - [`operations-control.ts`](../../packages/adapter-canvas/src/server/routes/operations-control.ts) accepts rollback and rollback-retry commands, persists the command before execution, and enforces one active operation per repository.
+- [`verification-workflow-cancellation.ts`](../../packages/adapter-canvas/src/server/services/verification-workflow-cancellation.ts) proves whether the exact verification run is inactive and cancels it when the customer requests cancellation after stopping an interrupted setup.
 - [`cleanup-commands.ts`](../../packages/adapter-canvas/src/server/services/cleanup-commands.ts) selects the deletion set for first rollback, rollback retry, and Exit setup.
 - [`workflow-provenance.ts`](../../packages/adapter-canvas/src/server/services/workflow-provenance.ts) proves that committed workflow files and setup branches are still exactly what Radius wrote.
 - [`workflow-rollback.ts`](../../packages/adapter-canvas/src/server/services/workflow-rollback.ts) safely removes an unmerged setup branch or creates file-revert commits for workflows that reached a repository branch.
@@ -206,11 +207,20 @@ The stable identity ties the ledger artifact, the cleanup target, and the cleanu
 
 - The environment verified successfully.
 - The operation is still active.
+- The interrupted verification workflow is active, cancelling, or its status cannot be established.
 - No proven-owned artifacts remain.
 - Rollback already ran and only retry or manual work remains.
 - A post-commit record lacks file branch, commit, blob, content digest, or setup-branch head provenance.
 
 The server re-evaluates eligibility when the command arrives. The browser preview explains what will happen, and the server decides what runs.
+
+### Interrupted verification
+
+A Canvas provider restart does not cancel GitHub Actions. Radius first pauses the restored setup and asks whether to continue or stop. Stop records the customer's decision before Radius reads GitHub. If the operation's exact saved run is active, Radius offers workflow cancellation. Destructive rollback stays blocked until a subsequent status read proves the run is inactive.
+
+The cancellation boundary is the saved repository and run ID, executed through the GitHub account recorded on the operation. Radius never infers a run from a workflow filename, branch, environment, or recency. Missing identity, unsupported status, and unreadable status fail closed for destructive cleanup rather than risking deletion underneath external work.
+
+External reconciliation never blocks the user's exit. While workflow or provider state is active or unknown, Radius offers **Abandon setup**. Abandon deletes nothing, preserves the remaining-resource ledger, relinquishes automatic cleanup authority, releases the repository lock, and lets the user start Create Environment again. The user accepts that the next attempt may need to reuse or manually remove resources from the abandoned operation.
 
 ## What rollback will remove
 
@@ -430,9 +440,11 @@ The route is:
 POST /api/operations/{operationId}/exit
 ```
 
-Exit runs the cleanup pass when proven-owned artifacts exist. When everything remaining was reused, Exit closes the operation and leaves those resources alone. Exit removes a created GitHub environment so the abandoned attempt does not linger in the environment list.
+Exit runs the cleanup pass when proven-owned artifacts exist and Radius has established that external work is inactive. When everything remaining was reused, Exit closes the operation and leaves those resources alone. Exit removes a created GitHub environment so the abandoned attempt does not linger in the environment list.
 
 Exit never deletes reused identities. If cleanup cannot finish, the setup stays visible and actionable instead of claiming it closed.
+
+When external workflow or provider state cannot be reconciled, the same route projects **Abandon setup** instead of Exit. Abandon closes immediately without running cleanup. It leaves the ledger intact for diagnosis but releases the repository lock so a new Create Environment attempt can begin.
 
 ## Rollback retry
 

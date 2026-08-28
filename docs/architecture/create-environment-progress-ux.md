@@ -14,7 +14,7 @@ graph TD
     Panel --> Commands["Contextual command row"]
     Panel --> Details["Collapsed Show details"]
     Panel --> Bottom["Bottom completion or exit action"]
-    Commands --> Controls["Stop / Continue / Retry / Rollback"]
+    Commands --> Controls["Stop / Continue / Cancel workflow / Retry / Rollback"]
     Details --> Timeline["Chronological steps"]
     Details --> Inventory["Terminal resource inventory"]
     Bottom --> Exit["Exit setup"]
@@ -24,7 +24,8 @@ graph TD
 ## Key components
 
 - [`operations.ts`](../../packages/adapter-canvas/src/operations.ts) owns the durable operation model, lifecycle transitions, server-projected actions, headline text, guidance, resource provenance, and browser-safe client view.
-- [`operations-control.ts`](../../packages/adapter-canvas/src/server/routes/operations-control.ts) owns the typed Stop, Continue, Rollback, Exit, and Retry HTTP routes.
+- [`operations-control.ts`](../../packages/adapter-canvas/src/server/routes/operations-control.ts) owns the typed Stop, Continue, Cancel workflow, Rollback, Exit, and Retry HTTP routes.
+- [`verification-workflow-cancellation.ts`](../../packages/adapter-canvas/src/server/services/verification-workflow-cancellation.ts) reads and cancels only the exact GitHub Actions run recorded by the operation, through the GitHub account that started setup.
 - [`server.ts`](../../packages/adapter-canvas/src/server.ts) owns the per-instance executors that continue setup, monitor or retry verification, and run rollback or exit cleanup.
 - [`cleanup-commands.ts`](../../packages/adapter-canvas/src/server/services/cleanup-commands.ts) defines which proven-owned resources each rollback, rollback retry, or exit command may remove.
 - [`workflow-rollback.ts`](../../packages/adapter-canvas/src/server/services/workflow-rollback.ts) verifies and reverses workflow changes before a post-commit rollback deletes dependent resources.
@@ -133,6 +134,7 @@ The command row sits above **Show details** and contains choices that continue o
 - **Roll back environment setup**
 - **Roll back created resources**
 - **Retry rollback**
+- **Cancel workflow**, after an interrupted setup has been stopped and the exact saved verification run is still active
 
 The row also contains short explanatory copy and any guidance explaining why an expected path is unavailable.
 
@@ -185,10 +187,17 @@ stateDiagram-v2
     Running --> FailedPartial: Step or verification fails
     Running --> ActionRequired: Setup PR must merge
     Running --> Succeeded: Verification succeeds
+    Running --> Interrupted: Canvas provider restarts
+
+    Interrupted --> Running: Continue setup
+    Interrupted --> Cancelled: Stop setup
+    Cancelled --> CancellingWorkflow: Cancel exact active workflow
+    CancellingWorkflow --> Cancelled: Workflow becomes inactive
 
     Cancelled --> Running: Continue setup
     Cancelled --> RollingBack: Roll back
     Cancelled --> Exiting: Exit setup
+    Cancelled --> Exited: Abandon setup with resources left in place
 
     FailedPartial --> Running: Retry setup
     FailedPartial --> Running: Retry verification
@@ -221,6 +230,21 @@ The page sends one complete request to `POST /api/operations`. The server:
 
 The browser immediately switches from the form to the progress panel and follows the saved operation.
 
+## Recovery after Refresh Canvas or application restart
+
+Refresh Canvas and restarting the GitHub Copilot application both restart the Radius provider. The durable operation and any external GitHub Actions run survive that boundary. Radius therefore restores unfinished setup as `action_required` with reason `provider-restart-decision` instead of silently resuming work.
+
+The panel presents **Environment setup was interrupted** and offers exactly two initial choices:
+
+- **Continue setup** resumes from the saved phase. When verification was already dispatched, Radius resolves or reuses the exact recorded run and continues monitoring it; it does not dispatch another workflow.
+- **Stop setup** durably closes Radius's setup attempt, then reads the status of the exact recorded verification run.
+
+If the run is still active after Stop, the panel offers **Cancel workflow**. Cancellation uses the saved repository, run ID, and GitHub account; it never searches by workflow name, branch, environment, or latest run. If GitHub has accepted cancellation but the run is still settling, the control changes to **Check workflow status**, which reads status without sending another cancellation request.
+
+Destructive rollback remains unavailable while the run is active, cancelling, or has an unknown status. Radius instead offers **Abandon setup**, which closes the operation without deleting resources that external work may still be using. Abandon releases the repository's Create Environment lock, preserves the resource ledger, and returns the user to the environment list so they can attempt Create Environment again. The confirmation lists remaining resources and warns that the next setup may need to reuse or manually remove them.
+
+Once Radius proves the run is inactive, the ordinary provenance-based rollback and Exit cleanup controls become available. Cleanup still fails closed, but external reconciliation never becomes a prerequisite for leaving the operation.
+
 ### An earlier rollback is incomplete
 
 A terminal operation may still own resources it can remove. This happens when Rollback, Retry rollback, or Exit was interrupted, or when cleanup finished with retryable warnings. Starting another setup for the repository would let the new setup reuse those resources while the older operation still had authority to delete them.
@@ -230,6 +254,8 @@ The durable registry therefore distinguishes active execution from repository ad
 `POST /api/operations` returns `409 previous-cleanup-required` with the earlier operation ID and does not create or persist the new operation. The browser reloads and focuses the earlier operation so the customer can finish **Roll back environment setup**, choose **Retry rollback**, or follow its manual guidance. After manual deletion, **Retry rollback** confirms absence as `not_found`; there is no separate recheck action. The customer submits Create Environment again after the earlier cleanup resolves.
 
 Admission-blocking terminal records are exempt from age and count pruning. Normal retention resumes after no removable target remains. This guard applies within one hydrated Copilot App Session. It does not coordinate independent sessions.
+
+An explicit **Abandon setup** decision relinquishes the earlier operation's automatic cleanup authority and releases admission even when removable resources remain. Radius keeps those resources in the durable ledger for diagnosis, but it will not later delete them after a new setup may have reused them.
 
 ## Stop setup
 

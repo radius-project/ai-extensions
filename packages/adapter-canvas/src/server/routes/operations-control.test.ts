@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createRequestContext } from "../request-context.js";
 import {
   createOperationsControlRoutes,
+  handleCancelWorkflow,
   handleContinueOperation,
   handleExitOperation,
   handleRetryOperation,
@@ -11,6 +12,7 @@ import {
   handleStopOperation,
   retryRefusalMessage,
   CONTINUE_OPERATION_ROUTE,
+  CANCEL_WORKFLOW_ROUTE,
   EXIT_OPERATION_ROUTE,
   RETRY_OPERATION_ROUTE,
   ROLLBACK_OPERATION_ROUTE,
@@ -24,7 +26,9 @@ import {
   buildDeleteStages,
   canRetryCleanup,
   createOperation,
+  enterStage,
   finish,
+  isProviderRestartDecision,
   finishSucceeded,
   markVerificationRetryAcquisition,
   onOperationTerminal,
@@ -32,11 +36,16 @@ import {
   recordCleanupState,
   recordCommittedWorkflowFile,
   recordGitHubEnvironment,
+  pauseForProviderRestart,
   requestStop,
   requireInput,
   setCommandState,
   setStageState,
+  setVerificationWorkflowState,
+  verificationWorkflowState,
   stopAtBoundary,
+  toClientView,
+  ABANDON_COMMAND_OUTCOME,
   EXIT_COMMAND_KIND,
   OPERATION_KIND_DELETE,
   STAGE_VERIFY
@@ -123,6 +132,21 @@ function controlPath(op: { operationId: string }, action: string): string {
   return `/api/operations/${op.operationId}/${action}`;
 }
 
+function verificationRunId(operation: {
+  verification?: unknown;
+  [key: string]: unknown;
+}): string {
+  const verification = operation.verification;
+  if (
+    !verification ||
+    typeof verification !== "object" ||
+    !("runId" in verification)
+  ) {
+    throw new Error("test operation has no verification run");
+  }
+  return String(verification.runId);
+}
+
 async function call(
   handler: ControlHandler,
   path: string,
@@ -184,6 +208,8 @@ function dependencies(
     checkPullRequestMerge: () => {
       throw new Error("checkPullRequestMerge not stubbed");
     },
+    inspectVerificationWorkflow: () => Promise.resolve("inactive"),
+    cancelVerificationWorkflow: () => Promise.resolve("inactive"),
     schedule: ({ kind, instanceId, commandId }) => {
       journal.scheduled.push({ kind, instanceId, commandId });
       return true;
@@ -212,12 +238,13 @@ function retryableDeletion(): OperationFixture {
 }
 
 describe("the route registry", () => {
-  it("claims exactly the five declared control routes", () => {
+  it("claims exactly the six declared control routes", () => {
     const registry = createOperationsControlRoutes(dependencies());
     expect(Object.keys(registry).sort()).toEqual(
       [
         routeKey({ method: "POST", path: STOP_OPERATION_ROUTE }),
         routeKey({ method: "POST", path: CONTINUE_OPERATION_ROUTE }),
+        routeKey({ method: "POST", path: CANCEL_WORKFLOW_ROUTE }),
         routeKey({ method: "POST", path: ROLLBACK_OPERATION_ROUTE }),
         routeKey({ method: "POST", path: EXIT_OPERATION_ROUTE }),
         routeKey({ method: "POST", path: RETRY_OPERATION_ROUTE })
@@ -337,6 +364,89 @@ describe("the route registry", () => {
 });
 
 describe("POST /api/operations/{id}/stop", () => {
+  function interruptedVerificationOperation(): OperationFixture {
+    const op = newOperation();
+    op.context = { githubLogin: "alice" };
+    op.resumeRequest = {
+      environment: {
+        repo: "contoso/store",
+        environment: "dev",
+        provider: "azure"
+      }
+    };
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: "42"
+    };
+    pauseForProviderRestart(op);
+    return op;
+  }
+
+  it("stops an interrupted setup before offering exact-run cancellation", async () => {
+    const op = interruptedVerificationOperation();
+
+    const out = await drive(handleStopOperation, op, "stop", {
+      inspectVerificationWorkflow: () => Promise.resolve("active")
+    });
+
+    expect(out.recording.status).toBe(200);
+    expect(out.journal.persistCalls).toBe(2);
+    expect(op.state).toBe("cancelled");
+    expect(
+      out.payload().operation.actions.map((action: { id: string }) => action.id)
+    ).toContain("cancel-workflow");
+    expect(
+      out.payload().operation.actions.map((action: { id: string }) => action.id)
+    ).not.toContain("rollback");
+  });
+
+  it("restores the interrupted decision when stopping cannot be saved", async () => {
+    const op = interruptedVerificationOperation();
+    const out = await drive(handleStopOperation, op, "stop", {
+      persistOperations: () => Promise.reject(new Error("disk gone"))
+    });
+
+    expect(out.recording.status).toBe(500);
+    expect(out.payload()).toMatchObject({
+      code: "operation-stop-persist-failed",
+      detail: "disk gone"
+    });
+    expect(op.state).toBe("action_required");
+    expect(isProviderRestartDecision(op)).toBe(true);
+  });
+
+  it("keeps cleanup blocked when workflow status and its update cannot be saved", async () => {
+    const op = interruptedVerificationOperation();
+    watchAnnouncements();
+    let persists = 0;
+    const out = await drive(handleStopOperation, op, "stop", {
+      inspectVerificationWorkflow: () =>
+        Promise.reject(new Error("GitHub unavailable")),
+      persistOperations: () => {
+        persists += 1;
+        return persists === 1 ?
+            Promise.resolve()
+          : Promise.reject(new Error("disk gone"));
+      }
+    });
+
+    expect(out.recording.status).toBe(200);
+    expect(out.payload()).toMatchObject({
+      code: "operation-stopped-workflow-status-unknown",
+      detail:
+        "GitHub unavailable Radius also could not save the unknown workflow status: disk gone"
+    });
+    expect(verificationWorkflowState(op)).toBe("unknown");
+    expect(announced).toEqual([op.operationId]);
+    expect(
+      out.payload().operation.actions.map((action: { id: string }) => action.id)
+    ).not.toContain("rollback");
+  });
+
   it("records a stop for a running operation and reports it as pending", async () => {
     const op = newOperation();
     const out = await drive(handleStopOperation, op, "stop");
@@ -1045,6 +1155,38 @@ describe("retryRefusalMessage", () => {
 // owns the record.
 
 describe("POST /api/operations/{id}/continue", () => {
+  it("continues recovered verification by monitoring without redispatching", async () => {
+    const op = newOperation();
+    op.context = { githubLogin: "alice" };
+    op.resumeRequest = {
+      environment: {
+        repo: "contoso/store",
+        environment: "dev",
+        provider: "azure"
+      }
+    };
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: "42"
+    };
+    pauseForProviderRestart(op);
+
+    const out = await drive(handleContinueOperation, op, "continue");
+
+    expect(out.recording.status).toBe(202);
+    expect(out.journal.scheduled).toEqual([
+      {
+        kind: "verification_monitor",
+        instanceId: "panel-a",
+        commandId: out.payload().commandId
+      }
+    ]);
+  });
+
   it("continues a stopped setup from the first unfinished step", async () => {
     const op = stoppedSetup();
     const out = await drive(handleContinueOperation, op, "continue");
@@ -1066,6 +1208,193 @@ describe("POST /api/operations/{id}/continue", () => {
     ]);
     // The command is saved before any work is handed to a runner.
     expect(out.journal.persistCalls).toBe(1);
+  });
+
+  describe("POST /api/operations/{id}/cancel-workflow", () => {
+    it("cancels only the exact run after setup is stopped", async () => {
+      const op = stoppedSetup();
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+      const seen: string[] = [];
+
+      const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
+        cancelVerificationWorkflow: (operation) => {
+          seen.push(verificationRunId(operation));
+          return Promise.resolve("inactive");
+        }
+      });
+
+      expect(out.recording.status).toBe(200);
+      expect(out.payload().code).toBe("workflow-cancelled");
+      expect(seen).toEqual(["42"]);
+      expect(toClientView(op).verification).toEqual({ dispatchedAt: null });
+      expect(out.journal.persistCalls).toBe(2);
+    });
+
+    it("can retry exact-run cancellation after a transient failure", async () => {
+      const op = stoppedSetup();
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+      let cancellations = 0;
+      const dependencies = {
+        cancelVerificationWorkflow: () => {
+          cancellations += 1;
+          if (cancellations === 1) {
+            return Promise.reject(new Error("GitHub temporarily unavailable"));
+          }
+          return Promise.resolve("inactive" as const);
+        },
+        inspectVerificationWorkflow: () => Promise.resolve("active" as const)
+      };
+
+      const failed = await drive(
+        handleCancelWorkflow,
+        op,
+        "cancel-workflow",
+        dependencies
+      );
+      expect(failed.recording.status).toBe(502);
+      expect(verificationWorkflowState(op)).toBe("unknown");
+
+      const checked = await drive(
+        handleCancelWorkflow,
+        op,
+        "cancel-workflow",
+        dependencies
+      );
+      expect(checked.payload().code).toBe("workflow-status-checked");
+      expect(verificationWorkflowState(op)).toBe("active");
+
+      const retried = await drive(
+        handleCancelWorkflow,
+        op,
+        "cancel-workflow",
+        dependencies
+      );
+      expect(retried.payload().code).toBe("workflow-cancelled");
+      expect(cancellations).toBe(2);
+      expect(
+        op.control.commands
+          .filter((command) => command.kind === "cancel_workflow")
+          .map((command) => command.attempt)
+      ).toEqual([0, 1]);
+    });
+
+    it("surfaces a failed status check while keeping cleanup blocked", async () => {
+      const op = stoppedSetup();
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "unknown");
+      const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
+        inspectVerificationWorkflow: () =>
+          Promise.reject(new Error("GitHub unavailable"))
+      });
+
+      expect(out.recording.status).toBe(502);
+      expect(out.payload()).toMatchObject({
+        code: "workflow-status-read-failed",
+        detail: "GitHub unavailable"
+      });
+      expect(verificationWorkflowState(op)).toBe("unknown");
+    });
+
+    it("checks status without repeating cancellation while GitHub is still settling", async () => {
+      const op = stoppedSetup();
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "cancelling");
+      let cancellations = 0;
+      const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
+        inspectVerificationWorkflow: () => Promise.resolve("active"),
+        cancelVerificationWorkflow: () => {
+          cancellations += 1;
+          return Promise.resolve("inactive");
+        }
+      });
+
+      expect(out.recording.status).toBe(200);
+      expect(out.payload().code).toBe("workflow-status-checked");
+      expect(verificationWorkflowState(op)).toBe("active");
+      expect(cancellations).toBe(0);
+      expect(op.control.commands).toEqual([]);
+    });
+
+    it("keeps an observed status unknown when it cannot be saved", async () => {
+      const op = stoppedSetup();
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "unknown");
+      const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
+        inspectVerificationWorkflow: () => Promise.resolve("active"),
+        persistOperations: () => Promise.reject(new Error("disk gone"))
+      });
+
+      expect(out.recording.status).toBe(500);
+      expect(out.payload()).toMatchObject({
+        code: "workflow-status-persist-failed",
+        detail: "disk gone"
+      });
+      expect(verificationWorkflowState(op)).toBe("unknown");
+    });
+
+    it("does not contact GitHub when the cancellation intent cannot be saved", async () => {
+      const op = stoppedSetup();
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+      let cancellations = 0;
+      const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
+        persistOperations: () => Promise.reject(new Error("disk gone")),
+        cancelVerificationWorkflow: () => {
+          cancellations += 1;
+          return Promise.resolve("inactive");
+        }
+      });
+
+      expect(out.recording.status).toBe(500);
+      expect(out.payload()).toMatchObject({
+        code: "workflow-cancel-persist-failed",
+        detail: "disk gone"
+      });
+      expect(cancellations).toBe(0);
+      expect(verificationWorkflowState(op)).toBe("active");
+      expect(
+        op.control.commands.filter(
+          (command) => command.kind === "cancel_workflow"
+        )
+      ).toEqual([]);
+    });
+
+    it("reports when neither cancellation nor its unknown status can be saved", async () => {
+      const op = stoppedSetup();
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+      let persists = 0;
+      const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
+        persistOperations: () => {
+          persists += 1;
+          return persists === 1 ?
+              Promise.resolve()
+            : Promise.reject(new Error("disk gone"));
+        },
+        cancelVerificationWorkflow: () =>
+          Promise.reject(new Error("GitHub unavailable"))
+      });
+
+      expect(out.recording.status).toBe(502);
+      expect(out.payload()).toMatchObject({
+        code: "workflow-cancel-failed",
+        detail:
+          "GitHub unavailable Radius also could not save the workflow status: disk gone"
+      });
+      expect(verificationWorkflowState(op)).toBe("unknown");
+    });
+
+    it("refuses cancellation before setup is stopped", async () => {
+      const op = newOperation();
+      op.verification = { runId: "42" };
+      const out = await drive(handleCancelWorkflow, op, "cancel-workflow");
+
+      expect(out.recording.status).toBe(409);
+      expect(out.payload().code).toBe("workflow-cancel-not-available");
+      expect(out.journal.persistCalls).toBe(0);
+    });
   });
 
   it("refuses to continue a setup whose ownership the ledger cannot prove", async () => {
@@ -1259,6 +1588,7 @@ describe("POST /api/operations/{id}/exit", () => {
       repo: "contoso/store",
       name: "dev"
     });
+
     const out = await drive(handleExitOperation, op, "exit");
 
     expect(out.recording.status).toBe(202);
@@ -1277,6 +1607,78 @@ describe("POST /api/operations/{id}/exit", () => {
     // the pass drops the listing when it proves the environment is gone.
     expect(out.journal.invalidatedListings).toEqual([]);
     expect(op.state).toBe("running");
+  });
+
+  it("abandons an active external workflow without scheduling deletion", async () => {
+    const op = stoppedSetup();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    op.verification = { runId: "42" };
+    setVerificationWorkflowState(op, "active");
+
+    const out = await drive(handleExitOperation, op, "exit?mode=abandon");
+
+    expect(out.recording.status).toBe(200);
+    expect(out.payload()).toMatchObject({
+      code: "setup-exited",
+      removed: false,
+      operation: {
+        headline: {
+          code: "setup-exited",
+          title: "Environment setup abandoned"
+        },
+        actions: []
+      }
+    });
+    expect(out.journal.scheduled).toEqual([]);
+    expect(op.control.commands).toEqual([
+      expect.objectContaining({
+        kind: EXIT_COMMAND_KIND,
+        state: "finished",
+        outcome: ABANDON_COMMAND_OUTCOME
+      })
+    ]);
+  });
+
+  it("rejects a stale abandonment request when ordinary cleanup is safe", async () => {
+    const op = stoppedSetup();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    setVerificationWorkflowState(op, "inactive");
+
+    const out = await drive(handleExitOperation, op, "exit?mode=abandon");
+
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toMatchObject({
+      code: "operation-abandon-not-available"
+    });
+    expect(out.journal.scheduled).toEqual([]);
+    expect(op.control.commands).toEqual([]);
+  });
+
+  it("requires an explicit abandonment request when cleanup becomes unsafe", async () => {
+    const op = stoppedSetup();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    setVerificationWorkflowState(op, "active");
+
+    const out = await drive(handleExitOperation, op, "exit");
+
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toMatchObject({
+      code: "operation-exit-requires-abandon"
+    });
+    expect(out.journal.scheduled).toEqual([]);
+    expect(op.control.commands).toEqual([]);
   });
 
   it("refuses to exit an environment whose verification succeeded", async () => {

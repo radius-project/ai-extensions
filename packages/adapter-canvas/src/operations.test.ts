@@ -86,6 +86,7 @@ import {
   projectNextTransition,
   projectOperationActions,
   projectOperationHeadline,
+  pauseForProviderRestart,
   pendingWorkflowCommits,
   provenOwnedCleanupTargets,
   readOperationControl,
@@ -94,9 +95,11 @@ import {
   reconcileOperationLifecycle,
   rollbackRetryAttempt,
   setCommandState,
+  setVerificationWorkflowState,
   rollbackArtifactIdentity,
   setupForwardIntent,
   snapshotRetryState,
+  stopProviderRestartDecision,
   stopAtBoundary,
   unresolvedCleanupTargets,
   workflowProvenanceGap,
@@ -112,6 +115,7 @@ import {
   setupExitState,
   EXIT_COMMAND_KIND,
   EXIT_COMMAND_OUTCOME,
+  ABANDON_COMMAND_OUTCOME,
   OPERATION_SCHEMA_VERSION,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
@@ -595,7 +599,7 @@ describe("provider mutation recovery journal", () => {
       }
     );
 
-    it("blocks every forward and destructive action on a quarantined record", () => {
+    it("blocks forward and destructive actions while preserving abandonment", () => {
       const restored = reconcileRestoredOperation(legacy("running", 4));
 
       expect(canContinueSetup(restored)).toMatchObject({ ok: false });
@@ -614,8 +618,10 @@ describe("provider mutation recovery journal", () => {
         code: "cleanup-retry-legacy-unrecoverable"
       });
       expect(canExitSetup(restored)).toMatchObject({
-        ok: false,
-        code: "exit-legacy-unrecoverable"
+        ok: true,
+        code: "setup-abandon-allowed",
+        abandon: true,
+        targets: []
       });
     });
 
@@ -714,8 +720,10 @@ describe("provider mutation recovery journal", () => {
         code: "rollback-legacy-unrecoverable"
       });
       expect(canExitSetup(restored)).toMatchObject({
-        ok: false,
-        code: "exit-legacy-unrecoverable"
+        ok: true,
+        code: "setup-abandon-allowed",
+        abandon: true,
+        targets: []
       });
       expect(canRetryCleanup(restored)).toMatchObject({
         ok: false,
@@ -1029,7 +1037,7 @@ describe("provider mutation recovery journal", () => {
         "Two applications carry this operation's name."
       ]
     ])(
-      "refuses rollback, retry-rollback and exit for %s",
+      "refuses destructive cleanup but allows abandonment for %s",
       (_label, status, expected) => {
         const op = terminalWithCleanupWarning();
         const mutation = prepareProviderMutation(op, {
@@ -1056,14 +1064,16 @@ describe("provider mutation recovery journal", () => {
           detail: expect.stringContaining(expected)
         });
         expect(canExitSetup(op)).toMatchObject({
-          ok: false,
-          code: "exit-provider-outcome-unknown",
+          ok: true,
+          code: "setup-abandon-allowed",
+          abandon: true,
+          targets: [],
           detail: expect.stringContaining(expected)
         });
       }
     );
 
-    it("refuses exit when the very first mutation is unknown and nothing is in the ledger", () => {
+    it("allows abandonment when the first mutation is unknown and nothing is in the ledger", () => {
       const op = terminalWithoutLedger();
       const mutation = prepareProviderMutation(op, {
         kind: "azure_application.create",
@@ -1076,13 +1086,12 @@ describe("provider mutation recovery journal", () => {
         "The create response was lost."
       );
 
-      // An empty selection is exactly the shape an unjournaled resource
-      // produces, so "nothing is owned" must not read as permission to close
-      // the setup and stop reporting it.
       expect(provenOwnedCleanupTargets(op)).toEqual([]);
       expect(canExitSetup(op)).toMatchObject({
-        ok: false,
-        code: "exit-provider-outcome-unknown"
+        ok: true,
+        code: "setup-abandon-allowed",
+        abandon: true,
+        targets: []
       });
       expect(canStartRollback(op)).toMatchObject({
         ok: false,
@@ -1090,7 +1099,7 @@ describe("provider mutation recovery journal", () => {
       });
       expect(
         projectOperationActions(op).map((action) => action.kind)
-      ).not.toContain(EXIT_COMMAND_KIND);
+      ).toContain(EXIT_COMMAND_KIND);
     });
 
     it("refuses retry-rollback before consulting a ledger it does not have", () => {
@@ -2178,7 +2187,9 @@ describe("client projection", () => {
       runUrl: "https://github.com/contoso/store/actions/runs/777"
     };
 
-    expect(toClientView(op).verification).toEqual({ dispatchedAt: 1234 });
+    expect(toClientView(op).verification).toEqual({
+      dispatchedAt: 1234
+    });
     const projected = JSON.stringify(toClientView(op));
     expect(projected).not.toContain("radius-verify-credentials");
     expect(projected).not.toContain("actions/runs");
@@ -3278,7 +3289,7 @@ describe("startup reconciliation", () => {
     expect(isStale(op)).toBe(false);
   });
 
-  it("keeps dispatched verification pending", () => {
+  it("pauses dispatched verification for a recovery decision", () => {
     const op = newOp();
     op.context = { githubLogin: "alice" };
     enterStage(op, STAGE_VERIFY);
@@ -3293,8 +3304,14 @@ describe("startup reconciliation", () => {
       runUrl: null
     };
     reconcileRestoredOperation(op);
-    expect(op.state).toBe("running");
-    expect(op.recoveryState).toBe("verification_pending");
+    expect(op.state).toBe("action_required");
+    expect(op.recoveryState).toBe("provider_restart_decision");
+    expect(op.terminal.reason).toBe("provider-restart-decision");
+    expect(op.verification.workflowState).toBe("unknown");
+    expect(projectOperationActions(op).map((action) => action.id)).toEqual([
+      "continue-setup",
+      "stop"
+    ]);
   });
 
   it("fails a restored verification closed when no selected account was saved", () => {
@@ -3448,12 +3465,12 @@ describe("startup reconciliation", () => {
 
     reconcileRestoredOperation(op);
 
-    expect(op.state).toBe("running");
-    expect(op.recoveryState).toBe("verification_pending");
+    expect(op.state).toBe("action_required");
+    expect(op.recoveryState).toBe("provider_restart_decision");
     expect(op.failure).toBeNull();
   });
 
-  it("recovers a pre-dispatch checkpoint by monitoring instead of redispatching", () => {
+  it("pauses a pre-dispatch checkpoint instead of redispatching", () => {
     const op = newOp();
     op.context = { githubLogin: "alice" };
     enterStage(op, STAGE_VERIFY);
@@ -3471,11 +3488,11 @@ describe("startup reconciliation", () => {
     reconcileRestoredOperation(op);
 
     expect(hasPendingVerificationAcquisition(op)).toBe(false);
-    expect(op.state).toBe("running");
-    expect(op.recoveryState).toBe("verification_pending");
+    expect(op.state).toBe("action_required");
+    expect(op.recoveryState).toBe("provider_restart_decision");
   });
 
-  it("latches interrupted work without scheduling automatic cleanup", () => {
+  it("pauses interrupted work without scheduling automatic cleanup", () => {
     const op = newOp();
     recordAzureApp(op, {
       state: "created",
@@ -3483,9 +3500,60 @@ describe("startup reconciliation", () => {
       displayName: "radius-app"
     });
     reconcileRestoredOperation(op);
-    expect(op.state).toBe("failed_partial");
+    expect(op.state).toBe("action_required");
     expect(op.setupArtifacts.cleanup.state).toBe("not_needed");
-    expect(op.failure.code).toBe("operation-interrupted");
+    expect(op.terminal.reason).toBe("provider-restart-decision");
+    expect(projectOperationHeadline(op)).toMatchObject({
+      code: "setup-interrupted",
+      title: "Environment setup was interrupted"
+    });
+  });
+
+  it("blocks cleanup until the interrupted verification run is inactive", () => {
+    const op = addSafeResumeRequest(newOp());
+    op.context = { githubLogin: "alice" };
+    recordAzureApp(op, { state: "created", appId: "app-1" });
+    enterStage(op, STAGE_VERIFY);
+    op.verification = {
+      dispatchedAt: Date.now(),
+      workflow: "radius-verify-credentials.yml",
+      ref: "main",
+      environment: "dev",
+      runId: "42"
+    };
+    pauseForProviderRestart(op);
+    stopProviderRestartDecision(op);
+    setVerificationWorkflowState(op, "active");
+
+    expect(canStartRollback(op)).toMatchObject({
+      ok: false,
+      code: "rollback-verification-workflow-active"
+    });
+    expect(canExitSetup(op)).toMatchObject({
+      ok: true,
+      code: "setup-abandon-allowed",
+      abandon: true,
+      targets: []
+    });
+    expect(projectOperationActions(op).map((action) => action.id)).toContain(
+      "cancel-workflow"
+    );
+
+    for (const candidate of [
+      { ...op, repo: "" },
+      { ...op, verification: { ...op.verification, runId: null } },
+      { ...op, context: {} }
+    ]) {
+      const actionIds = projectOperationActions(candidate).map(
+        (action) => action.id
+      );
+      expect(actionIds).not.toContain("cancel-workflow");
+      expect(actionIds).toContain("exit-setup");
+    }
+
+    setVerificationWorkflowState(op, "inactive");
+    expect(canStartRollback(op).ok).toBe(true);
+    expect(canExitSetup(op).ok).toBe(true);
   });
 
   it("persists a typed delete-recovery request for delete operations only", () => {
@@ -6328,9 +6396,7 @@ describe("a partially written ledger still describes itself truthfully", () => {
       })
     );
     restored.resumeRequest = op.resumeRequest;
-    finish(restored, "cancelled", {
-      terminal: { reason: "stopped-at-boundary" }
-    });
+    stopProviderRestartDecision(restored);
 
     const targets = provenOwnedCleanupTargets(restored);
     expect(targets.map((entry) => entry.target)).toEqual([
@@ -6402,9 +6468,10 @@ describe("a closed operation never looks like work in progress", () => {
     expect(findActiveCommand(restored, ["continue_setup", "retry_setup"])).toBe(
       null
     );
-    expect(
-      projectOperationActions(restored).map((entry) => entry.id)
-    ).toContain("retry-setup");
+    expect(projectOperationActions(restored).map((entry) => entry.id)).toEqual([
+      "continue-setup",
+      "stop"
+    ]);
   });
 });
 
@@ -6458,8 +6525,8 @@ describe("an interrupted rollback still offers a way out", () => {
       fromPersistedOperation(toPersistedOperation(op))
     );
 
-    // History, not work. Nothing is left to resume, so the record ends.
-    expect(restored.state).toBe("failed_partial");
+    // History, not work. The interrupted setup still waits for a decision.
+    expect(restored.state).toBe("action_required");
     expect(findActiveCommand(restored)).toBeNull();
   });
 
@@ -7137,10 +7204,68 @@ describe("exiting a setup", () => {
       confirmLabel: "Exit setup",
       cancelLabel: "Keep this setup"
     });
+
     expect(action.preview.removes).toContainEqual({
       kind: "github_environment",
       target: "contoso/store:dev"
     });
+  });
+
+  it("abandons an externally active setup without deleting resources or retaining the repository lock", () => {
+    const op = stoppedWithCreatedResources();
+    op.verification = { runId: "42" };
+    setVerificationWorkflowState(op, "active");
+
+    const eligibility = canExitSetup(op);
+    expect(eligibility).toMatchObject({
+      ok: true,
+      code: "setup-abandon-allowed",
+      abandon: true,
+      targets: [],
+      target: "abandon"
+    });
+    const action = projectOperationActions(op).find(
+      (entry) => entry.id === "exit-setup"
+    );
+    expect(action).toMatchObject({
+      label: "Abandon setup",
+      path: `/api/operations/${op.operationId}/exit?mode=abandon`,
+      requiresConfirmation: true,
+      removesResources: false,
+      confirmTitle: "Abandon setup and leave remaining resources?",
+      confirmLabel: "Abandon setup"
+    });
+    expect(action.preview.removes).toEqual([]);
+    expect(action.preview.manualActionRequired).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "azure_app",
+          action: expect.stringContaining("leave this resource in place")
+        })
+      ])
+    );
+
+    const command = acceptCommand(op, {
+      kind: EXIT_COMMAND_KIND,
+      attempt: 0,
+      target: eligibility.target
+    });
+    setCommandState(
+      op,
+      command.command.commandId,
+      "finished",
+      ABANDON_COMMAND_OUTCOME
+    );
+
+    expect(isSetupExited(op)).toBe(true);
+    expect(hasUnfinishedCleanupAuthority(op)).toBe(false);
+    expect(projectOperationHeadline(op)).toEqual({
+      code: "setup-exited",
+      title: "Environment setup abandoned",
+      message:
+        "Radius closed this setup without deleting resources that may still be in use. Review any remaining resources if the next setup cannot reuse them."
+    });
+    expect(summarize(op)).toBe('Abandoned the setup for "dev".');
   });
 
   it("never offers to exit a finished environment or an operation that is still running", () => {

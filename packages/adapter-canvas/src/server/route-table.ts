@@ -246,6 +246,13 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   ),
   declare(
     "POST",
+    "/api/operations/:operationId/cancel-workflow",
+    "template",
+    "json",
+    "operations-status"
+  ),
+  declare(
+    "POST",
     "/api/operations/:operationId/rollback",
     "template",
     "json",

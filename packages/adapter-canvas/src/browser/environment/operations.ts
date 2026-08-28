@@ -85,6 +85,7 @@ export const PROGRESS_IDS = {
   stateManualBlock: "env-progress-state-manual-block",
   commands: "env-progress-commands",
   commandButtons: "env-progress-command-buttons",
+  commandDescriptions: "env-progress-command-descriptions",
   commandNote: "env-progress-command-note",
   commandGuidance: "env-progress-command-guidance",
   commandStatus: "env-progress-command-status",
@@ -1603,6 +1604,16 @@ export function initializeEnvironmentOperations(
     element.className = COMMAND_TONE_CLASS[action.tone] ?? COMMAND_BUTTON_CLASS;
     element.textContent = action.label === "" ? "Continue" : action.label;
     element.disabled = commandInFlight || action.pending;
+    if (action.description !== "") {
+      element.setAttribute("title", action.description);
+      const descriptionId = `${element.id}-description`;
+      element.setAttribute("aria-describedby", descriptionId);
+      const description = dom.createElement("span");
+      description.id = descriptionId;
+      description.className = "env-progress__command-description";
+      description.textContent = action.description;
+      dom.byId(PROGRESS_IDS.commandDescriptions)?.appendChild(description);
+    }
     if (action.requiresConfirmation) {
       element.setAttribute("aria-haspopup", "dialog");
     }
@@ -1655,7 +1666,9 @@ export function initializeEnvironmentOperations(
     const container = dom.byId(PROGRESS_IDS.commands);
     const buttons = dom.byId(PROGRESS_IDS.commandButtons);
     const note = dom.byId(PROGRESS_IDS.commandNote);
+    const descriptions = dom.byId(PROGRESS_IDS.commandDescriptions);
     if (!container || !buttons || !note) return;
+    descriptions?.replaceChildren();
     const actions = visibleOperationActions(op);
     const rowActions = actions.filter(
       (action) => action.placement !== "bottom"
@@ -1711,12 +1724,8 @@ export function initializeEnvironmentOperations(
     for (const action of rowActions) {
       buttons.appendChild(createCommandButton(action, record));
     }
-    const descriptions = rowActions
-      .map((action) => action.description)
-      .filter((description) => description !== "");
     const transition = record.nextTransition?.message ?? "";
-    if (transition !== "") descriptions.unshift(transition);
-    note.textContent = descriptions.join(" ");
+    note.textContent = transition;
     if (rowActions.some((action) => action.kind === "stop" && action.pending)) {
       setCommandStatus(STOPPING_MESSAGE);
     }
