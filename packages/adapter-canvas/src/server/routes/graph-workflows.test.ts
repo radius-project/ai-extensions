@@ -40,7 +40,8 @@ import {
 import type {
   CanvasGraphResource,
   CanvasState,
-  GraphBuildEvent
+  GraphBuildEvent,
+  GraphProgressView
 } from "../../shared.js";
 import { expireGraphProgressWait } from "../../shared.js";
 
@@ -73,6 +74,7 @@ interface HandoffCall {
   repo: string;
   branches: string | string[];
   page: string;
+  progressView: GraphProgressView;
   hasEntry: boolean;
 }
 
@@ -242,8 +244,20 @@ function start(script: Partial<PipelineScript> = {}): Harness {
   const dependencies: GraphWorkflowDependencies = {
     readInstanceEntry: () => (entryMissing ? undefined : entry),
     pipeline,
-    triggerAppBicepHandoff: (handoffEntry, repo, branches, page) => {
-      handoffs.push({ repo, branches, page, hasEntry: !!handoffEntry });
+    triggerAppBicepHandoff: (
+      handoffEntry,
+      repo,
+      branches,
+      page,
+      progressView
+    ) => {
+      handoffs.push({
+        repo,
+        branches,
+        page,
+        progressView,
+        hasEntry: !!handoffEntry
+      });
     },
     triggerGraphRepairHandoff: () => ({
       attempt: 1,
@@ -410,6 +424,7 @@ describe("graph planning workflows", () => {
           repo: "octo/app",
           branches: "main",
           page: "graph",
+          progressView: "graph",
           hasEntry: true
         }
       ]);
@@ -440,6 +455,7 @@ describe("graph planning workflows", () => {
           repo: "octo/app",
           branches: "main",
           page: "graph",
+          progressView: "graph",
           hasEntry: true
         }
       ]);
@@ -1197,6 +1213,7 @@ describe("graph planning workflows", () => {
           repo: "octo/app",
           branches: "main",
           page: "graph",
+          progressView: "planned",
           hasEntry: true
         }
       ]);
@@ -1666,6 +1683,7 @@ describe("graph planning workflows", () => {
           repo: "octo/app",
           branches: ["main", "feature/x"],
           page: "graph-diff",
+          progressView: "diff",
           hasEntry: true
         }
       ]);
@@ -1906,6 +1924,7 @@ describe("graph planning workflows", () => {
           repo: "octo/app",
           branches: ["main", "feature/x"],
           page: "graph-diff",
+          progressView: "diff",
           hasEntry: true
         }
       ]);
@@ -1932,6 +1951,7 @@ describe("graph planning workflows", () => {
           repo: "octo/app",
           branches: ["main", "feature/x"],
           page: "graph-diff",
+          progressView: "diff",
           hasEntry: true
         }
       ]);
