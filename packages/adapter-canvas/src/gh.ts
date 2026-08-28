@@ -202,8 +202,46 @@ function errorMessage(error: unknown): string {
 // `workflow` (so setup acts as the identity the user sees), and fall back to a
 // stored keyring login only when we must for scope. The snapshot of `gh auth
 // status` is memoized.
-function ghExecutable() {
+
+// A bare name, never an absolute path: the GitHub Copilot app prepends its
+// bundled GitHub CLI directory to PATH before forking canvas extensions, so
+// letting the OS resolve `gh` against the inherited PATH picks up the bundled
+// CLI without requiring a machine-wide install or a hardcoded versioned path.
+function ghExecutable(): string {
   return process.platform === "win32" ? "gh.exe" : "gh";
+}
+
+function isSearchPathKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  return lower === "path" || lower === "pathext";
+}
+
+// Node replaces (rather than extends) the child environment when `env` is set,
+// and the token-stripping call sites below depend on that. An override that
+// omits PATH therefore costs the child the app-prepended search path that makes
+// the bundled `gh` resolvable. Windows hides this because libuv back-fills PATH
+// from the parent, but on macOS and Linux execvp falls back to a bare system
+// default and the bundled CLI disappears. Carry the inherited search path across
+// per key, without re-adding anything else a caller deliberately dropped, and
+// never override a search path the caller set itself.
+function withInheritedPath(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (!env) return { ...process.env };
+  const next = { ...env };
+  const supplied = new Set(Object.keys(next).map((key) => key.toLowerCase()));
+  for (const [key, value] of Object.entries(process.env)) {
+    if (isSearchPathKey(key) && !supplied.has(key.toLowerCase())) {
+      next[key] = value;
+    }
+  }
+  return next;
+}
+
+function execGhFile(
+  args: string[],
+  options: ExecFileOptionsWithStringEncoding,
+  callback: CliCallback
+): ChildProcess {
+  return execFile(ghExecutable(), args, options, callback);
 }
 
 // Memoized snapshot of `gh auth status` (default env + token-stripped env) and
@@ -292,8 +330,7 @@ export function decideGhTokenStrategy({
 // on a slow/locked-down network.
 function ghAuthStatusText(env: NodeJS.ProcessEnv): Promise<string> {
   return new Promise((resolve) => {
-    execFile(
-      ghExecutable(),
+    execGhFile(
       ["auth", "status", "--hostname", "github.com"],
       {
         env,
@@ -414,7 +451,7 @@ export function resetGhIdentityCache(): void {
 // (the identity endpoints and the deploy flow), which is before any
 // workflow-scope write, so the strategy is in effect when it matters.
 function ghChildEnv(baseEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env = { ...(baseEnv || process.env) };
+  const env = withInheritedPath(baseEnv);
   if (ghStrategyCached().useKeyring) {
     delete env.GH_TOKEN;
     delete env.GITHUB_TOKEN;
@@ -650,8 +687,7 @@ function ghKeyringTokenForUser(login: string): Promise<string> {
   delete env.GITHUB_TOKEN;
   delete env.GH_HOST;
   return new Promise((resolve) => {
-    execFile(
-      ghExecutable(),
+    execGhFile(
       ["auth", "token", "--hostname", "github.com", "--user", login],
       { env, timeout: GH_KEYRING_TOKEN_TIMEOUT_MS, windowsHide: true },
       (e, stdout) => {
@@ -663,8 +699,7 @@ function ghKeyringTokenForUser(login: string): Promise<string> {
 
 function ghVersion(): Promise<[major: number, minor: number] | null> {
   return new Promise((resolve) => {
-    execFile(
-      ghExecutable(),
+    execGhFile(
       ["--version"],
       { timeout: 5000, windowsHide: true },
       (error, stdout) => {
@@ -728,18 +763,13 @@ function pinnedGhExec(
     env,
     encoding: "utf8"
   };
-  return execFile(
-    ghExecutable(),
-    args,
-    execOptions,
-    (error, stdout, stderr) => {
-      callback(
-        error ? selectedExecError(error, redact) : null,
-        redact((stdout || "").toString()),
-        redact((stderr || "").toString())
-      );
-    }
-  );
+  return execGhFile(args, execOptions, (error, stdout, stderr) => {
+    callback(
+      error ? selectedExecError(error, redact) : null,
+      redact((stdout || "").toString()),
+      redact((stderr || "").toString())
+    );
+  });
 }
 
 export async function createSelectedGhExecutor(
@@ -1062,8 +1092,7 @@ export function switchGhKeyringAccount(
   delete env.GITHUB_TOKEN;
   delete env.GH_HOST;
   return new Promise((resolve) => {
-    execFile(
-      ghExecutable(),
+    execGhFile(
       ["auth", "switch", "--hostname", "github.com", "--user", selectedLogin],
       { env, timeout: 15000, windowsHide: true },
       (error, _stdout, stderr) => {
@@ -1137,7 +1166,7 @@ function windowsCmdCommandLine(command: string, args: string[]): string {
 // for infra setup, so agentic tagging is both unwanted and fatal here — strip it so az uses normal
 // cache-first user auth. Applies to every child CLI (az/aws/kubectl/gh); none of them need it.
 function withoutAgentSession(baseEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env = { ...(baseEnv || process.env) };
+  const env = withInheritedPath(baseEnv);
   delete env.COPILOT_AGENT_SESSION_ID;
   return env;
 }
@@ -1204,7 +1233,7 @@ export function runGhKeyringCommand(
   args: string[],
   opts: CommandOptions = {}
 ): Promise<string> {
-  const env = { ...(opts.env || process.env) };
+  const env = withInheritedPath(opts.env);
   delete env.GH_TOKEN;
   delete env.GITHUB_TOKEN;
   delete env.GH_HOST;
