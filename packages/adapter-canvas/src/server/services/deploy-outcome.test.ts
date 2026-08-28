@@ -17,6 +17,8 @@ function dependencies(
     extractGitHubActionsStepLog: () => "",
     explainOidcEnterpriseClaim: () => "",
     extractRadDeployError: () => "",
+    classifyDeployCloudAuthDrift: () => "",
+    cloudAuthDriftKind: "cloud-auth-drift",
     sleep: () => Promise.resolve(),
     now: () => 1_700_000_060_000,
     ...overrides
@@ -92,6 +94,7 @@ describe("deploy outcome construction", () => {
     "extractGitHubActionsStepLog",
     "explainOidcEnterpriseClaim",
     "extractRadDeployError",
+    "classifyDeployCloudAuthDrift",
     "sleep",
     "now"
   ] as const)("refuses to construct without %s", (name) => {
@@ -414,6 +417,81 @@ describe("deploy outcome on failure", () => {
     );
   });
 
+  it("prefixes the auth-drift message and stamps the kind when a cloud login step fails before any resource is touched", async () => {
+    // Exception 5.2: classifier matched, so the readable drift lead is prefixed
+    // to describeFailure's message and the kind is stamped so the repair guard
+    // leaves it for the user to re-verify.
+    const driftInputs: unknown[] = [];
+    const { request, state } = outcomeRequest({
+      conclusion: "failure",
+      provider: "aws",
+      deployStepStartedAt: 0,
+      steps: [
+        { name: "Configure AWS Credentials", conclusion: "failure" },
+        { name: "Run rad commands", conclusion: "skipped" }
+      ]
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        classifyDeployCloudAuthDrift: (input) => {
+          driftInputs.push(input);
+          return "Cloud authentication failed. Re-verify.";
+        }
+      })
+    );
+
+    await service.settle(request);
+
+    expect(driftInputs).toEqual([
+      {
+        provider: "aws",
+        resourcesTouched: false,
+        failedStepNames: ["Configure AWS Credentials"]
+      }
+    ]);
+    expect(state.deployStatus).toBe("failed");
+    expect(state.deployErrorKind).toBe("cloud-auth-drift");
+    expect(state.deployError).toContain(
+      "Cloud authentication failed. Re-verify."
+    );
+    expect(state.deployError).toContain(
+      "View the full run: https://github.com/acme/widgets/actions/runs/42"
+    );
+  });
+
+  it("prefixes the auth-drift message even when describeFailure throws", async () => {
+    const { request, state } = outcomeRequest({ conclusion: "failure" });
+    const service = createDeployOutcomeService(
+      dependencies({
+        fetchRunLog: () => Promise.reject(new Error("network down")),
+        classifyDeployCloudAuthDrift: () => "Cloud auth drift lead."
+      })
+    );
+
+    await service.settle(request);
+
+    expect(state.deployErrorKind).toBe("cloud-auth-drift");
+    expect(state.deployError).toBe(
+      "Cloud auth drift lead.\n\n" +
+        "Deployment failed (failure). The failure details could not be read; " +
+        "see the full run: https://github.com/acme/widgets/actions/runs/42."
+    );
+  });
+
+  it("leaves the kind unset when the failure is not auth drift", async () => {
+    const { request, state } = outcomeRequest({
+      conclusion: "failure",
+      deployStepStartedAt: 1_700_000_000_000,
+      steps: [{ name: "Run rad commands", conclusion: "failure" }]
+    });
+    const service = createDeployOutcomeService(dependencies());
+
+    await service.settle(request);
+
+    expect(state.deployStatus).toBe("failed");
+    expect(state.deployErrorKind).toBeUndefined();
+  });
+
   it("reports a conclusion-less failure without inventing one", async () => {
     const { request, state } = outcomeRequest({ conclusion: null, steps: [] });
     const service = createDeployOutcomeService(dependencies());
@@ -422,6 +500,24 @@ describe("deploy outcome on failure", () => {
 
     expect(state.deployError).toContain("Deployment failed.");
     expect(state.deployError).not.toContain("Failed step:");
+  });
+
+  it("omits the conclusion from the degraded message when there was none", async () => {
+    // The catch-branch fallback must not print "(null)": a conclusion-less run
+    // that also fails its log read gets a degraded message with no parenthetical.
+    const { request, state } = outcomeRequest({ conclusion: null });
+    const service = createDeployOutcomeService(
+      dependencies({
+        fetchRunLog: () => Promise.reject(new Error("network down"))
+      })
+    );
+
+    await service.settle(request);
+
+    expect(state.deployError).toBe(
+      "Deployment failed. The failure details could not be read; " +
+        "see the full run: https://github.com/acme/widgets/actions/runs/42."
+    );
   });
 
   it("keeps the run-log details when the control-plane log cannot be read", async () => {

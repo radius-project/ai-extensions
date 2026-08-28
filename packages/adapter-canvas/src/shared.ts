@@ -343,7 +343,8 @@ export type DeployErrorKind =
   | "branch-not-pushed"
   | "run-unconfirmed"
   | "oidc-subject-missing"
-  | "oidc-subject-case-mismatch";
+  | "oidc-subject-case-mismatch"
+  | "cloud-auth-drift";
 
 export function escapeHtml(str: unknown): string {
   if (!str) return "";

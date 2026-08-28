@@ -694,6 +694,64 @@ export function explainNoSubscriptions(logText?: string | null): string {
   ].join("\n");
 }
 
+// Names of the workflow steps that authenticate to the cloud before `rad`
+// runs. The deploy workflow signs in to the cloud in its own step (Azure Login
+// (OIDC) for Azure, Configure AWS Credentials / assume-role for AWS) that runs
+// *before* "Run rad commands", so a failure there means `rad deploy` never
+// started and no resource was touched. Matched case-insensitively against the
+// failed step names so a small wording change in the upstream workflow does not
+// silently disable the classification.
+const CLOUD_AUTH_STEP_PATTERN =
+  /login|credential|assume[\s-]*role|\boidc\b|authenticat/i;
+
+export interface DeployCloudAuthDriftInput {
+  // "aws", "azure", or anything else (falls back to a provider-agnostic label).
+  provider?: string | null;
+  // Whether `rad deploy` began touching resources. When true this is a
+  // mid-deploy resource failure (exception 5.1), never auth drift.
+  resourcesTouched: boolean;
+  // Names of the run's failed (non-success, non-skipped) steps.
+  failedStepNames: readonly (string | undefined)[];
+}
+
+// Exception 5.2: a redeploy to an environment that verified earlier now fails
+// cloud authentication or authorization *before any resource is touched*,
+// meaning the trust or permissions drifted since setup (the IAM role's trust
+// policy or permissions, or the Azure federated credential or role assignment,
+// was changed or removed). Detected purely from the run shape — a cloud
+// login/credentials step failed while `rad deploy` never ran — so it is
+// distinct from a mid-deploy resource failure (5.1). Returns a readable,
+// actionable message, or '' when the failure is not auth drift. Pure — no I/O,
+// never throws.
+export function classifyDeployCloudAuthDrift(
+  input: DeployCloudAuthDriftInput
+): string {
+  if (input.resourcesTouched) return "";
+  const failedAtAuth = input.failedStepNames.some(
+    (name) => !!name && CLOUD_AUTH_STEP_PATTERN.test(name)
+  );
+  if (!failedAtAuth) return "";
+  const cloud =
+    input.provider === "aws" ? "AWS"
+    : input.provider === "azure" ? "Azure"
+    : "the cloud provider";
+  const drift =
+    input.provider === "aws" ?
+      "the IAM role's trust policy or permissions were changed or removed"
+    : input.provider === "azure" ?
+      "the federated credential or role assignment was changed or removed"
+    : "the trust or permissions changed";
+  return [
+    "Cloud authentication or authorization failed before any resource was deployed.",
+    "This environment verified earlier, so its " +
+      cloud +
+      " credentials appear to have drifted since setup (for example " +
+      drift +
+      ").",
+    "Re-verify the environment's credentials, then redeploy."
+  ].join("\n");
+}
+
 // Whether the identifying cloud credentials the verify-credentials workflow
 // needs to authenticate are fully configured for the given provider. Azure OIDC
 // login requires client ID + tenant ID + subscription ID; AWS OIDC requires the

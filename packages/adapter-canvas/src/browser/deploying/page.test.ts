@@ -128,6 +128,7 @@ function fixture(options: FixtureOptions = {}) {
   // it would find the real parsed element.
   const pushActionHost = createFakeElement("deploy-push-action");
   const fixCredentialsBtn = createFakeInput("deploy-fix-credentials");
+  const reverifyCredentialsBtn = createFakeInput("deploy-reverify-credentials");
   if (withProgressModal) {
     elements.push(
       progressSpinner,
@@ -139,7 +140,8 @@ function fixture(options: FixtureOptions = {}) {
       failRepairNote,
       backBtn,
       pushActionHost,
-      fixCredentialsBtn
+      fixCredentialsBtn,
+      reverifyCredentialsBtn
     );
   }
   if (withProgressModalElement) elements.push(progressModal);
@@ -194,6 +196,7 @@ function fixture(options: FixtureOptions = {}) {
     backBtn,
     pushActionHost,
     fixCredentialsBtn,
+    reverifyCredentialsBtn,
     deleteModal,
     deleteBody,
     deleteApp,
@@ -1819,6 +1822,66 @@ describe("deploy flow", () => {
     expect(page.progressSubtitle.innerHTML).toContain(
       "Set up Azure credentials"
     );
+  });
+
+  it("shows the cloud-auth-drift panel and routes to the environments list to re-verify", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "cloud-auth-drift",
+        error:
+          "Cloud authentication or authorization failed before any resource was deployed.",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    // Nothing was dispatched to the resources, so this must not read like a run
+    // that failed mid-deploy.
+    expect(page.progressTitle.innerHTML).not.toContain("Deployment of");
+    expect(page.progressTitle.innerHTML).toContain(
+      "Cloud credentials need re-verifying"
+    );
+    expect(page.progressSubtitle.innerHTML).toContain("Nothing was deployed.");
+    expect(page.progressSubtitle.innerHTML).toContain(
+      "Cloud authentication or authorization failed before any resource was deployed."
+    );
+    // The fix is re-verifying (Part 4), which lives on the Environments list.
+    page.reverifyCredentialsBtn.dispatch("click");
+    await flushPromises();
+    expect(page.browser.nav.assigned).toContain("/?page=environment");
+  });
+
+  it("omits the preflight detail from the cloud-auth-drift panel when the failure carries no text", async () => {
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "cloud-auth-drift",
+        error: "",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(page.progressTitle.innerHTML).toContain(
+      "Cloud credentials need re-verifying"
+    );
+    expect(page.progressSubtitle.innerHTML).toContain("Nothing was deployed.");
+    expect(page.progressSubtitle.innerHTML).not.toContain("margin-top:10px");
   });
 
   it("shows a generic failure with the run link and repair note while repairing", async () => {

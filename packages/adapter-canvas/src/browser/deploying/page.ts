@@ -885,6 +885,23 @@ export function initializeDeployingPage(
             `<div style="margin-top:10px; color:var(--rad-text-secondary);">${escapeBrowserHtml(details.errorText)}</div>`
           : "");
       }
+    } else if (details.errorKind === "cloud-auth-drift") {
+      // Exception 5.2: the environment verified earlier but its cloud sign-in
+      // now fails before any resource is touched, so the fix is to re-verify
+      // the credentials (Part 4) and redeploy — not a model repair. Send the
+      // user to the Environments list where each environment can be re-verified.
+      if (progressTitle) {
+        progressTitle.innerHTML = "Cloud credentials need re-verifying";
+      }
+      if (progressSubtitle) {
+        progressSubtitle.style.color = "var(--rad-text-secondary)";
+        progressSubtitle.innerHTML =
+          `<div style="color:var(--rad-text);">Environment <strong>${escapeBrowserHtml(details.environment)}</strong> could not authenticate to the cloud, so deploying <strong>${escapeBrowserHtml(details.app)}</strong> stopped before any resource was touched. Nothing was deployed.</div>` +
+          (details.errorText ?
+            `<div style="margin-top:10px; color:var(--rad-text-secondary);">${escapeBrowserHtml(details.errorText)}</div>`
+          : "") +
+          `<div style="margin-top:12px;"><button type="button" id="deploy-reverify-credentials" class="rad-btn rad-btn--primary" style="margin:0;">Re-verify credentials</button></div>`;
+      }
     } else {
       if (progressTitle) {
         progressTitle.innerHTML = `Deployment of <strong>${escapeBrowserHtml(details.app)}</strong> to <strong>${escapeBrowserHtml(details.environment)}</strong> failed`;
@@ -931,6 +948,12 @@ export function initializeDeployingPage(
     if (fixCredentialsButton) {
       bind(copyBindings, fixCredentialsButton, "click", () => {
         context.nav.assign("/?page=environment&new=1");
+      });
+    }
+    const reverifyButton = context.dom.byId("deploy-reverify-credentials");
+    if (reverifyButton) {
+      bind(copyBindings, reverifyButton, "click", () => {
+        context.nav.assign("/?page=environment");
       });
     }
     deployBtn.disabled = false;
