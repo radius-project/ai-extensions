@@ -66,6 +66,25 @@ export interface ModelingActivity {
   ): Promise<boolean>;
 }
 
+export function observeWorkspaceModelingRun(
+  repo: string,
+  branches: ReadonlyArray<string>,
+  workspace: ModelingWorkspace,
+  modelingRunLastActivityAtMs: (
+    workspacePath: string | null | undefined
+  ) => Promise<number | null>
+): Promise<number | null> {
+  if (
+    !repo ||
+    !workspace.repo ||
+    workspace.repo !== repo ||
+    !branches.some((branch) => branch === workspace.branch)
+  ) {
+    return Promise.resolve(null);
+  }
+  return modelingRunLastActivityAtMs(workspace.path);
+}
+
 // Bounds the announcement map. One entry per repo+branch modeled in this
 // process, so this is a ceiling against a pathological caller rather than an
 // expected limit.

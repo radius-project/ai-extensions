@@ -112,6 +112,7 @@ import {
   DEFAULT_CANVAS_PAGE,
   DEPLOY_REPAIR_ATTEMPT_CAP
 } from "./runtime/hooks.js";
+import { observeWorkspaceModelingRun } from "./runtime/modeling-activity.js";
 import {
   buildVerifyWorkflowDispatchArgs,
   planCredentialVerification
@@ -1076,28 +1077,21 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
 // route modules free of it. The pure helpers (`defaultBranchForState`,
 // `computeGraphDiff`, `record`, …) are injected rather than imported by the
 // workflows, matching how the sibling families inject `repoMatchesWorkspace`.
-// Observe on-disk modeling activity, but only when the modeling target is the
-// workspace itself. Local staging directories say nothing about a remote branch
-// or a different repository, so probing outside that match would let unrelated
-// activity extend a wait that should have expired.
-//
-// Shared by both graph route families on purpose: this is the gate that keeps a
-// wait honest, and two copies of it could drift apart.
-function observeWorkspaceModelingRun(
+const observeServerWorkspaceModelingRun = (
   state: CanvasState,
   repo: string,
   branches: string[]
-): Promise<number | null> {
-  if (
-    !repo ||
-    !state.workspaceRepo ||
-    state.workspaceRepo !== repo ||
-    !branches.some((branch) => branch === state.workspaceBranch)
-  ) {
-    return Promise.resolve(null);
-  }
-  return modelingRunLastActivityAtMs(state.workspacePath);
-}
+): Promise<number | null> =>
+  observeWorkspaceModelingRun(
+    repo,
+    branches,
+    {
+      repo: state.workspaceRepo ?? "",
+      branch: state.workspaceBranch ?? "",
+      path: state.workspacePath
+    },
+    modelingRunLastActivityAtMs
+  );
 
 const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
@@ -1140,7 +1134,7 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     resolveRecipeOutputs(github, resources, recipes, provider),
   computeGraphDiff: (baseResources, headResources) =>
     computeGraphDiff(baseResources, headResources),
-  observeModelingRun: observeWorkspaceModelingRun,
+  observeModelingRun: observeServerWorkspaceModelingRun,
   record,
   optionalString,
   errorMessage,
@@ -1203,7 +1197,7 @@ const graphsPlanningRoutes = createGraphsPlanningRoutes({
   settleDeployStatuses,
   errorMessage,
   repoMatchesWorkspace,
-  observeModelingRun: observeWorkspaceModelingRun,
+  observeModelingRun: observeServerWorkspaceModelingRun,
   now: () => Date.now()
 });
 

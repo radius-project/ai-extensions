@@ -2,7 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import {
   createModelingActivity,
   MODELING_ANNOUNCEMENT_TTL_MS,
-  MODELING_STAGING_ACTIVITY_TTL_MS
+  MODELING_STAGING_ACTIVITY_TTL_MS,
+  observeWorkspaceModelingRun
 } from "./modeling-activity.js";
 import type {
   ModelingActivityDependencies,
@@ -18,6 +19,48 @@ const WORKSPACE = {
   branch: "feat",
   path: "/workspace"
 };
+
+describe("observeWorkspaceModelingRun", () => {
+  it("probes workspace staging activity when the repository and one requested branch match", async () => {
+    const probe = vi.fn(async () => 42);
+
+    await expect(
+      observeWorkspaceModelingRun("a/b", ["main", "feat"], WORKSPACE, probe)
+    ).resolves.toBe(42);
+    expect(probe).toHaveBeenCalledOnce();
+    expect(probe).toHaveBeenCalledWith("/workspace");
+  });
+
+  it.each([
+    ["an unnamed target repository", "", ["feat"], WORKSPACE],
+    [
+      "an unnamed workspace repository",
+      "a/b",
+      ["feat"],
+      { ...WORKSPACE, repo: "" }
+    ],
+    ["a different repository", "other/repo", ["feat"], WORKSPACE],
+    ["a different branch", "a/b", ["main"], WORKSPACE],
+    ["no requested branches", "a/b", [], WORKSPACE]
+  ])("does not probe for %s", async (_label, repo, branches, workspace) => {
+    const probe = vi.fn(async () => 42);
+
+    await expect(
+      observeWorkspaceModelingRun(repo, branches, workspace, probe)
+    ).resolves.toBeNull();
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("propagates a matching workspace probe failure to its caller", async () => {
+    const failure = new Error("EACCES");
+
+    await expect(
+      observeWorkspaceModelingRun("a/b", ["feat"], WORKSPACE, async () => {
+        throw failure;
+      })
+    ).rejects.toBe(failure);
+  });
+});
 
 function harness(overrides: Partial<ModelingActivityDependencies> = {}) {
   let nowMs = 1_000_000;

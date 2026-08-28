@@ -16,7 +16,10 @@ import { createRadiusCanvas } from "./create-radius-canvas.js";
 import { createRadiusTools } from "./create-radius-tools.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import { createAppModelHandoff } from "./app-model-handoff.js";
-import { createModelingActivity } from "./modeling-activity.js";
+import {
+  createModelingActivity,
+  observeWorkspaceModelingRun
+} from "./modeling-activity.js";
 import { createMissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
 import {
   RADIUS_CANVAS_INSTANCE_ID,
@@ -140,16 +143,13 @@ export function createRadiusExtension(
   // unrelated work silence a handoff that should have been sent.
   const modelingActivity = createModelingActivity({
     now: () => deps.clock.now(),
-    observeStagedRun: async (repo, branches, workspace) => {
-      if (
-        !workspace.repo ||
-        workspace.repo !== repo ||
-        !branches.some((branch) => branch === workspace.branch)
-      ) {
-        return null;
-      }
-      return deps.appModel.modelingRunLastActivityAtMs(workspace.path);
-    }
+    observeStagedRun: (repo, branches, workspace) =>
+      observeWorkspaceModelingRun(
+        repo,
+        branches,
+        workspace,
+        deps.appModel.modelingRunLastActivityAtMs
+      )
   });
 
   const pullRequestGraphDiffGuard = createPullRequestGraphDiffGuard({
