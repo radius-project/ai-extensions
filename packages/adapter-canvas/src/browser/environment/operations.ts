@@ -964,6 +964,10 @@ export function initializeEnvironmentOperations(
   let progressTimer: ScopeTimer | null = null;
   let elapsedTimer: ScopeTimer | null = null;
   let activeAbort: AbortHandle | null = null;
+  const stepsElement = dom.byId(PROGRESS_IDS.steps);
+  const detailsElement = dom.byId(PROGRESS_IDS.details);
+  let followStepTail = true;
+  let renderedOperationId = "";
   // Bumped at the start of every resumeProgress()/trackProgress() call. Async
   // work captures the value at its start and checks it before touching the
   // DOM or scheduling more work, so a response that outlives its session
@@ -977,6 +981,19 @@ export function initializeEnvironmentOperations(
   }
 
   scope.onTeardown(() => abortInFlight());
+
+  if (stepsElement) {
+    scope.on(stepsElement, "scroll", () => {
+      followStepTail = dom.isScrolledToEnd(stepsElement);
+    });
+    if (detailsElement) {
+      scope.on(detailsElement, "toggle", () => {
+        if (detailsElement.getAttribute("open") !== null && followStepTail) {
+          dom.scrollToEnd(stepsElement);
+        }
+      });
+    }
+  }
 
   function fetchTracked(
     url: string,
@@ -1670,6 +1687,10 @@ export function initializeEnvironmentOperations(
       renderHeadline(null);
       return;
     }
+    if (renderedOperationId !== op.operationId) {
+      renderedOperationId = op.operationId;
+      followStepTail = true;
+    }
     panel.style.display = "";
     setPanelActive(op.terminalState === null);
     const done =
@@ -1714,16 +1735,17 @@ export function initializeEnvironmentOperations(
 
     const stagesEl = dom.byId(PROGRESS_IDS.stages);
     if (stagesEl) setChildren(dom, stagesEl, op.stages.map(stageSpec));
-    const stepsEl = dom.byId(PROGRESS_IDS.steps);
-    if (stepsEl) setChildren(dom, stepsEl, op.steps.map(stepSpec));
+    if (stepsElement) {
+      setChildren(dom, stepsElement, op.steps.map(stepSpec));
+      if (followStepTail) dom.scrollToEnd(stepsElement);
+    }
 
     renderFailureCard(op);
     renderPartialState(op);
     renderCommands(op);
 
-    const detailsEl = dom.byId(PROGRESS_IDS.details);
-    if (detailsEl) {
-      detailsEl.style.display = op.steps.length > 0 ? "" : "none";
+    if (detailsElement) {
+      detailsElement.style.display = op.steps.length > 0 ? "" : "none";
     }
   }
 

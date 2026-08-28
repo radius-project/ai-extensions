@@ -82,6 +82,7 @@ export class FakeElement extends FakeEventTarget implements DomElement {
   scrollCount = 0;
   scrollTop = 0;
   scrollHeight = 0;
+  clientHeight = 0;
   removed = false;
   readonly classList: DomClassList;
 
