@@ -142,6 +142,7 @@ describe("environmentsPaneMarkup", () => {
       'id="env-progress-elapsed" class="env-progress__elapsed" role="timer" aria-label="Elapsed time"'
     );
     expect(html).toContain('id="env-progress-command-buttons"');
+    expect(html).toContain('id="env-progress-command-descriptions"');
     expect(html).toContain(
       '<div id="env-progress-command-status" class="env-progress__command-status" role="status" aria-live="polite"></div>'
     );

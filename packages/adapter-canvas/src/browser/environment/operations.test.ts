@@ -504,7 +504,11 @@ describe("parseOperationResponse", () => {
               ],
               keeps: "not-a-list",
               manualActionRequired: [
-                { kind: "role_assignment", target: "Contributor", action: "Go" }
+                {
+                  kind: "role_assignment",
+                  target: "Contributor",
+                  action: "Go"
+                }
               ]
             }
           },
@@ -1143,7 +1147,11 @@ describe("verify status polling", () => {
     const controller = controllerFor(browser);
     await primeVerifyPoll(browser, controller);
     browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
-      jsonResponse({ state: "failed", error: "Actions run failed", runUrl: "" })
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        runUrl: ""
+      })
     );
 
     await tickClock(browser.clock, 1500);
@@ -1632,13 +1640,18 @@ describe("operation commands", () => {
     expect(rendered[0].textContent).toBe("Stop setup");
     expect(rendered[0].getAttribute("type")).toBe("button");
     expect(rendered[0].className).toBe("rad-btn rad-btn--secondary");
+    expect(rendered[0].getAttribute("title")).toBe(STOP_ACTION.description);
+    expect(rendered[0].getAttribute("aria-describedby")).toBe(
+      "env-progress-command-stop-description"
+    );
+    expect(
+      browser.els[PROGRESS_IDS.commandDescriptions].children[0].textContent
+    ).toBe(STOP_ACTION.description);
     // A label the server did not name still gets an honest default rather
     // than an empty button, and a pending action cannot be pressed twice.
     expect(rendered[1].textContent).toBe("Continue");
     expect(Reflect.get(rendered[1], "disabled")).toBe(true);
-    expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe(
-      "Radius finishes the current step and stops."
-    );
+    expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe("");
   });
 
   it("keeps the retry in the command row and Exit setup below the details", () => {
@@ -1711,7 +1724,7 @@ describe("operation commands", () => {
     });
 
     expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe(
-      "Stopping soon… Radius finishes the current step and stops."
+      "Stopping soon…"
     );
   });
 
@@ -2127,7 +2140,11 @@ describe("previewEntryLabel", () => {
 
   it("says nothing extra when the server sent no reason", () => {
     expect(
-      previewEntryLabel({ kind: "azure_app", target: "radius-dev", action: "" })
+      previewEntryLabel({
+        kind: "azure_app",
+        target: "radius-dev",
+        action: ""
+      })
     ).toBe("App Registration: radius-dev");
   });
 });
@@ -4656,11 +4673,7 @@ describe("exiting a setup", () => {
       "Retry setup"
     ]);
     expect(textOf(browser, PROGRESS_IDS.bottomButtons)).toEqual(["Exit setup"]);
-    // The command note describes the row's choices; the exit stands on its own
-    // sentence in the dialog it opens or in the button itself.
-    expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe(
-      "Radius starts again from the failed step."
-    );
+    expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe("");
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
   });
 

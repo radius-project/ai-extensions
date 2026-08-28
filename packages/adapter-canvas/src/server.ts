@@ -739,6 +739,35 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
 // the route module from `operations.ts`, which is independently tested; the
 // merge proof stays in its own service with a single GitHub port. What is
 // injected here is the genuine I/O the routes cannot decide alone.
+function requiredVerificationWorkflowContext(op: {
+  operationId: string;
+  repo?: unknown;
+  verification?: unknown;
+  context?: unknown;
+  [key: string]: unknown;
+}): {
+  identity: ReturnType<typeof requireVerificationWorkflowIdentity>;
+  login: string;
+} {
+  const identity = requireVerificationWorkflowIdentity(op);
+  const operationContext =
+    op.context && typeof op.context === "object" ? op.context : null;
+  const login =
+    (
+      operationContext &&
+      "githubLogin" in operationContext &&
+      typeof operationContext.githubLogin === "string"
+    ) ?
+      operationContext.githubLogin.trim()
+    : "";
+  if (!login) {
+    throw new Error(
+      "The interrupted setup does not record the GitHub account that started it."
+    );
+  }
+  return { identity, login };
+}
+
 const operationsControlRoutes = createOperationsControlRoutes({
   get: (operationId) => operations.get(operationId),
   acquireForRetry: (op) => operations.acquireForRetry(op),
@@ -754,22 +783,7 @@ const operationsControlRoutes = createOperationsControlRoutes({
       errorMessage
     }),
   inspectVerificationWorkflow: async (op) => {
-    const identity = requireVerificationWorkflowIdentity(op);
-    const operationContext =
-      op.context && typeof op.context === "object" ? op.context : null;
-    const login =
-      (
-        operationContext &&
-        "githubLogin" in operationContext &&
-        typeof operationContext.githubLogin === "string"
-      ) ?
-        operationContext.githubLogin.trim()
-      : "";
-    if (!login) {
-      throw new Error(
-        "The interrupted setup does not record the GitHub account that started it."
-      );
-    }
+    const { identity, login } = requiredVerificationWorkflowContext(op);
     const result = await githubAccountCoordinator.withSelectedAccount(
       login,
       { instanceId: "operations-control", operationId: op.operationId },
@@ -785,30 +799,13 @@ const operationsControlRoutes = createOperationsControlRoutes({
     return result.value;
   },
   cancelVerificationWorkflow: async (op) => {
-    const identity = requireVerificationWorkflowIdentity(op);
-    const operationContext =
-      op.context && typeof op.context === "object" ? op.context : null;
-    const login =
-      (
-        operationContext &&
-        "githubLogin" in operationContext &&
-        typeof operationContext.githubLogin === "string"
-      ) ?
-        operationContext.githubLogin.trim()
-      : "";
-    if (!login) {
-      throw new Error(
-        "The interrupted setup does not record the GitHub account that started it."
-      );
-    }
+    const { identity, login } = requiredVerificationWorkflowContext(op);
     const result = await githubAccountCoordinator.withSelectedAccount(
       login,
       { instanceId: "operations-control", operationId: op.operationId },
       (executor) =>
         cancelVerificationWorkflow(executor, identity, {
-          run: (selected, args) => selected.run(args, { timeout: 30000 }),
-          sleep: (milliseconds) =>
-            new Promise((resolve) => setTimeout(resolve, milliseconds))
+          run: (selected, args) => selected.run(args, { timeout: 30000 })
         }),
       30000
     );

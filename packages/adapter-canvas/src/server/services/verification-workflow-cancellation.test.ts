@@ -74,31 +74,20 @@ describe("verification workflow cancellation", () => {
     ).rejects.toThrow('unsupported workflow status "unexpected"');
   });
 
-  it("cancels only the exact run and waits until it is inactive", async () => {
+  it("cancels only the exact run and returns while GitHub settles it", async () => {
     const calls: string[][] = [];
-    let reads = 0;
     await expect(
       cancelVerificationWorkflow(executor, identity, {
         run: async (_executor, args) => {
           calls.push(args);
           if (args[0] === "api") return { code: 0, stdout: "", stderr: "" };
-          reads += 1;
-          return {
-            code: 0,
-            stdout: JSON.stringify({
-              status: reads < 3 ? "in_progress" : "completed"
-            }),
-            stderr: ""
-          };
-        },
-        sleep: async () => {}
+          return { code: 0, stdout: '{"status":"in_progress"}', stderr: "" };
+        }
       })
-    ).resolves.toBe("inactive");
-    expect(calls).toContainEqual([
-      "api",
-      "--method",
-      "POST",
-      "repos/contoso/store/actions/runs/42/cancel"
+    ).resolves.toBe("cancelling");
+    expect(calls).toEqual([
+      ["run", "view", "42", "--json", "status", "--repo", "contoso/store"],
+      ["api", "--method", "POST", "repos/contoso/store/actions/runs/42/cancel"]
     ]);
   });
 
@@ -113,8 +102,7 @@ describe("verification workflow cancellation", () => {
             stdout: '{"status":"completed"}',
             stderr: ""
           };
-        },
-        sleep: async () => {}
+        }
       })
     ).resolves.toBe("inactive");
     expect(calls).toHaveLength(1);
@@ -126,8 +114,7 @@ describe("verification workflow cancellation", () => {
         run: async (_executor, args) =>
           args[0] === "api" ?
             { code: 0, stdout: "", stderr: "" }
-          : { code: 0, stdout: '{"status":"in_progress"}', stderr: "" },
-        sleep: async () => {}
+          : { code: 0, stdout: '{"status":"in_progress"}', stderr: "" }
       })
     ).resolves.toBe("cancelling");
   });
@@ -148,8 +135,7 @@ describe("verification workflow cancellation", () => {
             }),
             stderr: ""
           };
-        },
-        sleep: async () => {}
+        }
       })
     ).resolves.toBe("inactive");
   });
@@ -160,8 +146,7 @@ describe("verification workflow cancellation", () => {
         run: async (_executor, args) =>
           args[0] === "api" ?
             { code: 1, stdout: "", stderr: "cannot cancel" }
-          : { code: 0, stdout: '{"status":"in_progress"}', stderr: "" },
-        sleep: async () => {}
+          : { code: 0, stdout: '{"status":"in_progress"}', stderr: "" }
       })
     ).rejects.toThrow("cannot cancel");
   });

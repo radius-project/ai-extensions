@@ -1782,8 +1782,7 @@ describe("client projection", () => {
     };
 
     expect(toClientView(op).verification).toEqual({
-      dispatchedAt: 1234,
-      workflowState: null
+      dispatchedAt: 1234
     });
     const projected = JSON.stringify(toClientView(op));
     expect(projected).not.toContain("radius-verify-credentials");
@@ -2972,6 +2971,18 @@ describe("startup reconciliation", () => {
     expect(projectOperationActions(op).map((action) => action.id)).toContain(
       "cancel-workflow"
     );
+
+    for (const candidate of [
+      { ...op, repo: "" },
+      { ...op, verification: { ...op.verification, runId: null } },
+      { ...op, context: {} }
+    ]) {
+      const actionIds = projectOperationActions(candidate).map(
+        (action) => action.id
+      );
+      expect(actionIds).not.toContain("cancel-workflow");
+      expect(actionIds).toContain("exit-setup");
+    }
 
     setVerificationWorkflowState(op, "inactive");
     expect(canStartRollback(op).ok).toBe(true);

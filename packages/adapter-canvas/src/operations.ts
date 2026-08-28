@@ -833,6 +833,17 @@ export function verificationWorkflowState(
     : null;
 }
 
+function hasVerificationWorkflowControlIdentity(op: any): boolean {
+  const repo = typeof op?.repo === "string" ? op.repo.trim() : "";
+  const runId =
+    op?.verification?.runId == null ? "" : String(op.verification.runId).trim();
+  const login =
+    typeof op?.context?.githubLogin === "string" ?
+      op.context.githubLogin.trim()
+    : "";
+  return repo !== "" && runId !== "" && login !== "";
+}
+
 export function setVerificationWorkflowState(
   op: any,
   state: VerificationWorkflowState
@@ -3975,7 +3986,7 @@ export function projectOperationActions(op: any): any[] {
     (verificationWorkflowState(op) === "active" ||
       verificationWorkflowState(op) === "cancelling" ||
       verificationWorkflowState(op) === "unknown") &&
-    op.verification?.runId
+    hasVerificationWorkflowControlIdentity(op)
   ) {
     const workflowState = verificationWorkflowState(op);
     const checking =
@@ -5577,8 +5588,7 @@ export function toClientView(op: any): any {
           dispatchedAt:
             typeof op.verification.dispatchedAt === "number" ?
               op.verification.dispatchedAt
-            : null,
-          workflowState: verificationWorkflowState(op)
+            : null
         }
       : null,
     inputRequired: op.inputRequired || null,

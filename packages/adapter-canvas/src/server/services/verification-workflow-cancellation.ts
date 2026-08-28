@@ -20,7 +20,6 @@ export interface VerificationWorkflowCancellationDependencies {
     executor: SelectedGhExecutor,
     args: string[]
   ): Promise<{ code: string | number; stdout: string; stderr: string }>;
-  sleep(milliseconds: number): Promise<void>;
 }
 
 function commandError(result: { stdout: string; stderr: string }): string {
@@ -127,18 +126,6 @@ export async function cancelVerificationWorkflow(
     );
     if (state === "inactive") return "inactive";
     throw new Error(commandError(cancelled));
-  }
-  for (let attempt = 0; attempt < 10; attempt++) {
-    await dependencies.sleep(1000);
-    if (
-      (await readVerificationWorkflowState(
-        executor,
-        identity,
-        dependencies
-      )) === "inactive"
-    ) {
-      return "inactive";
-    }
   }
   return "cancelling";
 }

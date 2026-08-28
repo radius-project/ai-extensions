@@ -599,10 +599,7 @@ describe("stop, then continue or roll back, over the socket", () => {
 
       expect(response.status).toBe(200);
       expect(await body(response)).toMatchObject({
-        code: "workflow-cancelled",
-        operation: {
-          verification: { workflowState: "inactive" }
-        }
+        code: "workflow-cancelled"
       });
       const view = await poll(
         entry.baseUrl,
@@ -637,6 +634,27 @@ describe("stop, then continue or roll back, over the socket", () => {
       });
       expect(harness.scheduled).toEqual([]);
       expect(harness.registry.cleanupRequired("contoso/store")).toBeNull();
+    });
+
+    it("rejects a stale abandon URL after cleanup becomes safe", async () => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-abandon-stale");
+      const op = seed(harness, stoppedSetup({ includeEnvironment: true }));
+      setVerificationWorkflowState(op, "inactive");
+
+      const response = await post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/exit?mode=abandon`
+      );
+
+      expect(response.status).toBe(409);
+      expect(await body(response)).toMatchObject({
+        code: "operation-abandon-not-available"
+      });
+      expect(harness.scheduled).toEqual([]);
+      expect(
+        harness.registry.cleanupRequired("contoso/store")?.operationId
+      ).toBe(op.operationId);
     });
   });
 

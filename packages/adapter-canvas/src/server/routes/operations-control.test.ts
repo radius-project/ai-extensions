@@ -400,6 +400,7 @@ describe("POST /api/operations/{id}/stop", () => {
 
   it("keeps cleanup blocked when workflow status and its update cannot be saved", async () => {
     const op = interruptedVerificationOperation();
+    watchAnnouncements();
     let persists = 0;
     const out = await drive(handleStopOperation, op, "stop", {
       inspectVerificationWorkflow: () =>
@@ -419,6 +420,7 @@ describe("POST /api/operations/{id}/stop", () => {
         "GitHub unavailable Radius also could not save the unknown workflow status: disk gone"
     });
     expect(verificationWorkflowState(op)).toBe("unknown");
+    expect(announced).toEqual([op.operationId]);
     expect(
       out.payload().operation.actions.map((action: { id: string }) => action.id)
     ).not.toContain("rollback");
@@ -1159,9 +1161,7 @@ describe("POST /api/operations/{id}/continue", () => {
       expect(out.recording.status).toBe(200);
       expect(out.payload().code).toBe("workflow-cancelled");
       expect(seen).toEqual(["42"]);
-      expect(toClientView(op).verification).toMatchObject({
-        workflowState: "inactive"
-      });
+      expect(toClientView(op).verification).toEqual({ dispatchedAt: null });
       expect(out.journal.persistCalls).toBe(2);
     });
 
@@ -1577,7 +1577,7 @@ describe("POST /api/operations/{id}/exit", () => {
     ]);
   });
 
-  it("does not turn an explicit abandonment into cleanup when the workflow becomes inactive", async () => {
+  it("rejects a stale abandonment request when ordinary cleanup is safe", async () => {
     const op = stoppedSetup();
     recordGitHubEnvironment(op, {
       state: "created",
@@ -1588,15 +1588,12 @@ describe("POST /api/operations/{id}/exit", () => {
 
     const out = await drive(handleExitOperation, op, "exit?mode=abandon");
 
-    expect(out.recording.status).toBe(200);
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toMatchObject({
+      code: "operation-abandon-not-available"
+    });
     expect(out.journal.scheduled).toEqual([]);
-    expect(op.control.commands).toEqual([
-      expect.objectContaining({
-        kind: EXIT_COMMAND_KIND,
-        state: "finished",
-        outcome: ABANDON_COMMAND_OUTCOME
-      })
-    ]);
+    expect(op.control.commands).toEqual([]);
   });
 
   it("requires an explicit abandonment request when cleanup becomes unsafe", async () => {

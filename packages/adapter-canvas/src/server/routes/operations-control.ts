@@ -428,6 +428,7 @@ export async function handleStopOperation(
         statusUrl: statusUrlFor(operationId),
         operation: clientView(operation)
       });
+      announceOperationTerminal(operation);
       return;
     }
     announceOperationTerminal(operation);
@@ -596,28 +597,23 @@ export async function handleCancelWorkflow(
     attempt: cancellationAttempt,
     target: runId
   });
-  if (accepted.ok) {
-    setCommandState(operation, accepted.command.commandId, "running");
-    setVerificationWorkflowState(operation, "cancelling");
-    try {
-      await dependencies.persistOperations();
-    } catch (error) {
-      rollbackRetryAttempt(operation, snapshot);
-      sendJson(context, 500, {
-        error:
-          "Radius could not save the workflow cancellation request, so it did not contact GitHub. Try again.",
-        code: "workflow-cancel-persist-failed",
-        operationId,
-        detail: errorMessage(error)
-      });
-      return;
-    }
+  setCommandState(operation, accepted.command.commandId, "running");
+  setVerificationWorkflowState(operation, "cancelling");
+  try {
+    await dependencies.persistOperations();
+  } catch (error) {
+    rollbackRetryAttempt(operation, snapshot);
+    sendJson(context, 500, {
+      error:
+        "Radius could not save the workflow cancellation request, so it did not contact GitHub. Try again.",
+      code: "workflow-cancel-persist-failed",
+      operationId,
+      detail: errorMessage(error)
+    });
+    return;
   }
   try {
-    const state =
-      accepted.ok ?
-        await dependencies.cancelVerificationWorkflow(operation)
-      : await dependencies.inspectVerificationWorkflow(operation);
+    const state = await dependencies.cancelVerificationWorkflow(operation);
     setVerificationWorkflowState(operation, state);
     setCommandState(operation, accepted.command.commandId, "finished", state);
     await dependencies.persistOperations();
@@ -765,6 +761,14 @@ const requireCleanupExit: EligibilityCheck = (operation) => {
 const requireAbandonExit: EligibilityCheck = (operation) => {
   const eligibility = canExitSetup(operation);
   if (!eligibility.ok) return eligibility;
+  if (eligibility.abandon !== true) {
+    return {
+      ok: false,
+      code: "operation-abandon-not-available",
+      detail:
+        "Radius can safely clean up this setup. Review the setup again and choose Exit setup."
+    };
+  }
   return {
     ...eligibility,
     targets: [],

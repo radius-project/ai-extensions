@@ -86,6 +86,7 @@ export function environmentsPaneMarkup(
          abandon it. -->
     <div id="env-progress-commands" class="env-progress__commands" role="group" aria-label="Environment setup controls" style="display:none;">
       <div id="env-progress-command-buttons" class="env-progress__command-buttons"></div>
+      <div id="env-progress-command-descriptions" class="env-progress__command-descriptions"></div>
       <div id="env-progress-command-note" class="env-progress__command-note"></div>
       <!-- Why a path the customer might expect is missing. Silence reads as a
            bug, so every refusal that a customer can reach gets a sentence. -->

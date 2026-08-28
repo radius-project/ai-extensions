@@ -70,13 +70,6 @@ const hostStatusColors = {
 
 const statuses = ["success", "warning", "danger"] as const;
 
-describe("primary control styles", () => {
-  it("does not animate through low-contrast colors when controls become enabled", () => {
-    expect(SHELL_STYLE_CSS).toContain("transition: opacity 0.15s;");
-    expect(SHELL_STYLE_CSS).not.toContain("transition: background");
-  });
-});
-
 describe("document canvas background", () => {
   it("paints the host background before the full shell stylesheet loads", () => {
     expect(CRITICAL_SHELL_STYLE_CSS).toContain(

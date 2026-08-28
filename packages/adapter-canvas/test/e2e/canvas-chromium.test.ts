@@ -1429,6 +1429,13 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBeVisible();
     const stop = page.getByRole("button", { name: "Stop setup" });
     await expect(stop).toBeVisible();
+    await expect(stop).toHaveAttribute(
+      "title",
+      "Radius stops this setup. If its exact GitHub Actions run is still active, you can cancel it next."
+    );
+    await expect(stop).toHaveAccessibleDescription(
+      "Radius stops this setup. If its exact GitHub Actions run is still active, you can cancel it next."
+    );
     await expect(
       page.getByRole("button", { name: "Cancel workflow" })
     ).toHaveCount(0);
@@ -1439,6 +1446,9 @@ test.describe("Radius Canvas in Chromium", () => {
       name: "Cancel workflow"
     });
     await expect(cancelWorkflow).toBeVisible();
+    await expect(cancelWorkflow).toHaveAccessibleDescription(
+      "Radius cancels only the exact GitHub Actions run recorded for this setup."
+    );
     await expect(
       page.getByRole("button", { name: "Roll back created resources" })
     ).toHaveCount(0);
@@ -1447,7 +1457,9 @@ test.describe("Radius Canvas in Chromium", () => {
     );
     await expect(
       page.getByRole("button", { name: "Abandon setup" })
-    ).toBeVisible();
+    ).toHaveAccessibleDescription(
+      "Radius closes this setup without deleting resources that may still be used by external work. You can start Create Environment again, but you may need to remove or reuse the remaining resources manually."
+    );
     await cancelWorkflow.focus();
     await page.keyboard.press("Enter");
 
