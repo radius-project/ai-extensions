@@ -1404,6 +1404,102 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
   });
 
+  test("follows the latest setup detail until the user scrolls up", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let stepCount = 12;
+    const operationPayload = (stepCount: number) => ({
+      operation: {
+        operationId: "op_scroll_follow",
+        environment: "fixture-environment",
+        provider: "azure",
+        state: "running",
+        terminalState: null,
+        summary: "Creating fixture-environment…",
+        currentStage: "provision",
+        stages: [{ state: "running", label: "Provision" }],
+        steps: Array.from({ length: stepCount }, (_, index) => ({
+          state: index === stepCount - 1 ? "running" : "succeeded",
+          label: `Setup detail ${index + 1}`
+        })),
+        failure: null,
+        cleanup: null,
+        verification: null,
+        inputRequired: null,
+        startedAt: new Date(0).toISOString(),
+        endedAt: null,
+        terminal: null
+      }
+    });
+    await page.route("**/api/operations**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(operationPayload(stepCount))
+      });
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+    const details = page.locator("#env-progress-details");
+    const steps = page.locator("#env-progress-steps");
+    await expect(details).toBeVisible();
+    await steps.evaluate((element) => {
+      Reflect.set(Reflect.get(element, "style"), "maxHeight", "48px");
+    });
+    await details.locator("summary").click();
+    await expect
+      .poll(() =>
+        steps.evaluate(
+          (element) =>
+            Number(Reflect.get(element, "scrollHeight")) -
+            Number(Reflect.get(element, "scrollTop")) -
+            Number(Reflect.get(element, "clientHeight"))
+        )
+      )
+      .toBeLessThanOrEqual(4);
+
+    await steps.evaluate((element) => {
+      Reflect.set(element, "scrollTop", 0);
+      const dispatch = Reflect.get(element, "dispatchEvent");
+      if (typeof dispatch !== "function") throw new Error("Missing dispatch");
+      dispatch.call(element, new Event("scroll"));
+    });
+    stepCount = 13;
+    await page.clock.fastForward(1500);
+    await expect(steps).toContainText("Setup detail 13");
+    await expect
+      .poll(() =>
+        steps.evaluate((element) => Number(Reflect.get(element, "scrollTop")))
+      )
+      .toBe(0);
+
+    await steps.evaluate((element) => {
+      Reflect.set(
+        element,
+        "scrollTop",
+        Number(Reflect.get(element, "scrollHeight"))
+      );
+      const dispatch = Reflect.get(element, "dispatchEvent");
+      if (typeof dispatch !== "function") throw new Error("Missing dispatch");
+      dispatch.call(element, new Event("scroll"));
+    });
+    stepCount = 14;
+    await page.clock.fastForward(1500);
+    await expect(steps).toContainText("Setup detail 14");
+    await expect
+      .poll(() =>
+        steps.evaluate(
+          (element) =>
+            Number(Reflect.get(element, "scrollHeight")) -
+            Number(Reflect.get(element, "scrollTop")) -
+            Number(Reflect.get(element, "clientHeight"))
+        )
+      )
+      .toBeLessThanOrEqual(4);
+  });
+
   test("retries restored verification through the selected account and exact run identity @safety", async ({
     page,
     canvas

@@ -504,7 +504,11 @@ describe("parseOperationResponse", () => {
               ],
               keeps: "not-a-list",
               manualActionRequired: [
-                { kind: "role_assignment", target: "Contributor", action: "Go" }
+                {
+                  kind: "role_assignment",
+                  target: "Contributor",
+                  action: "Go"
+                }
               ]
             }
           },
@@ -797,6 +801,56 @@ describe("trackProgress rendering", () => {
     controller?.renderProgress(record({ stages: [], steps: [] }));
     expect(browser.els[PROGRESS_IDS.stages].children).toHaveLength(0);
     expect(browser.els[PROGRESS_IDS.steps].children).toHaveLength(0);
+  });
+
+  it("follows the latest step until the user scrolls up and resumes at the bottom", () => {
+    const browser = setup();
+    const steps = browser.els[PROGRESS_IDS.steps];
+    const details = browser.els[PROGRESS_IDS.details];
+    steps.scrollHeight = 200;
+    steps.clientHeight = 50;
+    const controller = controllerFor(browser);
+
+    controller?.renderProgress(
+      record({ steps: [{ state: "running", label: "Step one" }] })
+    );
+    expect(steps.scrollTop).toBe(200);
+
+    steps.scrollTop = 40;
+    steps.dispatch("scroll");
+    steps.scrollHeight = 240;
+    controller?.renderProgress(
+      record({
+        steps: [
+          { state: "succeeded", label: "Step one" },
+          { state: "running", label: "Step two" }
+        ]
+      })
+    );
+    expect(steps.scrollTop).toBe(40);
+
+    steps.scrollTop = 190;
+    steps.dispatch("scroll");
+    steps.scrollHeight = 280;
+    controller?.renderProgress(
+      record({
+        steps: [
+          { state: "succeeded", label: "Step one" },
+          { state: "succeeded", label: "Step two" },
+          { state: "running", label: "Step three" }
+        ]
+      })
+    );
+    expect(steps.scrollTop).toBe(280);
+
+    steps.scrollTop = 0;
+    details.setAttribute("open", "");
+    details.dispatch("toggle");
+    expect(steps.scrollTop).toBe(280);
+
+    controller?.teardown();
+    expect(steps.listenerCount("scroll")).toBe(0);
+    expect(details.listenerCount("toggle")).toBe(0);
   });
 
   it("falls back to a default glyph for an unrecognized stage or step state", () => {
@@ -1143,7 +1197,11 @@ describe("verify status polling", () => {
     const controller = controllerFor(browser);
     await primeVerifyPoll(browser, controller);
     browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
-      jsonResponse({ state: "failed", error: "Actions run failed", runUrl: "" })
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        runUrl: ""
+      })
     );
 
     await tickClock(browser.clock, 1500);
@@ -2127,7 +2185,11 @@ describe("previewEntryLabel", () => {
 
   it("says nothing extra when the server sent no reason", () => {
     expect(
-      previewEntryLabel({ kind: "azure_app", target: "radius-dev", action: "" })
+      previewEntryLabel({
+        kind: "azure_app",
+        target: "radius-dev",
+        action: ""
+      })
     ).toBe("App Registration: radius-dev");
   });
 });

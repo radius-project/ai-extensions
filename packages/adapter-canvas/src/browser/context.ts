@@ -24,6 +24,8 @@ import type {
   StoragePort
 } from "./ports.js";
 
+const SCROLL_END_TOLERANCE_PX = 4;
+
 function readMember(value: unknown, name: string): unknown {
   if (
     (typeof value !== "object" || value === null) &&
@@ -217,6 +219,22 @@ export function createDomPort(
         );
       }
       dispatchEvent.call(target, Reflect.construct(eventConstructor, [type]));
+    },
+    isScrolledToEnd(element) {
+      const top = readMember(element, "scrollTop");
+      const height = readMember(element, "scrollHeight");
+      const viewport = readMember(element, "clientHeight");
+      if (
+        typeof top !== "number" ||
+        !Number.isFinite(top) ||
+        typeof height !== "number" ||
+        !Number.isFinite(height) ||
+        typeof viewport !== "number" ||
+        !Number.isFinite(viewport)
+      ) {
+        return false;
+      }
+      return height - top - viewport <= SCROLL_END_TOLERANCE_PX;
     },
     scrollToEnd(element) {
       const height = readMember(element, "scrollHeight");
