@@ -19,24 +19,29 @@
 // The announcement therefore bridges the gap up to the staging directory, and
 // the staging directory carries the rest of the run.
 
-// How long an announcement is trusted on its own. It only has to survive from
-// the tool call to `--begin`, which is the skill's first step, so this is
-// generous rather than tuned. It is also the blast radius of a run that dies
-// before it stages anything: after this, a render asks again.
-export const MODELING_ANNOUNCEMENT_TTL_MS = 300000; // 5 min
+import {
+  GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
+  GRAPH_APP_BICEP_MAX_WAIT_MS
+} from "../graph-progress-contract.js";
 
-// Keep this aligned with STAGING_STALE_AFTER_MS in promote-app-model.mjs. A
-// completed run removes its staging directory, so a directory with no activity
-// for this long belongs to an interrupted run and must not suppress authoring
-// forever.
-export const MODELING_STAGING_ACTIVITY_TTL_MS = 6 * 60 * 60 * 1000;
+// These signals suppress the recovery handoff, so each must expire before the
+// graph's corresponding wait budget. The remaining minute lets the live page
+// poll again and enqueue recovery before its own terminal timeout.
+export const MODELING_ANNOUNCEMENT_TTL_MS =
+  GRAPH_APP_BICEP_IDLE_TIMEOUT_MS - 60_000;
+export const MODELING_STAGING_ACTIVITY_TTL_MS =
+  GRAPH_APP_BICEP_MAX_WAIT_MS - 60_000;
 
 export interface ModelingAnnouncement {
   repo: string;
-  // The branch being modeled. Empty when the target could not be resolved,
-  // which matches any branch of the repo rather than none: an announcement that
-  // cannot name its branch is still evidence that this repo is being modeled.
   branch: string;
+}
+
+export interface ModelingWorkspace {
+  repo: string;
+  branch: string;
+  path?: string | null;
+  waitStartedAtMs?: number;
 }
 
 export interface ModelingActivityDependencies {
@@ -47,13 +52,18 @@ export interface ModelingActivityDependencies {
   // branch or a different repository.
   observeStagedRun(
     repo: string,
-    branches: ReadonlyArray<string>
+    branches: ReadonlyArray<string>,
+    workspace: ModelingWorkspace
   ): Promise<number | null>;
 }
 
 export interface ModelingActivity {
   announce(announcement: ModelingAnnouncement): void;
-  inFlight(repo: string, branches: ReadonlyArray<string>): Promise<boolean>;
+  inFlight(
+    repo: string,
+    branches: ReadonlyArray<string>,
+    workspace: ModelingWorkspace
+  ): Promise<boolean>;
 }
 
 // Bounds the announcement map. One entry per repo+branch modeled in this
@@ -79,12 +89,16 @@ export function createModelingActivity(
   const announced = (
     nowMs: number,
     repo: string,
-    branches: ReadonlyArray<string>
+    branches: ReadonlyArray<string>,
+    workspace: ModelingWorkspace
   ): boolean => {
-    // "" is the wildcard an unresolvable target records itself under, so it is
-    // always a candidate alongside the named branches.
-    const candidates = ["", ...branches];
-    return candidates.some((branch) => {
+    if (
+      workspace.waitStartedAtMs !== undefined &&
+      nowMs - workspace.waitStartedAtMs >= MODELING_ANNOUNCEMENT_TTL_MS
+    ) {
+      return false;
+    }
+    return branches.some((branch) => {
       const atMs = announcements.get(keyFor(repo, branch));
       return atMs !== undefined && nowMs - atMs < MODELING_ANNOUNCEMENT_TTL_MS;
     });
@@ -92,7 +106,7 @@ export function createModelingActivity(
 
   return {
     announce({ repo, branch }: ModelingAnnouncement): void {
-      if (!repo) return;
+      if (!repo || !branch) return;
       const nowMs = deps.now();
       announcements.delete(keyFor(repo, branch));
       announcements.set(keyFor(repo, branch), nowMs);
@@ -101,18 +115,27 @@ export function createModelingActivity(
 
     async inFlight(
       repo: string,
-      branches: ReadonlyArray<string>
+      branches: ReadonlyArray<string>,
+      workspace: ModelingWorkspace
     ): Promise<boolean> {
       if (!repo) return false;
-      if (announced(deps.now(), repo, branches)) return true;
+      const nowMs = deps.now();
+      if (announced(nowMs, repo, branches, workspace)) return true;
       // A probe that cannot answer must not claim a run is in flight: this
       // suppresses the authoring handoff, so an unreadable workspace has to
       // leave the question askable rather than silence it.
       try {
-        const activityAtMs = await deps.observeStagedRun(repo, branches);
+        const activityAtMs = await deps.observeStagedRun(
+          repo,
+          branches,
+          workspace
+        );
         return (
           activityAtMs !== null &&
-          deps.now() - activityAtMs < MODELING_STAGING_ACTIVITY_TTL_MS
+          deps.now() - activityAtMs < MODELING_STAGING_ACTIVITY_TTL_MS &&
+          (workspace.waitStartedAtMs === undefined ||
+            deps.now() - workspace.waitStartedAtMs <
+              MODELING_STAGING_ACTIVITY_TTL_MS)
         );
       } catch {
         return false;

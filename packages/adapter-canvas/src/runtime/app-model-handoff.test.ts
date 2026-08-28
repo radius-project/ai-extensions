@@ -12,7 +12,16 @@ import type {
   AppModelFreshnessStatus,
   AppSourceEvaluation
 } from "@radius-project/core";
-import type { CanvasState } from "../shared.js";
+import type {
+  CanvasState,
+  GraphProgressRecord,
+  GraphProgressView
+} from "../shared.js";
+import {
+  createMissingModelHandoffClaims,
+  MISSING_MODEL_HANDOFF_CLAIM_TTL_MS
+} from "./missing-model-handoff-claims.js";
+import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
 
 interface StatusOverrides {
   status?: AppModelFreshnessStatus;
@@ -59,6 +68,22 @@ const MODELABLE: AppSourceEvaluation = {
 };
 const UNMODELABLE: AppSourceEvaluation = { status: "none", dockerfiles: [] };
 
+function progressRecord(
+  view: GraphProgressView,
+  startedAtMs: number
+): GraphProgressRecord {
+  return {
+    graphBuildEvents: [],
+    graphProgressGeneration: 1,
+    graphProgressStartedAtMs: startedAtMs,
+    graphProgressActive: true,
+    graphProgressView: view,
+    graphProgressKey: `${view}-key`,
+    graphProgressOwner: 1,
+    graphProgressAwaitingModel: true
+  };
+}
+
 function harness(
   overrides: Partial<AppModelHandoffDependencies> & {
     statuses?: Record<string, AppModelStatus>;
@@ -69,7 +94,7 @@ function harness(
   const logged: string[] = [];
   const waits: number[] = [];
   const requested = new Set<string>();
-  const claimedMissingModelHandoffs = new Set<string>();
+  let nowMs = 1_000_000;
   const resolveContext = vi.fn(async (): Promise<CanvasState> => ({
     workspaceRepo: "a/b",
     workspaceBranch: "feat"
@@ -107,15 +132,7 @@ function harness(
     releaseRefreshMemo: (key: string) => {
       requested.delete(key);
     },
-    claimMissingModelHandoff: (target: string, key: string) => {
-      const mapKey = `${target}::${key}`;
-      if (claimedMissingModelHandoffs.has(mapKey)) return false;
-      claimedMissingModelHandoffs.add(mapKey);
-      return true;
-    },
-    releaseMissingModelHandoff: (target: string, key: string) => {
-      claimedMissingModelHandoffs.delete(`${target}::${key}`);
-    },
+    missingModelHandoffs: createMissingModelHandoffClaims(() => nowMs),
     ...overrides
   };
   return {
@@ -126,7 +143,10 @@ function harness(
     modelingInFlight,
     resolveContext,
     resolveStatus,
-    evaluateSource
+    evaluateSource,
+    advance: (ms: number) => {
+      nowMs += ms;
+    }
   };
 }
 
@@ -309,7 +329,15 @@ describe("createAppModelHandoff", () => {
     const polls = MODELING_GRACE_WINDOW_MS / MODELING_GRACE_POLL_MS;
     expect(waits).toHaveLength(polls);
     expect(modelingInFlight).toHaveBeenCalledTimes(polls + 1);
-    expect(modelingInFlight).toHaveBeenLastCalledWith("a/b", ["feat"]);
+    expect(modelingInFlight).toHaveBeenLastCalledWith(
+      "a/b",
+      ["feat"],
+      expect.objectContaining({
+        workspaceRepo: "a/b",
+        workspaceBranch: "feat"
+      }),
+      undefined
+    );
   });
 
   it("re-reads the model before speaking, because a run can start and finish inside the window", async () => {
@@ -328,12 +356,17 @@ describe("createAppModelHandoff", () => {
     expect(sent).toHaveLength(0);
   });
 
-  it("still asks when a diff's other branch gained a model but the reported one did not", async () => {
+  it("stops asking once either diff branch gains a model because the route can render the other as added or removed", async () => {
     const statuses: Record<string, AppModelStatus> = {
       main: modelStatus("a/b", "main", { status: "missing" }),
       feat: modelStatus("a/b", "feat", { status: "missing" })
     };
-    const { handOff, sent } = harness({ statuses });
+    const { handOff, sent } = harness({
+      statuses,
+      wait: async () => {
+        statuses.feat = modelStatus("a/b", "feat");
+      }
+    });
 
     await handOff({
       repo: "a/b",
@@ -341,7 +374,7 @@ describe("createAppModelHandoff", () => {
       page: "graph-diff"
     });
 
-    expect(sent).toHaveLength(1);
+    expect(sent).toHaveLength(0);
   });
 
   it("propagates a probe that breaks rather than silently asking anyway", async () => {
@@ -416,6 +449,40 @@ describe("createAppModelHandoff", () => {
     expect(state.appBicepHandoffKey).toBe("newer-request");
   });
 
+  it("does not clear a newer shared owner when an older status read reports a model", async () => {
+    let finishStatus!: (status: AppModelStatus) => void;
+    const missingModelHandoffs = createMissingModelHandoffClaims(
+      () => 1_000_000
+    );
+    const oldOwner = missingModelHandoffs.claim("a/b::feat", "old");
+    if (!oldOwner) throw new Error("expected old owner");
+    const resolveStatus = vi.fn(
+      () =>
+        new Promise<AppModelStatus>((resolve) => {
+          finishStatus = resolve;
+        })
+    );
+    const { handOff } = harness({
+      missingModelHandoffs,
+      resolveStatus
+    });
+
+    const staleRead = handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph"
+    });
+    await vi.waitFor(() => expect(resolveStatus).toHaveBeenCalledOnce());
+    missingModelHandoffs.release(oldOwner);
+    const newOwner = missingModelHandoffs.claim("a/b::feat", "new");
+    if (!newOwner) throw new Error("expected new owner");
+
+    finishStatus(modelStatus("a/b", "feat"));
+    await staleRead;
+
+    expect(missingModelHandoffs.owns(newOwner)).toBe(true);
+  });
+
   it("sends only once when the canvas is closed and reopened mid-grace-window, producing a second CanvasState for the same target", async () => {
     // The per-CanvasState reservation only dedupes calls sharing one state
     // object. Closing the panel and reopening it while the first handoff is
@@ -448,6 +515,114 @@ describe("createAppModelHandoff", () => {
 
     expect(sent).toHaveLength(1);
   });
+
+  it("leaves the reopened panel retryable when it loses the shared claim and the owner later defers", async () => {
+    const stateA: CanvasState = {};
+    const stateB: CanvasState = {};
+    let finishProbe!: (inFlight: boolean) => void;
+    const modelingInFlight = vi
+      .fn<() => Promise<boolean>>()
+      .mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            finishProbe = resolve;
+          })
+      )
+      .mockResolvedValue(false);
+    const { handOff, sent } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
+      modelingInFlight
+    });
+
+    const owner = handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state: stateA
+    });
+    await vi.waitFor(() => expect(modelingInFlight).toHaveBeenCalledOnce());
+    await handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state: stateB
+    });
+    expect(stateB.appBicepHandoffKey).toBeUndefined();
+
+    finishProbe(true);
+    await owner;
+    await handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state: stateB
+    });
+
+    expect(sent).toHaveLength(1);
+  });
+
+  it("keeps a delivered handoff deduped while queued, then allows retry before the graph idle timeout", async () => {
+    const { handOff, sent, advance } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) }
+    });
+    const request = (state: CanvasState) => ({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state
+    });
+
+    await handOff(request({}));
+    await handOff(request({}));
+    expect(sent).toHaveLength(1);
+
+    advance(MISSING_MODEL_HANDOFF_CLAIM_TTL_MS);
+    await handOff(request({}));
+
+    expect(sent).toHaveLength(2);
+  });
+
+  it.each([
+    { page: "graph", progressView: "graph" },
+    { page: "graph", progressView: "planned" },
+    { page: "graph-diff", progressView: "diff" }
+  ] as const)(
+    "caps a delivered $progressView claim against that view's absolute graph deadline",
+    async ({ page, progressView }) => {
+      const nowMs = 1_000_000;
+      const expiredStart = nowMs - (GRAPH_APP_BICEP_IDLE_TIMEOUT_MS - 60_000);
+      const records = {
+        graph: progressRecord("graph", nowMs),
+        planned: progressRecord("planned", nowMs),
+        diff: progressRecord("diff", nowMs),
+        [progressView]: progressRecord(progressView, expiredStart)
+      };
+      const { handOff, sent } = harness({
+        statuses: {
+          main: modelStatus("a/b", "main", { status: "missing" }),
+          feat: modelStatus("a/b", "feat", { status: "missing" })
+        }
+      });
+      const branches = progressView === "diff" ? ["main", "feat"] : ["feat"];
+      const request = (canvasInstanceId: string) => ({
+        repo: "a/b",
+        branches,
+        page,
+        progressView,
+        state: {
+          canvasInstanceId,
+          workspaceRepo: "a/b",
+          workspaceBranch: "feat",
+          graphProgressRecords: records
+        }
+      });
+
+      await handOff(request("first"));
+      await handOff(request("second"));
+
+      expect(sent).toHaveLength(2);
+    }
+  );
 
   it("does not watch for a run at all when the repository cannot be modeled", async () => {
     const { handOff, sent, waits, modelingInFlight } = harness({
@@ -721,7 +896,7 @@ describe("createAppModelHandoff", () => {
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph", state });
 
     expect(sent).toHaveLength(1);
-    expect(state.appBicepHandoffKey).toBeTruthy();
+    expect(state.appBicepHandoffKey).toBeUndefined();
   });
 
   it("does not consult the source listing when a model already exists", async () => {
@@ -863,12 +1038,16 @@ describe("createAppModelHandoff", () => {
     expect(sent).toHaveLength(2);
   });
 
-  it("reports every render when no panel state carries the previous key", async () => {
-    const { handOff, sent } = harness({
+  it("dedupes state-free renders while delivery may still be queued, then retries after expiry", async () => {
+    const { handOff, sent, advance } = harness({
       statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) }
     });
 
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph" });
+    await handOff({ repo: "a/b", branches: ["feat"], page: "graph" });
+    expect(sent).toHaveLength(1);
+
+    advance(MISSING_MODEL_HANDOFF_CLAIM_TTL_MS);
     await handOff({ repo: "a/b", branches: ["feat"], page: "graph" });
 
     expect(sent).toHaveLength(2);

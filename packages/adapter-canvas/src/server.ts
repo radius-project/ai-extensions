@@ -508,6 +508,7 @@ interface AppBicepHandoffInput {
   repo: string;
   branches: string[];
   page: string;
+  progressView?: GraphProgressView;
   // The instance's state, so the runtime can resolve each branch's model
   // against the same workspace context the route just rendered from, and so it
   // can deduplicate against the handoff it last performed for this panel.
@@ -2156,7 +2157,8 @@ function triggerAppBicepHandoff(
   entry: { state: CanvasState } | undefined,
   repo: string,
   branches: string | string[],
-  page: string
+  page: string,
+  progressView: GraphProgressView = page === "graph-diff" ? "diff" : "graph"
 ): void {
   try {
     if (typeof appBicepHandoff !== "function") return;
@@ -2165,7 +2167,13 @@ function triggerAppBicepHandoff(
       (branch): branch is string => Boolean(branch)
     );
     Promise.resolve(
-      appBicepHandoff({ repo, branches: list, page, state: entry?.state })
+      appBicepHandoff({
+        repo,
+        branches: list,
+        page,
+        progressView,
+        state: entry?.state
+      })
     ).catch(() => {});
   } catch {
     /* never let a handoff failure break the response */

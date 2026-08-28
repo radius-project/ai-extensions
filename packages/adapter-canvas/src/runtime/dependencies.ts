@@ -9,7 +9,11 @@
 // handler exercises the injected dependencies.
 
 import type { CanvasServerEntry, SessionPromptMessage } from "../server.js";
-import type { CanvasGraphResource, CanvasState } from "../shared.js";
+import type {
+  CanvasGraphResource,
+  CanvasState,
+  GraphProgressView
+} from "../shared.js";
 import type {
   DeployServerEntry,
   DeployToolArgs,
@@ -216,6 +220,7 @@ export interface HostCallbackDependencies {
       repo: string;
       branches: string[];
       page: string;
+      progressView?: GraphProgressView;
       // The canvas instance's state, so the runtime resolves each branch's model
       // against the same workspace context the route rendered from and can
       // deduplicate against this panel's last handoff.
@@ -271,10 +276,6 @@ export interface ProcessDependencies {
   ): Promise<{ stdout: string; stderr: string }>;
 }
 
-// Facts needed to decide whether an existing application model still describes
-// the branch it sits on. Grouped into one narrow port so the freshness check has
-// a single seam: a graph open reads an origin record, a head commit, and the installed
-// generator version, and nothing else.
 // Time, injected so the runtime owns no ambient clock and no test has to spend
 // real seconds waiting for a window to close.
 export interface ClockDependencies {
@@ -282,6 +283,10 @@ export interface ClockDependencies {
   wait(ms: number): Promise<void>;
 }
 
+// Facts needed to decide whether an existing application model still describes
+// the branch it sits on. Grouped into one narrow port so the freshness check has
+// a single seam: a graph open reads an origin record, a head commit, and the installed
+// generator version, and nothing else.
 export interface AppModelDependencies {
   // Installed generator (radius-app-bicep) version, or "" when unresolvable.
   generatorVersion(): string;

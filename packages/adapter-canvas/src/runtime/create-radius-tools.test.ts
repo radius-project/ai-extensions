@@ -104,6 +104,22 @@ describe("RU-07: radius_generate_app", () => {
     });
   });
 
+  it("does not announce a repository-wide wildcard when the workspace branch is unresolved", async () => {
+    const { tools, modelingActivity } = setup({
+      workspaceContext: {
+        workspacePath: "/workspace",
+        repo: "acme/widgets",
+        branch: ""
+      }
+    });
+
+    await findTool(tools, "radius_generate_app").handler({
+      repoPath: "/workspace"
+    });
+
+    expect(modelingActivity.announce).not.toHaveBeenCalled();
+  });
+
   it("announces the run when the agent is briefed about several candidate directories", async () => {
     const { tools, modelingActivity } = setup({
       workspaceTreeByRepoBranch: {

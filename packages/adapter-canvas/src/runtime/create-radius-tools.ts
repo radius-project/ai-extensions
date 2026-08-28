@@ -26,10 +26,8 @@ interface ToolArgs {
 export function createRadiusTools(
   deps: RadiusExtensionDependencies,
   // Told when this tool hands the modeling skill over, so a graph render that
-  // finds no model does not ask for the run that is about to start. Optional so
-  // an existing caller that only wants the tools keeps working; the composition
-  // root always supplies it.
-  modelingActivity?: ModelingActivity
+  // finds no model does not ask for the run that is about to start.
+  modelingActivity: ModelingActivity
 ) {
   const {
     workspaceState,
@@ -54,10 +52,10 @@ export function createRadiusTools(
   // only on the paths that actually hand the skill over: a refused repository
   // is not being modeled.
   function announceModelingRun(state: CanvasState | null): void {
-    if (!state?.contextRepo) return;
-    modelingActivity?.announce({
+    if (!state?.contextRepo || !state.contextBranch) return;
+    modelingActivity.announce({
       repo: state.contextRepo,
-      branch: state.contextBranch || ""
+      branch: state.contextBranch
     });
   }
 

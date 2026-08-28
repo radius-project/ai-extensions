@@ -4,16 +4,37 @@ import {
   MODELING_ANNOUNCEMENT_TTL_MS,
   MODELING_STAGING_ACTIVITY_TTL_MS
 } from "./modeling-activity.js";
-import type { ModelingActivityDependencies } from "./modeling-activity.js";
+import type {
+  ModelingActivityDependencies,
+  ModelingWorkspace
+} from "./modeling-activity.js";
+import {
+  GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
+  GRAPH_APP_BICEP_MAX_WAIT_MS
+} from "../graph-progress-contract.js";
+
+const WORKSPACE = {
+  repo: "a/b",
+  branch: "feat",
+  path: "/workspace"
+};
 
 function harness(overrides: Partial<ModelingActivityDependencies> = {}) {
   let nowMs = 1_000_000;
   const observeStagedRun = vi.fn(async () => null as number | null);
-  const activity = createModelingActivity({
+  const rawActivity = createModelingActivity({
     now: () => nowMs,
     observeStagedRun,
     ...overrides
   });
+  const activity = {
+    announce: rawActivity.announce,
+    inFlight: (
+      repo: string,
+      branches: ReadonlyArray<string>,
+      workspace: ModelingWorkspace = WORKSPACE
+    ) => rawActivity.inFlight(repo, branches, workspace)
+  };
   return {
     activity,
     observeStagedRun,
@@ -44,13 +65,20 @@ describe("createModelingActivity", () => {
     expect(await activity.inFlight("other/repo", ["feat"])).toBe(false);
   });
 
-  it("treats an announcement with no resolvable branch as covering the repo", async () => {
+  it("treats a run for either diff side as sufficient because one model makes the diff renderable", async () => {
+    const { activity } = harness();
+    activity.announce({ repo: "a/b", branch: "feat" });
+
+    expect(await activity.inFlight("a/b", ["main", "feat"])).toBe(true);
+  });
+
+  it("does not let an unresolved branch announcement suppress named branches", async () => {
     const { activity } = harness();
 
     activity.announce({ repo: "a/b", branch: "" });
 
-    expect(await activity.inFlight("a/b", ["feat"])).toBe(true);
-    expect(await activity.inFlight("a/b", ["main"])).toBe(true);
+    expect(await activity.inFlight("a/b", ["feat"])).toBe(false);
+    expect(await activity.inFlight("a/b", ["main"])).toBe(false);
   });
 
   it("ignores an announcement that cannot name its repository", async () => {
@@ -90,7 +118,7 @@ describe("createModelingActivity", () => {
     advance(MODELING_ANNOUNCEMENT_TTL_MS);
 
     expect(await activity.inFlight("a/b", ["feat"])).toBe(true);
-    expect(observeStagedRun).toHaveBeenCalledWith("a/b", ["feat"]);
+    expect(observeStagedRun).toHaveBeenCalledWith("a/b", ["feat"], WORKSPACE);
   });
 
   it("trusts staging activity until its inactivity window closes", async () => {
@@ -108,6 +136,29 @@ describe("createModelingActivity", () => {
     });
 
     expect(await activity.inFlight("a/b", ["feat"])).toBe(false);
+  });
+
+  it("expires each suppressing signal before the graph's corresponding wait budget", () => {
+    expect(MODELING_ANNOUNCEMENT_TTL_MS).toBeLessThan(
+      GRAPH_APP_BICEP_IDLE_TIMEOUT_MS
+    );
+    expect(MODELING_STAGING_ACTIVITY_TTL_MS).toBeLessThan(
+      GRAPH_APP_BICEP_MAX_WAIT_MS
+    );
+  });
+
+  it("does not suppress recovery after an already-aged graph exhausts the signal budget", async () => {
+    const { activity } = harness({
+      observeStagedRun: async () => 1_000_000
+    });
+    activity.announce({ repo: "a/b", branch: "feat" });
+
+    expect(
+      await activity.inFlight("a/b", ["feat"], {
+        ...WORKSPACE,
+        waitStartedAtMs: 1_000_000 - MODELING_STAGING_ACTIVITY_TTL_MS
+      })
+    ).toBe(false);
   });
 
   it("reports no run when nothing is staged", async () => {

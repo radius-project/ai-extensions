@@ -72,28 +72,28 @@ describe("appBicepHandoffPrompt", () => {
   it("makes generation conditional on a re-check, because a queued handoff can arrive after the model exists", () => {
     const msg = appBicepHandoffPrompt("acme/widgets", "graph", ["feat"]);
     expect(msg).toContain("Generate it if it is still missing");
-    expect(msg).toContain("may have waited behind a turn that was already");
-    expect(msg).toContain("check whether .radius/app.bicep is now present");
+    expect(msg).toContain("may have queued behind another turn");
+    expect(msg).toContain("Recheck .radius/app.bicep");
     expect(msg).toContain("on branch `feat`");
-    expect(msg).toContain("generate nothing");
-    expect(msg).toContain("Only generate the model if it is genuinely still");
+    expect(msg).toContain("do not regenerate it");
+    expect(msg).toContain("Generate only while the model is still missing");
   });
 
   it("tells an in-place view to stand down rather than reopen when the model already arrived", () => {
     expect(appBicepHandoffPrompt("acme/widgets", "graph", ["feat"])).toContain(
-      "picks the model up on its own"
+      "picks it up automatically"
     );
   });
 
   it("tells a reopening view to open itself rather than regenerate when the model already arrived", () => {
     const msg = appBicepHandoffPrompt("acme/widgets", "planned", ["feat"]);
-    expect(msg).toContain("open the planned view again so it loads");
-    expect(msg).not.toContain("picks the model up on its own");
+    expect(msg).toContain("reopen the planned view so it loads");
+    expect(msg).not.toContain("picks it up automatically");
   });
 
   it("falls back to naming the selected branch when no branch is given", () => {
     expect(appBicepHandoffPrompt("acme/widgets", "graph")).toContain(
-      "now present on the selected branch"
+      ".radius/app.bicep on the selected branch"
     );
   });
 

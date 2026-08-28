@@ -78,11 +78,11 @@ function staleHandoffGuard(
   const phrase = branchPhrase(branches);
   const onPhrase = phrase ? ` on ${phrase}` : " on the selected branch";
   return [
-    `This request may have waited behind a turn that was already running, so it can arrive after the model exists. Before doing anything, check whether .radius/app.bicep is now present${onPhrase}.`,
+    `This handoff may have queued behind another turn. Recheck .radius/app.bicep${onPhrase} before acting.`,
     rendersInPlace ?
-      `If it is present, generate nothing: the view at instanceId \`${canvasInstanceId}\` picks the model up on its own, and regenerating would repeat work already done and overwrite the model that was just written.`
-    : `If it is present, generate nothing — open the ${page} view again so it loads. Regenerating would repeat work already done and overwrite the model that was just written.`,
-    "Only generate the model if it is genuinely still missing."
+      `If it exists, do not regenerate it; the view at instanceId \`${canvasInstanceId}\` picks it up automatically.`
+    : `If it exists, do not regenerate it; reopen the ${page} view so it loads.`,
+    "Generate only while the model is still missing."
   ].join(" ");
 }
 

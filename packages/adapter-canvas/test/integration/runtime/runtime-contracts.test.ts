@@ -845,6 +845,43 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     await harness.extension.shutdown("test");
   });
 
+  it("deduplicates missing-model delivery across canvas states without rediscovering the workspace on every poll", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["Dockerfile", "src/index.ts"]
+      }
+    });
+    const handoff = harness.capturedHostCallbacks.appBicepHandoff;
+    if (!handoff) throw new Error("runtime registered no app-model handoff");
+    const state = (canvasInstanceId: string) => ({
+      canvasInstanceId,
+      workspacePath: "/workspace",
+      workspaceRepo: "acme/widgets",
+      workspaceBranch: "main",
+      contextRepo: "acme/widgets",
+      contextBranch: "main"
+    });
+    const request = (canvasInstanceId: string) => ({
+      repo: "acme/widgets",
+      branches: ["main"],
+      page: "graph",
+      state: state(canvasInstanceId)
+    });
+
+    await handoff(request("closed-panel"));
+    await handoff(request("reopened-panel"));
+
+    expect(harness.session.send).toHaveBeenCalledTimes(1);
+    expect(
+      harness.deps.workspace.detectWorkspaceContext
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.deps.appModel.modelingRunLastActivityAtMs
+    ).toHaveBeenCalled();
+
+    await harness.extension.shutdown("test");
+  });
+
   // The memo key includes the commit the record names, so a long session with
   // many regenerations would otherwise grow it without limit.
   it("keeps asking about new problems without growing the memo forever", async () => {
