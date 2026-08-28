@@ -52,6 +52,21 @@ export const RADIUS_DEPLOY_STATUS_COLORS: Readonly<Record<string, NodeColors>> =
     failed: { bg: "var(--rad-danger-bg)", border: "var(--rad-danger)" }
   };
 
+export const RADIUS_DIFF_STATUS_COLORS: Readonly<Record<string, NodeColors>> = {
+  added: {
+    bg: "var(--rad-diff-added-bg)",
+    border: "var(--rad-diff-added)"
+  },
+  modified: {
+    bg: "var(--rad-diff-modified-bg)",
+    border: "var(--rad-diff-modified)"
+  },
+  removed: {
+    bg: "var(--rad-diff-removed-bg)",
+    border: "var(--rad-diff-removed)"
+  }
+};
+
 // What a page asks for when it renders a graph. Every field is optional: the
 // modeled, planned, diff and deployed pages each set a different subset.
 export interface GraphOptions {
@@ -214,25 +229,9 @@ export function nodeColors(
   // Diff cards use paired theme-aware fills and borders so changed resources
   // remain distinguishable without relying on a narrow border alone.
   if (settings.diffMode && resource.diffStatus) {
-    switch (resource.diffStatus) {
-      case "added":
-        return {
-          bg: "var(--rad-diff-added-bg)",
-          border: "var(--rad-diff-added)"
-        };
-      case "removed":
-        return {
-          bg: "var(--rad-diff-removed-bg)",
-          border: "var(--rad-diff-removed)"
-        };
-      case "modified":
-        return {
-          bg: "var(--rad-diff-modified-bg)",
-          border: "var(--rad-diff-modified)"
-        };
-      default:
-        return { bg: "var(--rad-node-bg)", border: "var(--rad-node-border)" };
-    }
+    const colors = RADIUS_DIFF_STATUS_COLORS[resource.diffStatus];
+    if (colors) return colors;
+    return { bg: "var(--rad-node-bg)", border: "var(--rad-node-border)" };
   }
   // A managed-cluster node always stays gray — its overall status is conveyed
   // by the corner status badge, not the fill. Other resources take the live

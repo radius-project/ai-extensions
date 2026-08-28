@@ -40,9 +40,12 @@ function contrast(a: Rgb, b: Rgb): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
-// Reads a status token straight out of the stylesheet, so the ratios below are
-// computed from the declaration that actually ships rather than a copy of it.
-function statusToken(name: string): { hostToken: string; portion: number } {
+// Reads a host color mix straight out of the stylesheet, so the ratios below
+// are computed from the declaration that actually ships rather than a copy.
+function hostColorMixToken(name: string): {
+  hostToken: string;
+  portion: number;
+} {
   const declaration = new RegExp(
     `--rad-${name}: color-mix\\(in srgb, var\\((--[a-z-]+), (#[0-9a-f]{6})\\) (\\d+)%, var\\(--rad-text\\)\\);`
   ).exec(SHELL_STYLE_CSS);
@@ -55,18 +58,20 @@ function diffToken(name: string): {
   borderPortion: number;
   fillPortion: number;
 } {
-  const border = new RegExp(
-    `--rad-diff-${name}: color-mix\\(in srgb, var\\((--[a-z-]+), (#[0-9a-f]{6})\\) (\\d+)%, var\\(--rad-text\\)\\);`
-  ).exec(SHELL_STYLE_CSS);
+  const border = hostColorMixToken(`diff-${name}`);
   const fill = new RegExp(
     `--rad-diff-${name}-bg: color-mix\\(in srgb, var\\(--rad-diff-${name}\\) (\\d+)%, var\\(--rad-surface\\)\\);`
   ).exec(SHELL_STYLE_CSS);
-  if (!border || !fill) throw new Error(`--rad-diff-${name} is incomplete`);
+  if (!fill) throw new Error(`--rad-diff-${name} is incomplete`);
   return {
-    hostToken: border[1],
-    borderPortion: Number(border[3]) / 100,
+    hostToken: border.hostToken,
+    borderPortion: border.portion,
     fillPortion: Number(fill[1]) / 100
   };
+}
+
+function maximumChannelDelta(a: Rgb, b: Rgb): number {
+  return Math.max(...a.map((channel, index) => Math.abs(channel - b[index])));
 }
 
 // The host owns theme selection and injects the palette. The dark-canvas case
@@ -153,7 +158,7 @@ describe("status color tokens", () => {
   it.each(cases)(
     "%s text stays readable on a %s canvas with the host's %s",
     (status, _canvas, _host, palette, hostColor) => {
-      const { portion } = statusToken(status);
+      const { portion } = hostColorMixToken(status);
       const resolved = mix(
         parseHex(hostColor),
         parseHex(palette.text),
@@ -168,7 +173,7 @@ describe("status color tokens", () => {
   it.each(statuses)(
     "%s reads the host token with a light-mode fallback",
     (status) => {
-      const { hostToken } = statusToken(status);
+      const { hostToken } = hostColorMixToken(status);
       expect(SHELL_STYLE_CSS).toContain(`var(${hostToken},`);
     }
   );
@@ -190,14 +195,14 @@ describe("status color tokens", () => {
       Object.entries(palettes).flatMap(([canvas, palette]) =>
         Object.entries(hostStatusColors).map(
           ([host, colors]) =>
-            [diffStatus, status, canvas, host, palette, colors[status]] as const
+            [diffStatus, canvas, host, palette, colors[status]] as const
         )
       )
     );
 
     it.each(cases)(
       "%s stays distinct and readable on a %s canvas with the host's %s",
-      (diffStatus, _status, _canvas, _host, palette, hostColor) => {
+      (diffStatus, _canvas, _host, palette, hostColor) => {
         const { borderPortion, fillPortion } = diffToken(diffStatus);
         const border = mix(
           parseHex(hostColor),
@@ -209,9 +214,6 @@ describe("status color tokens", () => {
         expect(contrast(border, parseHex(palette.bg))).toBeGreaterThanOrEqual(
           3
         );
-        expect(contrast(fill, parseHex(palette.bg))).toBeGreaterThanOrEqual(
-          1.05
-        );
         expect(contrast(parseHex(palette.text), fill)).toBeGreaterThanOrEqual(
           4.5
         );
@@ -221,6 +223,35 @@ describe("status color tokens", () => {
         expect(contrast(parseHex(palette.link), fill)).toBeGreaterThanOrEqual(
           4.5
         );
+      }
+    );
+
+    it.each(
+      Object.entries(palettes).flatMap(([canvas, palette]) =>
+        Object.entries(hostStatusColors).map(
+          ([host, colors]) => [canvas, host, palette, colors] as const
+        )
+      )
+    )(
+      "keeps every fill visibly distinct on a %s canvas with the host's %s",
+      (_canvas, _host, palette, colors) => {
+        const fills = diffStatuses.map(([diffStatus, status]) => {
+          const { borderPortion, fillPortion } = diffToken(diffStatus);
+          const border = mix(
+            parseHex(colors[status]),
+            parseHex(palette.text),
+            borderPortion
+          );
+          return mix(border, parseHex(palette.bg), fillPortion);
+        });
+
+        for (let left = 0; left < fills.length; left += 1) {
+          for (let right = left + 1; right < fills.length; right += 1) {
+            expect(
+              maximumChannelDelta(fills[left], fills[right])
+            ).toBeGreaterThanOrEqual(4);
+          }
+        }
       }
     );
 

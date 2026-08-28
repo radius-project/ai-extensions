@@ -11,6 +11,7 @@ import {
   isLocalSourceNode,
   nodeColors,
   RADIUS_DEPLOY_STATUS_COLORS,
+  RADIUS_DIFF_STATUS_COLORS,
   radiusMapLineType,
   resolveGraphSettings
 } from "./build.js";
@@ -173,18 +174,15 @@ describe("options", () => {
 describe("node colours", () => {
   it("gives each changed diff status a matching tinted fill and stronger border", () => {
     const diff = settings({ diffMode: true });
-    expect(nodeColors(diff, { diffStatus: "added" })).toEqual({
-      bg: "var(--rad-diff-added-bg)",
-      border: "var(--rad-diff-added)"
-    });
-    expect(nodeColors(diff, { diffStatus: "removed" })).toEqual({
-      bg: "var(--rad-diff-removed-bg)",
-      border: "var(--rad-diff-removed)"
-    });
-    expect(nodeColors(diff, { diffStatus: "modified" })).toEqual({
-      bg: "var(--rad-diff-modified-bg)",
-      border: "var(--rad-diff-modified)"
-    });
+    expect(nodeColors(diff, { diffStatus: "added" })).toEqual(
+      RADIUS_DIFF_STATUS_COLORS.added
+    );
+    expect(nodeColors(diff, { diffStatus: "removed" })).toEqual(
+      RADIUS_DIFF_STATUS_COLORS.removed
+    );
+    expect(nodeColors(diff, { diffStatus: "modified" })).toEqual(
+      RADIUS_DIFF_STATUS_COLORS.modified
+    );
     expect(nodeColors(diff, { diffStatus: "unchanged" }).border).toBe(
       "var(--rad-node-border)"
     );
@@ -229,7 +227,10 @@ describe("node colours", () => {
   });
 
   it("uses semantic tokens rather than literal colours", () => {
-    for (const colors of Object.values(RADIUS_DEPLOY_STATUS_COLORS)) {
+    for (const colors of Object.values({
+      ...RADIUS_DEPLOY_STATUS_COLORS,
+      ...RADIUS_DIFF_STATUS_COLORS
+    })) {
       expect(colors.bg).toMatch(/^var\(--rad-/);
       expect(colors.border).toMatch(/^var\(--rad-/);
     }

@@ -120,6 +120,23 @@ async function card(name: string): Promise<HTMLElement> {
   return element;
 }
 
+function rgbChannels(color: string): number[] {
+  return color.match(/\d+/g)?.slice(0, 3).map(Number) ?? [];
+}
+
+function maximumChannelDelta(left: string, right: string): number {
+  const leftChannels = rgbChannels(left);
+  const rightChannels = rgbChannels(right);
+  if (leftChannels.length !== 3 || rightChannels.length !== 3) {
+    throw new Error(`expected RGB colors, received ${left} and ${right}`);
+  }
+  return Math.max(
+    ...leftChannels.map((channel, index) =>
+      Math.abs(channel - rightChannels[index])
+    )
+  );
+}
+
 describe("graph view in a real browser", () => {
   it("renders changed diff states with distinct fills and borders", async () => {
     const style = document.createElement("style");
@@ -150,6 +167,16 @@ describe("graph view in a real browser", () => {
     expect(new Set(changed.map(({ borderColor }) => borderColor))).toHaveLength(
       3
     );
+    for (let left = 0; left < changed.length; left += 1) {
+      for (let right = left + 1; right < changed.length; right += 1) {
+        expect(
+          maximumChannelDelta(
+            changed[left].backgroundColor,
+            changed[right].backgroundColor
+          )
+        ).toBeGreaterThanOrEqual(4);
+      }
+    }
     for (const changedStyle of changed) {
       expect(changedStyle.backgroundColor).not.toBe(styles[3].backgroundColor);
       expect(changedStyle.borderColor).not.toBe(styles[3].borderColor);

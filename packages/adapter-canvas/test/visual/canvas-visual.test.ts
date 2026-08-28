@@ -82,7 +82,9 @@ const DIFF_RESOURCES: CanvasGraphResource[] = [
     id: "app/old-worker",
     name: "old-worker",
     type: "Radius.Compute/containers",
-    connections: [],
+    connections: [
+      { id: "app/web", direction: "Outbound", diffStatus: "removed" }
+    ],
     diffStatus: "removed"
   }
 ];
@@ -530,7 +532,7 @@ test.describe("Radius Canvas visual baselines", () => {
       await routeGraphControls(page, canvas);
       await gotoVisual(page, canvas, "graph-diff", theme);
       await expect(page.locator(".rad-node")).toHaveCount(5);
-      await expect(page.locator(".react-flow__edge")).toHaveCount(2);
+      await expect(page.locator(".react-flow__edge")).toHaveCount(3);
       await expect(page.locator("#base-branch")).toHaveValue("main");
       await expect(page.locator("#head-branch")).toHaveValue(WORKTREE_BRANCH);
       await expect(page.getByText("+1 added")).toBeVisible();
