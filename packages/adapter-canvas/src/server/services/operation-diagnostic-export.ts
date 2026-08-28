@@ -43,6 +43,7 @@ const COMMAND_KINDS = new Set([
   "stop",
   "resume_input",
   "continue_setup",
+  "cancel_workflow",
   "retry_setup",
   "retry_verification",
   "rollback",
@@ -88,6 +89,12 @@ const MUTATION_STATUSES = new Set([
   "not_applied",
   "outcome_unknown",
   "manual_required"
+]);
+const VERIFICATION_WORKFLOW_STATES = new Set([
+  "active",
+  "inactive",
+  "cancelling",
+  "unknown"
 ]);
 const PROVIDERS = new Set(["azure"]);
 const OPERATION_ID =
@@ -138,6 +145,7 @@ export interface OperationDiagnosticExport {
       mutationStatusCounts: Array<{ status: string; count: number }>;
     };
     verificationDispatched: boolean;
+    verificationWorkflowState: string | null;
     unrecognizedValueCount: number;
   };
 }
@@ -450,6 +458,11 @@ export function createOperationDiagnosticExport({
         typeof dispatchedAt === "number" &&
         Number.isFinite(dispatchedAt) &&
         dispatchedAt > 0,
+      verificationWorkflowState: optionalRecognized(
+        verification?.workflowState,
+        VERIFICATION_WORKFLOW_STATES,
+        diagnosticState
+      ),
       unrecognizedValueCount: diagnosticState.unrecognizedValueCount
     }
   };

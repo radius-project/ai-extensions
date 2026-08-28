@@ -32,7 +32,8 @@ function operation(overrides: Record<string, unknown> = {}) {
       commands: [
         { kind: "retry_setup", state: "finished", target: "secret target" },
         { kind: "retry_setup", state: "finished", outcome: "secret outcome" },
-        { kind: "rollback", state: "running", commandId: "secret id" }
+        { kind: "rollback", state: "running", commandId: "secret id" },
+        { kind: "cancel_workflow", state: "finished", target: "secret run id" }
       ]
     },
     failure: {
@@ -92,6 +93,7 @@ function operation(overrides: Record<string, unknown> = {}) {
     },
     verification: {
       dispatchedAt: Date.parse("2026-08-27T10:00:08.000Z"),
+      workflowState: "cancelling",
       workflow: "SECRET_WORKFLOW",
       ref: "SECRET_BRANCH",
       runUrl: "SECRET_URL"
@@ -145,6 +147,7 @@ describe("createOperationDiagnosticExport", () => {
         },
         stop: { requested: true, acknowledged: true },
         commandCounts: [
+          { kind: "cancel_workflow", state: "finished", count: 1 },
           { kind: "retry_setup", state: "finished", count: 2 },
           { kind: "rollback", state: "running", count: 1 }
         ],
@@ -170,6 +173,7 @@ describe("createOperationDiagnosticExport", () => {
           ]
         },
         verificationDispatched: true,
+        verificationWorkflowState: "cancelling",
         unrecognizedValueCount: 0
       }
     });
@@ -222,6 +226,10 @@ describe("createOperationDiagnosticExport", () => {
         providerRecovery: {
           state: "future-recovery",
           mutations: [{ status: "future-mutation" }]
+        },
+        verification: {
+          dispatchedAt: Date.parse("2026-08-27T10:00:08.000Z"),
+          workflowState: "future-workflow-state"
         }
       })
     );
@@ -246,7 +254,8 @@ describe("createOperationDiagnosticExport", () => {
         state: "unknown",
         mutationStatusCounts: [{ status: "unknown", count: 1 }]
       },
-      unrecognizedValueCount: 14
+      verificationWorkflowState: "unknown",
+      unrecognizedValueCount: 15
     });
     expect(JSON.stringify(diagnostic)).not.toContain("future-");
   });
@@ -297,6 +306,7 @@ describe("createOperationDiagnosticExport", () => {
         cleanup: { state: "not_started", attempts: 0 },
         recovery: { state: null, mutationStatusCounts: [] },
         verificationDispatched: false,
+        verificationWorkflowState: null,
         unrecognizedValueCount: 8
       }
     });
@@ -335,6 +345,7 @@ describe("createOperationDiagnosticExport", () => {
         warningCount: 0
       },
       recovery: { state: null, mutationStatusCounts: [] },
+      verificationWorkflowState: "cancelling",
       unrecognizedValueCount: 4
     });
   });
