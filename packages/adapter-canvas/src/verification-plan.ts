@@ -61,8 +61,8 @@ export async function planCredentialVerification({
     );
     return {
       shouldDispatch: true,
-      ref: "",
-      defaultBranch: "",
+      ref: directBranch,
+      defaultBranch: directBranch,
       pullRequestUrl: "",
       skipReason: "",
       supportsOperationMarker: hasVerificationOperationMarker(directWorkflow)

@@ -1032,7 +1032,7 @@ export async function handleCreateEnvironment(
           missingCredNote
       );
     } else {
-      if (verifyPlan.ref)
+      if (prState && verifyPlan.ref)
         steps.push(
           `ℹ️ The verify workflow is already on "${verifyPlan.defaultBranch}", so verification runs now against branch "${verifyPlan.ref}" rather than waiting for the merge.`
         );
