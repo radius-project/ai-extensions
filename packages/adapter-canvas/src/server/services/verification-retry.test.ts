@@ -118,19 +118,17 @@ describe("verification retry selected account", () => {
   });
 
   it.each([
-    ["prepared", null, true],
-    ["outcome_unknown", null, true],
-    ["confirmed", null, true],
-    ["confirmed", "41", false],
-    ["not_applied", null, false]
+    ["prepared", true],
+    ["outcome_unknown", true],
+    ["confirmed", true],
+    ["not_applied", false]
   ])(
-    "reuses a %s dispatch only while its selected-account outcome remains unresolved",
-    (previousStatus, runId, expected) => {
+    "reuses a %s dispatch when its selected-account recovery must keep the same identity",
+    (previousStatus, expected) => {
       expect(
         shouldReuseVerificationDispatch({
           accountUnavailablePhase: "dispatch",
-          previousStatus,
-          runId
+          previousStatus
         })
       ).toBe(expected);
     }
@@ -140,15 +138,13 @@ describe("verification retry selected account", () => {
     expect(
       shouldReuseVerificationDispatch({
         accountUnavailablePhase: "acquisition",
-        previousStatus: "outcome_unknown",
-        runId: null
+        previousStatus: "outcome_unknown"
       })
     ).toBe(false);
     expect(
       shouldReuseVerificationDispatch({
         accountUnavailablePhase: "dispatch",
-        previousStatus: "not_applied",
-        runId: null
+        previousStatus: "not_applied"
       })
     ).toBe(false);
   });

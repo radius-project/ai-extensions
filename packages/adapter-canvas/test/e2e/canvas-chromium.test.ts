@@ -2,12 +2,14 @@ import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import {
+  azureDiscoveryCommands,
   baseCanvasState,
   CREDENTIAL_SENTINEL,
   defaultFakeCliScenario,
   expect,
   PLACEHOLDER_SECRET,
   PROFILE_NAME,
+  PROFILE_SUBSCRIPTION_ID,
   REPOSITORY,
   test,
   WORKTREE_BRANCH,
@@ -23,7 +25,6 @@ import { GRAPH_RETRY_MS } from "../../src/browser/pages/graph-page.js";
 import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
-const VALID_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
 const SOURCE_FILE = "src/web/app.ts";
 const SOURCE_LINE = 12;
 const REMOVED_SOURCE_FILE = "src/web/worker.ts";
@@ -1079,69 +1080,20 @@ test.describe("Radius Canvas in Chromium", () => {
     canvas
   }) => {
     const scenario = defaultFakeCliScenario();
-    const resourceCommands: FakeCliCommand[] = [
-      {
-        tool: "az",
-        args: ["account", "set", "--subscription", VALID_SUBSCRIPTION_ID],
-        stdout: ""
-      },
-      {
-        tool: "az",
-        args: [
-          "aks",
-          "list",
-          "--query",
-          "[].{id:name, name:name, resourceGroup:resourceGroup}",
-          "-o",
-          "json",
-          "--subscription",
-          VALID_SUBSCRIPTION_ID
-        ],
-        stdout: JSON.stringify([
-          { id: "aks-first", name: "AKS First", resourceGroup: "rg-first" },
-          {
-            id: "aks-selected",
-            name: "AKS Selected",
-            resourceGroup: "rg-selected"
-          }
-        ])
-      },
-      {
-        tool: "az",
-        args: [
-          "group",
-          "list",
-          "--query",
-          "[].{id:name, name:name}",
-          "-o",
-          "json",
-          "--subscription",
-          VALID_SUBSCRIPTION_ID
-        ],
-        stdout: JSON.stringify([
-          { id: "rg-first", name: "rg-first" },
-          { id: "rg-selected", name: "rg-selected" }
-        ])
-      },
-      {
-        tool: "az",
-        argsPrefix: [
-          "aks",
-          "get-credentials",
-          "--name",
-          "aks-selected",
-          "--resource-group",
-          "rg-selected",
-          "--file"
-        ],
-        stdout: ""
-      },
-      {
-        tool: "kubectl",
-        argsPrefix: ["--kubeconfig"],
-        stdout: "default selected-team"
-      }
-    ];
+    const selected = {
+      id: "aks-selected",
+      name: "AKS Selected",
+      resourceGroup: "rg-selected"
+    };
+    const resourceCommands: FakeCliCommand[] = azureDiscoveryCommands({
+      subscriptionId: PROFILE_SUBSCRIPTION_ID,
+      clusters: [
+        { id: "aks-first", name: "AKS First", resourceGroup: "rg-first" },
+        selected
+      ],
+      selected,
+      namespaces: ["default", "selected-team"]
+    });
     scenario.commands.push(...resourceCommands);
     await canvas.setScenario(scenario);
     await gotoCanvas(page, canvas, "environment");
@@ -1150,14 +1102,14 @@ test.describe("Radius Canvas in Chromium", () => {
     const resourceGroup = page.getByLabel("Resource Group", { exact: true });
     const cluster = page.getByLabel("Cluster", { exact: true });
     const namespace = page.locator("#azure-namespace-select");
-    await expect(resourceGroup).toContainText("rg-selected");
-    await resourceGroup.selectOption("rg-selected");
+    await expect(resourceGroup).toContainText(selected.resourceGroup);
+    await resourceGroup.selectOption(selected.resourceGroup);
     await expect(cluster.locator("option")).toHaveText([
       "Select AKS cluster…",
-      "AKS Selected",
+      selected.name,
       "+ Enter custom..."
     ]);
-    await expect(cluster).toHaveValue("aks-selected");
+    await expect(cluster).toHaveValue(selected.id);
     await expect(namespace).toBeDisabled();
     await expect(namespace).toContainText("selected-team");
     await expect(namespace).toBeEnabled();
@@ -1174,7 +1126,7 @@ test.describe("Radius Canvas in Chromium", () => {
             call.args.includes("rg-selected") &&
             call.args.includes("--file") &&
             call.args.includes("--overwrite-existing") &&
-            call.args.includes(VALID_SUBSCRIPTION_ID)
+            call.args.includes(PROFILE_SUBSCRIPTION_ID)
         )
       )
       .toBe(true);
@@ -1187,16 +1139,16 @@ test.describe("Radius Canvas in Chromium", () => {
       )
     ).toBe(false);
 
-    const credentials = resourceCommands.find(
-      (command) =>
-        command.tool === "az" &&
-        (command.args?.includes("get-credentials") ||
-          command.argsPrefix?.includes("get-credentials"))
-    );
-    if (credentials) {
-      credentials.exitCode = 1;
-      credentials.stderr = "selected cluster unavailable";
+    // Second to last by construction: the factory appends the credential and
+    // namespace commands in the order discovery issues them. Throwing rather
+    // than skipping keeps a shape change here from silently turning the refresh
+    // failure below into an assertion about a scenario that never changed.
+    const credentials = resourceCommands.at(-2);
+    if (!credentials?.argsPrefix?.includes("get-credentials")) {
+      throw new Error("discovery stubs no longer end with the namespace step");
     }
+    credentials.exitCode = 1;
+    credentials.stderr = "selected cluster unavailable";
     await canvas.setScenario(scenario);
     await page.getByRole("button", { name: "Refresh" }).click();
     await expect(namespace).toBeDisabled();
@@ -1238,7 +1190,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.getByRole("button", { name: "New Credential Profile" }).click();
     await page.getByLabel("Profile Name").fill("failing-azure");
     await page.getByLabel("Tenant ID").fill(VALID_TENANT_ID);
-    await page.getByLabel("Subscription ID").fill(VALID_SUBSCRIPTION_ID);
+    await page.getByLabel("Subscription ID").fill(PROFILE_SUBSCRIPTION_ID);
     const verifyResponse = page.waitForResponse(
       (response) =>
         new URL(response.url()).pathname === "/api/verify-azure-login" &&
@@ -1266,7 +1218,7 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBeEnabled();
     expect(bodyFor(canvas, "/api/verify-azure-login")).toEqual({
       tenantId: VALID_TENANT_ID,
-      subscriptionId: VALID_SUBSCRIPTION_ID
+      subscriptionId: PROFILE_SUBSCRIPTION_ID
     });
     expect(verifyPayload).not.toContain(PLACEHOLDER_SECRET);
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
@@ -1503,7 +1455,7 @@ test.describe("Radius Canvas in Chromium", () => {
       .toBeLessThanOrEqual(4);
   });
 
-  test("retries restored verification through the selected account and exact run identity @safety", async ({
+  test("retries verification through the selected account and returned run URL @safety", async ({
     page,
     canvas
   }) => {
@@ -1519,7 +1471,7 @@ test.describe("Radius Canvas in Chromium", () => {
           "list",
           "--workflow=radius-verify-credentials.yml",
           "--limit",
-          "10",
+          "1",
           "--json",
           "databaseId",
           "--repo",
@@ -1544,7 +1496,7 @@ test.describe("Radius Canvas in Chromium", () => {
           WORKTREE_BRANCH
         ],
         env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: ""
+        stdout: `https://github.com/${REPOSITORY}/actions/runs/41`
       },
       {
         tool: "gh",
@@ -1637,6 +1589,16 @@ test.describe("Radius Canvas in Chromium", () => {
         })
       ]
     });
+    expect(
+      (await canvas.cliCalls()).filter(
+        (call) =>
+          call.tool === "gh" &&
+          call.args[0] === "run" &&
+          call.args.includes(
+            "databaseId,createdAt,displayTitle,event,headBranch"
+          )
+      )
+    ).toEqual([]);
     await expect(page.locator("body")).toContainText("Environment created");
     await expectNoWcagViolations(page);
   });

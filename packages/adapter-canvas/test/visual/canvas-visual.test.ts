@@ -2,10 +2,12 @@ import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import {
+  azureDiscoveryCommands,
   baseCanvasState,
   defaultFakeCliScenario,
   expect,
   PROFILE_NAME,
+  PROFILE_SUBSCRIPTION_ID,
   REPOSITORY,
   test,
   WORKTREE_BRANCH,
@@ -36,9 +38,11 @@ const require = createRequire(import.meta.url);
 const VISUAL_FONT_PATH =
   require.resolve("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2");
 const VISUAL_FONT = fs.readFile(VISUAL_FONT_PATH, "base64");
-const AZURE_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
-const AZURE_RESOURCE_GROUP = "fixture-resource-group";
-const AZURE_CLUSTER = "fixture-aks";
+const AZURE_CLUSTER = {
+  id: "fixture-aks",
+  name: "fixture-aks",
+  resourceGroup: "fixture-resource-group"
+};
 
 const GRAPH_RESOURCES: CanvasGraphResource[] = [
   {
@@ -142,65 +146,12 @@ async function seed(
   );
   const fakeCli = defaultFakeCliScenario();
   fakeCli.commands.push(
-    {
-      tool: "az",
-      args: ["account", "set", "--subscription", AZURE_SUBSCRIPTION_ID],
-      stdout: ""
-    },
-    {
-      tool: "az",
-      args: [
-        "aks",
-        "list",
-        "--query",
-        "[].{id:name, name:name, resourceGroup:resourceGroup}",
-        "-o",
-        "json",
-        "--subscription",
-        AZURE_SUBSCRIPTION_ID
-      ],
-      stdout: JSON.stringify([
-        {
-          id: AZURE_CLUSTER,
-          name: AZURE_CLUSTER,
-          resourceGroup: AZURE_RESOURCE_GROUP
-        }
-      ])
-    },
-    {
-      tool: "az",
-      args: [
-        "group",
-        "list",
-        "--query",
-        "[].{id:name, name:name}",
-        "-o",
-        "json",
-        "--subscription",
-        AZURE_SUBSCRIPTION_ID
-      ],
-      stdout: JSON.stringify([
-        { id: AZURE_RESOURCE_GROUP, name: AZURE_RESOURCE_GROUP }
-      ])
-    },
-    {
-      tool: "az",
-      args: [
-        "aks",
-        "get-credentials",
-        "--name",
-        AZURE_CLUSTER,
-        "--resource-group",
-        AZURE_RESOURCE_GROUP,
-        "--overwrite-existing"
-      ],
-      stdout: ""
-    },
-    {
-      tool: "kubectl",
-      args: ["get", "namespaces", "-o", "jsonpath={.items[*].metadata.name}"],
-      stdout: "default radius-system"
-    }
+    ...azureDiscoveryCommands({
+      subscriptionId: PROFILE_SUBSCRIPTION_ID,
+      clusters: [AZURE_CLUSTER],
+      selected: AZURE_CLUSTER,
+      namespaces: ["default", "radius-system"]
+    })
   );
   await canvas.setScenario(fakeCli);
   await canvas.seedState({
@@ -588,13 +539,17 @@ test.describe("Radius Canvas visual baselines", () => {
         "Found 1 cluster(s), 1 resource group(s)",
         { timeout: 15_000 }
       );
-      await page.locator("#azure-rg-select").selectOption(AZURE_RESOURCE_GROUP);
-      await page.locator("#azure-cluster-select").selectOption(AZURE_CLUSTER);
+      await page
+        .locator("#azure-rg-select")
+        .selectOption(AZURE_CLUSTER.resourceGroup);
+      await page
+        .locator("#azure-cluster-select")
+        .selectOption(AZURE_CLUSTER.id);
       await expect(page.locator("#azure-rg-select")).toHaveValue(
-        AZURE_RESOURCE_GROUP
+        AZURE_CLUSTER.resourceGroup
       );
       await expect(page.locator("#azure-cluster-select")).toHaveValue(
-        AZURE_CLUSTER
+        AZURE_CLUSTER.id
       );
       await expect(page.locator("#azure-namespace-select")).toHaveValue(
         "default"

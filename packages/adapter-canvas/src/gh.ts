@@ -164,8 +164,10 @@ export function parseGhVersion(
   return match ? [Number(match[1]), Number(match[2])] : null;
 }
 
-export function supportsGhMultiAccount(version: [number, number]): boolean {
-  return version[0] > 2 || (version[0] === 2 && version[1] >= 40);
+export function supportsWorkflowDispatchRunDetails(
+  version: [number, number]
+): boolean {
+  return version[0] > 2 || (version[0] === 2 && version[1] >= 87);
 }
 
 const MIN_OPAQUE_TOKEN_REDACTION_LENGTH = 12;
@@ -748,6 +750,17 @@ export async function createSelectedGhExecutor(
 ): Promise<SelectedGhExecutor> {
   const login = selectedLogin.trim();
   if (!login) throw new Error("A GitHub account login is required.");
+  const version = await ghVersion();
+  if (!version) {
+    throw new Error(
+      "Radius could not determine the installed GitHub CLI version. Install GitHub CLI 2.87 or newer and retry."
+    );
+  }
+  if (!supportsWorkflowDispatchRunDetails(version)) {
+    throw new Error(
+      "GitHub CLI 2.87 or newer is required so workflow dispatch returns the created run. Upgrade GitHub CLI and retry."
+    );
+  }
 
   const snapshot = await ensureGhSnapshot();
   const injectedToken = getInjectedGhToken(env);
@@ -774,13 +787,6 @@ export async function createSelectedGhExecutor(
         account: keyringAccount,
         source: "keyring"
       };
-    } else {
-      const version = await ghVersion();
-      if (version && !supportsGhMultiAccount(version)) {
-        throw new Error(
-          `GitHub CLI 2.40 or newer is required to select @${login} without relying on the active account. Upgrade GitHub CLI and retry.`
-        );
-      }
     }
   }
   const injectedCredential =
@@ -794,7 +800,7 @@ export async function createSelectedGhExecutor(
   const useInjected =
     injectedCredential !== null &&
     (keyringCredential === null ||
-      requiredScopeScore(injectedAccount) >
+      requiredScopeScore(injectedAccount) >=
         requiredScopeScore(keyringCredential.account));
   const selectedCredential =
     useInjected ? injectedCredential : keyringCredential;
