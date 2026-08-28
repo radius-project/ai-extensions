@@ -170,9 +170,15 @@ export function createAppModelHandoff(
     const context = state ?? (await deps.resolveContext());
     const modelProgressView =
       progressView ?? (page === "graph-diff" ? "diff" : "graph");
+    // The app.bicep wait is measured from when the model was first found
+    // missing, not from when the graph build began, so the recovery deadline
+    // has to share that origin to land inside the wait it belongs to. The
+    // field is absent on the very first render, because the wait is only
+    // recorded once the outcome settles; the claim then falls back to its
+    // ordinary TTL, which is the same length the deadline would have imposed.
     const waitStartedAtMs =
       context.graphProgressRecords?.[modelProgressView]
-        ?.graphProgressStartedAtMs;
+        ?.graphProgressWaitStartedAtMs;
     const recoveryDeadlineAtMs =
       waitStartedAtMs === undefined ? undefined : (
         waitStartedAtMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS - RECOVERY_WINDOW_MS

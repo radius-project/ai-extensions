@@ -77,10 +77,21 @@ export function createMissingModelHandoffClaims(
     markDelivered(claim) {
       const entry = activeEntry(claim.target);
       if (entry?.claim !== claim) return;
-      entry.expiresAtMs = Math.min(
-        entry.deadlineAtMs,
-        now() + MISSING_MODEL_HANDOFF_CLAIM_TTL_MS
-      );
+      const nowMs = now();
+      const ttlExpiresAtMs = nowMs + MISSING_MODEL_HANDOFF_CLAIM_TTL_MS;
+      // The deadline only ever SHORTENS a delivered claim, so that it expires
+      // inside the wait it belongs to and leaves the live page room for one
+      // retry. A deadline that has already passed cannot do that, and honouring
+      // it would set expiry in the past — the claim would lapse the instant
+      // delivery was recorded and every later render would re-send. That window
+      // is not narrow: once staging activity is observed the wait runs to the
+      // 30-minute ceiling while this deadline passed at four minutes. Falling
+      // back to the ordinary TTL re-arms the claim instead, so the page still
+      // gets a retry, just one per TTL rather than one per render.
+      entry.expiresAtMs =
+        entry.deadlineAtMs > nowMs ?
+          Math.min(entry.deadlineAtMs, ttlExpiresAtMs)
+        : ttlExpiresAtMs;
     },
 
     release(claim) {

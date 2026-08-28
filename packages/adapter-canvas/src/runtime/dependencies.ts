@@ -367,7 +367,7 @@ export interface RadiusExtensionDependencies {
   deploy: DeployRunnerDependencies;
   operations: OperationsDependencies;
   appModel: AppModelDependencies;
-  radiusAppBicepSkill(repoPath?: string): string;
+  radiusAppBicepSkill(repoPath?: string, brief?: string): string;
   renderPrDiffMarkdown(
     resources: CanvasGraphResource[],
     baseBranch: string,

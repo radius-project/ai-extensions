@@ -74,6 +74,25 @@ describe("createMissingModelHandoffClaims", () => {
     expect(claims.current("a/b::feat")).toBeNull();
   });
 
+  // A deadline in the past cannot leave room for a retry, and honouring it
+  // would expire the claim on delivery. The wait it belongs to may still have
+  // 26 minutes to run once staging activity is observed, so every render in
+  // that span would re-send.
+  it("re-arms a delivered claim whose recovery deadline has already passed", () => {
+    const { claims, advance } = harness();
+    const owner = claims.claim("a/b::feat", "missing", 1_001_000);
+    if (!owner) throw new Error("expected claim");
+    advance(2_000);
+
+    claims.markDelivered(owner);
+
+    expect(claims.owns(owner)).toBe(true);
+    advance(MISSING_MODEL_HANDOFF_CLAIM_TTL_MS - 1);
+    expect(claims.owns(owner)).toBe(true);
+    advance(1);
+    expect(claims.owns(owner)).toBe(false);
+  });
+
   it("ignores delivery from an owner that was already superseded", () => {
     const { claims, advance } = harness();
     const oldOwner = claims.claim("a/b::feat", "missing");

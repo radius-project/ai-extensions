@@ -374,8 +374,15 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
           filesByRepoBranch[`remote:${repo}@${branch}:${repoPath}`] ?? null
       )
     },
-    radiusAppBicepSkill: vi.fn(
-      (repoPath?: string) => `SKILL.md content for ${repoPath || "."}`
+    radiusAppBicepSkill: vi.fn((repoPath?: string, brief?: string) =>
+      JSON.stringify({
+        skill: "radius-app-bicep",
+        repoPath: repoPath || ".",
+        skillBase: "/test/skills/radius-app-bicep",
+        skillVersion: "0.1.0-test",
+        instruction: `SKILL.md content for ${repoPath || "."}`,
+        ...(brief ? { brief } : {})
+      })
     ),
     renderPrDiffMarkdown,
     withGhcrDockerConfig: vi.fn(async (fn) =>

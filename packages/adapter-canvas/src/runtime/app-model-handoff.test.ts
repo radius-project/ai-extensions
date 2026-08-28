@@ -70,12 +70,16 @@ const UNMODELABLE: AppSourceEvaluation = { status: "none", dockerfiles: [] };
 
 function progressRecord(
   view: GraphProgressView,
-  startedAtMs: number
+  waitStartedAtMs: number
 ): GraphProgressRecord {
   return {
     graphBuildEvents: [],
     graphProgressGeneration: 1,
-    graphProgressStartedAtMs: startedAtMs,
+    // Deliberately earlier than the wait. The build starts when the page asks
+    // for a graph; the wait starts only once that build finds no model, and it
+    // is the wait the app.bicep timeout is measured against.
+    graphProgressStartedAtMs: waitStartedAtMs - 120_000,
+    graphProgressWaitStartedAtMs: waitStartedAtMs,
     graphProgressActive: true,
     graphProgressView: view,
     graphProgressKey: `${view}-key`,
@@ -582,6 +586,11 @@ describe("createAppModelHandoff", () => {
     expect(sent).toHaveLength(2);
   });
 
+  // The cap has to bite BELOW the ordinary TTL to mean anything: without it the
+  // second render four seconds later is still deduped. The wait start is placed
+  // so the deadline falls one second out, which also fails if the deadline is
+  // derived from the build start instead — that is two minutes earlier here, so
+  // it would already have passed.
   it.each([
     { page: "graph", progressView: "graph" },
     { page: "graph", progressView: "planned" },
@@ -590,14 +599,15 @@ describe("createAppModelHandoff", () => {
     "caps a delivered $progressView claim against that view's absolute graph deadline",
     async ({ page, progressView }) => {
       const nowMs = 1_000_000;
-      const expiredStart = nowMs - (GRAPH_APP_BICEP_IDLE_TIMEOUT_MS - 60_000);
+      const endsInOneSecond =
+        nowMs - (GRAPH_APP_BICEP_IDLE_TIMEOUT_MS - 60_000) + 1_000;
       const records = {
         graph: progressRecord("graph", nowMs),
         planned: progressRecord("planned", nowMs),
         diff: progressRecord("diff", nowMs),
-        [progressView]: progressRecord(progressView, expiredStart)
+        [progressView]: progressRecord(progressView, endsInOneSecond)
       };
-      const { handOff, sent } = harness({
+      const { handOff, sent, advance } = harness({
         statuses: {
           main: modelStatus("a/b", "main", { status: "missing" }),
           feat: modelStatus("a/b", "feat", { status: "missing" })
@@ -619,10 +629,49 @@ describe("createAppModelHandoff", () => {
 
       await handOff(request("first"));
       await handOff(request("second"));
+      expect(sent).toHaveLength(1);
+
+      advance(1_000);
+      await handOff(request("third"));
 
       expect(sent).toHaveLength(2);
     }
   );
+
+  // A deadline already behind the clock cannot leave room for a retry, and
+  // honouring it would expire the claim the moment delivery is recorded. The
+  // wait it belongs to can still have most of the thirty-minute ceiling left
+  // once staging activity is observed, so every render in that span would ask
+  // again.
+  it("does not re-send on every render once the recovery deadline has passed", async () => {
+    const nowMs = 1_000_000;
+    const passed = nowMs - (GRAPH_APP_BICEP_IDLE_TIMEOUT_MS - 60_000) - 60_000;
+    const { handOff, sent, advance } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) }
+    });
+    const request = (canvasInstanceId: string) => ({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state: {
+        canvasInstanceId,
+        workspaceRepo: "a/b",
+        workspaceBranch: "feat",
+        graphProgressRecords: { graph: progressRecord("graph", passed) }
+      }
+    });
+
+    await handOff(request("first"));
+    await handOff(request("second"));
+    await handOff(request("third"));
+    expect(sent).toHaveLength(1);
+
+    // Still retryable, just once per TTL rather than once per render.
+    advance(MISSING_MODEL_HANDOFF_CLAIM_TTL_MS);
+    await handOff(request("fourth"));
+
+    expect(sent).toHaveLength(2);
+  });
 
   it("does not watch for a run at all when the repository cannot be modeled", async () => {
     const { handOff, sent, waits, modelingInFlight } = harness({
