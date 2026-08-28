@@ -164,10 +164,6 @@ export function parseGhVersion(
   return match ? [Number(match[1]), Number(match[2])] : null;
 }
 
-export function supportsGhMultiAccount(version: [number, number]): boolean {
-  return version[0] > 2 || (version[0] === 2 && version[1] >= 40);
-}
-
 export function supportsWorkflowDispatchRunDetails(
   version: [number, number]
 ): boolean {

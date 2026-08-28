@@ -331,8 +331,7 @@ export async function runVerificationRetry(
       previousMutationTarget &&
       shouldReuseVerificationDispatch({
         accountUnavailablePhase: saved.accountUnavailablePhase,
-        previousStatus: previousDispatchMutation?.status,
-        runId: saved.runId
+        previousStatus: previousDispatchMutation?.status
       });
     const mutationTarget =
       reusePreviousMutation ?
@@ -584,7 +583,9 @@ export async function runVerificationRetry(
 
     dependencies.addStep(
       operation,
-      "✅ Verify workflow dispatched again.",
+      dispatch.recovered ?
+        "✅ Resuming the previously identified verify workflow run."
+      : "✅ Verify workflow dispatched again.",
       dependencies.stageVerify
     );
     dependencies.setCommandState(operation, commandId, "running");

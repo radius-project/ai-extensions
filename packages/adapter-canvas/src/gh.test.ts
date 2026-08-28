@@ -828,17 +828,15 @@ describe("GitHub diagnostic redaction", () => {
   });
 });
 
-describe("GitHub CLI multi-account compatibility", () => {
+describe("GitHub CLI version compatibility", () => {
   it.each([
-    ["gh version 2.39.1 (2024-01-01)", [2, 39], false],
-    ["gh version 2.40.0 (2024-01-01)", [2, 40], true],
-    ["gh version 3.0.0", [3, 0], true],
-    ["unexpected", null, null]
-  ] as const)("parses and classifies %s", async (text, parsed, supported) => {
-    const { parseGhVersion, supportsGhMultiAccount } = await import("./gh.js");
-    const version = parseGhVersion(text);
-    expect(version).toEqual(parsed);
-    if (version) expect(supportsGhMultiAccount(version)).toBe(supported);
+    ["gh version 2.39.1 (2024-01-01)", [2, 39]],
+    ["gh version 2.40.0 (2024-01-01)", [2, 40]],
+    ["gh version 3.0.0", [3, 0]],
+    ["unexpected", null]
+  ] as const)("parses %s", async (text, parsed) => {
+    const { parseGhVersion } = await import("./gh.js");
+    expect(parseGhVersion(text)).toEqual(parsed);
   });
 
   it.each([
