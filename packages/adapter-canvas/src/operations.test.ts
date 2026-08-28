@@ -33,6 +33,7 @@ import {
   recordCreatedFederatedCredential,
   recordCreatedRoleAssignment,
   recordGitHubEnvironment,
+  recordGitHubEnvironmentVariable,
   readWorkflowCommitArtifact,
   promoteCreatedGitHubEnvironment,
   reconcileArtifactProvenance,
@@ -67,6 +68,8 @@ import {
   unresolvedProviderMutations,
   providerMutationRecord,
   providerRecoveryManualGuidance,
+  recordProviderMutationDiagnostics,
+  terminalizeProviderManualRequired,
   findActiveCommand,
   findCommand,
   getOperationControl,
@@ -94,6 +97,7 @@ import {
   workflowProvenanceGap,
   workflowRollbackCommitState,
   workflowRollbackTargets,
+  githubEnvironmentVariableRollbackTargets,
   canExitSetup,
   hasSurvivingCreatedArtifacts,
   isSetupExited,
@@ -109,6 +113,224 @@ import {
 } from "./operations.js";
 
 describe("provider mutation recovery journal", () => {
+  it("preserves separate bounded redacted dispatch diagnostics", () => {
+    const op = createOperation({ operationId: "op_diagnostics" });
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_workflow.dispatch",
+      target: "octo/app:verify:main:dev"
+    });
+
+    recordProviderMutationDiagnostics(op, mutation.mutationId, {
+      initial: `HTTP 404 ghp_fixture_secret ${"x".repeat(2500)}`,
+      final: "No exact run appeared."
+    });
+    recordProviderMutationDiagnostics(op, mutation.mutationId, {
+      initial: "replacement",
+      final: "Final exact lookup failed."
+    });
+
+    const persisted = toPersistedOperation(op);
+    const restored = fromPersistedOperation(persisted);
+    expect(restored.providerRecovery.mutations[0]).toMatchObject({
+      initialDiagnostic: expect.stringContaining("[REDACTED]"),
+      finalDiagnostic: "Final exact lookup failed."
+    });
+    expect(
+      restored.providerRecovery.mutations[0].initialDiagnostic.length
+    ).toBeLessThanOrEqual(2003);
+    expect(
+      restored.providerRecovery.mutations[0].initialDiagnostic
+    ).not.toContain("replacement");
+  });
+
+  it("terminalizes a nonterminal parent when provider recovery requires a person", () => {
+    const op = createOperation({
+      operationId: "op_terminalize",
+      repo: "octo/app"
+    });
+    enterStage(op, STAGE_VERIFY);
+
+    terminalizeProviderManualRequired(op, "Inspect the workflow run.");
+
+    expect(op).toMatchObject({
+      state: "failed_partial",
+      endedAt: expect.any(String),
+      recoveryState: "manual_required",
+      failure: {
+        code: "provider-reconciliation-manual-required",
+        message: "Inspect the workflow run."
+      }
+    });
+    expect(op.stages.find((stage) => stage.id === STAGE_VERIFY)?.state).toBe(
+      "failed"
+    );
+  });
+
+  it("preserves an already terminal parent verdict", () => {
+    const op = createOperation({ operationId: "op_terminal" });
+    finishSucceeded(op);
+    const endedAt = op.endedAt;
+
+    terminalizeProviderManualRequired(op, "ignored");
+
+    expect(op.state).toBe("succeeded");
+    expect(op.endedAt).toBe(endedAt);
+  });
+
+  it.each(["prepared", "outcome_unknown"])(
+    "fails a restored %s verification dispatch closed without resuming it",
+    (status) => {
+      const op = createOperation({
+        operationId: `op_${status}`,
+        repo: "octo/app"
+      });
+      const mutation = prepareProviderMutation(op, {
+        kind: "github_workflow.dispatch",
+        target: "octo/app:verify:main:dev"
+      });
+      settleProviderMutation(
+        op,
+        mutation.mutationId,
+        status,
+        "saved diagnostic"
+      );
+      op.state = "running";
+      op.endedAt = null;
+
+      reconcileRestoredOperation(op);
+
+      expect(op).toMatchObject({
+        state: "failed_partial",
+        endedAt: expect.any(String),
+        recoveryState: "manual_required",
+        providerRecovery: {
+          state: "manual_required",
+          mutations: [expect.objectContaining({ status: "manual_required" })]
+        },
+        requiresDurableRewrite: true
+      });
+    }
+  );
+
+  it("fails a confirmed dispatch without persisted run identity closed", () => {
+    const op = createOperation({
+      operationId: "op_confirmed_missing_identity",
+      repo: "octo/app"
+    });
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_workflow.dispatch",
+      target: "octo/app:verify:main:dev"
+    });
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "confirmed",
+      "GitHub accepted it.",
+      "123"
+    );
+    op.verification = { runId: "123", runUrl: null };
+
+    reconcileRestoredOperation(op);
+
+    expect(op.state).toBe("failed_partial");
+    expect(op.providerRecovery.mutations[0].status).toBe("manual_required");
+  });
+
+  it("durably rewrites a restored manual recovery parent mismatch", async () => {
+    const op = createOperation({
+      operationId: "op_repair",
+      repo: "octo/app"
+    });
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_workflow.dispatch",
+      target: "octo/app:verify:main:dev"
+    });
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "manual_required",
+      "Inspect Actions."
+    );
+    op.state = "running";
+    op.endedAt = null;
+    let envelope = {
+      schemaVersion: 1,
+      operations: [toPersistedOperation(op)]
+    };
+    let saves = 0;
+    const registry = createRegistry({
+      store: {
+        async load() {
+          return envelope;
+        },
+        async save(next) {
+          saves += 1;
+          envelope = structuredClone(next);
+        }
+      }
+    });
+
+    await registry.hydrate();
+
+    expect(saves).toBe(1);
+    expect(envelope.operations[0]).toMatchObject({
+      state: "failed_partial",
+      endedAt: expect.any(String),
+      failure: {
+        code: "provider-reconciliation-manual-required"
+      }
+    });
+  });
+
+  it("reports when a restored parent repair cannot be made durable", async () => {
+    const op = createOperation({
+      operationId: "op_repair_write_failure",
+      repo: "octo/app"
+    });
+    const mutation = prepareProviderMutation(op, {
+      kind: "github_workflow.dispatch",
+      target: "octo/app:verify:main:dev"
+    });
+    settleProviderMutation(
+      op,
+      mutation.mutationId,
+      "manual_required",
+      "Inspect Actions."
+    );
+    op.state = "running";
+    op.endedAt = null;
+    const diagnostics: Array<{ code: string; message: string }> = [];
+    const registry = createRegistry({
+      store: {
+        async load() {
+          return {
+            schemaVersion: 1,
+            operations: [toPersistedOperation(op)]
+          };
+        },
+        async save() {
+          throw new Error("disk full");
+        },
+        report(diagnostic) {
+          diagnostics.push(diagnostic);
+        }
+      }
+    });
+
+    await expect(registry.hydrate()).resolves.toHaveLength(1);
+
+    expect(registry.get(op.operationId)).toMatchObject({
+      state: "failed_partial",
+      endedAt: expect.any(String)
+    });
+    expect(diagnostics).toContainEqual({
+      code: "operation-store-repair-write-failed",
+      message: expect.stringContaining(
+        "repair is not durable: Error: disk full"
+      )
+    });
+  });
+
   it("survives persistence and reopens a terminal operation for reconciliation", () => {
     const op = createOperation({
       operationId: "op_recovery",
@@ -1266,6 +1488,7 @@ describe("record shape", () => {
         name: null,
         providerId: null
       },
+      githubEnvironmentVariables: [],
       commit: {
         mode: "not_started",
         branch: null,
@@ -2024,6 +2247,30 @@ describe("registry", () => {
       ok: false,
       conflict: { operationId: first.operationId },
       reason: "previous-cleanup-required"
+    });
+  });
+
+  it("keeps the repository reserved while a variable-only rollback remains", () => {
+    const reg = createRegistry();
+    const first = newOp();
+    recordGitHubEnvironmentVariable(first, {
+      repo: first.repo,
+      environment: first.environment,
+      environmentProviderId: "env-1",
+      name: "AZURE_CLIENT_ID",
+      valueSha256:
+        "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      previousValue: null,
+      previousKnown: true
+    });
+    reg.start(first);
+    finish(first, "failed_partial", { failure: { code: "setup-failed" } });
+
+    expect(hasUnfinishedCleanupAuthority(first)).toBe(true);
+    expect(reg.start(newOp())).toMatchObject({
+      ok: false,
+      reason: "previous-cleanup-required",
+      conflict: { operationId: first.operationId }
     });
   });
 
@@ -2856,7 +3103,9 @@ describe("startup reconciliation", () => {
       event: "workflow_dispatch",
       operationMarker: "op_test",
       baselineRunId: 40,
-      dispatchMutationTarget: "contoso/store:verify:main:dev:cmd-current"
+      dispatchMutationTarget: "contoso/store:verify:main:dev:cmd-current",
+      runId: "123",
+      runUrl: "https://github.com/contoso/store/actions/runs/123"
     };
     const rejected = prepareProviderMutation(op, {
       kind: "github_workflow.dispatch_retry",
@@ -3166,6 +3415,7 @@ describe("latestAny — the chip's repo-less lookup", () => {
     const live = createOperation({
       repo: "contoso/store",
       environment: "dev",
+      environmentProviderId: "env-1",
       provider: "azure",
       trigger: "ui"
     });
@@ -4971,7 +5221,11 @@ describe("stopped operations offer continuing and rolling back", () => {
       path: `/api/operations/${op.operationId}/retry/cleanup`
     });
     expect(actions[1].preview.removes.map((entry) => entry.target)).toEqual([
-      "radius-deploy (app-1)"
+      "radius-deploy (app-1)",
+      "contoso/store:dev",
+      "Contributor @ /subscriptions/s1",
+      "radius-main @ repo:contoso/store:ref:refs/heads/main",
+      "Service Principal for radius-deploy (app-1)"
     ]);
     expect(projectOperationHeadline(op)).toMatchObject({
       code: "rollback-incomplete",
@@ -5008,6 +5262,122 @@ describe("rollback eligibility", () => {
       code: "rollback-allowed"
     });
   });
+
+  it("persists and selects GitHub variable provenance before its environment", () => {
+    const op = stoppedWithCreatedResources();
+    recordGitHubEnvironmentVariable(op, {
+      repo: "contoso/store",
+      environment: "dev",
+      environmentProviderId: "env-1",
+      name: "AZURE_CLIENT_ID",
+      valueSha256:
+        "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+      previousValue: "old-client",
+      previousKnown: true
+    });
+
+    expect(
+      provenOwnedCleanupTargets(op).map((entry) => entry.artifactType)
+    ).toEqual([
+      "github_environment_variable",
+      "github_environment",
+      "role_assignment",
+      "federated_credential",
+      "service_principal",
+      "azure_app"
+    ]);
+    expect(githubEnvironmentVariableRollbackTargets(op)).toEqual([
+      expect.objectContaining({
+        name: "AZURE_CLIENT_ID",
+        previousValue: "old-client",
+        previousKnown: true,
+        identity: "env-1|contoso/store:dev:azure_client_id"
+      })
+    ]);
+
+    const restored = fromPersistedOperation(toPersistedOperation(op));
+    expect(restored.setupArtifacts.githubEnvironmentVariables).toEqual(
+      op.setupArtifacts.githubEnvironmentVariables
+    );
+    expect(
+      recordCleanupDeletion(restored, {
+        artifactType: "github_environment_variable",
+        identity: "env-1|contoso/store:dev:azure_client_id"
+      })
+    ).toBe(true);
+    expect(githubEnvironmentVariableRollbackTargets(restored)).toEqual([]);
+  });
+
+  it("does not treat a missing predecessor value as proven absence", () => {
+    const ledger = readSetupArtifactLedger({
+      githubEnvironmentVariables: [
+        {
+          state: "created",
+          repo: "contoso/store",
+          environment: "dev",
+          environmentProviderId: "env-1",
+          name: "AZURE_CLIENT_ID",
+          valueSha256:
+            "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+          previousKnown: true
+        }
+      ]
+    });
+
+    expect(ledger.githubEnvironmentVariables[0]).toMatchObject({
+      previousValue: null,
+      previousKnown: false
+    });
+  });
+
+  it.each(["warning", "skipped"] as const)(
+    "carries unattempted downstream resources into a variable cleanup retry after a %s result",
+    (outcome) => {
+      const op = stoppedWithCreatedResources();
+      recordGitHubEnvironmentVariable(op, {
+        repo: "contoso/store",
+        environment: "dev",
+        environmentProviderId: "env-1",
+        name: "AZURE_CLIENT_ID",
+        valueSha256:
+          "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+        previousValue: "old-client",
+        previousKnown: true
+      });
+      recordCleanupState(op, {
+        attempts: 1,
+        state: "succeeded_with_warnings",
+        results: [
+          {
+            attempt: 1,
+            artifactType: "github_environment_variable",
+            target: "contoso/store:dev variable AZURE_CLIENT_ID",
+            identity: "env-1|contoso/store:dev:azure_client_id",
+            outcome,
+            detail:
+              outcome === "warning" ?
+                "GitHub returned unreadable variable state."
+              : "The variable changed outside Radius."
+          }
+        ]
+      });
+
+      expect(
+        unresolvedCleanupTargets(op).map((entry) => entry.artifactType)
+      ).toEqual([
+        ...(outcome === "warning" ? ["github_environment_variable"] : []),
+        "github_environment",
+        "role_assignment",
+        "federated_credential",
+        "service_principal",
+        "azure_app"
+      ]);
+      expect(canRetryCleanup(op)).toMatchObject({
+        ok: true,
+        code: "cleanup-retry-allowed"
+      });
+    }
+  );
 
   it("never puts a reused or unprovable resource in the deletion set", () => {
     const op = addSafeResumeRequest(newOp());

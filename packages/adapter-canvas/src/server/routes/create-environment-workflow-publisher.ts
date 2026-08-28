@@ -6,6 +6,11 @@ import type {
 } from "./create-environment-types.js";
 import { cloudCredentialsComplete } from "../../deploy.js";
 import { ProviderMutationRecoveryError } from "../services/provider-mutation-recovery.js";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
 
 // Seam 5 of the `POST /api/create-environment` slice: steps 2, 3, 4 and 4b —
 // writing the provider's configuration onto the GitHub environment, then
@@ -21,10 +26,33 @@ import { ProviderMutationRecoveryError } from "../services/provider-mutation-rec
 // this code was inline: after each committed file. The use case still owns what
 // a gate means and when cancellation is observed; this module only calls it.
 
-export const WORKFLOW_SCOPE_HINT =
-  ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.';
 export const WRITE_ACCESS_HINT =
   " Check that you have write access to the repository and that GitHub Actions is enabled.";
+
+function workflowScopeHint(
+  ghCommandPresentation: GhCommandPresentation
+): string {
+  const refreshCommand = displayGhCommand(ghCommandPresentation, [
+    "auth",
+    "refresh",
+    "-h",
+    "github.com",
+    "-s",
+    "workflow"
+  ]);
+  if (!refreshCommand) {
+    return ` Your GitHub token is missing the "workflow" scope. ${ghCommandPresentation.installationNote}`;
+  }
+  const installation =
+    ghCommandPresentation.installationNote ?
+      ` ${ghCommandPresentation.installationNote}`
+    : "";
+  return ` Your GitHub token is missing the "workflow" scope. Run \`${refreshCommand}\` in a terminal, then retry.${installation}`;
+}
+
+export const WORKFLOW_SCOPE_HINT = workflowScopeHint(
+  BARE_GH_COMMAND_PRESENTATION
+);
 
 export const VERIFY_WORKFLOW_PATH =
   ".github/workflows/radius-verify-credentials.yml";
@@ -200,10 +228,13 @@ export function describeWorkflowCommitFailure(
   kind: "verify" | "deploy",
   path: string,
   targetRepo: string,
-  stderr: string | undefined
+  stderr: string | undefined,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): { status: number; error: string; code: string } {
   const hint =
-    needsWorkflowScope(stderr) ? WORKFLOW_SCOPE_HINT : WRITE_ACCESS_HINT;
+    needsWorkflowScope(stderr) ?
+      workflowScopeHint(ghCommandPresentation)
+    : WRITE_ACCESS_HINT;
   const label =
     kind === "verify" ? "verify-credentials workflow" : "deploy workflow";
   return {
@@ -245,6 +276,7 @@ export type WorkflowPublishResult =
   WorkflowPublishRefusal | WorkflowPublishCancelled | WorkflowPublishCompleted;
 
 export interface WorkflowPublisherPorts {
+  ghCommandPresentation?: GhCommandPresentation;
   generateVerifyWorkflow(
     environment: string,
     provider: string
@@ -335,7 +367,8 @@ export async function publishWorkflowFiles(
         "verify",
         VERIFY_WORKFLOW_PATH,
         targetRepo,
-        verifyCommit.stderr
+        verifyCommit.stderr,
+        ports.ghCommandPresentation
       ),
       ghError: verifyCommit.stderr || ""
     };
@@ -376,7 +409,8 @@ export async function publishWorkflowFiles(
           "deploy",
           deployPath,
           targetRepo,
-          deployCommit.stderr
+          deployCommit.stderr,
+          ports.ghCommandPresentation
         ),
         ghError: deployCommit.stderr || ""
       };

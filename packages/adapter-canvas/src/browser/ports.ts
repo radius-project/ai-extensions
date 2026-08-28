@@ -134,6 +134,7 @@ export interface DomPort {
     selectors: string
   ): readonly DomElement[];
   dispatch(target: DomElement, type: string): void;
+  isScrolledToEnd(element: DomElement): boolean;
   scrollToEnd(element: DomElement): boolean;
 }
 

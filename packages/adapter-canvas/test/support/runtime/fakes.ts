@@ -102,6 +102,10 @@ export interface FakeDependenciesOptions {
   // of a committed, unmodified model, so tests opt in to the risky states.
   modelRecoverable?: boolean;
   generatorVersion?: string;
+  // Newest modeling-run staging activity in the workspace checkout. Defaults to
+  // null: no run in flight, which is the ordinary case, so tests opt in to a
+  // run that is already under way.
+  modelingRunLastActivityAtMs?: number | null;
   // Worktree file listings keyed `<repo>@<branch>`. A missing key resolves to
   // null, matching fetchWorkspaceTree's "could not list" answer.
   workspaceTreeByRepoBranch?: Record<string, string[] | null>;
@@ -187,6 +191,12 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
   const deps: RadiusExtensionDependencies = {
     logError: vi.fn(),
     session: sessionHolder,
+    // Instant, so no suite spends real seconds inside a runtime wait. The
+    // durations themselves are asserted by the unit tests that own them.
+    clock: {
+      now: () => Date.now(),
+      wait: vi.fn(async () => {})
+    },
     servers,
     getOrCreateServer,
     getLastWebviewActivityAt: vi.fn(() => lastWebviewActivityAt),
@@ -352,6 +362,9 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         async (repo: string, branch: string) =>
           headCommits[`${repo}@${branch}`] ?? ""
       ),
+      modelingRunLastActivityAtMs: vi.fn(
+        async () => options.modelingRunLastActivityAtMs ?? null
+      ),
       fetchWorkspaceFile: vi.fn(
         async (_state, repo: string, branch: string, repoPath: string) =>
           filesByRepoBranch[`workspace:${repo}@${branch}:${repoPath}`] ?? null
@@ -361,8 +374,15 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
           filesByRepoBranch[`remote:${repo}@${branch}:${repoPath}`] ?? null
       )
     },
-    radiusAppBicepSkill: vi.fn(
-      (repoPath?: string) => `SKILL.md content for ${repoPath || "."}`
+    radiusAppBicepSkill: vi.fn((repoPath?: string, brief?: string) =>
+      JSON.stringify({
+        skill: "radius-app-bicep",
+        repoPath: repoPath || ".",
+        skillBase: "/test/skills/radius-app-bicep",
+        skillVersion: "0.1.0-test",
+        instruction: `SKILL.md content for ${repoPath || "."}`,
+        ...(brief ? { brief } : {})
+      })
     ),
     renderPrDiffMarkdown,
     withGhcrDockerConfig: vi.fn(async (fn) =>
