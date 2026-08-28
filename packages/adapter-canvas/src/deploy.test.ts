@@ -16,20 +16,34 @@ import {
 import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
 
 describe("selected-account workflow reads", () => {
-  it("classifies direct selected-account command authorization failures", async () => {
+  it.each([
+    ["gh: Forbidden (HTTP 403)", 403],
+    [
+      "Resource protected by organization SAML enforcement. You must grant your OAuth token access.",
+      403
+    ]
+  ])(
+    "classifies direct selected-account command authorization failure %j",
+    async (stderr, status) => {
+      const executor = successfulSelectedGhExecutor({ login: "alice" });
+
+      await expect(
+        selectedCommandAuthorizationError(executor, "contoso/store", {
+          code: 1,
+          stdout: "",
+          stderr
+        })
+      ).resolves.toMatchObject({
+        name: "SelectedGhAuthorizationError",
+        login: "alice",
+        status
+      });
+    }
+  );
+
+  it("does not classify rate limiting as selected-account authorization failure", async () => {
     const executor = successfulSelectedGhExecutor({ login: "alice" });
 
-    await expect(
-      selectedCommandAuthorizationError(executor, "contoso/store", {
-        code: 1,
-        stdout: "",
-        stderr: "gh: Forbidden (HTTP 403)"
-      })
-    ).resolves.toMatchObject({
-      name: "SelectedGhAuthorizationError",
-      login: "alice",
-      status: 403
-    });
     await expect(
       selectedCommandAuthorizationError(executor, "contoso/store", {
         code: 1,
