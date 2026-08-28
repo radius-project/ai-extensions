@@ -1774,6 +1774,35 @@ describe("deploy dispatch workflow publication and dispatch", () => {
     );
   });
 
+  it("uses the bundled GitHub CLI path for a stored-credential scope failure", async () => {
+    const { input, state } = request();
+    const gh = recordingGh([
+      {
+        code: 1,
+        stderr: "the token is missing the workflow scope",
+        stdout: ""
+      }
+    ]);
+    const service = createDeployDispatchService(
+      dependencies({
+        ...gh,
+        ghCommandPresentation: {
+          kind: "absolute",
+          shell: "powershell",
+          executablePath: "C:\\Copilot Tools\\gh.exe",
+          installationNote: "Install GitHub CLI system-wide."
+        }
+      })
+    );
+
+    await service.prepareAndDispatch(input);
+
+    expect(state.deployError).toContain(
+      "& 'C:\\Copilot Tools\\gh.exe' auth refresh"
+    );
+    expect(state.deployError).toContain("Install GitHub CLI system-wide.");
+  });
+
   it("does not tell an injected session token to run gh auth refresh", async () => {
     const { input, state } = request();
     const gh = recordingGh([

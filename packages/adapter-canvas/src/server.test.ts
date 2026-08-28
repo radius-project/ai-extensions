@@ -214,6 +214,29 @@ describe("preflightGhcrPackageWriteAccess", () => {
     ...overrides
   });
 
+  it("uses the bundled GitHub CLI path when package credentials are unavailable", async () => {
+    const result = await preflightGhcrPackageWriteAccess(
+      async () => {
+        throw new Error("No GitHub account is available.");
+      },
+      async () => identity(),
+      undefined,
+      {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/Applications/GitHub Copilot/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected GHCR preflight to fail");
+    expect(result.error).toContain(
+      "'/Applications/GitHub Copilot/gh' auth login -h github.com -s read:packages -s write:packages"
+    );
+    expect(result.error).toContain("Install GitHub CLI system-wide.");
+  });
+
   it("fails closed when the package credential username is blank", async () => {
     const result = await preflightGhcrPackageWriteAccess(
       async () => ({ token: "ghcr-token", username: "   ", source: "keyring" }),

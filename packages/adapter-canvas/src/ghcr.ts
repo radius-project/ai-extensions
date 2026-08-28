@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  type GhCommandPresentation
+} from "./gh-command-display.js";
 
 export interface GhCredentials {
   token: string;
@@ -51,6 +56,7 @@ interface RegistryTokenOptions extends GhCredentials {
   registryOrigin: string;
   repositoryPath: string;
   scope?: string;
+  ghCommandPresentation?: GhCommandPresentation;
 }
 
 interface BlobOptions {
@@ -82,6 +88,7 @@ export interface BootstrapGhcrOptions {
   apiBaseUrl?: string;
   sleep?: (milliseconds: number) => Promise<void>;
   metadataAttempts?: number;
+  ghCommandPresentation?: GhCommandPresentation;
 }
 
 class GhcrAuthError extends Error {
@@ -115,8 +122,28 @@ export const BOOTSTRAP_CONTENT =
 
 const OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json";
 const OCI_EMPTY_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json";
-const PACKAGE_AUTH_GUIDANCE =
-  "In the terminal, make the selected account active with: gh auth switch --hostname github.com --user <selected-login>. Then run: gh auth refresh --hostname github.com --scopes read:packages,write:packages. The first command changes your active GitHub CLI account if needed.";
+function packageAuthGuidance(
+  presentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+): string {
+  const switchCommand = displayGhCommand(presentation, [
+    "auth",
+    "switch",
+    "--hostname",
+    "github.com",
+    "--user",
+    "<selected-login>"
+  ]);
+  const refreshCommand = displayGhCommand(presentation, [
+    "auth",
+    "refresh",
+    "--hostname",
+    "github.com",
+    "--scopes",
+    "read:packages,write:packages"
+  ]);
+  if (!switchCommand || !refreshCommand) return presentation.installationNote;
+  return `In the terminal, make the selected account active with: ${switchCommand}. Then run: ${refreshCommand}. The first command changes your active GitHub CLI account if needed. ${presentation.installationNote}`.trim();
+}
 
 async function defaultRunKeyringCommand(args: string[]): Promise<string> {
   const { runGhKeyringCommand } = await import("./gh.js");
@@ -180,8 +207,11 @@ async function responseDetail(response: HttpResponse): Promise<string> {
   return text ? `: ${text.slice(0, 1000)}` : "";
 }
 
-function packageAuthError(message: string): GhcrAuthError {
-  return new GhcrAuthError(`${message}. ${PACKAGE_AUTH_GUIDANCE}`);
+function packageAuthError(
+  message: string,
+  presentation: GhCommandPresentation
+): GhcrAuthError {
+  return new GhcrAuthError(`${message}. ${packageAuthGuidance(presentation)}`);
 }
 
 function parseBearerChallenge(
@@ -210,7 +240,8 @@ async function getRegistryBearerToken({
   repositoryPath,
   username,
   token,
-  scope = "pull,push"
+  scope = "pull,push",
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 }: RegistryTokenOptions): Promise<string> {
   const challengeResponse = await fetchImpl(`${registryOrigin}/v2/`, {
     headers: { Accept: "application/json" },
@@ -243,7 +274,8 @@ async function getRegistryBearerToken({
   });
   if (response.status === 401 || response.status === 403) {
     throw packageAuthError(
-      `GHCR rejected package access for ${repositoryPath}`
+      `GHCR rejected package access for ${repositoryPath}`,
+      ghCommandPresentation
     );
   }
   if (!response.ok) {
@@ -416,7 +448,8 @@ async function githubJson(
   fetchImpl: FetchImplementation,
   url: string,
   token: string,
-  allowNotFound = false
+  allowNotFound = false,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): Promise<unknown | null> {
   const response = await fetchImpl(url, {
     headers: {
@@ -429,7 +462,8 @@ async function githubJson(
   if (allowNotFound && response.status === 404) return null;
   if (response.status === 401 || response.status === 403) {
     throw packageAuthError(
-      `GitHub Packages API rejected access (HTTP ${response.status})`
+      `GitHub Packages API rejected access (HTTP ${response.status})`,
+      ghCommandPresentation
     );
   }
   if (!response.ok) {
@@ -445,18 +479,22 @@ async function packageEndpoint({
   apiBaseUrl,
   owner,
   packageName,
-  token
+  token,
+  ghCommandPresentation
 }: {
   fetchImpl: FetchImplementation;
   apiBaseUrl: string;
   owner: string;
   packageName: string;
   token: string;
+  ghCommandPresentation: GhCommandPresentation;
 }): Promise<string> {
   const ownerMetadata = await githubJson(
     fetchImpl,
     `${apiBaseUrl}/users/${encodeURIComponent(owner)}`,
-    token
+    token,
+    false,
+    ghCommandPresentation
   );
   const ownerType =
     isRecord(ownerMetadata) && typeof ownerMetadata.type === "string" ?
@@ -497,8 +535,12 @@ function validatePackage(
 }
 
 export async function loadGhKeyringCredentials({
-  runKeyringCommand = defaultRunKeyringCommand
-}: { runKeyringCommand?: KeyringCommand } = {}): Promise<GhCredentials> {
+  runKeyringCommand = defaultRunKeyringCommand,
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+}: {
+  runKeyringCommand?: KeyringCommand;
+  ghCommandPresentation?: GhCommandPresentation;
+} = {}): Promise<GhCredentials> {
   try {
     const [token, username] = await Promise.all([
       runKeyringCommand(["auth", "token", "--hostname", "github.com"]),
@@ -515,7 +557,9 @@ export async function loadGhKeyringCredentials({
     return { token, username };
   } catch {
     throw new Error(
-      `A stored GitHub CLI login with package access is required. ${PACKAGE_AUTH_GUIDANCE}`
+      `A stored GitHub CLI login with package access is required. ${packageAuthGuidance(
+        ghCommandPresentation
+      )}`
     );
   }
 }
@@ -531,9 +575,11 @@ export async function loadGhKeyringCredentials({
 export async function withGhcrDockerConfig(
   fn: (env: { DOCKER_CONFIG: string }) => Promise<unknown>,
   {
-    loadCredentials = loadGhKeyringCredentials
+    ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION,
+    loadCredentials = () => loadGhKeyringCredentials({ ghCommandPresentation })
   }: {
     loadCredentials?: CredentialLoader;
+    ghCommandPresentation?: GhCommandPresentation;
   } = {}
 ): Promise<unknown> {
   const { token, username } = await loadCredentials();
@@ -564,7 +610,8 @@ export async function bootstrapGHCRStatePackage({
   apiBaseUrl = "https://api.github.com",
   sleep = (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  metadataAttempts = 6
+  metadataAttempts = 6,
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 }: BootstrapGhcrOptions): Promise<{
   registry: string;
   bootstrapTag: string;
@@ -574,16 +621,24 @@ export async function bootstrapGHCRStatePackage({
     throw new Error("This Node.js runtime does not provide fetch.");
   }
   const parsed = parseRegistry(registry, registryOrigin);
-  const auth = credentials || (await loadGhKeyringCredentials());
+  const auth =
+    credentials || (await loadGhKeyringCredentials({ ghCommandPresentation }));
   const endpoint = await packageEndpoint({
     fetchImpl,
     apiBaseUrl: apiBaseUrl.replace(/\/+$/, ""),
     owner: parsed.owner,
     packageName: parsed.packageName,
-    token: auth.token
+    token: auth.token,
+    ghCommandPresentation
   });
 
-  const existingValue = await githubJson(fetchImpl, endpoint, auth.token, true);
+  const existingValue = await githubJson(
+    fetchImpl,
+    endpoint,
+    auth.token,
+    true,
+    ghCommandPresentation
+  );
   if (existingValue)
     validatePackage(
       parsePackageMetadata(existingValue),
@@ -596,7 +651,8 @@ export async function bootstrapGHCRStatePackage({
     registryOrigin: parsed.registryOrigin,
     repositoryPath: parsed.repositoryPath,
     username: auth.username,
-    token: auth.token
+    token: auth.token,
+    ghCommandPresentation
   });
   await pushBootstrapManifest({
     fetchImpl,
@@ -608,7 +664,13 @@ export async function bootstrapGHCRStatePackage({
 
   let metadata: GitHubPackageMetadata | null = null;
   for (let attempt = 0; attempt < metadataAttempts; attempt++) {
-    const value = await githubJson(fetchImpl, endpoint, auth.token, true);
+    const value = await githubJson(
+      fetchImpl,
+      endpoint,
+      auth.token,
+      true,
+      ghCommandPresentation
+    );
     metadata = value ? parsePackageMetadata(value) : null;
     // validatePackage fails fast on public visibility and on a wrong repository
     // link; a not-yet-propagated (missing) link returns false so we keep retrying.

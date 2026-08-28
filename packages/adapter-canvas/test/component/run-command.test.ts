@@ -18,6 +18,7 @@ import { screen, waitFor } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
 import { remediationView } from "@radius-project/core/remediations";
 import { createCommandAction } from "../../src/browser/command-action.js";
+import { presentedRemediationView } from "../../src/gh-command-display.js";
 import { createRealScope, jsonResponse } from "./support/real-scope.js";
 import type { CommandActionHandle } from "../../src/browser/command-action.js";
 import type { DomElement } from "../../src/browser/ports.js";
@@ -105,6 +106,7 @@ describe("run-command callout in Chromium", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /^Copied$/ })).toBeTruthy();
     });
+
     expect(scope.copied).toEqual([LOW.command]);
     expect(scope.requests).toEqual([]);
 
@@ -114,6 +116,31 @@ describe("run-command callout in Chromium", () => {
       },
       { timeout: 5_000 }
     );
+  });
+
+  it("copies a bundled GitHub CLI invocation with its install alternative", async () => {
+    const user = userEvent.setup();
+    const remediation = presentedRemediationView(
+      "github-workflow-scope",
+      {},
+      {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/opt/Copilot Tools/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+    const { scope } = mount(remediation);
+
+    expect(scope.host.textContent).toContain(
+      "'/opt/Copilot Tools/gh' auth refresh"
+    );
+    expect(scope.host.textContent).toContain("Install GitHub CLI system-wide.");
+    await user.click(button(/^Copy$/));
+
+    await waitFor(() => {
+      expect(scope.copied).toEqual([remediation.command]);
+    });
   });
 
   it("keeps the label unchanged when the browser refuses the clipboard", async () => {

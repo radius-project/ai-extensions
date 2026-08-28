@@ -364,6 +364,53 @@ async function tickClock(
 }
 
 describe("parseOperationResponse", () => {
+  it("renders a bundled path for a GitHub remediation", () => {
+    const parsed = parseOperationResponse(
+      op({
+        failure: {
+          message: "GitHub access is missing.",
+          remediation: {
+            id: "github-workflow-scope",
+            params: {}
+          }
+        }
+      }),
+      {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/opt/Copilot Tools/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(parsed?.failure?.remediation?.command).toBe(
+      "'/opt/Copilot Tools/gh' auth refresh -h github.com -s workflow"
+    );
+  });
+
+  it("keeps only string remediation parameters", () => {
+    const parsed = parseOperationResponse(
+      op({
+        failure: {
+          message: "GitHub access is missing.",
+          remediation: {
+            id: "github-account-scopes",
+            params: {
+              login: "octocat",
+              workflow: "true",
+              packages: 1
+            }
+          }
+        }
+      })
+    );
+
+    expect(parsed?.failure?.remediation?.params).toEqual({
+      login: "octocat",
+      workflow: "true"
+    });
+  });
+
   it.each([
     ["null", null],
     ["a string", "running"],
