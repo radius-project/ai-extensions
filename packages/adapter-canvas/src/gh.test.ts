@@ -289,6 +289,44 @@ describe.sequential("cliExec", () => {
     expect(options.env.PATH).toBe("/only/here");
   });
 
+  it.each([
+    ["linux", "Path"],
+    ["darwin", "path"]
+  ] as const)(
+    "inherits uppercase PATH when a %s caller supplies unrelated %s",
+    async (platform, key) => {
+      const { cliExec } = await loadGh(platform);
+
+      cliExec(
+        "gh",
+        ["auth", "status"],
+        { env: { [key]: "/caller-only" } },
+        vi.fn()
+      );
+
+      const [, , options] = childProcess.execFile.mock.calls[0];
+      expect(options.env.PATH).toBe(process.env.PATH);
+      expect(options.env[key]).toBe("/caller-only");
+    }
+  );
+
+  it("matches a caller's Windows search path key case-insensitively", async () => {
+    const { cliExec } = await loadGh("win32");
+
+    cliExec(
+      "gh",
+      ["auth", "status"],
+      { env: { Path: "C:\\caller-only" } },
+      vi.fn()
+    );
+
+    const [, , options] = childProcess.execFile.mock.calls[0];
+    const searchPaths = Object.entries(options.env).filter(
+      ([key]) => key.toLowerCase() === "path"
+    );
+    expect(searchPaths).toEqual([["Path", "C:\\caller-only"]]);
+  });
+
   it("does not re-add unrelated ambient variables to a caller-supplied env", async () => {
     const { cliExec } = await loadGh("linux");
     process.env.RADIUS_AMBIENT_PROBE = "leak";

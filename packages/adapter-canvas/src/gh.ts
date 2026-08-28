@@ -211,9 +211,12 @@ function ghExecutable(): string {
   return process.platform === "win32" ? "gh.exe" : "gh";
 }
 
-function isSearchPathKey(key: string): boolean {
+function searchPathKey(key: string): string | null {
+  if (process.platform !== "win32") {
+    return key === "PATH" || key === "PATHEXT" ? key : null;
+  }
   const lower = key.toLowerCase();
-  return lower === "path" || lower === "pathext";
+  return lower === "path" || lower === "pathext" ? lower : null;
 }
 
 // Node replaces (rather than extends) the child environment when `env` is set,
@@ -227,9 +230,14 @@ function isSearchPathKey(key: string): boolean {
 function withInheritedPath(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (!env) return { ...process.env };
   const next = { ...env };
-  const supplied = new Set(Object.keys(next).map((key) => key.toLowerCase()));
+  const supplied = new Set(
+    Object.keys(next)
+      .map(searchPathKey)
+      .filter((key): key is string => key !== null)
+  );
   for (const [key, value] of Object.entries(process.env)) {
-    if (isSearchPathKey(key) && !supplied.has(key.toLowerCase())) {
+    const inheritedKey = searchPathKey(key);
+    if (inheritedKey && !supplied.has(inheritedKey)) {
       next[key] = value;
     }
   }
