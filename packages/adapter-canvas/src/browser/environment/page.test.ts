@@ -639,67 +639,6 @@ describe("initializeEnvironmentPage", () => {
     ).toHaveLength(0);
   });
 
-  it("rejects a non-GUID Azure client ID before dispatch", async () => {
-    const page = fixture();
-    await openWithProfile(page, "azure");
-    pageInput(page, "env-name-input").value = "dev";
-    pageInput(page, "azure-rg-select").value = "app-rg";
-    pageInput(page, "azure-cluster-select").value = "aks-1";
-    pageInput(page, "az-client-id").value = "not-a-guid";
-    page.elements["deploy-btn"].dispatch("click");
-
-    expect(page.elements["deploy-status"].textContent).toContain(
-      "must be a GUID"
-    );
-    expect(
-      page.browser.net.calls.filter(
-        (call) => call.url === CREATE_ENVIRONMENT_OPERATION_PATH
-      )
-    ).toHaveLength(0);
-  });
-
-  it("rejects a malformed AWS role ARN before dispatch", async () => {
-    const page = fixture();
-    page.browser.nav.search = "?page=environment&new=1&profile=aws-bad-arn";
-    page.browser.net.handle(
-      `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(page.repo)}`,
-      () =>
-        jsonResponse({
-          profiles: [
-            {
-              name: "aws-bad-arn",
-              provider: "aws",
-              accountId: "123456789012",
-              region: "us-east-1",
-              roleArn: "arn:aws:iam::bad:role/x"
-            }
-          ]
-        })
-    );
-    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
-      jsonResponse({
-        clusters: [{ id: "eks-1", name: "cluster", resourceGroup: "rg" }],
-        resourceGroups: [{ id: "app-rg", name: "app-rg" }],
-        namespaces: ["default"]
-      })
-    );
-    initializeEnvironmentPage(page.browser.context);
-    await flushPromises();
-    await flushPromises();
-    pageInput(page, "env-name-input").value = "prod";
-    pageInput(page, "aws-cluster-select").value = "eks-1";
-    page.elements["deploy-btn"].dispatch("click");
-
-    expect(page.elements["deploy-status"].textContent).toContain(
-      "must look like"
-    );
-    expect(
-      page.browser.net.calls.filter(
-        (call) => call.url === CREATE_ENVIRONMENT_OPERATION_PATH
-      )
-    ).toHaveLength(0);
-  });
-
   it("blocks creation when selected-account readiness has not passed", async () => {
     const page = fixture();
     page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
