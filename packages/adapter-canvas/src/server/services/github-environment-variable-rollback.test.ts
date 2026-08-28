@@ -490,41 +490,101 @@ describe("GitHub environment variable rollback", () => {
     );
   });
 
-  it("records a conclusive provider rejection without retrying rollback", async () => {
-    const operation = { operationId: "op-rejected-cleanup" };
-    let mutations = 0;
-    const outcome = await rollbackVariables({
+  it.each([
+    [
+      command({ code: 1, stderr: "HTTP 403: Forbidden" }),
+      "HTTP 403: Forbidden"
+    ],
+    [command({ code: 1, stdout: "HTTP 403: Forbidden" }), "HTTP 403: Forbidden"]
+  ])(
+    "records a conclusive provider rejection without retrying rollback",
+    async (rejection, expectedDetail) => {
+      const operation = { operationId: "op-rejected-cleanup" };
+      let mutations = 0;
+      const outcome = await rollbackVariables({
+        attempt: 1,
+        operation,
+        persist: async () => {},
+        variables: [artifact()],
+        run: async (args) => {
+          if (args[1] === ENVIRONMENT_PATH) return environment();
+          if (args[1] === VARIABLE_PATH) {
+            return command({
+              stdout: JSON.stringify({
+                name: "AZURE_CLIENT_ID",
+                value: "1"
+              })
+            });
+          }
+          mutations += 1;
+          return rejection;
+        }
+      });
+
+      expect(mutations).toBe(1);
+      expect(outcome).toMatchObject({
+        blocked: true,
+        results: [
+          {
+            outcome: "warning",
+            detail: expect.stringContaining(expectedDetail)
+          }
+        ]
+      });
+      expect(
+        providerMutationRecord(
+          operation,
+          "github_environment_variable.cleanup_delete",
+          artifact().identity
+        )?.status
+      ).toBe("not_applied");
+    }
+  );
+
+  it.each([
+    [{ id: 7 }, "7"],
+    [{ node_id: "ENV_node" }, "ENV_node"]
+  ])("accepts GitHub environment identity shape %#", async (body, id) => {
+    const outcome = await rollbackGitHubEnvironmentVariables({
       attempt: 1,
-      operation,
-      persist: async () => {},
+      variables: [artifact({ environmentProviderId: id })],
+      run: async (args) =>
+        args[1] === ENVIRONMENT_PATH ?
+          command({ stdout: JSON.stringify(body) })
+        : command({ code: 1, stderr: "HTTP 404" })
+    });
+
+    expect(outcome).toMatchObject({
+      blocked: false,
+      results: [{ outcome: "not_found" }]
+    });
+  });
+
+  it("records a non-Error pre-mutation failure as a warning", async () => {
+    let environmentReads = 0;
+    const outcome = await rollbackGitHubEnvironmentVariables({
+      attempt: 1,
       variables: [artifact()],
       run: async (args) => {
-        if (args[1] === ENVIRONMENT_PATH) return environment();
-        if (args[1] === VARIABLE_PATH) {
-          return command({
-            stdout: JSON.stringify({
-              name: "AZURE_CLIENT_ID",
-              value: "1"
-            })
-          });
+        if (args[1] === ENVIRONMENT_PATH) {
+          environmentReads += 1;
+          if (environmentReads === 2) throw "socket closed";
+          return environment();
         }
-        mutations += 1;
-        return command({ code: 1, stderr: "HTTP 403: Forbidden" });
+        return command({
+          stdout: JSON.stringify({
+            name: "AZURE_CLIENT_ID",
+            value: "1"
+          })
+        });
       }
     });
 
-    expect(mutations).toBe(1);
     expect(outcome).toMatchObject({
       blocked: true,
-      results: [{ outcome: "warning", detail: "HTTP 403: Forbidden" }]
+      warnings: ["socket closed"],
+      results: [{ outcome: "warning", detail: "socket closed" }]
     });
-    expect(
-      providerMutationRecord(
-        operation,
-        "github_environment_variable.cleanup_delete",
-        artifact().identity
-      )?.status
-    ).toBe("not_applied");
   });
 
   it.each([
@@ -568,6 +628,14 @@ describe("GitHub environment variable rollback", () => {
       expectedStatus: "manual_required"
     },
     {
+      label: "deleted variable before restore",
+      variable: artifact({ previousValue: "old" }),
+      environmentResult: environment(),
+      variableResult: command({ code: 1, stderr: "HTTP 404" }),
+      expectedOutcome: "skipped",
+      expectedStatus: "manual_required"
+    },
+    {
       label: "replacement environment",
       variable: artifact({ previousValue: "old" }),
       environmentResult: environment("env-2"),
@@ -588,6 +656,14 @@ describe("GitHub environment variable rollback", () => {
       variable: artifact({ previousValue: "old" }),
       environmentResult: environment(),
       variableResult: command({ stdout: "{" }),
+      expectedOutcome: "warning",
+      expectedStatus: "outcome_unknown"
+    },
+    {
+      label: "unreadable variable",
+      variable: artifact({ previousValue: "old" }),
+      environmentResult: environment(),
+      variableResult: command({ code: 1, stderr: "HTTP 503" }),
       expectedOutcome: "warning",
       expectedStatus: "outcome_unknown"
     }
