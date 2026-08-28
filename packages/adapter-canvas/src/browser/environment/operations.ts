@@ -58,6 +58,7 @@ export const PROGRESS_IDS = {
   steps: "env-progress-steps",
   details: "env-progress-details",
   actions: "env-progress-actions",
+  verifyBypass: "env-progress-verify-bypass",
   bottomButtons: "env-progress-bottom-buttons",
   dismiss: "env-progress-dismiss",
   failureCard: "env-progress-failure",
@@ -86,6 +87,11 @@ export const PROGRESS_IDS = {
   commandStatus: "env-progress-command-status",
   commandError: "env-progress-command-error"
 } as const;
+
+// The verify-bypass control is built dynamically (not part of the static
+// panel template), so its id lives here for the browser to bind and tests to
+// locate it.
+export const VERIFY_BYPASS_BUTTON_ID = "env-progress-verify-bypass-button";
 
 export const ROLLBACK_IDS = {
   modal: "env-rollback-modal",
@@ -1975,6 +1981,74 @@ export function initializeEnvironmentOperations(
       progressTimer = scope.after(delayMs, tick);
     }
 
+    // Build (or clear) the "Create environment anyway" control for a failed
+    // verification. Offered only for failures that can be resolved after the
+    // environment record exists (4.4 permissions, 4.5 unreachable); an
+    // OIDC-trust gap is never bypassable. The button is rebuilt fresh each time
+    // rather than reused so no stale click listener survives from an earlier
+    // tracking session.
+    function renderVerifyBypass(
+      offer: boolean,
+      provider: string,
+      environment: string
+    ): void {
+      const container = dom.byId(PROGRESS_IDS.verifyBypass);
+      if (!container) return;
+      if (!offer) {
+        container.replaceChildren();
+        container.style.display = "none";
+        return;
+      }
+      container.style.display = "flex";
+      const button = dom.createElement("button") as DomInputElement;
+      button.setAttribute("type", "button");
+      button.id = VERIFY_BYPASS_BUTTON_ID;
+      button.className = "rad-btn rad-btn--secondary";
+      button.textContent = "Create environment anyway";
+      const errorEl = dom.createElement("div");
+      errorEl.className = "env-progress__command-error";
+      errorEl.setAttribute("role", "alert");
+      button.addEventListener("click", () => {
+        if (button.disabled) return;
+        button.disabled = true;
+        errorEl.textContent = "";
+        void fetchTracked("/api/bypass-verification", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Radius-Mutation-Nonce": options.mutationNonce || ""
+          },
+          body: JSON.stringify({ repo, environment })
+        })
+          .then((response) =>
+            response
+              .json()
+              .catch(() => ({}))
+              .then((payload) => ({ ok: response.ok, payload }))
+          )
+          .then((result) => {
+            if (!active()) return;
+            if (!result.ok) {
+              button.disabled = false;
+              errorEl.textContent =
+                readString(result.payload, "error") ||
+                "Could not create the environment. Try again.";
+              return;
+            }
+            hideProgress();
+            deps.showSuccessBanner(provider || "azure", environment);
+            deps.reloadEnvironmentsTable();
+          })
+          .catch(() => {
+            if (!active()) return;
+            button.disabled = false;
+            errorEl.textContent =
+              "Could not create the environment. Try again.";
+          });
+      });
+      container.replaceChildren(button, errorEl);
+    }
+
     function pollVerifyStatus(): void {
       void fetchTracked(verifyStatusUrl(repo, environment, operationId))
         .then((response) => response.json())
@@ -2020,9 +2094,9 @@ export function initializeEnvironmentOperations(
             panel.style.display = "block";
             panel.classList.remove("env-progress--done");
             panel.classList.add("env-progress--failed");
+            const desc = describeVerifyFailure(v, provider);
             const activityEl = dom.byId(PROGRESS_IDS.activity);
             if (activityEl) {
-              const desc = describeVerifyFailure(v, provider);
               const parts = [desc.headline, desc.guidance];
               if (desc.permissions.length > 0)
                 parts.push(`Missing: ${desc.permissions.join(", ")}.`);
@@ -2031,6 +2105,7 @@ export function initializeEnvironmentOperations(
                 .filter((part) => part !== "")
                 .join(" ");
             }
+            renderVerifyBypass(desc.offerBypass, provider, environment);
             return;
           }
           if (v.activity !== "") verifyActivity = v.activity;

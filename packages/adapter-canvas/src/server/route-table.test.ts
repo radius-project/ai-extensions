@@ -463,6 +463,7 @@ describe("server route ownership boundary", () => {
     ).toEqual([
       "POST /api/run-remediation",
       "POST /api/github-account",
+      "POST /api/bypass-verification",
       "POST /api/operations",
       "POST /api/abandon-deployment",
       "POST /api/operations/:operationId/resume/:code",

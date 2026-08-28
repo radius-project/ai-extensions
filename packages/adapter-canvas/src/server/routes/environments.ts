@@ -222,6 +222,75 @@ export async function handleDeleteEnvironment(
   }
 }
 
+// The GitHub environment variable that records that a user chose to keep an
+// environment whose credential verification did not pass (exception scenarios
+// 4.4 permissions and 4.5 unreachable). It is durable because the environment
+// listing derives an environment's status live from its verify run, which stays
+// "failed" forever; the marker is what lets the listing report the environment
+// as usable so it can be selected for a deploy. Re-verifying and passing later
+// supersedes it (a genuine "success" run wins).
+const VERIFICATION_BYPASS_VARIABLE = "RADIUS_VERIFICATION_BYPASSED";
+
+// Records a verification bypass for an environment by writing the durable
+// marker variable, then invalidates the repo's cached listing so the picker
+// re-derives the environment as usable on its next read.
+export async function handleBypassVerification(
+  context: CanvasRequestContext,
+  dependencies: EnvironmentsDependencies
+): Promise<void> {
+  const { response } = context;
+  const body = await context.readTextBody();
+  try {
+    const data = JSON.parse(body || "{}");
+    const repo = (data.repo || "").trim();
+    const envName = (data.environment || "").trim();
+    if (!repo || !envName) {
+      response.setHeader("Content-Type", "application/json");
+      response.writeHead(400);
+      response.end(
+        JSON.stringify({ error: "repo and environment are required." })
+      );
+      return;
+    }
+    try {
+      await dependencies.runCommand(
+        "gh",
+        [
+          "variable",
+          "set",
+          VERIFICATION_BYPASS_VARIABLE,
+          "--body",
+          "1",
+          "--env",
+          envName,
+          "--repo",
+          repo
+        ],
+        { timeout: 20000 }
+      );
+    } catch (e) {
+      response.setHeader("Content-Type", "application/json");
+      response.writeHead(500);
+      response.end(
+        JSON.stringify({
+          error:
+            "Could not record the verification bypass: " +
+            dependencies.errorMessage(e)
+        })
+      );
+      return;
+    }
+    dependencies.envListCacheDelete(repo);
+    response.setHeader("Content-Type", "application/json");
+    response.writeHead(200);
+    response.end(JSON.stringify({ success: true }));
+  } catch (e) {
+    response.setHeader("Content-Type", "application/json");
+    response.writeHead(400);
+    response.end(JSON.stringify({ error: dependencies.errorMessage(e) }));
+  }
+}
+
 // The GitHub environment variables that hold what the creation form asks for,
 // mapped to the form's own field names. Everything else the environment stores
 // is either derived from the credential profile or internal Radius state.
@@ -469,6 +538,14 @@ export async function handleListEnvironments(
               }
             }
           }
+        }
+
+        // A user who kept an environment despite a failed verification (4.4 /
+        // 4.5) leaves this durable marker. The verify run stays "failed"
+        // forever, so without the override the environment could never be
+        // selected for a deploy; a real later "success" run still wins.
+        if (VERIFICATION_BYPASS_VARIABLE in vars && status !== "success") {
+          status = "bypassed";
         }
 
         const webUrl =
@@ -886,6 +963,8 @@ export function createEnvironmentsRoutes(
     "POST /api/app-params": (context) => handleAppParams(context, dependencies),
     "POST /api/delete-environment": (context) =>
       handleDeleteEnvironment(context, dependencies),
+    "POST /api/bypass-verification": (context) =>
+      handleBypassVerification(context, dependencies),
     "GET /api/list-environments": (context) =>
       handleListEnvironments(context, dependencies),
     "GET /api/verify-status": (context) =>

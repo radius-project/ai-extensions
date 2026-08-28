@@ -79,6 +79,11 @@ export function environmentsPaneMarkup(
         <ul id="env-progress-cleanup-warnings" class="env-progress__failure-list"></ul>
       </div>
     </div>
+    <!-- Recovery for a failed credential verification the customer chooses to
+         keep anyway (exception scenarios 4.4 permissions and 4.5 unreachable).
+         The button is built by the verify poller only when the failure is one
+         that can be resolved after the environment record exists. -->
+    <div id="env-progress-verify-bypass" class="env-progress__actions" style="display:none;"></div>
     <!-- Server-projected commands. The page renders whatever the operation
          record says is allowed; it never re-derives eligibility itself. The
          forward action comes first and the destructive one second, and neither

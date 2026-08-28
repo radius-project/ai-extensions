@@ -13,6 +13,7 @@ import { type ServerRoute } from "../route-table.js";
 import {
   createEnvironmentsRoutes,
   handleAppParams,
+  handleBypassVerification,
   handleDeleteEnvironment,
   handleListEnvironments,
   handleVerifyStatus,
@@ -195,6 +196,7 @@ function createControlledEnvironmentServer(
         instances,
         routes,
         markActivity,
+        validateBrowserMutation: () => true,
         handleUnmatchedRequest: (_request, response) => {
           response.writeHead(404);
           response.end("unmatched");
@@ -574,6 +576,88 @@ describe("environments — delete-environment refusal ladder", () => {
   });
 });
 
+describe("environments — bypass-verification", () => {
+  it("400s when repo or environment is missing", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      JSON.stringify({ repo: "o/r" })
+    );
+    await handleBypassVerification(ctx, deps({}));
+    expect(recording.status).toBe(400);
+    expect(recording.headerOrder).toEqual(["Content-Type"]);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "repo and environment are required."
+    });
+  });
+
+  it("an empty body parses to {} and 400s rather than throwing", async () => {
+    const { recording, ctx } = context("POST", "/api/bypass-verification", "");
+    await handleBypassVerification(ctx, deps({}));
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "repo and environment are required."
+    });
+  });
+
+  it("500s when writing the marker variable fails", async () => {
+    const runCommand = vi.fn(() => Promise.reject(new Error("boom")));
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+    await handleBypassVerification(ctx, deps({ runCommand }));
+    expect(recording.status).toBe(500);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Could not record the verification bypass: boom"
+    });
+  });
+
+  it("clean pass: writes the marker, invalidates the cache, and 200s", async () => {
+    const runCommand = vi.fn(() => Promise.resolve(""));
+    const envListCacheDelete = vi.fn();
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+    await handleBypassVerification(
+      ctx,
+      deps({ runCommand, envListCacheDelete })
+    );
+    expect(runCommand).toHaveBeenCalledWith(
+      "gh",
+      [
+        "variable",
+        "set",
+        "RADIUS_VERIFICATION_BYPASSED",
+        "--body",
+        "1",
+        "--env",
+        "dev",
+        "--repo",
+        "o/r"
+      ],
+      { timeout: 20000 }
+    );
+    expect(envListCacheDelete).toHaveBeenCalledWith("o/r");
+    expect(recording.status).toBe(200);
+    expect(JSON.parse(recording.body)).toEqual({ success: true });
+  });
+
+  it("outer catch: 400 when the body is malformed JSON", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      "{bad"
+    );
+    await handleBypassVerification(ctx, deps({}));
+    expect(recording.status).toBe(400);
+    expect(typeof JSON.parse(recording.body).error).toBe("string");
+  });
+});
+
 describe("environments — list-environments", () => {
   // API paths (the `args[1]` each `gh api` call targets), which uniquely key
   // the scripted `cliExec` responses.
@@ -727,6 +811,74 @@ describe("environments — list-environments", () => {
       "feat"
     );
     expect(envListCacheSet).toHaveBeenCalled();
+  });
+
+  it("reports a bypassed marker on a failed verify as the bypassed status", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "42\tcompleted\tfailure" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: {
+        stdout:
+          "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc\nRADIUS_VERIFICATION_BYPASSED\t1"
+      },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+      [ENV_PATH.statuses("o/r", "100")]: {
+        stdout: "https://github.com/o/r/actions/runs/42"
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        envListCacheSet: vi.fn(),
+        cliExec: cliFake(script),
+        readInstanceEntry: () => undefined,
+        repoMatchesWorkspace: () => false,
+        kickoffWorkflowSync: vi.fn()
+      })
+    );
+    const parsed = JSON.parse(recording.body);
+    expect(parsed.environments[0].status).toBe("bypassed");
+  });
+
+  it("keeps a passing verify as success even when the bypass marker is present", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "42\tcompleted\tsuccess" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: {
+        stdout:
+          "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc\nRADIUS_VERIFICATION_BYPASSED\t1"
+      },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+      [ENV_PATH.statuses("o/r", "100")]: {
+        stdout: "https://github.com/o/r/actions/runs/42"
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        envListCacheSet: vi.fn(),
+        cliExec: cliFake(script),
+        readInstanceEntry: () => undefined,
+        repoMatchesWorkspace: () => false,
+        kickoffWorkflowSync: vi.fn()
+      })
+    );
+    const parsed = JSON.parse(recording.body);
+    expect(parsed.environments[0].status).toBe("success");
   });
 
   it("reports unknown instead of pending when verification history is absent", async () => {
@@ -1668,12 +1820,13 @@ describe("environments — verify-status", () => {
 });
 
 describe("environments — registry", () => {
-  it("registers exactly the four migrated environment routes", () => {
+  it("registers exactly the five migrated environment routes", () => {
     const registry = createEnvironmentsRoutes(deps({}));
     expect(Object.keys(registry).sort()).toEqual([
       "GET /api/list-environments",
       "GET /api/verify-status",
       "POST /api/app-params",
+      "POST /api/bypass-verification",
       "POST /api/delete-environment"
     ]);
   });
@@ -1833,6 +1986,43 @@ describe("environments — real loopback", () => {
           expect.objectContaining({ name: "dev", status: "pending" })
         ]
       });
+    } finally {
+      await container.stopAll();
+    }
+  });
+
+  it("records a verification bypass over controlled HTTP", async () => {
+    const runCommand = vi.fn(() => Promise.resolve(""));
+    const envListCacheDelete = vi.fn();
+    const container = createControlledEnvironmentServer({
+      runCommand,
+      envListCacheDelete
+    });
+    try {
+      const controlled = await container.getOrCreate("bypass-verification");
+      const res = await fetch(controlled.baseUrl + "/api/bypass-verification", {
+        method: "POST",
+        body: JSON.stringify({ repo: "octo/app", environment: "dev" })
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ success: true });
+      expect(runCommand).toHaveBeenCalledWith(
+        "gh",
+        [
+          "variable",
+          "set",
+          "RADIUS_VERIFICATION_BYPASSED",
+          "--body",
+          "1",
+          "--env",
+          "dev",
+          "--repo",
+          "octo/app"
+        ],
+        { timeout: 20000 }
+      );
+      expect(envListCacheDelete).toHaveBeenCalledWith("octo/app");
     } finally {
       await container.stopAll();
     }
