@@ -1206,7 +1206,7 @@ test.describe("Radius Canvas in Chromium", () => {
     );
 
     await expect(page.locator("#azure-discover-status")).toContainText(
-      "Discovery failed: selected cluster unavailable"
+      "Discovery failed: az aks get-credentials failed (45s limit): selected cluster unavailable"
     );
     await expect(namespace).toBeEnabled();
     await expect(namespace.locator("option")).toHaveCount(2);
