@@ -1,4 +1,5 @@
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
+import { requireSuccessfulJsonResponse } from "../http.js";
 import { readBoolean, readString } from "../json.js";
 import { readPageState } from "./state.js";
 import { DEPLOY_RESULT_STATE_ID } from "../../pages/browser-state-ids.js";
@@ -41,8 +42,11 @@ export function initializeDeployResultPage(
         ...(abort ? { signal: abort.signal } : {})
       })
       .then(async (response) => {
-        const payload = await response.json();
-        if (!response.ok || !readBoolean(payload, "ok")) {
+        const payload = await requireSuccessfulJsonResponse(
+          response,
+          "The deployment view could not be reset."
+        );
+        if (!readBoolean(payload, "ok")) {
           throw new Error("The deployment view could not be reset.");
         }
       })

@@ -959,6 +959,54 @@ test.describe("Radius Canvas in Chromium", () => {
     await canvas.expectCliInvoked("gh");
   });
 
+  test("surfaces escaped server errors when environment loading fails @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.route("**/api/list-environments**", async (route) => {
+      await route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: "Repository <strong>administrator access</strong> is required."
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+
+    const table = page.locator("#env-table-body");
+    await expect(table).toContainText(
+      "Repository <strong>administrator access</strong> is required."
+    );
+    await expect(table.locator("strong")).toHaveCount(0);
+    await expectNoWcagViolations(page);
+  });
+
+  test("surfaces escaped server errors when credential loading fails @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.route("**/api/credential-profiles**", async (route) => {
+      await route.fulfill({
+        status: 502,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: "Credential <strong>service</strong> is unavailable."
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "credentials");
+
+    const table = page.locator("#cred-table-body");
+    await expect(table).toContainText(
+      "Credential <strong>service</strong> is unavailable."
+    );
+    await expect(table.locator("strong")).toHaveCount(0);
+    await expectNoWcagViolations(page);
+  });
+
   test("plans a deployment for an existing environment from its row", async ({
     page,
     canvas

@@ -1696,6 +1696,32 @@ describe("client projection", () => {
     expect(JSON.stringify(view)).not.toContain("ignore previous instructions");
   });
 
+  it("persists and projects only a structured failure remediation", () => {
+    const op = newOp();
+    finish(op, "failed", {
+      failure: {
+        code: "github-scopes-missing",
+        message: "GitHub access is missing.",
+        classification: "user-fixable",
+        remediation: {
+          id: "github-account-scopes",
+          params: { login: "octocat", packages: "true", unsafe: 1 }
+        }
+      }
+    });
+
+    const restored = fromPersistedOperation(toPersistedOperation(op));
+
+    expect(restored.failure.remediation).toEqual({
+      id: "github-account-scopes",
+      params: { login: "octocat", packages: "true" }
+    });
+    expect(toClientView(restored).failure.remediation).toEqual({
+      id: "github-account-scopes",
+      params: { login: "octocat", packages: "true" }
+    });
+  });
+
   it("names created resources with safe labels rather than the private ledger", () => {
     const op = newOp();
     recordAzureApp(op, {

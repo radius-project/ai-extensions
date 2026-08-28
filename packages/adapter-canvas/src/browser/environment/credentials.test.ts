@@ -580,9 +580,22 @@ describe("credential table loading", () => {
     );
     page.controller.loadCredentialTable();
     await flushPromises();
-    expect(page.elements.credTableBody.innerHTML).toContain(
-      "Could not load credential profiles"
+    expect(page.elements.credTableBody.innerHTML).toContain("server exploded");
+  });
+
+  it("escapes a server-provided profile error before displaying it", async () => {
+    const page = renderPage();
+    page.browser.net.handle(`${CREDENTIAL_PROFILES_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({ error: "<script>alert(1)</script>" }, false, 500)
     );
+
+    page.controller.loadCredentialTable();
+    await flushPromises();
+
+    expect(page.elements.credTableBody.innerHTML).toContain(
+      "&lt;script&gt;alert(1)&lt;/script&gt;"
+    );
+    expect(page.elements.credTableBody.innerHTML).not.toContain("<script>");
   });
 
   it("shows a load failure on a network error", async () => {
@@ -754,6 +767,7 @@ describe("row actions", () => {
     expect(shown.message).toContain(
       "Could not check which environments use this profile."
     );
+    expect(shown.message).toContain("repo lookup failed");
   });
 
   it("warns in the dialog when the usage lookup returns a non-OK status", async () => {

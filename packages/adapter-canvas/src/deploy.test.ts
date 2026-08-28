@@ -592,6 +592,8 @@ describe("explainRepoAccessForEnvSetup", () => {
     expect(out).toContain("ryanwaite");
     expect(out).toContain("azure-cto/app");
     expect(out).toContain("gh auth switch");
+    expect(out).toContain("start a new Copilot session");
+    expect(out).toContain("fork");
   });
 
   it("read failure with unknown login → 'the active gh account'", () => {
@@ -626,6 +628,8 @@ describe("explainRepoAccessForEnvSetup", () => {
     expect(out).toContain("Maintain");
     expect(out).toContain("grant");
     expect(out).not.toContain("gh auth switch");
+    expect(out).toContain("start a new Copilot session");
+    expect(out).toContain("fork");
   });
 
   it("push-only → role label Write", () => {

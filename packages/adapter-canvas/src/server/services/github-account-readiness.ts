@@ -278,7 +278,7 @@ function repairGuidance(
   }
   if (!repositoryReady) {
     return {
-      repair: `Grant @${login} repository administrator access, or select an account that can administer this repository.`,
+      repair: `Grant @${login} repository administrator access, select an account that can administer this repository, or fork the repository and start a new Copilot session from the fork's GitHub URL.`,
       remediation: null
     };
   }

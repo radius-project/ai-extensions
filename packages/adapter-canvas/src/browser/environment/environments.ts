@@ -1,4 +1,5 @@
 import { escapeBrowserHtml } from "../html.js";
+import { requireSuccessfulJsonResponse, ServerResponseError } from "../http.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { isRecord, readArray, readRecord, readString } from "../json.js";
 import type { EnvironmentConfirmDialog } from "./confirm-dialog.js";
@@ -404,10 +405,9 @@ export function initializeEnvironmentPane(
         `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(options.repo)}`,
         listAbort ? { signal: listAbort.signal } : undefined
       )
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
+      .then((response) =>
+        requireSuccessfulJsonResponse(response, "Could not load environments.")
+      )
       .then(
         (payload) => {
           if (!active || request !== listRequest) return;
@@ -432,8 +432,11 @@ export function initializeEnvironmentPane(
           ) {
             return;
           }
-          body.innerHTML =
-            '<tr><td colspan="5" style="color:var(--rad-text-tertiary);">Could not load environments.</td></tr>';
+          const message =
+            error instanceof ServerResponseError ?
+              error.message
+            : "Could not load environments.";
+          body.innerHTML = `<tr><td colspan="5" style="color:var(--rad-text-tertiary);">${escapeBrowserHtml(message)}</td></tr>`;
         }
       );
   };

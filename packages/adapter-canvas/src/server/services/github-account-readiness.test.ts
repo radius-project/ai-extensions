@@ -353,6 +353,9 @@ describe("GitHub account readiness", () => {
     expect(result.checks.repository.state).toBe("missing");
     expect(result.checks.environment.state).toBe("missing");
     expect(result.repair).toContain("repository administrator access");
+    expect(result.repair).toContain(
+      "fork the repository and start a new Copilot session"
+    );
     // A repository grant is not something a command can fix, so the wizard
     // must keep showing prose rather than an actionable callout.
     expect(result.repairRemediation).toBeNull();

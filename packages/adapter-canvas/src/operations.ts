@@ -4746,13 +4746,30 @@ const PERSISTED_OPERATION_KEYS = new Set([
 
 function persistedFailure(failure: any): any {
   if (!failure) return null;
+  const remediation =
+    (
+      failure.remediation &&
+      typeof failure.remediation === "object" &&
+      typeof failure.remediation.id === "string" &&
+      failure.remediation.id
+    ) ?
+      {
+        id: failure.remediation.id,
+        params: Object.fromEntries(
+          Object.entries(failure.remediation.params || {}).filter(
+            (entry) => typeof entry[1] === "string"
+          )
+        )
+      }
+    : null;
   return {
     code: String(failure.code || ""),
     stage: failure.stage == null ? null : String(failure.stage),
     stepSeq:
       Number.isFinite(Number(failure.stepSeq)) ? Number(failure.stepSeq) : null,
     message: String(failure.message || ""),
-    classification: String(failure.classification || "")
+    classification: String(failure.classification || ""),
+    ...(remediation ? { remediation } : {})
   };
 }
 
@@ -5409,15 +5426,6 @@ export function toClientView(op: any): any {
     headline: projectOperationHeadline(op),
     activeCommandKind: activeCommandKind(op),
     nextTransition: projectNextTransition(op),
-    failure:
-      op.failure ?
-        {
-          code: op.failure.code,
-          stage: op.failure.stage,
-          stepSeq: op.failure.stepSeq,
-          message: op.failure.message,
-          classification: op.failure.classification
-        }
-      : null
+    failure: persistedFailure(op.failure)
   };
 }

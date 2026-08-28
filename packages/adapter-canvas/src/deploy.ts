@@ -738,7 +738,8 @@ export function explainRepoAccessForEnvSetup({
       '". ' +
       "Either this account lacks access, or the wrong account is active (for example a personal account instead of your enterprise one). " +
       "Switch accounts with: gh auth switch --user <account>  (or sign in the account that has access), then retry. " +
-      "Note: gh auth switch changes your machine\u2019s active GitHub account for every tool in this terminal until you switch back."
+      "Note: gh auth switch changes your machine\u2019s active GitHub account for every tool in this terminal until you switch back. " +
+      "If you do not have access to this repository, fork it and start a new Copilot session from the fork\u2019s GitHub URL."
     );
   }
   if (permissions && permissions.admin === true) return "";
@@ -766,7 +767,8 @@ export function explainRepoAccessForEnvSetup({
     '", but ' +
     haveClause +
     ". " +
-    "Ask a repository or organization admin to grant you Admin (repo Settings \u2192 Collaborators and teams), then retry."
+    "Ask a repository or organization admin to grant you Admin (repo Settings \u2192 Collaborators and teams), then retry. " +
+    "If that is not possible, fork the repository and start a new Copilot session from the fork\u2019s GitHub URL."
   );
 }
 
