@@ -306,7 +306,7 @@ async function confirmProviderMutation<T>({
     providerId,
     createdByOperation
   );
-  requireRecoveryRollback(operation, mutation);
+  if (recovered) requireRecoveryRollback(operation, mutation);
   await persistOrThrow(
     persist,
     recovered ? "after reconciliation" : "after the provider acknowledged it"
