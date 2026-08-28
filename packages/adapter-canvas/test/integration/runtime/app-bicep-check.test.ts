@@ -708,6 +708,27 @@ test("resolves a composed value supplied through a parameter default", () => {
 
 test("stays silent when letter case decides the ordering", () => {
   const directory = temporaryDirectory();
+  // Ordinally APP_credential sorts after APP_OPTIONS ('c' > 'O'), but folded it
+  // sorts before ('C' < 'O'). The two answers disagree, so the check says
+  // nothing rather than risk failing a model the deployed sort would resolve.
+  const compiledOutput = template({
+    web: containerEnv({
+      APP_OPTIONS: { value: "password=$(APP_credential)" },
+      APP_credential: { value: "secret" }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("reports a lowercase helper that sorts after under every comparison", () => {
+  const directory = temporaryDirectory();
   const compiledOutput = template({
     web: containerEnv({
       APP_DATABASE_OPTIONS: { value: "password=$(app_password)" },
@@ -720,8 +741,8 @@ test("stays silent when letter case decides the ordering", () => {
     fakeBicep(directory, sarif([]), 0, compiledOutput)
   );
 
-  assert.equal(result.status, 0);
-  assert.equal(result.stderr, "");
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /runtime-variable/u);
 });
 
 test("resolves a top-level source-reference parameter default", () => {
