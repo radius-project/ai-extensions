@@ -14,6 +14,7 @@ import {
   test,
   WORKTREE_BRANCH,
   type CanvasHarness,
+  type FakeCliCommand,
   type FakeCliScenario
 } from "./support/canvas-harness.js";
 import type { Locator, Page } from "@playwright/test";
@@ -23,12 +24,6 @@ import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
 import { GRAPH_RETRY_MS } from "../../src/browser/pages/graph-page.js";
 import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
-// The environment-deletion journeys drive the real server-side OperationRecord
-// the delete route creates, exactly as the production delete runner does
-// (src/server/services/environment-deletion.ts): they enter each delete stage
-// and finish the operation. Importing the real module keeps the durable state
-// (and the `/dismiss` round trip) honest instead of stubbing it.
-type OperationsModule = typeof import("../../src/operations.js");
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const SOURCE_FILE = "src/web/app.ts";
@@ -300,29 +295,14 @@ test.describe("Radius Canvas in Chromium", () => {
     await canvas.setScenario(scenarioWithoutActiveDeployment());
     // Drive the real delete OperationRecord to a clean terminal exactly as the
     // production runner does (environment-deletion.ts): walk every delete stage
-    // to succeeded and finish the operation. The server owns the record, so its
-    // settled state — and the dismissal recorded against it — survives a reload.
-    // The completion is gated on a release signal so the progress poller first
-    // observes the operation running: it ignores an operation that is already
-    // terminal on its first observation, treating it as a stale prior record.
-    const releaseDeletion: { current: (() => void) | null } = { current: null };
-    canvas.setEnvironmentOperationRunner(async (operationId: string) => {
-      const ops = (await import("../../src/operations.js")) as OperationsModule;
-      const op = ops.operations.get(operationId);
-      if (!op) return;
-      const [firstStage] = op.stages;
-      if (!firstStage) return;
-      ops.enterStage(op, firstStage.id);
-      await new Promise<void>((resolve) => {
-        releaseDeletion.current = resolve;
-      });
-      for (const stage of op.stages) {
-        ops.enterStage(op, stage.id);
-        ops.setStageState(op, stage.id, "succeeded");
-      }
-      ops.finishSucceeded(op, "succeeded");
-      await ops.operations.persist();
-    });
+    // to succeeded and finish the operation. The server owns the record for the
+    // life of the process, so its settled state — and the dismissal recorded
+    // against it — is what a reload re-fetches, rather than the browser
+    // re-deriving it. `release` resolves only once the runner is parked mid
+    // operation, so the progress poller first observes it running: an operation
+    // already terminal on its first observation is treated as a stale prior
+    // record and skipped.
+    const deletion = canvas.driveEnvironmentDeletion({ state: "succeeded" });
 
     await gotoCanvas(page, canvas, "environment");
     const deleteEnvironment = page.locator(".js-delete-env").first();
@@ -333,12 +313,21 @@ test.describe("Radius Canvas in Chromium", () => {
     // modal driven with the deletion copy.
     const confirmTitle = page.locator("#env-confirm-title");
     await expect(confirmTitle).toHaveText("Delete environment?");
+    const deleteAccepted = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/delete-environment" &&
+        response.request().method() === "POST"
+    );
     const dismissRequest = page.waitForResponse(
       (response) =>
         new URL(response.url()).pathname.endsWith("/dismiss") &&
         response.request().method() === "POST"
     );
     await page.getByRole("button", { name: "Delete environment" }).click();
+    const { operationId } = (await (await deleteAccepted).json()) as {
+      operationId: string;
+    };
+    expect(operationId).toMatch(/^op_/);
 
     const panel = page.locator("#env-progress-panel");
     await expect(panel).toBeVisible();
@@ -348,23 +337,26 @@ test.describe("Radius Canvas in Chromium", () => {
     );
 
     // Let the tracked deletion settle now that its running panel is on screen.
-    releaseDeletion.current?.();
+    await deletion.release();
 
     // A clean Azure deletion acknowledges through the shared confirm dialog, and
     // acknowledging it is the dismissal.
     await expect(confirmTitle).toHaveText("Environment deleted");
+    await expectNoWcagViolations(page);
     const done = page.getByRole("button", { name: "Done" });
     await expect(done).toBeFocused();
     await done.click();
+    // The dismissal must target the very operation the delete route created, not
+    // merely some `/dismiss` POST, or a stray dismissal would pass this assertion.
     const dismissal = await dismissRequest;
-    expect(new URL(dismissal.url()).pathname).toMatch(
-      /^\/api\/operations\/op_[^/]+\/dismiss$/
+    expect(new URL(dismissal.url()).pathname).toBe(
+      `/api/operations/${operationId}/dismiss`
     );
     await expect(panel).toBeHidden();
 
-    // The key server round trip: the dismissal was recorded durably, so the
-    // panel does NOT reappear when the environments page is revisited. jsdom
-    // cannot prove this because it never reloads against the real server.
+    // The key server round trip: the dismissal was recorded against the record,
+    // so the panel does NOT reappear when the environments page is revisited.
+    // jsdom cannot prove this because it never reloads against the real server.
     await gotoCanvas(page, canvas, "environment");
     await expect(page.locator(".js-delete-env").first()).toBeVisible();
     await expect(page.locator("#env-progress-panel")).toBeHidden();
@@ -377,33 +369,19 @@ test.describe("Radius Canvas in Chromium", () => {
     await canvas.setScenario(scenarioWithoutActiveDeployment());
     // Drive the delete operation to failed_partial with the first stage failed,
     // mirroring environment-deletion.ts: a terminal partial failure keeps the
-    // completed stages recorded and offers a resume rather than restarting. The
-    // failure is gated on a release signal so the progress poller first observes
-    // the operation running (a first-observation terminal is treated as stale).
-    const releaseFailure: { current: (() => void) | null } = { current: null };
-    canvas.setEnvironmentOperationRunner(async (operationId: string) => {
-      const ops = (await import("../../src/operations.js")) as OperationsModule;
-      const op = ops.operations.get(operationId);
-      if (!op) return;
-      const [firstStage] = op.stages;
-      if (!firstStage) return;
-      ops.enterStage(op, firstStage.id);
-      await new Promise<void>((resolve) => {
-        releaseFailure.current = resolve;
-      });
-      ops.setStageState(op, firstStage.id, "failed");
-      ops.finish(op, "failed_partial", {
-        failure: {
-          code: "radius-env-delete-failed",
-          stage: firstStage.id,
-          stepSeq: null,
-          message:
-            "Radius could not confirm the environment was deleted from the cluster.",
-          classification: "user-fixable",
-          evidence: null
-        }
-      });
-      await ops.operations.persist();
+    // completed stages recorded and offers a resume rather than restarting.
+    // `release` resolves only once the runner is parked so the poller first
+    // observes it running (a first-observation terminal is treated as stale).
+    const deletion = canvas.driveEnvironmentDeletion({
+      state: "failed_partial",
+      failure: {
+        code: "radius-env-delete-failed",
+        stepSeq: null,
+        message:
+          "Radius could not confirm the environment was deleted from the cluster.",
+        classification: "user-fixable",
+        evidence: null
+      }
     });
 
     await gotoCanvas(page, canvas, "environment");
@@ -412,7 +390,7 @@ test.describe("Radius Canvas in Chromium", () => {
 
     const panel = page.locator("#env-progress-panel");
     await expect(panel).toBeVisible();
-    releaseFailure.current?.();
+    await deletion.release();
     await expect(panel).toContainText(
       "Deletion stopped before all stages completed. Completed stages remain recorded and will not be repeated."
     );
@@ -421,6 +399,35 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBeVisible();
   });
 
+  test("refuses to delete an environment that still has a deployed application @safety", async ({
+    page,
+    canvas
+  }) => {
+    // The default fixture keeps an active deployment, so the delete route's
+    // active-app guard (routes/environments.ts) answers 409 app-deployed and
+    // nothing is scheduled. The browser converts that refusal into a redirect
+    // prompt instead of opening the progress panel.
+    await canvas.setScenario(defaultFakeCliScenario());
+    const refusal = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/delete-environment" &&
+        response.request().method() === "POST"
+    );
+
+    await gotoCanvas(page, canvas, "environment");
+    await page.locator(".js-delete-env").first().click();
+    const confirmTitle = page.locator("#env-confirm-title");
+    await expect(confirmTitle).toHaveText("Delete environment?");
+    await page.getByRole("button", { name: "Delete environment" }).click();
+
+    expect((await refusal).status()).toBe(409);
+    await expect(confirmTitle).toHaveText("Delete the application first");
+    await expect(
+      page.getByRole("button", { name: "Go to Deployments" })
+    ).toBeVisible();
+    // No tracked deletion was started: the guard ran before any operation.
+    await expect(page.locator("#env-progress-panel")).toBeHidden();
+  });
   test("does not expose a pre-existing credential cache in browser state, requests, logs, or artifacts @safety", async ({
     page,
     canvas
