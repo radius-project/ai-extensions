@@ -210,6 +210,59 @@ describe("discovery service (SU-08)", () => {
     });
   });
 
+  it("gives the AKS credential fetch a budget beyond the Windows batch-shim cost", async () => {
+    let credentialsTimeout = 0;
+    const dependencies: DiscoveryDependencies = {
+      isUuid,
+      ...temporaryKubeconfig,
+      async runCli(command, args, options) {
+        if (args[0] === "aks" && args[1] === "get-credentials") {
+          credentialsTimeout = options.timeout;
+          return "";
+        }
+        if (command === "kubectl") return "default";
+        if (args[0] === "aks" && args[1] === "list") return "[]";
+        if (args[0] === "group") return "[]";
+        return "";
+      }
+    };
+
+    await discoverResources(
+      { provider: "azure", resourceGroup: "rg-valid", cluster: "aks-valid" },
+      dependencies
+    );
+
+    // On Windows the Azure CLI is an `az.cmd` batch shim launched through a
+    // fresh Python interpreter, which measured a consistent ~24s for this call.
+    // A budget at or below that reintroduces the silent SIGTERM that left the
+    // namespace picker permanently empty.
+    expect(credentialsTimeout).toBeGreaterThan(30000);
+  });
+
+  it("reports a failed namespace lookup rather than silently returning none", async () => {
+    const dependencies: DiscoveryDependencies = {
+      isUuid,
+      ...temporaryKubeconfig,
+      async runCli(command, args) {
+        if (args[0] === "aks" && args[1] === "get-credentials") {
+          throw new Error("Command failed: az aks get-credentials");
+        }
+        if (command === "kubectl") return "default";
+        if (args[0] === "aks" && args[1] === "list") return "[]";
+        if (args[0] === "group") return "[]";
+        return "";
+      }
+    };
+
+    const result = await discoverResources(
+      { provider: "azure", resourceGroup: "rg-valid", cluster: "aks-valid" },
+      dependencies
+    );
+
+    expect(result.namespaces).toEqual([]);
+    expect(result.errors?.namespaces).toContain("az aks get-credentials");
+  });
+
   it("leaves namespaces empty until both Azure selections are explicit", async () => {
     const commands: string[] = [];
     const dependencies: DiscoveryDependencies = {

@@ -712,13 +712,15 @@ describe("azure-discovery routes (SU-08)", () => {
         vpcs: [],
         subnets: []
       });
-      // The per-call timeouts are part of the contract with the runner.
+      // The per-call timeouts are part of the contract with the runner. The
+      // credential fetch is the outlier because the Windows Azure CLI batch
+      // shim measured ~24s for it, well over the other Azure lookups.
       expect(cli.calls).toEqual([
         { line: CLI.aks(), timeout: 30000 },
         { line: CLI.groups(), timeout: 30000 },
         {
           line: CLI.credentials("aks-selected", "rg-selected"),
-          timeout: 20000
+          timeout: 60000
         },
         { line: CLI.namespaces, timeout: 10000 }
       ]);

@@ -37,6 +37,18 @@ const AZURE_RESOURCE_GROUP_PATTERN =
   /^(?=.{1,90}$)[A-Za-z0-9._()-]*[A-Za-z0-9_()-]$/;
 const AKS_CLUSTER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?$/;
 
+// `az aks get-credentials` is the slowest CLI call in discovery: it makes a
+// management-plane request and then rewrites the kubeconfig. On Windows the
+// Azure CLI is an `az.cmd` batch shim that cmd.exe starts through a fresh
+// Python interpreter, which measured a consistent ~24s against a normal AKS
+// cluster — over the previous 20s budget. Exceeding it killed the process with
+// SIGTERM and no stderr, so the namespace lookup failed silently and the picker
+// was left permanently empty. This ceiling only bounds a genuine hang, so
+// sizing it well above the observed cost costs a faster host nothing; that is
+// deliberately preferred over branching on the platform, which would put hidden
+// process detection inside this otherwise platform-neutral service.
+const AKS_CREDENTIALS_TIMEOUT_MS = 60000;
+
 function record(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return {};
@@ -190,7 +202,7 @@ export async function discoverResources(
             "--overwrite-existing",
             ...subArgs
           ],
-          { timeout: 20000 }
+          { timeout: AKS_CREDENTIALS_TIMEOUT_MS }
         );
         const nsJson = await dependencies.runCli(
           "kubectl",
