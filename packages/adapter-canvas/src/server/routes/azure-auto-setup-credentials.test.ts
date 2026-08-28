@@ -950,12 +950,79 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     expect(test.failures).toEqual([]);
   });
 
-  it("treats a malformed advisory credential list as empty and creates the credential", async () => {
+  it("fails closed when the federated credential list is malformed", async () => {
     const test = harness({
       runAz: async (args) => {
         const line = args.join(" ");
         if (line.includes("federated-credential list")) {
           return result({ stdout: "{oops" });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.failures[0]).toMatchObject({
+      code: "federated-credential-list-malformed"
+    });
+    expect(test.calls).not.toContain("fic:dev");
+  });
+
+  it.each([
+    ["empty output", ""],
+    ["a non-object entry", JSON.stringify([null])],
+    ["an entry without a subject", JSON.stringify([{ name: "dev" }])]
+  ])("fails closed on %s in the credential list", async (_label, stdout) => {
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.failures[0]).toMatchObject({
+      code: "federated-credential-list-malformed"
+    });
+  });
+
+  it("accepts an unrelated flexible federated credential without a subject", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({
+            stdout: JSON.stringify([
+              existingCredential(),
+              {
+                name: "flexible",
+                subject: null,
+                claimsMatchingExpression: {
+                  languageVersion: 1,
+                  value: "claims['sub'] matches 'repo:octo/*'"
+                }
+              }
+            ])
+          });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+    expect(test.failures).toEqual([]);
+  });
+
+  it("records durable identity provenance for a created credential", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: "[]" });
         }
         if (line.includes("federated-credential create")) return result();
         if (line.startsWith("role assignment create ")) return result();
@@ -979,6 +1046,7 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
       audiences: ["api://AzureADTokenExchange"],
       repoId: 5
     });
+    expect(test.failures).toEqual([]);
   });
 
   it("fails setup when created-credential provenance cannot be persisted", async () => {
@@ -1001,6 +1069,97 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     });
     expect(test.calls).toContain("fic:dev");
     expect(test.calls.some((call) => call.startsWith("role:"))).toBe(false);
+  });
+
+  it("honors a short Retry-After for a rate-limited credential inventory read", async () => {
+    let reads = 0;
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          reads += 1;
+          return reads === 1 ?
+              result({
+                code: 1,
+                stderr: "TooManyRequests (HTTP 429)\nRetry-After: 2"
+              })
+            : result({
+                stdout: JSON.stringify([existingCredential()])
+              });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+    expect(reads).toBe(2);
+    expect(test.calls).toContain("sleep:2000");
+  });
+
+  it("does not retry before Retry-After when it exceeds the read budget", async () => {
+    let reads = 0;
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          reads += 1;
+          return result({
+            code: 1,
+            stderr: "TooManyRequests (HTTP 429)\nRetry-After: 60"
+          });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(reads).toBe(1);
+    expect(test.calls.some((call) => call.startsWith("sleep:"))).toBe(false);
+  });
+
+  it("honors Retry-After when Azure emits throttling on stdout", async () => {
+    let reads = 0;
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          reads += 1;
+          return result({
+            code: 1,
+            stdout: "TooManyRequests (HTTP 429)\nRetry-After: 60"
+          });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(reads).toBe(1);
+    expect(test.calls.some((call) => call.startsWith("sleep:"))).toBe(false);
+  });
+
+  it("does not retry an authorization failure from credential inventory", async () => {
+    let reads = 0;
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          reads += 1;
+          return result({
+            code: 1,
+            stderr: "AuthorizationFailed (HTTP 403)\nRetry-After: 60"
+          });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(reads).toBe(1);
+    expect(test.failures[0]).toMatchObject({
+      code: "federated-credential-list-failed"
+    });
   });
 
   it("warns when the immutable identity still has a legacy mutable credential", async () => {
@@ -1084,6 +1243,37 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     expect(test.calls.filter((call) => call.startsWith("sleep:"))).toHaveLength(
       5
     );
+  });
+
+  it("does not retry an authorization failure while resolving the Service Principal id", async () => {
+    let reads = 0;
+    const test = harness({
+      ensureServicePrincipal: async () => ({
+        ok: true,
+        state: "created",
+        origin: "this_operation",
+        objectId: null
+      }),
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({
+            stdout: JSON.stringify([existingCredential()])
+          });
+        }
+        if (line.startsWith("ad sp show ")) {
+          reads += 1;
+          return result({ code: 1, stderr: "AuthorizationFailed" });
+        }
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(reads).toBe(1);
+    expect(test.failures[0]).toMatchObject({
+      code: "sp-objectid-failed"
+    });
   });
 
   it("stops when persistence cancels after resolving the Service Principal object id", async () => {

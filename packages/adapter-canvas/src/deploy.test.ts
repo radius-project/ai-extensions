@@ -17,20 +17,34 @@ import {
 import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
 
 describe("selected-account workflow reads", () => {
-  it("classifies direct selected-account command authorization failures", async () => {
+  it.each([
+    ["gh: Forbidden (HTTP 403)", 403],
+    [
+      "Resource protected by organization SAML enforcement. You must grant your OAuth token access.",
+      403
+    ]
+  ])(
+    "classifies direct selected-account command authorization failure %j",
+    async (stderr, status) => {
+      const executor = successfulSelectedGhExecutor({ login: "alice" });
+
+      await expect(
+        selectedCommandAuthorizationError(executor, "contoso/store", {
+          code: 1,
+          stdout: "",
+          stderr
+        })
+      ).resolves.toMatchObject({
+        name: "SelectedGhAuthorizationError",
+        login: "alice",
+        status
+      });
+    }
+  );
+
+  it("does not classify rate limiting as selected-account authorization failure", async () => {
     const executor = successfulSelectedGhExecutor({ login: "alice" });
 
-    await expect(
-      selectedCommandAuthorizationError(executor, "contoso/store", {
-        code: 1,
-        stdout: "",
-        stderr: "gh: Forbidden (HTTP 403)"
-      })
-    ).resolves.toMatchObject({
-      name: "SelectedGhAuthorizationError",
-      login: "alice",
-      status: 403
-    });
     await expect(
       selectedCommandAuthorizationError(executor, "contoso/store", {
         code: 1,
@@ -593,6 +607,28 @@ describe("explainRepoAccessForEnvSetup", () => {
     expect(out).toContain("ryanwaite");
     expect(out).toContain("azure-cto/app");
     expect(out).toContain("gh auth switch");
+  });
+
+  it("uses the bundled GitHub CLI path in switch-account guidance", () => {
+    const out = explainRepoAccessForEnvSetup(
+      {
+        repo: "azure-cto/app",
+        login: "ryanwaite",
+        readFailed: true,
+        permissions: null
+      },
+      {
+        kind: "absolute",
+        shell: "powershell",
+        executablePath: "C:\\Copilot Tools\\gh.exe",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(out).toContain(
+      "& 'C:\\Copilot Tools\\gh.exe' auth switch --user <account>"
+    );
+    expect(out).toContain("Install GitHub CLI system-wide.");
   });
 
   it("read failure with unknown login → 'the active gh account'", () => {

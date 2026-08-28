@@ -1,6 +1,10 @@
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { queryValue } from "../query.js";
 import { readString } from "../json.js";
+import {
+  parseGhCommandPresentation,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
 import { readPageState } from "../pages/state.js";
 import { ENVIRONMENT_PAGE_STATE_ID } from "../../pages/browser-state-ids.js";
 import {
@@ -36,6 +40,7 @@ interface EnvironmentPageState {
   readonly branch: string;
   readonly activeSubtab: "credentials" | "environments";
   readonly mutationNonce: string;
+  readonly ghCommandPresentation: GhCommandPresentation;
 }
 
 function parsePageState(context: BrowserContext): EnvironmentPageState {
@@ -44,6 +49,9 @@ function parsePageState(context: BrowserContext): EnvironmentPageState {
     repo: readString(state, "repo"),
     branch: readString(state, "branch"),
     mutationNonce: readString(state, "mutationNonce"),
+    ghCommandPresentation: parseGhCommandPresentation(
+      state.ghCommandPresentation
+    ),
     activeSubtab:
       readString(state, "activeSubtab") === "credentials" ? "credentials" : (
         "environments"
@@ -157,6 +165,7 @@ export function initializeEnvironmentPage(
   const profiles = initializeCredentialProfilesPanel(context, {
     repo: state.repo,
     mutationNonce: state.mutationNonce,
+    ghCommandPresentation: state.ghCommandPresentation,
     environmentName: () => environmentInput.value,
     onReadinessChange(readiness) {
       githubReadiness = readiness;
@@ -248,6 +257,7 @@ export function initializeEnvironmentPage(
     {
       repo: state.repo,
       mutationNonce: state.mutationNonce,
+      ghCommandPresentation: state.ghCommandPresentation,
       decisions: context.dialogs,
       ...(confirmDialog ? { confirmDialog } : {})
     },
@@ -343,6 +353,7 @@ export function initializeEnvironmentPage(
   const initializedOperations = initializeEnvironmentOperations(context, {
     repo: state.repo,
     mutationNonce: state.mutationNonce,
+    ghCommandPresentation: state.ghCommandPresentation,
     deps: {
       showSuccessBanner: environments.showSuccess,
       showActionRequired: environments.showActionRequired,

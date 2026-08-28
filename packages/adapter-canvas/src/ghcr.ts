@@ -2,6 +2,11 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  type GhCommandPresentation
+} from "./gh-command-display.js";
 
 export interface GhCredentials {
   token: string;
@@ -24,6 +29,7 @@ export type FetchImplementation = (
     headers?: Record<string, string>;
     body?: Buffer;
     redirect?: "error" | "follow";
+    signal?: AbortSignal;
   }
 ) => Promise<HttpResponse>;
 
@@ -47,14 +53,15 @@ interface RegistryCoordinates {
 }
 
 interface RegistryTokenOptions extends GhCredentials {
-  fetchImpl: FetchImplementation;
+  requests: RequestContext;
   registryOrigin: string;
   repositoryPath: string;
   scope?: string;
+  ghCommandPresentation?: GhCommandPresentation;
 }
 
 interface BlobOptions {
-  fetchImpl: FetchImplementation;
+  requests: RequestContext;
   registryOrigin: string;
   repositoryPath: string;
   bearerToken: string;
@@ -63,7 +70,7 @@ interface BlobOptions {
 }
 
 interface BootstrapManifestOptions {
-  fetchImpl: FetchImplementation;
+  requests: RequestContext;
   registryOrigin: string;
   repositoryPath: string;
   bearerToken: string;
@@ -82,6 +89,10 @@ export interface BootstrapGhcrOptions {
   apiBaseUrl?: string;
   sleep?: (milliseconds: number) => Promise<void>;
   metadataAttempts?: number;
+  ghCommandPresentation?: GhCommandPresentation;
+  requestTimeoutMs?: number;
+  bootstrapTimeoutMs?: number;
+  now?: () => number;
 }
 
 class GhcrAuthError extends Error {
@@ -96,10 +107,24 @@ function parsePackageMetadata(value: unknown): GitHubPackageMetadata {
   if (!isRecord(value)) {
     throw new Error("GitHub Packages API returned an invalid response.");
   }
+  if (typeof value.visibility !== "string") {
+    throw new Error(
+      "GitHub Packages API response did not include a valid visibility."
+    );
+  }
+  if (
+    value.repository !== undefined &&
+    value.repository !== null &&
+    (!isRecord(value.repository) ||
+      typeof value.repository.full_name !== "string")
+  ) {
+    throw new Error(
+      "GitHub Packages API response included an invalid repository."
+    );
+  }
   const repository = isRecord(value.repository) ? value.repository : undefined;
   return {
-    visibility:
-      typeof value.visibility === "string" ? value.visibility : undefined,
+    visibility: value.visibility,
     repository:
       repository && typeof repository.full_name === "string" ?
         { full_name: repository.full_name }
@@ -115,8 +140,47 @@ export const BOOTSTRAP_CONTENT =
 
 const OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json";
 const OCI_EMPTY_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json";
-const PACKAGE_AUTH_GUIDANCE =
-  "In the terminal, make the selected account active with: gh auth switch --hostname github.com --user <selected-login>. Then run: gh auth refresh --hostname github.com --scopes read:packages,write:packages. The first command changes your active GitHub CLI account if needed.";
+function packageAuthGuidance(
+  presentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+): string {
+  const switchCommand = displayGhCommand(presentation, [
+    "auth",
+    "switch",
+    "--hostname",
+    "github.com",
+    "--user",
+    "<selected-login>"
+  ]);
+  const refreshCommand = displayGhCommand(presentation, [
+    "auth",
+    "refresh",
+    "--hostname",
+    "github.com",
+    "--scopes",
+    "read:packages,write:packages"
+  ]);
+  if (!switchCommand || !refreshCommand) return presentation.installationNote;
+  return `In the terminal, make the selected account active with: ${switchCommand}. Then run: ${refreshCommand}. The first command changes your active GitHub CLI account if needed. ${presentation.installationNote}`.trim();
+}
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 90_000;
+const MAX_IDEMPOTENT_ATTEMPTS = 3;
+
+interface RequestContext {
+  fetchImpl: FetchImplementation;
+  sleep: (milliseconds: number) => Promise<void>;
+  now: () => number;
+  deadline: number;
+  requestTimeoutMs: number;
+}
+
+interface RequestOptions {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: Buffer;
+  redirect?: "error" | "follow";
+}
 
 async function defaultRunKeyringCommand(args: string[]): Promise<string> {
   const { runGhKeyringCommand } = await import("./gh.js");
@@ -180,8 +244,133 @@ async function responseDetail(response: HttpResponse): Promise<string> {
   return text ? `: ${text.slice(0, 1000)}` : "";
 }
 
-function packageAuthError(message: string): GhcrAuthError {
-  return new GhcrAuthError(`${message}. ${PACKAGE_AUTH_GUIDANCE}`);
+function remainingBudget(requests: RequestContext): number {
+  return requests.deadline - requests.now();
+}
+
+function ensureBudget(requests: RequestContext): number {
+  const remaining = remainingBudget(requests);
+  if (remaining <= 0) {
+    throw new Error("GHCR bootstrap exceeded its overall elapsed-time budget.");
+  }
+  return remaining;
+}
+
+function retryDelay(
+  response: HttpResponse,
+  now: number,
+  attempt: number
+): number {
+  const retryAfter = response.headers.get("retry-after")?.trim();
+  if (retryAfter && /^\d+$/.test(retryAfter)) {
+    return Number(retryAfter) * 1000;
+  }
+  if (retryAfter) {
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) return Math.max(0, retryAt - now);
+  }
+  const reset = Number(response.headers.get("x-ratelimit-reset"));
+  if (Number.isFinite(reset) && reset > 0) {
+    return Math.max(0, reset * 1000 - now);
+  }
+  return Math.min(500 * 2 ** attempt, 4000);
+}
+
+async function sleepWithinBudget(
+  requests: RequestContext,
+  milliseconds: number
+): Promise<void> {
+  const remaining = ensureBudget(requests);
+  if (milliseconds >= remaining) {
+    throw new Error("GHCR bootstrap exceeded its overall elapsed-time budget.");
+  }
+  await requests.sleep(milliseconds);
+  ensureBudget(requests);
+}
+
+function isRetryableResponse(response: HttpResponse): boolean {
+  return (
+    response.status === 429 ||
+    response.status >= 500 ||
+    (response.status === 403 &&
+      (response.headers.get("retry-after") !== null ||
+        response.headers.get("x-ratelimit-remaining") === "0" ||
+        response.headers.get("x-ratelimit-reset") !== null))
+  );
+}
+
+async function request(
+  requests: RequestContext,
+  input: string | URL,
+  options: RequestOptions = {}
+): Promise<HttpResponse> {
+  const method = (options.method || "GET").toUpperCase();
+  const idempotent = method === "GET" || method === "HEAD";
+  const attempts = idempotent ? MAX_IDEMPOTENT_ATTEMPTS : 1;
+  let attempt = 0;
+  while (true) {
+    const remaining = ensureBudget(requests);
+    const signal = AbortSignal.timeout(
+      Math.max(1, Math.ceil(Math.min(requests.requestTimeoutMs, remaining)))
+    );
+    let response: HttpResponse;
+    try {
+      response = await requests.fetchImpl(input, {
+        ...options,
+        signal
+      });
+    } catch (error) {
+      if (!idempotent || attempt + 1 === attempts) throw error;
+      await sleepWithinBudget(requests, Math.min(500 * 2 ** attempt, 4000));
+      attempt++;
+      continue;
+    }
+    ensureBudget(requests);
+    if (!isRetryableResponse(response) || attempt + 1 === attempts) {
+      return response;
+    }
+    await sleepWithinBudget(
+      requests,
+      retryDelay(response, requests.now(), attempt)
+    );
+    attempt++;
+  }
+}
+
+function parseDigestHeader(response: HttpResponse, subject: string): string {
+  const digest = response.headers.get("docker-content-digest");
+  if (!digest || !/^sha256:[a-f0-9]{64}$/.test(digest)) {
+    throw new Error(`${subject} returned an invalid Docker-Content-Digest.`);
+  }
+  return digest;
+}
+
+function validateLocation(
+  response: HttpResponse,
+  registryOrigin: string,
+  subject: string
+): URL {
+  const location = response.headers.get("location");
+  if (!location) {
+    throw new Error(`${subject} did not include a location.`);
+  }
+  let url: URL;
+  try {
+    url = new URL(location, registryOrigin);
+  } catch {
+    throw new Error(`${subject} returned an invalid location.`);
+  }
+  if (url.origin !== registryOrigin) {
+    throw new Error(`${subject} pointed to an unexpected origin.`);
+  }
+  return url;
+}
+
+function packageAuthError(
+  message: string,
+  presentation: GhCommandPresentation
+): GhcrAuthError {
+  return new GhcrAuthError(`${message}. ${packageAuthGuidance(presentation)}`);
 }
 
 function parseBearerChallenge(
@@ -205,14 +394,15 @@ function parseBearerChallenge(
 }
 
 async function getRegistryBearerToken({
-  fetchImpl,
+  requests,
   registryOrigin,
   repositoryPath,
   username,
   token,
-  scope = "pull,push"
+  scope = "pull,push",
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 }: RegistryTokenOptions): Promise<string> {
-  const challengeResponse = await fetchImpl(`${registryOrigin}/v2/`, {
+  const challengeResponse = await request(requests, `${registryOrigin}/v2/`, {
     headers: { Accept: "application/json" },
     redirect: "error"
   });
@@ -234,7 +424,7 @@ async function getRegistryBearerToken({
   tokenUrl.searchParams.set("service", challenge.service || "ghcr.io");
   tokenUrl.searchParams.set("scope", `repository:${repositoryPath}:${scope}`);
 
-  const response = await fetchImpl(tokenUrl, {
+  const response = await request(requests, tokenUrl, {
     headers: {
       Accept: "application/json",
       Authorization: `Basic ${Buffer.from(`${username}:${token}`).toString("base64")}`
@@ -243,7 +433,8 @@ async function getRegistryBearerToken({
   });
   if (response.status === 401 || response.status === 403) {
     throw packageAuthError(
-      `GHCR rejected package access for ${repositoryPath}`
+      `GHCR rejected package access for ${repositoryPath}`,
+      ghCommandPresentation
     );
   }
   if (!response.ok) {
@@ -252,12 +443,14 @@ async function getRegistryBearerToken({
     );
   }
   const body = await response.json();
-  const tokenBody = isRecord(body) ? body : {};
+  if (!isRecord(body)) {
+    throw new Error("GHCR token endpoint returned an invalid response.");
+  }
   const bearerToken =
-    typeof tokenBody.token === "string" ? tokenBody.token
-    : typeof tokenBody.access_token === "string" ? tokenBody.access_token
+    typeof body.token === "string" ? body.token
+    : typeof body.access_token === "string" ? body.access_token
     : "";
-  if (!bearerToken) {
+  if (!bearerToken.trim()) {
     throw new Error("GHCR token response did not include an access token.");
   }
   return bearerToken;
@@ -268,7 +461,7 @@ function registryPath(repositoryPath: string): string {
 }
 
 async function registryFetch(
-  fetchImpl: FetchImplementation,
+  requests: RequestContext,
   registryOrigin: string,
   bearerToken: string,
   path: string,
@@ -278,7 +471,7 @@ async function registryFetch(
     body?: Buffer;
   } = {}
 ): Promise<HttpResponse> {
-  return fetchImpl(`${registryOrigin}${path}`, {
+  return request(requests, `${registryOrigin}${path}`, {
     ...options,
     headers: {
       Authorization: `Bearer ${bearerToken}`,
@@ -289,7 +482,7 @@ async function registryFetch(
 }
 
 async function pushBlob({
-  fetchImpl,
+  requests,
   registryOrigin,
   repositoryPath,
   bearerToken,
@@ -298,62 +491,97 @@ async function pushBlob({
 }: BlobOptions): Promise<void> {
   const encodedPath = registryPath(repositoryPath);
   const blobPath = `/v2/${encodedPath}/blobs/${digest}`;
-  const existing = await registryFetch(
-    fetchImpl,
-    registryOrigin,
-    bearerToken,
-    blobPath,
-    { method: "HEAD" }
-  );
-  if (existing.ok) return;
-  if (existing.status !== 404) {
-    throw new Error(
-      `Failed to check GHCR blob ${digest} (HTTP ${existing.status})${await responseDetail(existing)}`
+  const readBlob = async (): Promise<boolean> => {
+    const response = await registryFetch(
+      requests,
+      registryOrigin,
+      bearerToken,
+      blobPath,
+      { method: "HEAD" }
     );
-  }
+    if (response.status === 404) return false;
+    if (response.status !== 200) {
+      throw new Error(
+        `Failed to check GHCR blob ${digest} (HTTP ${response.status})${await responseDetail(response)}`
+      );
+    }
+    const actualDigest = parseDigestHeader(response, `GHCR blob ${digest}`);
+    if (actualDigest !== digest) {
+      throw new Error(
+        `GHCR blob ${digest} returned conflicting digest ${actualDigest}.`
+      );
+    }
+    return true;
+  };
 
-  const start = await registryFetch(
-    fetchImpl,
-    registryOrigin,
-    bearerToken,
-    `/v2/${encodedPath}/blobs/uploads/`,
-    { method: "POST" }
-  );
-  if (start.status !== 202) {
-    throw new Error(
-      `Failed to start GHCR blob upload (HTTP ${start.status})${await responseDetail(start)}`
-    );
-  }
-  const location = start.headers.get("location");
-  if (!location) {
-    throw new Error("GHCR blob upload response did not include a location.");
-  }
-  const uploadUrl = new URL(location, registryOrigin);
-  if (uploadUrl.origin !== registryOrigin) {
-    throw new Error(
-      "GHCR blob upload location pointed to an unexpected origin."
-    );
-  }
-  uploadUrl.searchParams.set("digest", digest);
+  if (await readBlob()) return;
 
-  const upload = await fetchImpl(uploadUrl, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bearer ${bearerToken}`,
-      "Content-Type": "application/octet-stream"
-    },
-    body: bytes,
-    redirect: "error"
-  });
-  if (upload.status !== 201) {
-    throw new Error(
-      `Failed to upload GHCR blob ${digest} (HTTP ${upload.status})${await responseDetail(upload)}`
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const start = await registryFetch(
+      requests,
+      registryOrigin,
+      bearerToken,
+      `/v2/${encodedPath}/blobs/uploads/`,
+      { method: "POST" }
+    ).catch(() => null);
+    if (!start || start.status >= 500) {
+      if (await readBlob()) return;
+      if (attempt === 0) continue;
+      throw new Error(
+        `GHCR blob upload for ${digest} remained absent after reconciliation.`
+      );
+    }
+    if (start.status !== 202) {
+      throw new Error(
+        `Failed to start GHCR blob upload (HTTP ${start.status})${await responseDetail(start)}`
+      );
+    }
+    const uploadUrl = validateLocation(
+      start,
+      registryOrigin,
+      "GHCR blob upload response"
     );
+    uploadUrl.searchParams.set("digest", digest);
+
+    const upload = await request(requests, uploadUrl, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${bearerToken}`,
+        "Content-Type": "application/octet-stream"
+      },
+      body: bytes,
+      redirect: "error"
+    }).catch(() => null);
+    if (!upload || upload.status >= 500) {
+      if (await readBlob()) return;
+      if (attempt === 0) continue;
+      throw new Error(
+        `GHCR blob upload for ${digest} remained absent after reconciliation.`
+      );
+    }
+    if (upload.status !== 201) {
+      throw new Error(
+        `Failed to upload GHCR blob ${digest} (HTTP ${upload.status})${await responseDetail(upload)}`
+      );
+    }
+    const actualDigest = parseDigestHeader(
+      upload,
+      `GHCR blob upload ${digest}`
+    );
+    if (actualDigest !== digest) {
+      throw new Error(
+        `GHCR blob upload returned conflicting digest ${actualDigest}.`
+      );
+    }
+    return;
   }
+  throw new Error(
+    `GHCR blob upload for ${digest} remained absent after reconciliation.`
+  );
 }
 
 async function pushBootstrapManifest({
-  fetchImpl,
+  requests,
   registryOrigin,
   repositoryPath,
   bearerToken,
@@ -376,9 +604,78 @@ async function pushBootstrapManifest({
     }
   };
   const manifestBytes = Buffer.from(JSON.stringify(manifest));
+  const manifestDigest = sha256(manifestBytes);
+
+  const manifestPath = `/v2/${registryPath(repositoryPath)}/manifests/${BOOTSTRAP_TAG}`;
+  const readManifest = async (): Promise<"absent" | "exact" | "conflict"> => {
+    const response = await registryFetch(
+      requests,
+      registryOrigin,
+      bearerToken,
+      manifestPath,
+      {
+        method: "HEAD",
+        headers: { Accept: OCI_MANIFEST_MEDIA_TYPE }
+      }
+    );
+    if (response.status === 404) return "absent";
+    if (response.status !== 200) {
+      throw new Error(
+        `Failed to check the GHCR bootstrap manifest (HTTP ${response.status})${await responseDetail(response)}`
+      );
+    }
+    if (
+      parseDigestHeader(response, "GHCR bootstrap manifest") === manifestDigest
+    ) {
+      return "exact";
+    }
+    const legacy = await registryFetch(
+      requests,
+      registryOrigin,
+      bearerToken,
+      manifestPath,
+      { headers: { Accept: OCI_MANIFEST_MEDIA_TYPE } }
+    );
+    if (legacy.status !== 200) return "conflict";
+    let legacyBody: unknown;
+    try {
+      legacyBody = await legacy.json();
+    } catch {
+      return "conflict";
+    }
+    if (!isRecord(legacyBody)) return "conflict";
+    const annotations =
+      isRecord(legacyBody.annotations) ? legacyBody.annotations : {};
+    const legacySource =
+      typeof annotations["org.opencontainers.image.source"] === "string" ?
+        annotations["org.opencontainers.image.source"].toLowerCase()
+      : "";
+    const expectedSource =
+      manifest.annotations["org.opencontainers.image.source"].toLowerCase();
+    return (
+        legacyBody.schemaVersion === manifest.schemaVersion &&
+          legacyBody.mediaType === manifest.mediaType &&
+          legacyBody.artifactType === manifest.artifactType &&
+          JSON.stringify(legacyBody.config) ===
+            JSON.stringify(manifest.config) &&
+          JSON.stringify(legacyBody.layers) ===
+            JSON.stringify(manifest.layers) &&
+          legacySource === expectedSource
+      ) ?
+        "exact"
+      : "conflict";
+  };
+
+  const initialState = await readManifest();
+  if (initialState === "exact") return;
+  if (initialState === "conflict") {
+    throw new Error(
+      "GHCR bootstrap tag already exists with a different digest; refusing to overwrite the external manifest."
+    );
+  }
 
   await pushBlob({
-    fetchImpl,
+    requests,
     registryOrigin,
     repositoryPath,
     bearerToken,
@@ -386,7 +683,7 @@ async function pushBootstrapManifest({
     digest: config.digest
   });
   await pushBlob({
-    fetchImpl,
+    requests,
     registryOrigin,
     repositoryPath,
     bearerToken,
@@ -394,31 +691,70 @@ async function pushBootstrapManifest({
     digest: layer.digest
   });
 
-  const response = await registryFetch(
-    fetchImpl,
-    registryOrigin,
-    bearerToken,
-    `/v2/${registryPath(repositoryPath)}/manifests/${BOOTSTRAP_TAG}`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": OCI_MANIFEST_MEDIA_TYPE },
-      body: manifestBytes
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await registryFetch(
+      requests,
+      registryOrigin,
+      bearerToken,
+      manifestPath,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": OCI_MANIFEST_MEDIA_TYPE,
+          "If-None-Match": "*"
+        },
+        body: manifestBytes
+      }
+    ).catch(() => null);
+    if (response && response.status < 500) {
+      if (response.status === 409 || response.status === 412) {
+        const state = await readManifest();
+        if (state === "exact") return;
+        throw new Error(
+          "GHCR bootstrap tag was published concurrently with a different manifest; refusing to overwrite it."
+        );
+      }
+      if (response.status !== 201 && response.status !== 202) {
+        throw new Error(
+          `Failed to push the GHCR bootstrap manifest (HTTP ${response.status})${await responseDetail(response)}`
+        );
+      }
+      const actualDigest = parseDigestHeader(
+        response,
+        "GHCR bootstrap manifest upload"
+      );
+      if (actualDigest !== manifestDigest) {
+        throw new Error(
+          `GHCR bootstrap manifest upload returned conflicting digest ${actualDigest}.`
+        );
+      }
+      return;
     }
-  );
-  if (response.status !== 201 && response.status !== 202) {
-    throw new Error(
-      `Failed to push the GHCR bootstrap manifest (HTTP ${response.status})${await responseDetail(response)}`
-    );
+
+    const state = await readManifest();
+    if (state === "exact") return;
+    if (state === "conflict") {
+      throw new Error(
+        "GHCR bootstrap tag changed to a different digest during reconciliation; refusing to overwrite it."
+      );
+    }
+    if (attempt === 0) ensureBudget(requests);
   }
+  throw new Error(
+    "GHCR bootstrap manifest remained absent after reconciliation."
+  );
 }
 
+const GITHUB_NOT_FOUND = Symbol("github-not-found");
+
 async function githubJson(
-  fetchImpl: FetchImplementation,
+  requests: RequestContext,
   url: string,
   token: string,
-  allowNotFound = false
-): Promise<unknown | null> {
-  const response = await fetchImpl(url, {
+  allowNotFound = false,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+): Promise<unknown | typeof GITHUB_NOT_FOUND> {
+  const response = await request(requests, url, {
     headers: {
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${token}`,
@@ -426,10 +762,11 @@ async function githubJson(
     },
     redirect: "error"
   });
-  if (allowNotFound && response.status === 404) return null;
+  if (allowNotFound && response.status === 404) return GITHUB_NOT_FOUND;
   if (response.status === 401 || response.status === 403) {
     throw packageAuthError(
-      `GitHub Packages API rejected access (HTTP ${response.status})`
+      `GitHub Packages API rejected access (HTTP ${response.status})`,
+      ghCommandPresentation
     );
   }
   if (!response.ok) {
@@ -441,23 +778,30 @@ async function githubJson(
 }
 
 async function packageEndpoint({
-  fetchImpl,
+  requests,
   apiBaseUrl,
   owner,
   packageName,
-  token
+  token,
+  ghCommandPresentation
 }: {
-  fetchImpl: FetchImplementation;
+  requests: RequestContext;
   apiBaseUrl: string;
   owner: string;
   packageName: string;
   token: string;
+  ghCommandPresentation: GhCommandPresentation;
 }): Promise<string> {
   const ownerMetadata = await githubJson(
-    fetchImpl,
+    requests,
     `${apiBaseUrl}/users/${encodeURIComponent(owner)}`,
-    token
+    token,
+    false,
+    ghCommandPresentation
   );
+  if (ownerMetadata === GITHUB_NOT_FOUND) {
+    throw new Error(`GitHub account "${owner}" was not found.`);
+  }
   const ownerType =
     isRecord(ownerMetadata) && typeof ownerMetadata.type === "string" ?
       ownerMetadata.type
@@ -497,8 +841,12 @@ function validatePackage(
 }
 
 export async function loadGhKeyringCredentials({
-  runKeyringCommand = defaultRunKeyringCommand
-}: { runKeyringCommand?: KeyringCommand } = {}): Promise<GhCredentials> {
+  runKeyringCommand = defaultRunKeyringCommand,
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+}: {
+  runKeyringCommand?: KeyringCommand;
+  ghCommandPresentation?: GhCommandPresentation;
+} = {}): Promise<GhCredentials> {
   try {
     const [token, username] = await Promise.all([
       runKeyringCommand(["auth", "token", "--hostname", "github.com"]),
@@ -515,7 +863,9 @@ export async function loadGhKeyringCredentials({
     return { token, username };
   } catch {
     throw new Error(
-      `A stored GitHub CLI login with package access is required. ${PACKAGE_AUTH_GUIDANCE}`
+      `A stored GitHub CLI login with package access is required. ${packageAuthGuidance(
+        ghCommandPresentation
+      )}`
     );
   }
 }
@@ -531,9 +881,11 @@ export async function loadGhKeyringCredentials({
 export async function withGhcrDockerConfig(
   fn: (env: { DOCKER_CONFIG: string }) => Promise<unknown>,
   {
-    loadCredentials = loadGhKeyringCredentials
+    ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION,
+    loadCredentials = () => loadGhKeyringCredentials({ ghCommandPresentation })
   }: {
     loadCredentials?: CredentialLoader;
+    ghCommandPresentation?: GhCommandPresentation;
   } = {}
 ): Promise<unknown> {
   const { token, username } = await loadCredentials();
@@ -564,7 +916,11 @@ export async function bootstrapGHCRStatePackage({
   apiBaseUrl = "https://api.github.com",
   sleep = (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  metadataAttempts = 6
+  metadataAttempts = 6,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  bootstrapTimeoutMs = DEFAULT_BOOTSTRAP_TIMEOUT_MS,
+  now = Date.now,
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 }: BootstrapGhcrOptions): Promise<{
   registry: string;
   bootstrapTag: string;
@@ -573,46 +929,80 @@ export async function bootstrapGHCRStatePackage({
   if (typeof fetchImpl !== "function") {
     throw new Error("This Node.js runtime does not provide fetch.");
   }
-  const parsed = parseRegistry(registry, registryOrigin);
-  const auth = credentials || (await loadGhKeyringCredentials());
-  const endpoint = await packageEndpoint({
+  if (
+    !Number.isFinite(requestTimeoutMs) ||
+    requestTimeoutMs <= 0 ||
+    !Number.isFinite(bootstrapTimeoutMs) ||
+    bootstrapTimeoutMs <= 0
+  ) {
+    throw new Error("GHCR timeout values must be positive finite numbers.");
+  }
+  const requests: RequestContext = {
     fetchImpl,
+    sleep,
+    now,
+    deadline: now() + bootstrapTimeoutMs,
+    requestTimeoutMs
+  };
+  const canonicalTargetRepository = targetRepository.toLowerCase();
+  const parsed = parseRegistry(registry, registryOrigin);
+  const auth =
+    credentials || (await loadGhKeyringCredentials({ ghCommandPresentation }));
+  const endpoint = await packageEndpoint({
+    requests,
     apiBaseUrl: apiBaseUrl.replace(/\/+$/, ""),
     owner: parsed.owner,
     packageName: parsed.packageName,
-    token: auth.token
+    token: auth.token,
+    ghCommandPresentation
   });
 
-  const existingValue = await githubJson(fetchImpl, endpoint, auth.token, true);
-  if (existingValue)
+  const existingValue = await githubJson(
+    requests,
+    endpoint,
+    auth.token,
+    true,
+    ghCommandPresentation
+  );
+  if (existingValue !== GITHUB_NOT_FOUND)
     validatePackage(
       parsePackageMetadata(existingValue),
-      targetRepository,
+      canonicalTargetRepository,
       true
     );
 
   const bearerToken = await getRegistryBearerToken({
-    fetchImpl,
+    requests,
     registryOrigin: parsed.registryOrigin,
     repositoryPath: parsed.repositoryPath,
     username: auth.username,
-    token: auth.token
+    token: auth.token,
+    ghCommandPresentation
   });
   await pushBootstrapManifest({
-    fetchImpl,
+    requests,
     registryOrigin: parsed.registryOrigin,
     repositoryPath: parsed.repositoryPath,
     bearerToken,
-    targetRepository
+    targetRepository: canonicalTargetRepository
   });
 
   let metadata: GitHubPackageMetadata | null = null;
   for (let attempt = 0; attempt < metadataAttempts; attempt++) {
-    const value = await githubJson(fetchImpl, endpoint, auth.token, true);
-    metadata = value ? parsePackageMetadata(value) : null;
+    const value = await githubJson(
+      requests,
+      endpoint,
+      auth.token,
+      true,
+      ghCommandPresentation
+    );
+    metadata = value === GITHUB_NOT_FOUND ? null : parsePackageMetadata(value);
     // validatePackage fails fast on public visibility and on a wrong repository
     // link; a not-yet-propagated (missing) link returns false so we keep retrying.
-    if (metadata && validatePackage(metadata, targetRepository, true)) {
+    if (
+      metadata &&
+      validatePackage(metadata, canonicalTargetRepository, true)
+    ) {
       return {
         registry,
         bootstrapTag: BOOTSTRAP_TAG,
@@ -620,7 +1010,7 @@ export async function bootstrapGHCRStatePackage({
       };
     }
     if (attempt + 1 < metadataAttempts) {
-      await sleep(Math.min(500 * 2 ** attempt, 4000));
+      await sleepWithinBudget(requests, Math.min(500 * 2 ** attempt, 4000));
     }
   }
 
@@ -629,7 +1019,7 @@ export async function bootstrapGHCRStatePackage({
       `GHCR state package "${registry}" was not visible through the GitHub Packages API after bootstrap.`
     );
   }
-  validatePackage(metadata, targetRepository);
+  validatePackage(metadata, canonicalTargetRepository);
   return {
     registry,
     bootstrapTag: BOOTSTRAP_TAG,

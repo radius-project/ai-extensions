@@ -361,11 +361,55 @@ export async function ensureGitHubEnvironment(input: {
    */
   beforeCreate?(): Promise<boolean>;
   now?: () => number;
+  sleep?: (milliseconds: number) => Promise<void>;
+  readAttempts?: number;
 }): Promise<EnsuredGitHubEnvironment> {
+  const readGitHubJson = async (
+    apiPath: string
+  ): Promise<GitHubEnvironmentReadResult> => {
+    const attempts = Math.max(1, input.readAttempts ?? 3);
+    let last: GitHubEnvironmentReadResult = {
+      ok: false,
+      status: null,
+      stderr: "The GitHub API lookup did not run."
+    };
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      last = await input.readGitHubJson(apiPath);
+      const transportFailure =
+        last.status == null &&
+        /(?:ECONNRESET|ECONNABORTED|ETIMEDOUT|EAI_AGAIN|network is unreachable|socket hang up|timed? ?out|error connecting to api\.github\.com|failed to connect|could not resolve host)/i.test(
+          last.stderr || ""
+        );
+      const retryable =
+        last.status === 429 ||
+        (typeof last.status === "number" && last.status >= 500) ||
+        transportFailure;
+      if (last.ok || !retryable || attempt + 1 >= attempts) return last;
+      const retryAfter = /Retry-After\s*:\s*([^\r\n]+)/i
+        .exec(last.stderr || "")?.[1]
+        ?.trim();
+      const seconds = Number(retryAfter);
+      const requestedDelay =
+        retryAfter && Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000
+        : retryAfter ? Date.parse(retryAfter) - (input.now?.() ?? Date.now())
+        : 300 * (attempt + 1);
+      const delay =
+        Number.isFinite(requestedDelay) ?
+          Math.max(0, requestedDelay)
+        : 300 * (attempt + 1);
+      if (delay > 5000) return last;
+      await (
+        input.sleep ??
+        ((milliseconds) =>
+          new Promise((resolve) => setTimeout(resolve, milliseconds)))
+      )(delay);
+    }
+    return last;
+  };
   const path =
     `/repos/${input.repo}/environments/` +
     encodeURIComponent(input.requestedName);
-  const lookup = await input.readGitHubJson(path);
+  const lookup = await readGitHubJson(path);
   const mutationKind = "github_environment.put";
   const mutationTarget = `${input.repo}:${input.requestedName}`;
   const pendingMutation =
@@ -453,9 +497,7 @@ export async function ensureGitHubEnvironment(input: {
   }
 
   const repository =
-    lookup.ok ?
-      { ok: true }
-    : await input.readGitHubJson(`/repos/${input.repo}`);
+    lookup.ok ? { ok: true } : await readGitHubJson(`/repos/${input.repo}`);
   if (!repository.ok) {
     const detail =
       repository.stderr?.trim() ||
@@ -501,7 +543,7 @@ export async function ensureGitHubEnvironment(input: {
         accept: (result) => result,
         providerIdOf: (result) => parseCommandEnvironmentProviderId(result),
         reconcile: async () => {
-          const reread = await input.readGitHubJson(path);
+          const reread = await readGitHubJson(path);
           if (!reread.ok) {
             if (reread.status === 404) {
               return {

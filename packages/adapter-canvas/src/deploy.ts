@@ -7,6 +7,11 @@
 
 import { cliExec } from "./gh.js";
 import type { SelectedGhExecutor } from "./gh.js";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  type GhCommandPresentation
+} from "./gh-command-display.js";
 
 type DeployStatus = "pending" | "in_progress" | "success" | "failed";
 
@@ -121,17 +126,25 @@ function selectedAuthorizationStatus(
   stdout: string,
   stderr: string
 ): 401 | 403 | null {
-  const match = /\bHTTP\s+(401|403)\b/i.exec(`${stderr}\n${stdout}`);
-  if (!match) return null;
+  const detail = `${stderr}\n${stdout}`;
+  const match = /\bHTTP\s+(401|403)\b/i.exec(detail);
+  if (!match) return isSamlAuthorizationFailure(detail) ? 403 : null;
   return match[1] === "401" ? 401 : 403;
+}
+
+function isSamlAuthorizationFailure(detail: string): boolean {
+  return /Resource protected by organization SAML enforcement|grant your OAuth token access/i.test(
+    detail
+  );
 }
 
 function selectedFailureStatus(
   stdout: string,
   stderr: string
 ): 401 | 403 | 404 | 429 | null {
-  const match = /\bHTTP\s+(401|403|404|429)\b/i.exec(`${stderr}\n${stdout}`);
-  if (!match) return null;
+  const detail = `${stderr}\n${stdout}`;
+  const match = /\bHTTP\s+(401|403|404|429)\b/i.exec(detail);
+  if (!match) return isSamlAuthorizationFailure(detail) ? 403 : null;
   const status = Number(match[1]);
   if (status === 401 || status === 403 || status === 404 || status === 429) {
     return status;
@@ -750,14 +763,18 @@ export function cloudCredentialsComplete(
 // setup: (1) the wrong gh account is active (repo invisible → read 404), and
 // (2) the account can read the repo but lacks the admin needed to create a
 // deployment environment (PUT /repos/{repo}/environments → 404).
-export function explainRepoAccessForEnvSetup({
-  repo,
-  login,
-  readFailed,
-  permissions
-}: RepoAccessInput = {}): string {
+export function explainRepoAccessForEnvSetup(
+  { repo, login, readFailed, permissions }: RepoAccessInput = {},
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+): string {
   const who = login || "the active gh account";
   if (readFailed) {
+    const switchCommand = displayGhCommand(ghCommandPresentation, [
+      "auth",
+      "switch",
+      "--user",
+      "<account>"
+    ]);
     return (
       'Can\u2019t read repository "' +
       repo +
@@ -765,7 +782,9 @@ export function explainRepoAccessForEnvSetup({
       who +
       '". ' +
       "Either this account lacks access, or the wrong account is active (for example a personal account instead of your enterprise one). " +
-      "Switch accounts with: gh auth switch --user <account>  (or sign in the account that has access), then retry. " +
+      (switchCommand ?
+        `Switch accounts with: ${switchCommand} (or sign in the account that has access), then retry. ${ghCommandPresentation.installationNote} `
+      : `${ghCommandPresentation.installationNote} `) +
       "Note: gh auth switch changes your machine\u2019s active GitHub account for every tool in this terminal until you switch back."
     );
   }

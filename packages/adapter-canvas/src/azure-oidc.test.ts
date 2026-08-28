@@ -308,6 +308,44 @@ describe("fetchGitHubJson retry", () => {
     expect(runner).toHaveBeenCalledTimes(3);
   });
 
+  it("does not retry before Retry-After when it exceeds the elapsed budget", async () => {
+    let now = 1000;
+    const sleeps: number[] = [];
+    const runner = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      stderr: "Retry-After: 60"
+    });
+    const res = await fetchGitHubJson(runner, "/x", {
+      retries: 3,
+      maxElapsedMs: 2000,
+      now: () => now,
+      sleepFn: async (milliseconds) => {
+        sleeps.push(milliseconds);
+        now += milliseconds;
+      }
+    });
+    expect(res?.ok).toBe(false);
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("does not start another read after the elapsed budget is exhausted", async () => {
+    let now = 0;
+    const runner = vi.fn(async () => {
+      now += 45_000;
+      return { ok: false, status: 503, stderr: "unavailable" };
+    });
+    const res = await fetchGitHubJson(runner, "/x", {
+      retries: 3,
+      maxElapsedMs: 45_000,
+      now: () => now,
+      sleepFn: async () => {}
+    });
+    expect(res?.status).toBe(503);
+    expect(runner).toHaveBeenCalledTimes(1);
+  });
+
   it("does not retry a 404", async () => {
     const runner = vi
       .fn()
@@ -325,6 +363,31 @@ describe("fetchGitHubJson retry", () => {
     const res = await fetchGitHubJson(runner, "/x", noSleep);
     expect(res?.ok).toBe(true);
     expect(runner).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries the GitHub CLI standard connection diagnostic", async () => {
+    const runner = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: null,
+        stderr: "error connecting to api.github.com"
+      })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: {} });
+    const res = await fetchGitHubJson(runner, "/x", noSleep);
+    expect(res?.ok).toBe(true);
+    expect(runner).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a malformed response with no HTTP status", async () => {
+    const runner = vi.fn().mockResolvedValue({
+      ok: false,
+      status: null,
+      stderr: "GitHub returned an invalid JSON response."
+    });
+    const res = await fetchGitHubJson(runner, "/x", noSleep);
+    expect(res?.ok).toBe(false);
+    expect(runner).toHaveBeenCalledTimes(1);
   });
 });
 

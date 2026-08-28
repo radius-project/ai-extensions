@@ -130,13 +130,22 @@ export function createRemediationRoutes(
  * session-prompt hook and error formatter bound at the composition root.
  */
 export function productionRemediationDependencies(seams: {
+  presentRemediation(remediation: Remediation): Remediation;
   runSessionPrompt(
     message: RemediationSessionMessage
   ): Promise<SessionPromptOutcome>;
   errorMessage(error: unknown): string;
 }): RemediationDependencies {
   return {
-    buildRemediation,
+    buildRemediation: (id, params) => {
+      const result = buildRemediation(id, params);
+      return result.ok ?
+          {
+            ok: true,
+            remediation: seams.presentRemediation(result.remediation)
+          }
+        : result;
+    },
     remediationSessionMessage,
     runSessionPrompt: seams.runSessionPrompt,
     errorMessage: seams.errorMessage

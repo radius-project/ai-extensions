@@ -5,6 +5,10 @@ import type {
   CreateEnvironmentCliOptions
 } from "./create-environment-types.js";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
+import {
+  createOperation,
+  recordGitHubEnvironmentVariable
+} from "../../operations.js";
 
 interface Invocation {
   command: string;
@@ -63,7 +67,33 @@ function fakeCli(script: ScriptedResult[]): {
   return { cliExec, calls };
 }
 
-const target = { targetRepo: "octo/app", envName: "dev" };
+const target = {
+  targetRepo: "octo/app",
+  envName: "dev",
+  environmentProviderId: "env-1"
+};
+
+function mutationRecovery(operation: ReturnType<typeof createOperation>) {
+  return {
+    operation,
+    persist: async () => {},
+    recordVariable: (
+      entry: Parameters<typeof recordGitHubEnvironmentVariable>[1]
+    ) => {
+      recordGitHubEnvironmentVariable(operation, entry);
+    }
+  };
+}
+
+function environmentIdentity(args: string[]) {
+  return args[0] === "api" && args[1] === "/repos/octo/app/environments/dev" ?
+      {
+        code: 0,
+        stdout: JSON.stringify({ id: "env-1", name: "dev" }),
+        stderr: ""
+      }
+    : null;
+}
 
 describe("the workflow-scope gh runner", () => {
   it("routes selected-account commands through the pinned executor", async () => {
@@ -220,6 +250,626 @@ describe("the workflow-scope gh runner", () => {
       "--repo",
       "octo/app"
     ]);
+  });
+
+  it("does not write a variable to a replacement environment", async () => {
+    const operation = createOperation({ operationId: "op_replacement" });
+    let writes = 0;
+    const pinned = successfulSelectedGhExecutor({
+      run: async (args) => {
+        if (args[0] === "variable") writes += 1;
+        return {
+          code: 0,
+          stdout: JSON.stringify({ id: "env-2", name: "dev" }),
+          stderr: ""
+        };
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({})
+      },
+      {
+        ...target,
+        mutationRecovery: mutationRecovery(operation)
+      },
+      pinned
+    );
+
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toMatchObject(
+      {
+        code: "provider-mutation-manual-required"
+      }
+    );
+    expect(writes).toBe(0);
+    expect(operation.providerRecovery.mutations).toEqual([]);
+  });
+
+  it("rechecks environment identity immediately before writing", async () => {
+    const operation = createOperation({
+      operationId: "op_replaced_during_read"
+    });
+    let environmentReads = 0;
+    let writes = 0;
+    const pinned = successfulSelectedGhExecutor({
+      run: async (args) => {
+        if (
+          args[0] === "api" &&
+          args[1] === "/repos/octo/app/environments/dev"
+        ) {
+          environmentReads += 1;
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              id: environmentReads === 1 ? "env-1" : "env-2",
+              name: "dev"
+            }),
+            stderr: ""
+          };
+        }
+        if (args[0] === "api") {
+          return {
+            code: 0,
+            stdout: JSON.stringify({ name: "A", value: "old" }),
+            stderr: ""
+          };
+        }
+        writes += 1;
+        return { code: 0, stdout: "", stderr: "" };
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({})
+      },
+      {
+        ...target,
+        mutationRecovery: mutationRecovery(operation)
+      },
+      pinned
+    );
+
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toMatchObject(
+      {
+        code: "provider-mutation-manual-required"
+      }
+    );
+    expect(writes).toBe(0);
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "not_applied"
+    });
+  });
+
+  it("records a failed pre-mutation identity read as not applied", async () => {
+    const operation = createOperation({
+      operationId: "op_identity_unreadable"
+    });
+    let environmentReads = 0;
+    let writes = 0;
+    const pinned = successfulSelectedGhExecutor({
+      run: async (args) => {
+        if (
+          args[0] === "api" &&
+          args[1] === "/repos/octo/app/environments/dev"
+        ) {
+          environmentReads += 1;
+          return environmentReads === 1 ?
+              {
+                code: 0,
+                stdout: JSON.stringify({ id: "env-1", name: "dev" }),
+                stderr: ""
+              }
+            : { code: 1, stdout: "", stderr: "HTTP 503: unavailable" };
+        }
+        if (args[0] === "api") {
+          return {
+            code: 0,
+            stdout: JSON.stringify({ name: "A", value: "old" }),
+            stderr: ""
+          };
+        }
+        writes += 1;
+        return { code: 0, stdout: "", stderr: "" };
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({})
+      },
+      {
+        ...target,
+        mutationRecovery: mutationRecovery(operation)
+      },
+      pinned
+    );
+
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toThrow(
+      "HTTP 503"
+    );
+    expect(writes).toBe(0);
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "not_applied"
+    });
+  });
+
+  it("does not overwrite a variable changed after its preflight", async () => {
+    const operation = createOperation({ operationId: "op_value_changed" });
+    let variableReads = 0;
+    let writes = 0;
+    const pinned = successfulSelectedGhExecutor({
+      run: async (args) => {
+        const identity = environmentIdentity(args);
+        if (identity) return identity;
+        if (args[0] === "api") {
+          variableReads += 1;
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              name: "A",
+              value: variableReads === 1 ? "old" : "manual"
+            }),
+            stderr: ""
+          };
+        }
+        writes += 1;
+        return { code: 0, stdout: "", stderr: "" };
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({})
+      },
+      {
+        ...target,
+        mutationRecovery: mutationRecovery(operation)
+      },
+      pinned
+    );
+
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toMatchObject(
+      {
+        code: "provider-mutation-manual-required"
+      }
+    );
+    expect(writes).toBe(0);
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "not_applied"
+    });
+  });
+
+  it("reconciles a timed-out variable write by exact name and value", async () => {
+    const operation = createOperation({ operationId: "op_variable" });
+    const calls: string[][] = [];
+    let variableReads = 0;
+    const pinned = successfulSelectedGhExecutor({
+      run: async (args) => {
+        const identity = environmentIdentity(args);
+        if (identity) return identity;
+        calls.push(args);
+        if (args[0] === "variable") {
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "timed out",
+            timedOut: true
+          };
+        }
+        if (args[0] === "api" && args[1]?.includes("/variables/A")) {
+          variableReads += 1;
+          if (variableReads <= 2) {
+            return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+          }
+          return {
+            code: 0,
+            stdout: JSON.stringify({ name: "A", value: "1" }),
+            stderr: ""
+          };
+        }
+        if (args[0] === "api" && args[1]?.includes("/environments/dev")) {
+          return { code: 0, stdout: "{}", stderr: "" };
+        }
+        throw new Error(`unscripted gh call: ${args.join(" ")}`);
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({})
+      },
+      {
+        ...target,
+        mutationRecovery: mutationRecovery(operation)
+      },
+      pinned
+    );
+
+    await expect(runner.setEnvironmentVariable("A", "1")).resolves.toBe(true);
+    expect(calls.filter((args) => args[0] === "variable")).toHaveLength(1);
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      kind: "github_environment_variable.put",
+      status: "confirmed",
+      intent: {
+        name: "A"
+      }
+    });
+    expect(operation.providerRecovery.mutations[0].intent?.valueSha256).toMatch(
+      /^[a-f0-9]{64}$/
+    );
+    expect(operation.setupArtifacts.githubEnvironmentVariables).toEqual([
+      expect.objectContaining({
+        name: "A",
+        previousValue: null,
+        previousKnown: true
+      })
+    ]);
+  });
+
+  it("refuses to overwrite a variable changed outside the operation", async () => {
+    const operation = createOperation({ operationId: "op_variable_conflict" });
+    let variableReads = 0;
+    const pinned = successfulSelectedGhExecutor({
+      run: async (args) => {
+        const identity = environmentIdentity(args);
+        if (identity) return identity;
+        if (args[0] === "variable") {
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "socket hang up",
+            timedOut: true
+          };
+        }
+        if (args[0] === "api" && args[1]?.includes("/variables/A")) {
+          variableReads += 1;
+          if (variableReads <= 2) {
+            return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+          }
+          return {
+            code: 0,
+            stdout: JSON.stringify({ name: "A", value: "manual" }),
+            stderr: ""
+          };
+        }
+        if (args[0] === "api" && args[1]?.includes("/environments/dev")) {
+          return { code: 0, stdout: "{}", stderr: "" };
+        }
+        throw new Error(`unscripted gh call: ${args.join(" ")}`);
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({})
+      },
+      {
+        ...target,
+        mutationRecovery: mutationRecovery(operation)
+      },
+      pinned
+    );
+
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toMatchObject(
+      {
+        code: "provider-mutation-manual-required"
+      }
+    );
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "manual_required"
+    });
+  });
+
+  it("checks for a manual value before retrying a conclusively refused write", async () => {
+    const operation = createOperation({ operationId: "op_variable_retry" });
+    const calls: string[][] = [];
+    const pinned = successfulSelectedGhExecutor({
+      run: async (args) => {
+        const identity = environmentIdentity(args);
+        if (identity) return identity;
+        calls.push(args);
+        if (
+          calls.filter((call) => call[0] === "variable").length === 1 &&
+          args[0] === "variable"
+        ) {
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "HTTP 429: Too Many Requests"
+          };
+        }
+        if (args[0] === "api" && args[1]?.includes("/variables/A")) {
+          return {
+            code: 0,
+            stdout: JSON.stringify({ name: "A", value: "manual" }),
+            stderr: ""
+          };
+        }
+        throw new Error(`unscripted gh call: ${args.join(" ")}`);
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({})
+      },
+      {
+        ...target,
+        mutationRecovery: mutationRecovery(operation)
+      },
+      pinned
+    );
+
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toThrow(
+      "HTTP 429"
+    );
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toMatchObject(
+      {
+        code: "provider-mutation-manual-required"
+      }
+    );
+    expect(calls.filter((args) => args[0] === "variable")).toHaveLength(1);
+  });
+
+  it("accepts an exact value that appeared after a conclusively refused write", async () => {
+    const operation = createOperation({ operationId: "op_variable_exact" });
+    let writes = 0;
+    const pinned = successfulSelectedGhExecutor({
+      run: async (args) => {
+        const identity = environmentIdentity(args);
+        if (identity) return identity;
+        if (args[0] === "variable") {
+          writes += 1;
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "HTTP 429: Too Many Requests"
+          };
+        }
+        if (args[0] === "api" && args[1]?.includes("/variables/A")) {
+          return {
+            code: 0,
+            stdout: JSON.stringify({ name: "A", value: "1" }),
+            stderr: ""
+          };
+        }
+        throw new Error(`unscripted gh call: ${args.join(" ")}`);
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({})
+      },
+      {
+        ...target,
+        mutationRecovery: mutationRecovery(operation)
+      },
+      pinned
+    );
+
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toThrow(
+      "HTTP 429"
+    );
+    await expect(runner.setEnvironmentVariable("A", "1")).resolves.toBe(true);
+    expect(writes).toBe(1);
+  });
+
+  it("records an ambiguous write as not applied only after proving the variable absent", async () => {
+    const operation = createOperation({ operationId: "op_variable_absent" });
+    const pinned = successfulSelectedGhExecutor({
+      run: async (args) => {
+        const identity = environmentIdentity(args);
+        if (identity) return identity;
+        if (args[0] === "variable") {
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "timed out",
+            timedOut: true
+          };
+        }
+        if (args[0] === "api" && args[1]?.includes("/variables/A")) {
+          return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+        }
+        if (args[0] === "api" && args[1]?.includes("/environments/dev")) {
+          return { code: 0, stdout: "{}", stderr: "" };
+        }
+        throw new Error(`unscripted gh call: ${args.join(" ")}`);
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({})
+      },
+      {
+        ...target,
+        mutationRecovery: mutationRecovery(operation)
+      },
+      pinned
+    );
+
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toThrow(
+      'Failed to set A on GitHub environment "dev"'
+    );
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "not_applied"
+    });
+  });
+
+  it.each([
+    ["invalid JSON", "{oops"],
+    ["a missing value", JSON.stringify({ name: "A" })]
+  ])("refuses %s variable state before writing", async (_label, stdout) => {
+    const operation = createOperation({
+      operationId: `op_variable_malformed_${_label.replace(/\s+/g, "_")}`
+    });
+    const pinned = successfulSelectedGhExecutor({
+      run: async (args) => {
+        const identity = environmentIdentity(args);
+        if (identity) return identity;
+        if (args[0] === "variable") {
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "socket hang up",
+            timedOut: true
+          };
+        }
+        if (args[0] === "api" && args[1]?.includes("/variables/A")) {
+          return { code: 0, stdout, stderr: "" };
+        }
+        throw new Error(`unscripted gh call: ${args.join(" ")}`);
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({})
+      },
+      {
+        ...target,
+        mutationRecovery: mutationRecovery(operation)
+      },
+      pinned
+    );
+
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toThrow(
+      "Radius did not write the variable"
+    );
+    expect(operation.providerRecovery.mutations).toEqual([]);
+  });
+
+  it("leaves an ambiguous variable write unresolved when provider state cannot be read", async () => {
+    const operation = createOperation({
+      operationId: "op_variable_unreadable"
+    });
+    let variableReads = 0;
+    const pinned = successfulSelectedGhExecutor({
+      run: async (args) => {
+        const identity = environmentIdentity(args);
+        if (identity) return identity;
+        if (args[0] === "variable") {
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "socket hang up",
+            timedOut: true
+          };
+        }
+        if (args[0] === "api" && args[1]?.includes("/variables/A")) {
+          variableReads += 1;
+          if (variableReads <= 2) {
+            return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
+          }
+          return { code: 1, stdout: "", stderr: "HTTP 503: unavailable" };
+        }
+        if (args[0] === "api" && args[1]?.includes("/environments/dev")) {
+          return { code: 0, stdout: "{}", stderr: "" };
+        }
+        throw new Error(`unscripted gh call: ${args.join(" ")}`);
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({})
+      },
+      {
+        ...target,
+        mutationRecovery: mutationRecovery(operation)
+      },
+      pinned
+    );
+
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toMatchObject(
+      {
+        code: "provider-mutation-outcome-unknown"
+      }
+    );
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "outcome_unknown"
+    });
+  });
+
+  it("does not retry a refused variable write while its preflight read is unavailable", async () => {
+    const operation = createOperation({ operationId: "op_variable_preflight" });
+    let writes = 0;
+    let variableReads = 0;
+    const pinned = successfulSelectedGhExecutor({
+      run: async (args) => {
+        const identity = environmentIdentity(args);
+        if (identity) return identity;
+        if (args[0] === "variable") {
+          writes += 1;
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "HTTP 429: Too Many Requests"
+          };
+        }
+        if (args[0] === "api" && args[1]?.includes("/variables/A")) {
+          variableReads += 1;
+          return variableReads <= 2 ?
+              {
+                code: 0,
+                stdout: JSON.stringify({ name: "A", value: "old" }),
+                stderr: ""
+              }
+            : { code: 1, stdout: "", stderr: "" };
+        }
+        throw new Error(`unscripted gh call: ${args.join(" ")}`);
+      }
+    });
+    const runner = createWorkflowScopeGhRunner(
+      {
+        cliExec: () => {
+          throw new Error("ambient cli path must not run");
+        },
+        readProcessEnv: () => ({})
+      },
+      {
+        ...target,
+        mutationRecovery: mutationRecovery(operation)
+      },
+      pinned
+    );
+
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toThrow(
+      "HTTP 429"
+    );
+    await expect(runner.setEnvironmentVariable("A", "1")).rejects.toThrow(
+      "Radius did not write the variable"
+    );
+    expect(writes).toBe(1);
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "not_applied"
+    });
   });
 
   it("propagates a failure to set an environment variable", async () => {
