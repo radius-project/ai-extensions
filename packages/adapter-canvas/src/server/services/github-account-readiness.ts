@@ -67,6 +67,11 @@ export interface GitHubAccountReadinessPorts {
   ): Promise<GitHubPackageAccessProbeResult>;
 }
 
+export interface GitHubAccountReadinessServiceOptions {
+  ports?: GitHubAccountReadinessPorts;
+  ghCommandPresentation?: GhCommandPresentation;
+}
+
 interface PackageTokenResponse {
   ok: boolean;
   status?: number;
@@ -346,12 +351,14 @@ async function inspectRepository(
 
 export function createGitHubAccountReadinessService(
   coordinator: GitHubAccountCoordinator,
-  ports: GitHubAccountReadinessPorts = {
+  options: GitHubAccountReadinessServiceOptions = {}
+): GitHubAccountReadinessService {
+  const ports = options.ports || {
     probePackageAccess: (executor, repo, environment) =>
       probeGhcrPackageWriteAccess(executor, repo, environment)
-  },
-  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
-): GitHubAccountReadinessService {
+  };
+  const ghCommandPresentation =
+    options.ghCommandPresentation || BARE_GH_COMMAND_PRESENTATION;
   return {
     async check({ instanceId, repo, environment, login }) {
       try {

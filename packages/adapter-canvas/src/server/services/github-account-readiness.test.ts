@@ -75,7 +75,9 @@ function readinessService(
   }
 ) {
   return createGitHubAccountReadinessService(accountCoordinator, {
-    probePackageAccess: async () => packageAccess
+    ports: {
+      probePackageAccess: async () => packageAccess
+    }
   });
 }
 
@@ -194,7 +196,7 @@ describe("GitHub account readiness", () => {
     );
     const service = createGitHubAccountReadinessService(
       coordinator(selectedExecutor({ scopes: ["repo"] })),
-      { probePackageAccess }
+      { ports: { probePackageAccess } }
     );
 
     const result = await service.check({
@@ -226,14 +228,16 @@ describe("GitHub account readiness", () => {
     const service = createGitHubAccountReadinessService(
       coordinator(selectedExecutor({ scopes: ["repo"] })),
       {
-        probePackageAccess: () =>
-          Promise.resolve({ ok: false, detail: "not checked" })
-      },
-      {
-        kind: "absolute",
-        shell: "posix",
-        executablePath: "/opt/Copilot Tools/gh",
-        installationNote: "Install GitHub CLI system-wide."
+        ports: {
+          probePackageAccess: () =>
+            Promise.resolve({ ok: false, detail: "not checked" })
+        },
+        ghCommandPresentation: {
+          kind: "absolute",
+          shell: "posix",
+          executablePath: "/opt/Copilot Tools/gh",
+          installationNote: "Install GitHub CLI system-wide."
+        }
       }
     );
 
@@ -309,7 +313,7 @@ describe("GitHub account readiness", () => {
           }
         })
       ),
-      { probePackageAccess }
+      { ports: { probePackageAccess } }
     );
 
     const result = await service.check({
@@ -336,7 +340,7 @@ describe("GitHub account readiness", () => {
     );
     const service = createGitHubAccountReadinessService(
       coordinator(selectedExecutor({ scopes: ["write:packages"] })),
-      { probePackageAccess }
+      { ports: { probePackageAccess } }
     );
 
     const result = await service.check({

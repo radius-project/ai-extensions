@@ -974,8 +974,7 @@ const githubAccountCoordinator = createGitHubAccountCoordinator(
 );
 const githubAccountReadiness = createGitHubAccountReadinessService(
   githubAccountCoordinator,
-  undefined,
-  GH_COMMAND_PRESENTATION
+  { ghCommandPresentation: GH_COMMAND_PRESENTATION }
 );
 const githubSelectionHandles = createGitHubSelectionHandleStore();
 const selectedGitHubExecutorsByOperation = new Map<
