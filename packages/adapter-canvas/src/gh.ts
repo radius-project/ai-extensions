@@ -1107,6 +1107,13 @@ function isGhCmd(cmd: string): boolean {
   return /(?:^|[\\/])gh(?:\.exe)?$/i.test(cmd);
 }
 
+// Azure CLI's Windows entry point is an az.cmd batch shim. Explicit .cmd and
+// .bat paths need the same treatment, while native CLIs retain argv boundaries
+// by going directly through execFile.
+function isWindowsBatchCommand(cmd: string): boolean {
+  return /(?:^|[\\/])az(?:\.cmd)?$/i.test(cmd) || /\.(?:cmd|bat)$/i.test(cmd);
+}
+
 function quoteWindowsCmdArgument(value: string): string {
   const escaped = value
     .replace(/(\\*)"/g, (_match, backslashes: string) => {
@@ -1142,13 +1149,11 @@ function withoutAgentSession(baseEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return env;
 }
 
-// Run a CLI (gh/az/aws). GitHub CLI ships as gh.exe on Windows, so invoke that
-// executable directly: passing it through cmd.exe would let metacharacters in an
-// API path (for example, '&' in a query string) be interpreted as shell syntax.
-// Other Windows CLIs may only provide `.cmd` shims. Route those through cmd.exe
-// with one verbatim command line so the validated argument shapes used here
-// retain their boundaries. A simple executable name must stay unquoted because
-// cmd.exe's first-token quote stripping breaks Azure CLI's batch launcher.
+// Run a CLI (gh/az/aws/kubectl). Native Windows executables run directly so
+// shell metacharacters remain ordinary argv content. Azure CLI's az.cmd launcher
+// and explicitly named batch files go through cmd.exe with one verbatim command
+// line. A simple executable name must stay unquoted because cmd.exe's first-token
+// quote stripping breaks Azure CLI's batch launcher.
 export function cliExec(
   cmd: string,
   args: string[],
@@ -1157,19 +1162,20 @@ export function cliExec(
 ): ChildProcess {
   const isWindows = process.platform === "win32";
   const isWindowsGh = isWindows && isGhCmd(cmd);
+  const usesWindowsCmd = isWindows && isWindowsBatchCommand(cmd);
   const file =
     isWindowsGh ? ghExecutable()
-    : isWindows ? "cmd.exe"
+    : usesWindowsCmd ? "cmd.exe"
     : cmd;
   const finalArgs =
-    isWindows && !isWindowsGh ? ["/c", windowsCmdCommandLine(cmd, args)] : args;
+    usesWindowsCmd ? ["/c", windowsCmdCommandLine(cmd, args)] : args;
   const execOpts: ExecFileOptionsWithStringEncoding = {
     maxBuffer: 10 * 1024 * 1024,
     windowsHide: true,
     ...opts,
     encoding: "utf8"
   };
-  if (isWindows && !isWindowsGh) {
+  if (usesWindowsCmd) {
     execOpts.windowsVerbatimArguments = true;
   }
   if (isGhCmd(cmd)) execOpts.env = ghChildEnv(execOpts.env);

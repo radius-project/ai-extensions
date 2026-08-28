@@ -391,15 +391,33 @@ describe.sequential("cliExec", () => {
     );
   });
 
-  it("preserves embedded quotes and trailing backslashes in Windows arguments", async () => {
+  it.each(["aws", "kubectl"])(
+    "runs the native Windows %s CLI directly",
+    async (command) => {
+      const { cliExec } = await loadGh("win32");
+      const callback = vi.fn();
+      const args = ["two words", 'say "hello"', "C:\\temp\\"];
+
+      cliExec(command, args, {}, callback);
+
+      expect(childProcess.execFile).toHaveBeenCalledWith(
+        command,
+        args,
+        expect.not.objectContaining({ windowsVerbatimArguments: true }),
+        callback
+      );
+    }
+  );
+
+  it("routes an explicitly named Windows batch file through cmd.exe", async () => {
     const { cliExec } = await loadGh("win32");
     const callback = vi.fn();
 
-    cliExec("aws", ["two words", 'say "hello"', "C:\\temp\\"], {}, callback);
+    cliExec("C:\\tools\\cloud-login.bat", ["two words"], {}, callback);
 
     expect(childProcess.execFile).toHaveBeenCalledWith(
       "cmd.exe",
-      ["/c", 'aws "two words" "say \\"hello\\"" "C:\\temp\\\\"'],
+      ["/c", 'C:\\tools\\cloud-login.bat "two words"'],
       expect.objectContaining({ windowsVerbatimArguments: true }),
       callback
     );

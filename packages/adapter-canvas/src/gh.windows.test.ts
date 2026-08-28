@@ -15,13 +15,14 @@ interface CommandResult {
 
 describeWindows("cliExec Windows process integration", () => {
   let directory = "";
+  let recorderPath = "";
   let launcherPath = "";
   let environment: NodeJS.ProcessEnv;
 
   beforeAll(async () => {
     directory = await mkdtemp(join(tmpdir(), "radius cli "));
-    const recorderPath = join(directory, "record-args.cjs");
-    launcherPath = join(directory, "radius-argv.cmd");
+    recorderPath = join(directory, "record-args.cjs");
+    launcherPath = join(directory, "az.cmd");
 
     await writeFile(
       recorderPath,
@@ -54,6 +55,7 @@ describeWindows("cliExec Windows process integration", () => {
       "PATH";
     environment[pathKey] = `${directory};${environment[pathKey] || ""}`;
     environment.RADIUS_TEST_NODE = process.execPath;
+    environment.RADIUS_TEST_SENTINEL = "expanded-by-cmd";
   });
 
   afterAll(async () => {
@@ -62,8 +64,8 @@ describeWindows("cliExec Windows process integration", () => {
     }
   });
 
-  it("keeps a plain PATH-resolved batch command working", async () => {
-    const result = await runCli("radius-argv", ["version", "-o", "json"]);
+  it("keeps the plain PATH-resolved Azure CLI batch command working", async () => {
+    const result = await runCli("az", ["version", "-o", "json"]);
 
     expect(result).toEqual({
       code: 0,
@@ -78,7 +80,7 @@ describeWindows("cliExec Windows process integration", () => {
       tags: ["radius-managed", "radius-repo:octo/app"]
     });
 
-    const result = await runCli("radius-argv", args);
+    const result = await runCli(launcherPath, args);
 
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
@@ -97,7 +99,7 @@ describeWindows("cliExec Windows process integration", () => {
       "left^right"
     ];
 
-    const result = await runCli("radius-argv", args);
+    const result = await runCli(launcherPath, args);
 
     expect(result.code).toBe(0);
     expect(result.stderr).toBe("");
@@ -114,8 +116,21 @@ describeWindows("cliExec Windows process integration", () => {
     expect(JSON.parse(result.stdout)).toEqual(args);
   });
 
+  it("runs a native executable directly without cmd.exe expansion", async () => {
+    const result = await runCli(process.execPath, [
+      recorderPath,
+      "%RADIUS_TEST_SENTINEL%"
+    ]);
+
+    expect(result).toEqual({
+      code: 0,
+      stdout: '["%RADIUS_TEST_SENTINEL%"]',
+      stderr: ""
+    });
+  });
+
   it("preserves a batch command failure and stderr", async () => {
-    const result = await runCli("radius-fail", ["ignored"]);
+    const result = await runCli("radius-fail.cmd", ["ignored"]);
 
     expect(result.code).toBe(7);
     expect(result.stdout).toBe("");
