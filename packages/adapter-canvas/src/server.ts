@@ -239,7 +239,7 @@ import { createOperationsControlRoutes } from "./server/routes/operations-contro
 import { checkSetupPullRequestMergeForOperation } from "./server/services/setup-pull-request.js";
 import {
   cancelVerificationWorkflow,
-  readVerificationWorkflowIdentity,
+  requireVerificationWorkflowIdentity,
   readVerificationWorkflowState
 } from "./server/services/verification-workflow-cancellation.js";
 import { honorStopBoundary } from "./server/services/operation-stop-boundary.js";
@@ -754,8 +754,7 @@ const operationsControlRoutes = createOperationsControlRoutes({
       errorMessage
     }),
   inspectVerificationWorkflow: async (op) => {
-    const identity = readVerificationWorkflowIdentity(op);
-    if (!identity) return "inactive";
+    const identity = requireVerificationWorkflowIdentity(op);
     const operationContext =
       op.context && typeof op.context === "object" ? op.context : null;
     const login =
@@ -786,12 +785,7 @@ const operationsControlRoutes = createOperationsControlRoutes({
     return result.value;
   },
   cancelVerificationWorkflow: async (op) => {
-    const identity = readVerificationWorkflowIdentity(op);
-    if (!identity) {
-      throw new Error(
-        "The interrupted setup does not record an exact workflow run."
-      );
-    }
+    const identity = requireVerificationWorkflowIdentity(op);
     const operationContext =
       op.context && typeof op.context === "object" ? op.context : null;
     const login =

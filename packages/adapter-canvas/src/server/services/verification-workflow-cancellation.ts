@@ -8,6 +8,7 @@ const ACTIVE_WORKFLOW_STATUSES = new Set([
   "waiting",
   "pending"
 ]);
+const INACTIVE_WORKFLOW_STATUSES = new Set(["completed"]);
 
 export interface VerificationWorkflowIdentity {
   repo: string;
@@ -50,6 +51,20 @@ export function readVerificationWorkflowIdentity(operation: {
   return repo && runId ? { repo, runId } : null;
 }
 
+export function requireVerificationWorkflowIdentity(operation: {
+  repo?: unknown;
+  verification?: unknown;
+  [key: string]: unknown;
+}): VerificationWorkflowIdentity {
+  const identity = readVerificationWorkflowIdentity(operation);
+  if (!identity) {
+    throw new Error(
+      "The interrupted setup does not record an exact workflow run."
+    );
+  }
+  return identity;
+}
+
 export async function readVerificationWorkflowState(
   executor: SelectedGhExecutor,
   identity: VerificationWorkflowIdentity,
@@ -82,7 +97,9 @@ export async function readVerificationWorkflowState(
       (parsed as { status: string }).status
     : "";
   if (!status) throw new Error("GitHub returned no workflow status.");
-  return ACTIVE_WORKFLOW_STATUSES.has(status) ? "active" : "inactive";
+  if (ACTIVE_WORKFLOW_STATUSES.has(status)) return "active";
+  if (INACTIVE_WORKFLOW_STATUSES.has(status)) return "inactive";
+  throw new Error(`GitHub returned unsupported workflow status "${status}".`);
 }
 
 export async function cancelVerificationWorkflow(

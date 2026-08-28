@@ -2156,10 +2156,15 @@ describe("cleanupAzureSetupArtifacts", () => {
       );
       expect(hasUnfinishedCleanupAuthority(op)).toBe(false);
       // And it still refuses every destructive command, so the resource is
-      // named rather than deleted a second time.
+      // named rather than deleted a second time. The non-destructive abandonment
+      // path remains available so this record cannot trap the customer.
       expect(canStartRollback(op).ok).toBe(false);
       expect(canRetryCleanup(op).ok).toBe(false);
-      expect(canExitSetup(op).ok).toBe(false);
+      expect(canExitSetup(op)).toMatchObject({
+        ok: true,
+        abandon: true,
+        targets: []
+      });
     });
 
     it("names nothing when every delete settled", async () => {

@@ -197,6 +197,7 @@ stateDiagram-v2
     Cancelled --> Running: Continue setup
     Cancelled --> RollingBack: Roll back
     Cancelled --> Exiting: Exit setup
+    Cancelled --> Exited: Abandon setup with resources left in place
 
     FailedPartial --> Running: Retry setup
     FailedPartial --> Running: Retry verification
@@ -238,9 +239,11 @@ The panel presents **Environment setup was interrupted** and offers exactly two 
 - **Continue setup** resumes from the saved phase. When verification was already dispatched, Radius resolves or reuses the exact recorded run and continues monitoring it; it does not dispatch another workflow.
 - **Stop setup** durably closes Radius's setup attempt, then reads the status of the exact recorded verification run.
 
-If the run is still active after Stop, the panel offers **Cancel workflow**. Cancellation uses the saved repository, run ID, and GitHub account; it never searches by workflow name, branch, environment, or latest run. If GitHub has accepted cancellation but the run is still settling, the control changes to **Check workflow status**.
+If the run is still active after Stop, the panel offers **Cancel workflow**. Cancellation uses the saved repository, run ID, and GitHub account; it never searches by workflow name, branch, environment, or latest run. If GitHub has accepted cancellation but the run is still settling, the control changes to **Check workflow status**, which reads status without sending another cancellation request.
 
-Rollback and Exit remain unavailable while the run is active, cancelling, or has an unknown status. Once Radius proves the run is inactive, the ordinary provenance-based cleanup controls become available. This ordering prevents cleanup from deleting an environment or identity while the workflow may still be using it.
+Destructive rollback remains unavailable while the run is active, cancelling, or has an unknown status. Radius instead offers **Abandon setup**, which closes the operation without deleting resources that external work may still be using. Abandon releases the repository's Create Environment lock, preserves the resource ledger, and returns the user to the environment list so they can attempt Create Environment again. The confirmation lists remaining resources and warns that the next setup may need to reuse or manually remove them.
+
+Once Radius proves the run is inactive, the ordinary provenance-based rollback and Exit cleanup controls become available. Cleanup still fails closed, but external reconciliation never becomes a prerequisite for leaving the operation.
 
 ### An earlier rollback is incomplete
 
@@ -251,6 +254,8 @@ The durable registry therefore distinguishes active execution from repository ad
 `POST /api/operations` returns `409 previous-cleanup-required` with the earlier operation ID and does not create or persist the new operation. The browser reloads and focuses the earlier operation so the customer can finish **Roll back environment setup**, choose **Retry rollback**, or follow its manual guidance. After manual deletion, **Retry rollback** confirms absence as `not_found`; there is no separate recheck action. The customer submits Create Environment again after the earlier cleanup resolves.
 
 Admission-blocking terminal records are exempt from age and count pruning. Normal retention resumes after no removable target remains. This guard applies within one hydrated Copilot App Session. It does not coordinate independent sessions.
+
+An explicit **Abandon setup** decision relinquishes the earlier operation's automatic cleanup authority and releases admission even when removable resources remain. Radius keeps those resources in the durable ledger for diagnosis, but it will not later delete them after a new setup may have reused them.
 
 ## Stop setup
 

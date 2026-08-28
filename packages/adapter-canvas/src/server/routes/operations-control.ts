@@ -33,6 +33,7 @@ import {
   toClientView,
   EXIT_COMMAND_KIND,
   EXIT_COMMAND_OUTCOME,
+  ABANDON_COMMAND_OUTCOME,
   STAGE_VERIFY,
   type OperationAttemptKind,
   type OperationCommandKind,
@@ -112,6 +113,7 @@ type RetryEligibility = {
   recoveredVerification?: boolean;
   requiresMergedPullRequest?: boolean;
   pullRequestUrl?: string | null;
+  abandon?: boolean;
 };
 
 // Registering a command either accepts a new one or resolves to the saved one
@@ -536,7 +538,10 @@ export async function handleCancelWorkflow(
     });
     return;
   }
-  if (verificationWorkflowState(operation) === "unknown") {
+  if (
+    verificationWorkflowState(operation) === "unknown" ||
+    verificationWorkflowState(operation) === "cancelling"
+  ) {
     let state: VerificationWorkflowState;
     try {
       state = await dependencies.inspectVerificationWorkflow(operation);
@@ -746,6 +751,28 @@ function enterVerifyStage(operation: OperationRecord): void {
 const applyResumePoint: CommandSpec["prepare"] = (operation, eligibility) =>
   applySetupResumePoint(operation, eligibility.resumeFrom);
 
+const requireCleanupExit: EligibilityCheck = (operation) => {
+  const eligibility = canExitSetup(operation);
+  if (!eligibility.ok || eligibility.abandon !== true) return eligibility;
+  return {
+    ok: false,
+    code: "operation-exit-requires-abandon",
+    detail:
+      "External work may still be using these resources. Review the setup again and choose Abandon setup to leave them in place."
+  };
+};
+
+const requireAbandonExit: EligibilityCheck = (operation) => {
+  const eligibility = canExitSetup(operation);
+  if (!eligibility.ok) return eligibility;
+  return {
+    ...eligibility,
+    targets: [],
+    target: "abandon",
+    abandon: true
+  };
+};
+
 const RETRY_PERSIST_FAILURE = {
   persistFailureCode: "operation-retry-persist-failed",
   persistFailureMessage:
@@ -777,7 +804,14 @@ async function closeExitedSetup({
     target: eligibility.target ?? "exit"
   });
   const commandId = accepted.command.commandId;
-  setCommandState(operation, commandId, "finished", EXIT_COMMAND_OUTCOME);
+  setCommandState(
+    operation,
+    commandId,
+    "finished",
+    eligibility.abandon === true ?
+      ABANDON_COMMAND_OUTCOME
+    : EXIT_COMMAND_OUTCOME
+  );
   try {
     await dependencies.persistOperations();
   } catch (error) {
@@ -892,7 +926,7 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     // Exit deletes through the cleanup ledger, so it advances the same attempt
     // counter a rollback does and its results select against the same attempt.
     attemptKind: "cleanup",
-    eligibility: canExitSetup,
+    eligibility: requireCleanupExit,
     // A second submission while the disposal is in flight resolves to the
     // command already running rather than deleting through the ledger twice.
     activeKinds: [EXIT_COMMAND_KIND],
@@ -905,6 +939,11 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     persistFailureMessage:
       "Radius could not save the request to exit setup, so nothing was removed and the setup is still open. Try again."
   }
+};
+
+const ABANDON_EXIT_COMMAND: CommandSpec = {
+  ...COMMANDS.exit,
+  eligibility: requireAbandonExit
 };
 
 function isRetryKind(value: string): value is OperationRetryKind {
@@ -1165,11 +1204,10 @@ export function handleExitOperation(
   context: CanvasRequestContext,
   dependencies: OperationsControlDependencies
 ): Promise<void> {
-  return runCommandRoute(
-    context,
-    dependencies,
-    EXIT_OPERATION_ROUTE,
-    () => COMMANDS.exit
+  return runCommandRoute(context, dependencies, EXIT_OPERATION_ROUTE, () =>
+    context.url.searchParams.get("mode") === "abandon" ?
+      ABANDON_EXIT_COMMAND
+    : COMMANDS.exit
   );
 }
 

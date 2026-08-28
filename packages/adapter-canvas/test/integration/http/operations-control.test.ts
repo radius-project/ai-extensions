@@ -613,6 +613,31 @@ describe("stop, then continue or roll back, over the socket", () => {
         "cancel-workflow"
       );
     });
+
+    it("abandons the stopped setup and releases admission while its workflow is active", async () => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-abandon");
+      const op = seed(harness, stoppedSetup({ includeEnvironment: true }));
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+
+      const response = await post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/exit?mode=abandon`
+      );
+
+      expect(response.status).toBe(200);
+      expect(await body(response)).toMatchObject({
+        code: "setup-exited",
+        removed: false,
+        operation: {
+          headline: { title: "Environment setup abandoned" },
+          actions: []
+        }
+      });
+      expect(harness.scheduled).toEqual([]);
+      expect(harness.registry.cleanupRequired("contoso/store")).toBeNull();
+    });
   });
 
   it("stops a running operation and then rolls it back through the same record", async () => {

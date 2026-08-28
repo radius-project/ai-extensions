@@ -42,6 +42,7 @@ import {
   verificationWorkflowState,
   stopAtBoundary,
   toClientView,
+  ABANDON_COMMAND_OUTCOME,
   EXIT_COMMAND_KIND,
   STAGE_VERIFY
 } from "../../operations.js";
@@ -1230,6 +1231,26 @@ describe("POST /api/operations/{id}/continue", () => {
       expect(verificationWorkflowState(op)).toBe("unknown");
     });
 
+    it("checks status without repeating cancellation while GitHub is still settling", async () => {
+      const op = stoppedSetup();
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "cancelling");
+      let cancellations = 0;
+      const out = await drive(handleCancelWorkflow, op, "cancel-workflow", {
+        inspectVerificationWorkflow: () => Promise.resolve("active"),
+        cancelVerificationWorkflow: () => {
+          cancellations += 1;
+          return Promise.resolve("inactive");
+        }
+      });
+
+      expect(out.recording.status).toBe(200);
+      expect(out.payload().code).toBe("workflow-status-checked");
+      expect(verificationWorkflowState(op)).toBe("active");
+      expect(cancellations).toBe(0);
+      expect(op.control.commands).toEqual([]);
+    });
+
     it("keeps an observed status unknown when it cannot be saved", async () => {
       const op = stoppedSetup();
       op.verification = { runId: "42" };
@@ -1501,6 +1522,7 @@ describe("POST /api/operations/{id}/exit", () => {
       repo: "contoso/store",
       name: "dev"
     });
+
     const out = await drive(handleExitOperation, op, "exit");
 
     expect(out.recording.status).toBe(202);
@@ -1519,6 +1541,81 @@ describe("POST /api/operations/{id}/exit", () => {
     // the pass drops the listing when it proves the environment is gone.
     expect(out.journal.invalidatedListings).toEqual([]);
     expect(op.state).toBe("running");
+  });
+
+  it("abandons an active external workflow without scheduling deletion", async () => {
+    const op = stoppedSetup();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    op.verification = { runId: "42" };
+    setVerificationWorkflowState(op, "active");
+
+    const out = await drive(handleExitOperation, op, "exit?mode=abandon");
+
+    expect(out.recording.status).toBe(200);
+    expect(out.payload()).toMatchObject({
+      code: "setup-exited",
+      removed: false,
+      operation: {
+        headline: {
+          code: "setup-exited",
+          title: "Environment setup abandoned"
+        },
+        actions: []
+      }
+    });
+    expect(out.journal.scheduled).toEqual([]);
+    expect(op.control.commands).toEqual([
+      expect.objectContaining({
+        kind: EXIT_COMMAND_KIND,
+        state: "finished",
+        outcome: ABANDON_COMMAND_OUTCOME
+      })
+    ]);
+  });
+
+  it("does not turn an explicit abandonment into cleanup when the workflow becomes inactive", async () => {
+    const op = stoppedSetup();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    setVerificationWorkflowState(op, "inactive");
+
+    const out = await drive(handleExitOperation, op, "exit?mode=abandon");
+
+    expect(out.recording.status).toBe(200);
+    expect(out.journal.scheduled).toEqual([]);
+    expect(op.control.commands).toEqual([
+      expect.objectContaining({
+        kind: EXIT_COMMAND_KIND,
+        state: "finished",
+        outcome: ABANDON_COMMAND_OUTCOME
+      })
+    ]);
+  });
+
+  it("requires an explicit abandonment request when cleanup becomes unsafe", async () => {
+    const op = stoppedSetup();
+    recordGitHubEnvironment(op, {
+      state: "created",
+      repo: "contoso/store",
+      name: "dev"
+    });
+    setVerificationWorkflowState(op, "active");
+
+    const out = await drive(handleExitOperation, op, "exit");
+
+    expect(out.recording.status).toBe(409);
+    expect(out.payload()).toMatchObject({
+      code: "operation-exit-requires-abandon"
+    });
+    expect(out.journal.scheduled).toEqual([]);
+    expect(op.control.commands).toEqual([]);
   });
 
   it("refuses to exit an environment whose verification succeeded", async () => {

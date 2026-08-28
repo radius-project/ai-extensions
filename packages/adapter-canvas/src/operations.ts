@@ -714,6 +714,7 @@ export const EXIT_COMMAND_KIND = "exit_setup";
 // a disposal that ended with warnings, or a command still in flight — leaves the
 // setup open, so the panel keeps reporting what is still present.
 export const EXIT_COMMAND_OUTCOME = "exited";
+export const ABANDON_COMMAND_OUTCOME = "abandoned";
 const DISPOSAL_COMMAND_KINDS = Object.freeze([
   ...CLEANUP_COMMAND_KINDS,
   EXIT_COMMAND_KIND
@@ -3303,7 +3304,12 @@ export function setupExitState(op: any): "none" | "requested" | "exited" {
     const command = commands[index];
     if (command.kind !== EXIT_COMMAND_KIND) continue;
     if (command.state !== "finished") return "requested";
-    return command.outcome === EXIT_COMMAND_OUTCOME ? "exited" : "none";
+    return (
+        command.outcome === EXIT_COMMAND_OUTCOME ||
+          command.outcome === ABANDON_COMMAND_OUTCOME
+      ) ?
+        "exited"
+      : "none";
   }
   return "none";
 }
@@ -3328,24 +3334,30 @@ export function canExitSetup(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
-  const workflowState = verificationWorkflowState(op);
-  if (
-    workflowState === "active" ||
-    workflowState === "cancelling" ||
-    workflowState === "unknown"
-  )
-    return {
-      ok: false,
-      code: "exit-verification-workflow-active"
-    };
-  const refused = providerDestructiveRefusal(op, "exit");
-  if (refused) return refused;
   // A verified environment is finished work, not an abandoned attempt. It is
   // removed with Delete Environment, exactly as a rollback is refused for it.
   if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
     return { ok: false, code: "exit-environment-ready" };
   if (setupExitState(op) !== "none")
     return { ok: false, code: "setup-already-exited" };
+  const workflowState = verificationWorkflowState(op);
+  const workflowBlocksCleanup =
+    workflowState === "active" ||
+    workflowState === "cancelling" ||
+    workflowState === "unknown";
+  const destructiveRefusal = providerDestructiveRefusal(op, "exit");
+  if (workflowBlocksCleanup || destructiveRefusal) {
+    return {
+      ok: true,
+      code: "setup-abandon-allowed",
+      abandon: true,
+      targets: [],
+      target: "abandon",
+      detail:
+        destructiveRefusal?.detail ??
+        "The verification workflow may still be using these resources."
+    };
+  }
   const targets = provenOwnedCleanupTargets(op);
   return {
     ok: true,
@@ -3553,6 +3565,7 @@ function isExecutableCleanupTarget(op: any, target: RollbackTarget): boolean {
  */
 export function hasUnfinishedCleanupAuthority(op: any): boolean {
   if (!op || !isTerminalState(op.state)) return false;
+  if (isSetupExited(op)) return false;
   // An unproven mutation is the one claim that has no ledger entry behind it:
   // the resource it may have created is precisely the one Radius could not
   // record. Releasing the repository here would let a second setup start
@@ -3691,6 +3704,22 @@ function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
   };
 }
 
+function projectAbandonPreview(op: any): any {
+  const preview = projectRollbackPreview(op, []);
+  return {
+    ...preview,
+    manualActionRequired: [
+      ...provenOwnedCleanupTargets(op).map((entry) => ({
+        kind: entry.artifactType,
+        target: entry.target,
+        action:
+          "Radius will leave this resource in place. Remove it manually if it prevents the next setup."
+      })),
+      ...preview.manualActionRequired
+    ]
+  };
+}
+
 /**
  * Why a path the customer might expect is not on offer.
  *
@@ -3804,11 +3833,15 @@ export function projectOperationHeadline(op: any): any {
   // leave, Radius did, and repeating the failure that led there would be the
   // panel arguing with the decision it just carried out.
   if (isSetupExited(op)) {
+    const abandoned = lastCommand?.outcome === ABANDON_COMMAND_OUTCOME;
     return {
       code: "setup-exited",
-      title: "Environment setup closed",
+      title:
+        abandoned ? "Environment setup abandoned" : "Environment setup closed",
       message:
-        "Radius closed this setup and removed the resources it proved it created. Anything it reused was left alone."
+        abandoned ?
+          "Radius closed this setup without deleting resources that may still be in use. Review any remaining resources if the next setup cannot reuse them."
+        : "Radius closed this setup and removed the resources it proved it created. Anything it reused was left alone."
     };
   }
   if (op.state === "failed_partial" && exitCommand) {
@@ -4099,19 +4132,26 @@ export function projectOperationActions(op: any): any[] {
     // The bottom action, below the details disclosure: it is the way out of the
     // panel rather than another attempt at the setup, so it never sits beside
     // the forward and destructive choices the command row offers.
+    const abandons = exit.abandon === true;
     const removes = exit.targets.length > 0;
     actions.push({
       id: "exit-setup",
       kind: EXIT_COMMAND_KIND,
-      label: "Exit setup",
+      label: abandons ? "Abandon setup" : "Exit setup",
       placement: "bottom",
       tone: "neutral",
       // Confirmed only when leaving actually deletes something. An exit that
       // removes nothing is not a destructive command, and asking a customer to
       // confirm a deletion Radius will not perform teaches them to dismiss the
       // dialog that matters.
-      requiresConfirmation: removes,
-      ...(removes ?
+      requiresConfirmation: removes || abandons,
+      ...(abandons ?
+        {
+          confirmTitle: "Abandon setup and leave remaining resources?",
+          confirmLabel: "Abandon setup",
+          cancelLabel: "Keep this setup"
+        }
+      : removes ?
         {
           confirmTitle: "Exit setup and remove what Radius created?",
           confirmLabel: "Exit setup",
@@ -4119,14 +4159,19 @@ export function projectOperationActions(op: any): any[] {
         }
       : {}),
       description:
-        removes ?
+        abandons ?
+          "Radius closes this setup without deleting resources that may still be used by external work. You can start Create Environment again, but you may need to remove or reuse the remaining resources manually."
+        : removes ?
           "Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added. Anything it reused is left alone. This cannot be undone."
         : "Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed.",
       method: "POST",
-      path: `${base}/exit`,
+      path: abandons ? `${base}/exit?mode=abandon` : `${base}/exit`,
       pending: false,
       removesResources: removes,
-      preview: projectRollbackPreview(op, exit.targets)
+      preview:
+        abandons ?
+          projectAbandonPreview(op)
+        : projectRollbackPreview(op, exit.targets)
     });
   }
   return actions;
@@ -4674,7 +4719,11 @@ export function snapshotRetryState(op: any): any {
 export function summarize(op: any): string {
   if (!op) return "";
   const env = op.environment || "environment";
-  if (isSetupExited(op)) return `Exited the setup for "${env}".`;
+  if (isSetupExited(op)) {
+    return latestCommand(op)?.outcome === ABANDON_COMMAND_OUTCOME ?
+        `Abandoned the setup for "${env}".`
+      : `Exited the setup for "${env}".`;
+  }
   switch (op.state) {
     case RUNNING_STATE: {
       const active = activeCommandKind(op);

@@ -3,7 +3,8 @@ import { successfulSelectedGhExecutor } from "../../../test/support/server/selec
 import {
   cancelVerificationWorkflow,
   readVerificationWorkflowIdentity,
-  readVerificationWorkflowState
+  readVerificationWorkflowState,
+  requireVerificationWorkflowIdentity
 } from "./verification-workflow-cancellation.js";
 
 const identity = { repo: "contoso/store", runId: "42" };
@@ -20,6 +21,9 @@ describe("verification workflow cancellation", () => {
     expect(readVerificationWorkflowIdentity({ repo: "contoso/store" })).toBe(
       null
     );
+    expect(() =>
+      requireVerificationWorkflowIdentity({ repo: "contoso/store" })
+    ).toThrow("does not record an exact workflow run");
   });
 
   it("classifies active and completed workflow states", async () => {
@@ -59,6 +63,15 @@ describe("verification workflow cancellation", () => {
         run: async () => ({ code: 0, stdout: "{", stderr: "" })
       })
     ).rejects.toThrow("unreadable workflow status");
+    await expect(
+      readVerificationWorkflowState(executor, identity, {
+        run: async () => ({
+          code: 0,
+          stdout: '{"status":"unexpected"}',
+          stderr: ""
+        })
+      })
+    ).rejects.toThrow('unsupported workflow status "unexpected"');
   });
 
   it("cancels only the exact run and waits until it is inactive", async () => {
