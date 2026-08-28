@@ -44,7 +44,7 @@ const AKS_CLUSTER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?$/;
 // cluster — over the previous 20s budget. Exceeding it killed the process with
 // SIGTERM and no stderr, so the namespace lookup failed silently and the picker
 // was left permanently empty. This ceiling only bounds a genuine hang, so
-// sizing it well above the observed cost costs a faster host nothing; that is
+// sizing it well above the observed cost adds nothing for a faster host; that is
 // deliberately preferred over branching on the platform, which would put hidden
 // process detection inside this otherwise platform-neutral service.
 const AKS_CREDENTIALS_TIMEOUT_MS = 60000;
