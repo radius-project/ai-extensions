@@ -16,6 +16,7 @@ import {
 
 const WORKFLOW = "radius-verify-credentials.yml";
 const WORKFLOW_PATH = `.github/workflows/${WORKFLOW}`;
+const MUTATION_TARGET = `octo/app:${WORKFLOW}:main:dev`;
 
 function command(
   overrides: Partial<{
@@ -107,6 +108,7 @@ function harness(input: {
     applyIdentity: (identity, run) => {
       op.verification = {
         ...identity,
+        dispatchMutationTarget: MUTATION_TARGET,
         workflow: WORKFLOW,
         runId: run?.runId ?? null,
         runUrl: run?.runUrl ?? null
@@ -123,7 +125,7 @@ function harness(input: {
     runVerificationDispatch({
       operation: op,
       kind: "github_workflow.dispatch",
-      target: `octo/app:${WORKFLOW}:main:dev`,
+      target: MUTATION_TARGET,
       repo: "octo/app",
       workflowPath: WORKFLOW_PATH,
       workflowFile: WORKFLOW,
@@ -160,6 +162,78 @@ describe("verification dispatch", () => {
       state: "running"
     });
   });
+
+  it("reuses a confirmed run identity without provider I/O", async () => {
+    const test = harness({
+      dispatches: [
+        command({
+          stdout: "https://github.com/octo/app/actions/runs/123\n"
+        })
+      ]
+    });
+    await test.run();
+    test.runGh.mockClear();
+    test.sendDispatch.mockClear();
+    const persistCount = test.persisted.length;
+
+    await expect(test.run()).resolves.toEqual({
+      state: "accepted",
+      runId: "123",
+      runUrl: "https://github.com/octo/app/actions/runs/123",
+      recovered: true
+    });
+
+    expect(test.runGh).not.toHaveBeenCalled();
+    expect(test.sendDispatch).not.toHaveBeenCalled();
+    expect(test.persisted).toHaveLength(persistCount);
+  });
+
+  it("fails closed when a confirmed run identity does not match its mutation", async () => {
+    const test = harness({
+      dispatches: [
+        command({
+          stdout: "https://github.com/octo/app/actions/runs/123\n"
+        })
+      ]
+    });
+    await test.run();
+    test.op.verification.runUrl =
+      "https://github.com/octo/app/actions/runs/124";
+    test.runGh.mockClear();
+    test.sendDispatch.mockClear();
+
+    await expect(test.run()).resolves.toMatchObject({
+      state: "manual_required"
+    });
+
+    expect(test.runGh).not.toHaveBeenCalled();
+    expect(test.sendDispatch).not.toHaveBeenCalled();
+    expect(test.op.state).toBe("failed_partial");
+  });
+
+  it.each(["", "not-a-run-url"])(
+    "fails closed when a confirmed run identity has an invalid URL (%j)",
+    async (runUrl) => {
+      const test = harness({
+        dispatches: [
+          command({
+            stdout: "https://github.com/octo/app/actions/runs/123\n"
+          })
+        ]
+      });
+      await test.run();
+      test.op.verification.runUrl = runUrl;
+      test.runGh.mockClear();
+      test.sendDispatch.mockClear();
+
+      await expect(test.run()).resolves.toMatchObject({
+        state: "manual_required"
+      });
+
+      expect(test.runGh).not.toHaveBeenCalled();
+      expect(test.sendDispatch).not.toHaveBeenCalled();
+    }
+  );
 
   it("refuses to dispatch when the baseline fails or is unreadable", async () => {
     const failed = harness({ dispatches: [command()] });
@@ -377,7 +451,7 @@ describe("verification dispatch", () => {
     });
     const mutation = prepareProviderMutation(test.op, {
       kind: "github_workflow.dispatch",
-      target: `octo/app:${WORKFLOW}:main:dev`
+      target: MUTATION_TARGET
     });
     settleProviderMutation(
       test.op,

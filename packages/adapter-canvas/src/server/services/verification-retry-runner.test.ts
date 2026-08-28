@@ -584,7 +584,7 @@ describe("selected-account verification retry runner", () => {
     ).toEqual([]);
   });
 
-  it("preserves a possibly accepted dispatch when its acknowledgement cannot be saved", async () => {
+  it("resumes a confirmed run when its first acknowledgement cannot be saved", async () => {
     const target = operation();
     let persists = 0;
     const dependencies = runnerDependencies({
@@ -604,7 +604,25 @@ describe("selected-account verification retry runner", () => {
         code: "verification-retry-persist-failed",
         evidence: expect.stringContaining("disk unavailable after dispatch")
       },
-      verification: { accountUnavailablePhase: "dispatch" }
+      verification: {
+        accountUnavailablePhase: "dispatch",
+        runId: "41",
+        runUrl: "https://github.com/contoso/store/actions/runs/41"
+      }
+    });
+
+    target.state = "running";
+    target.endedAt = null;
+    target.failure = null;
+    await runVerificationRetry(target, "cmd-2", dependencies);
+
+    expect(
+      dependencies.journal.calls.filter((entry) => entry.args[0] === "workflow")
+    ).toHaveLength(1);
+    expect(dependencies.journal.monitored).toEqual(["op_retry"]);
+    expect(dependencies.journal.steps).toContainEqual({
+      text: "✅ Resuming the previously identified verify workflow run.",
+      stage: "verify"
     });
   });
 

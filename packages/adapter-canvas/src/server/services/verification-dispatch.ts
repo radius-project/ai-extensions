@@ -63,7 +63,7 @@ export interface VerificationDispatchPorts {
 }
 
 export interface VerificationDispatchInput {
-  operation: object;
+  operation: { verification?: unknown };
   kind: "github_workflow.dispatch" | "github_workflow.dispatch_retry";
   target: string;
   repo: string;
@@ -75,6 +75,44 @@ export interface VerificationDispatchInput {
   allowRegistrationRetry: boolean;
   host?: string;
   ports: VerificationDispatchPorts;
+}
+
+function confirmedRunIdentity(
+  input: VerificationDispatchInput,
+  mutation: ProviderMutationRecord
+): { runId: string; runUrl: string } | null {
+  if (
+    mutation.status !== "confirmed" ||
+    typeof mutation.providerId !== "string" ||
+    !mutation.providerId ||
+    !input.operation.verification ||
+    typeof input.operation.verification !== "object"
+  ) {
+    return null;
+  }
+  const verification = input.operation.verification as Record<string, unknown>;
+  if (
+    verification.dispatchMutationTarget !== input.target ||
+    typeof verification.runId !== "string" ||
+    !verification.runId ||
+    typeof verification.runUrl !== "string" ||
+    !verification.runUrl
+  ) {
+    return null;
+  }
+  try {
+    const run = parseVerifyWorkflowRunUrl(verification.runUrl, {
+      targetRepo: input.repo,
+      host: input.host
+    });
+    return (
+        run.runId === verification.runId && run.runId === mutation.providerId
+      ) ?
+        run
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function commandDiagnostic(result: ProviderMutationCommandResult): string {
@@ -202,6 +240,10 @@ export async function runVerificationDispatch(
 ): Promise<VerificationDispatchOutcome> {
   const { operation, ports } = input;
   const existing = providerMutationRecord(operation, input.kind, input.target);
+  if (existing) {
+    const run = confirmedRunIdentity(input, existing);
+    if (run) return { state: "accepted", ...run, recovered: true };
+  }
   if (existing && existing.status !== "not_applied") {
     const guidance =
       "Radius found an existing verification dispatch without a safely reusable result. Inspect GitHub Actions before starting setup again; Radius will not dispatch another run.";
