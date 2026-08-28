@@ -1,4 +1,5 @@
 import { hasVerificationOperationMarker } from "./verification-run-identity.js";
+import { githubCredentialSourceLabel } from "./github-credential-source.js";
 
 export interface PullRequestState {
   branch: string;
@@ -129,6 +130,27 @@ export function buildVerifyWorkflowDispatchArgs({
     targetRepo,
     ...(ref ? ["--ref", ref] : [])
   ];
+}
+
+export function describeVerificationDispatch({
+  login,
+  credentialSource,
+  workflowFile,
+  targetRepo,
+  envName,
+  ref
+}: {
+  login: string;
+  credentialSource: "injected" | "keyring";
+  workflowFile: string;
+  targetRepo: string;
+  envName: string;
+  ref: string;
+}): string {
+  return (
+    `Credential verification dispatch is configured for @${login} using ${githubCredentialSourceLabel(credentialSource)}: ` +
+    `workflow "${workflowFile}", environment "${envName}", repository "${targetRepo}", ref "${ref}".`
+  );
 }
 
 export interface VerifyWorkflowRunIdentity {
