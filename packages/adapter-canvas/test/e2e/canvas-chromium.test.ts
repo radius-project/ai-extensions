@@ -14,8 +14,7 @@ import {
   test,
   WORKTREE_BRANCH,
   type CanvasHarness,
-  type FakeCliCommand,
-  type FakeCliScenario
+  type FakeCliCommand
 } from "./support/canvas-harness.js";
 import type { Locator, Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
@@ -66,53 +65,70 @@ async function filesContainingText(
 // classified Azure: the two deployment-list lookups the active-app guard runs
 // return empty, the environment's variable listing carries the Azure identity,
 // and the repository-id lookup the target discovery makes resolves.
-function scenarioWithoutActiveDeployment(): FakeCliScenario {
-  const scenario = defaultFakeCliScenario();
-  const argsOf = (command: FakeCliScenario["commands"][number]): string[] =>
-    command.args ?? [];
-  const listsEnvironmentDeployments = (
-    command: FakeCliScenario["commands"][number]
-  ): boolean =>
-    command.tool === "gh" &&
-    argsOf(command).some(
-      (arg) =>
-        arg.includes("/deployments?") &&
-        arg.includes("environment=fixture-environment")
-    );
-  const listsEnvironmentVariablesWithValues = (
-    command: FakeCliScenario["commands"][number]
-  ): boolean =>
-    command.tool === "gh" &&
-    argsOf(command).some((arg) =>
-      arg.includes("/environments/fixture-environment/variables")
-    ) &&
-    argsOf(command).some((arg) => arg.includes(".value"));
-  const commands = scenario.commands.map((command) => {
-    if (listsEnvironmentDeployments(command)) {
-      return { ...command, stdout: "" };
-    }
-    if (listsEnvironmentVariablesWithValues(command)) {
-      return {
-        ...command,
-        stdout: [
-          command.stdout ?? "",
-          "AZURE_CLIENT_ID\tfixture-client-id",
-          "AZURE_TENANT_ID\tfixture-tenant-id"
-        ]
-          .filter((line) => line.length > 0)
-          .join("\n")
-      };
-    }
-    return command;
-  });
-  // Azure target discovery reads the repository's numeric id after classifying
-  // the environment as Azure; the default scenario never needs it.
-  commands.push({
-    tool: "gh",
-    args: ["api", `/repos/${REPOSITORY}`, "--jq", ".id"],
-    stdout: "101\n"
-  });
-  return { ...scenario, commands };
+async function setScenarioWithoutActiveDeployment(
+  canvas: CanvasHarness
+): Promise<void> {
+  const argsOf = (command: FakeCliCommand): string[] => command.args ?? [];
+  await canvas.setScenarioOverrides(
+    defaultFakeCliScenario(),
+    [
+      (command) => {
+        const listsEnvironmentDeployments =
+          command.tool === "gh" &&
+          argsOf(command).some(
+            (arg) =>
+              arg.includes("/deployments?") &&
+              arg.includes("environment=fixture-environment")
+          );
+        if (listsEnvironmentDeployments) return { ...command, stdout: "" };
+        return command;
+      },
+      (command) => {
+        const listsEnvironmentVariablesWithValues =
+          command.tool === "gh" &&
+          argsOf(command).some((arg) =>
+            arg.includes("/environments/fixture-environment/variables")
+          ) &&
+          argsOf(command).some((arg) => arg.includes(".value"));
+        if (!listsEnvironmentVariablesWithValues) return command;
+        return {
+          ...command,
+          stdout: [
+            command.stdout ?? "",
+            "AZURE_CLIENT_ID\tfixture-client-id",
+            "AZURE_TENANT_ID\tfixture-tenant-id"
+          ]
+            .filter((line) => line.length > 0)
+            .join("\n")
+        };
+      }
+    ],
+    [
+      {
+        tool: "gh",
+        args: ["api", `/repos/${REPOSITORY}`, "--jq", ".id"],
+        stdout: "101\n"
+      }
+    ]
+  );
+}
+
+async function waitForOperationState(
+  page: Page,
+  operationId: string,
+  state: string
+): Promise<void> {
+  await expect
+    .poll(() =>
+      page.evaluate(async (id) => {
+        const response = await fetch(`/api/operations/${id}`);
+        const payload = (await response.json()) as {
+          operation?: { state?: string };
+        };
+        return payload.operation?.state;
+      }, operationId)
+    )
+    .toBe(state);
 }
 
 async function seed(canvas: CanvasHarness): Promise<void> {
@@ -292,16 +308,13 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }) => {
-    await canvas.setScenario(scenarioWithoutActiveDeployment());
+    await setScenarioWithoutActiveDeployment(canvas);
     // Drive the real delete OperationRecord to a clean terminal exactly as the
     // production runner does (environment-deletion.ts): walk every delete stage
     // to succeeded and finish the operation. The server owns the record for the
     // life of the process, so its settled state — and the dismissal recorded
     // against it — is what a reload re-fetches, rather than the browser
-    // re-deriving it. `release` resolves only once the runner is parked mid
-    // operation, so the progress poller first observes it running: an operation
-    // already terminal on its first observation is treated as a stale prior
-    // record and skipped.
+    // re-deriving it.
     const deletion = canvas.driveEnvironmentDeletion({ state: "succeeded" });
 
     await gotoCanvas(page, canvas, "environment");
@@ -318,11 +331,6 @@ test.describe("Radius Canvas in Chromium", () => {
         new URL(response.url()).pathname === "/api/delete-environment" &&
         response.request().method() === "POST"
     );
-    const dismissRequest = page.waitForResponse(
-      (response) =>
-        new URL(response.url()).pathname.endsWith("/dismiss") &&
-        response.request().method() === "POST"
-    );
     await page.getByRole("button", { name: "Delete environment" }).click();
     const { operationId } = (await (await deleteAccepted).json()) as {
       operationId: string;
@@ -336,16 +344,22 @@ test.describe("Radius Canvas in Chromium", () => {
       "polite"
     );
 
-    // Let the tracked deletion settle now that its running panel is on screen.
+    await waitForOperationState(page, operationId, "running");
     await deletion.release();
 
-    // A clean Azure deletion acknowledges through the shared confirm dialog, and
-    // acknowledging it is the dismissal.
+    // A clean Azure deletion acknowledges through the shared confirm dialog.
+    // The settled operation remains until the progress panel is dismissed.
     await expect(confirmTitle).toHaveText("Environment deleted");
     await expectNoWcagViolations(page);
     const done = page.getByRole("button", { name: "Done" });
     await expect(done).toBeFocused();
     await done.click();
+    const dismissRequest = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname.endsWith("/dismiss") &&
+        response.request().method() === "POST"
+    );
+    await page.locator("#env-progress-dismiss").click();
     // The dismissal must target the very operation the delete route created, not
     // merely some `/dismiss` POST, or a stray dismissal would pass this assertion.
     const dismissal = await dismissRequest;
@@ -366,12 +380,10 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }) => {
-    await canvas.setScenario(scenarioWithoutActiveDeployment());
+    await setScenarioWithoutActiveDeployment(canvas);
     // Drive the delete operation to failed_partial with the first stage failed,
     // mirroring environment-deletion.ts: a terminal partial failure keeps the
     // completed stages recorded and offers a resume rather than restarting.
-    // `release` resolves only once the runner is parked so the poller first
-    // observes it running (a first-observation terminal is treated as stale).
     const deletion = canvas.driveEnvironmentDeletion({
       state: "failed_partial",
       failure: {
@@ -386,17 +398,42 @@ test.describe("Radius Canvas in Chromium", () => {
 
     await gotoCanvas(page, canvas, "environment");
     await page.locator(".js-delete-env").first().click();
+    const deleteAccepted = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/delete-environment" &&
+        response.request().method() === "POST"
+    );
     await page.getByRole("button", { name: "Delete environment" }).click();
+    const { operationId } = (await (await deleteAccepted).json()) as {
+      operationId: string;
+    };
 
     const panel = page.locator("#env-progress-panel");
     await expect(panel).toBeVisible();
+    await waitForOperationState(page, operationId, "running");
     await deletion.release();
     await expect(panel).toContainText(
       "Deletion stopped before all stages completed. Completed stages remain recorded and will not be repeated."
     );
-    await expect(
-      panel.getByRole("button", { name: "Retry deletion" })
-    ).toBeVisible();
+    const retry = panel.getByRole("button", { name: "Retry deletion" });
+    await expect(retry).toBeVisible();
+
+    const resumedDeletion = canvas.driveEnvironmentDeletion({
+      state: "succeeded"
+    });
+    const retryAccepted = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname ===
+          `/api/operations/${operationId}/retry/deletion` &&
+        response.request().method() === "POST"
+    );
+    await retry.click();
+    expect((await retryAccepted).status()).toBe(202);
+    await waitForOperationState(page, operationId, "running");
+    await resumedDeletion.release();
+    await waitForOperationState(page, operationId, "succeeded");
+    await expect(retry).toBeHidden();
+    await expect(page.locator("#env-progress-dismiss")).toBeVisible();
   });
 
   test("refuses to delete an environment that still has a deployed application @safety", async ({
@@ -428,6 +465,7 @@ test.describe("Radius Canvas in Chromium", () => {
     // No tracked deletion was started: the guard ran before any operation.
     await expect(page.locator("#env-progress-panel")).toBeHidden();
   });
+
   test("does not expose a pre-existing credential cache in browser state, requests, logs, or artifacts @safety", async ({
     page,
     canvas

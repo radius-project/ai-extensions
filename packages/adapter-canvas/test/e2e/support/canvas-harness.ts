@@ -128,6 +128,10 @@ export interface FakeCliScenario {
   commands: FakeCliCommand[];
 }
 
+export type FakeCliCommandOverride = (
+  command: FakeCliCommand
+) => FakeCliCommand;
+
 export const FAKE_CLI_TOOLS = ["gh", "rad", "az", "aws", "kubectl"] as const;
 
 // The failure payload a partial deletion records, matching the shape the
@@ -1479,6 +1483,20 @@ export class CanvasHarness {
     assertFakeModeAvailable(this.mode, operation);
   }
 
+  async setScenarioOverrides(
+    scenario: FakeCliScenario,
+    overrides: readonly FakeCliCommandOverride[],
+    appendedCommands: readonly FakeCliCommand[] = []
+  ): Promise<void> {
+    const commands = scenario.commands.map((command) =>
+      overrides.reduce((overridden, override) => override(overridden), command)
+    );
+    await this.setScenario({
+      ...scenario,
+      commands: [...commands, ...appendedCommands]
+    });
+  }
+
   async seedRestartedVerificationFailure(): Promise<string> {
     return this.seedRestartedVerification("failed");
   }
@@ -1568,18 +1586,19 @@ export class CanvasHarness {
     const text = typeof graph === "string" ? graph : JSON.stringify(graph);
     const raw = await fs.readFile(this.scenarioPath, "utf8");
     const scenario = JSON.parse(raw) as FakeCliScenario;
-    const commands = scenario.commands.map((command) => {
-      const isAppGraph =
-        command.tool === "rad" &&
-        command.argsPrefix?.[0] === "app" &&
-        command.argsPrefix?.[1] === "graph";
-      if (!isAppGraph) return command;
-      return {
-        ...command,
-        writeFiles: [{ path: "app-graph.json", content: text }]
-      };
-    });
-    await this.setScenario({ ...scenario, commands });
+    await this.setScenarioOverrides(scenario, [
+      (command) => {
+        const isAppGraph =
+          command.tool === "rad" &&
+          command.argsPrefix?.[0] === "app" &&
+          command.argsPrefix?.[1] === "graph";
+        if (!isAppGraph) return command;
+        return {
+          ...command,
+          writeFiles: [{ path: "app-graph.json", content: text }]
+        };
+      }
+    ]);
   }
 
   // The scenario distinguishes a token-authenticated single account from the
@@ -1611,25 +1630,26 @@ export class CanvasHarness {
     this.assertFakeMode("setGitHubKeyringScopes");
     const raw = await fs.readFile(this.scenarioPath, "utf8");
     const scenario = JSON.parse(raw) as FakeCliScenario;
-    const commands = scenario.commands.map((command) => {
-      const isKeyringStatus =
-        command.tool === "gh" &&
-        JSON.stringify(command.args) ===
-          JSON.stringify(["auth", "status", "--hostname", "github.com"]) &&
-        command.env?.GH_TOKEN === "absent";
-      if (!isKeyringStatus) return command;
-      return {
-        ...command,
-        stdout: [
-          authStatus("repo-user", "keyring", [...scopes]),
-          authStatus("acting-user", "keyring", [...scopes]).replace(
-            "Active account: true",
-            "Active account: false"
-          )
-        ].join("\n")
-      };
-    });
-    await this.setScenario({ ...scenario, commands });
+    await this.setScenarioOverrides(scenario, [
+      (command) => {
+        const isKeyringStatus =
+          command.tool === "gh" &&
+          JSON.stringify(command.args) ===
+            JSON.stringify(["auth", "status", "--hostname", "github.com"]) &&
+          command.env?.GH_TOKEN === "absent";
+        if (!isKeyringStatus) return command;
+        return {
+          ...command,
+          stdout: [
+            authStatus("repo-user", "keyring", [...scopes]),
+            authStatus("acting-user", "keyring", [...scopes]).replace(
+              "Active account: true",
+              "Active account: false"
+            )
+          ].join("\n")
+        };
+      }
+    ]);
   }
 
   async cliCalls(): Promise<Array<{ tool: string; args: string[] }>> {
