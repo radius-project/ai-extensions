@@ -239,8 +239,6 @@ describe("provider mutation recovery", () => {
       accept: () => ({ sha: "first" }),
       reconcile: async () => ({ state: "not_applied" })
     });
-    expect(operation.providerRecovery.state).toBe("complete");
-    expect(operation.stopRequested).toBe(false);
     operation.providerRecovery.mutations[0].status = "prepared";
 
     const recovered = await executeRecoverableMutation({
@@ -278,6 +276,8 @@ describe("provider mutation recovery", () => {
       accept: () => ({ sha: "first" }),
       reconcile: async () => ({ state: "not_applied" })
     });
+    expect(operation.providerRecovery.state).toBe("complete");
+    expect(operation.stopRequested).toBe(false);
     operation.providerRecovery.mutations[0].status = "prepared";
 
     await executeRecoverableMutation({
