@@ -12,10 +12,10 @@
 // Two modes:
 //
 //   --begin [--run-id <id>]   Prepare a run: remove any staging directory left
-//                             behind by an interrupted run, ignore
-//                             `.radius/.staging-*`, record the fingerprint of
-//                             the application model as it is right now, and
-//                             print the staging directory to write into.
+//                             behind by an interrupted run, create a staging
+//                             directory that hides itself from git, record the
+//                             fingerprint of the application model as it is
+//                             right now, and print the directory to write into.
 //
 //   (default)                 Publish `--staging <dir>`: check the run is
 //                             complete, that its origin record describes the
@@ -54,6 +54,21 @@ import path from "node:path";
 const STAGING_DIR_PREFIX = ".staging-";
 const STAGING_IGNORE_PATTERN = `${STAGING_DIR_PREFIX}*/`;
 const STAGING_RUN_RECORD = "run.json";
+
+// A staging directory hides itself from git the moment it exists, by carrying
+// its own ignore file that excludes everything in it — including the ignore
+// file itself.
+//
+// This is what `.radius/.gitignore` cannot do. That rule is only written when a
+// run publishes (see ensureStagingIgnored), so until some run succeeds there is
+// no rule, and an interrupted run leaves an untracked directory a bulk
+// `git add -A` will happily commit. Agents commit on the user's behalf, so
+// "it is only untracked noise in `git status`" is not the whole cost.
+//
+// Writing it here rather than into `.radius/.gitignore` at `--begin` is what
+// keeps the byte-identical guarantee intact: it lives INSIDE the directory the
+// failure paths already delete, so no failure path has to remember to undo it.
+const STAGING_SELF_IGNORE = "*\n";
 const REQUIRED_STAGED_FILES = [
   "app.bicep",
   "bicepconfig.json",
@@ -291,9 +306,12 @@ function purgeStagingDirs(radiusDir, staleAfterMs = STAGING_STALE_AFTER_MS) {
 // outside its staging directory to undo, so the guarantee holds by construction
 // rather than by a revert that has to be correct.
 //
-// The cost is that a run interrupted mid-flight leaves its staging directory
-// untracked until the next run sweeps it up. That is visible in `git status` and
-// harmless, which is a better trade than a revert that can get it wrong.
+// The cost used to be that a run interrupted mid-flight left its staging
+// directory untracked until the next run swept it up. That is now covered from
+// the moment the directory is created, by the ignore file the directory carries
+// itself (see STAGING_SELF_IGNORE), so this rule is belt-and-braces for the
+// repository rather than the only thing standing between an interrupted run and
+// a bulk `git add`.
 //
 // Returns true when the file was written, so only a rule this run added is
 // staged in git.
@@ -388,6 +406,13 @@ function begin() {
     );
   }
   mkdirSync(stagingDir, { recursive: true });
+  // Written before anything else the run produces, so there is no window in
+  // which the directory holds model files git can see.
+  writeFileSync(
+    path.join(stagingDir, ".gitignore"),
+    STAGING_SELF_IGNORE,
+    "utf8"
+  );
 
   // The baseline fingerprint travels with the run rather than through the
   // agent, so the concurrent-edit check cannot be defeated by an agent that
