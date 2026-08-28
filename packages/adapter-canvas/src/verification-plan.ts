@@ -1,4 +1,5 @@
 import { hasVerificationOperationMarker } from "./verification-run-identity.js";
+import { githubCredentialSourceLabel } from "./github-credential-source.js";
 
 export interface PullRequestState {
   branch: string;
@@ -146,14 +147,9 @@ export function describeVerificationDispatch({
   envName: string;
   ref: string;
 }): string {
-  const credential =
-    credentialSource === "injected" ?
-      "the Copilot session token"
-    : "the stored GitHub CLI credential";
   return (
-    `Credential verification dispatch is configured for @${login} using ${credential}: ` +
-    `workflow "${workflowFile}", environment "${envName}", repository "${targetRepo}", ref "${ref}". ` +
-    "Radius passes this resolved ref explicitly so GitHub CLI does not perform another default-branch lookup."
+    `Credential verification dispatch is configured for @${login} using ${githubCredentialSourceLabel(credentialSource)}: ` +
+    `workflow "${workflowFile}", environment "${envName}", repository "${targetRepo}", ref "${ref}".`
   );
 }
 

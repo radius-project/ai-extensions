@@ -1104,10 +1104,7 @@ export async function handleCreateEnvironment(
           missingCredNote
       );
     } else {
-      if (prState && verifyPlan.ref)
-        steps.push(
-          `ℹ️ The verify workflow is already on "${verifyPlan.defaultBranch}", so verification runs now against branch "${verifyPlan.ref}" rather than waiting for the merge.`
-        );
+      verificationRef = verifyPlan.ref;
       steps.push(
         `ℹ️ ${describeVerificationDispatch({
           login: selectedExecutor.login,
@@ -1115,12 +1112,11 @@ export async function handleCreateEnvironment(
           workflowFile: dependencies.verifyWorkflowFile,
           targetRepo,
           envName,
-          ref: verifyPlan.ref || defaultBranch
+          ref: verificationRef
         })}`
       );
       steps.push("Dispatching verify-credentials workflow...");
       if (!(await stopBoundary("before-verification-dispatch"))) return;
-      verificationRef = verifyPlan.ref || defaultBranch;
       const supportsOperationMarker =
         verifyPlan.supportsOperationMarker !== false;
       const operationMarker =
@@ -1146,7 +1142,7 @@ export async function handleCreateEnvironment(
                 workflowFile: dependencies.verifyWorkflowFile,
                 targetRepo,
                 envName,
-                ref: verifyPlan.ref,
+                ref: verificationRef,
                 operationMarker
               })
             ),
