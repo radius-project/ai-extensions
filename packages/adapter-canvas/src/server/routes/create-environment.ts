@@ -48,6 +48,7 @@ import {
 } from "../services/provider-mutation-recovery.js";
 import { selectedEnvironmentReader } from "../services/github-environment.js";
 import { runVerificationDispatch } from "../services/verification-dispatch.js";
+import { describeVerificationDispatch } from "../../verification-plan.js";
 
 // Seam 4 of the `POST /api/create-environment` slice: the seven-step use case.
 //
@@ -1035,6 +1036,16 @@ export async function handleCreateEnvironment(
         steps.push(
           `ℹ️ The verify workflow is already on "${verifyPlan.defaultBranch}", so verification runs now against branch "${verifyPlan.ref}" rather than waiting for the merge.`
         );
+      steps.push(
+        `ℹ️ ${describeVerificationDispatch({
+          login: selectedExecutor.login,
+          credentialSource: selectedExecutor.credentialSource,
+          workflowFile: dependencies.verifyWorkflowFile,
+          targetRepo,
+          envName,
+          ref: verifyPlan.ref || defaultBranch
+        })}`
+      );
       steps.push("Dispatching verify-credentials workflow...");
       if (!(await stopBoundary("before-verification-dispatch"))) return;
       verificationRef = verifyPlan.ref || defaultBranch;

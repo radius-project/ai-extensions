@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildVerifyWorkflowDispatchArgs,
+  describeVerificationDispatch,
   hasWorkflowRunTrigger,
   parseVerifyWorkflowRunUrl,
   planCredentialVerification
@@ -163,6 +164,31 @@ describe("dispatch arguments", () => {
       })
     ).toContain("radius_operation=op_verify");
   });
+});
+
+describe("dispatch narration", () => {
+  it.each([
+    ["injected", "the Copilot session token"],
+    ["keyring", "the stored GitHub CLI credential"]
+  ] as const)(
+    "names the %s credential without exposing it",
+    (source, label) => {
+      expect(
+        describeVerificationDispatch({
+          login: "octocat",
+          credentialSource: source,
+          workflowFile: "radius-verify-credentials.yml",
+          targetRepo: "octo/app",
+          envName: "dev",
+          ref: "trunk"
+        })
+      ).toBe(
+        `Credential verification will run as @octocat using ${label}: ` +
+          'workflow "radius-verify-credentials.yml", environment "dev", repository "octo/app", ref "trunk". ' +
+          "Radius passes this resolved ref explicitly so GitHub CLI does not perform another default-branch lookup."
+      );
+    }
+  );
 });
 
 describe("workflow run URL parsing", () => {

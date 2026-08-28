@@ -1058,6 +1058,9 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     const payload = (await response.json()) as { steps: string[] };
 
     expect(payload.steps).toContain("✅ Credentials verification dispatched.");
+    expect(payload.steps).toContain(
+      'ℹ️ Credential verification will run as @octocat using the stored GitHub CLI credential: workflow "radius-verify-credentials.yml", environment "dev", repository "octo/app", ref "main". Radius passes this resolved ref explicitly so GitHub CLI does not perform another default-branch lookup.'
+    );
     expect(
       payload.steps.filter(
         (step) => step === "✅ Credentials verification dispatched."
@@ -1086,6 +1089,12 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       harness.ghCalls.find((call) => call.startsWith("workflow run "))
     ).toContain("--ref trunk");
     expect(harness.operation.verification).toMatchObject({ ref: "trunk" });
+    const payload = (await response.json()) as { steps: string[] };
+    expect(payload.steps).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('repository "octo/app", ref "trunk"')
+      ])
+    );
   });
 
   it("skips verification and finishes action_required when cloud credentials are incomplete", async () => {

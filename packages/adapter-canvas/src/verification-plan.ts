@@ -131,6 +131,32 @@ export function buildVerifyWorkflowDispatchArgs({
   ];
 }
 
+export function describeVerificationDispatch({
+  login,
+  credentialSource,
+  workflowFile,
+  targetRepo,
+  envName,
+  ref
+}: {
+  login: string;
+  credentialSource: "injected" | "keyring";
+  workflowFile: string;
+  targetRepo: string;
+  envName: string;
+  ref: string;
+}): string {
+  const credential =
+    credentialSource === "injected" ?
+      "the Copilot session token"
+    : "the stored GitHub CLI credential";
+  return (
+    `Credential verification will run as @${login} using ${credential}: ` +
+    `workflow "${workflowFile}", environment "${envName}", repository "${targetRepo}", ref "${ref}". ` +
+    "Radius passes this resolved ref explicitly so GitHub CLI does not perform another default-branch lookup."
+  );
+}
+
 export interface VerifyWorkflowRunIdentity {
   runId: string;
   runUrl: string;
