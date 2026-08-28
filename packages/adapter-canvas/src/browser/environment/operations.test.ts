@@ -863,6 +863,27 @@ describe("trackProgress rendering", () => {
     expect(details.listenerCount("toggle")).toBe(0);
   });
 
+  it("does not scroll when details close or tail following is paused", () => {
+    const browser = setup();
+    const steps = browser.els[PROGRESS_IDS.steps];
+    const details = browser.els[PROGRESS_IDS.details];
+    steps.scrollHeight = 200;
+    steps.clientHeight = 50;
+    const controller = controllerFor(browser);
+
+    steps.scrollTop = 17;
+    details.dispatch("toggle");
+    expect(steps.scrollTop).toBe(17);
+
+    steps.scrollTop = 40;
+    steps.dispatch("scroll");
+    details.setAttribute("open", "");
+    details.dispatch("toggle");
+    expect(steps.scrollTop).toBe(40);
+
+    controller?.teardown();
+  });
+
   it("falls back to a default glyph for an unrecognized stage or step state", () => {
     const browser = setup();
     const controller = controllerFor(browser);

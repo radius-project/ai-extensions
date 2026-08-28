@@ -1460,12 +1460,13 @@ test.describe("Radius Canvas in Chromium", () => {
       )
       .toBeLessThanOrEqual(4);
 
-    await steps.evaluate((element) => {
-      Reflect.set(element, "scrollTop", 0);
-      const dispatch = Reflect.get(element, "dispatchEvent");
-      if (typeof dispatch !== "function") throw new Error("Missing dispatch");
-      dispatch.call(element, new Event("scroll"));
-    });
+    await steps.hover();
+    await page.mouse.wheel(0, -1000);
+    await expect
+      .poll(() =>
+        steps.evaluate((element) => Number(Reflect.get(element, "scrollTop")))
+      )
+      .toBe(0);
     stepCount = 13;
     await page.clock.fastForward(1500);
     await expect(steps).toContainText("Setup detail 13");
@@ -1475,16 +1476,18 @@ test.describe("Radius Canvas in Chromium", () => {
       )
       .toBe(0);
 
-    await steps.evaluate((element) => {
-      Reflect.set(
-        element,
-        "scrollTop",
-        Number(Reflect.get(element, "scrollHeight"))
-      );
-      const dispatch = Reflect.get(element, "dispatchEvent");
-      if (typeof dispatch !== "function") throw new Error("Missing dispatch");
-      dispatch.call(element, new Event("scroll"));
-    });
+    await steps.hover();
+    await page.mouse.wheel(0, 1000);
+    await expect
+      .poll(() =>
+        steps.evaluate(
+          (element) =>
+            Number(Reflect.get(element, "scrollHeight")) -
+            Number(Reflect.get(element, "scrollTop")) -
+            Number(Reflect.get(element, "clientHeight"))
+        )
+      )
+      .toBeLessThanOrEqual(4);
     stepCount = 14;
     await page.clock.fastForward(1500);
     await expect(steps).toContainText("Setup detail 14");
