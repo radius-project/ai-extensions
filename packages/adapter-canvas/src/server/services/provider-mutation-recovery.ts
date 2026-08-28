@@ -188,6 +188,8 @@ const CONCLUSIVE_REJECTION = new RegExp(
     String.raw`\b(?:Bad Request|Unauthorized|Forbidden|Not Found|Method Not Allowed|Conflict|Gone|Unsupported Media Type|Unprocessable Entity|Validation Failed|API rate limit exceeded|Too Many Requests|TooManyRequests)\b`,
     String.raw`Resource not accessible by`,
     String.raw`Bad credentials`,
+    String.raw`Resource protected by organization SAML enforcement`,
+    String.raw`grant your OAuth token access`,
     String.raw`Must have admin rights`,
     String.raw`already exists`,
     String.raw`Reference (?:already exists|does not exist)`,
