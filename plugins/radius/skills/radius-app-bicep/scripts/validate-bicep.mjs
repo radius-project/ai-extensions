@@ -599,6 +599,23 @@ function expandedVariableNames(value) {
   return names;
 }
 
+// Whether `referenced` is emitted at or after `name`, and therefore cannot be
+// substituted into it. The recipe sorts with `items()`, so this asks where the
+// two keys fall in that sort — but the check fails a build, so it answers only
+// when the answer does not depend on how the sort treats letter case. Ordinary
+// environment names settle it either way; a pair that disagrees stays silent
+// rather than risk rejecting a model that would have deployed.
+function emittedAtOrAfter(referenced, name) {
+  if (referenced === name) {
+    return true;
+  }
+  return (
+    referenced > name &&
+    referenced.toUpperCase() > name.toUpperCase() &&
+    referenced.toLowerCase() > name.toLowerCase()
+  );
+}
+
 function plainEnvironmentValues(env) {
   const values = new Map();
   for (const [name, entry] of Object.entries(env)) {
@@ -687,7 +704,7 @@ function checkRuntimeVariableExpansion(
           if (!plainValues.has(referenced)) {
             continue;
           }
-          if (referenced < name) {
+          if (!emittedAtOrAfter(referenced, name)) {
             continue;
           }
           const advice =

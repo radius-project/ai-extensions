@@ -706,6 +706,24 @@ test("resolves a composed value supplied through a parameter default", () => {
   assert.match(result.stderr, /runtime-variable/u);
 });
 
+test("stays silent when letter case decides the ordering", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: containerEnv({
+      APP_DATABASE_OPTIONS: { value: "password=$(app_password)" },
+      app_password: { value: "secret" }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
 test("resolves a top-level source-reference parameter default", () => {
   const directory = temporaryDirectory();
   const compiledOutput = template(
