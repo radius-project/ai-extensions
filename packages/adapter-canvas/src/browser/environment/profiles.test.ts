@@ -702,6 +702,26 @@ describe("githubIdentityNote", () => {
     expect(note.specs[0].text).toContain("Install GitHub CLI system-wide.");
   });
 
+  it("surfaces installation guidance when no GitHub CLI is available", () => {
+    const note = githubIdentityNote(
+      {
+        ...base,
+        actingHasWorkflow: false,
+        actingHasPackages: true,
+        packagesHasWrite: false,
+        packagesCredentialSource: "injected-token"
+      },
+      {
+        kind: "unavailable",
+        shell: "posix",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(note.specs[0].text).toContain("Install GitHub CLI system-wide.");
+    expect(note.specs[0].text).not.toContain('run ""');
+  });
+
   it("names the acting login when an injected token reports no publisher", () => {
     const note = githubIdentityNote({
       ...base,

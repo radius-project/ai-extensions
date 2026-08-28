@@ -416,6 +416,17 @@ describe("GitHub Packages identity parsing and rendering", () => {
     expect(errored.statusHtml).toBeNull();
   });
 
+  it("surfaces installation guidance when GitHub CLI is unavailable", () => {
+    const view = renderGitHubAccessView(pkgIdentity({ actingLogin: "" }), {
+      kind: "unavailable",
+      shell: "posix",
+      installationNote: "Install GitHub CLI system-wide."
+    });
+
+    expect(view.statusText).toBe("Install GitHub CLI system-wide.");
+    expect(view.commandVisible).toBe(false);
+  });
+
   it("renders the verified view with an escaped login", () => {
     const view = renderGitHubAccessView({
       error: "",

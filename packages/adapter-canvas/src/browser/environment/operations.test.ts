@@ -387,6 +387,30 @@ describe("parseOperationResponse", () => {
       "'/opt/Copilot Tools/gh' auth refresh -h github.com -s workflow"
     );
   });
+
+  it("keeps only string remediation parameters", () => {
+    const parsed = parseOperationResponse(
+      op({
+        failure: {
+          message: "GitHub access is missing.",
+          remediation: {
+            id: "github-account-scopes",
+            params: {
+              login: "octocat",
+              workflow: "true",
+              packages: 1
+            }
+          }
+        }
+      })
+    );
+
+    expect(parsed?.failure?.remediation?.params).toEqual({
+      login: "octocat",
+      workflow: "true"
+    });
+  });
+
   it.each([
     ["null", null],
     ["a string", "running"],
