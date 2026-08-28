@@ -383,7 +383,8 @@ export function readBundledWorkflowTemplate(fileName: string): string {
 
 export async function generateVerifyWorkflow(
   env: string,
-  provider: string
+  provider: string,
+  ref: string = RADIUS_REF
 ): Promise<string> {
   const platform = getPlatform(provider);
   if (!platform)
@@ -394,7 +395,7 @@ export async function generateVerifyWorkflow(
   const fileName = verifyTemplateFile(platform);
   if (!fileName)
     throw new Error(`No verify template for provider "${provider}".`);
-  const upstream = await fetchRadiusTemplate(fileName);
+  const upstream = await fetchRadiusTemplate(fileName, ref);
   const workflow = configureVerifyGhcrProbe(
     configureVerifyOperationMarker(
       coreGenerateVerifyWorkflow(env, platform, upstream)

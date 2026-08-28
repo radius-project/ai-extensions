@@ -153,6 +153,16 @@ jobs:
       configureVerifyOperationMarker("name: verify\njobs:\n  v:\n    run: x\n")
     ).toThrow(/no longer exposes/u);
   });
+
+  it("renders the same marked workflow when a template ref is pinned", async () => {
+    // The live suite pins the fetch to a branch head sha so it reads the ported
+    // tree before it merges; the same render must hold for an explicit ref.
+    expect(
+      hasVerificationOperationMarker(
+        await generateVerifyWorkflow("dev", "azure", "some-sha")
+      )
+    ).toBe(true);
+  });
 });
 
 // Build the full expected committed-file map the extension would produce for one

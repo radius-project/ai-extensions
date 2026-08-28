@@ -92,10 +92,7 @@ interface RadiusBlob {
 // name that explicitly to make CI failures actionable (set GITHUB_TOKEN).
 function describeFetchFailure(res: Response): string {
   if (res.status === 403 || res.status === 429) {
-    return (
-      `${res.status} ${res.statusText} (likely GitHub API rate limiting; set ` +
-      `GITHUB_TOKEN to raise the limit)`
-    );
+    return `${res.status} ${res.statusText} (likely GitHub API rate limiting; set GITHUB_TOKEN to raise the limit)`;
   }
   return `${res.status} ${res.statusText}`;
 }
@@ -242,12 +239,13 @@ describe.skipIf(!LIVE)(
       // (executable), so a shell action that lost its +x bit in the port would
       // pass the byte-content check yet fail to run. Compare modes for every
       // shared Radius blob.
-      const modeDrift = blobs
-        .filter((b) => localModes.get(b.path) !== b.mode)
-        .map((b) => {
-          const local = localModes.get(b.path);
-          return `${b.path} (radius ${b.mode}, local ${local})`;
-        });
+      const modeDrift: string[] = [];
+      for (const b of blobs) {
+        const local = localModes.get(b.path);
+        if (local !== b.mode) {
+          modeDrift.push(`${b.path} (radius ${b.mode}, local ${local})`);
+        }
+      }
       expect(
         modeDrift.sort(),
         `these ai-extensions files have a different git file mode than Radius@${RADIUS_PARITY_REF}: ${modeDrift.join(", ")}`
