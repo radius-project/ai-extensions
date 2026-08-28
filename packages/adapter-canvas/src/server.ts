@@ -347,15 +347,11 @@ import {
   verificationAcquisitionExpiredCopy,
   verificationTrackingDeadline
 } from "./server/services/verification-retry.js";
-import {
-  resolveAcknowledgedVerificationRun,
-  runVerificationRetry as runSelectedVerificationRetry
-} from "./server/services/verification-retry-runner.js";
+import { runVerificationRetry as runSelectedVerificationRetry } from "./server/services/verification-retry-runner.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
 export { resolveDeployStatus } from "./server/services/deployment-resolver.js";
-export { resolveAcknowledgedVerificationRun };
 
 interface CommandResult {
   code: string | number;

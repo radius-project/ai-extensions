@@ -85,7 +85,6 @@ export function verificationAcquisitionDeadline(
 export function shouldReuseVerificationDispatch(input: {
   accountUnavailablePhase: unknown;
   previousStatus: unknown;
-  runId: unknown;
 }): boolean {
   if (input.accountUnavailablePhase !== "dispatch") {
     return false;
@@ -93,8 +92,7 @@ export function shouldReuseVerificationDispatch(input: {
   return (
     input.previousStatus === "prepared" ||
     input.previousStatus === "outcome_unknown" ||
-    (input.previousStatus === "confirmed" &&
-      (input.runId == null || !String(input.runId)))
+    input.previousStatus === "confirmed"
   );
 }
 
