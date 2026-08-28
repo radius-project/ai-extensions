@@ -31,6 +31,13 @@ import {
 import type { Remediation, RemediationView } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/adapter-shared";
 import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  presentedRemediationView,
+  presentRemediation
+} from "./gh-command-display.js";
+import { resolveGhCommandPresentation } from "./gh-command-resolution.js";
+import {
   sharedCredentials,
   cloudCredential,
   listCredentialProfiles,
@@ -46,6 +53,8 @@ import type {
   GraphProgressView,
   GraphView
 } from "./shared.js";
+
+const GH_COMMAND_PRESENTATION = resolveGhCommandPresentation();
 import {
   fetchFileFromRepo,
   github,
@@ -112,6 +121,7 @@ import {
   DEFAULT_CANVAS_PAGE,
   DEPLOY_REPAIR_ATTEMPT_CAP
 } from "./runtime/hooks.js";
+import { observeWorkspaceModelingRun } from "./runtime/modeling-activity.js";
 import {
   buildVerifyWorkflowDispatchArgs,
   planCredentialVerification
@@ -504,6 +514,7 @@ interface AppBicepHandoffInput {
   repo: string;
   branches: string[];
   page: string;
+  progressView?: GraphProgressView;
   // The instance's state, so the runtime can resolve each branch's model
   // against the same workspace context the route just rendered from, and so it
   // can deduplicate against the handoff it last performed for this panel.
@@ -788,6 +799,7 @@ const repositoriesRoutes = createRepositoriesRoutes({
 // because all three are declared further down the module and would otherwise be
 // in the temporal dead zone when this object is built at import time.
 const deploymentsRoutes = createDeploymentsRoutes({
+  ghCommandPresentation: GH_COMMAND_PRESENTATION,
   isValidRepoSlug,
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   triggerDeployRepairHandoff,
@@ -910,12 +922,13 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
         selectedGitHubExecutorsByOperation.get(operationId),
       getGitHubIdentity,
       preflightRepoAdmin: (repo, executor) =>
-        preflightRepoAdmin(repo, executor),
+        preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
       preflightGhcrPackageWriteAccess: (executor) =>
         preflightGhcrPackageWriteAccess(
           getGhPackageCredentials,
           getGitHubIdentity,
-          executor
+          executor,
+          GH_COMMAND_PRESENTATION
         ),
       runGitHubJson: (apiPath, executor) =>
         runGitHubJsonRequest(apiPath, executor),
@@ -946,14 +959,20 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
   })
 );
 
-const githubAccountCoordinator = createGitHubAccountCoordinator({
-  createExecutor: (login) => createSelectedGhExecutor(login),
-  getActiveKeyringLogin,
-  switchKeyringAccount: switchGhKeyringAccount,
-  resetIdentityCache: resetGhIdentityCache
-});
+const githubAccountCoordinator = createGitHubAccountCoordinator(
+  {
+    createExecutor: (login) => createSelectedGhExecutor(login),
+    getActiveKeyringLogin,
+    switchKeyringAccount: switchGhKeyringAccount,
+    resetIdentityCache: resetGhIdentityCache
+  },
+  {
+    ghCommandPresentation: GH_COMMAND_PRESENTATION
+  }
+);
 const githubAccountReadiness = createGitHubAccountReadinessService(
-  githubAccountCoordinator
+  githubAccountCoordinator,
+  { ghCommandPresentation: GH_COMMAND_PRESENTATION }
 );
 const githubSelectionHandles = createGitHubSelectionHandleStore();
 const selectedGitHubExecutorsByOperation = new Map<
@@ -997,7 +1016,8 @@ const identityProfilesRoutes = createIdentityProfilesRoutes({
       expiresAt: selection.expiresAt
     };
   },
-  preflightRepoAdmin,
+  preflightRepoAdmin: (repo) =>
+    preflightRepoAdmin(repo, undefined, GH_COMMAND_PRESENTATION),
   isValidRepoSlug,
   errorMessage
 });
@@ -1024,6 +1044,8 @@ const identityAuthRoutes = createIdentityAuthRoutes({
 // only seams it needs are that same session hook and the error formatter.
 const remediationRoutes = createRemediationRoutes(
   productionRemediationDependencies({
+    presentRemediation: (remediation) =>
+      presentRemediation(remediation, GH_COMMAND_PRESENTATION),
     runSessionPrompt: (prompt) =>
       invokeSessionPrompt(sessionPromptHandler, prompt),
     errorMessage
@@ -1071,28 +1093,21 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
 // route modules free of it. The pure helpers (`defaultBranchForState`,
 // `computeGraphDiff`, `record`, …) are injected rather than imported by the
 // workflows, matching how the sibling families inject `repoMatchesWorkspace`.
-// Observe on-disk modeling activity, but only when the modeling target is the
-// workspace itself. Local staging directories say nothing about a remote branch
-// or a different repository, so probing outside that match would let unrelated
-// activity extend a wait that should have expired.
-//
-// Shared by both graph route families on purpose: this is the gate that keeps a
-// wait honest, and two copies of it could drift apart.
-function observeWorkspaceModelingRun(
+const observeServerWorkspaceModelingRun = (
   state: CanvasState,
   repo: string,
   branches: string[]
-): Promise<number | null> {
-  if (
-    !repo ||
-    !state.workspaceRepo ||
-    state.workspaceRepo !== repo ||
-    !branches.some((branch) => branch === state.workspaceBranch)
-  ) {
-    return Promise.resolve(null);
-  }
-  return modelingRunLastActivityAtMs(state.workspacePath);
-}
+): Promise<number | null> =>
+  observeWorkspaceModelingRun(
+    repo,
+    branches,
+    {
+      repo: state.workspaceRepo ?? "",
+      branch: state.workspaceBranch ?? "",
+      path: state.workspacePath
+    },
+    modelingRunLastActivityAtMs
+  );
 
 const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
@@ -1135,7 +1150,7 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     resolveRecipeOutputs(github, resources, recipes, provider),
   computeGraphDiff: (baseResources, headResources) =>
     computeGraphDiff(baseResources, headResources),
-  observeModelingRun: observeWorkspaceModelingRun,
+  observeModelingRun: observeServerWorkspaceModelingRun,
   record,
   optionalString,
   errorMessage,
@@ -1198,7 +1213,7 @@ const graphsPlanningRoutes = createGraphsPlanningRoutes({
   settleDeployStatuses,
   errorMessage,
   repoMatchesWorkspace,
-  observeModelingRun: observeWorkspaceModelingRun,
+  observeModelingRun: observeServerWorkspaceModelingRun,
   now: () => Date.now()
 });
 
@@ -1313,6 +1328,7 @@ const environmentsRoutes = createEnvironmentsRoutes({
 // `randomUUID()` held by that instance's request coordinator, and this route is
 // reachable only through the internal loopback POST that carries it.
 const createEnvironmentRoutes = createCreateEnvironmentRoutes({
+  ghCommandPresentation: GH_COMMAND_PRESENTATION,
   isServerOwnedRequest: (instanceId, request) =>
     instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
     false,
@@ -1349,12 +1365,14 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   persistBestEffort,
   guardStopBoundary,
   runAzCommand: (args) => runCliCommand("az", args),
-  preflightRepoAdmin: (repo, executor) => preflightRepoAdmin(repo, executor),
+  preflightRepoAdmin: (repo, executor) =>
+    preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
   preflightGhcrPackageWriteAccess: (executor) =>
     preflightGhcrPackageWriteAccess(
       getGhPackageCredentials,
       getGitHubIdentity,
-      executor
+      executor,
+      GH_COMMAND_PRESENTATION
     ),
   readGitHubJson: (apiPath, executor) =>
     runGitHubJsonRequest(apiPath, executor),
@@ -1362,7 +1380,8 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
     bootstrapGHCRStatePackage({
       targetRepository: input.targetRepository,
       registry: input.registry,
-      credentials: input.credentials as GhcrPackageCredentials
+      credentials: input.credentials as GhcrPackageCredentials,
+      ghCommandPresentation: GH_COMMAND_PRESENTATION
     }),
   stateRegistryForEnvironment,
   getDefaultBranch: (repo, executor) =>
@@ -1504,6 +1523,7 @@ const canvasServer = createCanvasServer(
     },
     onStarted: (instanceId, entry) => {
       shuttingDownInstances.delete(instanceId);
+      entry.state.ghCommandPresentation = GH_COMMAND_PRESENTATION;
       const coordinator = instanceRequestCoordinators.get(instanceId);
       if (coordinator) {
         entry.state.browserMutationNonce = coordinator.browserMutationNonce;
@@ -2152,7 +2172,8 @@ function triggerAppBicepHandoff(
   entry: { state: CanvasState } | undefined,
   repo: string,
   branches: string | string[],
-  page: string
+  page: string,
+  progressView: GraphProgressView = page === "graph-diff" ? "diff" : "graph"
 ): void {
   try {
     if (typeof appBicepHandoff !== "function") return;
@@ -2161,7 +2182,13 @@ function triggerAppBicepHandoff(
       (branch): branch is string => Boolean(branch)
     );
     Promise.resolve(
-      appBicepHandoff({ repo, branches: list, page, state: entry?.state })
+      appBicepHandoff({
+        repo,
+        branches: list,
+        page,
+        progressView,
+        state: entry?.state
+      })
     ).catch(() => {});
   } catch {
     /* never let a handoff failure break the response */
@@ -2675,6 +2702,7 @@ const deployPlannedGraphService = createPlannedGraphRecoveryService({
 });
 
 const deployDispatchService = createDeployDispatchService({
+  ghCommandPresentation: GH_COMMAND_PRESENTATION,
   deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
   deployWorkflowFiles: [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE],
   branchNotPushedKind: DEPLOY_BRANCH_NOT_PUSHED_KIND,
@@ -2789,6 +2817,7 @@ const deployRequestService = createDeployRequestService({
 });
 
 const deploymentAbandonmentService = createDeploymentAbandonmentService({
+  ghCommandPresentation: GH_COMMAND_PRESENTATION,
   isValidRepoSlug,
   readInstanceState: (instanceId) =>
     canvasServer.instances.get(instanceId)?.state,
@@ -4354,7 +4383,8 @@ export async function finalizeSetupFailure(
 // true error. GitHub still enforces permissions server-side regardless.
 async function preflightRepoAdmin(
   repo: string,
-  executor?: SelectedGhExecutor
+  executor?: SelectedGhExecutor,
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): Promise<string> {
   let login = "";
   const runJson = (path: string) =>
@@ -4372,12 +4402,15 @@ async function preflightRepoAdmin(
   } else {
     return ""; // ambiguous/transient — don't block or mislead; let the real op surface the true error
   }
-  return explainRepoAccessForEnvSetup({
-    repo,
-    login,
-    readFailed,
-    permissions
-  });
+  return explainRepoAccessForEnvSetup(
+    {
+      repo,
+      login,
+      readFailed,
+      permissions
+    },
+    ghCommandPresentation
+  );
 }
 
 type GhcrPackageCredentialLoader = typeof getGhPackageCredentials;
@@ -4411,7 +4444,8 @@ type GhcrPackagePreflightResult =
 export async function preflightGhcrPackageWriteAccess(
   loadCredentials: GhcrPackageCredentialLoader = getGhPackageCredentials,
   loadIdentity: GhcrPackageIdentityLoader = getGitHubIdentity,
-  selectedExecutor?: SelectedGhExecutor
+  selectedExecutor?: SelectedGhExecutor,
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): Promise<GhcrPackagePreflightResult> {
   let packageCredentials: GhcrPackageCredentials;
   try {
@@ -4420,13 +4454,31 @@ export async function preflightGhcrPackageWriteAccess(
         selectedExecutor.packageCredentials()
       : await loadCredentials();
   } catch (e) {
+    const loginCommand = displayGhCommand(ghCommandPresentation, [
+      "auth",
+      "login",
+      "-h",
+      "github.com",
+      "-s",
+      "read:packages",
+      "-s",
+      "write:packages"
+    ]);
+    const guidance =
+      loginCommand ?
+        ` Run \`${loginCommand}\` in a terminal, then retry.${
+          ghCommandPresentation.installationNote ?
+            ` ${ghCommandPresentation.installationNote}`
+          : ""
+        }`
+      : ` ${ghCommandPresentation.installationNote}`;
     return {
       ok: false,
       status: 403,
       code: "ghcr-auth-failed",
       error: `Could not authenticate to GitHub Packages for this repository. ${errorMessage(
         e
-      )}`
+      )}${guidance}`
     };
   }
 
@@ -4500,7 +4552,8 @@ export async function preflightGhcrPackageWriteAccess(
     const scope = explainMissingPackagesScope(
       ghPkgLogin,
       packageCredentials.source,
-      ghPkgIdentity.accounts || []
+      ghPkgIdentity.accounts || [],
+      ghCommandPresentation
     );
     return {
       ok: false,
@@ -4527,7 +4580,8 @@ export async function preflightGhcrPackageWriteAccess(
 export function explainMissingPackagesScope(
   login: string,
   source: GhcrPackageCredentials["source"],
-  accounts: readonly GitHubIdentityAccount[]
+  accounts: readonly GitHubIdentityAccount[],
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): { message: string; remediation: RemediationView | null } {
   const missing = `The GitHub account @${login} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR.`;
   if (source === "injected-token") {
@@ -4543,13 +4597,17 @@ export function explainMissingPackagesScope(
         remediation: null
       };
     }
-    const login_ = remediationView("github-cli-login", { packages: "true" });
+    const login_ = presentedRemediationView(
+      "github-cli-login",
+      { packages: "true" },
+      ghCommandPresentation
+    );
     return {
       message:
         preamble +
         (login_.runnable ?
           "Run the command below to sign in a stored account that can publish packages, then retry."
-        : 'Run "gh auth login -h github.com -s read:packages -s write:packages" to sign in a stored account that can publish packages, then retry.'),
+        : `${ghCommandPresentation.installationNote} Then sign in a stored account that can publish packages and retry.`),
       remediation: login_.runnable ? login_ : null
     };
   }
@@ -4557,10 +4615,14 @@ export function explainMissingPackagesScope(
   // hand-written copy drifts from what the Copy/Run buttons offer and misses
   // registry-wide rules -- notably one command per line, because `&&` does not
   // parse in Windows PowerShell 5.1.
-  const fix = remediationView("github-account-scopes", {
-    login,
-    packages: "true"
-  });
+  const fix = presentedRemediationView(
+    "github-account-scopes",
+    {
+      login,
+      packages: "true"
+    },
+    ghCommandPresentation
+  );
   const grant =
     fix.runnable ?
       "Run the command below (or switch to an account that has it in the Create Environment dialog), then retry."
@@ -5244,7 +5306,11 @@ function createInstanceRequestCoordinator(
           executorRegistered = true;
           return runEnvironmentOperationWorkflow(op, executor, {
             preflightRepoAdmin: (repo, selectedExecutor) =>
-              preflightRepoAdmin(repo, selectedExecutor),
+              preflightRepoAdmin(
+                repo,
+                selectedExecutor,
+                GH_COMMAND_PRESENTATION
+              ),
             guardStopBoundary: (operation, boundary) =>
               honorStopBoundary({
                 operation,
@@ -5256,7 +5322,8 @@ function createInstanceRequestCoordinator(
               preflightGhcrPackageWriteAccess(
                 getGhPackageCredentials,
                 getGitHubIdentity,
-                selectedExecutor
+                selectedExecutor,
+                GH_COMMAND_PRESENTATION
               ),
             readGitHubJson: (apiPath, selectedExecutor) =>
               runGitHubJsonRequest(apiPath, selectedExecutor),

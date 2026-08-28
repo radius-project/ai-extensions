@@ -15,13 +15,20 @@ import {
   unavailableGraphDiffResult
 } from "./pr-graph-diff-result.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
+import type { ModelingActivity } from "./modeling-activity.js";
+import type { CanvasState } from "../shared.js";
 import type { DeployToolArgs } from "../deploy-tools.js";
 
 interface ToolArgs {
   [key: string]: unknown;
 }
 
-export function createRadiusTools(deps: RadiusExtensionDependencies) {
+export function createRadiusTools(
+  deps: RadiusExtensionDependencies,
+  // Told when this tool hands the modeling skill over, so a graph render that
+  // finds no model does not ask for the run that is about to start.
+  modelingActivity: ModelingActivity
+) {
   const {
     workspaceState,
     fetchBicepForBranch,
@@ -38,6 +45,18 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
     } catch {
       /* logging is best-effort */
     }
+  }
+
+  // Records that a modeling run is about to start, so a graph render that finds
+  // no model defers to it instead of asking for the same work again. Called
+  // only on the paths that actually hand the skill over: a refused repository
+  // is not being modeled.
+  function announceModelingRun(state: CanvasState | null): void {
+    if (!state?.contextRepo || !state.contextBranch) return;
+    modelingActivity.announce({
+      repo: state.contextRepo,
+      branch: state.contextBranch
+    });
   }
 
   return [
@@ -110,6 +129,7 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
               (ambiguousAppSourceBrief(source, listing) ?? undefined)
             );
         }
+        if (targetsWorkspace) announceModelingRun(state);
         return deps.radiusAppBicepSkill(repoPath, brief);
       }
     },

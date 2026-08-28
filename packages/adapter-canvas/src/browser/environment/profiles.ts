@@ -11,11 +11,14 @@
 import { isDomElement } from "../context.js";
 import { createCommandAction } from "../command-action.js";
 import type { CommandActionHandle } from "../command-action.js";
-import {
-  isRemediationId,
-  remediationView
-} from "@radius-project/core/remediations";
+import { isRemediationId } from "@radius-project/core/remediations";
 import type { RemediationView } from "@radius-project/core/remediations";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  presentedRemediationView,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
 import { setChildren } from "../dom.js";
 import type { ElementSpec } from "../dom.js";
 import { beginEntry } from "../lifecycle.js";
@@ -189,7 +192,10 @@ export function parseGithubIdentity(payload: unknown): GithubIdentity {
   };
 }
 
-export function parseGithubReadiness(payload: unknown): GithubReadiness {
+export function parseGithubReadiness(
+  payload: unknown,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+): GithubReadiness {
   const readiness =
     isRecord(payload) && isRecord(payload.readiness) ? payload.readiness : {};
   const checksValue =
@@ -221,7 +227,7 @@ export function parseGithubReadiness(payload: unknown): GithubReadiness {
           if (typeof value === "string") params[key] = value;
         }
       }
-      const view = remediationView(id, params);
+      const view = presentedRemediationView(id, params, ghCommandPresentation);
       return view.runnable ? view : null;
     })(),
     selectionHandle: readString(payload, "selectionHandle"),
@@ -286,7 +292,8 @@ export function githubAccountLabel(
 // a repo-access problem outranks an account mismatch, which outranks a missing
 // scope, which falls back to the muted "acts as" message.
 export function githubIdentityNote(
-  identity: GithubIdentity
+  identity: GithubIdentity,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): GithubIdentityNote {
   if (identity.repoAccess !== "") {
     return {
@@ -306,6 +313,10 @@ export function githubIdentityNote(
     };
   }
   const packagesMissing = !githubPackagesWriteAvailable(identity);
+  const installation =
+    ghCommandPresentation.installationNote ?
+      ` ${ghCommandPresentation.installationNote}`
+    : "";
   if (!identity.actingHasWorkflow || packagesMissing) {
     if (
       packagesMissing &&
@@ -317,22 +328,49 @@ export function githubIdentityNote(
       // picker when a stored account can actually publish.
       const publishingLogin = identity.packagesLogin || identity.actingLogin;
       const alternative = packagesAlternativeAccount(identity, publishingLogin);
+      const loginCommand = displayGhCommand(ghCommandPresentation, [
+        "auth",
+        "login",
+        "-h",
+        "github.com",
+        "-s",
+        "read:packages",
+        "-s",
+        "write:packages"
+      ]);
       let message =
         `The Copilot session token for @${publishingLogin} is missing the write:packages scope. ` +
         "It overrides stored gh credentials, so refreshing or switching a keyring login does not " +
         "change this token. " +
         (alternative ?
           `Select the stored account @${alternative.login} below, or restart the session with package write access.`
-        : 'No stored GitHub CLI account can publish packages either, so run "gh auth login -h github.com -s read:packages -s write:packages" and re-check, or restart the session with package write access.');
+        : loginCommand ?
+          `No stored GitHub CLI account can publish packages either, so run "${loginCommand}" and re-check, or restart the session with package write access.${installation}`
+        : `No stored GitHub CLI account can publish packages either. ${ghCommandPresentation.installationNote} Then re-check, or restart the session with package write access.`);
       // The workflow scope lives on the credential gh commands use, which is
       // not the packages credential — so its guidance still applies and must
       // not be dropped with the packages warning.
       if (!identity.actingHasWorkflow) {
+        const switchCommand = displayGhCommand(ghCommandPresentation, [
+          "auth",
+          "switch",
+          "-h",
+          "github.com",
+          "-u",
+          identity.actingLogin
+        ]);
+        const refreshCommand = displayGhCommand(ghCommandPresentation, [
+          "auth",
+          "refresh",
+          "-h",
+          "github.com",
+          "-s",
+          "workflow"
+        ]);
         message +=
-          ` Separately, the credential for @${identity.actingLogin} is missing the workflow scope ` +
-          `environment setup needs: run "gh auth switch -h github.com -u ${identity.actingLogin} && ` +
-          'gh auth refresh -h github.com -s workflow". Note: gh auth switch changes your active GitHub ' +
-          "account machine-wide for every tool in this terminal until you switch back.";
+          switchCommand && refreshCommand ?
+            ` Separately, the credential for @${identity.actingLogin} is missing the workflow scope environment setup needs: run "${switchCommand}\n${refreshCommand}".${installation} Note: gh auth switch changes your active GitHub account machine-wide for every tool in this terminal until you switch back.`
+          : ` Separately, the credential for @${identity.actingLogin} is missing the workflow scope environment setup needs. ${ghCommandPresentation.installationNote}`;
       }
       return { specs: textNote(message), tone: "warning", showRecheck: true };
     }
@@ -346,11 +384,15 @@ export function githubIdentityNote(
     // Built from the registry rather than hand-written here, so this note shows
     // the same command the callout would run, quoted the same way, and stays
     // paste-able in Windows PowerShell (which cannot parse `&&`).
-    const view = remediationView("github-account-scopes", {
-      login: identity.actingLogin,
-      ...(identity.actingHasWorkflow ? {} : { workflow: "true" }),
-      ...(identity.actingHasPackages ? {} : { packages: "true" })
-    });
+    const view = presentedRemediationView(
+      "github-account-scopes",
+      {
+        login: identity.actingLogin,
+        ...(identity.actingHasWorkflow ? {} : { workflow: "true" }),
+        ...(identity.actingHasPackages ? {} : { packages: "true" })
+      },
+      ghCommandPresentation
+    );
     const runLine =
       view.runnable ?
         ` Run:\n${view.command}\n`
@@ -472,6 +514,7 @@ export function profileDetailSpecs(
 export interface CredentialProfilesPanelDeps {
   readonly repo: string;
   readonly mutationNonce?: string;
+  readonly ghCommandPresentation?: GhCommandPresentation;
   environmentName(): string;
   onProfileChange(profile: CredentialProfile | null): void;
   onReadinessChange?(readiness: GithubReadiness | null): void;
@@ -907,7 +950,10 @@ export function initializeCredentialProfilesPanel(
           readString(payload, "error") || "Could not check GitHub access."
         );
       }
-      githubReadiness = parseGithubReadiness(payload);
+      githubReadiness = parseGithubReadiness(
+        payload,
+        deps.ghCommandPresentation
+      );
       deps.onReadinessChange?.(githubReadiness);
     } catch (error) {
       if (!scope.active || generation !== githubRequestGeneration) return;

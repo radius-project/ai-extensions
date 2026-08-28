@@ -4,7 +4,6 @@
 // deep-linking, and resuming an in-flight operation belong to the page
 // controller that composes this module with the Environments pane, not here.
 
-import { remediationView } from "@radius-project/core/remediations";
 import { createCommandAction } from "../command-action.js";
 import type { CommandActionHandle } from "../command-action.js";
 import { escapeBrowserHtml } from "../html.js";
@@ -24,6 +23,12 @@ import type {
 } from "./environments.js";
 import type { RemediationView } from "@radius-project/core/remediations";
 import type { EnvironmentConfirmDialog } from "./confirm-dialog.js";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  presentedRemediationView,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
 
 export const CREDENTIALS_ENTRY_KEY = "environment-credentials";
 export const CREDENTIAL_PROFILES_PATH = "/api/credential-profiles";
@@ -40,11 +45,18 @@ export const VERIFY_AWS_PATH = "/api/verify-aws-login";
  * of its own. A remediation that does not resolve is dropped rather than shown
  * as an action that cannot run.
  */
-export function payloadRemediation(payload: unknown): RemediationView | null {
+export function payloadRemediation(
+  payload: unknown,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+): RemediationView | null {
   if (!isRecord(payload)) return null;
   const entry = payload["remediation"];
   if (!isRecord(entry)) return null;
-  const view = remediationView(entry["id"], entry["params"]);
+  const view = presentedRemediationView(
+    entry["id"],
+    entry["params"],
+    ghCommandPresentation
+  );
   return view.runnable ? view : null;
 }
 
@@ -112,6 +124,7 @@ export interface CredentialsPaneOptions {
   repo: string;
   /** Nonce for mutating requests; run-command hand-off is rejected without it. */
   mutationNonce: string;
+  ghCommandPresentation?: GhCommandPresentation;
   decisions: EnvironmentDecisionPort;
   confirmDialog?: EnvironmentConfirmDialog;
 }
@@ -217,7 +230,8 @@ function packagesCredentialLogin(identity: GitHubPackagesIdentity): string {
 }
 
 export function renderGitHubAccessView(
-  identity: GitHubPackagesIdentity
+  identity: GitHubPackagesIdentity,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): GitHubAccessView {
   // No account we can name, so there is no command we can offer. Both the
   // unreadable-identity case and an acting login the registry will not accept
@@ -225,7 +239,12 @@ export function renderGitHubAccessView(
   const noAccount: GitHubAccessView = {
     packagesVerified: false,
     statusText:
-      "Could not detect a GitHub CLI account. Sign in with gh auth login, then retry.",
+      ghCommandPresentation.kind === "unavailable" ?
+        ghCommandPresentation.installationNote
+      : `Could not detect a GitHub CLI account. Sign in with ${displayGhCommand(
+          ghCommandPresentation,
+          ["auth", "login"]
+        )}, then retry. ${ghCommandPresentation.installationNote}`.trim(),
     statusHtml: null,
     statusColor: "var(--rad-danger)",
     commandVisible: false,
@@ -281,7 +300,11 @@ export function renderGitHubAccessView(
       commandVisible: alternative === null,
       remediation:
         alternative === null ?
-          remediationView("github-cli-login", { packages: "true" })
+          presentedRemediationView(
+            "github-cli-login",
+            { packages: "true" },
+            ghCommandPresentation
+          )
         : null,
       retryVisible: true
     };
@@ -294,7 +317,11 @@ export function renderGitHubAccessView(
   // Target the credential that actually publishes, not the acting account: the
   // acting account may already hold write:packages, in which case refreshing it
   // changes nothing and the publisher stays broken.
-  const remediation = remediationView("github-packages-scope", { login });
+  const remediation = presentedRemediationView(
+    "github-packages-scope",
+    { login },
+    ghCommandPresentation
+  );
   if (!remediation.runnable) {
     return noAccount;
   }
@@ -503,7 +530,10 @@ export function initializeCredentialsPane(
   };
 
   const applyGitHubAccessView = (identity: GitHubPackagesIdentity): void => {
-    const view = renderGitHubAccessView(identity);
+    const view = renderGitHubAccessView(
+      identity,
+      options.ghCommandPresentation
+    );
     credPackagesVerified = view.packagesVerified;
     credGhcrCommandRow.style.display = view.commandVisible ? "block" : "none";
     credGhcrRetry.style.display = view.retryVisible ? "" : "none";
@@ -821,7 +851,10 @@ export function initializeCredentialsPane(
           btnVerifyAzure.textContent = "Verify Credentials";
           const error = readString(payload, "error");
           if (error !== "") {
-            verifyError(error, payloadRemediation(payload));
+            verifyError(
+              error,
+              payloadRemediation(payload, options.ghCommandPresentation)
+            );
             return;
           }
           const returnedTenantId = readString(payload, "tenantId");
@@ -875,7 +908,10 @@ export function initializeCredentialsPane(
           btnVerifyAws.textContent = "Verify Credentials";
           const error = readString(payload, "error");
           if (error !== "") {
-            verifyError(error, payloadRemediation(payload));
+            verifyError(
+              error,
+              payloadRemediation(payload, options.ghCommandPresentation)
+            );
             return;
           }
           const returnedAccountId = readString(payload, "accountId");

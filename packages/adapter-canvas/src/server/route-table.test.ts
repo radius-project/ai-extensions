@@ -215,6 +215,7 @@ const productionHandlers = {
   }),
   ...createRemediationRoutes(
     productionRemediationDependencies({
+      presentRemediation: (remediation) => remediation,
       runSessionPrompt: () => Promise.resolve({ status: 200 }),
       errorMessage: (error) => String(error)
     })
