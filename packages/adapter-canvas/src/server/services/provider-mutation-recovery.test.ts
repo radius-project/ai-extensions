@@ -65,6 +65,59 @@ describe("provider mutation recovery", () => {
     ]);
   });
 
+  it.each([
+    ["acknowledged", false],
+    ["reconciled", true]
+  ] as const)(
+    "durably requires manual action when %s mutation provenance recording fails",
+    async (_label, recovered) => {
+      const operation = createOperation({ operationId: "op_provenance" });
+      const persisted: string[] = [];
+      const mutate = vi.fn(async () =>
+        command(recovered ? { code: 1, timedOut: true } : {})
+      );
+
+      await expect(
+        executeRecoverableMutation({
+          operation,
+          kind: "github_environment_variable.put",
+          target: "octo/app:prod:A",
+          persist: async () => {
+            persisted.push(
+              operation.providerRecovery.mutations[0]?.status || "missing"
+            );
+          },
+          mutate,
+          accept: () => "value",
+          onConfirmed: () => {
+            throw new Error("artifact ledger rejected the record");
+          },
+          reconcile: async () => ({
+            state: "applied",
+            value: "value",
+            evidence: "The exact value exists."
+          })
+        })
+      ).rejects.toMatchObject({
+        code: "provider-mutation-manual-required",
+        message: expect.stringContaining(
+          "could not record the rollback provenance"
+        )
+      });
+
+      expect(mutate).toHaveBeenCalledOnce();
+      expect(operation.providerRecovery.mutations[0]).toMatchObject({
+        status: "manual_required",
+        evidence: expect.stringContaining("artifact ledger rejected the record")
+      });
+      expect(persisted).toEqual([
+        "prepared",
+        ...(recovered ? ["outcome_unknown"] : []),
+        "manual_required"
+      ]);
+    }
+  );
+
   it("does not start a mutation when Stop arrives while its journal is saved", async () => {
     const operation = createOperation({ operationId: "op_test" });
     const events: string[] = [];

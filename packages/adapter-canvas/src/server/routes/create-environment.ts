@@ -489,6 +489,9 @@ export async function handleCreateEnvironment(
     envName = ensuredEnvironment.name;
     dependencies.setCanonicalEnvironment(operation, envName);
 
+    // #307 hardens the existing Azure setup path only. AWS still uses the
+    // provider-neutral legacy runner until its boundary work is designed in
+    // #255; do not imply that this ledger captures AWS variable predecessors.
     const runner = createWorkflowScopeGhRunner(
       dependencies,
       {

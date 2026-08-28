@@ -5330,44 +5330,54 @@ describe("rollback eligibility", () => {
     });
   });
 
-  it("carries unattempted downstream resources into a variable cleanup retry", () => {
-    const op = stoppedWithCreatedResources();
-    recordGitHubEnvironmentVariable(op, {
-      repo: "contoso/store",
-      environment: "dev",
-      environmentProviderId: "env-1",
-      name: "AZURE_CLIENT_ID",
-      valueSha256:
-        "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
-      previousValue: "old-client",
-      previousKnown: true
-    });
-    recordCleanupState(op, {
-      attempts: 1,
-      state: "succeeded_with_warnings",
-      results: [
-        {
-          attempt: 1,
-          artifactType: "github_environment_variable",
-          target: "contoso/store:dev variable AZURE_CLIENT_ID",
-          identity: "env-1|contoso/store:dev:azure_client_id",
-          outcome: "warning",
-          detail: "GitHub returned unreadable variable state."
-        }
-      ]
-    });
+  it.each(["warning", "skipped"] as const)(
+    "carries unattempted downstream resources into a variable cleanup retry after a %s result",
+    (outcome) => {
+      const op = stoppedWithCreatedResources();
+      recordGitHubEnvironmentVariable(op, {
+        repo: "contoso/store",
+        environment: "dev",
+        environmentProviderId: "env-1",
+        name: "AZURE_CLIENT_ID",
+        valueSha256:
+          "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
+        previousValue: "old-client",
+        previousKnown: true
+      });
+      recordCleanupState(op, {
+        attempts: 1,
+        state: "succeeded_with_warnings",
+        results: [
+          {
+            attempt: 1,
+            artifactType: "github_environment_variable",
+            target: "contoso/store:dev variable AZURE_CLIENT_ID",
+            identity: "env-1|contoso/store:dev:azure_client_id",
+            outcome,
+            detail:
+              outcome === "warning" ?
+                "GitHub returned unreadable variable state."
+              : "The variable changed outside Radius."
+          }
+        ]
+      });
 
-    expect(
-      unresolvedCleanupTargets(op).map((entry) => entry.artifactType)
-    ).toEqual([
-      "github_environment_variable",
-      "github_environment",
-      "role_assignment",
-      "federated_credential",
-      "service_principal",
-      "azure_app"
-    ]);
-  });
+      expect(
+        unresolvedCleanupTargets(op).map((entry) => entry.artifactType)
+      ).toEqual([
+        ...(outcome === "warning" ? ["github_environment_variable"] : []),
+        "github_environment",
+        "role_assignment",
+        "federated_credential",
+        "service_principal",
+        "azure_app"
+      ]);
+      expect(canRetryCleanup(op)).toMatchObject({
+        ok: true,
+        code: "cleanup-retry-allowed"
+      });
+    }
+  );
 
   it("never puts a reused or unprovable resource in the deletion set", () => {
     const op = addSafeResumeRequest(newOp());

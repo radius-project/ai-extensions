@@ -105,14 +105,8 @@ function own(mapping: Record<string, unknown>, key: string): boolean {
 }
 
 function containsAwsWorkflowReference(value: unknown): boolean {
-  if (Array.isArray(value)) return value.some(containsAwsWorkflowReference);
-  if (!isMapping(value)) return false;
-  return Object.entries(value).some(
-    ([key, child]) =>
-      (key === "uses" &&
-        typeof child === "string" &&
-        /(?:run-rad-commands|delete)-aws\.yml/u.test(child)) ||
-      containsAwsWorkflowReference(child)
+  return [DEPLOY_AWS_FILE, DELETE_AWS_FILE].some((fileName) =>
+    containsWorkflowReference(value, fileName)
   );
 }
 
@@ -391,7 +385,11 @@ export function configureVerifyGhcrProbe(workflow: string): string {
   const index = lines.findIndex((line) =>
     /^\s*-\s+name:\s*Verify GHCR package push permission\s*$/.test(line)
   );
-  if (index < 0) return workflow;
+  if (index < 0) {
+    throw new Error(
+      'The upstream verify workflow template no longer contains the "Verify GHCR package push permission" step, so Radius cannot replace it with the trusted non-mutating probe.'
+    );
+  }
   const indent = lines[index].match(/^\s*/)?.[0] ?? "";
   let end = index + 1;
   while (end < lines.length && !lines[end].startsWith(`${indent}- name:`)) {

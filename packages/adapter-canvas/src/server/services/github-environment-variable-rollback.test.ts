@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  prepareProviderMutation,
+  providerMutationRecord
+} from "../../operations.js";
+import {
   rollbackGitHubEnvironmentVariables as rollbackVariables,
   type GitHubEnvironmentVariableRollbackArtifact,
   type GitHubVariableCommandResult
@@ -44,6 +48,17 @@ function rollbackGitHubEnvironmentVariables(
     ...input,
     operation: { operationId: "op-variable-cleanup" },
     persist: async () => {}
+  });
+}
+
+function prepareCleanup(
+  operation: { operationId: string },
+  variable: GitHubEnvironmentVariableRollbackArtifact
+): void {
+  prepareProviderMutation(operation, {
+    kind: "github_environment_variable.cleanup_delete",
+    target: variable.identity,
+    providerIdempotencyKey: variable.identity
   });
 }
 
@@ -407,5 +422,242 @@ describe("GitHub environment variable rollback", () => {
       blocked: true,
       results: [{ outcome: "skipped" }]
     });
+  });
+
+  it("stops when the environment becomes unreadable immediately before mutation", async () => {
+    let environmentReads = 0;
+    let mutations = 0;
+    const outcome = await rollbackGitHubEnvironmentVariables({
+      attempt: 1,
+      variables: [artifact()],
+      run: async (args) => {
+        if (args[1] === ENVIRONMENT_PATH) {
+          environmentReads += 1;
+          return environmentReads === 1 ? environment() : (
+              command({ code: 1, stderr: "HTTP 503" })
+            );
+        }
+        if (args[1] === VARIABLE_PATH) {
+          return command({
+            stdout: JSON.stringify({
+              name: "AZURE_CLIENT_ID",
+              value: "1"
+            })
+          });
+        }
+        mutations += 1;
+        return command();
+      }
+    });
+
+    expect(mutations).toBe(0);
+    expect(outcome).toMatchObject({
+      blocked: true,
+      results: [{ outcome: "warning" }]
+    });
+    expect(outcome.warnings[0]).toContain("HTTP 503");
+  });
+
+  it("stops when the variable changes immediately before mutation", async () => {
+    let variableReads = 0;
+    let mutations = 0;
+    const outcome = await rollbackGitHubEnvironmentVariables({
+      attempt: 1,
+      variables: [artifact()],
+      run: async (args) => {
+        if (args[1] === ENVIRONMENT_PATH) return environment();
+        if (args[1] === VARIABLE_PATH) {
+          variableReads += 1;
+          return command({
+            stdout: JSON.stringify({
+              name: "AZURE_CLIENT_ID",
+              value: variableReads === 1 ? "1" : "manual"
+            })
+          });
+        }
+        mutations += 1;
+        return command();
+      }
+    });
+
+    expect(mutations).toBe(0);
+    expect(outcome).toMatchObject({
+      blocked: true,
+      results: [{ outcome: "skipped" }]
+    });
+    expect(outcome.warnings[0]).toContain(
+      "no longer contains the value Radius configured"
+    );
+  });
+
+  it("records a conclusive provider rejection without retrying rollback", async () => {
+    const operation = { operationId: "op-rejected-cleanup" };
+    let mutations = 0;
+    const outcome = await rollbackVariables({
+      attempt: 1,
+      operation,
+      persist: async () => {},
+      variables: [artifact()],
+      run: async (args) => {
+        if (args[1] === ENVIRONMENT_PATH) return environment();
+        if (args[1] === VARIABLE_PATH) {
+          return command({
+            stdout: JSON.stringify({
+              name: "AZURE_CLIENT_ID",
+              value: "1"
+            })
+          });
+        }
+        mutations += 1;
+        return command({ code: 1, stderr: "HTTP 403: Forbidden" });
+      }
+    });
+
+    expect(mutations).toBe(1);
+    expect(outcome).toMatchObject({
+      blocked: true,
+      results: [{ outcome: "warning", detail: "HTTP 403: Forbidden" }]
+    });
+    expect(
+      providerMutationRecord(
+        operation,
+        "github_environment_variable.cleanup_delete",
+        artifact().identity
+      )?.status
+    ).toBe("not_applied");
+  });
+
+  it.each([
+    {
+      label: "saved predecessor",
+      variable: artifact({ previousValue: "old" }),
+      environmentResult: environment(),
+      variableResult: command({
+        stdout: JSON.stringify({
+          name: "AZURE_CLIENT_ID",
+          value: "old"
+        })
+      }),
+      expectedOutcome: "restored",
+      expectedStatus: "confirmed"
+    },
+    {
+      label: "unchanged Radius value",
+      variable: artifact({ previousValue: "old" }),
+      environmentResult: environment(),
+      variableResult: command({
+        stdout: JSON.stringify({
+          name: "AZURE_CLIENT_ID",
+          value: "1"
+        })
+      }),
+      expectedOutcome: "skipped",
+      expectedStatus: "manual_required"
+    },
+    {
+      label: "manual replacement value",
+      variable: artifact({ previousValue: "old" }),
+      environmentResult: environment(),
+      variableResult: command({
+        stdout: JSON.stringify({
+          name: "AZURE_CLIENT_ID",
+          value: "manual"
+        })
+      }),
+      expectedOutcome: "skipped",
+      expectedStatus: "manual_required"
+    },
+    {
+      label: "replacement environment",
+      variable: artifact({ previousValue: "old" }),
+      environmentResult: environment("env-2"),
+      variableResult: command(),
+      expectedOutcome: "skipped",
+      expectedStatus: "manual_required"
+    },
+    {
+      label: "unreadable environment",
+      variable: artifact({ previousValue: "old" }),
+      environmentResult: command({ code: 1, stderr: "HTTP 503" }),
+      variableResult: command(),
+      expectedOutcome: "warning",
+      expectedStatus: "outcome_unknown"
+    },
+    {
+      label: "malformed variable",
+      variable: artifact({ previousValue: "old" }),
+      environmentResult: environment(),
+      variableResult: command({ stdout: "{" }),
+      expectedOutcome: "warning",
+      expectedStatus: "outcome_unknown"
+    }
+  ] as const)(
+    "reconciles a prepared cleanup against $label without replaying it",
+    async ({
+      variable,
+      environmentResult,
+      variableResult,
+      expectedOutcome,
+      expectedStatus
+    }) => {
+      const operation = { operationId: "op-prepared-cleanup" };
+      prepareCleanup(operation, variable);
+      let mutations = 0;
+
+      const outcome = await rollbackVariables({
+        attempt: 2,
+        operation,
+        persist: async () => {},
+        variables: [variable],
+        run: async (args) => {
+          if (args[1] === ENVIRONMENT_PATH) return environmentResult;
+          if (args[1] === VARIABLE_PATH) return variableResult;
+          mutations += 1;
+          return command();
+        }
+      });
+
+      expect(mutations).toBe(0);
+      expect(outcome.results[0]?.outcome).toBe(expectedOutcome);
+      expect(
+        providerMutationRecord(
+          operation,
+          "github_environment_variable.cleanup_delete",
+          variable.identity
+        )?.status
+      ).toBe(expectedStatus);
+    }
+  );
+
+  it("propagates a journal persistence failure before mutating", async () => {
+    let mutations = 0;
+
+    await expect(
+      rollbackVariables({
+        attempt: 1,
+        operation: { operationId: "op-persist-failure" },
+        persist: async () => {
+          throw new Error("disk full");
+        },
+        variables: [artifact()],
+        run: async (args) => {
+          if (args[1] === ENVIRONMENT_PATH) return environment();
+          if (args[1] === VARIABLE_PATH) {
+            return command({
+              stdout: JSON.stringify({
+                name: "AZURE_CLIENT_ID",
+                value: "1"
+              })
+            });
+          }
+          mutations += 1;
+          return command();
+        }
+      })
+    ).rejects.toMatchObject({
+      code: "provider-mutation-recovery-persistence-failed",
+      message: expect.stringContaining("disk full")
+    });
+    expect(mutations).toBe(0);
   });
 });

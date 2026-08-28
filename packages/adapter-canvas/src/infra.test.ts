@@ -279,7 +279,7 @@ describe("generated workflow YAML validation", () => {
     );
 
     await expect(generateVerifyWorkflow("prod", "azure")).rejects.toThrow(
-      /trusted non-mutating GHCR push-permission probe is required/u
+      /upstream verify workflow template no longer contains/u
     );
   });
 

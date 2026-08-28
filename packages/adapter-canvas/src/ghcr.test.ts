@@ -32,6 +32,8 @@ interface HarnessOptions {
   tokenStatus?: number;
   tokenBody?: unknown;
   uploadLocation?: string | null;
+  blobCompletionLocation?: string | null;
+  manifestCompletionLocation?: string | null;
   blobAmbiguity?: AmbiguousWrite;
   manifestAmbiguity?: AmbiguousWrite;
   blobSuccessIdentity?: SuccessIdentity;
@@ -74,7 +76,7 @@ function json(body: unknown, init: ResponseInit = {}): Response {
 function identityHeaders(
   identity: SuccessIdentity,
   expectedDigest: string,
-  location: string
+  location?: string | null
 ): Record<string, string> {
   return {
     ...(identity === "missing" ?
@@ -83,7 +85,7 @@ function identityHeaders(
         "Docker-Content-Digest":
           identity === "exact" ? expectedDigest : wrongDigest
       }),
-    Location: location
+    ...(location ? { Location: location } : {})
   };
 }
 
@@ -98,6 +100,8 @@ function createHarness({
   tokenStatus = 200,
   tokenBody = { token: "registry-bearer" },
   uploadLocation = "https://registry.test/uploads/{id}",
+  blobCompletionLocation,
+  manifestCompletionLocation,
   blobAmbiguity = "none",
   manifestAmbiguity = "none",
   blobSuccessIdentity = "exact",
@@ -234,7 +238,9 @@ function createHarness({
         headers: identityHeaders(
           blobSuccessIdentity,
           expectedDigest,
-          url.toString()
+          blobCompletionLocation === undefined ?
+            url.toString()
+          : blobCompletionLocation
         )
       });
     }
@@ -300,7 +306,9 @@ function createHarness({
         headers: identityHeaders(
           manifestSuccessIdentity,
           expectedDigest,
-          url.toString()
+          manifestCompletionLocation === undefined ?
+            url.toString()
+          : manifestCompletionLocation
         )
       });
     }
@@ -681,6 +689,27 @@ test("stops an ambiguous blob upload after one proven-absent retry", async () =>
   assert.equal(harness.blobPuts, 2);
   assert.equal(harness.manifestPushes, 0);
 });
+
+test.each([
+  ["cross-origin", "https://pkg-containers.githubusercontent.com/v2/blob"],
+  ["missing", null]
+])(
+  "accepts a digest-matched blob and manifest with a %s completion location",
+  async (_label, location) => {
+    const harness = createHarness({
+      blobCompletionLocation: location,
+      manifestCompletionLocation: location
+    });
+
+    await bootstrapGHCRStatePackage({
+      ...baseOptions,
+      fetchImpl: harness.fetchImpl
+    });
+
+    assert.equal(harness.blobPuts, 2);
+    assert.equal(harness.manifestPushes, 1);
+  }
+);
 
 test.each([
   { uploadLocation: null, message: /did not include a location/ },

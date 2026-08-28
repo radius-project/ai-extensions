@@ -404,7 +404,6 @@ export function createWorkflowScopeGhRunner(
               };
         }
       });
-    if (mutation.state === "cancelled") return false;
     if (mutation.state === "not_applied") {
       const detail = (
         mutation.result?.stderr ||

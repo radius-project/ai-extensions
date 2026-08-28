@@ -388,9 +388,6 @@ export async function rollbackGitHubEnvironmentVariables(input: {
         );
         continue;
       }
-      if (mutation.state === "cancelled") {
-        throw new Error("Variable rollback cannot be stopped.");
-      }
       if (mutation.value === "deleted") {
         steps.push(`✅ Removed ${variable.target}.`);
       } else {

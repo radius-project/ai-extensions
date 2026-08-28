@@ -573,9 +573,11 @@ async function pushBlob({
         `GHCR blob upload returned conflicting digest ${actualDigest}.`
       );
     }
-    validateLocation(upload, registryOrigin, "GHCR blob upload response");
     return;
   }
+  throw new Error(
+    `GHCR blob upload for ${digest} remained absent after reconciliation.`
+  );
 }
 
 async function pushBootstrapManifest({
@@ -726,11 +728,6 @@ async function pushBootstrapManifest({
           `GHCR bootstrap manifest upload returned conflicting digest ${actualDigest}.`
         );
       }
-      validateLocation(
-        response,
-        registryOrigin,
-        "GHCR bootstrap manifest upload"
-      );
       return;
     }
 

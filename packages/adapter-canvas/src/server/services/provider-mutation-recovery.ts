@@ -260,6 +260,59 @@ async function persistOrThrow(
  */
 const MAX_RECONCILE_ATTEMPTS = 12;
 
+async function confirmProviderMutation<T>({
+  operation,
+  mutation,
+  value,
+  recovered,
+  evidence,
+  providerId = null,
+  createdByOperation,
+  persist,
+  onConfirmed
+}: {
+  operation: object;
+  mutation: ProviderMutationRecord;
+  value: T;
+  recovered: boolean;
+  evidence: string | null;
+  providerId?: string | null;
+  createdByOperation?: boolean;
+  persist: () => Promise<void>;
+  onConfirmed?: (value: T, recovered: boolean) => void;
+}): Promise<void> {
+  try {
+    onConfirmed?.(value, recovered);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const guidance = `The provider mutation succeeded, but Radius could not record the rollback provenance: ${detail}`;
+    settleProviderMutation(
+      operation,
+      mutation.mutationId,
+      "manual_required",
+      guidance
+    );
+    await persistOrThrow(persist, "after rollback provenance recording failed");
+    throw new ProviderMutationRecoveryError(
+      guidance,
+      "provider-mutation-manual-required"
+    );
+  }
+  settleProviderMutation(
+    operation,
+    mutation.mutationId,
+    "confirmed",
+    evidence,
+    providerId,
+    createdByOperation
+  );
+  requireRecoveryRollback(operation, mutation);
+  await persistOrThrow(
+    persist,
+    recovered ? "after reconciliation" : "after the provider acknowledged it"
+  );
+}
+
 async function reconcileMutation<T>(
   operation: object,
   mutation: ProviderMutationRecord,
@@ -307,19 +360,28 @@ async function reconcileMutation<T>(
       "provider-mutation-manual-required"
     );
   }
+  if (outcome.state === "applied") {
+    await confirmProviderMutation({
+      operation,
+      mutation,
+      value: outcome.value,
+      recovered: true,
+      evidence: outcome.evidence || null,
+      providerId: outcome.providerId ?? null,
+      persist,
+      onConfirmed
+    });
+    return { state: "applied", value: outcome.value, recovered: true };
+  }
   settleProviderMutation(
     operation,
     mutation.mutationId,
-    outcome.state === "applied" ? "confirmed" : "not_applied",
-    outcome.evidence || null,
-    outcome.state === "applied" ? (outcome.providerId ?? null) : null
+    "not_applied",
+    outcome.evidence || null
   );
-  if (outcome.state === "applied") onConfirmed?.(outcome.value, true);
   requireRecoveryRollback(operation, mutation);
   await persistOrThrow(persist, "after reconciliation");
-  return outcome.state === "applied" ?
-      { state: "applied", value: outcome.value, recovered: true }
-    : { state: "not_applied" };
+  return { state: "not_applied" };
 }
 
 export async function recordProviderReconciliationFailure(
@@ -393,7 +455,7 @@ export function providerMutationWillWrite(
   return !journaled || journaled.status === "not_applied";
 }
 
-export async function executeRecoverableMutation<T>(input: {
+type RecoverableMutationInput<T> = {
   operation: object & { operationId: string };
   kind: string;
   target: string;
@@ -447,7 +509,22 @@ export async function executeRecoverableMutation<T>(input: {
    */
   rejectionGuidance?(result: ProviderMutationCommandResult): string;
   rethrowReconciliationError?(error: unknown): boolean;
-}): Promise<RecoverableMutationResult<T>> {
+};
+
+type NonCancelledMutationResult<T> = Exclude<
+  RecoverableMutationResult<T>,
+  { state: "cancelled" }
+>;
+
+export function executeRecoverableMutation<T>(
+  input: RecoverableMutationInput<T> & { beforeMutation?: undefined }
+): Promise<NonCancelledMutationResult<T>>;
+export function executeRecoverableMutation<T>(
+  input: RecoverableMutationInput<T>
+): Promise<RecoverableMutationResult<T>>;
+export async function executeRecoverableMutation<T>(
+  input: RecoverableMutationInput<T>
+): Promise<RecoverableMutationResult<T>> {
   const mutationId = providerMutationId(
     input.operation.operationId,
     input.kind,
@@ -596,17 +673,19 @@ export async function executeRecoverableMutation<T>(input: {
     }
     if (result.code === 0 || result.code === "0") {
       const value = input.accept(result);
-      settleProviderMutation(
-        input.operation,
-        mutation.mutationId,
-        "confirmed",
-        input.acceptedEvidence?.(result) ||
+      await confirmProviderMutation({
+        operation: input.operation,
+        mutation,
+        value,
+        recovered: false,
+        evidence:
+          input.acceptedEvidence?.(result) ||
           "The provider acknowledged the mutation.",
-        input.providerIdOf?.(result, value) ?? null,
-        input.createdByOperation?.(result, value)
-      );
-      input.onConfirmed?.(value, false);
-      await persistOrThrow(input.persist, "after the provider acknowledged it");
+        providerId: input.providerIdOf?.(result, value) ?? null,
+        createdByOperation: input.createdByOperation?.(result, value),
+        persist: input.persist,
+        onConfirmed: input.onConfirmed
+      });
       return { state: "applied", value, recovered: false };
     }
     // Everything ambiguous was settled above, so what is left is an answer the

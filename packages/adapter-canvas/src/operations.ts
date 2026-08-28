@@ -1704,6 +1704,9 @@ export function recordGitHubEnvironmentVariable(op: any, entry: any): any {
     environmentProviderId: optionalIdentityString(entry.environmentProviderId),
     name: String(entry.name || ""),
     valueSha256: String(entry.valueSha256 || ""),
+    // GitHub Actions variables are non-secret configuration. Radius retains the
+    // predecessor only in its local operation store because cleanup needs the
+    // plaintext to restore it; toClientView never projects artifact contents.
     previousValue:
       typeof entry.previousValue === "string" ? entry.previousValue : null,
     previousKnown:
@@ -3577,7 +3580,12 @@ export function unresolvedCleanupTargets(op: any): any[] {
       };
     })
     .filter((entry: any) => entry !== null);
-  if (unresolved.length === 0) return [];
+  const blockedByVariableConflict = attemptResults.some(
+    (entry: any) =>
+      entry.artifactType === "github_environment_variable" &&
+      entry.outcome === "skipped"
+  );
+  if (unresolved.length === 0 && !blockedByVariableConflict) return [];
   const attemptedKeys = new Set(
     attemptResults.map((entry: any) => {
       const artifact = findProvenOwnedCleanupTarget(ledger, entry);
