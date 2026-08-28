@@ -94,6 +94,8 @@ const productionHandlers = {
     acquireForRetry: () => ({ ok: true }),
     persistOperations: () => Promise.resolve(),
     checkPullRequestMerge: () => Promise.resolve({ state: "open" }),
+    inspectVerificationWorkflow: () => Promise.resolve("inactive"),
+    cancelVerificationWorkflow: () => Promise.resolve("inactive"),
     schedule: () => true,
     invalidateEnvironmentListing: () => {}
   }),
@@ -402,6 +404,7 @@ const productionHandlers = {
     tempFile: { write: () => "", remove: () => {} },
     setCanonicalEnvironment: () => {},
     recordGitHubEnvironment: () => {},
+    recordGitHubEnvironmentVariable: () => {},
     promoteCreatedGitHubEnvironment: () => false,
     envListCacheDelete: () => {},
     ociStateBackend: "oci",
@@ -471,6 +474,7 @@ describe("server route ownership boundary", () => {
       "POST /api/operations/:operationId/abandon",
       "POST /api/operations/:operationId/stop",
       "POST /api/operations/:operationId/continue",
+      "POST /api/operations/:operationId/cancel-workflow",
       "POST /api/operations/:operationId/rollback",
       "POST /api/operations/:operationId/exit",
       "POST /api/operations/:operationId/retry/:retryKind"

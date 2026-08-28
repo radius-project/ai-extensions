@@ -105,6 +105,116 @@ describe("ensureGitHubEnvironment", () => {
     ]);
   });
 
+  it("honors a short Retry-After for a transient environment read", async () => {
+    let reads = 0;
+    const sleeps: number[] = [];
+    const ensured = await ensureGitHubEnvironment({
+      repo: "octo/app",
+      requestedName: "production",
+      readGitHubJson: async () => {
+        reads += 1;
+        return reads === 1 ?
+            readResult({
+              ok: false,
+              status: 429,
+              stderr: "Retry-After: 2"
+            })
+          : readResult({ json: { name: "production", id: 17 } });
+      },
+      runGh: async () => {
+        throw new Error("an existing environment must not be mutated");
+      },
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    expect(ensured).toMatchObject({
+      name: "production",
+      state: "reused",
+      providerId: "17"
+    });
+    expect(reads).toBe(2);
+    expect(sleeps).toEqual([2000]);
+  });
+
+  it("does not retry before Retry-After when it exceeds the read budget", async () => {
+    let reads = 0;
+    const sleeps: number[] = [];
+    await expect(
+      ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async () => {
+          reads += 1;
+          return readResult({
+            ok: false,
+            status: 429,
+            stderr: "Retry-After: 60"
+          });
+        },
+        runGh: async () => {
+          throw new Error("must not mutate");
+        },
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds);
+        }
+      })
+    ).rejects.toMatchObject({ code: "github-environment-lookup-failed" });
+    expect(reads).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("honors an HTTP-date Retry-After without retrying early", async () => {
+    let reads = 0;
+    const now = Date.parse("2026-08-25T00:00:00.000Z");
+    await expect(
+      ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async () => {
+          reads += 1;
+          return readResult({
+            ok: false,
+            status: 429,
+            stderr: "Retry-After: Tue, 25 Aug 2026 00:01:00 GMT"
+          });
+        },
+        runGh: async () => {
+          throw new Error("must not mutate");
+        },
+        now: () => now,
+        sleep: async () => {
+          throw new Error("must not retry before Retry-After");
+        }
+      })
+    ).rejects.toMatchObject({ code: "github-environment-lookup-failed" });
+    expect(reads).toBe(1);
+  });
+
+  it("does not retry an authorization failure", async () => {
+    let reads = 0;
+    await expect(
+      ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async () => {
+          reads += 1;
+          return readResult({
+            ok: false,
+            status: 403,
+            stderr: "Forbidden"
+          });
+        },
+        runGh: async () => {
+          throw new Error("must not mutate");
+        },
+        sleep: async () => {}
+      })
+    ).rejects.toMatchObject({ code: "github-environment-lookup-failed" });
+    expect(reads).toBe(1);
+  });
+
   it("checks Stop after repository reads and before environment creation", async () => {
     let mutations = 0;
 
@@ -444,7 +554,7 @@ describe("ensureGitHubEnvironment", () => {
     expect(operation.providerRecovery.state).toBe("manual_required");
   });
 
-  it("fails closed on lookup errors that are not an explicit HTTP 404", async () => {
+  it("retries a transient lookup failure to the bound, then fails closed", async () => {
     const calls: string[][] = [];
 
     await expect(
@@ -461,14 +571,40 @@ describe("ensureGitHubEnvironment", () => {
         },
         runGh: async () => {
           throw new Error("lookup failure must not mutate");
-        }
+        },
+        sleep: async () => {}
       })
     ).rejects.toMatchObject({
       code: "github-environment-lookup-failed",
       message:
         'Could not resolve GitHub environment "production". HTTP 503: unavailable'
     });
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("retries the GitHub CLI standard connection diagnostic", async () => {
+    let reads = 0;
+    const ensured = await ensureGitHubEnvironment({
+      repo: "octo/app",
+      requestedName: "production",
+      readGitHubJson: async () => {
+        reads += 1;
+        return reads === 1 ?
+            readResult({
+              ok: false,
+              status: null,
+              stderr: "error connecting to api.github.com"
+            })
+          : readResult({ json: { name: "production", id: 17 } });
+      },
+      runGh: async () => {
+        throw new Error("an existing environment must not be mutated");
+      },
+      sleep: async () => {}
+    });
+
+    expect(ensured).toMatchObject({ state: "reused", providerId: "17" });
+    expect(reads).toBe(2);
   });
 
   it("does not treat an unqualified Not Found message as authoritative absence", async () => {

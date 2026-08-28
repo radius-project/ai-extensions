@@ -97,6 +97,8 @@ export type GitHubJsonRunner = (apiPath: string) => Promise<GitHubJsonResponse>;
 export interface FetchGitHubJsonOptions {
   retries?: number;
   baseDelayMs?: number;
+  maxElapsedMs?: number;
+  now?: () => number;
   sleepFn?: (milliseconds: number) => Promise<unknown>;
 }
 
@@ -825,17 +827,40 @@ export async function fetchGitHubJson(
   {
     retries = 3,
     baseDelayMs = 300,
+    maxElapsedMs = 45_000,
+    now = Date.now,
     sleepFn = defaultSleep
   }: FetchGitHubJsonOptions = {}
 ): Promise<GitHubJsonResponse | undefined> {
+  const startedAt = now();
   let last: GitHubJsonResponse | undefined;
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     last = await runner(apiPath);
     const status = last?.status;
+    const transportFailure =
+      status == null &&
+      /(?:ECONNRESET|ECONNABORTED|ETIMEDOUT|EAI_AGAIN|network is unreachable|socket hang up|timed? ?out|error connecting to api\.github\.com|failed to connect|could not resolve host)/i.test(
+        last?.stderr || ""
+      );
     const retriable =
-      status === 429 || (status != null && status >= 500) || status == null;
+      status === 429 || (status != null && status >= 500) || transportFailure;
     if (last?.ok || !retriable || attempt === retries) return last;
-    await sleepFn(baseDelayMs * attempt);
+    const remaining = maxElapsedMs - (now() - startedAt);
+    if (remaining <= 0) return last;
+    const retryAfter = /Retry-After\s*:\s*([^\r\n]+)/i
+      .exec(last.stderr || "")?.[1]
+      ?.trim();
+    const seconds = Number(retryAfter);
+    const requestedDelay =
+      retryAfter && Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000
+      : retryAfter ? Date.parse(retryAfter) - now()
+      : baseDelayMs * attempt;
+    const delay = Math.max(
+      0,
+      Number.isFinite(requestedDelay) ? requestedDelay : baseDelayMs * attempt
+    );
+    if (delay >= remaining) return last;
+    await sleepFn(delay);
   }
   return last;
 }
