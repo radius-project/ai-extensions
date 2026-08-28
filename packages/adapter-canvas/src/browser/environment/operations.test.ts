@@ -829,11 +829,21 @@ describe("trackProgress rendering", () => {
     );
     expect(steps.scrollTop).toBe(40);
 
-    steps.scrollTop = 190;
+    steps.scrollHeight = 260;
+    controller?.renderProgress(
+      record({
+        operationId: "op-2",
+        steps: [{ state: "running", label: "New operation step" }]
+      })
+    );
+    expect(steps.scrollTop).toBe(260);
+
+    steps.scrollTop = 210;
     steps.dispatch("scroll");
     steps.scrollHeight = 280;
     controller?.renderProgress(
       record({
+        operationId: "op-2",
         steps: [
           { state: "succeeded", label: "Step one" },
           { state: "succeeded", label: "Step two" },
