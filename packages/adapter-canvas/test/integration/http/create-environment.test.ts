@@ -1788,6 +1788,41 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
   });
 
+  it("surfaces a conclusive SAML dispatch refusal without reconciliation", async () => {
+    const harness = start({
+      dispatchResults: [
+        {
+          code: 1,
+          stderr:
+            "Resource protected by organization SAML enforcement. You must grant your OAuth token access."
+        }
+      ]
+    });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      code: "verify-dispatch-failed",
+      error: expect.stringContaining("SAML enforcement")
+    });
+    expect(
+      harness.ghCalls.filter((call) => call.startsWith("run list "))
+    ).toHaveLength(1);
+    const operation = harness.operation as CreateEnvironmentOperation & {
+      providerRecovery?: {
+        mutations?: Array<{
+          status: string;
+          initialDiagnostic?: string | null;
+        }>;
+      };
+    };
+    expect(operation.providerRecovery?.mutations?.at(-1)).toMatchObject({
+      status: "not_applied",
+      initialDiagnostic: expect.stringContaining("SAML enforcement")
+    });
+  });
+
   it("does not adopt concurrent environment runs after an uncertain verification dispatch", async () => {
     const harness = start({
       gh: [

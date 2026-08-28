@@ -525,6 +525,10 @@ describe("provider mutation recovery", () => {
         "HTTP 409: refusing to allow an OAuth App to create or update workflow"
       ],
       [
+        "an organization SAML refusal without an HTTP status",
+        "Resource protected by organization SAML enforcement. You must grant your OAuth token access."
+      ],
+      [
         "an argument the CLI rejected",
         "ERROR: unrecognized arguments: --subject"
       ],
