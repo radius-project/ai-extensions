@@ -1971,6 +1971,31 @@ describe("client projection", () => {
     }
   );
 
+  it.each([
+    ["absent", undefined, null],
+    ["null", null, null],
+    ["non-numeric", "later", null],
+    ["numeric", 4, 4]
+  ])(
+    "projects a %s failure stepSeq without inventing step zero",
+    (_name, stepSeq, expected) => {
+      const op = newOp();
+      finish(op, "failed", {
+        failure: {
+          code: "github-scopes-missing",
+          message: "GitHub access is missing.",
+          classification: "user-fixable",
+          stepSeq
+        }
+      });
+
+      expect(toClientView(op).failure.stepSeq).toBe(expected);
+      expect(
+        fromPersistedOperation(toPersistedOperation(op)).failure.stepSeq
+      ).toBe(expected);
+    }
+  );
+
   it("names created resources with safe labels rather than the private ledger", () => {
     const op = newOp();
     recordAzureApp(op, {

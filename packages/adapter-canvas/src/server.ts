@@ -78,7 +78,8 @@ import {
   selectedGetBranchHeadSha,
   selectedCreateBranchRef,
   selectedCreatePullRequest,
-  selectedFetchFileFromRepo
+  selectedFetchFileFromRepo,
+  redactGhCredentials
 } from "./gh.js";
 import type {
   CliOptions,
@@ -1244,6 +1245,7 @@ const VERIFY_WORKFLOW_FILE = "radius-verify-credentials.yml";
 // reads no module-level mutable state.
 const environmentsRoutes = createEnvironmentsRoutes({
   errorMessage,
+  redactDiagnostic: (value) => redactGhCredentials(value),
   repoMatchesWorkspace,
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   runCommand: (command, args, options) => runCommand(command, args, options),

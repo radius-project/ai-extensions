@@ -80,19 +80,24 @@ describe("initializeDeployResultPage", () => {
     expect(browser.status.textContent).toBe(expected);
   });
 
-  it("surfaces a request failure and permits a retry", async () => {
+  it("hides a raw request failure behind the generic message and permits a retry", async () => {
     const browser = renderResult("");
     let calls = 0;
     browser.net.handle(DEPLOY_RESET_PATH, () => {
       calls += 1;
-      if (calls === 1) return Promise.reject(new Error("offline"));
+      if (calls === 1) {
+        return Promise.reject(new Error("connect ECONNREFUSED ghp_secret"));
+      }
       return jsonResponse({ ok: true });
     });
     initializeDeployResultPage(browser.context);
 
     browser.button.dispatch("click");
     await flushPromises();
-    expect(browser.status.textContent).toBe("offline");
+    expect(browser.status.textContent).toBe(
+      "The deployment view could not be reset."
+    );
+    expect(browser.status.textContent).not.toContain("ghp_secret");
     expect(browser.button.disabled).toBe(false);
 
     browser.button.dispatch("click");

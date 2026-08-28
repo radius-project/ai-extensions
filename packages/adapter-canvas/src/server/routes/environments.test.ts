@@ -105,6 +105,9 @@ function deps(
   const base: EnvironmentsDependencies = {
     errorMessage: (error) =>
       error instanceof Error ? error.message : String(error),
+    // Deliberately distinct from identity so a route that forgets to redact a
+    // browser-visible diagnostic is detectable.
+    redactDiagnostic: (value) => value.replaceAll("ghp_secret", "[REDACTED]"),
     repoMatchesWorkspace: unset("repoMatchesWorkspace") as never,
     readInstanceEntry: unset("readInstanceEntry") as never,
     runCommand: unset("runCommand") as never,
@@ -668,6 +671,61 @@ describe("environments — list-environments", () => {
     expect(JSON.parse(recording.body)).toEqual({
       environments: [],
       error: "403"
+    });
+  });
+
+  it("redacts credential-shaped stderr before the browser-visible envelope", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+      [ENV_PATH.names("o/r")]: {
+        error: new Error("no auth"),
+        stderr: "gh: authentication failed using ghp_secret"
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        cliExec: cliFake(script)
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      environments: [],
+      error: "gh: authentication failed using [REDACTED]"
+    });
+    expect(recording.body).not.toContain("ghp_secret");
+  });
+
+  it("falls back to generic text when redaction empties the diagnostic", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+      [ENV_PATH.names("o/r")]: {
+        error: Object.assign(new Error(""), { message: "" }),
+        stderr: "   "
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        cliExec: cliFake(script)
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      environments: [],
+      error: "Failed to list environments."
     });
   });
 

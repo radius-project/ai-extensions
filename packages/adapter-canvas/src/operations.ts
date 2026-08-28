@@ -4849,7 +4849,9 @@ function persistedFailure(failure: any): any {
     code: String(failure.code || ""),
     stage: failure.stage == null ? null : String(failure.stage),
     stepSeq:
-      Number.isFinite(Number(failure.stepSeq)) ? Number(failure.stepSeq) : null,
+      failure.stepSeq == null || !Number.isFinite(Number(failure.stepSeq)) ?
+        null
+      : Number(failure.stepSeq),
     message: String(failure.message || ""),
     classification: String(failure.classification || ""),
     ...(remediation ? { remediation } : {})

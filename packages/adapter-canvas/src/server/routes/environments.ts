@@ -327,8 +327,9 @@ export async function handleListEnvironments(
             if (err) {
               resolve({
                 error:
-                  (stderr || err.message || "").trim() ||
-                  "Failed to list environments."
+                  dependencies
+                    .redactDiagnostic((stderr || err.message || "").trim())
+                    .trim() || "Failed to list environments."
               });
               return;
             }
@@ -511,7 +512,10 @@ export async function handleListEnvironments(
       : "";
     dependencies.kickoffWorkflowSync(repo, managedEnvironments, workingBranch);
   } catch (e) {
-    respond({ environments: [], error: dependencies.errorMessage(e) });
+    respond({
+      environments: [],
+      error: dependencies.redactDiagnostic(dependencies.errorMessage(e))
+    });
   }
 }
 
