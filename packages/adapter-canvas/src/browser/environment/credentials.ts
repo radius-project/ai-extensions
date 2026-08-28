@@ -29,6 +29,7 @@ import {
   presentedRemediationView,
   type GhCommandPresentation
 } from "../../gh-command-display.js";
+import { githubCredentialSourceLabel } from "../../github-credential-source.js";
 
 export const CREDENTIALS_ENTRY_KEY = "environment-credentials";
 export const CREDENTIAL_PROFILES_PATH = "/api/credential-profiles";
@@ -256,10 +257,9 @@ export function renderGitHubAccessView(
   }
   const login = packagesCredentialLogin(identity);
   if (packagesCredentialCanWrite(identity)) {
-    const source =
-      identity.packagesCredentialSource === "injected-token" ?
-        "the Copilot session token"
-      : "the stored GitHub CLI credential";
+    const source = githubCredentialSourceLabel(
+      identity.packagesCredentialSource
+    );
     return {
       packagesVerified: true,
       statusText: "",
