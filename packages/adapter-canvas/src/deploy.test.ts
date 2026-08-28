@@ -610,6 +610,28 @@ describe("explainRepoAccessForEnvSetup", () => {
     expect(out).toContain("fork");
   });
 
+  it("uses the bundled GitHub CLI path in switch-account guidance", () => {
+    const out = explainRepoAccessForEnvSetup(
+      {
+        repo: "azure-cto/app",
+        login: "ryanwaite",
+        readFailed: true,
+        permissions: null
+      },
+      {
+        kind: "absolute",
+        shell: "powershell",
+        executablePath: "C:\\Copilot Tools\\gh.exe",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(out).toContain(
+      "& 'C:\\Copilot Tools\\gh.exe' auth switch --user <account>"
+    );
+    expect(out).toContain("Install GitHub CLI system-wide.");
+  });
+
   it("read failure with unknown login → 'the active gh account'", () => {
     const out = explainRepoAccessForEnvSetup({
       repo: "azure-cto/app",

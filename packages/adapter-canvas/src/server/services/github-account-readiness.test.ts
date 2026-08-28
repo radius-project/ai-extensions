@@ -75,7 +75,9 @@ function readinessService(
   }
 ) {
   return createGitHubAccountReadinessService(accountCoordinator, {
-    probePackageAccess: async () => packageAccess
+    ports: {
+      probePackageAccess: async () => packageAccess
+    }
   });
 }
 
@@ -194,7 +196,7 @@ describe("GitHub account readiness", () => {
     );
     const service = createGitHubAccountReadinessService(
       coordinator(selectedExecutor({ scopes: ["repo"] })),
-      { probePackageAccess }
+      { ports: { probePackageAccess } }
     );
 
     const result = await service.check({
@@ -220,6 +222,36 @@ describe("GitHub account readiness", () => {
       id: "github-account-scopes",
       params: { login: "octocat", workflow: "true", packages: "true" }
     });
+  });
+
+  it("uses the bundled GitHub CLI path in repair guidance", async () => {
+    const service = createGitHubAccountReadinessService(
+      coordinator(selectedExecutor({ scopes: ["repo"] })),
+      {
+        ports: {
+          probePackageAccess: () =>
+            Promise.resolve({ ok: false, detail: "not checked" })
+        },
+        ghCommandPresentation: {
+          kind: "absolute",
+          shell: "posix",
+          executablePath: "/opt/Copilot Tools/gh",
+          installationNote: "Install GitHub CLI system-wide."
+        }
+      }
+    );
+
+    const result = await service.check({
+      instanceId: "panel",
+      repo: "octo/app",
+      environment: "dev",
+      login: "octocat"
+    });
+
+    expect(result.repair).toContain(
+      "'/opt/Copilot Tools/gh' auth switch -h github.com -u octocat"
+    );
+    expect(result.repair).toContain("Install GitHub CLI system-wide.");
   });
 
   it("falls back to prose when the login is one the registry will not run", async () => {
@@ -281,7 +313,7 @@ describe("GitHub account readiness", () => {
           }
         })
       ),
-      { probePackageAccess }
+      { ports: { probePackageAccess } }
     );
 
     const result = await service.check({
@@ -308,7 +340,7 @@ describe("GitHub account readiness", () => {
     );
     const service = createGitHubAccountReadinessService(
       coordinator(selectedExecutor({ scopes: ["write:packages"] })),
-      { probePackageAccess }
+      { ports: { probePackageAccess } }
     );
 
     const result = await service.check({

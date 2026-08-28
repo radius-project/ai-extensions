@@ -93,6 +93,7 @@ import { radiusAppBicepSkill } from "./skill.js";
 import { createGeneratorVersionReader } from "./generator-version.js";
 import { renderPrDiffMarkdown } from "./pr-diff-markdown.js";
 import { withGhcrDockerConfig } from "./ghcr.js";
+import { resolveGhCommandPresentation } from "./gh-command-resolution.js";
 import {
   resolveExistingRadiusArtifact,
   resolveRadiusArtifactTarget,
@@ -113,6 +114,7 @@ const execFileAsync = promisify(execFile);
 // ─── Production dependency wiring ────────────────────────────────────────────
 const sessionHolder = createSessionHolder();
 
+const ghCommandPresentation = resolveGhCommandPresentation();
 const dependencies: RadiusExtensionDependencies = {
   logError: (message) => console.error(message),
   session: sessionHolder,
@@ -209,7 +211,8 @@ const dependencies: RadiusExtensionDependencies = {
   },
   radiusAppBicepSkill,
   renderPrDiffMarkdown,
-  withGhcrDockerConfig
+  withGhcrDockerConfig: (fn) =>
+    withGhcrDockerConfig(fn, { ghCommandPresentation })
 };
 
 const radiusExtension = await bootstrapRadiusExtension(dependencies, {

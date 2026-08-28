@@ -310,6 +310,10 @@ describe("productionRemediationDependencies", () => {
   it("binds the core registry to the injected session seams", async () => {
     const sent: RemediationSessionMessage[] = [];
     const dependencies = productionRemediationDependencies({
+      presentRemediation: (remediation) => ({
+        ...remediation,
+        displayCommand: "presented command"
+      }),
       runSessionPrompt: async (message) => {
         sent.push(message);
         return { status: 200 };
@@ -320,6 +324,7 @@ describe("productionRemediationDependencies", () => {
     const result = dependencies.buildRemediation("aws-cli-login", {});
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected a runnable remediation");
+    expect(result.remediation.displayCommand).toBe("presented command");
     expect(dependencies.remediationSessionMessage(result.remediation)).toEqual(
       remediationSessionMessage(result.remediation)
     );
