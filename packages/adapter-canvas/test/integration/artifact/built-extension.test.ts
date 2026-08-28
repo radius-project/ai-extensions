@@ -134,6 +134,23 @@ function prepareBuildWorkspace(
     recursive: true
   });
 
+  // The build bundles the static environment-delete workflows from
+  // .github/extension/ (see copyStaticWorkflows in build.mjs). Stage them so the
+  // build reaches the install-copy step this test exercises instead of failing
+  // earlier on a missing static workflow asset.
+  const sourceExtension = join(REPO_ROOT, ".github", "extension");
+  const workspaceExtension = join(workspaceRoot, ".github", "extension");
+  mkdirSync(workspaceExtension, { recursive: true });
+  for (const workflowFile of [
+    "delete-environment.yml",
+    "delete-environment-azure.yml"
+  ]) {
+    copyFileSync(
+      join(sourceExtension, workflowFile),
+      join(workspaceExtension, workflowFile)
+    );
+  }
+
   return workspaceAdapter;
 }
 
