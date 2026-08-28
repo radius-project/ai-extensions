@@ -1195,10 +1195,23 @@ export class CanvasHarness {
   }
 
   async seedRestartedVerificationFailure(): Promise<string> {
+    return this.seedRestartedVerification("failed");
+  }
+
+  async seedInterruptedVerification(): Promise<string> {
+    return this.seedRestartedVerification("interrupted");
+  }
+
+  private async seedRestartedVerification(
+    outcome: "failed" | "interrupted"
+  ): Promise<string> {
     const operationModule: OperationsModule =
       await import("../../../src/operations.js");
     const operation = operationModule.createOperation({
-      operationId: "op_chromium_verification",
+      operationId:
+        outcome === "failed" ?
+          "op_chromium_verification"
+        : "op_chromium_interrupted_verification",
       provider: "azure",
       repo: REPOSITORY,
       environment: "fixture-environment",
@@ -1232,15 +1245,17 @@ export class CanvasHarness {
       runId: "39",
       runUrl: `https://github.com/${REPOSITORY}/actions/runs/39`
     };
-    operationModule.finish(operation, "failed_partial", {
-      failure: {
-        code: "verify-run-failed",
-        stage: operationModule.STAGE_VERIFY,
-        message: "Credential verification failed.",
-        classification: "user-fixable",
-        evidence: "The controlled verification run failed."
-      }
-    });
+    if (outcome === "failed") {
+      operationModule.finish(operation, "failed_partial", {
+        failure: {
+          code: "verify-run-failed",
+          stage: operationModule.STAGE_VERIFY,
+          message: "Credential verification failed.",
+          classification: "user-fixable",
+          evidence: "The controlled verification run failed."
+        }
+      });
+    }
 
     const restored = operationModule.fromPersistedOperation(
       JSON.parse(JSON.stringify(operation))
