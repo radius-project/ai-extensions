@@ -113,10 +113,11 @@ async function mapWithConcurrency<T, R>(
       results[index] = await fn(items[index]);
     }
   }
-  const workers = Array.from(
-    { length: Math.min(limit, items.length) },
-    () => worker()
-  );
+  const workers: Promise<void>[] = [];
+  const parallel = Math.min(limit, items.length);
+  for (let i = 0; i < parallel; i++) {
+    workers.push(worker());
+  }
   await Promise.all(workers);
   return results;
 }
