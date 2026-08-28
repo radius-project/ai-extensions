@@ -48,6 +48,18 @@ describeWindows("cliExec Windows process integration", () => {
       ["@ECHO OFF", "ECHO fixture failure 1>&2", "EXIT /B 7", ""].join("\r\n"),
       "utf8"
     );
+    // Installed only as a batch shim, exactly like AWS CLI v1 from pip. A bare
+    // name for this tool is unresolvable by CreateProcess, so it exercises the
+    // cmd.exe fallback rather than the direct launch.
+    await writeFile(
+      join(directory, "radius-batch-only.cmd"),
+      [
+        "@ECHO OFF",
+        '"%RADIUS_TEST_NODE%" "%~dp0\\record-args.cjs" %*',
+        ""
+      ].join("\r\n"),
+      "utf8"
+    );
 
     environment = { ...process.env };
     const pathKey =
@@ -135,6 +147,22 @@ describeWindows("cliExec Windows process integration", () => {
     expect(result.code).toBe(7);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain("fixture failure");
+  });
+
+  it("resolves a bare name installed only as a batch shim", async () => {
+    const result = await runCli("radius-batch-only", ["eks", "list-clusters"]);
+
+    expect(result).toEqual({
+      code: 0,
+      stdout: '["eks","list-clusters"]',
+      stderr: ""
+    });
+  });
+
+  it("reports a failure for a command installed in no form at all", async () => {
+    const result = await runCli("radius-absent-tool", ["version"]);
+
+    expect(result.code).not.toBe(0);
   });
 
   function runCli(command: string, args: string[]): Promise<CommandResult> {

@@ -408,14 +408,97 @@ describe.sequential("cliExec", () => {
 
       cliExec(command, args, {}, callback);
 
-      expect(childProcess.execFile).toHaveBeenCalledWith(
-        command,
-        args,
-        expect.not.objectContaining({ windowsVerbatimArguments: true }),
-        callback
-      );
+      expect(childProcess.execFile).toHaveBeenCalledOnce();
+      const [file, receivedArgs, options] = childProcess.execFile.mock.calls[0];
+      expect(file).toBe(command);
+      expect(receivedArgs).toEqual(args);
+      expect(options.windowsVerbatimArguments).toBeUndefined();
     }
   );
+
+  it("delivers native Windows CLI output without a cmd.exe retry", async () => {
+    const { cliExec } = await loadGh("win32");
+    const callback = vi.fn();
+    childProcess.execFile.mockImplementationOnce(
+      (_file, _args, _options, cb) => {
+        cb(null, "default kube-system", "");
+        return { stdin: { end() {} } };
+      }
+    );
+
+    cliExec("kubectl", ["get", "namespaces"], {}, callback);
+
+    expect(childProcess.execFile).toHaveBeenCalledOnce();
+    expect(callback).toHaveBeenCalledWith(null, "default kube-system", "");
+  });
+
+  // CreateProcess resolves a bare name by appending .exe only, so a CLI present
+  // solely as a PATHEXT-resolved batch shim (AWS CLI v1 from pip ships aws.cmd)
+  // must stay reachable through cmd.exe.
+  it("retries a native Windows CLI through cmd.exe when only a batch shim is installed", async () => {
+    const { cliExec } = await loadGh("win32");
+    const callback = vi.fn();
+    const missing = Object.assign(new Error("spawn aws ENOENT"), {
+      code: "ENOENT",
+      errno: -4058,
+      syscall: "spawn aws"
+    });
+    childProcess.execFile
+      .mockImplementationOnce((_file, _args, _options, cb) => {
+        cb(missing, "", "");
+        return { stdin: { end() {} } };
+      })
+      .mockImplementationOnce((_file, _args, _options, cb) => {
+        cb(null, '["cluster-a"]', "");
+        return { stdin: { end() {} } };
+      });
+
+    cliExec("aws", ["eks", "list-clusters"], {}, callback);
+
+    expect(childProcess.execFile).toHaveBeenCalledTimes(2);
+    const [file, args, options] = childProcess.execFile.mock.calls[1];
+    expect(file).toBe("cmd.exe");
+    expect(args).toEqual(["/c", 'aws "eks" "list-clusters"']);
+    expect(options.windowsVerbatimArguments).toBe(true);
+    expect(callback).toHaveBeenCalledOnce();
+    expect(callback).toHaveBeenCalledWith(null, '["cluster-a"]', "");
+  });
+
+  it("reports a native Windows CLI failure without retrying through cmd.exe", async () => {
+    const { cliExec } = await loadGh("win32");
+    const callback = vi.fn();
+    const failure = Object.assign(new Error("exit status 2"), { code: 2 });
+    childProcess.execFile.mockImplementationOnce(
+      (_file, _args, _options, cb) => {
+        cb(failure, "", "cluster not found");
+        return { stdin: { end() {} } };
+      }
+    );
+
+    cliExec("kubectl", ["get", "namespaces"], {}, callback);
+
+    expect(childProcess.execFile).toHaveBeenCalledOnce();
+    expect(callback).toHaveBeenCalledWith(failure, "", "cluster not found");
+  });
+
+  it("propagates ENOENT without a cmd.exe retry off Windows", async () => {
+    const { cliExec } = await loadGh("linux");
+    const callback = vi.fn();
+    const missing = Object.assign(new Error("spawn aws ENOENT"), {
+      code: "ENOENT"
+    });
+    childProcess.execFile.mockImplementationOnce(
+      (_file, _args, _options, cb) => {
+        cb(missing, "", "");
+        return { stdin: { end() {} } };
+      }
+    );
+
+    cliExec("aws", ["eks", "list-clusters"], {}, callback);
+
+    expect(childProcess.execFile).toHaveBeenCalledOnce();
+    expect(callback).toHaveBeenCalledWith(missing, "", "");
+  });
 
   it("routes an explicitly named Windows batch file through cmd.exe", async () => {
     const { cliExec } = await loadGh("win32");

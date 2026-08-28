@@ -1141,6 +1141,26 @@ function windowsCmdCommandLine(command: string, args: string[]): string {
   return executableNeedsQuoting ? `"${commandLine}"` : commandLine;
 }
 
+// CreateProcess resolves a bare command name by appending `.exe` only, while
+// cmd.exe searches every PATHEXT extension. A CLI installed solely as a batch
+// shim -- AWS CLI v1 from pip ships `aws.cmd` -- therefore reports ENOENT when
+// launched directly, so retry it through cmd.exe rather than reporting the tool
+// as missing. Reached only after a spawn failure, so a natively installed CLI
+// never pays for the second attempt.
+function retryThroughWindowsCmd(
+  cmd: string,
+  args: string[],
+  execOpts: ExecFileOptionsWithStringEncoding,
+  cb: CliCallback
+): void {
+  execFile(
+    "cmd.exe",
+    ["/c", windowsCmdCommandLine(cmd, args)],
+    { ...execOpts, windowsVerbatimArguments: true },
+    cb
+  );
+}
+
 // Azure CLI 2.88+ "agentic session": when COPILOT_AGENT_SESSION_ID is set, az injects it as a
 // `client_session` query param + a claims challenge that BYPASSES the token cache and forces a
 // fresh ESTS fetch on every call. The GitHub Copilot app sets this var for all child processes,
@@ -1156,7 +1176,8 @@ function withoutAgentSession(baseEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 // Run a CLI (gh/az/aws/kubectl). Native Windows executables run directly so
-// shell metacharacters remain ordinary argv content. Azure CLI's az.cmd launcher
+// shell metacharacters remain ordinary argv content, falling back to cmd.exe only
+// when the direct launch cannot resolve the command. Azure CLI's az.cmd launcher
 // and explicitly named batch files go through cmd.exe with one verbatim command
 // line. A simple executable name must stay unquoted because cmd.exe's first-token
 // quote stripping breaks Azure CLI's batch launcher.
@@ -1169,6 +1190,7 @@ export function cliExec(
   const isWindows = process.platform === "win32";
   const isWindowsGh = isWindows && isGhCmd(cmd);
   const usesWindowsCmd = isWindows && isWindowsBatchCommand(cmd);
+  const usesWindowsNative = isWindows && !isWindowsGh && !usesWindowsCmd;
   const file =
     isWindowsGh ? ghExecutable()
     : usesWindowsCmd ? "cmd.exe"
@@ -1186,6 +1208,15 @@ export function cliExec(
   }
   if (isGhCmd(cmd)) execOpts.env = ghChildEnv(execOpts.env);
   execOpts.env = withoutAgentSession(execOpts.env);
+  if (usesWindowsNative) {
+    return execFile(file, finalArgs, execOpts, (error, stdout, stderr) => {
+      if (error?.code === "ENOENT") {
+        retryThroughWindowsCmd(cmd, args, execOpts, cb);
+        return;
+      }
+      cb(error, stdout, stderr);
+    });
+  }
   return execFile(file, finalArgs, execOpts, cb);
 }
 
