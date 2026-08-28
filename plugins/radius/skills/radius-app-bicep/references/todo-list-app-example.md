@@ -34,7 +34,7 @@ The requested profile runs the application with MySQL instead of its default SQL
 5. Referencing the image and Recipe-mapped MySQL host creates dependency ordering. Omit a generic connection unless the request explicitly requires Radius relationship metadata or the source consumes its exact projection.
 6. Pin `build.source` to the modeled commit, validate tag omission against the exact current Recipe, omit `build.platforms` because the single unpinned stage either produces requested-platform output or fails before publishing an image, and consume the build through verified `properties.imageReference`.
 7. Verify that the target Environment registers Recipes for every emitted extensible type.
-8. Match `containerPort` to the inspected process listener. The pinned Compose profile exposes only a loopback mapping, so it is not evidence for public ingress; add a route only when the request or another deployment contract requires one.
+8. Match `containerPort` to the inspected process listener. The loopback-only Compose mapping is not external-client ingress evidence.
 
 ## Completion checks
 

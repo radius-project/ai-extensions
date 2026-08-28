@@ -6,6 +6,7 @@ import {
 } from "../browser/scripts.js";
 import { CRITICAL_SHELL_STYLE_CSS } from "./shell-styles.js";
 import { pageShell } from "./shell.js";
+import { markupWithoutBrowserBundles } from "../../test/support/pages/hostile-state.js";
 import type { BrowserEntryName } from "../browser/scripts.js";
 
 // One entry name is a prefix of another ("graph" and "graph-chip"), so anything
@@ -61,7 +62,7 @@ describe("pageShell", () => {
       "--rad-danger: color-mix(in srgb, var(--text-color-danger"
     );
     expect(html).not.toContain("localStorage");
-    expect(html).not.toContain("matchMedia");
+    expect(markupWithoutBrowserBundles(html)).not.toContain("matchMedia");
     expect(html).not.toContain("prefers-color-scheme");
     expect(html).not.toContain(
       "--rad-bg-subtle: var(--background-color-segmented"
@@ -121,6 +122,19 @@ describe("pageShell", () => {
     expect(typeStyles).toContain("width: 100%");
     expect(typeStyles).toContain("overflow: hidden");
     expect(typeStyles).toContain("white-space: nowrap");
+  });
+
+  it("constrains graph titles to the node card width", () => {
+    const html = pageShell("My Title", "<p>hello</p>");
+    const titleStyles = html.match(/\.rad-node__title\s*\{([^}]*)\}/)?.[1];
+    const badgeHeadStyles = html.match(
+      /\.rad-node__head--with-badge\s*\{([^}]*)\}/
+    )?.[1];
+    expect(titleStyles).toContain("min-width: 0");
+    expect(titleStyles).toContain("overflow: hidden");
+    expect(titleStyles).toContain("text-overflow: ellipsis");
+    expect(titleStyles).toContain("white-space: nowrap");
+    expect(badgeHeadStyles).toContain("padding-right: 22px");
   });
 
   it("shows a pointer over a deployed node portal link", () => {
@@ -338,7 +352,9 @@ describe("pageShell document structure", () => {
     // The canvas webview blocks external scripts, so every asset the page needs
     // is inlined: no <script src>, no stylesheet link, no CDN reference.
     expect(html).not.toMatch(/<script[^>]+src=/);
-    expect(html).not.toContain('rel="stylesheet"');
+    // Matched as an element, not a substring: the inlined React bundle carries
+    // a `link[rel="stylesheet"]` query selector of its own.
+    expect(html).not.toMatch(/<link[^>]+rel="stylesheet"/);
     expect(html).not.toContain("unpkg.com");
     expect(html).toContain('<link rel="icon" type="image/svg+xml" href="data:');
   });

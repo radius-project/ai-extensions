@@ -5,7 +5,7 @@
 // graph: a model produced by a different generator is refreshed rather than
 // shown as-is. The skill ships inside this extension, so the extension's own
 // plugin manifest version IS the generator version. A release build carries the
-// released version and CI stamps an edge build (e.g. 0.1.0-edge-20260811053232).
+// released version and CI stamps an edge build (e.g. 0.1.0-edge-0b33186).
 //
 // Resolution is best-effort by design. An unresolvable version is reported as ""
 // and makes the freshness check ignore generator drift entirely, because

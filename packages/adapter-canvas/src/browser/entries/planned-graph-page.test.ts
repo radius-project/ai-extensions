@@ -47,6 +47,7 @@ describe("planned graph page browser entry", () => {
     );
     browser.scope.radiusRenderGraph = vi.fn();
     browser.scope.radiusSetGraphLoading = vi.fn();
+    browser.scope.radiusSetGraphError = vi.fn();
 
     installPlannedGraphPageEntry(browser.scope);
     installPlannedGraphPageEntry(browser.scope);

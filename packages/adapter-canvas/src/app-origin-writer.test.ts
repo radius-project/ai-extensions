@@ -95,7 +95,7 @@ describe("write-app-origin", () => {
       [
         repo.appPath,
         "--skill-version",
-        "0.1.0-edge-20260811053232",
+        "0.1.0-edge-0b33186",
         "--generated-at",
         "2026-08-11T05:32:32.000Z"
       ],
@@ -107,7 +107,7 @@ describe("write-app-origin", () => {
     expect(parseAppOrigin(fs.readFileSync(repo.originPath, "utf8"))).toEqual({
       generatedAt: "2026-08-11T05:32:32.000Z",
       sourceCommit: repo.commit,
-      skillVersion: "0.1.0-edge-20260811053232",
+      skillVersion: "0.1.0-edge-0b33186",
       appBicepHash: hashAppBicep(MODEL)
     });
   });

@@ -57,7 +57,6 @@ interface GraphDiffAttempt extends PullRequestIdentity {
 
 export interface PullRequestGraphDiffGuard {
   activateAtSessionStart(workingDirectory: unknown): Promise<boolean>;
-  recordDeniedGraphDiff(input: ToolUseInput, reason: string): void;
   onPreToolUse(
     input: ToolUseInput
   ): Promise<DeniedToolUse | ToolUseGuidance | undefined>;
@@ -155,15 +154,6 @@ function failedGraphDiffAttempt(
   return { ...identity, outcome: "failure", text: reason };
 }
 
-function deniedGraphDiffAttempt(
-  toolArgs: unknown,
-  reason: string
-): GraphDiffAttempt | null {
-  const identity = graphDiffIdentity(toolArgs);
-  if (!identity) return null;
-  return { ...identity, outcome: "unavailable", text: reason };
-}
-
 function rememberBounded<T>(map: Map<string, T>, key: string, value: T): void {
   map.delete(key);
   map.set(key, value);
@@ -225,16 +215,6 @@ export function createPullRequestGraphDiffGuard(
     if (!workspacePath) return false;
     active = await deps.hasRadiusApplicationModel(workspacePath);
     return active;
-  }
-
-  function recordDeniedGraphDiff(input: ToolUseInput, reason: string): void {
-    if (!isGraphDiffTool(input.toolName)) return;
-    const attempt = deniedGraphDiffAttempt(input.toolArgs, reason);
-    if (attempt) {
-      active = true;
-      rememberBounded(attempts, proofKey(attempt), attempt);
-      requestedDiffs.delete(proofKey(attempt));
-    }
   }
 
   async function onPreToolUse(
@@ -378,7 +358,6 @@ export function createPullRequestGraphDiffGuard(
 
   return {
     activateAtSessionStart,
-    recordDeniedGraphDiff,
     onPreToolUse,
     onPostToolUse,
     onPostToolUseFailure

@@ -62,6 +62,7 @@ export interface GraphOptions {
   branch?: string;
   baseBranch?: string;
   localSource?: boolean;
+  workspaceBranch?: string;
   lineType?: string;
   curveStyle?: string;
   showLegend?: boolean;
@@ -79,6 +80,7 @@ export interface GraphSettings {
   readonly branch: string;
   readonly baseBranch: string;
   readonly localSource: boolean;
+  readonly workspaceBranch: string;
   readonly edgeType: string;
   readonly showLegend: boolean;
   readonly enablePopup: boolean;
@@ -180,10 +182,29 @@ export function resolveGraphSettings(
     // baseBranch while everything else points at the page's normal branch.
     baseBranch: options.baseBranch || branch,
     localSource: options.localSource === true,
+    workspaceBranch: options.workspaceBranch || "",
     edgeType: radiusMapLineType(options.lineType || options.curveStyle),
     showLegend: options.showLegend === true,
     enablePopup: options.enablePopup !== false
   };
+}
+
+// Whether this node's source file is on disk in the current worktree.
+//
+// The modeled and planned pages render a single branch, so they answer this
+// once at the page level and pass localSource. The diff page renders two
+// branches at the same time and a worktree can only have one of them checked
+// out, so it passes workspaceBranch instead and locality is decided per node
+// against that node's sourceBranch — a removed resource, whose file lives on
+// the base branch, correctly keeps its remote link while the head-branch nodes
+// beside it open locally. When no workspaceBranch is supplied the page-level
+// flag decides, so the single-branch pages are unaffected.
+export function isLocalSourceNode(
+  settings: GraphSettings,
+  data: Pick<GraphNodeData, "sourceBranch">
+): boolean {
+  if (!settings.workspaceBranch) return settings.localSource;
+  return (data.sourceBranch || settings.branch) === settings.workspaceBranch;
 }
 
 export function nodeColors(
