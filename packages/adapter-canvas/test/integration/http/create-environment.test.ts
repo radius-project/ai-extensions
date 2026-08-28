@@ -1091,8 +1091,16 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     const payload = (await response.json()) as { steps: string[] };
 
     expect(payload.steps).toContain("✅ Credentials verification dispatched.");
-    expect(payload.steps).toContain(
-      'ℹ️ Credential verification will run as @octocat using the stored GitHub CLI credential: workflow "radius-verify-credentials.yml", environment "dev", repository "octo/app", ref "main". Radius passes this resolved ref explicitly so GitHub CLI does not perform another default-branch lookup.'
+    const dispatchStep = payload.steps.find((step) =>
+      step.includes('workflow "radius-verify-credentials.yml"')
+    );
+    expect(dispatchStep).toEqual(
+      expect.stringContaining("@octocat using the stored GitHub CLI credential")
+    );
+    expect(dispatchStep).toEqual(
+      expect.stringContaining(
+        'environment "dev", repository "octo/app", ref "main"'
+      )
     );
     expect(
       payload.steps.filter(

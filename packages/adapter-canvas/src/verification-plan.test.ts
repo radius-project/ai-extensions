@@ -183,7 +183,7 @@ describe("dispatch narration", () => {
           ref: "trunk"
         })
       ).toBe(
-        `Credential verification will run as @octocat using ${label}: ` +
+        `Credential verification dispatch is configured for @octocat using ${label}: ` +
           'workflow "radius-verify-credentials.yml", environment "dev", repository "octo/app", ref "trunk". ' +
           "Radius passes this resolved ref explicitly so GitHub CLI does not perform another default-branch lookup."
       );

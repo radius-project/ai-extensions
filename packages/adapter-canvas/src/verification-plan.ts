@@ -151,7 +151,7 @@ export function describeVerificationDispatch({
       "the Copilot session token"
     : "the stored GitHub CLI credential";
   return (
-    `Credential verification will run as @${login} using ${credential}: ` +
+    `Credential verification dispatch is configured for @${login} using ${credential}: ` +
     `workflow "${workflowFile}", environment "${envName}", repository "${targetRepo}", ref "${ref}". ` +
     "Radius passes this resolved ref explicitly so GitHub CLI does not perform another default-branch lookup."
   );
