@@ -72,6 +72,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Pin to the PR head (not the default merge commit) so the parity
+          # test's working-tree read of `.github/extension/` matches the SHA the
+          # API-based live suites fetch via RADIUS_LIVE_REF. Falls back to the
+          # pushed SHA on push/schedule/dispatch.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Install pnpm

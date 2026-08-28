@@ -46,8 +46,10 @@ import {
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE,
+  DELETE_RADIUS_REF,
   generateDeleteWorkflow
 } from "./delete.js";
+import { fetchExtensionFile } from "../../test/support/live-github.js";
 import {
   VERIFY_AZURE_FILE,
   VERIFY_AWS_FILE,
@@ -61,24 +63,23 @@ const LIVE = !!process.env.RUN_LIVE_WORKFLOW_TESTS;
 // falls back to RADIUS_REF (`main`).
 const LIVE_REF = process.env.RADIUS_LIVE_REF?.trim() || RADIUS_REF;
 
+// The delete templates and the `delete-resource` composite action can be
+// re-pinned independently via RADIUS_DELETE_REF (DELETE_RADIUS_REF). Without an
+// explicit RADIUS_LIVE_REF, validate the delete templates on that override so
+// the re-pin path stays exercised live rather than silently on RADIUS_REF.
+const DELETE_LIVE_REF =
+  process.env.RADIUS_LIVE_REF?.trim() || DELETE_RADIUS_REF;
+
 // radius-project/ai-extensions is an internal repo, so the templates are not
 // reachable over anonymous raw.githubusercontent.com. Fetch them through the
 // authenticated GitHub contents API (raw media type) using the CI token.
-async function fetchWorkflow(file: string, ref: string): Promise<string> {
-  const token = process.env.GITHUB_TOKEN?.trim();
-  const url = `https://api.github.com/repos/${RADIUS_WORKFLOW_REPO}/contents/${RADIUS_WORKFLOW_DIR}/${file}?ref=${encodeURIComponent(ref)}`;
-  const headers: Record<string, string> = {
-    Accept: "application/vnd.github.raw",
-    "User-Agent": "radius-ai-extensions-live-tests"
-  };
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-  const res = await fetch(url, { headers });
-  if (!res.ok) {
-    throw new Error(`failed to fetch ${url}: ${res.status} ${res.statusText}`);
-  }
-  return res.text();
+function fetchWorkflow(file: string, ref: string): Promise<string> {
+  return fetchExtensionFile(
+    RADIUS_WORKFLOW_REPO,
+    RADIUS_WORKFLOW_DIR,
+    file,
+    ref
+  );
 }
 
 async function fetchTemplates(
@@ -139,13 +140,13 @@ describe.skipIf(!LIVE)(
     it("renders valid YAML from the current upstream delete templates", async () => {
       const templates = await fetchTemplates(
         [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE],
-        LIVE_REF
+        DELETE_LIVE_REF
       );
       const generated = generateDeleteWorkflow("prod", {
         ...templates,
         ...(await readLocalDeleteTemplates())
       });
-      assertAllValidYaml(generated, LIVE_REF);
+      assertAllValidYaml(generated, DELETE_LIVE_REF);
     }, 30_000);
 
     it("renders valid YAML from the current upstream verify templates", async () => {

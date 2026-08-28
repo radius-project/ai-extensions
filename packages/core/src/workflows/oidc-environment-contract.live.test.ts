@@ -28,6 +28,7 @@ import {
   DEPLOY_DISPATCHER_FILE
 } from "./deploy.js";
 import { VERIFY_AZURE_FILE } from "./verify.js";
+import { fetchExtensionFile } from "../../test/support/live-github.js";
 
 const LIVE = !!process.env.RUN_LIVE_WORKFLOW_TESTS;
 
@@ -39,21 +40,13 @@ const LIVE_REF = process.env.RADIUS_LIVE_REF?.trim() || RADIUS_REF;
 // radius-project/ai-extensions is an internal repo, so the templates are not
 // reachable over anonymous raw.githubusercontent.com. Fetch them through the
 // authenticated GitHub contents API (raw media type) using the CI token.
-async function fetchWorkflow(file: string): Promise<string> {
-  const token = process.env.GITHUB_TOKEN?.trim();
-  const url = `https://api.github.com/repos/${RADIUS_WORKFLOW_REPO}/contents/${RADIUS_WORKFLOW_DIR}/${file}?ref=${encodeURIComponent(LIVE_REF)}`;
-  const headers: Record<string, string> = {
-    Accept: "application/vnd.github.raw",
-    "User-Agent": "radius-ai-extensions-live-tests"
-  };
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-  const res = await fetch(url, { headers });
-  if (!res.ok) {
-    throw new Error(`failed to fetch ${url}: ${res.status} ${res.statusText}`);
-  }
-  return res.text();
+function fetchWorkflow(file: string): Promise<string> {
+  return fetchExtensionFile(
+    RADIUS_WORKFLOW_REPO,
+    RADIUS_WORKFLOW_DIR,
+    file,
+    LIVE_REF
+  );
 }
 
 // Return the body of the top-level job (a 2-space-indented `name:` header under

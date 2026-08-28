@@ -17,6 +17,12 @@
 // finally deleted from Radius. When Radius parity is intentionally advanced,
 // bump RADIUS_PARITY_REF to the new commit and re-run the port.
 //
+// This is a temporary migration guard: delete it once
+// radius-project/radius#12719 lands and removes the duplicated
+// `.github/extension/` tree from Radius. At that point ai-extensions is the
+// sole source of truth, there is no upstream tree left to compare against, and
+// the parity check has served its purpose.
+//
 // The transform is the same repointing applied during the port: every
 // `radius-project/radius/.github/extension` reference (composite-action `uses:`
 // refs and doc links) becomes `radius-project/ai-extensions/.github/extension`,
@@ -36,6 +42,7 @@ import { describe, it, expect } from "vitest";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { githubApiHeaders } from "../../test/support/live-github.js";
 
 const LIVE = !!process.env.RUN_LIVE_WORKFLOW_TESTS;
 
@@ -77,42 +84,79 @@ const ADDITIONS = new Set<string>([
 interface RadiusBlob {
   path: string; // relative to EXTENSION_DIR
   sha: string;
+  mode: string; // git file mode, e.g. 100644 / 100755
 }
 
-function ghHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {
-    Accept: "application/vnd.github+json",
-    "User-Agent": "radius-ai-extensions-parity-check",
-    "X-GitHub-Api-Version": "2022-11-28"
-  };
-  const token = process.env.GITHUB_TOKEN?.trim();
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
+// GitHub returns 403 for both permission and rate-limit failures; the parity
+// job may run unauthenticated, where the anonymous limit is only 60/hour, so
+// name that explicitly to make CI failures actionable (set GITHUB_TOKEN).
+function describeFetchFailure(res: Response): string {
+  if (res.status === 403 || res.status === 429) {
+    return (
+      `${res.status} ${res.statusText} (likely GitHub API rate limiting; set ` +
+      `GITHUB_TOKEN to raise the limit)`
+    );
   }
-  return headers;
+  return `${res.status} ${res.statusText}`;
+}
+
+// Resolve `items` through `fn` with a bounded number in flight so a large tree
+// does not open dozens of simultaneous connections and trip GitHub secondary
+// rate limits.
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]);
+    }
+  }
+  const workers = Array.from(
+    { length: Math.min(limit, items.length) },
+    () => worker()
+  );
+  await Promise.all(workers);
+  return results;
 }
 
 async function fetchRadiusExtensionBlobs(ref: string): Promise<RadiusBlob[]> {
   const encodedRef = encodeURIComponent(ref);
   const url = `https://api.github.com/repos/${RADIUS_REPO}/git/trees/${encodedRef}?recursive=1`;
-  const res = await fetch(url, { headers: ghHeaders() });
+  const res = await fetch(url, {
+    headers: githubApiHeaders("application/vnd.github+json")
+  });
   if (!res.ok) {
-    throw new Error(`failed to fetch Radius tree ${url}: ${res.status}`);
+    throw new Error(
+      `failed to fetch Radius tree ${url}: ${describeFetchFailure(res)}`
+    );
   }
   const body = (await res.json()) as {
-    tree: { path: string; type: string; sha: string }[];
+    tree: { path: string; type: string; sha: string; mode: string }[];
   };
   const prefix = `${EXTENSION_DIR}/`;
   return body.tree
     .filter((e) => e.type === "blob" && e.path.startsWith(prefix))
-    .map((e) => ({ path: e.path.slice(prefix.length), sha: e.sha }));
+    .map((e) => ({
+      path: e.path.slice(prefix.length),
+      sha: e.sha,
+      mode: e.mode
+    }));
 }
 
 async function fetchRadiusBlob(sha: string): Promise<Buffer> {
   const url = `https://api.github.com/repos/${RADIUS_REPO}/git/blobs/${sha}`;
-  const res = await fetch(url, { headers: ghHeaders() });
+  const res = await fetch(url, {
+    headers: githubApiHeaders("application/vnd.github+json")
+  });
   if (!res.ok) {
-    throw new Error(`failed to fetch Radius blob ${sha}: ${res.status}`);
+    throw new Error(
+      `failed to fetch Radius blob ${sha}: ${describeFetchFailure(res)}`
+    );
   }
   const body = (await res.json()) as { content: string; encoding: string };
   return Buffer.from(body.content, body.encoding as BufferEncoding);
@@ -155,20 +199,27 @@ describe.skipIf(!LIVE)(
       const radiusPaths = new Set(blobs.map((b) => b.path));
 
       const localPaths = new Set<string>();
+      const localModes = new Map<string, string>();
       // Discover local files by asking git for the tracked set under the tree,
       // so an accidentally-ignored asset (e.g. a prebuilt bundle under a
       // `dist/` dir) is caught as a missing file rather than silently skipped.
+      // `-s` also yields each blob's mode so we can compare the executable bit
+      // against Radius (a lost +x on a shell action would break at runtime).
       const { execFileSync } = await import("node:child_process");
-      const tracked = execFileSync("git", ["ls-files", EXTENSION_DIR], {
+      const tracked = execFileSync("git", ["ls-files", "-s", EXTENSION_DIR], {
         cwd: REPO_ROOT,
         encoding: "utf8"
       })
         .trim()
         .split("\n")
-        .filter(Boolean)
-        .map((p) => p.slice(`${EXTENSION_DIR}/`.length));
-      for (const p of tracked) {
-        localPaths.add(p);
+        .filter(Boolean);
+      for (const line of tracked) {
+        // Format: "<mode> <sha> <stage>\t<path>", e.g. "100644 <sha> 0\tfoo".
+        const [meta, fullPath] = line.split("\t");
+        const mode = meta.split(" ")[0];
+        const rel = fullPath.slice(`${EXTENSION_DIR}/`.length);
+        localPaths.add(rel);
+        localModes.set(rel, mode);
       }
 
       // Every Radius asset must be present here.
@@ -187,21 +238,36 @@ describe.skipIf(!LIVE)(
         `ai-extensions has extension files with no Radius counterpart (not in the additions allowlist): ${extra.join(", ")}`
       ).toEqual([]);
 
+      // File-mode parity: Git only tracks 100644 (regular) vs 100755
+      // (executable), so a shell action that lost its +x bit in the port would
+      // pass the byte-content check yet fail to run. Compare modes for every
+      // shared Radius blob.
+      const modeDrift = blobs
+        .filter((b) => localModes.get(b.path) !== b.mode)
+        .map((b) => {
+          const local = localModes.get(b.path);
+          return `${b.path} (radius ${b.mode}, local ${local})`;
+        });
+      expect(
+        modeDrift.sort(),
+        `these ai-extensions files have a different git file mode than Radius@${RADIUS_PARITY_REF}: ${modeDrift.join(", ")}`
+      ).toEqual([]);
+
       // Content parity for every shared file except the documented exceptions.
       const drift: string[] = [];
-      await Promise.all(
-        blobs.map(async (blob) => {
-          if (CONTENT_EXCEPTIONS.has(blob.path)) {
-            return;
-          }
-          const radiusBytes = await fetchRadiusBlob(blob.sha);
-          const expected = expectedLocalBytes(radiusBytes);
-          const local = await readLocalExtensionFile(blob.path);
-          if (!expected.equals(local)) {
-            drift.push(blob.path);
-          }
-        })
-      );
+      // Cap in-flight blob fetches so a large tree does not fire ~60 concurrent
+      // requests at the GitHub API and trip secondary rate limiting.
+      await mapWithConcurrency(blobs, 8, async (blob) => {
+        if (CONTENT_EXCEPTIONS.has(blob.path)) {
+          return;
+        }
+        const radiusBytes = await fetchRadiusBlob(blob.sha);
+        const expected = expectedLocalBytes(radiusBytes);
+        const local = await readLocalExtensionFile(blob.path);
+        if (!expected.equals(local)) {
+          drift.push(blob.path);
+        }
+      });
       expect(
         drift.sort(),
         `these ai-extensions files diverge from Radius@${RADIUS_PARITY_REF} beyond the port transform: ${drift.join(", ")}`
