@@ -43,9 +43,9 @@ import { redactGhCredentials } from "./gh.js";
 // `readSetupArtifactLedger` fill the new fields with safe defaults rather than
 // discarding the operation, and a default of "no provenance" fails a
 // post-commit rollback closed instead of guessing.
-export const OPERATION_SCHEMA_VERSION = 5;
+export const OPERATION_SCHEMA_VERSION = 6;
 export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([
-  1, 2, 3, 4, 5
+  1, 2, 3, 4, 5, 6
 ]);
 
 // `deleted` is written only after a cleanup attempt proved the resource is gone
@@ -132,6 +132,17 @@ export type GitHubEnvironmentArtifact = {
   providerId: string | null;
 };
 
+export type GitHubEnvironmentVariableArtifact = {
+  state: "created" | "deleted";
+  repo: string;
+  environment: string;
+  environmentProviderId: string | null;
+  name: string;
+  valueSha256: string;
+  previousValue: string | null;
+  previousKnown: boolean;
+};
+
 // `state` keeps a reverted file in the ledger instead of deleting the entry:
 // the record still has to prove this operation crossed the commit point, and a
 // cleanup retry still needs the provenance of the write it is repeating.
@@ -168,6 +179,7 @@ export type SetupArtifactCommitState = {
 
 export type SetupCleanupArtifactType =
   | "workflow_file"
+  | "github_environment_variable"
   | "github_environment"
   | "role_assignment"
   | "federated_credential"
@@ -204,6 +216,7 @@ export type SetupArtifactLedger = {
   federatedCredentials: FederatedCredentialArtifact[];
   roleAssignments: RoleAssignmentArtifact[];
   githubEnvironment: GitHubEnvironmentArtifact;
+  githubEnvironmentVariables: GitHubEnvironmentVariableArtifact[];
   commit: SetupArtifactCommitState;
   cleanup: SetupArtifactCleanupState;
 };
@@ -972,6 +985,7 @@ export function createSetupArtifactLedger(): SetupArtifactLedger {
       name: null,
       providerId: null
     },
+    githubEnvironmentVariables: [],
     commit: {
       mode: "not_started",
       branch: null,
@@ -1101,6 +1115,38 @@ export function readSetupArtifactLedger(value: any): SetupArtifactLedger {
         source.githubEnvironment && source.githubEnvironment.providerId
       )
     },
+    githubEnvironmentVariables:
+      Array.isArray(source.githubEnvironmentVariables) ?
+        source.githubEnvironmentVariables
+          .map((entry: any) => ({
+            state: entry?.state === "deleted" ? "deleted" : "created",
+            repo: String(entry?.repo || ""),
+            environment: String(entry?.environment || ""),
+            environmentProviderId: optionalIdentityString(
+              entry?.environmentProviderId
+            ),
+            name: String(entry?.name || ""),
+            valueSha256: String(entry?.valueSha256 || ""),
+            previousValue:
+              typeof entry?.previousValue === "string" ?
+                entry.previousValue
+              : null,
+            previousKnown:
+              entry?.previousKnown === true &&
+              entry !== null &&
+              typeof entry === "object" &&
+              Object.hasOwn(entry, "previousValue") &&
+              (typeof entry.previousValue === "string" ||
+                entry.previousValue === null)
+          }))
+          .filter(
+            (entry: GitHubEnvironmentVariableArtifact) =>
+              entry.repo !== "" &&
+              entry.environment !== "" &&
+              entry.name !== "" &&
+              /^[a-f0-9]{64}$/i.test(entry.valueSha256)
+          )
+      : [],
     commit: {
       ...ledger.commit,
       ...(source.commit || {}),
@@ -1648,6 +1694,54 @@ export function recordGitHubEnvironment(op: any, patch: any): any {
   return op;
 }
 
+export function recordGitHubEnvironmentVariable(op: any, entry: any): any {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger || !entry) return op;
+  const record: GitHubEnvironmentVariableArtifact = {
+    state: "created",
+    repo: String(entry.repo || ""),
+    environment: String(entry.environment || ""),
+    environmentProviderId: optionalIdentityString(entry.environmentProviderId),
+    name: String(entry.name || ""),
+    valueSha256: String(entry.valueSha256 || ""),
+    // GitHub Actions variables are non-secret configuration. Radius retains the
+    // predecessor only in its local operation store because cleanup needs the
+    // plaintext to restore it; toClientView never projects artifact contents.
+    previousValue:
+      typeof entry.previousValue === "string" ? entry.previousValue : null,
+    previousKnown:
+      entry.previousKnown === true &&
+      Object.hasOwn(entry, "previousValue") &&
+      (typeof entry.previousValue === "string" || entry.previousValue === null)
+  };
+  if (
+    !record.repo ||
+    !record.environment ||
+    !record.environmentProviderId ||
+    !record.name ||
+    !/^[a-f0-9]{64}$/i.test(record.valueSha256)
+  ) {
+    return op;
+  }
+  const existing = ledger.githubEnvironmentVariables.findIndex(
+    (candidate) =>
+      candidate.repo === record.repo &&
+      candidate.environment === record.environment &&
+      candidate.name === record.name
+  );
+  if (existing === -1) {
+    ledger.githubEnvironmentVariables.push(record);
+  } else {
+    const previous = ledger.githubEnvironmentVariables[existing];
+    ledger.githubEnvironmentVariables[existing] = {
+      ...record,
+      previousValue: previous.previousValue,
+      previousKnown: previous.previousKnown
+    };
+  }
+  return op;
+}
+
 /**
  * Turn the GitHub environment this operation created from a candidate into a
  * proven creation.
@@ -1815,6 +1909,14 @@ export function recordCleanupDeletion(
         return false;
       ledger.githubEnvironment.state = "deleted";
       return true;
+    case "github_environment_variable": {
+      const variable = ledger.githubEnvironmentVariables.find(
+        (entry) => entry.state === "created" && matches(entry)
+      );
+      if (!variable) return false;
+      variable.state = "deleted";
+      return true;
+    }
     case "federated_credential": {
       const remaining = ledger.federatedCredentials.filter(
         (entry: any) => !matches(entry)
@@ -1858,6 +1960,9 @@ function hasTrackedSetupArtifacts(ledger: SetupArtifactLedger | null): boolean {
     ledger.roleAssignments.length > 0 ||
     ledger.githubEnvironment.state === "created" ||
     ledger.githubEnvironment.state === "created_candidate" ||
+    ledger.githubEnvironmentVariables.some(
+      (entry) => entry.state === "created"
+    ) ||
     ledger.commit.workflowFiles.length > 0
   );
 }
@@ -1979,6 +2084,10 @@ function formatWorkflowFileLabel(file: any): string {
   return branch ? `${path} on ${branch}` : path;
 }
 
+function formatGitHubEnvironmentVariableLabel(variable: any): string {
+  return `${String(variable.repo || "")}:${String(variable.environment || "")} variable ${String(variable.name || "")}`;
+}
+
 // ─── Reuse and unproven-ownership copy ───────────────────────────────────────
 // "Reused" on its own is the sentence that sends a customer to a support
 // thread: they watched Create Environment make an App Registration, and the
@@ -2089,6 +2198,13 @@ export function cleanupArtifactIdentity(
           artifact.name
         )}`
       );
+    case "github_environment_variable":
+      return identityLedBy(
+        artifact.environmentProviderId,
+        `${normalizeIdentityPart(artifact.repo)}:${normalizeIdentityPart(
+          artifact.environment
+        )}:${normalizeIdentityPart(artifact.name)}`
+      );
     // Path plus branch, because the same workflow path on a setup branch and on
     // the default branch are two different files with two different provenances.
     case "workflow_file":
@@ -2192,6 +2308,18 @@ const LEDGER_ARTIFACTS: readonly LedgerArtifactRow[] = Object.freeze([
       )
     ],
     unprovenAction: UNPROVEN_GITHUB_ENVIRONMENT_ACTION
+  },
+  {
+    kind: "github_environment_variable",
+    entries: (ledger: any) =>
+      ledger.githubEnvironmentVariables.map((entry: any) =>
+        ledgerEntry(
+          "github_environment_variable",
+          entry,
+          formatGitHubEnvironmentVariableLabel(entry),
+          entry.state
+        )
+      )
   },
   {
     kind: "workflow_file",
@@ -3016,6 +3144,7 @@ export function canRetrySetup(op: any): any {
 const ROLLBACK_ARTIFACT_ORDER: readonly SetupCleanupArtifactType[] =
   Object.freeze([
     "workflow_file",
+    "github_environment_variable",
     "github_environment",
     "role_assignment",
     "federated_credential",
@@ -3255,6 +3384,40 @@ export function workflowRollbackTargets(
     .filter((entry: any) => !keys || keys.has(entry.key));
 }
 
+export function githubEnvironmentVariableRollbackTargets(
+  op: any,
+  keys?: Set<string> | null
+): Array<
+  GitHubEnvironmentVariableArtifact & {
+    target: string;
+    identity: string;
+    key: string;
+  }
+> {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger) return [];
+  return ledger.githubEnvironmentVariables
+    .filter((variable) => variable.state === "created")
+    .map((variable) => {
+      const target = formatGitHubEnvironmentVariableLabel(variable);
+      const identity = cleanupArtifactIdentity(
+        "github_environment_variable",
+        variable
+      );
+      return {
+        ...variable,
+        target,
+        identity,
+        key: cleanupTargetKey({
+          artifactType: "github_environment_variable",
+          identity,
+          target
+        })
+      };
+    })
+    .filter((entry) => !keys || keys.has(entry.key));
+}
+
 /** The commit state a rollback needs to locate what it would revert. */
 export function workflowRollbackCommitState(op: any): any {
   const ledger = getSetupArtifactLedger(op);
@@ -3392,7 +3555,8 @@ function findProvenOwnedCleanupTarget(
 export function unresolvedCleanupTargets(op: any): any[] {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return [];
-  return cleanupAttemptResults(ledger)
+  const attemptResults = cleanupAttemptResults(ledger);
+  const unresolved = attemptResults
     .filter((entry: any) => entry.outcome === "warning")
     .map((entry: any) => {
       const artifact = findProvenOwnedCleanupTarget(ledger, entry);
@@ -3416,6 +3580,35 @@ export function unresolvedCleanupTargets(op: any): any[] {
       };
     })
     .filter((entry: any) => entry !== null);
+  const blockedByVariableConflict = attemptResults.some(
+    (entry: any) =>
+      entry.artifactType === "github_environment_variable" &&
+      entry.outcome === "skipped"
+  );
+  if (unresolved.length === 0 && !blockedByVariableConflict) return [];
+  const attemptedKeys = new Set(
+    attemptResults.map((entry: any) => {
+      const artifact = findProvenOwnedCleanupTarget(ledger, entry);
+      const identity =
+        artifact ?
+          cleanupArtifactIdentity(artifact.kind, artifact.artifact)
+        : normalizeIdentityPart(entry?.identity);
+      return cleanupTargetKey({
+        artifactType: entry.artifactType,
+        identity,
+        target: entry.target
+      });
+    })
+  );
+  for (const target of provenOwnedCleanupTargets(op)) {
+    if (
+      !attemptedKeys.has(target.key) &&
+      !unresolved.some((entry: any) => entry.key === target.key)
+    ) {
+      unresolved.push(target);
+    }
+  }
+  return unresolved;
 }
 
 /**
@@ -3478,6 +3671,17 @@ function isExecutableCleanupTarget(op: any, target: RollbackTarget): boolean {
     return Boolean(
       String(ledger.githubEnvironment.repo || "").trim() &&
       String(ledger.githubEnvironment.name || "").trim()
+    );
+  }
+  if (target.artifactType === "github_environment_variable") {
+    return ledger.githubEnvironmentVariables.some(
+      (artifact) =>
+        artifact.state === "created" &&
+        Boolean(artifact.environmentProviderId) &&
+        artifact.previousKnown &&
+        /^[a-f0-9]{64}$/i.test(artifact.valueSha256) &&
+        cleanupArtifactIdentity("github_environment_variable", artifact) ===
+          target.identity
     );
   }
   if (target.artifactType === "service_principal") {

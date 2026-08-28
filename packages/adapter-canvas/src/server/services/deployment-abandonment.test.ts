@@ -386,4 +386,24 @@ describe("createDeploymentAbandonmentService", () => {
       }
     });
   });
+
+  it("uses the bundled GitHub CLI path in permission guidance", async () => {
+    await expect(
+      abandon({
+        ghCommandPresentation: {
+          kind: "absolute",
+          shell: "posix",
+          executablePath: "/opt/Copilot Tools/gh",
+          installationNote: "Install GitHub CLI system-wide."
+        },
+        ghOrThrow: () => Promise.reject(new Error("HTTP 403: Forbidden"))
+      })
+    ).resolves.toMatchObject({
+      body: {
+        error: expect.stringContaining(
+          "'/opt/Copilot Tools/gh' auth refresh -h github.com -s repo"
+        )
+      }
+    });
+  });
 });

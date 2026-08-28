@@ -1,6 +1,10 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import type { RemediationSessionMessage } from "@radius-project/core";
+import type {
+  Remediation,
+  RemediationSessionMessage
+} from "@radius-project/core";
+import { presentRemediation } from "../../../src/gh-command-display.js";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { validateBrowserMutationRequest } from "../../../src/server/browser-mutation.js";
@@ -26,12 +30,16 @@ interface Harness {
   outcome: { status: number; error?: string };
 }
 
-function start(): Harness {
+function start(
+  presenter: (remediation: Remediation) => Remediation = (remediation) =>
+    remediation
+): Harness {
   const harness: Harness = { sent: [], outcome: { status: 200 } };
 
   const routes = createTestRouteTable(
     createRemediationRoutes(
       productionRemediationDependencies({
+        presentRemediation: presenter,
         runSessionPrompt: (message) => {
           harness.sent.push(message);
           return Promise.resolve(harness.outcome);
@@ -112,8 +120,34 @@ describe("run-remediation real-loopback HIT", () => {
       message:
         "Asked Copilot to run `az login --use-device-code`. After the login finishes, return to the Radius canvas and click Verify Credentials again."
     });
+
     expect(harness.sent).toHaveLength(1);
     expect(harness.sent[0].prompt).toContain("az login --use-device-code");
+  });
+
+  it("returns and hands off the bundled GitHub CLI path", async () => {
+    const harness = start((remediation) =>
+      presentRemediation(remediation, {
+        kind: "absolute",
+        shell: "powershell",
+        executablePath: "C:\\Copilot Tools\\gh.exe",
+        installationNote: "Install GitHub CLI system-wide."
+      })
+    );
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      { id: "github-workflow-scope", params: {}, confirmed: true },
+      browserHeaders(entry.baseUrl)
+    );
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as { command: string };
+    expect(payload.command).toBe(
+      "& 'C:\\Copilot Tools\\gh.exe' auth refresh -h github.com -s workflow"
+    );
+    expect(harness.sent[0].prompt).toContain(payload.command);
   });
 
   it("rejects a request without the browser mutation nonce", async () => {

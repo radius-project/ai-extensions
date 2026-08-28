@@ -20,6 +20,7 @@ import {
   promoteCreatedGitHubEnvironment,
   recordCommittedWorkflowFile,
   recordGitHubEnvironment,
+  recordGitHubEnvironmentVariable,
   setCanonicalEnvironment,
   settleProviderMutation
 } from "../../../src/operations.js";
@@ -28,6 +29,7 @@ import { createTestRouteTable } from "../../support/server/route-table.js";
 import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasState } from "../../../src/shared.js";
+import type { GhCommandPresentation } from "../../../src/gh-command-display.js";
 import type {
   CreateEnvironmentDependencies,
   CreateEnvironmentInstanceEntry
@@ -56,6 +58,7 @@ interface GhRule {
 }
 
 interface Script {
+  ghCommandPresentation?: GhCommandPresentation;
   gh?: GhRule[];
   runListResults?: Array<Partial<CreateEnvironmentCommandResult>>;
   dispatchResults?: Array<Partial<CreateEnvironmentCommandResult>>;
@@ -191,6 +194,10 @@ function recoveredVerifyWorkflowRules(): GhRule[] {
 
 const DEFAULT_GH_RULES: GhRule[] = [
   {
+    match: /^api \/repos\/octo\/app\/environments\/[^/]+\/variables\//,
+    result: { code: 1, stderr: "HTTP 404: Not Found" }
+  },
+  {
     match: /^api \/repos\/octo\/app\/environments\/dev$/,
     result: { code: 1, stderr: "HTTP 404: Not Found" }
   },
@@ -204,6 +211,7 @@ const DEFAULT_GH_RULES: GhRule[] = [
       code: 0,
       stdout: JSON.stringify({
         name: "dev",
+        id: 1234567,
         created_at: "2023-11-14T22:13:20.000Z"
       })
     }
@@ -294,7 +302,7 @@ function start(script: Script = {}): Harness {
     operation.setupArtifacts = {
       ...createSetupArtifactLedger(),
       githubEnvironment: {
-        providerId: null,
+        providerId: "1234567",
         state: script.preparedEnvironment.state,
         origin:
           script.preparedEnvironment.state === "reused" ?
@@ -306,8 +314,6 @@ function start(script: Script = {}): Harness {
     };
   }
 
-  const rules = [...(script.gh ?? []), ...DEFAULT_GH_RULES];
-
   // `gh api --method PUT .../contents/...` carries its target branch in the
   // JSON body, not in argv, so the argv alone cannot tell a default-branch
   // commit from a pull-request-branch one. The fake reads the body the
@@ -317,6 +323,12 @@ function start(script: Script = {}): Harness {
   let defaultRunListCalls = 0;
   const runListResults = [...(script.runListResults || [])];
   const dispatchResults = [...(script.dispatchResults || [])];
+  const resolveRule = (rule: GhRule): CreateEnvironmentCommandResult => ({
+    code: rule.result.code ?? 0,
+    stdout: rule.result.stdout ?? "",
+    stderr: rule.result.stderr ?? "",
+    ...(rule.result.timedOut ? { timedOut: true } : {})
+  });
   const runGhArgs = (args: string[]): CreateEnvironmentCommandResult => {
     const key = args
       .map((arg) => (arg === TEMP_BODY_PATH ? `@${lastBodyBranch}` : arg))
@@ -367,14 +379,30 @@ function start(script: Script = {}): Harness {
         stderr: ""
       };
     }
-    for (const rule of rules) {
+    for (const rule of script.gh ?? []) {
+      if (rule.match.test(key)) return resolveRule(rule);
+    }
+    const providerId =
+      (
+        typeof operation.setupArtifacts.githubEnvironment.providerId ===
+        "string"
+      ) ?
+        operation.setupArtifacts.githubEnvironment.providerId
+      : "";
+    if (
+      providerId &&
+      /^api \/repos\/octo\/app\/environments\/[^/]+$/.test(key)
+    ) {
+      const name = decodeURIComponent(key.split("/").at(-1) || "");
+      return {
+        code: 0,
+        stdout: JSON.stringify({ id: providerId, name }),
+        stderr: ""
+      };
+    }
+    for (const rule of DEFAULT_GH_RULES) {
       if (rule.match.test(key)) {
-        return {
-          code: rule.result.code ?? 0,
-          stdout: rule.result.stdout ?? "",
-          stderr: rule.result.stderr ?? "",
-          ...(rule.result.timedOut ? { timedOut: true } : {})
-        };
+        return resolveRule(rule);
       }
     }
     throw new Error(`unscripted gh call: ${key}`);
@@ -383,6 +411,7 @@ function start(script: Script = {}): Harness {
   const entry: CreateEnvironmentInstanceEntry = { state };
 
   const dependencies: CreateEnvironmentDependencies = {
+    ghCommandPresentation: script.ghCommandPresentation,
     // --- request scope: read per request, exactly as server.ts does ---
     isServerOwnedRequest: (_instanceId, request) =>
       request.headers["x-radius-server-owned"] === SERVER_OWNED_TOKEN,
@@ -614,6 +643,10 @@ function start(script: Script = {}): Harness {
     recordGitHubEnvironment: (targetOperation, patch) => {
       journal.push(`recordGitHubEnvironment:${patch.state}`);
       recordGitHubEnvironment(targetOperation, patch);
+    },
+    recordGitHubEnvironmentVariable: (targetOperation, entry) => {
+      journal.push(`recordGitHubEnvironmentVariable:${entry.name}`);
+      recordGitHubEnvironmentVariable(targetOperation, entry);
     },
     promoteCreatedGitHubEnvironment: (targetOperation, identity) => {
       const promoted = promoteCreatedGitHubEnvironment(
@@ -1139,6 +1172,73 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     ]);
   });
 
+  it("reconciles a restored variable mutation before any later provider write", async () => {
+    const harness = start({
+      preparedEnvironment: {
+        requestedName: "dev",
+        canonicalName: "dev",
+        state: "reused"
+      },
+      gh: [
+        {
+          match:
+            /^api \/repos\/octo\/app\/environments\/dev\/variables\/RADIUS_MANAGED$/,
+          result: {
+            code: 0,
+            stdout: JSON.stringify({ name: "RADIUS_MANAGED", value: "true" })
+          }
+        }
+      ]
+    });
+    harness.operation.recoveryState = "provider_reconciliation_pending";
+    prepareProviderMutation(harness.operation, {
+      kind: "github_environment_variable.put",
+      target: "octo/app:dev:RADIUS_MANAGED",
+      intent: {
+        name: "RADIUS_MANAGED",
+        value: "true",
+        valueSha256: digestOf("true"),
+        previousKnown: true,
+        previousValue: null
+      }
+    });
+
+    const response = await post({
+      repo: "octo/app",
+      environment: "dev",
+      operationEnvironment: "dev",
+      operationId: "op-http"
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      cancelled: true,
+      code: "operation-stopped"
+    });
+    const providerRecovery = harness.operation.providerRecovery;
+    if (!providerRecovery?.mutations) {
+      throw new Error("expected the restored mutation journal");
+    }
+    expect(providerRecovery.mutations[0]).toMatchObject({
+      status: "confirmed"
+    });
+    expect(harness.operation.setupArtifacts.githubEnvironmentVariables).toEqual(
+      [
+        expect.objectContaining({
+          name: "RADIUS_MANAGED",
+          previousValue: null,
+          previousKnown: true
+        })
+      ]
+    );
+    expect(
+      harness.ghCalls.some((call) => call.startsWith("variable set "))
+    ).toBe(false);
+    expect(
+      harness.ghCalls.some((call) => call.startsWith("api --method PUT "))
+    ).toBe(false);
+  });
+
   it("recomputes incomplete credentials while reconciling a workflow", async () => {
     const harness = start({
       preparedEnvironment: {
@@ -1408,7 +1508,10 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       gh: [
         {
           match: /^api \/repos\/octo\/app\/environments\/production$/,
-          result: { code: 0, stdout: '{"name":"Production"}' }
+          result: {
+            code: 0,
+            stdout: '{"name":"Production","id":1234567}'
+          }
         }
       ]
     });
@@ -1478,7 +1581,9 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     });
     expect(
       harness.ghCalls.some((call) =>
-        call.includes("/repos/octo/app/environments/")
+        /^api \/repos\/octo\/app\/environments\/(?!Production(?:\/|$))/.test(
+          call
+        )
       )
     ).toBe(false);
     expect(harness.journal).toContain(
@@ -1633,6 +1738,33 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       "variable set RADIUS_MANAGED --body true --env dev --repo octo/app"
     );
     expect(harness.journal).toContain("envListCacheDelete:octo/app");
+  });
+
+  it("finalizes a variable preflight failure instead of reporting nonexistent reconciliation", async () => {
+    const harness = start({
+      gh: [
+        {
+          match:
+            /^api \/repos\/octo\/app\/environments\/dev\/variables\/RADIUS_MANAGED$/,
+          result: { code: 1, stderr: "HTTP 503: unavailable" }
+        }
+      ]
+    });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      code: "create-environment-unhandled"
+    });
+    expect(harness.failures).toContainEqual(
+      expect.objectContaining({ code: "create-environment-unhandled" })
+    );
+    expect(
+      harness.ghCalls.some((call) =>
+        call.startsWith("variable set RADIUS_MANAGED ")
+      )
+    ).toBe(false);
   });
 
   it("records the credential profile the request names", async () => {
@@ -2050,6 +2182,12 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
 
   it("fails 400 with the workflow-scope hint when the verify workflow cannot be committed", async () => {
     const harness = start({
+      ghCommandPresentation: {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/opt/Copilot Tools/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      },
       gh: [
         {
           match: /^api --method PUT \/repos\/octo\/app\/contents\//,
@@ -2068,8 +2206,9 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     const payload = (await response.json()) as { error: string; code: string };
     expect(payload.code).toBe("verify-workflow-commit-failed");
     expect(payload.error).toContain(
-      "gh auth refresh -h github.com -s workflow"
+      "'/opt/Copilot Tools/gh' auth refresh -h github.com -s workflow"
     );
+    expect(payload.error).toContain("Install GitHub CLI system-wide.");
     expect(harness.committedFiles).toEqual([]);
   });
 

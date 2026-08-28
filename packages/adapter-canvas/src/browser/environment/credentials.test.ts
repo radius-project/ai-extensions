@@ -416,6 +416,17 @@ describe("GitHub Packages identity parsing and rendering", () => {
     expect(errored.statusHtml).toBeNull();
   });
 
+  it("surfaces installation guidance when GitHub CLI is unavailable", () => {
+    const view = renderGitHubAccessView(pkgIdentity({ actingLogin: "" }), {
+      kind: "unavailable",
+      shell: "posix",
+      installationNote: "Install GitHub CLI system-wide."
+    });
+
+    expect(view.statusText).toBe("Install GitHub CLI system-wide.");
+    expect(view.commandVisible).toBe(false);
+  });
+
   it("renders the verified view with an escaped login", () => {
     const view = renderGitHubAccessView({
       error: "",
@@ -436,11 +447,36 @@ describe("GitHub Packages identity parsing and rendering", () => {
       actingHasPackages: false,
       ...LEGACY_IDENTITY
     });
+
     expect(view.packagesVerified).toBe(false);
     expect(view.commandVisible).toBe(true);
     expect(view.retryVisible).toBe(true);
     expect(view.remediation?.command).toBe(
       "gh auth switch -h github.com -u octocat\ngh auth refresh -h github.com -s read:packages -s write:packages"
+    );
+  });
+
+  it("renders a bundled GitHub CLI path and installation alternative", () => {
+    const view = renderGitHubAccessView(
+      pkgIdentity({
+        actingLogin: "octocat",
+        packagesLogin: "octocat",
+        packagesHasWrite: false,
+        packagesCredentialSource: "keyring"
+      }),
+      {
+        kind: "absolute",
+        shell: "powershell",
+        executablePath: "C:\\Copilot Tools\\gh.exe",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(view.remediation?.command).toContain(
+      "& 'C:\\Copilot Tools\\gh.exe' auth switch"
+    );
+    expect(view.remediation?.warning).toContain(
+      "Install GitHub CLI system-wide."
     );
   });
 

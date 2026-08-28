@@ -253,6 +253,101 @@ describe.sequential("cliExec", () => {
     delete process.env.GITHUB_TOKEN;
   });
 
+  it.each([
+    ["win32", "gh.exe"],
+    ["linux", "gh"],
+    ["darwin", "gh"]
+  ] as const)(
+    "invokes gh by bare name on %s so the inherited PATH resolves it",
+    async (platform, expected) => {
+      const { cliExec } = await loadGh(platform);
+
+      cliExec("gh", ["auth", "status"], {}, vi.fn());
+
+      const [file] = childProcess.execFile.mock.calls[0];
+      expect(file).toBe(expected);
+    }
+  );
+
+  it("keeps an explicit non-Windows gh path instead of rewriting it to a bare name", async () => {
+    const { cliExec } = await loadGh("linux");
+
+    cliExec("/usr/local/bin/gh", ["auth", "status"], {}, vi.fn());
+
+    const [file] = childProcess.execFile.mock.calls[0];
+    expect(file).toBe("/usr/local/bin/gh");
+  });
+
+  it("adds the inherited search path to a caller env that omits it", async () => {
+    const { cliExec } = await loadGh("linux");
+
+    cliExec("gh", ["auth", "status"], { env: { KEEP_ME: "yes" } }, vi.fn());
+
+    const [, , options] = childProcess.execFile.mock.calls[0];
+    expect(options.env.PATH).toBe(process.env.PATH);
+    expect(options.env.KEEP_ME).toBe("yes");
+  });
+
+  it("does not overwrite a search path the caller supplied", async () => {
+    const { cliExec } = await loadGh("linux");
+
+    cliExec("gh", ["auth", "status"], { env: { PATH: "/only/here" } }, vi.fn());
+
+    const [, , options] = childProcess.execFile.mock.calls[0];
+    expect(options.env.PATH).toBe("/only/here");
+  });
+
+  it.each([
+    ["linux", "Path"],
+    ["darwin", "path"]
+  ] as const)(
+    "inherits uppercase PATH when a %s caller supplies unrelated %s",
+    async (platform, key) => {
+      const { cliExec } = await loadGh(platform);
+
+      cliExec(
+        "gh",
+        ["auth", "status"],
+        { env: { [key]: "/caller-only" } },
+        vi.fn()
+      );
+
+      const [, , options] = childProcess.execFile.mock.calls[0];
+      expect(options.env.PATH).toBe(process.env.PATH);
+      expect(options.env[key]).toBe("/caller-only");
+    }
+  );
+
+  it("matches a caller's Windows search path key case-insensitively", async () => {
+    const { cliExec } = await loadGh("win32");
+
+    cliExec(
+      "gh",
+      ["auth", "status"],
+      { env: { Path: "C:\\caller-only" } },
+      vi.fn()
+    );
+
+    const [, , options] = childProcess.execFile.mock.calls[0];
+    const searchPaths = Object.entries(options.env).filter(
+      ([key]) => key.toLowerCase() === "path"
+    );
+    expect(searchPaths).toEqual([["Path", "C:\\caller-only"]]);
+  });
+
+  it("does not re-add unrelated ambient variables to a caller-supplied env", async () => {
+    const { cliExec } = await loadGh("linux");
+    process.env.RADIUS_AMBIENT_PROBE = "leak";
+    try {
+      cliExec("gh", ["auth", "status"], { env: { KEEP_ME: "yes" } }, vi.fn());
+    } finally {
+      delete process.env.RADIUS_AMBIENT_PROBE;
+    }
+
+    const [, , options] = childProcess.execFile.mock.calls[0];
+    expect(options.env.RADIUS_AMBIENT_PROBE).toBeUndefined();
+  });
+
   it("passes a Windows gh query string containing an ampersand as one literal argument", async () => {
     const { cliExec } = await loadGh("win32");
     const callback = vi.fn();
@@ -337,8 +432,16 @@ describe.sequential("cliExec", () => {
       callback
     );
 
-    const [, , options] = childProcess.execFile.mock.calls[0];
-    expect(options.env).toEqual({ KEEP_ME: "yes" });
+    const [file, , options] = childProcess.execFile.mock.calls[0];
+    expect(file).toBe("/usr/local/bin/gh");
+    expect(options.env).toEqual(
+      expect.objectContaining({
+        PATH: process.env.PATH,
+        KEEP_ME: "yes"
+      })
+    );
+    expect(options.env.GH_TOKEN).toBeUndefined();
+    expect(options.env.GITHUB_TOKEN).toBeUndefined();
   });
 
   it("quotes Windows CLI arguments while leaving a simple executable unquoted", async () => {
@@ -438,9 +541,17 @@ describe.sequential("cliExec", () => {
     expect(childProcess.execFile).toHaveBeenCalledWith(
       "gh.exe",
       ["auth", "status"],
-      expect.objectContaining({ env: { KEEP_ME: "yes" } }),
+      expect.objectContaining({
+        env: expect.objectContaining({
+          PATH: process.env.PATH,
+          KEEP_ME: "yes"
+        })
+      }),
       callback
     );
+    const [, , options] = childProcess.execFile.mock.calls[0];
+    expect(options.env.GH_TOKEN).toBeUndefined();
+    expect(options.env.GITHUB_TOKEN).toBeUndefined();
   });
 
   it("keeps ambient GitHub tokens when the injected token already has workflow (even with a keyring login)", async () => {
@@ -468,10 +579,11 @@ describe.sequential("cliExec", () => {
       "gh.exe",
       ["auth", "status"],
       expect.objectContaining({
-        env: {
+        env: expect.objectContaining({
+          PATH: process.env.PATH,
           GH_TOKEN: "ambient-gh",
           GITHUB_TOKEN: "ambient-github"
-        }
+        })
       }),
       callback
     );
@@ -502,10 +614,11 @@ describe.sequential("cliExec", () => {
       "gh.exe",
       ["auth", "status"],
       expect.objectContaining({
-        env: {
+        env: expect.objectContaining({
+          PATH: process.env.PATH,
           GH_TOKEN: "ambient-gh",
           GITHUB_TOKEN: "ambient-github"
-        }
+        })
       }),
       callback
     );
@@ -553,8 +666,35 @@ describe.sequential("cliExec", () => {
     const [, , options] = childProcess.execFile.mock.calls[0];
     // ghChildEnv strips GH_TOKEN (token lacks workflow, keyring has it) and
     // withoutAgentSession strips the agent session var; KEEP_ME survives.
-    expect(options.env).toEqual({ KEEP_ME: "yes" });
+    expect(options.env).toEqual(
+      expect.objectContaining({
+        PATH: process.env.PATH,
+        KEEP_ME: "yes"
+      })
+    );
+    expect(options.env.GH_TOKEN).toBeUndefined();
     expect(options.env.COPILOT_AGENT_SESSION_ID).toBeUndefined();
+  });
+
+  it("merges keyring-only overrides with the inherited app environment", async () => {
+    const { runGhKeyringCommand } = await loadGh("linux", {
+      token: "ambient-gh",
+      githubToken: "ambient-github"
+    });
+
+    await runGhKeyringCommand(["auth", "token"], {
+      env: { GH_CONFIG_DIR: "isolated-config" }
+    });
+
+    const options = childProcess.execFile.mock.calls.at(-1)?.[2];
+    expect(options?.env).toEqual(
+      expect.objectContaining({
+        PATH: process.env.PATH,
+        GH_CONFIG_DIR: "isolated-config"
+      })
+    );
+    expect(options?.env.GH_TOKEN).toBeUndefined();
+    expect(options?.env.GITHUB_TOKEN).toBeUndefined();
   });
 
   it("produces a valid env with PATH when COPILOT_AGENT_SESSION_ID is unset", async () => {
@@ -892,6 +1032,7 @@ describe.sequential("selected GitHub executor", () => {
     expect(options.env.GH_TOKEN).toBe("selected-injected-token");
     expect(options.env.GITHUB_TOKEN).toBeUndefined();
     expect(options.env.GH_HOST).toBeUndefined();
+    expect(options.env.PATH).toBe(process.env.PATH);
     expect(executor.credentialSource).toBe("injected");
   });
 
@@ -1265,7 +1406,10 @@ describe.sequential("getGitHubIdentity", () => {
       token: "tok",
       withToken: STATUS.tokenPubActive,
       keyring: STATUS.keyringPubAndEmu,
-      userTokens: { pubuser: "keyring-pub-token", emuuser: "keyring-emu-token" }
+      userTokens: {
+        pubuser: "keyring-pub-token",
+        emuuser: "keyring-emu-token"
+      }
     });
     const id = await getGitHubIdentity();
     expect(id.actingLogin).toBe("pubuser");
