@@ -18,6 +18,7 @@ import {
 
 const RECONCILE_DELAYS_MS = Object.freeze([0, 2000, 5000]);
 const REGISTRATION_RETRY_DELAYS_MS = Object.freeze([2000, 5000]);
+const REGISTRATION_MAX_ATTEMPTS = REGISTRATION_RETRY_DELAYS_MS.length + 1;
 
 export interface VerificationDispatchIdentity {
   dispatchedAt: number;
@@ -73,7 +74,6 @@ export interface VerificationDispatchInput {
   ref: string;
   operationMarker: string;
   allowRegistrationRetry: boolean;
-  host?: string;
   ports: VerificationDispatchPorts;
 }
 
@@ -102,8 +102,7 @@ function confirmedRunIdentity(
   }
   try {
     const run = parseVerifyWorkflowRunUrl(verification.runUrl, {
-      targetRepo: input.repo,
-      host: input.host
+      targetRepo: input.repo
     });
     return (
         run.runId === verification.runId && run.runId === mutation.providerId
@@ -313,7 +312,7 @@ export async function runVerificationDispatch(
     input.ref
   );
   const actionsUrl =
-    `https://${input.host || "github.com"}/${input.repo}/actions/workflows/` +
+    `https://github.com/${input.repo}/actions/workflows/` +
     encodeURIComponent(input.workflowFile);
 
   const manualRequired = async (
@@ -384,7 +383,7 @@ export async function runVerificationDispatch(
         operationMarker: identity.operationMarker
       });
       if (exact.state === "applied") {
-        const runUrl = `https://${input.host || "github.com"}/${input.repo}/actions/runs/${exact.runId}`;
+        const runUrl = `https://github.com/${input.repo}/actions/runs/${exact.runId}`;
         ports.applyIdentity(identity, { runId: exact.runId, runUrl });
         finalDiagnostic =
           "The exact operation-marked verification run was adopted.";
@@ -499,8 +498,7 @@ export async function runVerificationDispatch(
       let run;
       try {
         run = parseVerifyWorkflowRunUrl(result.stdout, {
-          targetRepo: input.repo,
-          host: input.host
+          targetRepo: input.repo
         });
       } catch (error) {
         const malformed = `${diagnostic}; ${
@@ -532,7 +530,7 @@ export async function runVerificationDispatch(
 
     const canRetry =
       input.allowRegistrationRetry &&
-      attempt < 3 &&
+      attempt < REGISTRATION_MAX_ATTEMPTS &&
       isWorkflowRegistrationRejection(result, freshWrite);
     settleProviderMutation(
       operation,

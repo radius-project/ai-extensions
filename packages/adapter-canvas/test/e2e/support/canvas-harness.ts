@@ -414,6 +414,12 @@ export function defaultFakeCliScenario(): FakeCliScenario {
       },
       {
         tool: "gh",
+        args: ["api", "user", "--jq", ".login"],
+        env: { GH_TOKEN: PLACEHOLDER_SECRET },
+        stdout: "acting-user"
+      },
+      {
+        tool: "gh",
         args: ["api", `repos/${REPOSITORY}`],
         stdout: '{"permissions":{"admin":true,"push":true,"pull":true}}'
       },
