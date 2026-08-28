@@ -4,15 +4,15 @@ This record tracks issue [#308](https://github.com/radius-project/ai-extensions/
 
 ## Candidate identity
 
-| Field                               | Value                                                     |
-|-------------------------------------|-----------------------------------------------------------|
-| Stacked source commit               | `939428bf50b733038b3dee79014b3d5615c233c4` (PR #544 head) |
-| Required base before final signoff  | PR #544 merge commit                                      |
-| Release-candidate version           | `NOT RUN` - no immutable candidate is designated          |
-| Installation source and attestation | `NOT RUN`                                                 |
-| Record last refreshed               | 2026-08-27                                                |
+| Field                               | Value                                                   |
+|-------------------------------------|---------------------------------------------------------|
+| Environment-hardening baseline      | `ebe35941589a30cce99e4be919f1a95f2d4864d8` (#544 merge) |
+| #308 implementation commit          | Record the final commit after this refresh              |
+| Release-candidate version           | `NOT RUN` - no immutable candidate is designated        |
+| Installation source and attestation | `NOT RUN`                                               |
+| Record last refreshed               | 2026-08-28                                              |
 
-Before final qualification, replace the stacked source commit with the actual #544 merge descendant and identify one immutable plugin version, ref, artifact digest, and attestation. `main`, `edge`, or an arbitrary commit is not implicitly the release candidate.
+Before final qualification, record the final #308 commit and identify one immutable plugin version, ref, artifact digest, and attestation. `main`, `edge`, or an arbitrary commit is not implicitly the release candidate.
 
 ## Status rules
 
@@ -40,17 +40,17 @@ Mocks, an empty checklist, inferred approval, prior prototype work, and work per
 
 ## Existing automated evidence
 
-The following is supporting evidence for the stacked source commit, not a #308 release-candidate `PASS`:
+The following is supporting evidence for the merged #544 baseline, not a #308 release-candidate `PASS`:
 
-| Check                                | Status                             | Evidence                                                                                                                    |
-|--------------------------------------|------------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
-| PR #544 Build                        | `NOT RUN` for the future candidate | [Run 33051609919](https://github.com/radius-project/ai-extensions/actions/runs/33051609919) passed for the stacked PR head. |
-| PR #544 live upstream templates      | `NOT RUN` for the future candidate | [Run 33051609890](https://github.com/radius-project/ai-extensions/actions/runs/33051609890) passed without cloud mutation.  |
-| #308 diagnostics and support changes | `NOT RUN`                          | Record the final CI run URL and exact test identifiers after this change is committed.                                      |
+| Check                                | Status                             | Evidence                                                                                                                                                        |
+|--------------------------------------|------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| PR #544 Publish/Build                | `NOT RUN` for the future candidate | [Run 33215077408](https://github.com/radius-project/ai-extensions/actions/runs/33215077408) passed for merge commit `ebe35941589a30cce99e4be919f1a95f2d4864d8`. |
+| PR #544 live upstream templates      | `NOT RUN` for the future candidate | [Run 33215077239](https://github.com/radius-project/ai-extensions/actions/runs/33215077239) passed for the merge commit without cloud mutation.                 |
+| #308 diagnostics and support changes | `NOT RUN`                          | Record the final CI run URL and exact test identifiers after this change is committed.                                                                          |
 
 ## Mutation-boundary traceability
 
-This section maps deterministic coverage to the stacked #544 implementation. Add a new test only if a production mutation owner lacks evidence for prepared intent, conclusive rejection or unknown outcome, reconciliation, duplicate prevention, and safe cleanup disposition. Generic recovery behavior is proven once in `provider-mutation-recovery.test.ts`; call-site tests prove each owner uses that contract.
+This section maps deterministic coverage to the merged #544 implementation. The map was refreshed against merge commit `ebe35941589a30cce99e4be919f1a95f2d4864d8`, including its final rollback-provenance and variable-rollback review changes. Add a new test only if a production mutation owner lacks evidence for prepared intent, conclusive rejection or unknown outcome, reconciliation, duplicate prevention, and safe cleanup disposition. Generic recovery behavior is proven once in `provider-mutation-recovery.test.ts`; call-site tests prove each owner uses that contract.
 
 | Boundary                                        | Production owner                                                                         | Existing deterministic evidence                                                                                                                                                                                                                                                                                                                                 |
 |-------------------------------------------------|------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
