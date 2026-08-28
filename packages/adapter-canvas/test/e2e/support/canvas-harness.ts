@@ -4,6 +4,10 @@ import { promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test as base, expect, type Page } from "@playwright/test";
+import {
+  azureDiscoveryContract,
+  type AzureDiscoveryCluster
+} from "../../support/azure-discovery-contract.js";
 import type { CanvasState, SharedCredentials } from "../../../src/shared.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
 
@@ -27,7 +31,10 @@ export const WORKTREE_BRANCH = "feature/phase-6";
 export const PROFILE_NAME = "fixture-azure";
 const PROFILE_USER = "fixture-user";
 const PROFILE_TENANT_ID = "11111111-1111-1111-1111-111111111111";
-const PROFILE_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
+// The subscription every suite's fixture profile is provisioned with. Exported
+// so the browser suites name the one subscription once instead of each
+// declaring its own constant for the same value.
+export const PROFILE_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
 export const OPERATION_ID = "operation-fixture-1";
 
 type ServerModule = typeof import("../../../src/server.js");
@@ -66,11 +73,46 @@ export interface FakeCliCommand {
   tool: string;
   args?: string[];
   argsPrefix?: string[];
+  /**
+   * Pins the trailing arguments when a command embeds a value the harness
+   * cannot predict, such as the temporary kubeconfig path discovery generates.
+   * Combined with `argsPrefix` it leaves only the unpredictable span unchecked.
+   */
+  argsSuffix?: string[];
   env?: Record<string, "present" | "absent" | string>;
   exitCode?: number;
   stdout?: string;
   stderr?: string;
   writeFiles?: Array<{ path: string; content: string; executable?: boolean }>;
+}
+
+/**
+ * How the fake CLI decides a command models an invocation. Defined once and
+ * injected into the generated script by source, so a stub asserted against this
+ * predicate in a unit test is matched by exactly the same rule at runtime.
+ */
+export function fakeCliArgsMatch(
+  command: Pick<FakeCliCommand, "args" | "argsPrefix" | "argsSuffix">,
+  args: string[]
+): boolean {
+  if (Array.isArray(command.args)) {
+    return JSON.stringify(command.args) === JSON.stringify(args);
+  }
+  const prefix = command.argsPrefix;
+  const suffix = command.argsSuffix;
+  if (!Array.isArray(prefix) && !Array.isArray(suffix)) {
+    return args.length === 0;
+  }
+  const head = Array.isArray(prefix) ? prefix : [];
+  const tail = Array.isArray(suffix) ? suffix : [];
+  // Overlapping ends would let a short argument list satisfy both halves twice.
+  if (head.length + tail.length > args.length) return false;
+  return (
+    head.every((value, index) => args[index] === value) &&
+    tail.every(
+      (value, index) => args[args.length - tail.length + index] === value
+    )
+  );
 }
 
 export interface FakeCliScenario {
@@ -219,13 +261,7 @@ function envMatches(expected = {}) {
 }
 
 function argsMatch(command) {
-  if (Array.isArray(command.args)) {
-    return JSON.stringify(command.args) === JSON.stringify(args);
-  }
-  if (Array.isArray(command.argsPrefix)) {
-    return command.argsPrefix.every((value, index) => args[index] === value);
-  }
-  return args.length === 0;
+  return (${fakeCliArgsMatch.toString()})(command, args);
 }
 
 if (!scenarioPath) {
@@ -645,92 +681,90 @@ export function defaultFakeCliScenario(): FakeCliScenario {
   };
 }
 
-export interface AzureDiscoveryCluster {
-  id: string;
-  name: string;
-  resourceGroup: string;
-}
-
 export interface AzureDiscoveryFixture {
-  subscriptionId: string;
+  subscriptionId?: string;
   clusters: AzureDiscoveryCluster[];
   resourceGroups?: string[];
-  cluster: string;
-  resourceGroup: string;
-  namespaces: string[];
+  /**
+   * The cluster the UI selects, which must be one of `clusters`: discovery only
+   * reaches the credential and namespace commands for a cluster the listing
+   * actually offered. Omit it to model the listing steps alone.
+   */
+  selected?: AzureDiscoveryCluster;
+  namespaces?: string[];
 }
 
-// Single source of truth for the Azure discovery CLI contract implemented by
-// `src/server/services/discovery.ts`. Namespace discovery writes credentials to a
-// temporary kubeconfig, so the last two stubs must match on a prefix: the generated
-// temp path and the trailing `--overwrite-existing` / `--subscription` arguments
-// cannot be spelled out. Every suite that exercises discovery builds its stubs here
-// so a change to that contract cannot drift out of sync with one of them.
+// The path is generated per request by `createTemporaryKubeconfig`, so the
+// harness cannot spell it out. The stubs are built from the real contract
+// against this sentinel and then split around it, which pins every argument on
+// both sides of the generated path instead of stopping at it.
+const KUBECONFIG_SENTINEL = "<generated-kubeconfig>";
+
+function splitAroundKubeconfig(args: string[]): {
+  argsPrefix: string[];
+  argsSuffix: string[];
+} {
+  const index = args.indexOf(KUBECONFIG_SENTINEL);
+  if (index === -1) {
+    throw new Error("discovery contract no longer names a kubeconfig path");
+  }
+  return {
+    argsPrefix: args.slice(0, index),
+    argsSuffix: args.slice(index + 1)
+  };
+}
+
+/**
+ * Fake-CLI stubs for Azure discovery, built from the shared contract in
+ * `test/support/azure-discovery-contract.ts` so the browser suites model the
+ * same invocations the unit and integration suites assert against.
+ */
 export function azureDiscoveryCommands(
   fixture: AzureDiscoveryFixture
 ): FakeCliCommand[] {
+  if (
+    fixture.selected &&
+    !fixture.clusters.some((entry) => entry.id === fixture.selected?.id)
+  ) {
+    throw new Error(
+      `selected cluster "${fixture.selected.id}" is not in the fixture listing`
+    );
+  }
+  const contract = azureDiscoveryContract({
+    subscriptionId: fixture.subscriptionId,
+    cluster: fixture.selected?.id,
+    resourceGroup: fixture.selected?.resourceGroup,
+    kubeconfigPath: KUBECONFIG_SENTINEL
+  });
   const resourceGroups =
     fixture.resourceGroups ??
     Array.from(new Set(fixture.clusters.map((entry) => entry.resourceGroup)));
-  return [
+  const commands: FakeCliCommand[] = [];
+  if (contract.accountSet) {
+    commands.push({ ...contract.accountSet, stdout: "" });
+  }
+  commands.push(
+    { ...contract.aksList, stdout: JSON.stringify(fixture.clusters) },
     {
-      tool: "az",
-      args: ["account", "set", "--subscription", fixture.subscriptionId],
-      stdout: ""
-    },
-    {
-      tool: "az",
-      args: [
-        "aks",
-        "list",
-        "--query",
-        "[].{id:name, name:name, resourceGroup:resourceGroup}",
-        "-o",
-        "json",
-        "--subscription",
-        fixture.subscriptionId
-      ],
-      stdout: JSON.stringify(
-        fixture.clusters.map((entry) => ({
-          id: entry.id,
-          name: entry.name,
-          resourceGroup: entry.resourceGroup
-        }))
-      )
-    },
-    {
-      tool: "az",
-      args: [
-        "group",
-        "list",
-        "--query",
-        "[].{id:name, name:name}",
-        "-o",
-        "json",
-        "--subscription",
-        fixture.subscriptionId
-      ],
+      ...contract.groupList,
       stdout: JSON.stringify(resourceGroups.map((name) => ({ id: name, name })))
-    },
-    {
-      tool: "az",
-      argsPrefix: [
-        "aks",
-        "get-credentials",
-        "--name",
-        fixture.cluster,
-        "--resource-group",
-        fixture.resourceGroup,
-        "--file"
-      ],
-      stdout: ""
-    },
-    {
-      tool: "kubectl",
-      argsPrefix: ["--kubeconfig"],
-      stdout: fixture.namespaces.join(" ")
     }
-  ];
+  );
+  if (contract.getCredentials && contract.namespaces) {
+    commands.push(
+      {
+        tool: contract.getCredentials.tool,
+        ...splitAroundKubeconfig(contract.getCredentials.args),
+        stdout: ""
+      },
+      {
+        tool: contract.namespaces.tool,
+        ...splitAroundKubeconfig(contract.namespaces.args),
+        stdout: (fixture.namespaces ?? []).join(" ")
+      }
+    );
+  }
+  return commands;
 }
 
 function delay(milliseconds: number): Promise<void> {

@@ -7,6 +7,7 @@ import {
   defaultFakeCliScenario,
   expect,
   PROFILE_NAME,
+  PROFILE_SUBSCRIPTION_ID,
   REPOSITORY,
   test,
   WORKTREE_BRANCH,
@@ -37,9 +38,11 @@ const require = createRequire(import.meta.url);
 const VISUAL_FONT_PATH =
   require.resolve("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2");
 const VISUAL_FONT = fs.readFile(VISUAL_FONT_PATH, "base64");
-const AZURE_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
-const AZURE_RESOURCE_GROUP = "fixture-resource-group";
-const AZURE_CLUSTER = "fixture-aks";
+const AZURE_CLUSTER = {
+  id: "fixture-aks",
+  name: "fixture-aks",
+  resourceGroup: "fixture-resource-group"
+};
 
 const GRAPH_RESOURCES: CanvasGraphResource[] = [
   {
@@ -144,16 +147,9 @@ async function seed(
   const fakeCli = defaultFakeCliScenario();
   fakeCli.commands.push(
     ...azureDiscoveryCommands({
-      subscriptionId: AZURE_SUBSCRIPTION_ID,
-      clusters: [
-        {
-          id: AZURE_CLUSTER,
-          name: AZURE_CLUSTER,
-          resourceGroup: AZURE_RESOURCE_GROUP
-        }
-      ],
-      cluster: AZURE_CLUSTER,
-      resourceGroup: AZURE_RESOURCE_GROUP,
+      subscriptionId: PROFILE_SUBSCRIPTION_ID,
+      clusters: [AZURE_CLUSTER],
+      selected: AZURE_CLUSTER,
       namespaces: ["default", "radius-system"]
     })
   );
@@ -543,13 +539,17 @@ test.describe("Radius Canvas visual baselines", () => {
         "Found 1 cluster(s), 1 resource group(s)",
         { timeout: 15_000 }
       );
-      await page.locator("#azure-rg-select").selectOption(AZURE_RESOURCE_GROUP);
-      await page.locator("#azure-cluster-select").selectOption(AZURE_CLUSTER);
+      await page
+        .locator("#azure-rg-select")
+        .selectOption(AZURE_CLUSTER.resourceGroup);
+      await page
+        .locator("#azure-cluster-select")
+        .selectOption(AZURE_CLUSTER.id);
       await expect(page.locator("#azure-rg-select")).toHaveValue(
-        AZURE_RESOURCE_GROUP
+        AZURE_CLUSTER.resourceGroup
       );
       await expect(page.locator("#azure-cluster-select")).toHaveValue(
-        AZURE_CLUSTER
+        AZURE_CLUSTER.id
       );
       await expect(page.locator("#azure-namespace-select")).toHaveValue(
         "default"
