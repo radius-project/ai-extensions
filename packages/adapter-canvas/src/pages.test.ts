@@ -203,6 +203,7 @@ describe("compiled page entry API contracts", () => {
         "/api/azure-app-serves-repos",
         "/api/operations",
         "/api/verify-status",
+        "/api/bypass-verification",
         "/api/github-account"
       ]
     ]
