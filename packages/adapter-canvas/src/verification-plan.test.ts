@@ -47,20 +47,24 @@ describe("credential verification planning", () => {
         "on:\n  workflow_dispatch:\n    inputs:\n      radius_operation:\n        required: false\nrun-name: ${{ inputs.radius_operation }}\n"
     });
     expect(plan.shouldDispatch).toBe(true);
-    expect(plan.ref).toBe("");
+    expect(plan.ref).toBe("main");
+    expect(plan.defaultBranch).toBe("main");
     expect(plan.supportsOperationMarker).toBe(true);
   });
 
-  it("claims no marker support on the direct path when the workflow cannot be read", async () => {
+  it("uses main explicitly when the direct-path default branch cannot be resolved", async () => {
     // Assuming support would send `-f radius_operation` to a workflow that may
     // not declare it, and GitHub answers that with a 422 the journal reads as a
     // conclusive refusal, failing setup for the wrong stated reason.
     const plan = await planCredentialVerification({
       ...base,
+      resolveDefaultBranch: async () => null,
       prState: null,
       fetchFile: async () => null
     });
     expect(plan.shouldDispatch).toBe(true);
+    expect(plan.ref).toBe("main");
+    expect(plan.defaultBranch).toBe("main");
     expect(plan.supportsOperationMarker).toBe(false);
   });
 

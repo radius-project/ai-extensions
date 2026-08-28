@@ -1071,6 +1071,9 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       ])
     );
     expect(harness.steps).toContain("✅ Credentials verification dispatched.");
+    expect(
+      harness.ghCalls.find((call) => call.startsWith("workflow run "))
+    ).toContain("--ref main");
   });
 
   it("skips verification and finishes action_required when cloud credentials are incomplete", async () => {
