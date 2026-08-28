@@ -41,6 +41,7 @@ import {
   fetchWorkspaceTree,
   isWorkspacePath,
   isWorkspaceSelection,
+  modelingRunLastActivityAtMs,
   parseRepoFromRemote,
   resolvePersistedSessionId,
   toSafeRepoRelPath,
@@ -115,6 +116,15 @@ const sessionHolder = createSessionHolder();
 const dependencies: RadiusExtensionDependencies = {
   logError: (message) => console.error(message),
   session: sessionHolder,
+  clock: {
+    now: () => Date.now(),
+    wait: (ms) =>
+      new Promise<void>((resolve) => {
+        // Unref'd so a pending wait cannot hold the extension process open at
+        // shutdown; everything it guards is fire-and-forget.
+        setTimeout(resolve, ms).unref?.();
+      })
+  },
   servers,
   getOrCreateServer,
   getLastWebviewActivityAt,
@@ -192,6 +202,7 @@ const dependencies: RadiusExtensionDependencies = {
     workspaceModelRecoverable,
     workspaceSourceChangedSince,
     branchHeadCommit: (repo, branch) => getBranchHeadSha(repo, branch),
+    modelingRunLastActivityAtMs,
     fetchWorkspaceFile,
     fetchRepoFile: (repo, branch, repoPath) =>
       fetchFileFromRepo(repo, repoPath, branch)

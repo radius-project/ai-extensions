@@ -88,6 +88,14 @@ const STATUS = {
   ✓ Logged in to github.com account pubuser (keyring)
     - Active account: true
     - Token scopes: 'gist', 'repo'`,
+  tokenPubFull: `github.com
+  ✓ Logged in to github.com account pubuser (GITHUB_TOKEN)
+    - Active account: true
+    - Token scopes: 'repo', 'workflow', 'write:packages'`,
+  keyringPubFull: `github.com
+  ✓ Logged in to github.com account pubuser (keyring)
+    - Active account: true
+    - Token scopes: 'repo', 'workflow', 'write:packages'`,
   // One login signed in TWICE: once as the host-injected session token and once
   // as a stored keyring credential, each with its own scopes. gh prints both
   // blocks under the same host, so the two credentials are indistinguishable by
@@ -930,18 +938,28 @@ describe("GitHub diagnostic redaction", () => {
   });
 });
 
-describe("GitHub CLI multi-account compatibility", () => {
+describe("GitHub CLI version compatibility", () => {
   it.each([
-    ["gh version 2.39.1 (2024-01-01)", [2, 39], false],
-    ["gh version 2.40.0 (2024-01-01)", [2, 40], true],
-    ["gh version 3.0.0", [3, 0], true],
-    ["unexpected", null, null]
-  ] as const)("parses and classifies %s", async (text, parsed, supported) => {
-    const { parseGhVersion, supportsGhMultiAccount } = await import("./gh.js");
-    const version = parseGhVersion(text);
-    expect(version).toEqual(parsed);
-    if (version) expect(supportsGhMultiAccount(version)).toBe(supported);
+    ["gh version 2.39.1 (2024-01-01)", [2, 39]],
+    ["gh version 2.40.0 (2024-01-01)", [2, 40]],
+    ["gh version 3.0.0", [3, 0]],
+    ["unexpected", null]
+  ] as const)("parses %s", async (text, parsed) => {
+    const { parseGhVersion } = await import("./gh.js");
+    expect(parseGhVersion(text)).toEqual(parsed);
   });
+
+  it.each([
+    [[2, 86], false],
+    [[2, 87], true],
+    [[3, 0], true]
+  ] as const)(
+    "classifies workflow dispatch support for %j",
+    async (version, supported) => {
+      const { supportsWorkflowDispatchRunDetails } = await import("./gh.js");
+      expect(supportsWorkflowDispatchRunDetails([...version])).toBe(supported);
+    }
+  );
 });
 
 describe.sequential("selected GitHub executor", () => {
@@ -1041,16 +1059,28 @@ describe.sequential("selected GitHub executor", () => {
     );
   });
 
-  it("reports an actionable error when GitHub CLI predates multi-account token lookup", async () => {
+  it("reports an actionable error when GitHub CLI predates dispatch run details", async () => {
     const gh = await loadGh("linux", {
       token: "selected-injected-token",
       withToken: STATUS.tokenWithWorkflow,
       keyring: STATUS.keyringWithWorkflow,
-      ghVersion: "gh version 2.39.1"
+      ghVersion: "gh version 2.86.1"
     });
 
     await expect(gh.createSelectedGhExecutor("keyuser")).rejects.toThrow(
-      "GitHub CLI 2.40 or newer"
+      "GitHub CLI 2.87 or newer"
+    );
+  });
+
+  it("fails closed when the GitHub CLI version is unreadable", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      ghVersion: "unexpected output"
+    });
+
+    await expect(gh.createSelectedGhExecutor("tokuser")).rejects.toThrow(
+      "could not determine the installed GitHub CLI version"
     );
   });
 
@@ -1086,12 +1116,12 @@ describe.sequential("selected GitHub executor", () => {
     );
   });
 
-  it("prefers a same-login keyring credential when scope metadata ties", async () => {
+  it("prefers the injected credential when same-login scope metadata ties", async () => {
     const gh = await loadGh("linux", {
       token: "injected-token",
-      withToken: STATUS.tokenPubNoWorkflow,
-      keyring: STATUS.keyringPubNoWorkflow,
-      userTokens: { pubuser: "sso-authorized-keyring-token" },
+      withToken: STATUS.tokenPubFull,
+      keyring: STATUS.keyringPubFull,
+      userTokens: { pubuser: "same-scope-keyring-token" },
       apiLogin: "pubuser"
     });
 
@@ -1099,10 +1129,10 @@ describe.sequential("selected GitHub executor", () => {
     childProcess.execFile.mockClear();
     await executor.verifyIdentity();
 
-    expect(executor.credentialSource).toBe("keyring");
+    expect(executor.credentialSource).toBe("injected");
     expect(executor.requiresKeyringSwitch).toBe(false);
     expect(childProcess.execFile.mock.calls[0]?.[2].env.GH_TOKEN).toBe(
-      "sso-authorized-keyring-token"
+      "injected-token"
     );
   });
 
