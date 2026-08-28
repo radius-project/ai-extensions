@@ -30,6 +30,7 @@ import {
   PERSISTED_OPERATIONS_VERSION,
   type OperationStore
 } from "./operation-store.js";
+import { redactGhCredentials } from "./gh.js";
 
 // Version 2 adds the cooperative control record (stop, attempts, commands,
 // outcome history). Version 3 adds workflow provenance to the artifact ledger
@@ -299,6 +300,8 @@ export type ProviderMutationRecord = {
   // the exact target already present. Persisted with confirmation so recovery
   // never promotes a reused resource into cleanup ownership.
   createdByOperation?: boolean;
+  initialDiagnostic?: string | null;
+  finalDiagnostic?: string | null;
   evidence: string | null;
 };
 
@@ -331,6 +334,40 @@ const PROVIDER_MUTATION_STATUSES = Object.freeze([
 
 export function createProviderRecovery(): ProviderRecoveryRecord {
   return { state: "idle", guidance: null, mutations: [] };
+}
+
+export const PROVIDER_DIAGNOSTIC_MAX_LENGTH = 2000;
+
+export function boundedProviderDiagnostic(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const diagnostic = redactGhCredentials(value).trim();
+  if (!diagnostic) return null;
+  return diagnostic.length > PROVIDER_DIAGNOSTIC_MAX_LENGTH ?
+      `${diagnostic.slice(0, PROVIDER_DIAGNOSTIC_MAX_LENGTH)}...`
+    : diagnostic;
+}
+
+export function recordProviderMutationDiagnostics(
+  op: any,
+  mutationId: string,
+  diagnostics: {
+    initial?: string | null;
+    final?: string | null;
+  }
+): boolean {
+  const recovery = readProviderRecovery(op?.providerRecovery);
+  const mutation = recovery.mutations.find(
+    (entry) => entry.mutationId === mutationId
+  );
+  if (!mutation) return false;
+  const initial = boundedProviderDiagnostic(diagnostics.initial);
+  if (initial && !mutation.initialDiagnostic) {
+    mutation.initialDiagnostic = initial;
+  }
+  const final = boundedProviderDiagnostic(diagnostics.final);
+  if (final) mutation.finalDiagnostic = final;
+  op.providerRecovery = recovery;
+  return true;
 }
 
 function readProviderRecovery(value: any): ProviderRecoveryRecord {
@@ -387,6 +424,18 @@ function readProviderRecovery(value: any): ProviderRecoveryRecord {
           ) ?
             {
               reconcileAttempts: Math.floor(Number(entry.reconcileAttempts))
+            }
+          : {}),
+          ...(boundedProviderDiagnostic(entry.initialDiagnostic) ?
+            {
+              initialDiagnostic: boundedProviderDiagnostic(
+                entry.initialDiagnostic
+              )
+            }
+          : {}),
+          ...(boundedProviderDiagnostic(entry.finalDiagnostic) ?
+            {
+              finalDiagnostic: boundedProviderDiagnostic(entry.finalDiagnostic)
             }
           : {}),
           evidence:
@@ -597,6 +646,31 @@ export function providerRecoveryManualGuidance(op: any): string | null {
     manualMutation?.evidence ||
     "Radius could not prove the identity or ownership of a provider resource. Review the operation recovery details before making another attempt."
   );
+}
+
+export function terminalizeProviderManualRequired(
+  op: any,
+  guidance: string
+): void {
+  if (!op || isTerminalState(op.state)) return;
+  const now = nowIso();
+  op.state = "failed_partial";
+  op.endedAt = now;
+  op.lastActivityAt = now;
+  op.executionActive = false;
+  op.failure = {
+    code: "provider-reconciliation-manual-required",
+    stage: op.currentStage,
+    stepSeq: null,
+    message: guidance,
+    classification: "user-fixable",
+    evidence: null
+  };
+  for (const stage of op.stages || []) {
+    if (stage.state === "running") stage.state = "failed";
+    else if (stage.state === "pending") stage.state = "skipped";
+  }
+  op.recoveryState = "manual_required";
 }
 
 const UNRECOVERABLE_LEGACY_GUIDANCE =
@@ -4838,6 +4912,45 @@ export function reconcileRestoredOperation(op: any): any {
     delete op.verification.acquisitionProvisionalToken;
     delete op.verification.acquisitionDeadline;
   }
+  const manualGuidance = providerRecoveryManualGuidance(op);
+  if (manualGuidance && !isTerminalState(op.state)) {
+    terminalizeProviderManualRequired(op, manualGuidance);
+    op.requiresDurableRewrite = true;
+    return op;
+  }
+  const currentDispatchTarget =
+    typeof op.verification?.dispatchMutationTarget === "string" ?
+      op.verification.dispatchMutationTarget
+    : "";
+  const dispatchMutation = op.providerRecovery?.mutations?.find(
+    (mutation: ProviderMutationRecord) =>
+      (mutation.kind === "github_workflow.dispatch" ||
+        mutation.kind === "github_workflow.dispatch_retry") &&
+      (!currentDispatchTarget || mutation.target === currentDispatchTarget)
+  );
+  const hasPersistedRunIdentity =
+    typeof op.verification?.runId === "string" &&
+    op.verification.runId &&
+    typeof op.verification?.runUrl === "string" &&
+    op.verification.runUrl;
+  if (
+    dispatchMutation &&
+    (dispatchMutation.status === "prepared" ||
+      dispatchMutation.status === "outcome_unknown" ||
+      (dispatchMutation.status === "confirmed" && !hasPersistedRunIdentity))
+  ) {
+    const guidance =
+      "Radius restarted without a persisted verification run URL. Inspect GitHub Actions before starting setup again; Radius will not dispatch another run.";
+    settleProviderMutation(
+      op,
+      dispatchMutation.mutationId,
+      "manual_required",
+      guidance
+    );
+    terminalizeProviderManualRequired(op, guidance);
+    op.requiresDurableRewrite = true;
+    return op;
+  }
   if (unresolvedProviderMutations(op).length > 0) {
     const rollbackPending = op.providerRecovery?.state === "rollback_pending";
     // Reopened so the recovery scheduler, which skips ended records, can
@@ -4883,10 +4996,6 @@ export function reconcileRestoredOperation(op: any): any {
     op.recoveryState = "verification_acquisition_pending";
     return op;
   }
-  const currentDispatchTarget =
-    typeof op.verification?.dispatchMutationTarget === "string" ?
-      op.verification.dispatchMutationTarget
-    : "";
   const rejectedVerificationDispatch =
     currentDispatchTarget ?
       op.providerRecovery?.mutations?.find(
@@ -4936,22 +5045,6 @@ export function reconcileRestoredOperation(op: any): any {
   }
   if (hasCompleteVerificationIdentity(op)) {
     op.recoveryState = "verification_pending";
-    return op;
-  }
-  const manualGuidance = providerRecoveryManualGuidance(op);
-  if (manualGuidance) {
-    const now = nowIso();
-    op.state = "failed_partial";
-    op.endedAt = now;
-    op.lastActivityAt = now;
-    op.failure = {
-      code: "provider-reconciliation-manual-required",
-      stage: op.currentStage,
-      stepSeq: null,
-      message: manualGuidance,
-      classification: "user-fixable"
-    };
-    op.recoveryState = "manual_required";
     return op;
   }
   const activeCommand = latestCommand(op);
@@ -5060,9 +5153,14 @@ export function createRegistry({
       if (!envelope) return [];
       const restored = [];
       let rejected = 0;
+      let repaired = 0;
       for (const [index, value] of envelope.operations.entries()) {
         try {
           const op = reconcileRestoredOperation(fromPersistedOperation(value));
+          if (op.requiresDurableRewrite) {
+            repaired += 1;
+            delete op.requiresDurableRewrite;
+          }
           byId.set(op.operationId, op);
           restored.push(op);
         } catch (error) {
@@ -5084,13 +5182,19 @@ export function createRegistry({
       prune();
       // Rewrite only after every record has been inspected. This removes rejected
       // records without allowing one bad entry to brick every future startup.
-      if (rejected > 0) {
+      if (rejected > 0 || repaired > 0) {
         try {
           await store.save(snapshot());
         } catch (error) {
           store.report?.({
-            code: "operation-store-cleanup-write-failed",
-            message: `Restored valid operations but could not rewrite the cleaned operation store: ${String(error)}`
+            code:
+              repaired > 0 ?
+                "operation-store-repair-write-failed"
+              : "operation-store-cleanup-write-failed",
+            message:
+              repaired > 0 ?
+                `Repaired ${repaired} persisted operation(s) in memory but could not rewrite the operation store, so the repair is not durable: ${String(error)}`
+              : `Restored valid operations but could not rewrite the cleaned operation store: ${String(error)}`
           });
         }
       }

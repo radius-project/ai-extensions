@@ -1,12 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { SelectedGhExecutor } from "../../gh.js";
-import {
-  prepareProviderMutation,
-  providerMutationRecord,
-  requestStop,
-  settleProviderMutation,
-  unresolvedProviderMutations
-} from "../../operations.js";
+import { providerMutationRecord } from "../../operations.js";
 import {
   isGitHubRateLimitError,
   isSelectedGhAuthorizationError,
@@ -14,8 +8,6 @@ import {
 } from "../../deploy.js";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
 import {
-  parseVerificationBaselineRunId,
-  resolveAcknowledgedVerificationRun,
   runVerificationRetry,
   type VerificationRetryRunnerDependencies
 } from "./verification-retry-runner.js";
@@ -77,7 +69,11 @@ function defaultRun(journal: RunnerJournal): SelectedGhExecutor["run"] {
   return async (args, options) => {
     journal.calls.push({ args, timeout: options?.timeout });
     if (args[0] === "workflow") {
-      return { code: 0, stdout: "", stderr: "" };
+      return {
+        code: 0,
+        stdout: "https://github.com/contoso/store/actions/runs/41\n",
+        stderr: ""
+      };
     }
     if (args[0] === "run" && args[1] === "list") {
       const json = args[args.indexOf("--json") + 1];
@@ -201,7 +197,7 @@ describe("selected-account verification retry runner", () => {
     const dependencies = runnerDependencies({
       stopBoundary: async ({ boundary, beforePersist }) => {
         dependencies.journal.boundaries.push(boundary);
-        if (boundary !== "before-verification-retry-dispatch-attempt") {
+        if (boundary !== "before-verification-dispatch-attempt:1") {
           return true;
         }
         beforePersist();
@@ -220,37 +216,6 @@ describe("selected-account verification retry runner", () => {
       state: "finished",
       outcome: "cancelled"
     });
-    expect(target.providerRecovery).toBeUndefined();
-  });
-
-  it("finishes reconciliation-pending when Stop cannot settle around an older mutation", async () => {
-    const target = operation();
-    prepareProviderMutation(target, {
-      kind: "github_environment.put",
-      target: "contoso/store:dev",
-      intent: {
-        created: true
-      }
-    });
-    requestStop(target);
-    const dependencies = runnerDependencies();
-
-    await runVerificationRetry(target, "cmd-1", dependencies);
-
-    expect(dependencies.journal.calls.map((entry) => entry.args[0])).toEqual([
-      "run"
-    ]);
-    expect(dependencies.journal.commands).toContainEqual({
-      state: "finished",
-      outcome: "provider-reconciliation-pending"
-    });
-    expect(dependencies.journal.monitored).toEqual([]);
-    expect(unresolvedProviderMutations(target)).toEqual([
-      expect.objectContaining({
-        kind: "github_environment.put",
-        status: "prepared"
-      })
-    ]);
     expect(
       providerMutationRecord(
         target,
@@ -279,8 +244,7 @@ describe("selected-account verification retry runner", () => {
 
     expect(dependencies.journal.calls.map((entry) => entry.args[0])).toEqual([
       "run",
-      "workflow",
-      "run"
+      "workflow"
     ]);
     expect(target.providerRecovery).toMatchObject({
       mutations: [
@@ -309,8 +273,7 @@ describe("selected-account verification retry runner", () => {
 
     expect(dependencies.journal.calls.map((entry) => entry.args[0])).toEqual([
       "run",
-      "workflow",
-      "run"
+      "workflow"
     ]);
     expect(dependencies.journal.calls[1]).toMatchObject({
       args: expect.arrayContaining(["radius_operation=op_retry"]),
@@ -334,7 +297,7 @@ describe("selected-account verification retry runner", () => {
     });
     expect(registeredDuringMonitor).toBe(true);
     expect(dependencies.journal.unregistered).toEqual(["op_retry"]);
-    expect(dependencies.journal.sleeps).toEqual([5000]);
+    expect(dependencies.journal.sleeps).toEqual([]);
   });
 
   it("fails closed without a selected login", async () => {
@@ -601,37 +564,6 @@ describe("selected-account verification retry runner", () => {
     });
   });
 
-  it("reconciles an unresolved dispatch without sending it again", async () => {
-    const target = operation();
-    const mutationTarget =
-      "contoso/store:radius-verify-credentials.yml:main:dev:cmd-1";
-    const mutation = prepareProviderMutation(target, {
-      kind: "github_workflow.dispatch_retry",
-      target: mutationTarget,
-      providerIdempotencyKey: "op_retry"
-    });
-    settleProviderMutation(
-      target,
-      mutation.mutationId,
-      "outcome_unknown",
-      "response lost"
-    );
-    target.verification = {
-      ...(target.verification || {}),
-      dispatchMutationTarget: mutationTarget,
-      accountUnavailablePhase: "dispatch",
-      baselineRunId: 40
-    };
-    const dependencies = runnerDependencies();
-
-    await runVerificationRetry(target, "cmd-1", dependencies);
-
-    expect(
-      dependencies.journal.calls.filter((entry) => entry.args[0] === "workflow")
-    ).toEqual([]);
-    expect(target.verification).toMatchObject({ runId: "41" });
-  });
-
   it("fails retryably when the dispatch journal cannot be saved", async () => {
     const target = operation();
     const dependencies = runnerDependencies({
@@ -676,46 +608,6 @@ describe("selected-account verification retry runner", () => {
     });
   });
 
-  it("surfaces authorization failure while reconciling an unresolved dispatch", async () => {
-    const target = operation();
-    const mutationTarget =
-      "contoso/store:radius-verify-credentials.yml:main:dev:cmd-1";
-    const mutation = prepareProviderMutation(target, {
-      kind: "github_workflow.dispatch_retry",
-      target: mutationTarget,
-      providerIdempotencyKey: "op_retry"
-    });
-    settleProviderMutation(
-      target,
-      mutation.mutationId,
-      "outcome_unknown",
-      "response lost"
-    );
-    target.verification = {
-      ...(target.verification || {}),
-      dispatchMutationTarget: mutationTarget,
-      accountUnavailablePhase: "dispatch",
-      baselineRunId: 40
-    };
-    const dependencies = runnerDependencies({
-      run: async () => ({
-        code: 1,
-        stdout: "",
-        stderr: "gh: Forbidden (HTTP 403)"
-      })
-    });
-
-    await runVerificationRetry(target, "cmd-1", dependencies);
-
-    expect(target).toMatchObject({
-      failure: {
-        code: "verification-retry-github-account-unavailable",
-        evidence: expect.stringContaining("HTTP 403")
-      },
-      verification: { accountUnavailablePhase: "dispatch" }
-    });
-  });
-
   it("surfaces authorization failure during acknowledged-run discovery", async () => {
     const target = operation();
     const dependencies = runnerDependencies({
@@ -753,12 +645,12 @@ describe("selected-account verification retry runner", () => {
         stdout: "",
         stderr: "gh: Service Unavailable (HTTP 503)"
       },
-      guidance: "could not confirm the exact marked run"
+      guidance: "could not read verification runs"
     },
     {
       name: "an unreadable run list",
       result: { code: 0, stdout: "not-json", stderr: "" },
-      guidance: "could not confirm the exact marked run"
+      guidance: "unreadable verification run list"
     },
     {
       name: "a new run with the wrong marker",
@@ -775,12 +667,12 @@ describe("selected-account verification retry runner", () => {
         ]),
         stderr: ""
       },
-      guidance: "none matches this operation's exact"
+      guidance: "could not identify exactly one verification run"
     },
     {
       name: "no visible post-dispatch run",
       result: { code: 0, stdout: "[]", stderr: "" },
-      guidance: "could not confirm the exact marked run"
+      guidance: "No exact verification run appeared"
     }
   ])("hands off $name without adopting a run", async (scenario) => {
     const target = operation();
@@ -799,10 +691,10 @@ describe("selected-account verification retry runner", () => {
     await runVerificationRetry(target, "cmd-1", dependencies);
 
     expect(target).toMatchObject({
-      state: "action_required",
-      terminal: {
-        reason: "verification-run-manual",
-        userMessage: expect.stringContaining(scenario.guidance)
+      state: "failed_partial",
+      failure: {
+        code: "provider-reconciliation-manual-required",
+        message: expect.stringContaining(scenario.guidance)
       }
     });
     expect(dependencies.journal.monitored).toEqual([]);
@@ -829,10 +721,12 @@ describe("selected-account verification retry runner", () => {
     await runVerificationRetry(target, "cmd-1", dependencies);
 
     expect(target).toMatchObject({
-      state: "action_required",
-      terminal: {
-        reason: "verification-run-manual",
-        userMessage: expect.stringContaining("Multiple verification retry runs")
+      state: "failed_partial",
+      failure: {
+        code: "provider-reconciliation-manual-required",
+        message: expect.stringContaining(
+          "could not identify exactly one verification run"
+        )
       }
     });
     expect(dependencies.journal.monitored).toEqual([]);
@@ -840,32 +734,25 @@ describe("selected-account verification retry runner", () => {
 
   it("keeps a manual reconciliation disposition when its persistence fails", async () => {
     const target = operation();
-    const mutationTarget =
-      "contoso/store:radius-verify-credentials.yml:main:dev:cmd-1";
-    const mutation = prepareProviderMutation(target, {
-      kind: "github_workflow.dispatch_retry",
-      target: mutationTarget,
-      providerIdempotencyKey: "op_retry"
-    });
-    settleProviderMutation(
-      target,
-      mutation.mutationId,
-      "outcome_unknown",
-      "response lost"
-    );
-    target.verification = {
-      ...(target.verification || {}),
-      dispatchMutationTarget: mutationTarget,
-      accountUnavailablePhase: "dispatch",
-      baselineRunId: 40
-    };
     const ambiguous = JSON.stringify([
       JSON.parse(exactRun(41))[0],
       JSON.parse(exactRun(42))[0]
     ]);
+    let persists = 0;
     const dependencies = runnerDependencies({
-      run: async () => ({ code: 0, stdout: ambiguous, stderr: "" }),
-      persistJournal: () => Promise.reject(new Error("disk unavailable"))
+      run: async (args) => {
+        if (args[0] === "workflow") {
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        const json = args[args.indexOf("--json") + 1];
+        return json === "databaseId" ?
+            { code: 0, stdout: '[{"databaseId":40}]', stderr: "" }
+          : { code: 0, stdout: ambiguous, stderr: "" };
+      },
+      persistJournal: async () => {
+        persists += 1;
+        if (persists === 3) throw new Error("disk unavailable");
+      }
     });
 
     await runVerificationRetry(target, "cmd-1", dependencies);
@@ -873,83 +760,15 @@ describe("selected-account verification retry runner", () => {
     expect(target).toMatchObject({
       failure: {
         code: "provider-mutation-manual-required",
-        message: expect.stringContaining("Multiple verification retry runs")
+        message: expect.stringContaining(
+          "could not identify exactly one verification run"
+        )
       },
       verification: { accountUnavailablePhase: "dispatch" }
     });
   });
 
-  it("propagates an unreadable unresolved dispatch for server-owned recovery", async () => {
-    const target = operation();
-    const mutationTarget =
-      "contoso/store:radius-verify-credentials.yml:main:dev:cmd-1";
-    const mutation = prepareProviderMutation(target, {
-      kind: "github_workflow.dispatch_retry",
-      target: mutationTarget,
-      providerIdempotencyKey: "op_retry"
-    });
-    settleProviderMutation(
-      target,
-      mutation.mutationId,
-      "outcome_unknown",
-      "response lost"
-    );
-    target.verification = {
-      ...(target.verification || {}),
-      dispatchMutationTarget: mutationTarget,
-      accountUnavailablePhase: "dispatch",
-      baselineRunId: 40
-    };
-    const dependencies = runnerDependencies({
-      run: async () => ({
-        code: 1,
-        stdout: "",
-        stderr: "gh: Service Unavailable (HTTP 503)"
-      })
-    });
-
-    await expect(
-      runVerificationRetry(target, "cmd-1", dependencies)
-    ).rejects.toMatchObject({
-      code: "provider-mutation-outcome-unknown"
-    });
-    expect(dependencies.journal.unregistered).toEqual(["op_retry"]);
-  });
-
-  it("refuses to reconcile an unmarked unresolved dispatch", async () => {
-    const target = operation();
-    const mutationTarget =
-      "contoso/store:radius-verify-credentials.yml:main:dev:cmd-1";
-    const mutation = prepareProviderMutation(target, {
-      kind: "github_workflow.dispatch_retry",
-      target: mutationTarget
-    });
-    settleProviderMutation(
-      target,
-      mutation.mutationId,
-      "outcome_unknown",
-      "response lost"
-    );
-    target.verification = {
-      ...(target.verification || {}),
-      operationMarker: "",
-      dispatchMutationTarget: mutationTarget,
-      accountUnavailablePhase: "dispatch",
-      baselineRunId: 40
-    };
-    const dependencies = runnerDependencies({
-      run: async () => ({ code: 0, stdout: "[]", stderr: "" })
-    });
-
-    await expect(
-      runVerificationRetry(target, "cmd-1", dependencies)
-    ).rejects.toMatchObject({
-      code: "provider-mutation-manual-required"
-    });
-    expect(dependencies.journal.unregistered).toEqual(["op_retry"]);
-  });
-
-  it("hands off an acknowledged legacy workflow instead of guessing a run", async () => {
+  it("accepts the returned run identity without an operation marker", async () => {
     const target = operation({
       verification: {
         workflow: "radius-verify-credentials.yml",
@@ -963,12 +782,9 @@ describe("selected-account verification retry runner", () => {
     await runVerificationRetry(target, "cmd-1", dependencies);
 
     expect(target).toMatchObject({
-      state: "action_required",
-      terminal: { reason: "verification-run-manual" },
       verification: {
-        runId: null,
-        runUrl:
-          "https://github.com/contoso/store/actions/workflows/radius-verify-credentials.yml"
+        runId: "41",
+        runUrl: "https://github.com/contoso/store/actions/runs/41"
       }
     });
     expect(dependencies.journal.sleeps).toEqual([]);
@@ -1003,70 +819,5 @@ describe("selected-account verification retry runner", () => {
     await runVerificationRetry(target, "cmd-1", dependencies);
 
     expect(createExecutor).not.toHaveBeenCalled();
-  });
-});
-
-describe("verification retry parsing and adoption", () => {
-  it("reads the newest positive safe baseline id", () => {
-    expect(
-      parseVerificationBaselineRunId(
-        '[{"databaseId":2},{"databaseId":7},{"databaseId":4}]'
-      )
-    ).toBe(7);
-    expect(parseVerificationBaselineRunId("[]")).toBeNull();
-  });
-
-  it.each([
-    "{}",
-    '[{"databaseId":0}]',
-    '[{"databaseId":1.5}]',
-    '[{"databaseId":"2"}]',
-    "[null]"
-  ])("rejects malformed baseline JSON %s", (value) => {
-    expect(() => parseVerificationBaselineRunId(value)).toThrow();
-  });
-
-  it("adopts one exact marked run after the acknowledgement delay", async () => {
-    const pauses: number[] = [];
-    await expect(
-      resolveAcknowledgedVerificationRun({
-        operationMarker: "op_retry",
-        pause: async (milliseconds) => {
-          pauses.push(milliseconds);
-        },
-        discover: async () => ({ state: "applied", value: "41" }),
-        actionsUrl: "https://github.com/contoso/store/actions"
-      })
-    ).resolves.toEqual({ state: "applied", runId: "41" });
-    expect(pauses).toEqual([5000]);
-  });
-
-  it("hands off discovery failures but rethrows authorization errors", async () => {
-    const authorization = new SelectedGhAuthorizationError(
-      "alice",
-      403,
-      "forbidden"
-    );
-    await expect(
-      resolveAcknowledgedVerificationRun({
-        operationMarker: "op_retry",
-        pause: async () => {},
-        discover: async () => {
-          throw new Error("runs unavailable");
-        },
-        actionsUrl: "https://github.com/contoso/store/actions"
-      })
-    ).resolves.toMatchObject({ state: "manual_required" });
-    await expect(
-      resolveAcknowledgedVerificationRun({
-        operationMarker: "op_retry",
-        pause: async () => {},
-        discover: async () => {
-          throw authorization;
-        },
-        actionsUrl: "https://github.com/contoso/store/actions",
-        isAuthorizationError: isSelectedGhAuthorizationError
-      })
-    ).rejects.toBe(authorization);
   });
 });

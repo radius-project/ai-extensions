@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildVerifyWorkflowDispatchArgs,
   hasWorkflowRunTrigger,
+  parseVerifyWorkflowRunUrl,
   planCredentialVerification
 } from "./verification-plan.js";
 
@@ -157,5 +158,42 @@ describe("dispatch arguments", () => {
         operationMarker: "op_verify"
       })
     ).toContain("radius_operation=op_verify");
+  });
+});
+
+describe("workflow run URL parsing", () => {
+  it("extracts the immutable run identity from gh workflow run output", () => {
+    expect(
+      parseVerifyWorkflowRunUrl(
+        "  https://github.com/octo/app/actions/runs/12345\n",
+        { targetRepo: "octo/app" }
+      )
+    ).toEqual({
+      runId: "12345",
+      runUrl: "https://github.com/octo/app/actions/runs/12345"
+    });
+  });
+
+  it.each([
+    "",
+    "created\nhttps://github.com/octo/app/actions/runs/1",
+    "not a URL",
+    "http://github.com/octo/app/actions/runs/1",
+    "https://example.test/octo/app/actions/runs/1",
+    "https://github.com/other/app/actions/runs/1",
+    "https://github.com/octo/app/actions/runs/0",
+    "https://github.com/octo/app/actions/runs/1?check=true"
+  ])("rejects ambiguous or unexpected output %j", (stdout) => {
+    expect(() =>
+      parseVerifyWorkflowRunUrl(stdout, { targetRepo: "octo/app" })
+    ).toThrow();
+  });
+
+  it("rejects an invalid repository identity", () => {
+    expect(() =>
+      parseVerifyWorkflowRunUrl("https://github.com/octo/app/actions/runs/1", {
+        targetRepo: "octo/app/extra"
+      })
+    ).toThrow("target GitHub repository is invalid");
   });
 });
