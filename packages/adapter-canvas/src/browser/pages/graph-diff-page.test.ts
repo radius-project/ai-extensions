@@ -15,15 +15,26 @@ import {
 } from "../../../test/support/browser/graph-progress.js";
 import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
-import type { HttpResponse } from "../ports.js";
+import type { BrowserTeardown } from "../lifecycle.js";
+import type { BrowserContext, HttpResponse } from "../ports.js";
 import {
   DIFF_DEBOUNCE_MS,
   DIFF_PROGRESS_MS,
   DIFF_PROGRESS_STEPS_ID,
   DIFF_RETRY_MS,
   GRAPH_DIFF_STATE_ID,
-  initializeGraphDiffPage
+  initializeGraphDiffPage as initializeGraphDiffPageEntry
 } from "./graph-diff-page.js";
+
+function initializeGraphDiffPage(
+  context: BrowserContext,
+  browserGlobals: Record<string, unknown>
+): BrowserTeardown {
+  return initializeGraphDiffPageEntry(context, {
+    radiusSetGraphError: vi.fn(),
+    ...browserGlobals
+  });
+}
 
 interface FixtureOptions {
   resources?: unknown[];
@@ -73,7 +84,9 @@ function fixture(options: FixtureOptions = {}) {
   const status = createFakeElement("diff-status");
   const progressHost = createFakeElement(DIFF_PROGRESS_STEPS_ID);
   const graphContainer = createFakeElement("graph-container");
-  const elements = [state, app, progressHost, graphContainer];
+  const summary = createFakeElement("graph-diff-summary");
+  summary.textContent = "No application graph changes.";
+  const elements = [state, app, progressHost, graphContainer, summary];
   if (withRepoInput) elements.push(repoInput);
   if (withBaseSelect) elements.push(baseSelect);
   if (withHeadSelect) elements.push(headSelect);
@@ -106,7 +119,8 @@ function fixture(options: FixtureOptions = {}) {
     head: headSelect,
     status,
     progressHost,
-    graphContainer
+    graphContainer,
+    summary
   };
 }
 
@@ -116,7 +130,16 @@ describe("initializeGraphDiffPage", () => {
     const teardown = initializeGraphDiffPage(browser.context, {
       radiusRenderGraph: vi.fn()
     });
+
     expect(teardown).toBe(NOOP_TEARDOWN);
+  });
+
+  it("fails initialization when the graph error renderer is unavailable", () => {
+    const { browser } = fixture();
+
+    expect(() => initializeGraphDiffPageEntry(browser.context, {})).toThrow(
+      'Radius browser global "radiusSetGraphError" is not available.'
+    );
   });
 
   it("renders preloaded resources and binds each selector once", async () => {
@@ -542,37 +565,102 @@ describe("initializeGraphDiffPage", () => {
 
   it("shows the refusal verbatim when the skill cannot model the repo", async () => {
     const { browser, head, status } = fixture();
+    const setError = vi.fn();
+    let requests = 0;
+    browser.net.handle("/api/diff-branches", () => {
+      requests++;
+      return jsonResponse({
+        error: "octo/app has no Dockerfile on feature/x.",
+        appBicepUnsupported: true
+      });
+    });
+    initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn(),
+      radiusSetGraphError: setError
+    });
+    await flushPromises();
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "octo/app has no Dockerfile on feature/x."
+    );
+    expect(status.style.display).toBe("none");
+    browser.clock.tick(DIFF_RETRY_MS * 2);
+    await flushPromises();
+    expect(requests).toBe(1);
+  });
+
+  it("falls back to a generic refusal message without an error string", async () => {
+    const { browser, head, status } = fixture();
+    const setError = vi.fn();
+    browser.net.handle("/api/diff-branches", () =>
+      jsonResponse({ appBicepUnsupported: true })
+    );
+    initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn(),
+      radiusSetGraphError: setError
+    });
+    await flushPromises();
+
+    head.dispatch("change");
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+
+    expect(setError).toHaveBeenCalledWith(
+      "graph-container",
+      "The Radius app-bicep skill cannot model this repository."
+    );
+    expect(status.style.display).toBe("none");
+  });
+
+  it("hides stale diff summaries after a terminal refusal", async () => {
+    const { browser, head, summary } = fixture({
+      resources: [{ id: "existing", diffStatus: "unchanged" }]
+    });
     browser.net.handle("/api/diff-branches", () =>
       jsonResponse({
         error: "octo/app has no Dockerfile on feature/x.",
         appBicepUnsupported: true
       })
     );
-    initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+    initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn()
+    });
     await flushPromises();
 
     head.dispatch("change");
     browser.clock.tick(DIFF_DEBOUNCE_MS);
     await flushPromises();
 
-    expect(status.textContent).toBe("octo/app has no Dockerfile on feature/x.");
+    expect(summary.style.display).toBe("none");
   });
 
-  it("falls back to a generic refusal message without an error string", async () => {
-    const { browser, head, status } = fixture();
+  it("restores the diff summary when a new comparison starts", async () => {
+    const { browser, head, summary } = fixture({
+      resources: [{ id: "existing", diffStatus: "unchanged" }]
+    });
     browser.net.handle("/api/diff-branches", () =>
-      jsonResponse({ appBicepUnsupported: true })
+      jsonResponse({
+        error: "octo/app has no Dockerfile on feature/x.",
+        appBicepUnsupported: true
+      })
     );
-    initializeGraphDiffPage(browser.context, { radiusRenderGraph: vi.fn() });
+    initializeGraphDiffPage(browser.context, {
+      radiusRenderGraph: vi.fn()
+    });
     await flushPromises();
+    browser.clock.tick(DIFF_DEBOUNCE_MS);
+    await flushPromises();
+    expect(summary.style.display).toBe("none");
 
     head.dispatch("change");
     browser.clock.tick(DIFF_DEBOUNCE_MS);
-    await flushPromises();
 
-    expect(status.textContent).toBe(
-      "The Radius app-bicep skill cannot model this repository."
-    );
+    expect(summary.style.display).toBe("");
   });
 
   it("surfaces a diff computation error", async () => {
@@ -755,23 +843,18 @@ describe("initializeGraphDiffPage", () => {
         `${GRAPH_STAGE_LABELS.comparing_graphs}:running`
       ]);
     });
-    it.each([
-      [
-        "the skill refuses the repository",
-        {
-          error: "octo/app has no Dockerfile on feature/x.",
-          appBicepUnsupported: true
-        }
-      ],
-      ["the comparison errors", { error: "invalid app.bicep" }]
-    ])("clears the panel when %s", async (_name, body) => {
+    it("clears the panel when the comparison errors", async () => {
       const { browser, head, progressHost, status } = fixture();
-      browser.net.handle("/api/diff-branches", () => jsonResponse(body));
+      const setError = vi.fn();
+      browser.net.handle("/api/diff-branches", () =>
+        jsonResponse({ error: "invalid app.bicep" })
+      );
       browser.net.handle("/api/progress?view=diff", () =>
         jsonResponse({ events: [] })
       );
       initializeGraphDiffPage(browser.context, {
-        radiusRenderGraph: vi.fn()
+        radiusRenderGraph: vi.fn(),
+        radiusSetGraphError: setError
       });
       await flushPromises();
 
@@ -779,8 +862,7 @@ describe("initializeGraphDiffPage", () => {
       browser.clock.tick(DIFF_DEBOUNCE_MS);
       await flushPromises();
 
-      // The failure is stated once, in the status banner. A panel left behind
-      // would repeat it and keep claiming the comparison is running.
+      expect(setError).not.toHaveBeenCalled();
       expect(status.textContent).not.toBe("");
       expect(stageText(progressHost)).toEqual([]);
     });

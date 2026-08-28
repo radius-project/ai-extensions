@@ -37,6 +37,7 @@ describe("graphPage", () => {
     });
     expect(html).toContain('id="graph-container"');
     expect(html).toContain('id="graph-refresh-status"');
+    expect(html).toContain('id="graph-guidance"');
     expect(readBrowserPageState(html, "radius-graph-page-state")).toEqual({
       repo: "octo/app",
       branch: "worktree",
