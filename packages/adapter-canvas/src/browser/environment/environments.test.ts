@@ -23,6 +23,13 @@ import {
 import type { FakeBrowser } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
 
+function confirm(options: EnvironmentConfirmOptions) {
+  if (!options.onConfirm) {
+    throw new Error("Expected confirmation callback.");
+  }
+  return options.onConfirm();
+}
+
 function renderPage(repo = "octo/app", withoutInfraSelection = false) {
   const browser = createFakeBrowser();
   const elements = {
@@ -87,7 +94,7 @@ function renderPage(repo = "octo/app", withoutInfraSelection = false) {
     notify: vi.fn()
   };
   const confirmDialog = {
-    show: vi.fn((options: EnvironmentConfirmOptions) => options.onConfirm()),
+    show: vi.fn(confirm),
     close: vi.fn(),
     teardown: vi.fn()
   };
@@ -1116,9 +1123,7 @@ describe("environment deletion", () => {
     const { page, rows } = await readyDelete();
     page.confirmDialog.show
       .mockReset()
-      .mockImplementationOnce((options: EnvironmentConfirmOptions) =>
-        options.onConfirm()
-      )
+      .mockImplementationOnce(confirm)
       .mockImplementation(() => {});
     page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () =>
       jsonResponse(
@@ -1151,7 +1156,7 @@ describe("environment deletion", () => {
 
     // Only an explicit confirmation navigates, and a hostile redirect is
     // replaced by the deployments page.
-    conflict.onConfirm();
+    confirm(conflict);
     expect(page.browser.nav.assigned).toEqual(["/?page=deploying"]);
   });
 
@@ -1159,9 +1164,7 @@ describe("environment deletion", () => {
     const { page, rows } = await readyDelete();
     page.confirmDialog.show
       .mockReset()
-      .mockImplementationOnce((options: EnvironmentConfirmOptions) =>
-        options.onConfirm()
-      )
+      .mockImplementationOnce(confirm)
       .mockImplementation(() => {});
     page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () =>
       jsonResponse(
@@ -1180,7 +1183,7 @@ describe("environment deletion", () => {
     expect(conflict.message).toContain(
       "An application is still deployed to this environment."
     );
-    conflict.onConfirm();
+    confirm(conflict);
     expect(page.browser.nav.assigned).toEqual(["/?page=deploying&env=dev"]);
   });
 
@@ -1188,9 +1191,7 @@ describe("environment deletion", () => {
     const { page, rows } = await readyDelete();
     page.confirmDialog.show
       .mockReset()
-      .mockImplementationOnce((options: EnvironmentConfirmOptions) =>
-        options.onConfirm()
-      )
+      .mockImplementationOnce(confirm)
       .mockImplementation(() => {});
     page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () =>
       jsonResponse(
@@ -1208,7 +1209,7 @@ describe("environment deletion", () => {
     await flushPromises();
     const conflict = page.confirmDialog.show.mock.calls[1][0];
     expect(conflict.message).toContain("The previous teardown failed.");
-    conflict.onConfirm();
+    confirm(conflict);
     expect(page.browser.nav.assigned).toEqual([
       "/?page=deployed&application=app&environment=dev"
     ]);

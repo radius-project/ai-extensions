@@ -46,7 +46,7 @@ The extension keeps the committed delete workflow files current before dispatchi
 
 ## What the environment-delete flow does
 
-Deleting an environment runs as a tracked operation through the same progress panel as environment creation. Only Azure-backed environments are supported; deleting an AWS (or any non-Azure) environment is refused up front with a clear message and nothing is torn down.
+Deleting an environment runs as a tracked operation through the same progress panel as environment creation. Only Azure-backed environments are supported; deleting an AWS (or any non-Azure) environment is refused up front with a clear message and nothing is torn down. Any AWS-related deletion code is unsupported framework scaffolding, not a compatibility contract, and may change or be removed when AWS support is designed.
 
 - Refuses to proceed while an application is still deployed to the environment (its cloud resources would be orphaned), and points you at the deployment-delete flow first.
 - **Stage 1 — Radius environment:** dispatches the Azure-only `delete-environment` workflow, which connects to the target AKS cluster and runs `rad env delete`. This runs first, while the federated credential still exists, because the workflow authenticates with it. If this cannot be confirmed (dispatch failed, run not found, timeout, or a non-guard failure), the whole deletion **stops fail-closed** and is reported as a retryable partial failure — the credential and GitHub environment a retry needs are left in place.

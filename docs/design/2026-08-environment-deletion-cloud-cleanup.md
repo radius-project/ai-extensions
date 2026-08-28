@@ -68,10 +68,7 @@ Radius has a second, sibling flow — **Create-Environment rollback** — that t
   the broader established-environment identity model and are out of scope here.
 - **Depending on the setup artifact ledger.** Environments created before the ledger existed never recorded one, so deletion does not use it as authority. Credential deletion instead combines live discovery with its separate, immutable credential-consumer provenance and retains credentials when that proof is unavailable.
 - **Merging the delete and rollback flows.** They have different entry conditions and opposite credential ordering; sharing low-level mutation seams is not the same as sharing the flow.
-- **AWS teardown.** AWS is not a supported provider yet — a user cannot create
-  an AWS environment, so the AWS branch is barebones framework only. The delete
-  flow surfaces that AWS cleanup is not implemented rather than pretending to
-  run it.
+- **AWS teardown.** AWS is not a supported provider yet — a user cannot create an AWS environment, so the AWS branch is barebones framework only. The delete flow surfaces that AWS cleanup is not implemented rather than pretending to run it. This scaffolding is not a supported API or compatibility contract and may change or be removed when AWS support is designed.
 
 ### User scenarios (optional)
 
@@ -249,9 +246,7 @@ entry (`minor`) documents the feature.
   before the failure** so the user knows the current state, plus a retry
   message. It does **not** claim the environment was fully torn down.
 - The app-registration reminder ("left in place — remove it in Azure") is surfaced only when the operation **concludes** — `succeeded` or `succeeded_with_warnings` (the latter includes retained/shared-FIC cases). On a hard fail-closed stop the panel shows completed steps plus a retry message and does **not** show the reminder, because nothing was fully torn down and the user has not reached the end of a deletion.
-- **AWS.** Because AWS environments cannot be created yet, the AWS cleanup path
-  is framework only. If it is ever reached, it surfaces that AWS cleanup is not
-  implemented instead of silently succeeding.
+- **AWS.** Because AWS environments cannot be created yet, the AWS cleanup path is framework only. If it is ever reached, it surfaces that AWS cleanup is not implemented instead of silently succeeding. Its current types, markers, and behavior are implementation scaffolding and are subject to change.
 
 ## Test plan
 
@@ -285,9 +280,7 @@ Testing challenges: the production adapters do real `az`/`gh` I/O, so they are i
 ## Compatibility (optional)
 
 - **Backward compatible.** Delete Environment does not depend on the setup artifact ledger, so established environments created before rollback provenance existed can still be removed. Federated credentials without immutable credential-consumer provenance are retained with a warning rather than deleted speculatively.
-- **AWS not supported.** No AWS environment can be created, so no established
-  AWS environment can reach the delete flow; the AWS cleanup branch is inert
-  framework until AWS support lands.
+- **AWS not supported.** No AWS environment can be created, so no established AWS environment can reach the delete flow; the AWS cleanup branch is inert framework until AWS support lands. Nothing in that branch is a supported compatibility surface, and it may change or be removed.
 
 ## Monitoring and logging
 
