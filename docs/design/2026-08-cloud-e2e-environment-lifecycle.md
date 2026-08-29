@@ -213,6 +213,14 @@ These are **not** stored in `ai-extensions` and copied in at run time. They are 
 
 The cost is cross-repository atomicity: a product change needing an `app.bicep` change cannot land in one pull request. Mitigated by pinning the baseline commit SHA in a single `ai-extensions` constant, so updating the application is a deliberate, reviewable SHA bump — and that SHA doubles as the cleanup reset target. A conformance check asserts the pinned baseline still has the three files and still compiles, so an upstream Radius change cannot silently rot the fixture into an unexplained overnight failure.
 
+#### Two product behaviours the fixture must respect
+
+Both were found by reading the production code, and both would otherwise cause a leaked run to report clean.
+
+**The application name is repository-scoped, so runs must serialize.** [`azure-auto-setup-application.ts:99`](../../packages/adapter-canvas/src/server/routes/azure-auto-setup-application.ts) derives the Entra application name as `radius-deploy-<owner>-<repo>`, with no environment and no unique id. Two runs against one fixture repository therefore contend for a single application. The fixture must not work around this by making the name unique per run — the product owns that derivation, and overriding it in test would exercise something no user ever runs. Runs serialize through a `concurrency` group instead, and cleanup must never delete an application a concurrent run is still using.
+
+**Workflow publication has two paths, and only one touches the default branch.** When the token lacks `workflow` scope the product does not commit to the default branch at all; it creates a `radius/setup-<env>-workflows-<suffix>` branch and opens a pull request ([`create-environment-workflow-committer.ts:230`](../../packages/adapter-canvas/src/server/routes/create-environment-workflow-committer.ts)). So a clean-slate or leak check that compares only the default-branch head to the pinned baseline reports clean while a branch and an open pull request leak; those checks must cover both. It also means the end-to-end GitHub App must hold `workflows: write`. Without it the journey quietly takes the pull-request path and passes without ever testing the committed-workflow path it claims to cover — a green run proving the wrong thing.
+
 ### API design (if applicable)
 
 No public API change. No route, canvas action, tool, `plugin.json` entry, or `packages/core` export is added or modified. The new surfaces are test-internal:
@@ -281,14 +289,15 @@ Upstream `wellknown` changes, which gate CI but not local development:
 
 ### Error handling
 
-| Scenario                         | Handling                                                                                                                                                                          |
-|----------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Credentials absent or flag unset | The suite **skips**, matching the `describe.skipIf` convention in the existing `live-tests.yml` suites. `pnpm test` is never broken.                                              |
-| `assertCleanSlate()` fails       | Fail immediately, naming the artifact found. This is leaked state, not a product regression, and the message says so to keep triage honest.                                       |
-| AKS provisioning fails           | Fail fast with the `az` error attached; classified as infrastructure, not a product regression.                                                                                   |
-| Entra propagation delay          | The product already retries. Fixture assertions poll with a bounded timeout rather than reading once.                                                                             |
-| Test crashes mid-run             | `dispose()` runs from an `always()` teardown. If the runner dies outright, the Radius purge reclaims the resource group and the cleanup workflow reclaims Entra and GitHub state. |
-| Fixture branch left dirty        | Cleanup resets it to the pinned baseline. Runs serialize through a `concurrency` group with `cancel-in-progress: false`.                                                          |
+| Scenario                         | Handling                                                                                                                                                                                                                                   |
+|----------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Credentials absent or flag unset | The suite **skips**, matching the `describe.skipIf` convention in the existing `live-tests.yml` suites. `pnpm test` is never broken.                                                                                                       |
+| `assertCleanSlate()` fails       | Fail immediately, naming the artifact found. This is leaked state, not a product regression, and the message says so to keep triage honest.                                                                                                |
+| AKS provisioning fails           | Fail fast with the `az` error attached; classified as infrastructure, not a product regression.                                                                                                                                            |
+| Entra propagation delay          | The product already retries. Fixture assertions poll with a bounded timeout rather than reading once.                                                                                                                                      |
+| Test crashes mid-run             | `dispose()` runs from an `always()` teardown. If the runner dies outright, the Radius purge reclaims the resource group and the cleanup workflow reclaims Entra and GitHub state.                                                          |
+| Fixture branch left dirty        | Cleanup resets it to the pinned baseline. Runs serialize through a `concurrency` group with `cancel-in-progress: false`.                                                                                                                   |
+| Token scope silently degraded    | Without `workflows: write` the product takes the pull-request path and the journey passes without ever committing workflows. The spec asserts the files exist **on the default branch**, so this fails loudly instead of passing hollowly. |
 
 ## Test plan
 
