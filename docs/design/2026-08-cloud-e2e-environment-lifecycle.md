@@ -183,7 +183,7 @@ Two mechanisms enforce it.
 
 **`assertCleanSlate()` runs before the journey starts.** It asserts every right-hand item is absent. This turns later assertions from observations into proofs, and catches a previous run's leaked state before that state silently turns a red test green.
 
-**The bootstrap identity is dedicated, not shared.** [`azure-discovery.ts:71`](../../packages/adapter-canvas/src/server/routes/azure-discovery.ts) runs `az ad app list --show-mine`, which returns applications owned by the signed-in identity. If we reused the service principal shared with Radius functional tests, that query would return applications from unrelated repositories and the extension's "does this already exist" logic would reason over foreign state. A dedicated identity keeps the query scoped to our runs.
+**The bootstrap identity is dedicated, not shared.** The extension repeatedly asks "does the caller already own this application?" — both in the cross-repo picker ([`azure-discovery.ts:71`](../../packages/adapter-canvas/src/server/routes/azure-discovery.ts) runs `az ad app list --show-mine`) and in the ownership checks the setup route makes before reusing an application. If we reused the service principal shared with Radius functional tests, those checks would reason over applications from unrelated repositories. A dedicated identity keeps them scoped to our runs. Note that `--show-mine` is Graph `/me`-backed and so does not apply to a service-principal caller at all; the durable reason for a dedicated identity is the owner comparisons in the setup route, which match against the caller's own object id.
 
 #### Why a per-run AKS cluster
 
@@ -337,15 +337,16 @@ A stack of pull requests, each independently mergeable and leaving the repositor
 1. **Foundation.** This doc, the test-plan amendment, and the twelfth layer in the architecture doc. No code.
 1. **Harness cloud mode.** `mode` and `workspacePath`, fully unit-tested. Hermetic; no cloud needed to review.
 1. **Cloud fixture.** `cloud-fixture.ts`, `assertCleanSlate()`, the pinned baseline, and the conformance check.
+1. **Service-principal identity support.** Teach the setup route to resolve a caller that is a service principal as well as one that is a user, with hermetic tests for both. The only production change in the stack, and a prerequisite for any journey run by a CI runner.
 1. **Create-environment journey.** Stage one end to end, plus the Playwright config and script.
 1. **CI.** The scheduled workflow, the cleanup workflow, and the runbook.
 1. **Deploy and deletion journeys.** Deferred until environment-deletion work is merged.
 
-Upstream `wellknown` changes gate step 5 only. Steps 2 through 4 can be developed against a personal subscription.
+Upstream `wellknown` changes gate step 6 only. Steps 2 through 5 can be developed against a personal subscription, and steps 2 through 4 need no cloud access at all.
 
 ## Open questions
 
-1. **Is `Application.ReadWrite.OwnedBy` enough when the caller is a service principal rather than a user?** The extension calls `az ad signed-in-user show` ([`azure-auto-setup-application.ts:161`](../../packages/adapter-canvas/src/server/routes/azure-auto-setup-application.ts)), which behaves differently for a service principal. There is a fallback for a null result, but it has never run against a real service principal. This is the highest-risk unknown and should be validated on a personal subscription before the Terraform change is proposed.
+1. **Is `Application.ReadWrite.OwnedBy` enough when the caller is a service principal rather than a user?** Two separate risks were folded together here; the first is now resolved and the second is not. The *identity* risk is understood: `az ad signed-in-user show` ([`azure-auto-setup-application.ts:161`](../../packages/adapter-canvas/src/server/routes/azure-auto-setup-application.ts)) calls Microsoft Graph `/me`, which does not exist for a service principal, and the route fails closed rather than falling back — so Create Environment aborts with `app-owner-lookup-failed`. Step 4 of the development plan fixes that by resolving the principal type from `az account show` and taking the object id from `az ad sp show` for a service principal. The *permission* risk is still open: whether that grant actually lets a service principal create an app registration and hold ownership of it end to end. Only a real tenant can answer it, so validate on a personal subscription before proposing the Terraform change.
 1. **Should the fixture repository live in `radius-project` or a test-only organization?** `radius-project` keeps the App installation narrow but puts a deliberately mutable repository beside production ones.
 1. **What nightly spend is acceptable?** The per-run cluster dominates. If it is too expensive, the second long-lived cluster alternative should be revisited.
 1. **Should `merge_group` be a trigger initially?** It gives pre-merge signal but makes the merge queue depend on Azure availability. Starting with `schedule` and `workflow_dispatch` only is more conservative.
@@ -357,7 +358,7 @@ Upstream `wellknown` changes gate step 5 only. Steps 2 through 4 can be develope
 - **Reuse the long-running cluster.** Rejected: shared state weakens deletion assertions and it is contended by a long daily job.
 - **Ephemeral fixture repository per run.** Cleanest isolation, rejected on privilege: it needs standing organization-wide repository administration.
 - **Reuse the existing org-wide GitHub App.** Rejected: it would broaden a widely installed App from read scopes to write scopes for one test tier.
-- **Reuse the shared Radius service principal.** Rejected on correctness: `az ad app list --show-mine` would return applications from unrelated repositories.
+- **Reuse the shared Radius service principal.** Rejected on correctness: the setup route's ownership checks would match applications owned by that identity for unrelated repositories.
 - **Drive the journey over HTTP instead of a browser.** Faster and less flaky, but it would not close the browser-owned journey gap recorded in [`phase-6-traceability.md`](../../packages/adapter-canvas/test/e2e/phase-6-traceability.md), which is the coverage this work exists to provide.
 
 ## Design review notes
