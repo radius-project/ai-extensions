@@ -1,4 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi
+} from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { providerMutationOutcomeUnknown } from "./server/services/provider-mutation-recovery.js";
 
 const childProcess = vi.hoisted(() => ({
@@ -242,6 +254,35 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
 }
 
 describe.sequential("cliExec", () => {
+  // Real directories because the adapter resolves a bare Windows command name
+  // through the filesystem. Supplying PATH and PATHEXT explicitly keeps the
+  // resolution independent of whichever CLIs the host machine has installed.
+  let nativeDir: string;
+  let shimDir: string;
+  let emptyDir: string;
+  let pathRoot: string;
+
+  const pathEnv = (searchPath: string): NodeJS.ProcessEnv => ({
+    PATH: searchPath,
+    PATHEXT: ".COM;.EXE;.BAT;.CMD"
+  });
+
+  beforeAll(() => {
+    pathRoot = mkdtempSync(join(tmpdir(), "gh-cliexec-path-"));
+    nativeDir = join(pathRoot, "native");
+    shimDir = join(pathRoot, "shim");
+    emptyDir = join(pathRoot, "empty");
+    for (const dir of [nativeDir, shimDir, emptyDir]) mkdirSync(dir);
+    for (const command of ["aws", "kubectl"]) {
+      writeFileSync(join(nativeDir, `${command}.exe`), "");
+      writeFileSync(join(shimDir, `${command}.cmd`), "");
+    }
+  });
+
+  afterAll(() => {
+    rmSync(pathRoot, { recursive: true, force: true });
+  });
+
   beforeEach(() => {
     childProcess.execFile.mockReset();
     childProcess.execFileSync.mockReset();
@@ -509,17 +550,19 @@ describe.sequential("cliExec", () => {
       const callback = vi.fn();
       const args = ["two words", 'say "hello"', "C:\\temp\\"];
 
-      cliExec(command, args, {}, callback);
+      cliExec(command, args, { env: pathEnv(nativeDir) }, callback);
 
       expect(childProcess.execFile).toHaveBeenCalledOnce();
-      const [file, receivedArgs, options] = childProcess.execFile.mock.calls[0];
+      const [file, receivedArgs, options, receivedCallback] =
+        childProcess.execFile.mock.calls[0];
       expect(file).toBe(command);
       expect(receivedArgs).toEqual(args);
       expect(options.windowsVerbatimArguments).toBeUndefined();
+      expect(receivedCallback).toBe(callback);
     }
   );
 
-  it("delivers native Windows CLI output without a cmd.exe retry", async () => {
+  it("delivers native Windows CLI output straight from the single child", async () => {
     const { cliExec } = await loadGh("win32");
     const callback = vi.fn();
     childProcess.execFile.mockImplementationOnce(
@@ -529,7 +572,12 @@ describe.sequential("cliExec", () => {
       }
     );
 
-    cliExec("kubectl", ["get", "namespaces"], {}, callback);
+    cliExec(
+      "kubectl",
+      ["get", "namespaces"],
+      { env: pathEnv(nativeDir) },
+      callback
+    );
 
     expect(childProcess.execFile).toHaveBeenCalledOnce();
     expect(callback).toHaveBeenCalledWith(null, "default kube-system", "");
@@ -538,69 +586,119 @@ describe.sequential("cliExec", () => {
   // CreateProcess resolves a bare name by appending .exe only, so a CLI present
   // solely as a PATHEXT-resolved batch shim (AWS CLI v1 from pip ships aws.cmd)
   // must stay reachable through cmd.exe.
-  it("retries a native Windows CLI through cmd.exe when only a batch shim is installed", async () => {
+  it("routes a bare Windows name through cmd.exe when PATH holds only a batch shim", async () => {
     const { cliExec } = await loadGh("win32");
     const callback = vi.fn();
-    const missing = Object.assign(new Error("spawn aws ENOENT"), {
-      code: "ENOENT",
-      errno: -4058,
-      syscall: "spawn aws"
-    });
-    childProcess.execFile
-      .mockImplementationOnce((_file, _args, _options, cb) => {
-        cb(missing, "", "");
-        return { stdin: { end() {} } };
-      })
-      .mockImplementationOnce((_file, _args, _options, cb) => {
-        cb(null, '["cluster-a"]', "");
-        return { stdin: { end() {} } };
-      });
 
-    cliExec("aws", ["eks", "list-clusters"], {}, callback);
+    cliExec(
+      "aws",
+      ["eks", "list-clusters"],
+      { env: pathEnv(shimDir) },
+      callback
+    );
 
-    expect(childProcess.execFile).toHaveBeenCalledTimes(2);
-    const [file, args, options] = childProcess.execFile.mock.calls[1];
+    expect(childProcess.execFile).toHaveBeenCalledOnce();
+    const [file, args, options] = childProcess.execFile.mock.calls[0];
     expect(file).toBe("cmd.exe");
     expect(args).toEqual(["/c", 'aws "eks" "list-clusters"']);
     expect(options.windowsVerbatimArguments).toBe(true);
-    expect(callback).toHaveBeenCalledOnce();
-    expect(callback).toHaveBeenCalledWith(null, '["cluster-a"]', "");
   });
 
-  it("reports a native Windows CLI failure without retrying through cmd.exe", async () => {
+  // cmd.exe stops at the first directory that yields a match, so an earlier
+  // native install wins over a later batch shim and vice versa.
+  it.each([
+    ["native", () => `${nativeDir};${shimDir}`, "aws"],
+    ["batch shim", () => `${shimDir};${nativeDir}`, "cmd.exe"]
+  ])(
+    "resolves a bare Windows name against the first PATH directory holding a %s",
+    async (_label, buildPath, expectedFile) => {
+      const { cliExec } = await loadGh("win32");
+
+      cliExec("aws", ["sts"], { env: pathEnv(buildPath()) }, vi.fn());
+
+      expect(childProcess.execFile.mock.calls[0][0]).toBe(expectedFile);
+    }
+  );
+
+  // Handing an unresolvable name to cmd.exe would let its implicit
+  // current-directory search run a batch file committed to the open repository,
+  // so an absent CLI must fail as a direct spawn instead.
+  it("spawns directly rather than through cmd.exe when PATH holds no match", async () => {
     const { cliExec } = await loadGh("win32");
-    const callback = vi.fn();
-    const failure = Object.assign(new Error("exit status 2"), { code: 2 });
-    childProcess.execFile.mockImplementationOnce(
-      (_file, _args, _options, cb) => {
-        cb(failure, "", "cluster not found");
-        return { stdin: { end() {} } };
-      }
+
+    cliExec(
+      "kubectl",
+      ["get", "namespaces"],
+      { env: pathEnv(emptyDir) },
+      vi.fn()
     );
 
-    cliExec("kubectl", ["get", "namespaces"], {}, callback);
-
     expect(childProcess.execFile).toHaveBeenCalledOnce();
-    expect(callback).toHaveBeenCalledWith(failure, "", "cluster not found");
+    expect(childProcess.execFile.mock.calls[0][0]).toBe("kubectl");
   });
 
-  it("propagates ENOENT without a cmd.exe retry off Windows", async () => {
-    const { cliExec } = await loadGh("linux");
-    const callback = vi.fn();
-    const missing = Object.assign(new Error("spawn aws ENOENT"), {
-      code: "ENOENT"
-    });
-    childProcess.execFile.mockImplementationOnce(
-      (_file, _args, _options, cb) => {
-        cb(missing, "", "");
-        return { stdin: { end() {} } };
-      }
+  it("ignores a batch shim that the caller's PATHEXT does not make executable", async () => {
+    const { cliExec } = await loadGh("win32");
+
+    cliExec(
+      "aws",
+      ["sts"],
+      { env: { PATH: shimDir, PATHEXT: ".COM;.EXE" } },
+      vi.fn()
     );
 
-    cliExec("aws", ["eks", "list-clusters"], {}, callback);
+    expect(childProcess.execFile.mock.calls[0][0]).toBe("aws");
+  });
+
+  it("falls back to the default PATHEXT when the child environment omits it", async () => {
+    const { cliExec } = await loadGh("win32");
+
+    cliExec("aws", ["sts"], { env: { PATH: shimDir, PATHEXT: "" } }, vi.fn());
+
+    expect(childProcess.execFile.mock.calls[0][0]).toBe("cmd.exe");
+  });
+
+  it.each([
+    ["quoted", () => `"${shimDir}"`],
+    ["empty and whitespace", () => `;   ;${shimDir}`]
+  ])(
+    "tolerates %s PATH entries while resolving a bare Windows name",
+    async (_label, buildPath) => {
+      const { cliExec } = await loadGh("win32");
+
+      cliExec("aws", ["sts"], { env: pathEnv(buildPath()) }, vi.fn());
+
+      expect(childProcess.execFile.mock.calls[0][0]).toBe("cmd.exe");
+    }
+  );
+
+  it("does not search PATH for a bare command name off Windows", async () => {
+    const { cliExec } = await loadGh("linux");
+
+    cliExec(
+      "aws",
+      ["eks", "list-clusters"],
+      { env: pathEnv(shimDir) },
+      vi.fn()
+    );
 
     expect(childProcess.execFile).toHaveBeenCalledOnce();
-    expect(callback).toHaveBeenCalledWith(missing, "", "");
+    expect(childProcess.execFile.mock.calls[0][0]).toBe("aws");
+  });
+
+  it("skips the PATH search for an absolute Windows executable path", async () => {
+    const { cliExec } = await loadGh("win32");
+
+    cliExec(
+      join(shimDir, "aws.exe"),
+      ["sts"],
+      { env: pathEnv(shimDir) },
+      vi.fn()
+    );
+
+    expect(childProcess.execFile.mock.calls[0][0]).toBe(
+      join(shimDir, "aws.exe")
+    );
   });
 
   it("routes an explicitly named Windows batch file through cmd.exe", async () => {

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -62,6 +62,11 @@ describeWindows("cliExec Windows process integration", () => {
       ].join("\r\n"),
       "utf8"
     );
+
+    // A tool installed only as a native executable, exactly like the AWS CLI v2
+    // MSI and kubectl. A bare name for it must resolve through PATHEXT and then
+    // launch directly, without cmd.exe touching its arguments.
+    await copyFile(process.execPath, join(directory, "radius-native.exe"));
 
     environment = { ...process.env };
     const pathKey =
@@ -193,18 +198,76 @@ describeWindows("cliExec Windows process integration", () => {
     });
   });
 
+  // The production callers pass bare `aws` and `kubectl`, so PATHEXT resolution
+  // and the direct launch have to hold for a name rather than an absolute path.
+  it("resolves a bare name installed as a native executable without cmd.exe expansion", async () => {
+    const result = await runCli("radius-native", [
+      recorderPath,
+      "%RADIUS_TEST_SENTINEL%",
+      'say "hello"',
+      "applications(appId='fixture')"
+    ]);
+
+    expect(result).toEqual({
+      code: 0,
+      stdout: JSON.stringify([
+        "%RADIUS_TEST_SENTINEL%",
+        'say "hello"',
+        "applications(appId='fixture')"
+      ]),
+      stderr: ""
+    });
+  });
+
+  // cmd.exe searches the working directory before PATH, and the CLI children
+  // inherit the open repository. An absent tool must therefore fail rather than
+  // run a same-named batch file that the repository happened to carry.
+  it("never runs a batch file that exists only in the working directory", async () => {
+    const workingDirectory = await mkdtemp(join(tmpdir(), "radius cwd "));
+    try {
+      await writeFile(
+        join(workingDirectory, "radius-planted-tool.cmd"),
+        ["@ECHO OFF", "ECHO planted-payload-ran", ""].join("\r\n"),
+        "utf8"
+      );
+      // Windows consults the working directory only while this policy variable
+      // is absent, which is the default. Drop it so the test is not vacuous on
+      // a machine that happens to set it.
+      const workingEnvironment = { ...environment };
+      for (const key of Object.keys(workingEnvironment)) {
+        if (key.toLowerCase() === "nodefaultcurrentdirectoryinexepath") {
+          delete workingEnvironment[key];
+        }
+      }
+
+      const result = await runCli("radius-planted-tool", ["version"], {
+        cwd: workingDirectory,
+        env: workingEnvironment
+      });
+
+      expect(result.code).not.toBe(0);
+      expect(result.stdout).not.toContain("planted-payload-ran");
+    } finally {
+      await rm(workingDirectory, { recursive: true, force: true });
+    }
+  });
+
   it("reports a failure for a command installed in no form at all", async () => {
     const result = await runCli("radius-absent-tool", ["version"]);
 
     expect(result.code).not.toBe(0);
   });
 
-  function runCli(command: string, args: string[]): Promise<CommandResult> {
+  function runCli(
+    command: string,
+    args: string[],
+    overrides: { cwd?: string; env?: NodeJS.ProcessEnv } = {}
+  ): Promise<CommandResult> {
     return new Promise((resolve) => {
       const child = cliExec(
         command,
         args,
-        { env: environment },
+        { env: environment, ...overrides },
         (error, stdout, stderr) => {
           resolve({
             code: error?.code || 0,

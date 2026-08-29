@@ -4,6 +4,8 @@
 // process-spawning surface besides the deploy monitor and infra modules.
 
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type {
   ChildProcess,
   ExecFileException,
@@ -1178,24 +1180,53 @@ function windowsCmdCommandLine(command: string, args: string[]): string {
   return executableNeedsQuoting ? `"${commandLine}"` : commandLine;
 }
 
+// Matches cmd.exe's default when PATHEXT is absent from the child environment.
+const DEFAULT_WINDOWS_PATHEXT = ".COM;.EXE;.BAT;.CMD";
+
+function readSearchPathVar(
+  env: NodeJS.ProcessEnv,
+  name: "path" | "pathext"
+): string {
+  for (const [key, value] of Object.entries(env)) {
+    if (searchPathKey(key) === name && value) return value;
+  }
+  return "";
+}
+
 // CreateProcess resolves a bare command name by appending `.exe` only, while
 // cmd.exe searches every PATHEXT extension. A CLI installed solely as a batch
-// shim -- AWS CLI v1 from pip ships `aws.cmd` -- therefore reports ENOENT when
-// launched directly, so retry it through cmd.exe rather than reporting the tool
-// as missing. Reached only after a spawn failure, so a natively installed CLI
-// never pays for the second attempt.
-function retryThroughWindowsCmd(
+// shim -- AWS CLI v1 from pip ships `aws.cmd` -- is therefore invisible to a
+// direct launch, so decide which launcher a bare name reaches by searching PATH
+// the way cmd.exe would, and report whether the winning entry is a batch file.
+//
+// Choosing up front rather than retrying a failed direct launch matters twice
+// over. It keeps one spawn per call, so the ChildProcess cliExec returns is
+// always the process that runs the command. And it never hands an unresolvable
+// name to cmd.exe, whose search starts in the current directory: the CLI
+// children inherit the open repository as their working directory, so a repo
+// that carried its own `kubectl.cmd` would otherwise be executed on any machine
+// where the real CLI is absent.
+function resolvesToWindowsBatchShim(
   cmd: string,
-  args: string[],
-  execOpts: ExecFileOptionsWithStringEncoding,
-  cb: CliCallback
-): void {
-  execFile(
-    "cmd.exe",
-    ["/c", windowsCmdCommandLine(cmd, args)],
-    { ...execOpts, windowsVerbatimArguments: true },
-    cb
-  );
+  env: NodeJS.ProcessEnv
+): boolean {
+  if (/[\\/.]/.test(cmd)) return false;
+  const extensions = (
+    readSearchPathVar(env, "pathext") || DEFAULT_WINDOWS_PATHEXT
+  )
+    .split(";")
+    .map((extension) => extension.trim())
+    .filter((extension) => extension.length > 0);
+  for (const rawDirectory of readSearchPathVar(env, "path").split(";")) {
+    const directory = rawDirectory.trim().replace(/^"(.*)"$/, "$1");
+    if (!directory) continue;
+    for (const extension of extensions) {
+      if (existsSync(join(directory, `${cmd}${extension}`))) {
+        return /^\.(?:cmd|bat)$/i.test(extension);
+      }
+    }
+  }
+  return false;
 }
 
 // Azure CLI 2.88+ "agentic session": when COPILOT_AGENT_SESSION_ID is set, az injects it as a
@@ -1213,46 +1244,40 @@ function withoutAgentSession(baseEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 // Run a CLI (gh/az/aws/kubectl). Native Windows executables run directly so
-// shell metacharacters remain ordinary argv content, falling back to cmd.exe only
-// when the direct launch cannot resolve the command. Azure CLI's az.cmd launcher
-// and explicitly named batch files go through cmd.exe with one verbatim command
-// line. A simple executable name must stay unquoted because cmd.exe's first-token
-// quote stripping breaks Azure CLI's batch launcher.
+// shell metacharacters remain ordinary argv content. Azure CLI's az.cmd
+// launcher, explicitly named batch files, and bare names that PATH resolves to a
+// batch shim go through cmd.exe with one verbatim command line. A simple
+// executable name must stay unquoted because cmd.exe's first-token quote
+// stripping breaks Azure CLI's batch launcher.
 export function cliExec(
   cmd: string,
   args: string[],
   opts: CliOptions,
   cb: CliCallback
 ): ChildProcess {
-  const isWindows = process.platform === "win32";
-  const isWindowsGh = isWindows && isGhCmd(cmd);
-  const usesWindowsCmd = isWindows && isWindowsBatchCommand(cmd);
-  const usesWindowsNative = isWindows && !isWindowsGh && !usesWindowsCmd;
-  const file =
-    isWindowsGh ? ghExecutable()
-    : usesWindowsCmd ? "cmd.exe"
-    : cmd;
-  const finalArgs =
-    usesWindowsCmd ? ["/c", windowsCmdCommandLine(cmd, args)] : args;
   const execOpts: ExecFileOptionsWithStringEncoding = {
     maxBuffer: 10 * 1024 * 1024,
     windowsHide: true,
     ...opts,
     encoding: "utf8"
   };
-  if (usesWindowsCmd) {
-    execOpts.windowsVerbatimArguments = true;
-  }
   if (isGhCmd(cmd)) execOpts.env = ghChildEnv(execOpts.env);
   execOpts.env = withoutAgentSession(execOpts.env);
-  if (usesWindowsNative) {
-    return execFile(file, finalArgs, execOpts, (error, stdout, stderr) => {
-      if (error?.code === "ENOENT") {
-        retryThroughWindowsCmd(cmd, args, execOpts, cb);
-        return;
-      }
-      cb(error, stdout, stderr);
-    });
+  const isWindows = process.platform === "win32";
+  const isWindowsGh = isWindows && isGhCmd(cmd);
+  const usesWindowsCmd =
+    isWindows &&
+    !isWindowsGh &&
+    (isWindowsBatchCommand(cmd) ||
+      resolvesToWindowsBatchShim(cmd, execOpts.env));
+  const file =
+    isWindowsGh ? ghExecutable()
+    : usesWindowsCmd ? "cmd.exe"
+    : cmd;
+  const finalArgs =
+    usesWindowsCmd ? ["/c", windowsCmdCommandLine(cmd, args)] : args;
+  if (usesWindowsCmd) {
+    execOpts.windowsVerbatimArguments = true;
   }
   return execFile(file, finalArgs, execOpts, cb);
 }
