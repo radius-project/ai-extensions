@@ -154,18 +154,29 @@ describe("environmentsPaneMarkup", () => {
     );
   });
 
-  it("renders a local diagnostic download inside operation details", () => {
+  it("renders an accessible diagnostic review inside operation details", () => {
     const html = environmentsPaneMarkup(baseOptions);
     expect(html.indexOf('id="env-progress-diagnostics"')).toBeGreaterThan(
       html.indexOf('id="env-progress-details"')
     );
     expect(html).toContain(
-      'id="env-progress-diagnostics-download" class="rad-btn rad-btn--secondary" href="" download="radius-environment-operation-diagnostics.json"'
+      'id="env-progress-diagnostics-open" class="rad-btn rad-btn--secondary" aria-describedby="env-progress-diagnostics-note"'
     );
-    expect(html).toContain(">Download diagnostic snapshot</a>");
-    expect(html).toContain('aria-describedby="env-progress-diagnostics-note"');
+    expect(html).toContain(">Download diagnostic snapshot</button>");
     expect(html).toContain(
       "Captures this paused or completed state in a local, redacted JSON file. Radius does not upload it."
+    );
+    expect(html).toContain(
+      'id="env-diagnostics-modal" role="dialog" aria-modal="true" aria-labelledby="env-diagnostics-title" aria-describedby="env-diagnostics-intro"'
+    );
+    expect(html).toContain(
+      '<label for="env-diagnostics-include-identifiers">Include contextual identifiers</label>'
+    );
+    expect(html).toContain(
+      '<label for="env-diagnostics-reviewed-identifiers">I reviewed these identifiers</label>'
+    );
+    expect(html).toContain(
+      'id="env-diagnostics-download" class="rad-btn rad-btn--primary" href="" download="radius-environment-operation-diagnostics.json" aria-disabled="true"'
     );
   });
 
@@ -201,7 +212,7 @@ describe("environmentsPaneMarkup", () => {
     );
     const actions = html.slice(
       html.indexOf('id="env-progress-actions"'),
-      html.indexOf('id="env-rollback-modal"')
+      html.indexOf('id="env-diagnostics-modal"')
     );
     expect(actions).toContain(
       '<div id="env-progress-bottom-buttons" class="env-progress__bottom-buttons"></div>'

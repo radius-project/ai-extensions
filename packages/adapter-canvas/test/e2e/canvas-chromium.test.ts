@@ -1360,13 +1360,25 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("body")).not.toContainText("cancelled");
     await expect(page.locator("body")).not.toContainText("Cancelled");
     await resumedPanel.locator("#env-progress-details > summary").click();
-    const diagnosticLink = page.getByRole("link", {
+    const diagnosticButton = page.getByRole("button", {
       name: "Download diagnostic snapshot"
     });
-    await expect(diagnosticLink).toBeVisible();
+    await expect(diagnosticButton).toBeVisible();
+    await diagnosticButton.focus();
+    await page.keyboard.press("Enter");
+    const diagnosticDialog = page.getByRole("dialog", {
+      name: "Download diagnostic snapshot"
+    });
+    await expect(diagnosticDialog).toBeVisible();
+    await expect(
+      diagnosticDialog.getByLabel("Include contextual identifiers")
+    ).not.toBeChecked();
+    await expectNoWcagViolations(page);
+    const diagnosticLink = diagnosticDialog.getByRole("link", {
+      name: "Download snapshot"
+    });
     await diagnosticLink.focus();
     await expect(diagnosticLink).toBeFocused();
-    await expectNoWcagViolations(page);
     const downloadStarted = page.waitForEvent("download");
     await page.keyboard.press("Enter");
     const download = await downloadStarted;
@@ -1382,10 +1394,43 @@ test.describe("Radius Canvas in Chromium", () => {
     expect(diagnosticText).not.toContain("fixture-environment");
     expect(diagnosticText).not.toContain(PLACEHOLDER_SECRET);
     expect(JSON.parse(diagnosticText)).toMatchObject({
-      diagnosticSchemaVersion: 1,
+      diagnosticSchemaVersion: 2,
+      identifierProfile: "support_safe",
+      contextualIdentifiers: null,
       operation: {
         operationId: result.operationId,
         lifecycle: { state: "failed" }
+      }
+    });
+
+    await diagnosticDialog.getByLabel("Include contextual identifiers").check();
+    await expect(diagnosticDialog.getByText(REPOSITORY)).toBeVisible();
+    await expect(
+      diagnosticDialog.getByText("fixture-environment", { exact: true })
+    ).toBeVisible();
+    await expect(diagnosticDialog.getByText("repo-user")).toBeVisible();
+    await expectNoWcagViolations(page);
+    await diagnosticDialog.getByLabel("I reviewed these identifiers").check();
+    const contextualDownloadStarted = page.waitForEvent("download");
+    await diagnosticLink.click();
+    const contextualDownload = await contextualDownloadStarted;
+    const contextualPath = await contextualDownload.path();
+    if (contextualPath === null) {
+      throw new Error(
+        "Playwright did not retain the contextual diagnostic download."
+      );
+    }
+    const contextualText = await fs.readFile(contextualPath, "utf8");
+    expect(contextualText).not.toContain(PLACEHOLDER_SECRET);
+    expect(JSON.parse(contextualText)).toMatchObject({
+      diagnosticSchemaVersion: 2,
+      identifierProfile: "support_safe_with_identifiers",
+      contextualIdentifiers: {
+        repository: REPOSITORY,
+        branch: WORKTREE_BRANCH,
+        environment: "fixture-environment",
+        githubLogin: "repo-user",
+        omittedFieldCount: 0
       }
     });
     expect(bodyFor(canvas, "/api/operations")).toMatchObject({

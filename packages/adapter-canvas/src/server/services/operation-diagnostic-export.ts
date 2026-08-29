@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 const UNKNOWN = "unknown";
 
 const LIFECYCLE_STATES = new Set([
@@ -100,13 +102,22 @@ const PROVIDERS = new Set(["azure"]);
 const OPERATION_ID =
   /^op_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const PRODUCT_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]*$/u;
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/u;
+const CONTEXT_LIMITS = {
+  repository: 200,
+  branch: 255,
+  environment: 255,
+  githubLogin: 100
+} as const;
 
 type UnknownRecord = Record<string, unknown>;
 
 export interface OperationDiagnosticExport {
-  diagnosticSchemaVersion: 1;
+  diagnosticSchemaVersion: 2;
   generatedAt: string;
   productVersion: string;
+  identifierProfile: "support_safe" | "support_safe_with_identifiers";
+  contextualIdentifiers: OperationDiagnosticContext | null;
   operation: {
     operationId: string;
     operationSchemaVersion: number | null;
@@ -148,6 +159,14 @@ export interface OperationDiagnosticExport {
     verificationWorkflowState: string | null;
     unrecognizedValueCount: number;
   };
+}
+
+export interface OperationDiagnosticContext {
+  repository: string | null;
+  branch: string | null;
+  environment: string | null;
+  githubLogin: string | null;
+  omittedFieldCount: number;
 }
 
 interface DiagnosticState {
@@ -269,14 +288,83 @@ function productVersion(value: string): string {
   return PRODUCT_VERSION.test(trimmed) ? trimmed : UNKNOWN;
 }
 
+function contextualIdentifier(
+  value: unknown,
+  maximumLength: number
+): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (
+    trimmed === "" ||
+    trimmed.length > maximumLength ||
+    CONTROL_CHARACTERS.test(trimmed)
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
+export function createOperationDiagnosticContext(
+  operation: unknown
+): OperationDiagnosticContext {
+  const source = record(operation);
+  if (!source) throw new Error("Operation record is required.");
+  const context = nested(source, "context");
+  const journey = nested(source, "journey");
+  const resumeTarget = nested(journey, "resumeTarget");
+  const identifiers = {
+    repository: contextualIdentifier(source.repo, CONTEXT_LIMITS.repository),
+    branch: contextualIdentifier(
+      journey?.resumeBranch ?? resumeTarget?.branch,
+      CONTEXT_LIMITS.branch
+    ),
+    environment: contextualIdentifier(
+      source.environment,
+      CONTEXT_LIMITS.environment
+    ),
+    githubLogin: contextualIdentifier(
+      context?.githubLogin,
+      CONTEXT_LIMITS.githubLogin
+    )
+  };
+  return {
+    ...identifiers,
+    omittedFieldCount: Object.values(identifiers).filter(
+      (value) => value === null
+    ).length
+  };
+}
+
+export function operationDiagnosticContextFingerprint(
+  context: OperationDiagnosticContext
+): string {
+  return createHash("sha256").update(JSON.stringify(context)).digest("hex");
+}
+
+export function operationDiagnosticAvailable(operation: unknown): boolean {
+  const source = record(operation);
+  if (!source) return false;
+  if (typeof source.state === "string" && TERMINAL_STATES.has(source.state)) {
+    return true;
+  }
+  if (source.state === "input_required") return true;
+  const stop = nested(nested(source, "control"), "stop");
+  return (
+    typeof stop?.requestedAt === "string" &&
+    Number.isFinite(Date.parse(stop.requestedAt))
+  );
+}
+
 export function createOperationDiagnosticExport({
   operation,
   version,
-  now
+  now,
+  includeContext = false
 }: {
   operation: unknown;
   version: string;
   now: number;
+  includeContext?: boolean;
 }): OperationDiagnosticExport {
   const source = record(operation);
   if (!source) throw new Error("Operation record is required.");
@@ -390,9 +478,13 @@ export function createOperationDiagnosticExport({
   const dispatchedAt = verification?.dispatchedAt;
 
   return {
-    diagnosticSchemaVersion: 1,
+    diagnosticSchemaVersion: 2,
     generatedAt: new Date(now).toISOString(),
     productVersion: productVersion(version),
+    identifierProfile:
+      includeContext ? "support_safe_with_identifiers" : "support_safe",
+    contextualIdentifiers:
+      includeContext ? createOperationDiagnosticContext(source) : null,
     operation: {
       operationId,
       operationSchemaVersion: optionalSchemaVersion(

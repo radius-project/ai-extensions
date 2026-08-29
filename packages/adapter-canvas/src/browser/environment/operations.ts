@@ -62,7 +62,6 @@ export const PROGRESS_IDS = {
   steps: "env-progress-steps",
   details: "env-progress-details",
   diagnostics: "env-progress-diagnostics",
-  diagnosticsDownload: "env-progress-diagnostics-download",
   actions: "env-progress-actions",
   bottomButtons: "env-progress-bottom-buttons",
   dismiss: "env-progress-dismiss",
@@ -92,6 +91,24 @@ export const PROGRESS_IDS = {
   commandGuidance: "env-progress-command-guidance",
   commandStatus: "env-progress-command-status",
   commandError: "env-progress-command-error"
+} as const;
+
+export const DIAGNOSTIC_IDS = {
+  open: "env-progress-diagnostics-open",
+  modal: "env-diagnostics-modal",
+  title: "env-diagnostics-title",
+  includeIdentifiers: "env-diagnostics-include-identifiers",
+  preview: "env-diagnostics-preview",
+  repository: "env-diagnostics-repository",
+  branch: "env-diagnostics-branch",
+  environment: "env-diagnostics-environment",
+  githubLogin: "env-diagnostics-github-login",
+  reviewBlock: "env-diagnostics-review-block",
+  reviewedIdentifiers: "env-diagnostics-reviewed-identifiers",
+  status: "env-diagnostics-status",
+  error: "env-diagnostics-error",
+  cancel: "env-diagnostics-cancel",
+  download: "env-diagnostics-download"
 } as const;
 
 export const ROLLBACK_IDS = {
@@ -151,6 +168,7 @@ const DEFAULT_FAILURE_TITLE = "Setup didn’t finish";
 const DEFAULT_ROLLBACK_TITLE = "Roll back resources created by this setup?";
 const DEFAULT_ROLLBACK_CONFIRM = "Roll back resources";
 const DEFAULT_ROLLBACK_CANCEL = "Keep resources";
+const DIAGNOSTIC_FILENAME = "radius-environment-operation-diagnostics.json";
 const CANCELLED_ACTIVITY_MESSAGE = "Environment setup cancelled.";
 // Commands that delete. Accepting one supersedes the failure the landing is
 // still reporting, so the banner comes down and the environment table is
@@ -352,6 +370,19 @@ export interface OperationInputPrompt {
   readonly checkpoint: unknown;
   readonly candidates: readonly AppPickerCandidate[];
   readonly defaultAppId: string;
+}
+
+interface DiagnosticContext {
+  readonly repository: string | null;
+  readonly branch: string | null;
+  readonly environment: string | null;
+  readonly githubLogin: string | null;
+  readonly omittedFieldCount: number;
+}
+
+interface DiagnosticContextPreview {
+  readonly identifiers: DiagnosticContext;
+  readonly fingerprint: string;
 }
 
 export type OperationTerminalPayload = Readonly<Record<string, unknown>>;
@@ -653,6 +684,30 @@ function parseVerification(
   return { dispatchedAt: readNumber(value, "dispatchedAt") };
 }
 
+function parseDiagnosticContext(
+  value: unknown
+): DiagnosticContextPreview | null {
+  if (!isRecord(value)) return null;
+  const identifiers = readRecord(value, "contextualIdentifiers");
+  if (!identifiers) return null;
+  const fingerprint = readString(value, "contextFingerprint");
+  if (!/^[0-9a-f]{64}$/u.test(fingerprint)) return null;
+  const optional = (key: string): string | null => {
+    const value = readString(identifiers, key);
+    return value === "" ? null : value;
+  };
+  return {
+    identifiers: {
+      repository: optional("repository"),
+      branch: optional("branch"),
+      environment: optional("environment"),
+      githubLogin: optional("githubLogin"),
+      omittedFieldCount: readNumber(identifiers, "omittedFieldCount") ?? 0
+    },
+    fingerprint
+  };
+}
+
 function parseAppCandidates(value: unknown): AppPickerCandidate[] {
   if (!Array.isArray(value)) return [];
   const candidates: AppPickerCandidate[] = [];
@@ -910,6 +965,21 @@ function operationsByRepoUrl(repo: string): string {
 
 function operationUrl(operationId: string): string {
   return `${OPERATIONS_PATH}/${encodeURIComponent(operationId)}`;
+}
+
+function diagnosticUrl(
+  operationId: string,
+  identifiers?: "preview" | "include",
+  contextFingerprint?: string
+): string {
+  const base = `${operationUrl(operationId)}/diagnostics`;
+  if (!identifiers) return base;
+  return (
+    `${base}?identifiers=${identifiers}` +
+    (contextFingerprint ?
+      `&contextFingerprint=${encodeURIComponent(contextFingerprint)}`
+    : "")
+  );
 }
 
 function resumeUrl(operationId: string, code: string): string {
@@ -1256,6 +1326,366 @@ export function initializeEnvironmentOperations(
     const banner = dom.byId(ERROR_BANNER_ID);
     if (banner) banner.style.display = "none";
   }
+
+  // ---------------- Diagnostic snapshot review ----------------
+
+  let diagnosticOperationId = "";
+  let diagnosticReturnFocus: DomElement | null = null;
+  let diagnosticKeydownBound = false;
+  let diagnosticContextReady = false;
+  let diagnosticContextFingerprint = "";
+  let diagnosticPreviewGeneration = 0;
+  let diagnosticPreviewAbort: AbortHandle | null = null;
+  let diagnosticDownloadGeneration = 0;
+  let diagnosticDownloadAbort: AbortHandle | null = null;
+  let diagnosticDownloadBusy = false;
+
+  function setDiagnosticStatus(message: string): void {
+    const status = dom.byId(DIAGNOSTIC_IDS.status);
+    if (status) status.textContent = message;
+  }
+
+  function setDiagnosticError(message: string): void {
+    const error = dom.byId(DIAGNOSTIC_IDS.error);
+    if (error) error.textContent = message;
+  }
+
+  function setDiagnosticDownload(url: string): void {
+    const download = dom.byId(DIAGNOSTIC_IDS.download);
+    if (!download) return;
+    if (url === "") {
+      download.removeAttribute("href");
+      download.setAttribute("aria-disabled", "true");
+      return;
+    }
+    download.setAttribute("href", url);
+    download.setAttribute("aria-disabled", "false");
+  }
+
+  function diagnosticFocusable(dialog: DomElement): readonly DomElement[] {
+    return dom.all(
+      dialog,
+      "button:not([disabled]), input:not([disabled]), a[href]"
+    );
+  }
+
+  const diagnosticKeydown: DomEventListener = (event) => {
+    const dialog = dom.byId(DIAGNOSTIC_IDS.modal);
+    if (!dialog) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeDiagnosticDialog();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = diagnosticFocusable(dialog);
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = context.focus.active();
+    if (event.shiftKey === true && (active === first || active === null)) {
+      event.preventDefault();
+      last.focus();
+      return;
+    }
+    if (event.shiftKey !== true && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  function bindDiagnosticKeydown(): void {
+    if (diagnosticKeydownBound) return;
+    dom.document.addEventListener("keydown", diagnosticKeydown);
+    diagnosticKeydownBound = true;
+  }
+
+  function unbindDiagnosticKeydown(): void {
+    if (!diagnosticKeydownBound) return;
+    dom.document.removeEventListener("keydown", diagnosticKeydown);
+    diagnosticKeydownBound = false;
+  }
+
+  function abortDiagnosticPreview(): void {
+    diagnosticPreviewGeneration += 1;
+    diagnosticPreviewAbort?.abort();
+    diagnosticPreviewAbort = null;
+  }
+
+  function abortDiagnosticDownload(): void {
+    diagnosticDownloadGeneration += 1;
+    diagnosticDownloadAbort?.abort();
+    diagnosticDownloadAbort = null;
+    diagnosticDownloadBusy = false;
+  }
+
+  function dismissDiagnosticDialog(): void {
+    const dialog = dom.byId(DIAGNOSTIC_IDS.modal);
+    if (dialog) dialog.style.display = "none";
+    abortDiagnosticPreview();
+    abortDiagnosticDownload();
+    unbindDiagnosticKeydown();
+    diagnosticContextReady = false;
+    diagnosticContextFingerprint = "";
+  }
+
+  function closeDiagnosticDialog(): void {
+    dismissDiagnosticDialog();
+    const trigger = diagnosticReturnFocus;
+    diagnosticReturnFocus = null;
+    context.focus.focus(trigger);
+  }
+
+  function renderDiagnosticContext(identifiers: DiagnosticContext): void {
+    const values: ReadonlyArray<readonly [string, string | null]> = [
+      [DIAGNOSTIC_IDS.repository, identifiers.repository],
+      [DIAGNOSTIC_IDS.branch, identifiers.branch],
+      [DIAGNOSTIC_IDS.environment, identifiers.environment],
+      [DIAGNOSTIC_IDS.githubLogin, identifiers.githubLogin]
+    ];
+    for (const [id, value] of values) {
+      const element = dom.byId(id);
+      if (element) element.textContent = value ?? "Not available";
+    }
+    setDiagnosticStatus(
+      identifiers.omittedFieldCount === 0 ?
+        "Review the identifiers, then confirm that you reviewed them."
+      : `${identifiers.omittedFieldCount} contextual identifier${
+          identifiers.omittedFieldCount === 1 ? " is" : "s are"
+        } unavailable. Review the remaining values before downloading.`
+    );
+  }
+
+  function refreshDiagnosticDownload(): void {
+    const include = dom.inputById(DIAGNOSTIC_IDS.includeIdentifiers);
+    const reviewed = dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers);
+    if (diagnosticOperationId === "") {
+      setDiagnosticDownload("");
+      return;
+    }
+    if (include?.checked !== true) {
+      setDiagnosticDownload(diagnosticUrl(diagnosticOperationId));
+      return;
+    }
+    if (diagnosticDownloadBusy) {
+      setDiagnosticDownload("");
+      return;
+    }
+    setDiagnosticDownload(
+      diagnosticContextReady && reviewed?.checked === true ?
+        diagnosticUrl(
+          diagnosticOperationId,
+          "include",
+          diagnosticContextFingerprint
+        )
+      : ""
+    );
+  }
+
+  function loadDiagnosticContext(): void {
+    const preview = dom.byId(DIAGNOSTIC_IDS.preview);
+    const reviewed = dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers);
+    if (preview) preview.style.display = "";
+    if (reviewed) reviewed.checked = false;
+    diagnosticContextReady = false;
+    diagnosticContextFingerprint = "";
+    refreshDiagnosticDownload();
+    setDiagnosticError("");
+    setDiagnosticStatus("Loading contextual identifiers…");
+    abortDiagnosticPreview();
+    const generation = diagnosticPreviewGeneration;
+    const abort = context.net.createAbort();
+    diagnosticPreviewAbort = abort;
+    void context.net
+      .fetch(
+        diagnosticUrl(diagnosticOperationId, "preview"),
+        abort ?
+          { cache: "no-store", signal: abort.signal }
+        : { cache: "no-store" }
+      )
+      .then((response) => {
+        if (!response.ok) throw new Error("preview request failed");
+        return response.json();
+      })
+      .then((payload) => {
+        if (generation !== diagnosticPreviewGeneration) return;
+        const preview = parseDiagnosticContext(payload);
+        if (!preview) throw new Error("preview response was invalid");
+        diagnosticContextReady = true;
+        diagnosticContextFingerprint = preview.fingerprint;
+        renderDiagnosticContext(preview.identifiers);
+        refreshDiagnosticDownload();
+      })
+      .catch((error: unknown) => {
+        if (generation !== diagnosticPreviewGeneration) return;
+        context.logger.error(
+          "Radius could not preview diagnostic identifiers.",
+          error
+        );
+        setDiagnosticStatus("");
+        setDiagnosticError(
+          "Radius could not load the contextual identifiers. Download the support-safe snapshot or try again."
+        );
+      })
+      .finally(() => {
+        if (diagnosticPreviewAbort === abort) diagnosticPreviewAbort = null;
+      });
+  }
+
+  function handleDiagnosticIdentifierChoice(): void {
+    const include = dom.inputById(DIAGNOSTIC_IDS.includeIdentifiers);
+    const preview = dom.byId(DIAGNOSTIC_IDS.preview);
+    const reviewed = dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers);
+    if (include?.checked === true) {
+      loadDiagnosticContext();
+      return;
+    }
+    abortDiagnosticPreview();
+    abortDiagnosticDownload();
+    diagnosticContextReady = false;
+    diagnosticContextFingerprint = "";
+    if (preview) preview.style.display = "none";
+    if (reviewed) reviewed.checked = false;
+    setDiagnosticStatus("");
+    setDiagnosticError("");
+    refreshDiagnosticDownload();
+  }
+
+  function openDiagnosticDialog(): void {
+    const dialog = dom.byId(DIAGNOSTIC_IDS.modal);
+    const trigger = dom.byId(DIAGNOSTIC_IDS.open);
+    if (!dialog || !trigger || diagnosticOperationId === "") return;
+    diagnosticReturnFocus = trigger;
+    const include = dom.inputById(DIAGNOSTIC_IDS.includeIdentifiers);
+    const reviewed = dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers);
+    const preview = dom.byId(DIAGNOSTIC_IDS.preview);
+    if (include) include.checked = false;
+    if (reviewed) reviewed.checked = false;
+    if (preview) preview.style.display = "none";
+    diagnosticContextReady = false;
+    diagnosticContextFingerprint = "";
+    setDiagnosticStatus("");
+    setDiagnosticError("");
+    refreshDiagnosticDownload();
+    dialog.style.display = "flex";
+    bindDiagnosticKeydown();
+    dom.byId(DIAGNOSTIC_IDS.title)?.focus();
+  }
+
+  function handleDiagnosticDownload(
+    download: DomElement,
+    event: Parameters<DomEventListener>[0]
+  ): void {
+    if (diagnosticDownloadBusy) {
+      event.preventDefault();
+      return;
+    }
+    const url = download.getAttribute("href");
+    if (url === null) {
+      event.preventDefault();
+      setDiagnosticError(
+        "Review the contextual identifiers before downloading this snapshot."
+      );
+      dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers)?.focus();
+      return;
+    }
+    const include = dom.inputById(DIAGNOSTIC_IDS.includeIdentifiers);
+    if (include?.checked === true) {
+      event.preventDefault();
+      abortDiagnosticDownload();
+      diagnosticDownloadBusy = true;
+      refreshDiagnosticDownload();
+      setDiagnosticError("");
+      setDiagnosticStatus("Confirming the reviewed identifiers…");
+      const generation = diagnosticDownloadGeneration;
+      const abort = context.net.createAbort();
+      diagnosticDownloadAbort = abort;
+      void context.net
+        .fetch(
+          url,
+          abort ?
+            { cache: "no-store", signal: abort.signal }
+          : { cache: "no-store" }
+        )
+        .then(async (response) => {
+          if (!response.ok) {
+            throw new Error(
+              response.status === 409 ? "context-changed" : "download-failed"
+            );
+          }
+          const text = await response.text();
+          if (generation !== diagnosticDownloadGeneration) return;
+          if (
+            !context.download.save(
+              text,
+              "application/json",
+              DIAGNOSTIC_FILENAME
+            )
+          ) {
+            throw new Error("download-unavailable");
+          }
+        })
+        .then(() => {
+          if (generation !== diagnosticDownloadGeneration) return;
+          setDiagnosticStatus("Diagnostic snapshot download started.");
+        })
+        .catch((error: unknown) => {
+          if (generation !== diagnosticDownloadGeneration) return;
+          const code = error instanceof Error ? error.message : "";
+          if (code === "context-changed") {
+            const reviewed = dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers);
+            if (reviewed) reviewed.checked = false;
+            diagnosticContextReady = false;
+            diagnosticContextFingerprint = "";
+            loadDiagnosticContext();
+            setDiagnosticError(
+              "The contextual identifiers changed. Review the updated values before downloading."
+            );
+            return;
+          }
+          context.logger.error(
+            "Radius could not download contextual diagnostics.",
+            error
+          );
+          setDiagnosticStatus("");
+          setDiagnosticError(
+            code === "download-unavailable" ?
+              "This host could not save the contextual diagnostic snapshot."
+            : "Radius could not download the contextual diagnostic snapshot. Try again."
+          );
+        })
+        .finally(() => {
+          if (generation !== diagnosticDownloadGeneration) return;
+          diagnosticDownloadAbort = null;
+          diagnosticDownloadBusy = false;
+          refreshDiagnosticDownload();
+        });
+      return;
+    }
+    setDiagnosticError("");
+    setDiagnosticStatus("Diagnostic snapshot download started.");
+  }
+
+  const diagnosticOpen = dom.byId(DIAGNOSTIC_IDS.open);
+  if (diagnosticOpen) scope.on(diagnosticOpen, "click", openDiagnosticDialog);
+  const diagnosticInclude = dom.byId(DIAGNOSTIC_IDS.includeIdentifiers);
+  if (diagnosticInclude)
+    scope.on(diagnosticInclude, "change", handleDiagnosticIdentifierChoice);
+  const diagnosticReviewed = dom.byId(DIAGNOSTIC_IDS.reviewedIdentifiers);
+  if (diagnosticReviewed)
+    scope.on(diagnosticReviewed, "change", refreshDiagnosticDownload);
+  const diagnosticCancel = dom.byId(DIAGNOSTIC_IDS.cancel);
+  if (diagnosticCancel)
+    scope.on(diagnosticCancel, "click", closeDiagnosticDialog);
+  const diagnosticDownload = dom.byId(DIAGNOSTIC_IDS.download);
+  if (diagnosticDownload)
+    scope.on(diagnosticDownload, "click", (event) =>
+      handleDiagnosticDownload(diagnosticDownload, event)
+    );
+  scope.onTeardown(() => {
+    dismissDiagnosticDialog();
+    diagnosticReturnFocus = null;
+  });
 
   // ---------------- Rollback confirmation ----------------
   //
@@ -1687,24 +2117,33 @@ export function initializeEnvironmentOperations(
 
   function renderDiagnostics(op: OperationRecord | null): boolean {
     const container = dom.byId(PROGRESS_IDS.diagnostics);
-    const download = dom.byId(PROGRESS_IDS.diagnosticsDownload);
-    if (!container || !download) return false;
+    const open = dom.byId(DIAGNOSTIC_IDS.open);
+    if (!container || !open) return false;
     const available =
       op !== null &&
+      !isExitedSetup(op) &&
       (op.terminalState !== null ||
         op.state === "input_required" ||
         op.actions.some(
           (action) => action.kind === "stop" && action.pending === true
         ));
     if (!available) {
-      download.setAttribute("href", "");
+      if (diagnosticOperationId !== "") {
+        dismissDiagnosticDialog();
+        diagnosticReturnFocus = null;
+      }
+      diagnosticOperationId = "";
       container.style.display = "none";
       return false;
     }
-    download.setAttribute(
-      "href",
-      `${OPERATIONS_PATH}/${encodeURIComponent(op.operationId)}/diagnostics`
-    );
+    if (
+      diagnosticOperationId !== "" &&
+      diagnosticOperationId !== op.operationId
+    ) {
+      dismissDiagnosticDialog();
+      diagnosticReturnFocus = null;
+    }
+    diagnosticOperationId = op.operationId;
     container.style.display = "flex";
     return true;
   }

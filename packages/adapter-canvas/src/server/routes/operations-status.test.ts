@@ -491,7 +491,11 @@ describe("operations-status routes (SU-16)", () => {
       },
       providerRecovery: { state: "idle", mutations: [] },
       verification: null,
-      request: { clientSecret: "SECRET_CLIENT_SECRET" }
+      request: { clientSecret: "SECRET_CLIENT_SECRET" },
+      repo: "octo/widgets",
+      environment: "production-west",
+      context: { githubLogin: "octocat" },
+      journey: { resumeBranch: "feature/environment-recovery" }
     };
     const recording = run(
       `/api/operations/${operationId}/diagnostics`,
@@ -521,8 +525,10 @@ describe("operations-status routes (SU-16)", () => {
       operation: { operationId: string; failure: { classification: string } };
     };
     expect(parsed).toMatchObject({
-      diagnosticSchemaVersion: 1,
+      diagnosticSchemaVersion: 2,
       productVersion: "0.3.0-edge.1",
+      identifierProfile: "support_safe",
+      contextualIdentifiers: null,
       operation: {
         operationId,
         failure: { classification: "user-fixable" }
@@ -530,6 +536,135 @@ describe("operations-status routes (SU-16)", () => {
     });
     expect(recording.body).not.toContain("IGNORE PREVIOUS INSTRUCTIONS");
     expect(recording.body).not.toContain("SECRET");
+    expect(recording.body).not.toContain("octo/widgets");
+    expect(recording.body).not.toContain("production-west");
+    expect(recording.body).not.toContain("octocat");
+  });
+
+  it("previews and explicitly includes bounded contextual identifiers", () => {
+    const operationId = "op_12345678-1234-4123-8123-123456789abc";
+    const operation = {
+      operationId,
+      schemaVersion: 6,
+      provider: "azure",
+      state: "failed",
+      currentStage: "verify",
+      startedAt: "2026-08-27T10:00:00.000Z",
+      lastActivityAt: "2026-08-27T10:00:05.000Z",
+      endedAt: "2026-08-27T10:00:05.000Z",
+      stages: [],
+      control: {
+        attempts: { setup: 1, verification: 0 },
+        stop: { requestedAt: null, acknowledgedAt: null },
+        commands: []
+      },
+      failure: null,
+      setupArtifacts: {
+        cleanup: { state: "not_needed", attempts: 0, results: [] }
+      },
+      providerRecovery: { state: "complete", mutations: [] },
+      repo: "octo/widgets",
+      environment: "production-west",
+      context: { githubLogin: "octocat" },
+      journey: { resumeBranch: "feature/environment-recovery" }
+    };
+    const deps = dependencies({
+      get: () => operation,
+      productVersion: () => "0.3.0",
+      now: () => Date.parse("2026-08-27T11:00:00.000Z")
+    });
+
+    const preview = run(
+      `/api/operations/${operationId}/diagnostics?identifiers=preview`,
+      handleOperationDiagnostics,
+      deps
+    );
+    expect(preview.status).toBe(200);
+    expectJsonNoStore(preview);
+    const previewPayload = JSON.parse(preview.body) as {
+      contextFingerprint: string;
+      contextualIdentifiers: Record<string, unknown>;
+    };
+    expect(previewPayload.contextFingerprint).toMatch(/^[0-9a-f]{64}$/u);
+    expect(previewPayload.contextualIdentifiers).toEqual({
+      repository: "octo/widgets",
+      branch: "feature/environment-recovery",
+      environment: "production-west",
+      githubLogin: "octocat",
+      omittedFieldCount: 0
+    });
+
+    const included = run(
+      `/api/operations/${operationId}/diagnostics?identifiers=include&contextFingerprint=${previewPayload.contextFingerprint}`,
+      handleOperationDiagnostics,
+      deps
+    );
+    expect(included.status).toBe(200);
+    expect(included.headers["Content-Disposition"]).toBe(
+      'attachment; filename="radius-environment-operation-diagnostics.json"'
+    );
+    expect(JSON.parse(included.body)).toMatchObject({
+      identifierProfile: "support_safe_with_identifiers",
+      contextualIdentifiers: {
+        repository: "octo/widgets",
+        branch: "feature/environment-recovery",
+        environment: "production-west",
+        githubLogin: "octocat",
+        omittedFieldCount: 0
+      }
+    });
+  });
+
+  it("refuses normal progress and an unknown identifier profile", () => {
+    const operationId = "op_12345678-1234-4123-8123-123456789abc";
+    const running = run(
+      `/api/operations/${operationId}/diagnostics`,
+      handleOperationDiagnostics,
+      dependencies({
+        get: () => ({ operationId, state: "running", control: { stop: {} } })
+      })
+    );
+    expect(running.status).toBe(409);
+    expectJsonNoStore(running);
+    expect(JSON.parse(running.body)).toEqual({
+      error:
+        "Diagnostics are available after Stop is requested, while Radius is waiting for input, or after the operation finishes.",
+      code: "operation-diagnostics-unavailable"
+    });
+
+    const invalid = run(
+      `/api/operations/${operationId}/diagnostics?identifiers=everything`,
+      handleOperationDiagnostics,
+      dependencies({
+        get: () => ({ operationId, state: "failed" })
+      })
+    );
+    expect(invalid.status).toBe(400);
+    expectJsonNoStore(invalid);
+    expect(JSON.parse(invalid.body)).toEqual({
+      error: "Invalid diagnostic identifier profile.",
+      code: "invalid-diagnostic-profile"
+    });
+
+    const changed = run(
+      `/api/operations/${operationId}/diagnostics?identifiers=include&contextFingerprint=${"0".repeat(64)}`,
+      handleOperationDiagnostics,
+      dependencies({
+        get: () => ({
+          operationId,
+          state: "failed",
+          repo: "octo/widgets",
+          environment: "dev"
+        })
+      })
+    );
+    expect(changed.status).toBe(409);
+    expectJsonNoStore(changed);
+    expect(JSON.parse(changed.body)).toEqual({
+      error:
+        "The contextual identifiers changed after review. Review them again before downloading.",
+      code: "diagnostic-context-changed"
+    });
   });
 
   it("answers safely when diagnostics name an unknown operation", () => {
@@ -565,7 +700,7 @@ describe("operations-status routes (SU-16)", () => {
       "/api/operations/not-generated/diagnostics",
       handleOperationDiagnostics,
       dependencies({
-        get: () => ({ operationId: "not-generated" }),
+        get: () => ({ operationId: "not-generated", state: "failed" }),
         productVersion: () => "SECRET_PRODUCT_VERSION",
         now: () => 0
       })

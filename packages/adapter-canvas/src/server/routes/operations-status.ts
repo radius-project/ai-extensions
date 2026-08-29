@@ -1,6 +1,11 @@
 import type { CanvasRequestContext } from "../request-context.js";
 import type { SelectionHandleClaim } from "../services/github-account-readiness.js";
-import { createOperationDiagnosticExport } from "../services/operation-diagnostic-export.js";
+import {
+  createOperationDiagnosticContext,
+  createOperationDiagnosticExport,
+  operationDiagnosticContextFingerprint,
+  operationDiagnosticAvailable
+} from "../services/operation-diagnostic-export.js";
 import {
   templatePathParameters,
   type RouteHandlerRegistry
@@ -316,12 +321,72 @@ export function handleOperationDiagnostics(
     );
     return;
   }
+  if (!operationDiagnosticAvailable(operation)) {
+    context.response.writeHead(409);
+    context.response.end(
+      JSON.stringify({
+        error:
+          "Diagnostics are available after Stop is requested, while Radius is waiting for input, or after the operation finishes.",
+        code: "operation-diagnostics-unavailable"
+      })
+    );
+    return;
+  }
 
   try {
+    const identifiers = context.url.searchParams.get("identifiers");
+    if (
+      identifiers !== null &&
+      identifiers !== "preview" &&
+      identifiers !== "include"
+    ) {
+      context.response.writeHead(400);
+      context.response.end(
+        JSON.stringify({
+          error: "Invalid diagnostic identifier profile.",
+          code: "invalid-diagnostic-profile"
+        })
+      );
+      return;
+    }
+    if (identifiers === "preview") {
+      const contextualIdentifiers = createOperationDiagnosticContext(operation);
+      context.response.writeHead(200);
+      context.response.end(
+        JSON.stringify({
+          contextualIdentifiers,
+          contextFingerprint: operationDiagnosticContextFingerprint(
+            contextualIdentifiers
+          )
+        })
+      );
+      return;
+    }
+    if (identifiers === "include") {
+      const contextualIdentifiers = createOperationDiagnosticContext(operation);
+      const expectedFingerprint = operationDiagnosticContextFingerprint(
+        contextualIdentifiers
+      );
+      if (
+        context.url.searchParams.get("contextFingerprint") !==
+        expectedFingerprint
+      ) {
+        context.response.writeHead(409);
+        context.response.end(
+          JSON.stringify({
+            error:
+              "The contextual identifiers changed after review. Review them again before downloading.",
+            code: "diagnostic-context-changed"
+          })
+        );
+        return;
+      }
+    }
     const diagnostic = createOperationDiagnosticExport({
       operation,
       version: dependencies.productVersion(),
-      now: dependencies.now()
+      now: dependencies.now(),
+      includeContext: identifiers === "include"
     });
     context.response.setHeader(
       "Content-Disposition",

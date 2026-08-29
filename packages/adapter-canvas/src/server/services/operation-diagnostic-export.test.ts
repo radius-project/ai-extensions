@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createOperationDiagnosticExport } from "./operation-diagnostic-export.js";
+import {
+  createOperationDiagnosticContext,
+  createOperationDiagnosticExport,
+  operationDiagnosticContextFingerprint,
+  operationDiagnosticAvailable
+} from "./operation-diagnostic-export.js";
 
 const STARTED_AT = "2026-08-27T10:00:00.000Z";
 const LAST_ACTIVITY_AT = "2026-08-27T10:00:05.000Z";
@@ -117,9 +122,11 @@ function build(value: unknown = operation(), version = "0.3.0-edge.1") {
 describe("createOperationDiagnosticExport", () => {
   it("builds the exact local support schema from allowlisted states and counts", () => {
     expect(build()).toEqual({
-      diagnosticSchemaVersion: 1,
+      diagnosticSchemaVersion: 2,
       generatedAt: "2026-08-27T11:00:00.000Z",
       productVersion: "0.3.0-edge.1",
+      identifierProfile: "support_safe",
+      contextualIdentifiers: null,
       operation: {
         operationId: OPERATION_ID,
         operationSchemaVersion: 6,
@@ -192,6 +199,162 @@ describe("createOperationDiagnosticExport", () => {
     ]) {
       expect(serialized).not.toContain(forbidden);
     }
+  });
+
+  it("includes only the four reviewed contextual identifiers when explicitly requested", () => {
+    const diagnostic = createOperationDiagnosticExport({
+      operation: operation({
+        repo: "octo/widgets",
+        environment: "production-west",
+        context: {
+          githubLogin: "octocat",
+          clientSecret: "SECRET_CLIENT_SECRET"
+        },
+        journey: {
+          resumeBranch: "feature/environment-recovery",
+          resumeTarget: {
+            branch: "ignored-fallback",
+            path: "/Users/example/private-worktree"
+          }
+        },
+        request: {
+          environment: {
+            profileName: "SECRET_PROFILE_NAME",
+            tenantId: "SECRET_TENANT"
+          }
+        }
+      }),
+      version: "0.3.0",
+      now: GENERATED_AT,
+      includeContext: true
+    });
+
+    expect(diagnostic).toMatchObject({
+      diagnosticSchemaVersion: 2,
+      identifierProfile: "support_safe_with_identifiers",
+      contextualIdentifiers: {
+        repository: "octo/widgets",
+        branch: "feature/environment-recovery",
+        environment: "production-west",
+        githubLogin: "octocat",
+        omittedFieldCount: 0
+      }
+    });
+    const serialized = JSON.stringify(diagnostic);
+    expect(serialized).not.toContain("SECRET");
+    expect(serialized).not.toContain("/Users/example/private-worktree");
+    expect(serialized).not.toContain("ignored-fallback");
+  });
+
+  it("uses the sanitized resume-target branch only when no resume branch exists", () => {
+    expect(
+      createOperationDiagnosticContext(
+        operation({
+          repo: " octo/widgets ",
+          environment: " dev ",
+          context: { githubLogin: " octocat " },
+          journey: {
+            resumeBranch: null,
+            resumeTarget: { branch: " feature/fallback " }
+          }
+        })
+      )
+    ).toEqual({
+      repository: "octo/widgets",
+      branch: "feature/fallback",
+      environment: "dev",
+      githubLogin: "octocat",
+      omittedFieldCount: 0
+    });
+  });
+
+  it("fingerprints the exact reviewed identifier set", () => {
+    const context = createOperationDiagnosticContext(
+      operation({
+        repo: "octo/widgets",
+        environment: "dev",
+        context: { githubLogin: "octocat" },
+        journey: { resumeBranch: "main" }
+      })
+    );
+    const fingerprint = operationDiagnosticContextFingerprint(context);
+    expect(fingerprint).toMatch(/^[0-9a-f]{64}$/u);
+    expect(
+      operationDiagnosticContextFingerprint({
+        ...context,
+        branch: "feature/changed-after-review"
+      })
+    ).not.toBe(fingerprint);
+  });
+
+  it("omits missing, oversized, and control-character identifiers", () => {
+    expect(
+      createOperationDiagnosticContext(
+        operation({
+          repo: 42,
+          environment: `dev\u0000production`,
+          context: { githubLogin: "x".repeat(101) },
+          journey: { resumeBranch: "x".repeat(256) }
+        })
+      )
+    ).toEqual({
+      repository: null,
+      branch: null,
+      environment: null,
+      githubLogin: null,
+      omittedFieldCount: 4
+    });
+  });
+
+  it("requires an operation record for contextual identifiers", () => {
+    expect(() => createOperationDiagnosticContext(null)).toThrow(
+      "Operation record is required."
+    );
+  });
+
+  it.each([
+    ["terminal success", operation({ state: "succeeded" }), true],
+    ["terminal failure", operation({ state: "failed" }), true],
+    ["input pause", operation({ state: "input_required" }), true],
+    [
+      "pending Stop",
+      operation({
+        state: "running",
+        control: {
+          attempts: { setup: 1, verification: 0 },
+          stop: { requestedAt: STARTED_AT, acknowledgedAt: null },
+          commands: []
+        }
+      }),
+      true
+    ],
+    [
+      "malformed Stop timestamp",
+      operation({
+        state: "running",
+        control: {
+          attempts: { setup: 1, verification: 0 },
+          stop: { requestedAt: "not-a-date", acknowledgedAt: null },
+          commands: []
+        }
+      }),
+      false
+    ],
+    [
+      "normal progress",
+      operation({
+        state: "running",
+        control: {
+          attempts: { setup: 1, verification: 0 },
+          stop: { requestedAt: null, acknowledgedAt: null },
+          commands: []
+        }
+      }),
+      false
+    ],
+    ["invalid record", null, false]
+  ])("reports diagnostic availability for %s", (_label, value, expected) => {
+    expect(operationDiagnosticAvailable(value)).toBe(expected);
   });
 
   it("replaces future enum values with a fixed marker and reports every replacement", () => {
@@ -287,6 +450,8 @@ describe("createOperationDiagnosticExport", () => {
 
     expect(diagnostic).toMatchObject({
       productVersion: "unknown",
+      identifierProfile: "support_safe",
+      contextualIdentifiers: null,
       operation: {
         operationSchemaVersion: null,
         lifecycle: {

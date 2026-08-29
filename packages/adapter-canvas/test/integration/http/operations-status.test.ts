@@ -81,8 +81,8 @@ const DIAGNOSTIC_OPERATION: OperationActionRecord = {
   operationId: "op_12345678-1234-4123-8123-123456789abc",
   schemaVersion: 6,
   provider: "azure",
-  repo: "SECRET_REPOSITORY",
-  environment: "SECRET_ENVIRONMENT",
+  repo: "octo/widgets",
+  environment: "production-west",
   startedAt: "2026-08-27T10:00:00.000Z",
   lastActivityAt: "2026-08-27T10:00:05.000Z",
   endedAt: "2026-08-27T10:00:05.000Z",
@@ -106,6 +106,8 @@ const DIAGNOSTIC_OPERATION: OperationActionRecord = {
   },
   providerRecovery: { state: "idle", mutations: [] },
   verification: null,
+  context: { githubLogin: "octocat" },
+  journey: { resumeBranch: "feature/environment-recovery" },
   request: { azure: { clientSecret: "SECRET_CLIENT_SECRET" } }
 };
 
@@ -329,9 +331,14 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     const text = await response.text();
     expect(text).not.toContain("SECRET");
     expect(text).not.toContain("IGNORE PREVIOUS INSTRUCTIONS");
+    expect(text).not.toContain("octo/widgets");
+    expect(text).not.toContain("production-west");
+    expect(text).not.toContain("octocat");
     expect(JSON.parse(text)).toMatchObject({
-      diagnosticSchemaVersion: 1,
+      diagnosticSchemaVersion: 2,
       productVersion: "0.3.0-edge.1",
+      identifierProfile: "support_safe",
+      contextualIdentifiers: null,
       operation: {
         operationId: DIAGNOSTIC_OPERATION.operationId,
         failure: {
@@ -339,6 +346,57 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
           stage: "configure_environment"
         }
       }
+    });
+
+    const preview = await fetch(
+      `${entry.baseUrl}/api/operations/${DIAGNOSTIC_OPERATION.operationId}/diagnostics?identifiers=preview`
+    );
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get("content-disposition")).toBeNull();
+    const previewPayload = (await preview.json()) as {
+      contextFingerprint: string;
+      contextualIdentifiers: Record<string, unknown>;
+    };
+    expect(previewPayload.contextFingerprint).toMatch(/^[0-9a-f]{64}$/u);
+    expect(previewPayload.contextualIdentifiers).toEqual({
+      repository: "octo/widgets",
+      branch: "feature/environment-recovery",
+      environment: "production-west",
+      githubLogin: "octocat",
+      omittedFieldCount: 0
+    });
+
+    const included = await fetch(
+      `${entry.baseUrl}/api/operations/${DIAGNOSTIC_OPERATION.operationId}/diagnostics?identifiers=include&contextFingerprint=${previewPayload.contextFingerprint}`
+    );
+    expect(included.status).toBe(200);
+    expect(included.headers.get("content-disposition")).not.toBeNull();
+    expect(await included.json()).toMatchObject({
+      identifierProfile: "support_safe_with_identifiers",
+      contextualIdentifiers: {
+        repository: "octo/widgets",
+        branch: "feature/environment-recovery",
+        environment: "production-west",
+        githubLogin: "octocat"
+      }
+    });
+
+    const changed = await fetch(
+      `${entry.baseUrl}/api/operations/${DIAGNOSTIC_OPERATION.operationId}/diagnostics?identifiers=include&contextFingerprint=${"0".repeat(64)}`
+    );
+    expect(changed.status).toBe(409);
+    expect(changed.headers.get("content-disposition")).toBeNull();
+    expect(await changed.json()).toMatchObject({
+      code: "diagnostic-context-changed"
+    });
+
+    const unavailable = await fetch(
+      `${entry.baseUrl}/api/operations/op-running/diagnostics`
+    );
+    expect(unavailable.status).toBe(409);
+    expect(unavailable.headers.get("content-disposition")).toBeNull();
+    expect(await unavailable.json()).toMatchObject({
+      code: "operation-diagnostics-unavailable"
     });
 
     const unknown = await fetch(
