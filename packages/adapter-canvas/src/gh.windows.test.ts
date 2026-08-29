@@ -1,9 +1,11 @@
+import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildAppTagPatchArgs } from "./azure-oidc.js";
 import { cliExec } from "./gh.js";
+import { displayGhCommand } from "./gh-command-display.js";
 
 const describeWindows = process.platform === "win32" ? describe : describe.skip;
 
@@ -137,6 +139,38 @@ describeWindows("cliExec Windows process integration", () => {
     expect(result).toEqual({
       code: 0,
       stdout: '["%RADIUS_TEST_SENTINEL%"]',
+      stderr: ""
+    });
+  });
+
+  it("runs the displayed PowerShell invocation for an absolute path", async () => {
+    const command = displayGhCommand(
+      {
+        kind: "absolute",
+        shell: "powershell",
+        executablePath: launcherPath,
+        installationNote: ""
+      },
+      ["version", "two words"]
+    );
+    const result = await new Promise<CommandResult>((resolve) => {
+      execFile(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", command],
+        { env: environment, windowsHide: true },
+        (error, stdout, stderr) => {
+          resolve({
+            code: error?.code || 0,
+            stdout: stdout.trim(),
+            stderr: stderr.trim()
+          });
+        }
+      );
+    });
+
+    expect(result).toEqual({
+      code: 0,
+      stdout: '["version","two words"]',
       stderr: ""
     });
   });

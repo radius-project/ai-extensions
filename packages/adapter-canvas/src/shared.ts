@@ -257,6 +257,7 @@ export interface CanvasState {
   appFile?: string;
   existingEnvs?: string[];
   activeSubtab?: string;
+  ghCommandPresentation?: import("./gh-command-display.js").GhCommandPresentation;
   deployResult?: CanvasDeployResult;
   deployingRepo?: string;
   deployingBranch?: string;

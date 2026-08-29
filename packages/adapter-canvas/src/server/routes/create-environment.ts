@@ -15,6 +15,7 @@ import {
 } from "./create-environment-gh-runner.js";
 import { createWorkflowFileCommitter } from "./create-environment-workflow-committer.js";
 import {
+  settleProviderMutation,
   shouldStop,
   terminalizeProviderManualRequired,
   unresolvedProviderMutations
@@ -25,6 +26,7 @@ import {
   providerCredentialStatus,
   type ProviderCredentialStatus
 } from "./create-environment-workflow-publisher.js";
+import type { GhCommandPresentation } from "../../gh-command-display.js";
 import {
   ensureGitHubEnvironment,
   GitHubEnvironmentEnsureCancelled,
@@ -48,6 +50,7 @@ import {
 } from "../services/provider-mutation-recovery.js";
 import { selectedEnvironmentReader } from "../services/github-environment.js";
 import { runVerificationDispatch } from "../services/verification-dispatch.js";
+import { describeVerificationDispatch } from "../../verification-plan.js";
 
 // Seam 4 of the `POST /api/create-environment` slice: the seven-step use case.
 //
@@ -68,6 +71,7 @@ export interface CreateEnvironmentInstanceEntry {
 
 export interface CreateEnvironmentDependencies
   extends AdmissionPorts, WorkflowScopeGhRunnerPorts {
+  ghCommandPresentation?: GhCommandPresentation;
   // --- request scope ---
   // Evaluated per request against this instance's server-owned token. Never a
   // construction-time value: the token is a per-instance randomUUID().
@@ -161,6 +165,18 @@ export interface CreateEnvironmentDependencies
       name: string;
       providerId?: string | null;
       origin?: string;
+    }
+  ): void;
+  recordGitHubEnvironmentVariable(
+    operation: CreateEnvironmentOperation,
+    entry: {
+      repo: string;
+      environment: string;
+      environmentProviderId: string;
+      name: string;
+      valueSha256: string;
+      previousValue: string | null;
+      previousKnown: boolean;
     }
   ): void;
   // Promotes the environment this request wrote from "Radius may own this" to
@@ -303,6 +319,8 @@ export async function handleCreateEnvironment(
   // or an access failure reads as "gone" and the delete goes out blind.
   let readGitHubEnvironmentRunner:
     ((args: string[]) => Promise<CreateEnvironmentCommandResult>) | null = null;
+  let runGitHubVariableRunner:
+    ((args: string[]) => Promise<CreateEnvironmentCommandResult>) | null = null;
   try {
     const data: CreateEnvironmentRequestData = JSON.parse(body);
     const admission = await admitCreateEnvironmentRequest(data, dependencies);
@@ -332,6 +350,8 @@ export async function handleCreateEnvironment(
       }
     };
     readGitHubEnvironmentRunner = selectedEnvironmentReader(selectedExecutor);
+    runGitHubVariableRunner = (args) =>
+      selectedExecutor.run(args, { timeout: 20000 });
 
     steps = [];
     const rawPush = steps.push.bind(steps);
@@ -403,6 +423,7 @@ export async function handleCreateEnvironment(
             provider === "azure" ?
               (args: string[]) => dependencies.runAzCommand(args)
             : null,
+          runGitHubVariable: runGitHubVariableRunner,
           runDeleteEnvironment: deleteGitHubEnvironmentRunner,
           readEnvironment: readGitHubEnvironmentRunner
         });
@@ -420,6 +441,7 @@ export async function handleCreateEnvironment(
           error: ghcrPreflight.error,
           code: ghcrPreflight.code,
           steps,
+          runGitHubVariable: runGitHubVariableRunner,
           runDeleteEnvironment: deleteGitHubEnvironmentRunner,
           readEnvironment: readGitHubEnvironmentRunner
         });
@@ -468,11 +490,25 @@ export async function handleCreateEnvironment(
     envName = ensuredEnvironment.name;
     dependencies.setCanonicalEnvironment(operation, envName);
 
+    // #307 hardens the existing Azure setup path only. AWS still uses the
+    // provider-neutral legacy runner until its boundary work is designed in
+    // #255; do not imply that this ledger captures AWS variable predecessors.
     const runner = createWorkflowScopeGhRunner(
       dependencies,
       {
         targetRepo,
-        envName
+        envName,
+        environmentProviderId: ensuredEnvironment.providerId,
+        ...(provider === "azure" ?
+          {
+            mutationRecovery: {
+              operation,
+              persist: () => dependencies.persistOperations(),
+              recordVariable: (entry) =>
+                dependencies.recordGitHubEnvironmentVariable(operation, entry)
+            }
+          }
+        : {})
       },
       selectedExecutor
     );
@@ -499,6 +535,7 @@ export async function handleCreateEnvironment(
           provider === "azure" ?
             (args: string[]) => dependencies.runAzCommand(args)
           : null,
+        runGitHubVariable: runGitHubVariableRunner,
         runDeleteEnvironment: deleteGitHubEnvironmentRunner,
         readEnvironment: readGitHubEnvironmentRunner
       });
@@ -553,6 +590,41 @@ export async function handleCreateEnvironment(
       );
     }
     if (!(await checkpoint("after-github-environment"))) return;
+
+    const pendingVariable = unresolvedProviderMutations(operation).find(
+      (mutation) => mutation.kind === "github_environment_variable.put"
+    );
+    if (pendingVariable) {
+      const name =
+        typeof pendingVariable.intent?.name === "string" ?
+          pendingVariable.intent.name
+        : "";
+      const value =
+        typeof pendingVariable.intent?.value === "string" ?
+          pendingVariable.intent.value
+        : "";
+      if (!name || !value) {
+        const guidance =
+          "Radius cannot reconcile the interrupted GitHub environment variable because its saved intent is incomplete. Review the environment variables manually before starting a new setup.";
+        settleProviderMutation(
+          operation,
+          pendingVariable.mutationId,
+          "manual_required",
+          guidance
+        );
+        await dependencies.persistOperations();
+        throw new ProviderMutationRecoveryError(
+          guidance,
+          "provider-mutation-manual-required"
+        );
+      }
+      await setEnvironmentVariable(name, value);
+      if (
+        !(await checkpoint(`after-environment-variable-reconciliation:${name}`))
+      ) {
+        return;
+      }
+    }
 
     const defaultBranch = await dependencies.getDefaultBranch(
       targetRepo,
@@ -735,6 +807,7 @@ export async function handleCreateEnvironment(
     // responds, so `fail` is still called from here alone.
     const published = await publishWorkflowFiles(
       {
+        ghCommandPresentation: dependencies.ghCommandPresentation,
         generateVerifyWorkflow: (environment, workflowProvider) =>
           dependencies.generateVerifyWorkflow(environment, workflowProvider),
         generateDeployWorkflow: (environment, appFile) =>
@@ -1031,13 +1104,19 @@ export async function handleCreateEnvironment(
           missingCredNote
       );
     } else {
-      if (prState && verifyPlan.ref)
-        steps.push(
-          `ℹ️ The verify workflow is already on "${verifyPlan.defaultBranch}", so verification runs now against branch "${verifyPlan.ref}" rather than waiting for the merge.`
-        );
+      verificationRef = verifyPlan.ref;
+      steps.push(
+        `ℹ️ ${describeVerificationDispatch({
+          login: selectedExecutor.login,
+          credentialSource: selectedExecutor.credentialSource,
+          workflowFile: dependencies.verifyWorkflowFile,
+          targetRepo,
+          envName,
+          ref: verificationRef
+        })}`
+      );
       steps.push("Dispatching verify-credentials workflow...");
       if (!(await stopBoundary("before-verification-dispatch"))) return;
-      verificationRef = verifyPlan.ref || defaultBranch;
       const supportsOperationMarker =
         verifyPlan.supportsOperationMarker !== false;
       const operationMarker =
@@ -1063,7 +1142,7 @@ export async function handleCreateEnvironment(
                 workflowFile: dependencies.verifyWorkflowFile,
                 targetRepo,
                 envName,
-                ref: verifyPlan.ref,
+                ref: verificationRef,
                 operationMarker
               })
             ),
@@ -1349,6 +1428,7 @@ export async function handleCreateEnvironment(
         op && op.provider === "azure" ?
           (args: string[]) => dependencies.runAzCommand(args)
         : null,
+      runGitHubVariable: runGitHubVariableRunner,
       runDeleteEnvironment: deleteGitHubEnvironmentRunner,
       readEnvironment: readGitHubEnvironmentRunner
     });

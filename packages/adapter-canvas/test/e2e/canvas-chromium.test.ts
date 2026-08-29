@@ -926,6 +926,15 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }) => {
+    await canvas.seedState({
+      ...baseCanvasState(canvas.workspacePath),
+      ghCommandPresentation: {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/opt/Copilot Tools/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    });
     // No account can supply the workflow scope, so the injected token stays in
     // effect and the acting account is the one the warning must name.
     await canvas.setGitHubKeyringScopes(["repo"]);
@@ -951,7 +960,8 @@ test.describe("Radius Canvas in Chromium", () => {
     // disclosure, and it is reachable by keyboard.
     const repair = page.locator("#env-gh-repair");
     await expect(repair).toBeVisible();
-    await expect(repair).toContainText("gh auth switch");
+    await expect(repair).toContainText("'/opt/Copilot Tools/gh' auth switch");
+    await expect(note).toContainText("Install GitHub CLI system-wide.");
     const runButton = repair.getByRole("button", { name: COMMAND_RUN_LABEL });
     await expect(repair.getByRole("button", { name: "Copy" })).toBeVisible();
     await runButton.focus();
@@ -1356,6 +1366,105 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
   });
 
+  test("follows the latest setup detail until the user scrolls up", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let stepCount = 12;
+    const operationPayload = (stepCount: number) => ({
+      operation: {
+        operationId: "op_scroll_follow",
+        environment: "fixture-environment",
+        provider: "azure",
+        state: "running",
+        terminalState: null,
+        summary: "Creating fixture-environment…",
+        currentStage: "provision",
+        stages: [{ state: "running", label: "Provision" }],
+        steps: Array.from({ length: stepCount }, (_, index) => ({
+          state: index === stepCount - 1 ? "running" : "succeeded",
+          label: `Setup detail ${index + 1}`
+        })),
+        failure: null,
+        cleanup: null,
+        verification: null,
+        inputRequired: null,
+        startedAt: new Date(0).toISOString(),
+        endedAt: null,
+        terminal: null
+      }
+    });
+    await page.route("**/api/operations**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(operationPayload(stepCount))
+      });
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+    const details = page.locator("#env-progress-details");
+    const steps = page.locator("#env-progress-steps");
+    await expect(details).toBeVisible();
+    await steps.evaluate((element) => {
+      Reflect.set(Reflect.get(element, "style"), "maxHeight", "48px");
+    });
+    await details.locator("summary").click();
+    await expect
+      .poll(() =>
+        steps.evaluate(
+          (element) =>
+            Number(Reflect.get(element, "scrollHeight")) -
+            Number(Reflect.get(element, "scrollTop")) -
+            Number(Reflect.get(element, "clientHeight"))
+        )
+      )
+      .toBeLessThanOrEqual(4);
+
+    await steps.hover();
+    await page.mouse.wheel(0, -1000);
+    await expect
+      .poll(() =>
+        steps.evaluate((element) => Number(Reflect.get(element, "scrollTop")))
+      )
+      .toBe(0);
+    stepCount = 13;
+    await page.clock.fastForward(1500);
+    await expect(steps).toContainText("Setup detail 13");
+    await expect
+      .poll(() =>
+        steps.evaluate((element) => Number(Reflect.get(element, "scrollTop")))
+      )
+      .toBe(0);
+
+    await steps.hover();
+    await page.mouse.wheel(0, 1000);
+    await expect
+      .poll(() =>
+        steps.evaluate(
+          (element) =>
+            Number(Reflect.get(element, "scrollHeight")) -
+            Number(Reflect.get(element, "scrollTop")) -
+            Number(Reflect.get(element, "clientHeight"))
+        )
+      )
+      .toBeLessThanOrEqual(4);
+    stepCount = 14;
+    await page.clock.fastForward(1500);
+    await expect(steps).toContainText("Setup detail 14");
+    await expect
+      .poll(() =>
+        steps.evaluate(
+          (element) =>
+            Number(Reflect.get(element, "scrollHeight")) -
+            Number(Reflect.get(element, "scrollTop")) -
+            Number(Reflect.get(element, "clientHeight"))
+        )
+      )
+      .toBeLessThanOrEqual(4);
+  });
+
   test("retries verification through the selected account and returned run URL @safety", async ({
     page,
     canvas
@@ -1502,6 +1611,153 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toEqual([]);
     await expect(page.locator("body")).toContainText("Environment created");
     await expectNoWcagViolations(page);
+  });
+
+  test("stops an interrupted setup before offering exact-run cancellation by keyboard @safety", async ({
+    page,
+    canvas
+  }) => {
+    const operationId = await canvas.seedInterruptedVerification();
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      {
+        tool: "gh",
+        args: ["run", "view", "39", "--json", "status", "--repo", REPOSITORY],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: '{"status":"in_progress"}'
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          "--method",
+          "POST",
+          `repos/${REPOSITORY}/actions/runs/39/cancel`
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: ""
+      }
+    );
+    await canvas.setScenario(scenario);
+    await page.goto(
+      `${canvas.baseUrl}/?page=environment&operationId=${operationId}`
+    );
+
+    await expect(page.locator("#env-progress-title")).toContainText(
+      "Environment setup was interrupted"
+    );
+    await expect(
+      page.getByRole("button", { name: "Continue setup" })
+    ).toBeVisible();
+    const stop = page.getByRole("button", { name: "Stop setup" });
+    await expect(stop).toBeVisible();
+    await expect(stop).toHaveAttribute(
+      "title",
+      "Radius stops this setup. If its exact GitHub Actions run is still active, you can cancel it next."
+    );
+    await expect(stop).toHaveAccessibleDescription(
+      "Radius stops this setup. If its exact GitHub Actions run is still active, you can cancel it next."
+    );
+    await expect(
+      page.getByRole("button", { name: "Cancel workflow" })
+    ).toHaveCount(0);
+    await stop.focus();
+    await page.keyboard.press("Enter");
+
+    const cancelWorkflow = page.getByRole("button", {
+      name: "Cancel workflow"
+    });
+    await expect(cancelWorkflow).toBeVisible();
+    await expect(cancelWorkflow).toHaveAccessibleDescription(
+      "Radius cancels only the exact GitHub Actions run recorded for this setup."
+    );
+    await expect(
+      page.getByRole("button", { name: "Roll back created resources" })
+    ).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Exit setup" })).toHaveCount(
+      0
+    );
+    await expect(
+      page.getByRole("button", { name: "Abandon setup" })
+    ).toHaveAccessibleDescription(
+      "Radius closes this setup without deleting resources that may still be used by external work. You can start Create Environment again, but you may need to remove or reuse the remaining resources manually."
+    );
+    await cancelWorkflow.focus();
+    await page.keyboard.press("Enter");
+
+    const dialog = page.locator("#env-rollback-modal");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAccessibleName(
+      "Cancel the verification workflow?"
+    );
+    await expectNoWcagViolations(page);
+    const confirm = dialog.getByRole("button", { name: "Cancel workflow" });
+    await confirm.focus();
+    await page.keyboard.press("Enter");
+
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "gh" &&
+            JSON.stringify(call.args) ===
+              JSON.stringify([
+                "api",
+                "--method",
+                "POST",
+                `repos/${REPOSITORY}/actions/runs/39/cancel`
+              ])
+        )
+      )
+      .toBe(true);
+    await expect(
+      page.getByRole("button", { name: "Check workflow status" })
+    ).toBeVisible({ timeout: 15_000 });
+  });
+
+  test("abandons an interrupted setup without waiting for the active workflow @safety", async ({
+    page,
+    canvas
+  }) => {
+    const operationId = await canvas.seedInterruptedVerification();
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push({
+      tool: "gh",
+      args: ["run", "view", "39", "--json", "status", "--repo", REPOSITORY],
+      env: { GH_TOKEN: "fixture-repo-token" },
+      stdout: '{"status":"in_progress"}'
+    });
+    await canvas.setScenario(scenario);
+    await page.goto(
+      `${canvas.baseUrl}/?page=environment&operationId=${operationId}`
+    );
+
+    await page.getByRole("button", { name: "Stop setup" }).click();
+    const abandon = page.getByRole("button", { name: "Abandon setup" });
+    await expect(abandon).toBeVisible();
+    await abandon.click();
+
+    const dialog = page.locator("#env-rollback-modal");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAccessibleName(
+      "Abandon setup and leave remaining resources?"
+    );
+    await expect(dialog).toContainText("Radius will keep");
+    await expect(dialog).toContainText(
+      "the command you are confirming leaves it in place"
+    );
+    await expectNoWcagViolations(page);
+    await dialog.getByRole("button", { name: "Abandon setup" }).click();
+
+    await expect(page.locator("#env-progress-panel")).toBeHidden();
+    await expect(page.locator("#new-env-btn")).toBeVisible();
+    expect(
+      (await canvas.cliCalls()).some(
+        (call) =>
+          call.tool === "gh" &&
+          call.args.some((arg) => arg.endsWith("/actions/runs/39/cancel"))
+      )
+    ).toBe(false);
   });
 
   test("sends the worktree branch the page selected when Deploy is activated @safety", async ({

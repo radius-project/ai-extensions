@@ -364,6 +364,53 @@ async function tickClock(
 }
 
 describe("parseOperationResponse", () => {
+  it("renders a bundled path for a GitHub remediation", () => {
+    const parsed = parseOperationResponse(
+      op({
+        failure: {
+          message: "GitHub access is missing.",
+          remediation: {
+            id: "github-workflow-scope",
+            params: {}
+          }
+        }
+      }),
+      {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/opt/Copilot Tools/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(parsed?.failure?.remediation?.command).toBe(
+      "'/opt/Copilot Tools/gh' auth refresh -h github.com -s workflow"
+    );
+  });
+
+  it("keeps only string remediation parameters", () => {
+    const parsed = parseOperationResponse(
+      op({
+        failure: {
+          message: "GitHub access is missing.",
+          remediation: {
+            id: "github-account-scopes",
+            params: {
+              login: "octocat",
+              workflow: "true",
+              packages: 1
+            }
+          }
+        }
+      })
+    );
+
+    expect(parsed?.failure?.remediation?.params).toEqual({
+      login: "octocat",
+      workflow: "true"
+    });
+  });
+
   it.each([
     ["null", null],
     ["a string", "running"],
@@ -504,7 +551,11 @@ describe("parseOperationResponse", () => {
               ],
               keeps: "not-a-list",
               manualActionRequired: [
-                { kind: "role_assignment", target: "Contributor", action: "Go" }
+                {
+                  kind: "role_assignment",
+                  target: "Contributor",
+                  action: "Go"
+                }
               ]
             }
           },
@@ -797,6 +848,87 @@ describe("trackProgress rendering", () => {
     controller?.renderProgress(record({ stages: [], steps: [] }));
     expect(browser.els[PROGRESS_IDS.stages].children).toHaveLength(0);
     expect(browser.els[PROGRESS_IDS.steps].children).toHaveLength(0);
+  });
+
+  it("follows the latest step until the user scrolls up and resumes at the bottom", () => {
+    const browser = setup();
+    const steps = browser.els[PROGRESS_IDS.steps];
+    const details = browser.els[PROGRESS_IDS.details];
+    steps.scrollHeight = 200;
+    steps.clientHeight = 50;
+    const controller = controllerFor(browser);
+
+    controller?.renderProgress(
+      record({ steps: [{ state: "running", label: "Step one" }] })
+    );
+    expect(steps.scrollTop).toBe(200);
+
+    steps.scrollTop = 40;
+    steps.dispatch("scroll");
+    steps.scrollHeight = 240;
+    controller?.renderProgress(
+      record({
+        steps: [
+          { state: "succeeded", label: "Step one" },
+          { state: "running", label: "Step two" }
+        ]
+      })
+    );
+    expect(steps.scrollTop).toBe(40);
+
+    steps.scrollHeight = 260;
+    controller?.renderProgress(
+      record({
+        operationId: "op-2",
+        steps: [{ state: "running", label: "New operation step" }]
+      })
+    );
+    expect(steps.scrollTop).toBe(260);
+
+    steps.scrollTop = 210;
+    steps.dispatch("scroll");
+    steps.scrollHeight = 280;
+    controller?.renderProgress(
+      record({
+        operationId: "op-2",
+        steps: [
+          { state: "succeeded", label: "Step one" },
+          { state: "succeeded", label: "Step two" },
+          { state: "running", label: "Step three" }
+        ]
+      })
+    );
+    expect(steps.scrollTop).toBe(280);
+
+    steps.scrollTop = 0;
+    details.setAttribute("open", "");
+    details.dispatch("toggle");
+    expect(steps.scrollTop).toBe(280);
+
+    controller?.teardown();
+    expect(steps.listenerCount("scroll")).toBe(0);
+    expect(details.listenerCount("toggle")).toBe(0);
+  });
+
+  it("does not scroll when details close or tail following is paused", () => {
+    const browser = setup();
+    const steps = browser.els[PROGRESS_IDS.steps];
+    const details = browser.els[PROGRESS_IDS.details];
+    steps.scrollHeight = 200;
+    steps.clientHeight = 50;
+    const controller = controllerFor(browser);
+
+    steps.scrollTop = 17;
+    details.dispatch("toggle");
+    expect(steps.scrollTop).toBe(17);
+
+    steps.scrollTop = 40;
+    steps.dispatch("scroll");
+    details.setAttribute("open", "");
+    details.dispatch("toggle");
+    expect(steps.scrollTop).toBe(40);
+
+    controller?.teardown();
   });
 
   it("falls back to a default glyph for an unrecognized stage or step state", () => {
@@ -1143,7 +1275,11 @@ describe("verify status polling", () => {
     const controller = controllerFor(browser);
     await primeVerifyPoll(browser, controller);
     browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
-      jsonResponse({ state: "failed", error: "Actions run failed", runUrl: "" })
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        runUrl: ""
+      })
     );
 
     await tickClock(browser.clock, 1500);
@@ -1632,13 +1768,18 @@ describe("operation commands", () => {
     expect(rendered[0].textContent).toBe("Stop setup");
     expect(rendered[0].getAttribute("type")).toBe("button");
     expect(rendered[0].className).toBe("rad-btn rad-btn--secondary");
+    expect(rendered[0].getAttribute("title")).toBe(STOP_ACTION.description);
+    expect(rendered[0].getAttribute("aria-describedby")).toBe(
+      "env-progress-command-stop-description"
+    );
+    expect(
+      browser.els[PROGRESS_IDS.commandDescriptions].children[0].textContent
+    ).toBe(STOP_ACTION.description);
     // A label the server did not name still gets an honest default rather
     // than an empty button, and a pending action cannot be pressed twice.
     expect(rendered[1].textContent).toBe("Continue");
     expect(Reflect.get(rendered[1], "disabled")).toBe(true);
-    expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe(
-      "Radius finishes the current step and stops."
-    );
+    expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe("");
   });
 
   it("keeps the retry in the command row and Exit setup below the details", () => {
@@ -1711,7 +1852,7 @@ describe("operation commands", () => {
     });
 
     expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe(
-      "Stopping soon… Radius finishes the current step and stops."
+      "Stopping soon…"
     );
   });
 
@@ -2127,7 +2268,11 @@ describe("previewEntryLabel", () => {
 
   it("says nothing extra when the server sent no reason", () => {
     expect(
-      previewEntryLabel({ kind: "azure_app", target: "radius-dev", action: "" })
+      previewEntryLabel({
+        kind: "azure_app",
+        target: "radius-dev",
+        action: ""
+      })
     ).toBe("App Registration: radius-dev");
   });
 });
@@ -4656,11 +4801,7 @@ describe("exiting a setup", () => {
       "Retry setup"
     ]);
     expect(textOf(browser, PROGRESS_IDS.bottomButtons)).toEqual(["Exit setup"]);
-    // The command note describes the row's choices; the exit stands on its own
-    // sentence in the dialog it opens or in the button itself.
-    expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe(
-      "Radius starts again from the failed step."
-    );
+    expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe("");
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
   });
 
