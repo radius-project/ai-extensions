@@ -510,6 +510,7 @@ describe("P0-C built Radius extension artifact", () => {
       "heartbeat",
       "operation-chip",
       "graph-chip",
+      "deploy-chip",
       "deploy-result-page",
       "environment-page",
       "deploying-page",

@@ -259,6 +259,69 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(sinceBody).not.toHaveProperty("logs");
   });
 
+  it("serves the ambient deploy notification without the poll's payload or side effects", async () => {
+    const harness = start();
+    harness.state.deployAttempt = {
+      id: "attempt-3",
+      targetRepo: "octo/todolist",
+      environment: "dev"
+    };
+    harness.state.deployStatus = "failed";
+    harness.state.deployRunId = 77;
+    harness.state.deployGeneration = 6;
+    harness.state.deployAppName = "todolist";
+    harness.state.deployEnvName = "dev";
+    harness.state.deployError = "Bicep template failed to compile";
+    harness.state.deployRunUrl =
+      "https://github.com/octo/todolist/actions/runs/3";
+    harness.state.deployFinishedAt = 1700;
+    harness.state.deployLogs = ["a", "b", "c"];
+    harness.state.deployingResources = [
+      { id: "db", name: "db", type: "Radius.Data/x" }
+    ];
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy-notification`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    // The chip polls this from every page, so the resource list and the log
+    // buffer that `/api/deploy-status` carries are deliberately absent.
+    expect(await response.json()).toEqual({
+      attemptId: "attempt-3",
+      generation: 6,
+      runId: "77",
+      status: "failed",
+      application: "todolist",
+      environment: "dev",
+      error: "Bicep template failed to compile",
+      runUrl: "https://github.com/octo/todolist/actions/runs/3",
+      repairing: false,
+      finishedAt: 1700
+    });
+  });
+
+  it("answers the deploy notification defaults when the instance has no entry", async () => {
+    const harness = start();
+    harness.setEntryMissing(true);
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy-notification`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      attemptId: "",
+      generation: 0,
+      runId: "",
+      status: "pending",
+      application: "",
+      environment: "",
+      error: "",
+      runUrl: "",
+      repairing: false,
+      finishedAt: 0
+    });
+  });
+
   it("answers the applications listing with no-store caching headers", async () => {
     const harness = start();
     harness.state.contextBranch = "feature/x";
