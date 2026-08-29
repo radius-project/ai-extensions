@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import path from "node:path";
 import {
   discoverResources,
   type DiscoveryDependencies
@@ -10,14 +11,19 @@ import {
   TEST_KUBECONFIG_PATH
 } from "../../support/azure-discovery-contract.js";
 import {
+  assertFakeModeAvailable,
   azureDiscoveryCommands,
+  CREDENTIAL_STORE_PATH,
   fakeCliArgsMatch,
   FAKE_CLI_TOOLS,
+  planHarnessProcess,
   removeDirectoryWithRetries,
   replaceSharedCredentials,
+  resolveHarnessWorkspace,
   stopHarnessServer,
   unwindHarnessConstruction,
-  type FakeCliCommand
+  type FakeCliCommand,
+  type HarnessProcessPlanInput
 } from "./canvas-harness.js";
 
 describe("fake CLI isolation", () => {
@@ -457,5 +463,228 @@ describe("unwindHarnessConstruction", () => {
     });
     expect(reset).toBe(true);
     expect(process.env[key]).toBeUndefined();
+  });
+});
+
+const FAKE_PLAN_INPUT: HarnessProcessPlanInput = {
+  mode: "fake",
+  fakeBin: "/tmp/root/bin",
+  ghConfigDir: "/tmp/root/gh-config",
+  fakeScript: "/tmp/e2e/fake-cli.mjs",
+  scenarioPath: "/tmp/root/scenario.json",
+  cliLogPath: "/tmp/root/cli.log",
+  pathKey: "PATH",
+  currentPath: "/usr/bin",
+  isWindows: false
+};
+
+const CLOUD_PLAN_INPUT: HarnessProcessPlanInput = {
+  mode: "cloud",
+  fakeBin: "/tmp/root/bin",
+  ghConfigDir: "/tmp/root/gh-config",
+  pathKey: "PATH",
+  currentPath: "/usr/bin",
+  isWindows: false,
+  githubToken: "gho_realtoken"
+};
+
+describe("planHarnessProcess in fake mode", () => {
+  it("prepends the shim directory to both path spellings", () => {
+    const plan = planHarnessProcess(FAKE_PLAN_INPUT);
+
+    expect(plan.env.PATH).toBe(`/tmp/root/bin${path.delimiter}/usr/bin`);
+    expect(plan.useFakeCli).toBe(true);
+    expect(plan.interceptFetch).toBe(true);
+  });
+
+  it("writes the platform path variable Windows actually reads", () => {
+    const plan = planHarnessProcess({
+      ...FAKE_PLAN_INPUT,
+      pathKey: "Path",
+      isWindows: true
+    });
+
+    expect(plan.env.Path).toBe(plan.env.PATH);
+    expect(plan.env.RADIUS_RAD_BINARY).toBe(
+      path.join("/tmp/root/bin", "rad.exe")
+    );
+  });
+
+  it("names the extensionless shim off Windows", () => {
+    expect(planHarnessProcess(FAKE_PLAN_INPUT).env.RADIUS_RAD_BINARY).toBe(
+      path.join("/tmp/root/bin", "rad")
+    );
+  });
+
+  it("points every fake CLI variable at the generated script", () => {
+    const plan = planHarnessProcess(FAKE_PLAN_INPUT);
+
+    expect(plan.env.RADIUS_FAKE_CLI_SCRIPT).toBe("/tmp/e2e/fake-cli.mjs");
+    expect(plan.env.RADIUS_FAKE_CLI_SCENARIO).toBe("/tmp/root/scenario.json");
+    expect(plan.env.RADIUS_FAKE_CLI_LOG).toBe("/tmp/root/cli.log");
+    expect(plan.env.RADIUS_RAD_SKIP_VERSION_CHECK).toBe("1");
+  });
+
+  it("uses the placeholder token even when a real one is exported", () => {
+    const plan = planHarnessProcess({
+      ...FAKE_PLAN_INPUT,
+      githubToken: "gho_realtoken"
+    });
+
+    expect(plan.env.GH_TOKEN).not.toContain("realtoken");
+    expect(plan.env.GH_TOKEN).toBe(plan.env.GITHUB_TOKEN);
+  });
+
+  it.each([
+    ["fakeScript", { fakeScript: undefined }],
+    ["scenarioPath", { scenarioPath: undefined }],
+    ["cliLogPath", { cliLogPath: undefined }]
+  ])("rejects a plan missing %s", (_name, override) => {
+    expect(() =>
+      planHarnessProcess({ ...FAKE_PLAN_INPUT, ...override })
+    ).toThrow(/Fake mode requires/);
+  });
+});
+
+describe("planHarnessProcess in cloud mode", () => {
+  it("leaves the real tools on PATH and the registry unintercepted", () => {
+    const plan = planHarnessProcess(CLOUD_PLAN_INPUT);
+
+    expect(plan.env.PATH).toBeUndefined();
+    expect(plan.env.Path).toBeUndefined();
+    expect(plan.useFakeCli).toBe(false);
+    expect(plan.interceptFetch).toBe(false);
+  });
+
+  it("omits every fake CLI variable rather than blanking it", () => {
+    const plan = planHarnessProcess(CLOUD_PLAN_INPUT);
+
+    for (const key of [
+      "RADIUS_FAKE_CLI_SCRIPT",
+      "RADIUS_FAKE_CLI_SCENARIO",
+      "RADIUS_FAKE_CLI_LOG",
+      "RADIUS_RAD_BINARY",
+      "RADIUS_RAD_SKIP_VERSION_CHECK"
+    ]) {
+      expect(Object.hasOwn(plan.env, key)).toBe(false);
+    }
+  });
+
+  it("carries the runner token through to both variables", () => {
+    const plan = planHarnessProcess(CLOUD_PLAN_INPUT);
+
+    expect(plan.env.GH_TOKEN).toBe("gho_realtoken");
+    expect(plan.env.GITHUB_TOKEN).toBe("gho_realtoken");
+  });
+
+  it("trims surrounding whitespace from the token", () => {
+    const plan = planHarnessProcess({
+      ...CLOUD_PLAN_INPUT,
+      githubToken: "  gho_realtoken\n"
+    });
+
+    expect(plan.env.GH_TOKEN).toBe("gho_realtoken");
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["empty", ""],
+    ["only whitespace", "   "]
+  ])("fails when the token is %s", (_name, githubToken) => {
+    expect(() =>
+      planHarnessProcess({ ...CLOUD_PLAN_INPUT, githubToken })
+    ).toThrow(/Cloud mode requires GH_TOKEN/);
+  });
+});
+
+describe("planHarnessProcess credential isolation", () => {
+  it.each([
+    ["fake", FAKE_PLAN_INPUT] as const,
+    ["cloud", CLOUD_PLAN_INPUT] as const
+  ])(
+    "keeps the isolated gh config and credential store in %s mode",
+    (_name, input) => {
+      const plan = planHarnessProcess(input);
+
+      expect(plan.env.GH_CONFIG_DIR).toBe("/tmp/root/gh-config");
+      expect(plan.env.RADIUS_CREDENTIALS_FILE).toBe(CREDENTIAL_STORE_PATH);
+    }
+  );
+
+  it("preserves a credential store the suite already isolated", () => {
+    const plan = planHarnessProcess({
+      ...FAKE_PLAN_INPUT,
+      credentialsFile: "/tmp/e2e/existing-cache.json"
+    });
+
+    expect(plan.env.RADIUS_CREDENTIALS_FILE).toBe(
+      "/tmp/e2e/existing-cache.json"
+    );
+  });
+});
+
+describe("resolveHarnessWorkspace", () => {
+  it("scaffolds a temporary workspace in fake mode", () => {
+    const plan = resolveHarnessWorkspace({
+      mode: "fake",
+      rootDir: path.join("/tmp", "root")
+    });
+
+    expect(plan.path).toBe(path.join("/tmp", "root", "workspace"));
+    expect(plan.createRadiusDirectory).toBe(true);
+  });
+
+  it("uses the clone unchanged in cloud mode", () => {
+    const clone = path.resolve("fixture-clone");
+
+    const plan = resolveHarnessWorkspace({
+      mode: "cloud",
+      rootDir: path.join("/tmp", "root"),
+      workspacePath: clone
+    });
+
+    expect(plan.path).toBe(clone);
+    expect(plan.createRadiusDirectory).toBe(false);
+  });
+
+  it("rejects a workspace path in fake mode", () => {
+    expect(() =>
+      resolveHarnessWorkspace({
+        mode: "fake",
+        rootDir: path.join("/tmp", "root"),
+        workspacePath: path.resolve("fixture-clone")
+      })
+    ).toThrow(/only supported in cloud mode/);
+  });
+
+  it("rejects cloud mode without a clone", () => {
+    expect(() =>
+      resolveHarnessWorkspace({
+        mode: "cloud",
+        rootDir: path.join("/tmp", "root")
+      })
+    ).toThrow(/requires workspacePath/);
+  });
+
+  it("rejects a relative clone path, which would resolve against the runner cwd", () => {
+    expect(() =>
+      resolveHarnessWorkspace({
+        mode: "cloud",
+        rootDir: path.join("/tmp", "root"),
+        workspacePath: "fixture-clone"
+      })
+    ).toThrow(/absolute workspacePath/);
+  });
+});
+
+describe("assertFakeModeAvailable", () => {
+  it("allows a fake-CLI helper in fake mode", () => {
+    expect(() => assertFakeModeAvailable("fake", "cliCalls")).not.toThrow();
+  });
+
+  it("names the helper and the mode when called against a cloud harness", () => {
+    expect(() => assertFakeModeAvailable("cloud", "cliCalls")).toThrow(
+      "cliCalls is only available in fake mode; this harness is in cloud mode."
+    );
   });
 });

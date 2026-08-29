@@ -121,6 +121,134 @@ export interface FakeCliScenario {
 
 export const FAKE_CLI_TOOLS = ["gh", "rad", "az", "aws", "kubectl"] as const;
 
+/**
+ * Which outside world the harness runs against.
+ *
+ * `fake` is every existing suite: generated CLI shims on `PATH`, a placeholder
+ * token, and intercepted registry traffic. `cloud` removes exactly those four
+ * substitutions so the same server, routes, and browser run against real
+ * `gh`, `az`, `rad`, and `kubectl`. Nothing above the seams changes.
+ */
+export type CanvasHarnessMode = "fake" | "cloud";
+
+export interface HarnessProcessPlanInput {
+  mode: CanvasHarnessMode;
+  fakeBin: string;
+  ghConfigDir: string;
+  /** Present only in fake mode; the generated shim script and its side files. */
+  fakeScript?: string;
+  scenarioPath?: string;
+  cliLogPath?: string;
+  pathKey: "PATH" | "Path";
+  currentPath: string;
+  isWindows: boolean;
+  /** The existing `RADIUS_CREDENTIALS_FILE`, preserved when already isolated. */
+  credentialsFile?: string;
+  /** Cloud mode only: the runner's GitHub token. */
+  githubToken?: string;
+}
+
+export interface HarnessProcessPlan {
+  readonly env: Record<string, string>;
+  readonly useFakeCli: boolean;
+  readonly interceptFetch: boolean;
+}
+
+/**
+ * Resolves every process-level difference between the two modes in one place,
+ * so the mode switch is a pure function with assertable output rather than a
+ * set of conditionals spread through construction.
+ */
+export function planHarnessProcess(
+  input: HarnessProcessPlanInput
+): HarnessProcessPlan {
+  const env: Record<string, string> = {
+    GH_CONFIG_DIR: input.ghConfigDir,
+    RADIUS_CREDENTIALS_FILE: input.credentialsFile || CREDENTIAL_STORE_PATH
+  };
+
+  if (input.mode === "cloud") {
+    const token = input.githubToken?.trim();
+    if (!token)
+      throw new Error(
+        "Cloud mode requires GH_TOKEN. Export a token for the fixture repository before running the cloud suite."
+      );
+    // PATH is left alone so the real tools resolve, and the fake-CLI variables
+    // are omitted rather than blanked: a stale value would silently redirect a
+    // real invocation back into the shim.
+    env.GH_TOKEN = token;
+    env.GITHUB_TOKEN = token;
+    return { env, useFakeCli: false, interceptFetch: false };
+  }
+
+  if (!input.fakeScript || !input.scenarioPath || !input.cliLogPath)
+    throw new Error(
+      "Fake mode requires a generated CLI script, scenario path, and log path."
+    );
+
+  const nextPath = `${input.fakeBin}${path.delimiter}${input.currentPath}`;
+  env[input.pathKey] = nextPath;
+  env.PATH = nextPath;
+  env.GH_TOKEN = PLACEHOLDER_SECRET;
+  env.GITHUB_TOKEN = PLACEHOLDER_SECRET;
+  env.RADIUS_FAKE_CLI_SCRIPT = input.fakeScript;
+  env.RADIUS_FAKE_CLI_SCENARIO = input.scenarioPath;
+  env.RADIUS_FAKE_CLI_LOG = input.cliLogPath;
+  env.RADIUS_RAD_BINARY = path.join(
+    input.fakeBin,
+    input.isWindows ? "rad.exe" : "rad"
+  );
+  // The shim has no version to report. A real `rad` must answer the product's
+  // version check, so cloud mode deliberately leaves this unset.
+  env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
+  return { env, useFakeCli: true, interceptFetch: true };
+}
+
+export interface HarnessWorkspacePlan {
+  readonly path: string;
+  /** Fake mode scaffolds an empty `.radius`; a clone already carries one. */
+  readonly createRadiusDirectory: boolean;
+}
+
+/**
+ * Fake-CLI helpers write or read files no real tool consults, so in cloud mode
+ * they would quietly do nothing and let a test assert against an empty log.
+ * Failing here keeps that mistake visible.
+ */
+export function assertFakeModeAvailable(
+  mode: CanvasHarnessMode,
+  operation: string
+): void {
+  if (mode !== "fake")
+    throw new Error(
+      `${operation} is only available in fake mode; this harness is in ${mode} mode.`
+    );
+}
+
+export function resolveHarnessWorkspace(input: {
+  mode: CanvasHarnessMode;
+  rootDir: string;
+  workspacePath?: string;
+}): HarnessWorkspacePlan {
+  if (input.mode === "cloud") {
+    if (!input.workspacePath)
+      throw new Error(
+        "Cloud mode requires workspacePath, a clone of the fixture repository."
+      );
+    if (!path.isAbsolute(input.workspacePath))
+      throw new Error(
+        `Cloud mode requires an absolute workspacePath; received "${input.workspacePath}".`
+      );
+    return { path: input.workspacePath, createRadiusDirectory: false };
+  }
+  if (input.workspacePath)
+    throw new Error("workspacePath is only supported in cloud mode.");
+  return {
+    path: path.join(input.rootDir, "workspace"),
+    createRadiusDirectory: true
+  };
+}
+
 export interface RecordedRequest {
   method: string;
   path: string;
@@ -132,6 +260,10 @@ interface CanvasHarnessOptions {
   title: string;
   initialState?: CanvasState;
   initialPage?: string;
+  /** Defaults to "fake", so every existing suite is unaffected. */
+  mode?: CanvasHarnessMode;
+  /** Cloud mode only: an absolute path to a real clone to run against. */
+  workspacePath?: string;
 }
 
 let serverModulePromise: Promise<ServerModule> | null = null;
@@ -958,6 +1090,7 @@ export class CanvasHarness {
   readonly scenarioPath: string;
   readonly cliLogPath: string;
   readonly workspacePath: string;
+  readonly mode: CanvasHarnessMode;
   readonly requests: RecordedRequest[] = [];
   readonly externalRequests: string[] = [];
 
@@ -977,6 +1110,7 @@ export class CanvasHarness {
     scenarioPath: string;
     cliLogPath: string;
     workspacePath: string;
+    mode: CanvasHarnessMode;
     originalEnv: Record<string, string | undefined>;
     originalFetch: typeof fetch;
     serverModule: ServerModule;
@@ -990,6 +1124,7 @@ export class CanvasHarness {
     this.scenarioPath = input.scenarioPath;
     this.cliLogPath = input.cliLogPath;
     this.workspacePath = input.workspacePath;
+    this.mode = input.mode;
     this.originalEnv = input.originalEnv;
     this.originalFetch = input.originalFetch;
     this.serverModule = input.serverModule;
@@ -997,6 +1132,7 @@ export class CanvasHarness {
   }
 
   static async create(options: CanvasHarnessOptions): Promise<CanvasHarness> {
+    const mode: CanvasHarnessMode = options.mode ?? "fake";
     await fs.mkdir(E2E_TMP_ROOT, { recursive: true });
     const rootParent = await fs.mkdtemp(
       path.join(E2E_TMP_ROOT, `${sanitizeTitle(options.title)}-`)
@@ -1027,36 +1163,46 @@ export class CanvasHarness {
     try {
       const fakeBin = path.join(rootParent, "bin");
       const ghConfig = path.join(rootParent, "gh-config");
-      const workspacePath = path.join(rootParent, "workspace");
+      const workspace = resolveHarnessWorkspace({
+        mode,
+        rootDir: rootParent,
+        workspacePath: options.workspacePath
+      });
+      const workspacePath = workspace.path;
       await fs.mkdir(fakeBin, { recursive: true });
       await fs.mkdir(ghConfig, { recursive: true });
-      await fs.mkdir(path.join(workspacePath, ".radius"), { recursive: true });
-      const fakeScript = await writeFakeCli(fakeBin);
+      if (workspace.createRadiusDirectory)
+        await fs.mkdir(path.join(workspacePath, ".radius"), {
+          recursive: true
+        });
+      const useFakeCli = mode === "fake";
+      const fakeScript = useFakeCli ? await writeFakeCli(fakeBin) : undefined;
       const scenarioPath = path.join(rootParent, "scenario.json");
       const cliLogPath = path.join(rootParent, "cli.log");
-      await fs.writeFile(
-        scenarioPath,
-        JSON.stringify({ commands: [] }),
-        "utf8"
-      );
+      if (useFakeCli)
+        await fs.writeFile(
+          scenarioPath,
+          JSON.stringify({ commands: [] }),
+          "utf8"
+        );
 
       const pathKey = process.platform === "win32" ? "Path" : "PATH";
-      process.env[pathKey] =
-        `${fakeBin}${path.delimiter}${process.env[pathKey] || process.env.PATH || ""}`;
-      process.env.PATH = process.env[pathKey];
-      process.env.GH_CONFIG_DIR = ghConfig;
-      process.env.GH_TOKEN = PLACEHOLDER_SECRET;
-      process.env.GITHUB_TOKEN = PLACEHOLDER_SECRET;
-      process.env.RADIUS_FAKE_CLI_SCRIPT = fakeScript;
-      process.env.RADIUS_FAKE_CLI_SCENARIO = scenarioPath;
-      process.env.RADIUS_FAKE_CLI_LOG = cliLogPath;
-      process.env.RADIUS_RAD_BINARY =
-        process.platform === "win32" ?
-          path.join(fakeBin, "rad.exe")
-        : path.join(fakeBin, "rad");
-      process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
-      process.env.RADIUS_CREDENTIALS_FILE ??= CREDENTIAL_STORE_PATH;
-      globalThis.fetch = createHarnessFetch(originalFetch);
+      const plan = planHarnessProcess({
+        mode,
+        fakeBin,
+        ghConfigDir: ghConfig,
+        fakeScript,
+        scenarioPath: useFakeCli ? scenarioPath : undefined,
+        cliLogPath: useFakeCli ? cliLogPath : undefined,
+        pathKey,
+        currentPath: process.env[pathKey] || process.env.PATH || "",
+        isWindows: process.platform === "win32",
+        credentialsFile: process.env.RADIUS_CREDENTIALS_FILE,
+        githubToken: process.env.GH_TOKEN
+      });
+      Object.assign(process.env, plan.env);
+      if (plan.interceptFetch)
+        globalThis.fetch = createHarnessFetch(originalFetch);
 
       // All process and credential-store isolation is in place before the first
       // production import. shared.ts reads its store at module initialization.
@@ -1075,22 +1221,31 @@ export class CanvasHarness {
       credentialIsolationVerified = true;
       ghModule.resetGhIdentityCache();
       await ghModule.primeGhIdentity().catch(() => undefined);
-      replaceSharedCredentials(sharedModule.sharedCredentials, {
-        profiles: {
-          [REPOSITORY]: [
-            {
-              name: PROFILE_NAME,
-              provider: "azure",
-              status: "verified",
-              user: PROFILE_USER,
-              tenantId: PROFILE_TENANT_ID,
-              tenantName: "Fixture tenant",
-              subscriptionId: PROFILE_SUBSCRIPTION_ID,
-              subscriptionName: "Fixture subscription"
+      // The fixture profile names a tenant and subscription that do not exist.
+      // Cloud mode is left with an empty store so the caller can seed the real
+      // ones; seeding fictional identifiers there would make the first real
+      // Azure call fail for a reason that has nothing to do with the product.
+      replaceSharedCredentials(
+        sharedModule.sharedCredentials,
+        useFakeCli ?
+          {
+            profiles: {
+              [REPOSITORY]: [
+                {
+                  name: PROFILE_NAME,
+                  provider: "azure",
+                  status: "verified",
+                  user: PROFILE_USER,
+                  tenantId: PROFILE_TENANT_ID,
+                  tenantName: "Fixture tenant",
+                  subscriptionId: PROFILE_SUBSCRIPTION_ID,
+                  subscriptionName: "Fixture subscription"
+                }
+              ]
             }
-          ]
-        }
-      });
+          }
+        : {}
+      );
 
       // The production SDK entry registers this hook to open a worktree file in
       // the editor canvas. The Chromium harness has no host SDK, so provide the
@@ -1132,6 +1287,7 @@ export class CanvasHarness {
         scenarioPath,
         cliLogPath,
         workspacePath,
+        mode,
         originalEnv,
         originalFetch,
         serverModule,
@@ -1189,9 +1345,19 @@ export class CanvasHarness {
   }
 
   async setScenario(scenario: FakeCliScenario): Promise<void> {
+    this.assertFakeMode("setScenario");
     await fs.writeFile(this.scenarioPath, JSON.stringify(scenario, null, 2));
     this.ghModule.resetGhIdentityCache();
     await this.ghModule.primeGhIdentity().catch(() => undefined);
+  }
+
+  /**
+   * Fake-CLI helpers write or read files no real tool consults, so in cloud
+   * mode they would quietly do nothing and let a test assert against an empty
+   * log. Failing here keeps that mistake visible.
+   */
+  private assertFakeMode(operation: string): void {
+    assertFakeModeAvailable(this.mode, operation);
   }
 
   async seedRestartedVerificationFailure(): Promise<string> {
@@ -1343,6 +1509,7 @@ export class CanvasHarness {
   }
 
   async cliCalls(): Promise<Array<{ tool: string; args: string[] }>> {
+    this.assertFakeMode("cliCalls");
     try {
       const text = await fs.readFile(this.cliLogPath, "utf8");
       return text
