@@ -137,6 +137,17 @@ describe("DOM and focus ports", () => {
     plain.scrollHeight = 120;
     expect(dom.scrollToEnd(plain)).toBe(true);
     expect(plain.scrollTop).toBe(120);
+    plain.clientHeight = 40;
+    plain.scrollTop = 76;
+    expect(dom.isScrolledToEnd(plain)).toBe(true);
+    plain.scrollTop = 75;
+    expect(dom.isScrolledToEnd(plain)).toBe(false);
+    Object.assign(plain, { scrollTop: Number.NaN });
+    expect(dom.isScrolledToEnd(plain)).toBe(false);
+    Object.assign(plain, { scrollTop: 80, scrollHeight: Number.NaN });
+    expect(dom.isScrolledToEnd(plain)).toBe(false);
+    Object.assign(plain, { scrollHeight: 120, clientHeight: Number.NaN });
+    expect(dom.isScrolledToEnd(plain)).toBe(false);
     Object.assign(plain, { scrollHeight: Number.NaN });
     expect(dom.scrollToEnd(plain)).toBe(false);
   });

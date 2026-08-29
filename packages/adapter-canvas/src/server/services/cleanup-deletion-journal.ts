@@ -187,9 +187,6 @@ export async function executeJournaledCleanupDeletion(input: {
         "The provider rejected the delete.";
       return { outcome: "warning", detail };
     }
-    if (removal.state === "cancelled") {
-      throw new Error("Cleanup deletion cannot be stopped.");
-    }
     return removal.value === "not_found" ?
         { outcome: "not_found", detail: null }
       : { outcome: "deleted", detail: null };
