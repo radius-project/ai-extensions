@@ -260,6 +260,50 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
     expect(got.status).toBe(404);
   });
 
+  it.each([
+    {
+      step: "credentials",
+      failure: Object.assign(new Error("command terminated"), { timedOut: true }),
+      expected:
+        "az aks get-credentials failed (45s limit): command terminated"
+    },
+    {
+      step: "namespaces",
+      failure: new Error("access denied"),
+      expected: "kubectl get namespaces failed: access denied"
+    }
+  ])(
+    "reports a $step failure with a limit only for a confirmed timeout",
+    async ({ step, failure, expected }) => {
+      const { cli } = start();
+      cli.set(CLI.aks, "[]");
+      cli.set(CLI.groups, "[]");
+      cli.set(
+        CLI.credentials("aks-selected", "rg-selected"),
+        step === "credentials" ? { throws: failure } : ""
+      );
+      if (step === "namespaces") {
+        cli.set(CLI.namespaces, { throws: failure });
+      }
+      const entry = await container!.getOrCreate("panel-a");
+
+      const response = await fetch(`${entry.baseUrl}/api/discover`, {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "azure",
+          resourceGroup: "rg-selected",
+          cluster: "aks-selected"
+        })
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        namespaces: [],
+        errors: { namespaces: expected }
+      });
+    }
+  );
+
   it("answers 200 with the refusal shape for unsafe discovery inputs and a bad body", async () => {
     // Nothing is scripted on `runCli`, so any spawn attempt throws: both of
     // these must be refused before the CLI is reached.

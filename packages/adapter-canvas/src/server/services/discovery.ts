@@ -45,11 +45,14 @@ const AKS_CLUSTER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?$/;
 // output on every Windows run, which emptied the Namespace picker, and 30s left
 // the list queries only ~6s of margin on the same measurement. 45s is ~1.9x the
 // measured worst case, which absorbs a cold interpreter start on a loaded
-// machine while still bounding how long the Environment page can wait.
+// machine while still bounding each query. The calls are sequential and there
+// is no outer browser deadline, so a request that sets a subscription and
+// discovers namespaces can consume the accepted cumulative ceiling of 155s.
 const AZURE_CLI_TIMEOUT_MS = 45000;
 
-// kubectl is a native binary invoked directly, not through the shim, and the
-// namespace listing returns in well under a second.
+// The measured namespace listing returns in about 0.5s, so its existing
+// 10-second allowance remains sufficient even though the current Windows
+// process adapter also routes kubectl through cmd.exe.
 const KUBECTL_TIMEOUT_MS = 10000;
 
 function record(value: unknown): Record<string, unknown> {
@@ -65,6 +68,10 @@ function optionalString(value: unknown): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function commandTimedOut(error: unknown): boolean {
+  return record(error).timedOut === true;
 }
 
 function discoveryItems(value: unknown): DiscoveryItem[] {
@@ -192,11 +199,10 @@ export async function discoverResources(
     }
     if (resourceGroup && cluster) {
       const kubeconfig = dependencies.createTemporaryKubeconfig();
-      // Names the step that failed. A budget kill arrives as a SIGTERM with
-      // empty stdout and stderr, so the runner's raw message is just the spawned
-      // command line with no hint that a limit was hit; the label and the limit
-      // are the only way the Environment page can say what went wrong.
-      let failedStep = `az aks get-credentials failed (${AZURE_CLI_TIMEOUT_MS / 1000}s limit)`;
+      let failedStep = {
+        name: "az aks get-credentials",
+        timeout: AZURE_CLI_TIMEOUT_MS
+      };
       try {
         await dependencies.runCli(
           "az",
@@ -214,7 +220,10 @@ export async function discoverResources(
           ],
           { timeout: AZURE_CLI_TIMEOUT_MS }
         );
-        failedStep = `kubectl get namespaces failed (${KUBECTL_TIMEOUT_MS / 1000}s limit)`;
+        failedStep = {
+          name: "kubectl get namespaces",
+          timeout: KUBECTL_TIMEOUT_MS
+        };
         const nsJson = await dependencies.runCli(
           "kubectl",
           [
@@ -231,10 +240,10 @@ export async function discoverResources(
       } catch (e) {
         result.namespaces = [];
         result.errors = result.errors || {};
-        result.errors.namespaces = `${failedStep}: ${errorMessage(e)}`.slice(
-          0,
-          800
-        );
+        const limit =
+          commandTimedOut(e) ? ` (${failedStep.timeout / 1000}s limit)` : "";
+        result.errors.namespaces =
+          `${failedStep.name} failed${limit}: ${errorMessage(e)}`.slice(0, 800);
       } finally {
         kubeconfig.remove();
       }

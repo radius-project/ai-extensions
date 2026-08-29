@@ -356,8 +356,11 @@ describe("discovery service (SU-08)", () => {
         if (args[0] === "aks" && args[1] === "get-credentials") {
           // A budget kill arrives with empty stdout and stderr, so the runner
           // rejects with nothing but the spawned command line.
-          throw new Error(
-            'Command failed: cmd.exe /c az "aks" "get-credentials"'
+          throw Object.assign(
+            new Error(
+              'Command failed: cmd.exe /c az "aks" "get-credentials"'
+            ),
+            { timedOut: true }
           );
         }
         if (command === "kubectl") {
@@ -398,7 +401,7 @@ describe("discovery service (SU-08)", () => {
 
     expect(result.namespaces).toEqual([]);
     expect(result.errors?.namespaces).toBe(
-      "kubectl get namespaces failed (10s limit): connection refused"
+      "kubectl get namespaces failed: connection refused"
     );
   });
 
@@ -419,7 +422,7 @@ describe("discovery service (SU-08)", () => {
       dependencies
     );
 
-    const label = "az aks get-credentials failed (45s limit): ";
+    const label = "az aks get-credentials failed: ";
     expect(result.errors?.namespaces).toBe(
       `${label}${"x".repeat(800 - label.length)}`
     );
@@ -443,8 +446,7 @@ describe("discovery service (SU-08)", () => {
     );
 
     expect(result.errors).toEqual({
-      namespaces:
-        "az aks get-credentials failed (45s limit): credentials exploded"
+      namespaces: "az aks get-credentials failed: credentials exploded"
     });
   });
 });

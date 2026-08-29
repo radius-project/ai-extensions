@@ -806,14 +806,16 @@ describe("azure-discovery routes (SU-08)", () => {
     });
 
     it("reports namespace discovery failures without a static fallback", async () => {
-      for (const { failing, label } of [
+      for (const { failing, error, label } of [
         {
           failing: CLI.credentials("aks-1", "rg-1"),
+          error: Object.assign(new Error("kube down"), { timedOut: true }),
           label: "az aks get-credentials failed (45s limit): kube down"
         },
         {
           failing: CLI.namespaces,
-          label: "kubectl get namespaces failed (10s limit): kube down"
+          error: new Error("kube down"),
+          label: "kubectl get namespaces failed: kube down"
         }
       ]) {
         const cli = cliFake({
@@ -823,7 +825,7 @@ describe("azure-discovery routes (SU-08)", () => {
           [CLI.groups()]: JSON.stringify([{ id: "rg-1", name: "rg-1" }]),
           [CLI.credentials("aks-1", "rg-1")]: "",
           [CLI.namespaces]: "ns-a",
-          [failing]: { throws: new Error("kube down") }
+          [failing]: { throws: error }
         });
         const recording = await discover(
           JSON.stringify({
@@ -842,8 +844,6 @@ describe("azure-discovery routes (SU-08)", () => {
           errors?: Record<string, string>;
         };
         expect(parsed.namespaces, failing).toEqual([]);
-        // The step label and its limit are what tell a user whose call was
-        // killed with no output which stage ran out of budget.
         expect(parsed.errors?.namespaces, failing).toBe(label);
       }
     });

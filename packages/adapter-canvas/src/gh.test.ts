@@ -19,7 +19,7 @@ interface LoadGhOptions {
   userTokenErrors?: Record<string, Error>;
   apiLogin?: string;
   commandResult?: {
-    error?: string;
+    error?: string | Error;
     stdout?: string;
     stderr?: string;
   };
@@ -225,7 +225,9 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
     }
     if (commandResult) {
       return done(
-        commandResult.error ? new Error(commandResult.error) : null,
+        typeof commandResult.error === "string" ?
+          new Error(commandResult.error)
+        : commandResult.error || null,
         commandResult.stdout || "",
         commandResult.stderr || ""
       );
@@ -712,6 +714,29 @@ describe.sequential("cliExec", () => {
     expect(options.env).toBeTypeOf("object");
     expect(options.env.PATH).toBe(process.env.PATH);
     expect(options.env.COPILOT_AGENT_SESSION_ID).toBeUndefined();
+  });
+
+  it("preserves process metadata and identifies a command deadline", async () => {
+    const processError = Object.assign(new Error("command terminated"), {
+      code: "ETIMEDOUT",
+      killed: true,
+      signal: "SIGTERM",
+      cmd: "az aks get-credentials"
+    });
+    const { runCommand } = await loadGh("linux", {
+      commandResult: { error: processError }
+    });
+
+    await expect(runCommand("az", ["aks", "get-credentials"])).rejects.toEqual(
+      expect.objectContaining({
+        message: "command terminated",
+        code: "ETIMEDOUT",
+        killed: true,
+        signal: "SIGTERM",
+        cmd: "az aks get-credentials",
+        timedOut: true
+      })
+    );
   });
 });
 

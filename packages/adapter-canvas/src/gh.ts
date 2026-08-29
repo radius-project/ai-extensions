@@ -91,6 +91,14 @@ export interface CommandOptions extends CliOptions {
   stdin?: string;
 }
 
+export interface CommandFailure extends Error {
+  code?: string | number | null;
+  killed?: boolean;
+  signal?: NodeJS.Signals | null;
+  cmd?: string;
+  timedOut: boolean;
+}
+
 export interface SelectedGhCommandResult {
   code: string | number;
   stdout: string;
@@ -1230,8 +1238,22 @@ export function runCommand(
   const { stdin, ...execOpts } = opts;
   return new Promise((resolve, reject) => {
     const child = cliExec(cmd, args, execOpts, (err, stdout, stderr) => {
-      if (err) reject(new Error(redactGhCredentials(stderr || err.message)));
-      else resolve(stdout.trim());
+      if (!err) {
+        resolve(stdout.trim());
+        return;
+      }
+      const redact = (value: string) => redactGhCredentials(value);
+      const failure: CommandFailure = Object.assign(
+        new Error(redact(stderr || err.message)),
+        {
+          code: err.code,
+          killed: err.killed,
+          signal: err.signal,
+          cmd: redact(err.cmd || ""),
+          timedOut: err.killed === true || err.code === "ETIMEDOUT"
+        }
+      );
+      reject(failure);
     });
     if (stdin !== undefined) child.stdin?.end(stdin);
   });
