@@ -357,9 +357,7 @@ describe("discovery service (SU-08)", () => {
           // A budget kill arrives with empty stdout and stderr, so the runner
           // rejects with nothing but the spawned command line.
           throw Object.assign(
-            new Error(
-              'Command failed: cmd.exe /c az "aks" "get-credentials"'
-            ),
+            new Error('Command failed: cmd.exe /c az "aks" "get-credentials"'),
             { timedOut: true }
           );
         }

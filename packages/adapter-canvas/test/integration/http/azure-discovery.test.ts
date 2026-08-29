@@ -263,9 +263,10 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
   it.each([
     {
       step: "credentials",
-      failure: Object.assign(new Error("command terminated"), { timedOut: true }),
-      expected:
-        "az aks get-credentials failed (45s limit): command terminated"
+      failure: Object.assign(new Error("command terminated"), {
+        timedOut: true
+      }),
+      expected: "az aks get-credentials failed (45s limit): command terminated"
     },
     {
       step: "namespaces",
