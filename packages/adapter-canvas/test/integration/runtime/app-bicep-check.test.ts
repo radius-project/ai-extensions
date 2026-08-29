@@ -612,6 +612,47 @@ test("accepts a secretKeyRef helper regardless of its key", () => {
   assert.equal(result.stderr, "");
 });
 
+test.each([
+  ["a dotted name", "DB.PASSWORD"],
+  ["a hyphenated name", "DB-PASSWORD"]
+])("reports %s that the kubelet would still look up", (_label, helper) => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: containerEnv({
+      APP_DATABASE_OPTIONS: { value: `password=$(${helper})` },
+      [helper]: { value: "secret" }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /runtime-variable/u);
+});
+
+test("reports a repeated reference once", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: containerEnv({
+      APP_DATABASE_OPTIONS: {
+        value: "primary=$(DB_PASSWORD);replica=$(DB_PASSWORD)"
+      },
+      DB_PASSWORD: { value: "secret" }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr.match(/runtime-variable/gu)?.length, 1);
+});
+
 test("ignores a name this container's env does not define", () => {
   const directory = temporaryDirectory();
   const compiledOutput = template({
@@ -685,7 +726,7 @@ test("reports an unresolved expansion inside a nested module", () => {
   );
 });
 
-test("resolves a composed value supplied through a parameter default", () => {
+test("reports an unresolved expansion in a value supplied by a parameter default", () => {
   const directory = temporaryDirectory();
   const compiledOutput = template(
     {

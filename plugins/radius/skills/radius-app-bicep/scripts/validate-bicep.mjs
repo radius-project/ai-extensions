@@ -584,16 +584,26 @@ function checkSourceCodeReferences(
 // called, and a name that is not in this `env` map at all may come from the
 // image, the platform, or connection projection. Neither can be judged from the
 // template, so neither is flagged — this check has no opinion it cannot support.
-const RUNTIME_VARIABLE_PATTERN = /(\$*)\$\(([A-Za-z_][A-Za-z0-9_]*)\)/gu;
+// The reference grammar the kubelet actually applies: everything between `$(`
+// and the first `)` is the name, whatever it contains, because
+// tryReadVariableName scans to the closer rather than matching an identifier.
+// Kubernetes environment names are wider than C identifiers too (`.` and `-`
+// are valid), and Radius does not restrict `env` keys at all, so a narrower
+// pattern here would skip `$(DB.PASSWORD)` and let exactly the failure this
+// check exists to catch through. Matching the closer keeps the two in step; a
+// name that is not a modeled variable is filtered later by `plainValues`.
+const RUNTIME_VARIABLE_PATTERN = /(\$*)\$\(([^)]*)\)/gu;
 
 function expandedVariableNames(value) {
-  const names = [];
+  // A name repeated in one value is one fact about that value, so it is
+  // reported once rather than once per occurrence.
+  const names = new Set();
   for (const match of value.matchAll(RUNTIME_VARIABLE_PATTERN)) {
     // Kubernetes collapses `$$` to a literal `$`, so `$$(NAME)` is text rather
     // than an expansion. An odd number of leading `$` leaves one unpaired to
     // open the expansion; an even number does not.
     if (match[1].length % 2 === 0) {
-      names.push(match[2]);
+      names.add(match[2]);
     }
   }
   return names;
