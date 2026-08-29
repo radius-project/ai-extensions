@@ -1236,6 +1236,10 @@ export function runCommand(
   opts: CommandOptions = {}
 ): Promise<string> {
   const { stdin, ...execOpts } = opts;
+  const timeoutSignal =
+    execOpts.killSignal === undefined ? "SIGTERM"
+    : typeof execOpts.killSignal === "string" ? execOpts.killSignal
+    : undefined;
   return new Promise((resolve, reject) => {
     const child = cliExec(cmd, args, execOpts, (err, stdout, stderr) => {
       if (!err) {
@@ -1250,7 +1254,14 @@ export function runCommand(
           killed: err.killed,
           signal: err.signal,
           cmd: redact(err.cmd || ""),
-          timedOut: err.killed === true || err.code === "ETIMEDOUT"
+          timedOut:
+            err.code === "ETIMEDOUT" ||
+            (execOpts.timeout !== undefined &&
+              execOpts.timeout > 0 &&
+              execOpts.signal?.aborted !== true &&
+              err.killed === true &&
+              timeoutSignal !== undefined &&
+              err.signal === timeoutSignal)
         }
       );
       reject(failure);

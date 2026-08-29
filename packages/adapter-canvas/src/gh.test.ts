@@ -727,7 +727,9 @@ describe.sequential("cliExec", () => {
       commandResult: { error: processError }
     });
 
-    await expect(runCommand("az", ["aks", "get-credentials"])).rejects.toEqual(
+    await expect(
+      runCommand("az", ["aks", "get-credentials"], { timeout: 45000 })
+    ).rejects.toEqual(
       expect.objectContaining({
         message: "command terminated",
         code: "ETIMEDOUT",
@@ -735,6 +737,26 @@ describe.sequential("cliExec", () => {
         signal: "SIGTERM",
         cmd: "az aks get-credentials",
         timedOut: true
+      })
+    );
+  });
+
+  it("does not classify an unrelated process kill as a deadline", async () => {
+    const processError = Object.assign(new Error("process killed"), {
+      killed: true,
+      signal: "SIGKILL"
+    });
+    const { runCommand } = await loadGh("linux", {
+      commandResult: { error: processError }
+    });
+
+    await expect(
+      runCommand("az", ["account", "show"], { timeout: 45000 })
+    ).rejects.toEqual(
+      expect.objectContaining({
+        killed: true,
+        signal: "SIGKILL",
+        timedOut: false
       })
     );
   });
