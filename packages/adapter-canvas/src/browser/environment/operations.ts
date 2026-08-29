@@ -2124,6 +2124,7 @@ export function initializeEnvironmentOperations(
     const available =
       op !== null &&
       !isExitedSetup(op) &&
+      !isSuccessfulSetup(op) &&
       (op.terminalState !== null ||
         op.state === "input_required" ||
         op.actions.some(

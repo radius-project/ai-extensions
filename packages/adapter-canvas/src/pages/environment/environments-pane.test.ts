@@ -164,7 +164,7 @@ describe("environmentsPaneMarkup", () => {
     );
     expect(html).toContain(">Download diagnostic snapshot</button>");
     expect(html).toContain(
-      "Captures this paused or completed state in a local, redacted JSON file. Radius does not upload it."
+      "Captures this paused or unsuccessful state in a local, redacted JSON file. Radius does not upload it."
     );
     expect(html).toContain(
       'id="env-diagnostics-modal" role="dialog" aria-modal="true" aria-labelledby="env-diagnostics-title" aria-describedby="env-diagnostics-intro"'

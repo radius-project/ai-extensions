@@ -201,14 +201,16 @@ ${confirmDialogMarkup()}
 .env-progress__details > summary { font-size:12px; color:var(--rad-text-tertiary); cursor:pointer; }
 .env-progress__steps { list-style:none; margin:8px 0 0; padding:0; display:flex; flex-direction:column; gap:4px; max-height:220px; overflow:auto; }
 .env-progress__diagnostics { margin-top:10px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.env-progress__diagnostics .rad-btn { margin-top:0; }
 .env-progress__diagnostics-note { font-size:12px; color:var(--rad-text-tertiary); line-height:1.45; }
 .env-diagnostics__panel { background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:620px; width:92%; max-height:80vh; overflow:auto; display:flex; flex-direction:column; gap:12px; }
 .env-diagnostics__title { font-size:15px; font-weight:600; line-height:1.4; color:var(--rad-text); }
 .env-diagnostics__intro, .env-diagnostics__list, .env-diagnostics__warning, .env-diagnostics__status { margin:0; font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; }
 .env-diagnostics__section-title { font-size:12px; font-weight:600; color:var(--rad-text); margin-bottom:4px; }
 .env-diagnostics__list { padding-left:20px; }
-.env-diagnostics__option { display:flex; align-items:flex-start; gap:8px; font-size:13px; color:var(--rad-text); }
-.env-diagnostics__option input { margin-top:2px; }
+.env-diagnostics__option { display:flex; align-items:center; gap:8px; font-size:13px; color:var(--rad-text); }
+.env-diagnostics__option input { margin:0; }
+.env-diagnostics__option label { margin:0; line-height:1.4; }
 .env-diagnostics__preview { padding:12px 14px; border:1px solid var(--rad-stroke); border-radius:8px; background:var(--rad-bg-subtle); }
 .env-diagnostics__identifiers { display:grid; grid-template-columns:minmax(100px, auto) 1fr; gap:6px 12px; margin:8px 0; font-size:12px; line-height:1.5; }
 .env-diagnostics__identifiers dt { font-weight:600; color:var(--rad-text); }
@@ -222,6 +224,7 @@ ${confirmDialogMarkup()}
 .env-progress__step--failed { color:var(--rad-danger); }
 .env-progress__actions { display:flex; gap:8px; margin-top:12px; }
 .env-progress__bottom-buttons { display:flex; gap:8px; flex-wrap:wrap; }
+.env-progress__bottom-buttons:empty { display:none; }
 .env-progress__commands { display:flex; flex-direction:column; gap:6px; margin-top:12px; }
 .env-progress__command-buttons { display:flex; gap:8px; flex-wrap:wrap; }
 .env-progress__command-description { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0, 0, 0, 0); white-space:nowrap; border:0; }

@@ -77,6 +77,15 @@ const RUNNING: OperationActionRecord = {
   }
 };
 
+const SUCCESSFUL_OPERATION: OperationActionRecord = {
+  ...RUNNING,
+  operationId: "op-succeeded",
+  state: "succeeded",
+  endedAt: "2026-08-01T00:00:05.000Z",
+  stages: [{ id: "verify", label: "Verify", state: "succeeded" }],
+  failure: undefined
+};
+
 const DIAGNOSTIC_OPERATION: OperationActionRecord = {
   operationId: "op_12345678-1234-4123-8123-123456789abc",
   schemaVersion: 6,
@@ -114,6 +123,7 @@ const DIAGNOSTIC_OPERATION: OperationActionRecord = {
 function start(strictBrowserMutations = false): Harness {
   const records = new Map<string, OperationActionRecord>([
     ["op-running", RUNNING],
+    [SUCCESSFUL_OPERATION.operationId, SUCCESSFUL_OPERATION],
     [DIAGNOSTIC_OPERATION.operationId, DIAGNOSTIC_OPERATION],
     [
       "op_12345678-1234-4123-8123-ffffffffffff",
@@ -396,6 +406,15 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     expect(unavailable.status).toBe(409);
     expect(unavailable.headers.get("content-disposition")).toBeNull();
     expect(await unavailable.json()).toMatchObject({
+      code: "operation-diagnostics-unavailable"
+    });
+
+    const successful = await fetch(
+      `${entry.baseUrl}/api/operations/${SUCCESSFUL_OPERATION.operationId}/diagnostics`
+    );
+    expect(successful.status).toBe(409);
+    expect(successful.headers.get("content-disposition")).toBeNull();
+    expect(await successful.json()).toMatchObject({
       code: "operation-diagnostics-unavailable"
     });
 

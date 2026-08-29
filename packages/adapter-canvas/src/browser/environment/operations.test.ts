@@ -1027,6 +1027,14 @@ describe("trackProgress rendering", () => {
     [
       "an unrequested Stop action",
       { state: "running", terminalState: null, actions: [STOP_ACTION] }
+    ],
+    ["success", { state: "succeeded", terminalState: "succeeded" }],
+    [
+      "success with warnings",
+      {
+        state: "succeeded_with_warnings",
+        terminalState: "succeeded_with_warnings"
+      }
     ]
   ])("hides diagnostics during %s", (_label, overrides) => {
     const browser = setup();
@@ -1048,7 +1056,6 @@ describe("trackProgress rendering", () => {
       "an input pause",
       { state: "input_required", terminalState: null, actions: [] }
     ],
-    ["success", { state: "succeeded", terminalState: "succeeded" }],
     ["failure", { state: "failed", terminalState: "failed" }],
     [
       "external action",

@@ -20,6 +20,7 @@ const TERMINAL_STATES = new Set([
   "failed_partial",
   "cancelled"
 ]);
+const SUCCESS_STATES = new Set(["succeeded", "succeeded_with_warnings"]);
 const STAGES = new Set([
   "authorize_identity",
   "configure_environment",
@@ -344,6 +345,9 @@ export function operationDiagnosticContextFingerprint(
 export function operationDiagnosticAvailable(operation: unknown): boolean {
   const source = record(operation);
   if (!source) return false;
+  if (typeof source.state === "string" && SUCCESS_STATES.has(source.state)) {
+    return false;
+  }
   if (typeof source.state === "string" && TERMINAL_STATES.has(source.state)) {
     return true;
   }

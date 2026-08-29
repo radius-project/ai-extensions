@@ -313,8 +313,16 @@ describe("createOperationDiagnosticExport", () => {
   });
 
   it.each([
-    ["terminal success", operation({ state: "succeeded" }), true],
+    ["terminal success", operation({ state: "succeeded" }), false],
+    [
+      "terminal success with warnings",
+      operation({ state: "succeeded_with_warnings" }),
+      false
+    ],
+    ["terminal action required", operation({ state: "action_required" }), true],
     ["terminal failure", operation({ state: "failed" }), true],
+    ["terminal partial failure", operation({ state: "failed_partial" }), true],
+    ["terminal cancellation", operation({ state: "cancelled" }), true],
     ["input pause", operation({ state: "input_required" }), true],
     [
       "pending Stop",

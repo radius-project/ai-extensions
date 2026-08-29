@@ -273,6 +273,18 @@ describe("environmentPage — stop, continue and rollback styling", () => {
     expect(markup).toContain(
       '.env-diagnostics__buttons a[aria-disabled="true"] { pointer-events:none; opacity:0.55; }'
     );
+    expect(markup).toContain(
+      ".env-diagnostics__option { display:flex; align-items:center;"
+    );
+    expect(markup).toContain(
+      ".env-diagnostics__option label { margin:0; line-height:1.4; }"
+    );
+    expect(markup).toContain(
+      ".env-progress__diagnostics .rad-btn { margin-top:0; }"
+    );
+    expect(markup).toContain(
+      ".env-progress__bottom-buttons:empty { display:none; }"
+    );
     const panelStyles = markup.slice(
       markup.indexOf(".env-diagnostics__panel"),
       markup.indexOf(".env-progress__step")

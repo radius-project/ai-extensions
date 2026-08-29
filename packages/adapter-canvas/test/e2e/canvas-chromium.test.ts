@@ -16,7 +16,7 @@ import {
   type CanvasHarness,
   type FakeCliCommand
 } from "./support/canvas-harness.js";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 // Bound to the production constants so the retry cadence is exercised at the
 // value the compiled browser bundle actually schedules, not a copy of it.
@@ -99,6 +99,22 @@ async function expectNoWcagViolations(page: Page): Promise<void> {
       targets: violation.nodes.map((node) => node.target.join(" "))
     }))
   ).toEqual([]);
+}
+
+async function expectVerticallyAligned(
+  first: Locator,
+  second: Locator
+): Promise<void> {
+  const firstBox = await first.boundingBox();
+  const secondBox = await second.boundingBox();
+  if (firstBox === null || secondBox === null) {
+    throw new Error("Expected both elements to have layout boxes.");
+  }
+  expect(
+    Math.abs(
+      firstBox.y + firstBox.height / 2 - (secondBox.y + secondBox.height / 2)
+    )
+  ).toBeLessThanOrEqual(1);
 }
 
 function bodyFor(canvas: CanvasHarness, pathName: string): unknown {
@@ -1364,6 +1380,10 @@ test.describe("Radius Canvas in Chromium", () => {
       name: "Download diagnostic snapshot"
     });
     await expect(diagnosticButton).toBeVisible();
+    await expectVerticallyAligned(
+      diagnosticButton,
+      page.locator("#env-progress-diagnostics-note")
+    );
     await diagnosticButton.focus();
     await page.keyboard.press("Enter");
     const diagnosticDialog = page.getByRole("dialog", {
@@ -1373,6 +1393,13 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(
       diagnosticDialog.getByLabel("Include contextual identifiers")
     ).not.toBeChecked();
+    const includeCheckbox = diagnosticDialog.getByLabel(
+      "Include contextual identifiers"
+    );
+    const includeLabel = diagnosticDialog.locator(
+      'label[for="env-diagnostics-include-identifiers"]'
+    );
+    await expectVerticallyAligned(includeCheckbox, includeLabel);
     await expectNoWcagViolations(page);
     const diagnosticLink = diagnosticDialog.getByRole("link", {
       name: "Download snapshot"
@@ -1413,6 +1440,13 @@ test.describe("Radius Canvas in Chromium", () => {
       diagnosticDialog.getByText("fixture-environment", { exact: true })
     ).toBeVisible();
     await expect(diagnosticDialog.getByText("repo-user")).toBeVisible();
+    const reviewedCheckbox = diagnosticDialog.getByLabel(
+      "I reviewed these identifiers"
+    );
+    const reviewedLabel = diagnosticDialog.locator(
+      'label[for="env-diagnostics-reviewed-identifiers"]'
+    );
+    await expectVerticallyAligned(reviewedCheckbox, reviewedLabel);
     await expectNoWcagViolations(page);
     await diagnosticDialog.getByLabel("I reviewed these identifiers").check();
     const contextualDownloadStarted = page.waitForEvent("download");
@@ -1693,6 +1727,10 @@ test.describe("Radius Canvas in Chromium", () => {
       )
     ).toEqual([]);
     await expect(page.locator("body")).toContainText("Environment created");
+    await page.locator("#env-progress-details > summary").click();
+    await expect(
+      page.getByRole("button", { name: "Download diagnostic snapshot" })
+    ).toBeHidden();
     await expectNoWcagViolations(page);
   });
 
@@ -1747,6 +1785,10 @@ test.describe("Radius Canvas in Chromium", () => {
     await stop.focus();
     await page.keyboard.press("Enter");
 
+    await page.locator("#env-progress-details > summary").click();
+    await expect(
+      page.getByRole("button", { name: "Download diagnostic snapshot" })
+    ).toBeVisible();
     const cancelWorkflow = page.getByRole("button", {
       name: "Cancel workflow"
     });
