@@ -44,6 +44,9 @@ describe("provider mutation recovery", () => {
         return command({ stdout: '{"name":"prod"}' });
       },
       accept: (value) => JSON.parse(value.stdout) as { name: string },
+      onConfirmed: (_value, recovered) => {
+        events.push(`artifact:${String(recovered)}`);
+      },
       reconcile: async () => {
         throw new Error("successful mutations do not need reconciliation");
       }
@@ -54,8 +57,66 @@ describe("provider mutation recovery", () => {
       value: { name: "prod" },
       recovered: false
     });
-    expect(events).toEqual(["persist:prepared", "mutate", "persist:confirmed"]);
+    expect(events).toEqual([
+      "persist:prepared",
+      "mutate",
+      "artifact:false",
+      "persist:confirmed"
+    ]);
   });
+
+  it.each([
+    ["acknowledged", false],
+    ["reconciled", true]
+  ] as const)(
+    "durably requires manual action when %s mutation provenance recording fails",
+    async (_label, recovered) => {
+      const operation = createOperation({ operationId: "op_provenance" });
+      const persisted: string[] = [];
+      const mutate = vi.fn(async () =>
+        command(recovered ? { code: 1, timedOut: true } : {})
+      );
+
+      await expect(
+        executeRecoverableMutation({
+          operation,
+          kind: "github_environment_variable.put",
+          target: "octo/app:prod:A",
+          persist: async () => {
+            persisted.push(
+              operation.providerRecovery.mutations[0]?.status || "missing"
+            );
+          },
+          mutate,
+          accept: () => "value",
+          onConfirmed: () => {
+            throw new Error("artifact ledger rejected the record");
+          },
+          reconcile: async () => ({
+            state: "applied",
+            value: "value",
+            evidence: "The exact value exists."
+          })
+        })
+      ).rejects.toMatchObject({
+        code: "provider-mutation-manual-required",
+        message: expect.stringContaining(
+          "could not record the rollback provenance"
+        )
+      });
+
+      expect(mutate).toHaveBeenCalledOnce();
+      expect(operation.providerRecovery.mutations[0]).toMatchObject({
+        status: "manual_required",
+        evidence: expect.stringContaining("artifact ledger rejected the record")
+      });
+      expect(persisted).toEqual([
+        "prepared",
+        ...(recovered ? ["outcome_unknown"] : []),
+        "manual_required"
+      ]);
+    }
+  );
 
   it("does not start a mutation when Stop arrives while its journal is saved", async () => {
     const operation = createOperation({ operationId: "op_test" });
@@ -91,6 +152,37 @@ describe("provider mutation recovery", () => {
       "persist:not_applied",
       "boundary:not_applied"
     ]);
+  });
+
+  it("records a failed pre-mutation identity validation as not applied", async () => {
+    const operation = createOperation({ operationId: "op_validation" });
+    const persisted: string[] = [];
+    const mutate = vi.fn(async () => command());
+
+    await expect(
+      executeRecoverableMutation({
+        operation,
+        kind: "github_environment_variable.put",
+        target: "octo/app:dev:A",
+        persist: async () => {
+          persisted.push(operation.providerRecovery.mutations[0]?.status || "");
+        },
+        validateBeforeMutation: async () => {
+          throw new Error("environment identity unavailable");
+        },
+        mutate,
+        accept: (value) => value,
+        reconcile: async () => {
+          throw new Error("validation failure must not reconcile");
+        }
+      })
+    ).rejects.toThrow("environment identity unavailable");
+
+    expect(mutate).not.toHaveBeenCalled();
+    expect(persisted).toEqual(["prepared", "not_applied"]);
+    expect(operation.providerRecovery.mutations[0]).toMatchObject({
+      status: "not_applied"
+    });
   });
 
   it("defers Stop while an older provider mutation still needs reconciliation", async () => {
@@ -184,6 +276,8 @@ describe("provider mutation recovery", () => {
       accept: () => ({ sha: "first" }),
       reconcile: async () => ({ state: "not_applied" })
     });
+    expect(operation.providerRecovery.state).toBe("complete");
+    expect(operation.stopRequested).toBe(false);
     operation.providerRecovery.mutations[0].status = "prepared";
 
     await executeRecoverableMutation({
@@ -239,6 +333,7 @@ describe("provider mutation recovery", () => {
     const mutate = vi.fn(async () =>
       command({ code: 1, timedOut: true, stderr: "terminated" })
     );
+    const recorded: Array<{ value: number; recovered: boolean }> = [];
 
     const result = await executeRecoverableMutation({
       operation,
@@ -247,6 +342,9 @@ describe("provider mutation recovery", () => {
       persist: async () => {},
       mutate,
       accept: () => 0,
+      onConfirmed: (value, recovered) => {
+        recorded.push({ value, recovered });
+      },
       reconcile: async () => ({
         state: "applied",
         value: 42,
@@ -256,6 +354,7 @@ describe("provider mutation recovery", () => {
 
     expect(result).toEqual({ state: "applied", value: 42, recovered: true });
     expect(mutate).toHaveBeenCalledOnce();
+    expect(recorded).toEqual([{ value: 42, recovered: true }]);
     expect(operation.providerRecovery.mutations[0]).toMatchObject({
       status: "confirmed",
       evidence: "Run 42 appeared after the saved baseline."
@@ -523,6 +622,10 @@ describe("provider mutation recovery", () => {
       [
         "a protected branch refusal",
         "HTTP 409: refusing to allow an OAuth App to create or update workflow"
+      ],
+      [
+        "an organization SAML refusal without an HTTP status",
+        "Resource protected by organization SAML enforcement. You must grant your OAuth token access."
       ],
       [
         "an argument the CLI rejected",

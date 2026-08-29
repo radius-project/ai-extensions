@@ -75,6 +75,7 @@ describe("environmentPage", () => {
       "env-progress-state",
       "env-progress-commands",
       "env-progress-command-buttons",
+      "env-progress-command-descriptions",
       "env-smr-modal",
       "env-appselect-modal",
       "env-profile-button",
@@ -108,6 +109,28 @@ describe("environmentPage", () => {
     expect(html).toContain(browserEntryMarker("environment-page"));
     expect(html.split(browserScript("environment-page"))).toHaveLength(2);
     expectSafeInlineScripts(html);
+  });
+
+  it("serializes the host-specific GitHub CLI presentation", () => {
+    const html = environmentPage({
+      ghCommandPresentation: {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/Applications/GitHub Copilot/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    });
+
+    expect(readBrowserPageState(html, ENVIRONMENT_PAGE_STATE_ID)).toMatchObject(
+      {
+        ghCommandPresentation: {
+          kind: "absolute",
+          shell: "posix",
+          executablePath: "/Applications/GitHub Copilot/gh",
+          installationNote: "Install GitHub CLI system-wide."
+        }
+      }
+    );
   });
 
   it("preserves state fallback and escapes hostile form values", () => {

@@ -207,6 +207,7 @@ ${confirmDialogMarkup()}
 .env-progress__bottom-buttons { display:flex; gap:8px; flex-wrap:wrap; }
 .env-progress__commands { display:flex; flex-direction:column; gap:6px; margin-top:12px; }
 .env-progress__command-buttons { display:flex; gap:8px; flex-wrap:wrap; }
+.env-progress__command-description { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0, 0, 0, 0); white-space:nowrap; border:0; }
 .env-progress__command-note { font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; }
 .env-progress__command-guidance { margin:0; padding-left:18px; font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; }
 .env-progress__command-status { font-size:12px; color:var(--rad-text); line-height:1.5; }
@@ -304,6 +305,7 @@ ${confirmDialogMarkup()}
         repo: ctxRepo,
         branch: ctxBranch,
         activeSubtab,
+        ghCommandPresentation: state.ghCommandPresentation,
         mutationNonce:
           typeof state.browserMutationNonce === "string" ?
             state.browserMutationNonce

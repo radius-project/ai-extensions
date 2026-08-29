@@ -30,6 +30,7 @@ import {
   PERSISTED_OPERATIONS_VERSION,
   type OperationStore
 } from "./operation-store.js";
+import { redactGhCredentials } from "./gh.js";
 
 // Version 2 adds the cooperative control record (stop, attempts, commands,
 // outcome history). Version 3 adds workflow provenance to the artifact ledger
@@ -42,9 +43,9 @@ import {
 // `readSetupArtifactLedger` fill the new fields with safe defaults rather than
 // discarding the operation, and a default of "no provenance" fails a
 // post-commit rollback closed instead of guessing.
-export const OPERATION_SCHEMA_VERSION = 5;
+export const OPERATION_SCHEMA_VERSION = 6;
 export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([
-  1, 2, 3, 4, 5
+  1, 2, 3, 4, 5, 6
 ]);
 
 // `deleted` is written only after a cleanup attempt proved the resource is gone
@@ -131,6 +132,17 @@ export type GitHubEnvironmentArtifact = {
   providerId: string | null;
 };
 
+export type GitHubEnvironmentVariableArtifact = {
+  state: "created" | "deleted";
+  repo: string;
+  environment: string;
+  environmentProviderId: string | null;
+  name: string;
+  valueSha256: string;
+  previousValue: string | null;
+  previousKnown: boolean;
+};
+
 // `state` keeps a reverted file in the ledger instead of deleting the entry:
 // the record still has to prove this operation crossed the commit point, and a
 // cleanup retry still needs the provenance of the write it is repeating.
@@ -167,6 +179,7 @@ export type SetupArtifactCommitState = {
 
 export type SetupCleanupArtifactType =
   | "workflow_file"
+  | "github_environment_variable"
   | "github_environment"
   | "role_assignment"
   | "federated_credential"
@@ -203,6 +216,7 @@ export type SetupArtifactLedger = {
   federatedCredentials: FederatedCredentialArtifact[];
   roleAssignments: RoleAssignmentArtifact[];
   githubEnvironment: GitHubEnvironmentArtifact;
+  githubEnvironmentVariables: GitHubEnvironmentVariableArtifact[];
   commit: SetupArtifactCommitState;
   cleanup: SetupArtifactCleanupState;
 };
@@ -222,6 +236,7 @@ export type OperationCommandKind =
   | "stop"
   | "resume_input"
   | "continue_setup"
+  | "cancel_workflow"
   | "retry_setup"
   | "retry_verification"
   | "rollback"
@@ -299,6 +314,8 @@ export type ProviderMutationRecord = {
   // the exact target already present. Persisted with confirmation so recovery
   // never promotes a reused resource into cleanup ownership.
   createdByOperation?: boolean;
+  initialDiagnostic?: string | null;
+  finalDiagnostic?: string | null;
   evidence: string | null;
 };
 
@@ -331,6 +348,40 @@ const PROVIDER_MUTATION_STATUSES = Object.freeze([
 
 export function createProviderRecovery(): ProviderRecoveryRecord {
   return { state: "idle", guidance: null, mutations: [] };
+}
+
+export const PROVIDER_DIAGNOSTIC_MAX_LENGTH = 2000;
+
+export function boundedProviderDiagnostic(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const diagnostic = redactGhCredentials(value).trim();
+  if (!diagnostic) return null;
+  return diagnostic.length > PROVIDER_DIAGNOSTIC_MAX_LENGTH ?
+      `${diagnostic.slice(0, PROVIDER_DIAGNOSTIC_MAX_LENGTH)}...`
+    : diagnostic;
+}
+
+export function recordProviderMutationDiagnostics(
+  op: any,
+  mutationId: string,
+  diagnostics: {
+    initial?: string | null;
+    final?: string | null;
+  }
+): boolean {
+  const recovery = readProviderRecovery(op?.providerRecovery);
+  const mutation = recovery.mutations.find(
+    (entry) => entry.mutationId === mutationId
+  );
+  if (!mutation) return false;
+  const initial = boundedProviderDiagnostic(diagnostics.initial);
+  if (initial && !mutation.initialDiagnostic) {
+    mutation.initialDiagnostic = initial;
+  }
+  const final = boundedProviderDiagnostic(diagnostics.final);
+  if (final) mutation.finalDiagnostic = final;
+  op.providerRecovery = recovery;
+  return true;
 }
 
 function readProviderRecovery(value: any): ProviderRecoveryRecord {
@@ -387,6 +438,18 @@ function readProviderRecovery(value: any): ProviderRecoveryRecord {
           ) ?
             {
               reconcileAttempts: Math.floor(Number(entry.reconcileAttempts))
+            }
+          : {}),
+          ...(boundedProviderDiagnostic(entry.initialDiagnostic) ?
+            {
+              initialDiagnostic: boundedProviderDiagnostic(
+                entry.initialDiagnostic
+              )
+            }
+          : {}),
+          ...(boundedProviderDiagnostic(entry.finalDiagnostic) ?
+            {
+              finalDiagnostic: boundedProviderDiagnostic(entry.finalDiagnostic)
             }
           : {}),
           evidence:
@@ -599,6 +662,31 @@ export function providerRecoveryManualGuidance(op: any): string | null {
   );
 }
 
+export function terminalizeProviderManualRequired(
+  op: any,
+  guidance: string
+): void {
+  if (!op || isTerminalState(op.state)) return;
+  const now = nowIso();
+  op.state = "failed_partial";
+  op.endedAt = now;
+  op.lastActivityAt = now;
+  op.executionActive = false;
+  op.failure = {
+    code: "provider-reconciliation-manual-required",
+    stage: op.currentStage,
+    stepSeq: null,
+    message: guidance,
+    classification: "user-fixable",
+    evidence: null
+  };
+  for (const stage of op.stages || []) {
+    if (stage.state === "running") stage.state = "failed";
+    else if (stage.state === "pending") stage.state = "skipped";
+  }
+  op.recoveryState = "manual_required";
+}
+
 const UNRECOVERABLE_LEGACY_GUIDANCE =
   "This setup was recorded by an older version of Radius that did not journal the provider requests it had in flight, and the extension restarted before it finished. " +
   "Radius cannot tell which cloud or GitHub resources that attempt had already created, so it will neither continue the setup nor delete anything on its guess. " +
@@ -694,6 +782,7 @@ const COMMAND_KINDS = Object.freeze([
   "stop",
   "resume_input",
   "continue_setup",
+  "cancel_workflow",
   "retry_setup",
   "retry_verification",
   "rollback",
@@ -712,6 +801,7 @@ export const EXIT_COMMAND_KIND = "exit_setup";
 // a disposal that ended with warnings, or a command still in flight — leaves the
 // setup open, so the panel keeps reporting what is still present.
 export const EXIT_COMMAND_OUTCOME = "exited";
+export const ABANDON_COMMAND_OUTCOME = "abandoned";
 const DISPOSAL_COMMAND_KINDS = Object.freeze([
   ...CLEANUP_COMMAND_KINDS,
   EXIT_COMMAND_KIND
@@ -804,6 +894,95 @@ export const TERMINAL_STATES = Object.freeze([
 
 export const RUNNING_STATE = "running";
 export const INPUT_REQUIRED_STATE = "input_required";
+export const PROVIDER_RESTART_DECISION_REASON = "provider-restart-decision";
+
+export type VerificationWorkflowState =
+  "active" | "inactive" | "cancelling" | "unknown";
+
+export function isProviderRestartDecision(op: any): boolean {
+  return (
+    op?.state === "action_required" &&
+    op?.terminal?.reason === PROVIDER_RESTART_DECISION_REASON
+  );
+}
+
+export function verificationWorkflowState(
+  op: any
+): VerificationWorkflowState | null {
+  const state = op?.verification?.workflowState;
+  return (
+      state === "active" ||
+        state === "inactive" ||
+        state === "cancelling" ||
+        state === "unknown"
+    ) ?
+      state
+    : null;
+}
+
+function hasVerificationWorkflowControlIdentity(op: any): boolean {
+  const repo = typeof op?.repo === "string" ? op.repo.trim() : "";
+  const runId =
+    op?.verification?.runId == null ? "" : String(op.verification.runId).trim();
+  const login =
+    typeof op?.context?.githubLogin === "string" ?
+      op.context.githubLogin.trim()
+    : "";
+  return repo !== "" && runId !== "" && login !== "";
+}
+
+export function setVerificationWorkflowState(
+  op: any,
+  state: VerificationWorkflowState
+): any {
+  if (!op) return op;
+  op.verification = { ...(op.verification || {}), workflowState: state };
+  op.lastActivityAt = nowIso();
+  return op;
+}
+
+export function pauseForProviderRestart(op: any): any {
+  if (!op || isTerminalState(op.state)) return op;
+  const now = nowIso();
+  op.state = "action_required";
+  op.endedAt = now;
+  op.lastActivityAt = now;
+  op.executionActive = false;
+  op.failure = null;
+  op.terminal = {
+    reason: PROVIDER_RESTART_DECISION_REASON,
+    interruptedStage: op.currentStage || null
+  };
+  if (
+    op.currentStage === STAGE_VERIFY &&
+    Number.isFinite(Number(op.verification?.dispatchedAt))
+  ) {
+    setVerificationWorkflowState(op, "unknown");
+  }
+  op.recoveryState = "provider_restart_decision";
+  return op;
+}
+
+export function stopProviderRestartDecision(op: any): boolean {
+  if (!isProviderRestartDecision(op)) return false;
+  const now = nowIso();
+  const control = getOperationControl(op);
+  if (control) {
+    control.stop.requestedAt ||= now;
+    control.stop.acknowledgedAt ||= now;
+    control.stop.boundary ||= "restart_recovery";
+  }
+  op.stopRequested = true;
+  op.state = "cancelled";
+  op.endedAt = now;
+  op.lastActivityAt = now;
+  op.terminal = { reason: "provider-restart-stopped" };
+  op.recoveryState = "stopped";
+  for (const stage of op.stages || []) {
+    if (stage.state === "running") stage.state = "warning";
+  }
+  return true;
+}
 
 export function isTerminalState(state: any): boolean {
   return TERMINAL_STATES.includes(state);
@@ -898,6 +1077,7 @@ export function createSetupArtifactLedger(): SetupArtifactLedger {
       name: null,
       providerId: null
     },
+    githubEnvironmentVariables: [],
     commit: {
       mode: "not_started",
       branch: null,
@@ -1027,6 +1207,38 @@ export function readSetupArtifactLedger(value: any): SetupArtifactLedger {
         source.githubEnvironment && source.githubEnvironment.providerId
       )
     },
+    githubEnvironmentVariables:
+      Array.isArray(source.githubEnvironmentVariables) ?
+        source.githubEnvironmentVariables
+          .map((entry: any) => ({
+            state: entry?.state === "deleted" ? "deleted" : "created",
+            repo: String(entry?.repo || ""),
+            environment: String(entry?.environment || ""),
+            environmentProviderId: optionalIdentityString(
+              entry?.environmentProviderId
+            ),
+            name: String(entry?.name || ""),
+            valueSha256: String(entry?.valueSha256 || ""),
+            previousValue:
+              typeof entry?.previousValue === "string" ?
+                entry.previousValue
+              : null,
+            previousKnown:
+              entry?.previousKnown === true &&
+              entry !== null &&
+              typeof entry === "object" &&
+              Object.hasOwn(entry, "previousValue") &&
+              (typeof entry.previousValue === "string" ||
+                entry.previousValue === null)
+          }))
+          .filter(
+            (entry: GitHubEnvironmentVariableArtifact) =>
+              entry.repo !== "" &&
+              entry.environment !== "" &&
+              entry.name !== "" &&
+              /^[a-f0-9]{64}$/i.test(entry.valueSha256)
+          )
+      : [],
     commit: {
       ...ledger.commit,
       ...(source.commit || {}),
@@ -1574,6 +1786,54 @@ export function recordGitHubEnvironment(op: any, patch: any): any {
   return op;
 }
 
+export function recordGitHubEnvironmentVariable(op: any, entry: any): any {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger || !entry) return op;
+  const record: GitHubEnvironmentVariableArtifact = {
+    state: "created",
+    repo: String(entry.repo || ""),
+    environment: String(entry.environment || ""),
+    environmentProviderId: optionalIdentityString(entry.environmentProviderId),
+    name: String(entry.name || ""),
+    valueSha256: String(entry.valueSha256 || ""),
+    // GitHub Actions variables are non-secret configuration. Radius retains the
+    // predecessor only in its local operation store because cleanup needs the
+    // plaintext to restore it; toClientView never projects artifact contents.
+    previousValue:
+      typeof entry.previousValue === "string" ? entry.previousValue : null,
+    previousKnown:
+      entry.previousKnown === true &&
+      Object.hasOwn(entry, "previousValue") &&
+      (typeof entry.previousValue === "string" || entry.previousValue === null)
+  };
+  if (
+    !record.repo ||
+    !record.environment ||
+    !record.environmentProviderId ||
+    !record.name ||
+    !/^[a-f0-9]{64}$/i.test(record.valueSha256)
+  ) {
+    return op;
+  }
+  const existing = ledger.githubEnvironmentVariables.findIndex(
+    (candidate) =>
+      candidate.repo === record.repo &&
+      candidate.environment === record.environment &&
+      candidate.name === record.name
+  );
+  if (existing === -1) {
+    ledger.githubEnvironmentVariables.push(record);
+  } else {
+    const previous = ledger.githubEnvironmentVariables[existing];
+    ledger.githubEnvironmentVariables[existing] = {
+      ...record,
+      previousValue: previous.previousValue,
+      previousKnown: previous.previousKnown
+    };
+  }
+  return op;
+}
+
 /**
  * Turn the GitHub environment this operation created from a candidate into a
  * proven creation.
@@ -1741,6 +2001,14 @@ export function recordCleanupDeletion(
         return false;
       ledger.githubEnvironment.state = "deleted";
       return true;
+    case "github_environment_variable": {
+      const variable = ledger.githubEnvironmentVariables.find(
+        (entry) => entry.state === "created" && matches(entry)
+      );
+      if (!variable) return false;
+      variable.state = "deleted";
+      return true;
+    }
     case "federated_credential": {
       const remaining = ledger.federatedCredentials.filter(
         (entry: any) => !matches(entry)
@@ -1784,6 +2052,9 @@ function hasTrackedSetupArtifacts(ledger: SetupArtifactLedger | null): boolean {
     ledger.roleAssignments.length > 0 ||
     ledger.githubEnvironment.state === "created" ||
     ledger.githubEnvironment.state === "created_candidate" ||
+    ledger.githubEnvironmentVariables.some(
+      (entry) => entry.state === "created"
+    ) ||
     ledger.commit.workflowFiles.length > 0
   );
 }
@@ -1905,6 +2176,10 @@ function formatWorkflowFileLabel(file: any): string {
   return branch ? `${path} on ${branch}` : path;
 }
 
+function formatGitHubEnvironmentVariableLabel(variable: any): string {
+  return `${String(variable.repo || "")}:${String(variable.environment || "")} variable ${String(variable.name || "")}`;
+}
+
 // ─── Reuse and unproven-ownership copy ───────────────────────────────────────
 // "Reused" on its own is the sentence that sends a customer to a support
 // thread: they watched Create Environment make an App Registration, and the
@@ -2015,6 +2290,13 @@ export function cleanupArtifactIdentity(
           artifact.name
         )}`
       );
+    case "github_environment_variable":
+      return identityLedBy(
+        artifact.environmentProviderId,
+        `${normalizeIdentityPart(artifact.repo)}:${normalizeIdentityPart(
+          artifact.environment
+        )}:${normalizeIdentityPart(artifact.name)}`
+      );
     // Path plus branch, because the same workflow path on a setup branch and on
     // the default branch are two different files with two different provenances.
     case "workflow_file":
@@ -2118,6 +2400,18 @@ const LEDGER_ARTIFACTS: readonly LedgerArtifactRow[] = Object.freeze([
       )
     ],
     unprovenAction: UNPROVEN_GITHUB_ENVIRONMENT_ACTION
+  },
+  {
+    kind: "github_environment_variable",
+    entries: (ledger: any) =>
+      ledger.githubEnvironmentVariables.map((entry: any) =>
+        ledgerEntry(
+          "github_environment_variable",
+          entry,
+          formatGitHubEnvironmentVariableLabel(entry),
+          entry.state
+        )
+      )
   },
   {
     kind: "workflow_file",
@@ -2835,6 +3129,7 @@ export function applySetupResumePoint(
  */
 export function setupForwardIntent(op: any): "continue" | "retry" | null {
   if (!op || !isTerminalState(op.state)) return null;
+  if (isProviderRestartDecision(op)) return "continue";
   if (op.state === "cancelled") return "continue";
   if (op.state !== "failed_partial" && op.state !== "failed") return null;
   const command = latestCommand(op);
@@ -2895,7 +3190,9 @@ function setupForwardEligibility(
   return {
     ok: true,
     code: `${prefix}-allowed`,
-    resumeFrom: nextIncompleteSetupStep(op)
+    resumeFrom: nextIncompleteSetupStep(op),
+    recoveredVerification:
+      isProviderRestartDecision(op) && op.currentStage === STAGE_VERIFY
   };
 }
 
@@ -2942,6 +3239,7 @@ export function canRetrySetup(op: any): any {
 const ROLLBACK_ARTIFACT_ORDER: readonly SetupCleanupArtifactType[] =
   Object.freeze([
     "workflow_file",
+    "github_environment_variable",
     "github_environment",
     "role_assignment",
     "federated_credential",
@@ -3106,6 +3404,16 @@ export function canStartRollback(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
+  const workflowState = verificationWorkflowState(op);
+  if (
+    workflowState === "active" ||
+    workflowState === "cancelling" ||
+    workflowState === "unknown"
+  )
+    return {
+      ok: false,
+      code: "rollback-verification-workflow-active"
+    };
   const refused = providerDestructiveRefusal(op, "rollback");
   if (refused) return refused;
   // Successful verification is the completion boundary, so a verified
@@ -3181,6 +3489,40 @@ export function workflowRollbackTargets(
     .filter((entry: any) => !keys || keys.has(entry.key));
 }
 
+export function githubEnvironmentVariableRollbackTargets(
+  op: any,
+  keys?: Set<string> | null
+): Array<
+  GitHubEnvironmentVariableArtifact & {
+    target: string;
+    identity: string;
+    key: string;
+  }
+> {
+  const ledger = getSetupArtifactLedger(op);
+  if (!ledger) return [];
+  return ledger.githubEnvironmentVariables
+    .filter((variable) => variable.state === "created")
+    .map((variable) => {
+      const target = formatGitHubEnvironmentVariableLabel(variable);
+      const identity = cleanupArtifactIdentity(
+        "github_environment_variable",
+        variable
+      );
+      return {
+        ...variable,
+        target,
+        identity,
+        key: cleanupTargetKey({
+          artifactType: "github_environment_variable",
+          identity,
+          target
+        })
+      };
+    })
+    .filter((entry) => !keys || keys.has(entry.key));
+}
+
 /** The commit state a rollback needs to locate what it would revert. */
 export function workflowRollbackCommitState(op: any): any {
   const ledger = getSetupArtifactLedger(op);
@@ -3210,7 +3552,12 @@ export function setupExitState(op: any): "none" | "requested" | "exited" {
     const command = commands[index];
     if (command.kind !== EXIT_COMMAND_KIND) continue;
     if (command.state !== "finished") return "requested";
-    return command.outcome === EXIT_COMMAND_OUTCOME ? "exited" : "none";
+    return (
+        command.outcome === EXIT_COMMAND_OUTCOME ||
+          command.outcome === ABANDON_COMMAND_OUTCOME
+      ) ?
+        "exited"
+      : "none";
   }
   return "none";
 }
@@ -3235,14 +3582,30 @@ export function canExitSetup(op: any): any {
   if (!op) return { ok: false, code: "unknown-operation" };
   if (!isTerminalState(op.state))
     return { ok: false, code: "operation-active" };
-  const refused = providerDestructiveRefusal(op, "exit");
-  if (refused) return refused;
   // A verified environment is finished work, not an abandoned attempt. It is
   // removed with Delete Environment, exactly as a rollback is refused for it.
   if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
     return { ok: false, code: "exit-environment-ready" };
   if (setupExitState(op) !== "none")
     return { ok: false, code: "setup-already-exited" };
+  const workflowState = verificationWorkflowState(op);
+  const workflowBlocksCleanup =
+    workflowState === "active" ||
+    workflowState === "cancelling" ||
+    workflowState === "unknown";
+  const destructiveRefusal = providerDestructiveRefusal(op, "exit");
+  if (workflowBlocksCleanup || destructiveRefusal) {
+    return {
+      ok: true,
+      code: "setup-abandon-allowed",
+      abandon: true,
+      targets: [],
+      target: "abandon",
+      detail:
+        destructiveRefusal?.detail ??
+        "The verification workflow may still be using these resources."
+    };
+  }
   const targets = provenOwnedCleanupTargets(op);
   return {
     ok: true,
@@ -3318,7 +3681,8 @@ function findProvenOwnedCleanupTarget(
 export function unresolvedCleanupTargets(op: any): any[] {
   const ledger = getSetupArtifactLedger(op);
   if (!ledger) return [];
-  return cleanupAttemptResults(ledger)
+  const attemptResults = cleanupAttemptResults(ledger);
+  const unresolved = attemptResults
     .filter((entry: any) => entry.outcome === "warning")
     .map((entry: any) => {
       const artifact = findProvenOwnedCleanupTarget(ledger, entry);
@@ -3342,6 +3706,35 @@ export function unresolvedCleanupTargets(op: any): any[] {
       };
     })
     .filter((entry: any) => entry !== null);
+  const blockedByVariableConflict = attemptResults.some(
+    (entry: any) =>
+      entry.artifactType === "github_environment_variable" &&
+      entry.outcome === "skipped"
+  );
+  if (unresolved.length === 0 && !blockedByVariableConflict) return [];
+  const attemptedKeys = new Set(
+    attemptResults.map((entry: any) => {
+      const artifact = findProvenOwnedCleanupTarget(ledger, entry);
+      const identity =
+        artifact ?
+          cleanupArtifactIdentity(artifact.kind, artifact.artifact)
+        : normalizeIdentityPart(entry?.identity);
+      return cleanupTargetKey({
+        artifactType: entry.artifactType,
+        identity,
+        target: entry.target
+      });
+    })
+  );
+  for (const target of provenOwnedCleanupTargets(op)) {
+    if (
+      !attemptedKeys.has(target.key) &&
+      !unresolved.some((entry: any) => entry.key === target.key)
+    ) {
+      unresolved.push(target);
+    }
+  }
+  return unresolved;
 }
 
 /**
@@ -3406,6 +3799,17 @@ function isExecutableCleanupTarget(op: any, target: RollbackTarget): boolean {
       String(ledger.githubEnvironment.name || "").trim()
     );
   }
+  if (target.artifactType === "github_environment_variable") {
+    return ledger.githubEnvironmentVariables.some(
+      (artifact) =>
+        artifact.state === "created" &&
+        Boolean(artifact.environmentProviderId) &&
+        artifact.previousKnown &&
+        /^[a-f0-9]{64}$/i.test(artifact.valueSha256) &&
+        cleanupArtifactIdentity("github_environment_variable", artifact) ===
+          target.identity
+    );
+  }
   if (target.artifactType === "service_principal") {
     return Boolean(
       String(
@@ -3450,6 +3854,7 @@ function isExecutableCleanupTarget(op: any, target: RollbackTarget): boolean {
  */
 export function hasUnfinishedCleanupAuthority(op: any): boolean {
   if (!op || !isTerminalState(op.state)) return false;
+  if (isSetupExited(op)) return false;
   // An unproven mutation is the one claim that has no ledger entry behind it:
   // the resource it may have created is precisely the one Radius could not
   // record. Releasing the repository here would let a second setup start
@@ -3588,6 +3993,22 @@ function projectRollbackPreview(op: any, targets: RollbackTarget[]): any {
   };
 }
 
+function projectAbandonPreview(op: any): any {
+  const preview = projectRollbackPreview(op, []);
+  return {
+    ...preview,
+    manualActionRequired: [
+      ...provenOwnedCleanupTargets(op).map((entry) => ({
+        kind: entry.artifactType,
+        target: entry.target,
+        action:
+          "Radius will leave this resource in place. Remove it manually if it prevents the next setup."
+      })),
+      ...preview.manualActionRequired
+    ]
+  };
+}
+
 /**
  * Why a path the customer might expect is not on offer.
  *
@@ -3651,6 +4072,14 @@ export function projectActionGuidance(op: any): any[] {
  */
 export function projectOperationHeadline(op: any): any {
   if (!op) return null;
+  if (isProviderRestartDecision(op)) {
+    return {
+      code: "setup-interrupted",
+      title: "Environment setup was interrupted",
+      message:
+        "Radius found an unfinished setup after restarting. External work may still be running. Review the current state before deciding whether to continue."
+    };
+  }
   const activeCleanup = activeCommandKind(op);
   if (!isTerminalState(op.state)) {
     if (activeCleanup === "rollback" || activeCleanup === "retry_cleanup") {
@@ -3693,11 +4122,15 @@ export function projectOperationHeadline(op: any): any {
   // leave, Radius did, and repeating the failure that led there would be the
   // panel arguing with the decision it just carried out.
   if (isSetupExited(op)) {
+    const abandoned = lastCommand?.outcome === ABANDON_COMMAND_OUTCOME;
     return {
       code: "setup-exited",
-      title: "Environment setup closed",
+      title:
+        abandoned ? "Environment setup abandoned" : "Environment setup closed",
       message:
-        "Radius closed this setup and removed the resources it proved it created. Anything it reused was left alone."
+        abandoned ?
+          "Radius closed this setup without deleting resources that may still be in use. Review any remaining resources if the next setup cannot reuse them."
+        : "Radius closed this setup and removed the resources it proved it created. Anything it reused was left alone."
     };
   }
   if (op.state === "failed_partial" && exitCommand) {
@@ -3717,11 +4150,14 @@ export function projectOperationHeadline(op: any): any {
           "Radius removed the resources it created during this attempt. Anything it reused was left alone."
       };
     }
+    const workflowState = verificationWorkflowState(op);
     return {
       code: "stopped",
       title: "Environment setup stopped",
       message:
-        "Radius stopped before the next setup step. Review what exists, then roll it back or continue setup."
+        workflowState === "active" || workflowState === "cancelling" ?
+          "Radius stopped this setup, but its GitHub Actions workflow may still be running. Cancel it or wait for it to finish before rolling back or exiting."
+        : "Radius stopped before the next setup step. Review what exists, then roll it back or continue setup."
     };
   }
   if (op.state === "failed_partial" && cleanupCommand) {
@@ -3762,6 +4198,36 @@ export function projectOperationActions(op: any): any[] {
   if (!op) return [];
   const base = `/api/operations/${encodeURIComponent(op.operationId)}`;
   const control = op.control || createOperationControl();
+  if (isProviderRestartDecision(op)) {
+    return [
+      {
+        id: "continue-setup",
+        kind: "continue_setup",
+        label: "Continue setup",
+        placement: "row",
+        tone: "primary",
+        requiresConfirmation: false,
+        description:
+          "Radius continues the interrupted setup without dispatching another verification workflow.",
+        method: "POST",
+        path: `${base}/continue`,
+        pending: false
+      },
+      {
+        id: "stop",
+        kind: "stop",
+        label: "Stop setup",
+        placement: "row",
+        tone: "neutral",
+        requiresConfirmation: false,
+        description:
+          "Radius stops this setup. If its exact GitHub Actions run is still active, you can cancel it next.",
+        method: "POST",
+        path: `${base}/stop`,
+        pending: false
+      }
+    ];
+  }
   if (!isTerminalState(op.state)) {
     // A confirmed rollback is one cooperative server-owned command: cleanup has
     // no pause control, so offering Stop mid-deletion would promise a boundary
@@ -3793,6 +4259,39 @@ export function projectOperationActions(op: any): any[] {
   // is about finishing or undoing an attempt they have already left, and the
   // resources those choices act on may have just been removed.
   if (isSetupExited(op)) return actions;
+  if (
+    op.state === "cancelled" &&
+    (verificationWorkflowState(op) === "active" ||
+      verificationWorkflowState(op) === "cancelling" ||
+      verificationWorkflowState(op) === "unknown") &&
+    hasVerificationWorkflowControlIdentity(op)
+  ) {
+    const workflowState = verificationWorkflowState(op);
+    const checking =
+      workflowState === "cancelling" || workflowState === "unknown";
+    actions.push({
+      id: "cancel-workflow",
+      kind: "cancel_workflow",
+      label: checking ? "Check workflow status" : "Cancel workflow",
+      placement: "row",
+      tone: "danger",
+      requiresConfirmation: !checking,
+      ...(checking ?
+        {}
+      : {
+          confirmTitle: "Cancel the verification workflow?",
+          confirmLabel: "Cancel workflow",
+          cancelLabel: "Keep workflow running"
+        }),
+      description:
+        checking ?
+          "Radius checks whether the exact workflow run has finished cancelling."
+        : "Radius cancels only the exact GitHub Actions run recorded for this setup.",
+      method: "POST",
+      path: `${base}/cancel-workflow`,
+      pending: false
+    });
+  }
   const verification = canRetryVerification(op);
   if (verification.ok) {
     actions.push({
@@ -3922,19 +4421,26 @@ export function projectOperationActions(op: any): any[] {
     // The bottom action, below the details disclosure: it is the way out of the
     // panel rather than another attempt at the setup, so it never sits beside
     // the forward and destructive choices the command row offers.
+    const abandons = exit.abandon === true;
     const removes = exit.targets.length > 0;
     actions.push({
       id: "exit-setup",
       kind: EXIT_COMMAND_KIND,
-      label: "Exit setup",
+      label: abandons ? "Abandon setup" : "Exit setup",
       placement: "bottom",
       tone: "neutral",
       // Confirmed only when leaving actually deletes something. An exit that
       // removes nothing is not a destructive command, and asking a customer to
       // confirm a deletion Radius will not perform teaches them to dismiss the
       // dialog that matters.
-      requiresConfirmation: removes,
-      ...(removes ?
+      requiresConfirmation: removes || abandons,
+      ...(abandons ?
+        {
+          confirmTitle: "Abandon setup and leave remaining resources?",
+          confirmLabel: "Abandon setup",
+          cancelLabel: "Keep this setup"
+        }
+      : removes ?
         {
           confirmTitle: "Exit setup and remove what Radius created?",
           confirmLabel: "Exit setup",
@@ -3942,14 +4448,19 @@ export function projectOperationActions(op: any): any[] {
         }
       : {}),
       description:
-        removes ?
+        abandons ?
+          "Radius closes this setup without deleting resources that may still be used by external work. You can start Create Environment again, but you may need to remove or reuse the remaining resources manually."
+        : removes ?
           "Radius closes this setup and removes only the resources it proved it created during this attempt, including the GitHub environment it added. Anything it reused is left alone. This cannot be undone."
         : "Radius closes this setup. Everything that exists was already here before this attempt, so nothing is removed.",
       method: "POST",
-      path: `${base}/exit`,
+      path: abandons ? `${base}/exit?mode=abandon` : `${base}/exit`,
       pending: false,
       removesResources: removes,
-      preview: projectRollbackPreview(op, exit.targets)
+      preview:
+        abandons ?
+          projectAbandonPreview(op)
+        : projectRollbackPreview(op, exit.targets)
     });
   }
   return actions;
@@ -4497,7 +5008,11 @@ export function snapshotRetryState(op: any): any {
 export function summarize(op: any): string {
   if (!op) return "";
   const env = op.environment || "environment";
-  if (isSetupExited(op)) return `Exited the setup for "${env}".`;
+  if (isSetupExited(op)) {
+    return latestCommand(op)?.outcome === ABANDON_COMMAND_OUTCOME ?
+        `Abandoned the setup for "${env}".`
+      : `Exited the setup for "${env}".`;
+  }
   switch (op.state) {
     case RUNNING_STATE: {
       const active = activeCommandKind(op);
@@ -4526,6 +5041,8 @@ export function summarize(op: any): string {
       }.`;
     }
     case "action_required":
+      if (isProviderRestartDecision(op))
+        return `Environment setup for "${env}" was interrupted.`;
       return (
         (op.terminal && op.terminal.userMessage) ||
         `Environment "${env}" needs one more step from you.`
@@ -4838,6 +5355,45 @@ export function reconcileRestoredOperation(op: any): any {
     delete op.verification.acquisitionProvisionalToken;
     delete op.verification.acquisitionDeadline;
   }
+  const manualGuidance = providerRecoveryManualGuidance(op);
+  if (manualGuidance && !isTerminalState(op.state)) {
+    terminalizeProviderManualRequired(op, manualGuidance);
+    op.requiresDurableRewrite = true;
+    return op;
+  }
+  const currentDispatchTarget =
+    typeof op.verification?.dispatchMutationTarget === "string" ?
+      op.verification.dispatchMutationTarget
+    : "";
+  const dispatchMutation = op.providerRecovery?.mutations?.find(
+    (mutation: ProviderMutationRecord) =>
+      (mutation.kind === "github_workflow.dispatch" ||
+        mutation.kind === "github_workflow.dispatch_retry") &&
+      (!currentDispatchTarget || mutation.target === currentDispatchTarget)
+  );
+  const hasPersistedRunIdentity =
+    typeof op.verification?.runId === "string" &&
+    op.verification.runId &&
+    typeof op.verification?.runUrl === "string" &&
+    op.verification.runUrl;
+  if (
+    dispatchMutation &&
+    (dispatchMutation.status === "prepared" ||
+      dispatchMutation.status === "outcome_unknown" ||
+      (dispatchMutation.status === "confirmed" && !hasPersistedRunIdentity))
+  ) {
+    const guidance =
+      "Radius restarted without a persisted verification run URL. Inspect GitHub Actions before starting setup again; Radius will not dispatch another run.";
+    settleProviderMutation(
+      op,
+      dispatchMutation.mutationId,
+      "manual_required",
+      guidance
+    );
+    terminalizeProviderManualRequired(op, guidance);
+    op.requiresDurableRewrite = true;
+    return op;
+  }
   if (unresolvedProviderMutations(op).length > 0) {
     const rollbackPending = op.providerRecovery?.state === "rollback_pending";
     // Reopened so the recovery scheduler, which skips ended records, can
@@ -4883,10 +5439,6 @@ export function reconcileRestoredOperation(op: any): any {
     op.recoveryState = "verification_acquisition_pending";
     return op;
   }
-  const currentDispatchTarget =
-    typeof op.verification?.dispatchMutationTarget === "string" ?
-      op.verification.dispatchMutationTarget
-    : "";
   const rejectedVerificationDispatch =
     currentDispatchTarget ?
       op.providerRecovery?.mutations?.find(
@@ -4935,24 +5487,7 @@ export function reconcileRestoredOperation(op: any): any {
     return op;
   }
   if (hasCompleteVerificationIdentity(op)) {
-    op.recoveryState = "verification_pending";
-    return op;
-  }
-  const manualGuidance = providerRecoveryManualGuidance(op);
-  if (manualGuidance) {
-    const now = nowIso();
-    op.state = "failed_partial";
-    op.endedAt = now;
-    op.lastActivityAt = now;
-    op.failure = {
-      code: "provider-reconciliation-manual-required",
-      stage: op.currentStage,
-      stepSeq: null,
-      message: manualGuidance,
-      classification: "user-fixable"
-    };
-    op.recoveryState = "manual_required";
-    return op;
+    return pauseForProviderRestart(op);
   }
   const activeCommand = latestCommand(op);
   const cleanupInterrupted =
@@ -4978,18 +5513,7 @@ export function reconcileRestoredOperation(op: any): any {
     if (ledger) ledger.cleanup.state = "running";
     return op;
   }
-  const now = nowIso();
-  op.state = "failed_partial";
-  op.endedAt = now;
-  op.lastActivityAt = now;
-  op.failure = {
-    code: "operation-interrupted",
-    stage: op.currentStage,
-    stepSeq: null,
-    message:
-      "The Radius extension restarted before this operation reached a durable terminal state. Existing resources were retained for a safe retry.",
-    classification: "user-fixable"
-  };
+  pauseForProviderRestart(op);
   const ledger = getSetupArtifactLedger(op);
   if (ledger && !hasAttemptedCleanup(op)) {
     // No pass was in flight, so nothing is left half-done for this record.
@@ -5001,8 +5525,7 @@ export function reconcileRestoredOperation(op: any): any {
     ledger.cleanup.state = "not_needed";
   }
   for (const stage of op.stages || []) {
-    if (stage.state === "running") stage.state = "failed";
-    else if (stage.state === "pending") stage.state = "skipped";
+    if (stage.state === "running") stage.state = "warning";
   }
   op.recoveryState = "interrupted";
   return op;
@@ -5060,9 +5583,14 @@ export function createRegistry({
       if (!envelope) return [];
       const restored = [];
       let rejected = 0;
+      let repaired = 0;
       for (const [index, value] of envelope.operations.entries()) {
         try {
           const op = reconcileRestoredOperation(fromPersistedOperation(value));
+          if (op.requiresDurableRewrite) {
+            repaired += 1;
+            delete op.requiresDurableRewrite;
+          }
           byId.set(op.operationId, op);
           restored.push(op);
         } catch (error) {
@@ -5084,13 +5612,19 @@ export function createRegistry({
       prune();
       // Rewrite only after every record has been inspected. This removes rejected
       // records without allowing one bad entry to brick every future startup.
-      if (rejected > 0) {
+      if (rejected > 0 || repaired > 0) {
         try {
           await store.save(snapshot());
         } catch (error) {
           store.report?.({
-            code: "operation-store-cleanup-write-failed",
-            message: `Restored valid operations but could not rewrite the cleaned operation store: ${String(error)}`
+            code:
+              repaired > 0 ?
+                "operation-store-repair-write-failed"
+              : "operation-store-cleanup-write-failed",
+            message:
+              repaired > 0 ?
+                `Repaired ${repaired} persisted operation(s) in memory but could not rewrite the operation store, so the repair is not durable: ${String(error)}`
+              : `Restored valid operations but could not rewrite the cleaned operation store: ${String(error)}`
           });
         }
       }
@@ -5357,8 +5891,13 @@ export function toClientView(op: any): any {
     journey: op.journey,
     terminal: op.terminal,
     verification:
-      typeof op.verification?.dispatchedAt === "number" ?
-        { dispatchedAt: op.verification.dispatchedAt }
+      op.verification ?
+        {
+          dispatchedAt:
+            typeof op.verification.dispatchedAt === "number" ?
+              op.verification.dispatchedAt
+            : null
+        }
       : null,
     inputRequired: op.inputRequired || null,
     summary: summarize(op),
