@@ -4212,6 +4212,8 @@ describe("stale response ordering and operation identity", () => {
     expect(browser.els[DIAGNOSTIC_IDS.status].textContent).toBe(
       "Diagnostic snapshot download started."
     );
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("none");
+    expect(browser.els[DIAGNOSTIC_IDS.open].focusCount).toBe(1);
   });
 
   it("refreshes identifiers instead of saving a changed contextual payload", async () => {
@@ -4245,6 +4247,9 @@ describe("stale response ordering and operation identity", () => {
     expect(responseFailure.els[DIAGNOSTIC_IDS.error].textContent).toContain(
       "could not download"
     );
+    expect(responseFailure.els[DIAGNOSTIC_IDS.modal].style.display).toBe(
+      "flex"
+    );
     expect(responseFailure.logger.errors[0]?.message).toBe(
       "Radius could not download contextual diagnostics."
     );
@@ -4258,6 +4263,7 @@ describe("stale response ordering and operation identity", () => {
     expect(hostFailure.els[DIAGNOSTIC_IDS.error].textContent).toContain(
       "host could not save"
     );
+    expect(hostFailure.els[DIAGNOSTIC_IDS.modal].style.display).toBe("flex");
   });
 
   it("aborts an in-flight contextual download when the dialog closes", async () => {
@@ -4364,9 +4370,8 @@ describe("stale response ordering and operation identity", () => {
     expect(browser.els[DIAGNOSTIC_IDS.status].textContent).toBe(
       "Diagnostic snapshot download started."
     );
-    expect(browser.els[DIAGNOSTIC_IDS.download].getAttribute("href")).toBe(
-      "/api/operations/op-1/diagnostics"
-    );
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("none");
+    expect(browser.els[DIAGNOSTIC_IDS.open].focusCount).toBe(1);
   });
 
   it("ignores a stale resume-prompt rejection once a newer session has started", async () => {

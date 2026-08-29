@@ -1628,6 +1628,7 @@ export function initializeEnvironmentOperations(
         .then(() => {
           if (generation !== diagnosticDownloadGeneration) return;
           setDiagnosticStatus("Diagnostic snapshot download started.");
+          closeDiagnosticDialog();
         })
         .catch((error: unknown) => {
           if (generation !== diagnosticDownloadGeneration) return;
@@ -1664,6 +1665,7 @@ export function initializeEnvironmentOperations(
     }
     setDiagnosticError("");
     setDiagnosticStatus("Diagnostic snapshot download started.");
+    closeDiagnosticDialog();
   }
 
   const diagnosticOpen = dom.byId(DIAGNOSTIC_IDS.open);

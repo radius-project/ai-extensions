@@ -1402,7 +1402,11 @@ test.describe("Radius Canvas in Chromium", () => {
         lifecycle: { state: "failed" }
       }
     });
+    await expect(diagnosticDialog).toBeHidden();
+    await expect(diagnosticButton).toBeFocused();
 
+    await diagnosticButton.click();
+    await expect(diagnosticDialog).toBeVisible();
     await diagnosticDialog.getByLabel("Include contextual identifiers").check();
     await expect(diagnosticDialog.getByText(REPOSITORY)).toBeVisible();
     await expect(
@@ -1433,6 +1437,8 @@ test.describe("Radius Canvas in Chromium", () => {
         omittedFieldCount: 0
       }
     });
+    await expect(diagnosticDialog).toBeHidden();
+    await expect(diagnosticButton).toBeFocused();
     expect(bodyFor(canvas, "/api/operations")).toMatchObject({
       repo: REPOSITORY,
       environment: "fixture-environment",
