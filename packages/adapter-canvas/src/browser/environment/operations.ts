@@ -85,6 +85,7 @@ export const PROGRESS_IDS = {
   stateManualBlock: "env-progress-state-manual-block",
   commands: "env-progress-commands",
   commandButtons: "env-progress-command-buttons",
+  commandDescriptions: "env-progress-command-descriptions",
   commandNote: "env-progress-command-note",
   commandGuidance: "env-progress-command-guidance",
   commandStatus: "env-progress-command-status",
@@ -964,6 +965,10 @@ export function initializeEnvironmentOperations(
   let progressTimer: ScopeTimer | null = null;
   let elapsedTimer: ScopeTimer | null = null;
   let activeAbort: AbortHandle | null = null;
+  const stepsElement = dom.byId(PROGRESS_IDS.steps);
+  const detailsElement = dom.byId(PROGRESS_IDS.details);
+  let followStepTail = true;
+  let renderedOperationId = "";
   // Bumped at the start of every resumeProgress()/trackProgress() call. Async
   // work captures the value at its start and checks it before touching the
   // DOM or scheduling more work, so a response that outlives its session
@@ -977,6 +982,19 @@ export function initializeEnvironmentOperations(
   }
 
   scope.onTeardown(() => abortInFlight());
+
+  if (stepsElement) {
+    scope.on(stepsElement, "scroll", () => {
+      followStepTail = dom.isScrolledToEnd(stepsElement);
+    });
+    if (detailsElement) {
+      scope.on(detailsElement, "toggle", () => {
+        if (detailsElement.getAttribute("open") !== null && followStepTail) {
+          dom.scrollToEnd(stepsElement);
+        }
+      });
+    }
+  }
 
   function fetchTracked(
     url: string,
@@ -1526,6 +1544,16 @@ export function initializeEnvironmentOperations(
     element.className = COMMAND_TONE_CLASS[action.tone] ?? COMMAND_BUTTON_CLASS;
     element.textContent = action.label === "" ? "Continue" : action.label;
     element.disabled = commandInFlight || action.pending;
+    if (action.description !== "") {
+      element.setAttribute("title", action.description);
+      const descriptionId = `${element.id}-description`;
+      element.setAttribute("aria-describedby", descriptionId);
+      const description = dom.createElement("span");
+      description.id = descriptionId;
+      description.className = "env-progress__command-description";
+      description.textContent = action.description;
+      dom.byId(PROGRESS_IDS.commandDescriptions)?.appendChild(description);
+    }
     if (action.requiresConfirmation) {
       element.setAttribute("aria-haspopup", "dialog");
     }
@@ -1572,7 +1600,9 @@ export function initializeEnvironmentOperations(
     const container = dom.byId(PROGRESS_IDS.commands);
     const buttons = dom.byId(PROGRESS_IDS.commandButtons);
     const note = dom.byId(PROGRESS_IDS.commandNote);
+    const descriptions = dom.byId(PROGRESS_IDS.commandDescriptions);
     if (!container || !buttons || !note) return;
+    descriptions?.replaceChildren();
     const actions = op?.actions ?? [];
     const rowActions = actions.filter(
       (action) => action.placement !== "bottom"
@@ -1628,12 +1658,8 @@ export function initializeEnvironmentOperations(
     for (const action of rowActions) {
       buttons.appendChild(createCommandButton(action, record));
     }
-    const descriptions = rowActions
-      .map((action) => action.description)
-      .filter((description) => description !== "");
     const transition = record.nextTransition?.message ?? "";
-    if (transition !== "") descriptions.unshift(transition);
-    note.textContent = descriptions.join(" ");
+    note.textContent = transition;
     if (rowActions.some((action) => action.kind === "stop" && action.pending)) {
       setCommandStatus(STOPPING_MESSAGE);
     }
@@ -1669,6 +1695,10 @@ export function initializeEnvironmentOperations(
       renderCommands(null);
       renderHeadline(null);
       return;
+    }
+    if (renderedOperationId !== op.operationId) {
+      renderedOperationId = op.operationId;
+      followStepTail = true;
     }
     panel.style.display = "";
     setPanelActive(op.terminalState === null);
@@ -1714,16 +1744,17 @@ export function initializeEnvironmentOperations(
 
     const stagesEl = dom.byId(PROGRESS_IDS.stages);
     if (stagesEl) setChildren(dom, stagesEl, op.stages.map(stageSpec));
-    const stepsEl = dom.byId(PROGRESS_IDS.steps);
-    if (stepsEl) setChildren(dom, stepsEl, op.steps.map(stepSpec));
+    if (stepsElement) {
+      setChildren(dom, stepsElement, op.steps.map(stepSpec));
+      if (followStepTail) dom.scrollToEnd(stepsElement);
+    }
 
     renderFailureCard(op);
     renderPartialState(op);
     renderCommands(op);
 
-    const detailsEl = dom.byId(PROGRESS_IDS.details);
-    if (detailsEl) {
-      detailsEl.style.display = op.steps.length > 0 ? "" : "none";
+    if (detailsElement) {
+      detailsElement.style.display = op.steps.length > 0 ? "" : "none";
     }
   }
 

@@ -75,6 +75,7 @@ describe("environmentPage", () => {
       "env-progress-state",
       "env-progress-commands",
       "env-progress-command-buttons",
+      "env-progress-command-descriptions",
       "env-smr-modal",
       "env-appselect-modal",
       "env-profile-button",

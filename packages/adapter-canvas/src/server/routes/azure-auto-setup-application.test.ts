@@ -1512,6 +1512,37 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     expect(test.failures[0]).toMatchObject({ code: "app-create-failed" });
   });
 
+  it("reconciles instead of confirming a create response without a valid app id", async () => {
+    let lists = 0;
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          lists += 1;
+          return command({ stdout: "[]" });
+        }
+        if (line.startsWith("ad app create ")) {
+          return command({ stdout: "not-an-app-id" });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).rejects.toMatchObject({
+      code: "provider-mutation-outcome-unknown"
+    });
+    expect(lists).toBe(2);
+    expect(
+      (
+        test.input.workflow.operation as AzureAutoSetupOperation & {
+          providerRecovery: { mutations: Array<{ status: string }> };
+        }
+      ).providerRecovery.mutations[0]
+    ).toMatchObject({ status: "outcome_unknown" });
+  });
+
   it("stops before ownership mutation when the post-create checkpoint cancels", async () => {
     const azCalls: string[] = [];
     const test = harness({

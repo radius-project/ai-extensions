@@ -342,7 +342,7 @@ describe("discovery service (SU-08)", () => {
     ]);
   });
 
-  it("reports the credential step and its limit when the az call is killed", async () => {
+  it("reports the credential step when the az call is killed", async () => {
     const removed: string[] = [];
     const dependencies: DiscoveryDependencies = {
       isUuid,
@@ -374,12 +374,12 @@ describe("discovery service (SU-08)", () => {
 
     expect(result.namespaces).toEqual([]);
     expect(result.errors?.namespaces).toBe(
-      'az aks get-credentials failed (45s limit): Command failed: cmd.exe /c az "aks" "get-credentials"'
+      'az aks get-credentials failed: Command failed: cmd.exe /c az "aks" "get-credentials"'
     );
     expect(removed).toEqual(["/tmp/radius-kubeconfig-test"]);
   });
 
-  it("reports the kubectl step and its limit once credentials are written", async () => {
+  it("reports the kubectl step once credentials are written", async () => {
     const dependencies: DiscoveryDependencies = {
       isUuid,
       ...temporaryKubeconfig,
@@ -398,7 +398,7 @@ describe("discovery service (SU-08)", () => {
 
     expect(result.namespaces).toEqual([]);
     expect(result.errors?.namespaces).toBe(
-      "kubectl get namespaces failed (10s limit): connection refused"
+      "kubectl get namespaces failed: connection refused"
     );
   });
 
@@ -419,7 +419,7 @@ describe("discovery service (SU-08)", () => {
       dependencies
     );
 
-    const label = "az aks get-credentials failed (45s limit): ";
+    const label = "az aks get-credentials failed: ";
     expect(result.errors?.namespaces).toBe(
       `${label}${"x".repeat(800 - label.length)}`
     );
@@ -443,8 +443,7 @@ describe("discovery service (SU-08)", () => {
     );
 
     expect(result.errors).toEqual({
-      namespaces:
-        "az aks get-credentials failed (45s limit): credentials exploded"
+      namespaces: "az aks get-credentials failed: credentials exploded"
     });
   });
 });

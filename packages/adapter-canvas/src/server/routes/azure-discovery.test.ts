@@ -809,11 +809,11 @@ describe("azure-discovery routes (SU-08)", () => {
       for (const { failing, label } of [
         {
           failing: CLI.credentials("aks-1", "rg-1"),
-          label: "az aks get-credentials failed (45s limit): kube down"
+          label: "az aks get-credentials failed: kube down"
         },
         {
           failing: CLI.namespaces,
-          label: "kubectl get namespaces failed (10s limit): kube down"
+          label: "kubectl get namespaces failed: kube down"
         }
       ]) {
         const cli = cliFake({
