@@ -1473,6 +1473,26 @@ test.describe("Radius Canvas in Chromium", () => {
     });
     await expect(diagnosticDialog).toBeHidden();
     await expect(diagnosticButton).toBeFocused();
+
+    await page.route(
+      `**/api/operations/${result.operationId}/diagnostics`,
+      async (route) => {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: '{"code":"diagnostic-export-unavailable"}'
+        });
+      }
+    );
+    await diagnosticButton.click();
+    await diagnosticLink.click();
+    await expect(diagnosticDialog).toBeVisible();
+    await expect(diagnosticDialog.getByRole("alert")).toContainText(
+      "could not download the support-safe diagnostic snapshot"
+    );
+    await page.unroute(`**/api/operations/${result.operationId}/diagnostics`);
+    await diagnosticDialog.getByRole("button", { name: "Cancel" }).click();
+
     expect(bodyFor(canvas, "/api/operations")).toMatchObject({
       repo: REPOSITORY,
       environment: "fixture-environment",

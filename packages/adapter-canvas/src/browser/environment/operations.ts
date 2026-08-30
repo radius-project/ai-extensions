@@ -1537,6 +1537,7 @@ export function initializeEnvironmentOperations(
     const preview = dom.byId(DIAGNOSTIC_IDS.preview);
     const reviewed = dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers);
     if (include?.checked === true) {
+      abortDiagnosticDownload();
       loadDiagnosticContext();
       return;
     }
@@ -1576,13 +1577,12 @@ export function initializeEnvironmentOperations(
     download: DomElement,
     event: Parameters<DomEventListener>[0]
   ): void {
+    event.preventDefault();
     if (diagnosticDownloadBusy) {
-      event.preventDefault();
       return;
     }
     const url = download.getAttribute("href");
     if (url === null) {
-      event.preventDefault();
       setDiagnosticError(
         "Review the contextual identifiers before downloading this snapshot."
       );
@@ -1590,82 +1590,80 @@ export function initializeEnvironmentOperations(
       return;
     }
     const include = dom.inputById(DIAGNOSTIC_IDS.includeIdentifiers);
-    if (include?.checked === true) {
-      event.preventDefault();
-      abortDiagnosticDownload();
-      diagnosticDownloadBusy = true;
-      refreshDiagnosticDownload();
-      setDiagnosticError("");
-      setDiagnosticStatus("Confirming the reviewed identifiers…");
-      const generation = diagnosticDownloadGeneration;
-      const abort = context.net.createAbort();
-      diagnosticDownloadAbort = abort;
-      void context.net
-        .fetch(
-          url,
-          abort ?
-            { cache: "no-store", signal: abort.signal }
-          : { cache: "no-store" }
-        )
-        .then(async (response) => {
-          if (!response.ok) {
-            throw new Error(
-              response.status === 409 ? "context-changed" : "download-failed"
-            );
-          }
-          const text = await response.text();
-          if (generation !== diagnosticDownloadGeneration) return;
-          if (
-            !context.download.save(
-              text,
-              "application/json",
-              DIAGNOSTIC_FILENAME
-            )
-          ) {
-            throw new Error("download-unavailable");
-          }
-        })
-        .then(() => {
-          if (generation !== diagnosticDownloadGeneration) return;
-          setDiagnosticStatus("Diagnostic snapshot download started.");
-          closeDiagnosticDialog();
-        })
-        .catch((error: unknown) => {
-          if (generation !== diagnosticDownloadGeneration) return;
-          const code = error instanceof Error ? error.message : "";
-          if (code === "context-changed") {
-            const reviewed = dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers);
-            if (reviewed) reviewed.checked = false;
-            diagnosticContextReady = false;
-            diagnosticContextFingerprint = "";
-            loadDiagnosticContext();
-            setDiagnosticError(
-              "The contextual identifiers changed. Review the updated values before downloading."
-            );
-            return;
-          }
-          context.logger.error(
-            "Radius could not download contextual diagnostics.",
-            error
-          );
-          setDiagnosticStatus("");
-          setDiagnosticError(
-            code === "download-unavailable" ?
-              "This host could not save the contextual diagnostic snapshot."
-            : "Radius could not download the contextual diagnostic snapshot. Try again."
-          );
-        })
-        .finally(() => {
-          if (generation !== diagnosticDownloadGeneration) return;
-          diagnosticDownloadAbort = null;
-          diagnosticDownloadBusy = false;
-          refreshDiagnosticDownload();
-        });
-      return;
-    }
+    const contextual = include?.checked === true;
+    abortDiagnosticDownload();
+    diagnosticDownloadBusy = true;
+    refreshDiagnosticDownload();
     setDiagnosticError("");
-    setDiagnosticStatus("Diagnostic snapshot download started.");
-    closeDiagnosticDialog();
+    setDiagnosticStatus(
+      contextual ?
+        "Confirming the reviewed identifiers…"
+      : "Preparing the diagnostic snapshot…"
+    );
+    const generation = diagnosticDownloadGeneration;
+    const abort = context.net.createAbort();
+    diagnosticDownloadAbort = abort;
+    void context.net
+      .fetch(
+        url,
+        abort ?
+          { cache: "no-store", signal: abort.signal }
+        : { cache: "no-store" }
+      )
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(
+            contextual && response.status === 409 ?
+              "context-changed"
+            : "download-failed"
+          );
+        }
+        const text = await response.text();
+        if (generation !== diagnosticDownloadGeneration) return;
+        if (
+          !context.download.save(text, "application/json", DIAGNOSTIC_FILENAME)
+        ) {
+          throw new Error("download-unavailable");
+        }
+      })
+      .then(() => {
+        if (generation !== diagnosticDownloadGeneration) return;
+        setDiagnosticStatus("Diagnostic snapshot download started.");
+        closeDiagnosticDialog();
+      })
+      .catch((error: unknown) => {
+        if (generation !== diagnosticDownloadGeneration) return;
+        const code = error instanceof Error ? error.message : "";
+        if (code === "context-changed") {
+          const reviewed = dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers);
+          if (reviewed) reviewed.checked = false;
+          diagnosticContextReady = false;
+          diagnosticContextFingerprint = "";
+          loadDiagnosticContext();
+          setDiagnosticError(
+            "The contextual identifiers changed. Review the updated values before downloading."
+          );
+          return;
+        }
+        context.logger.error(
+          contextual ?
+            "Radius could not download contextual diagnostics."
+          : "Radius could not download support-safe diagnostics.",
+          error
+        );
+        setDiagnosticStatus("");
+        setDiagnosticError(
+          code === "download-unavailable" ?
+            `This host could not save the ${contextual ? "contextual" : "support-safe"} diagnostic snapshot.`
+          : `Radius could not download the ${contextual ? "contextual" : "support-safe"} diagnostic snapshot. Try again.`
+        );
+      })
+      .finally(() => {
+        if (generation !== diagnosticDownloadGeneration) return;
+        diagnosticDownloadAbort = null;
+        diagnosticDownloadBusy = false;
+        refreshDiagnosticDownload();
+      });
   }
 
   const diagnosticOpen = dom.byId(DIAGNOSTIC_IDS.open);

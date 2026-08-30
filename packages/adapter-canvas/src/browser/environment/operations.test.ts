@@ -4364,21 +4364,104 @@ describe("stale response ordering and operation identity", () => {
     );
   });
 
-  it("announces a support-safe download without changing its profile", () => {
+  it("downloads the checked support-safe response and closes the dialog", async () => {
     const browser = setup();
     const controller = controllerFor(browser);
     controller?.renderProgress(
       record({ state: "failed", terminalState: "failed" })
     );
+    browser.net.handle("/api/operations/op-1/diagnostics", () =>
+      textResponse('{"identifierProfile":"support_safe"}')
+    );
     browser.els[DIAGNOSTIC_IDS.open].dispatch("click");
     browser.els[DIAGNOSTIC_IDS.error].textContent = "stale error";
-    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    let prevented = 0;
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click", {
+      preventDefault() {
+        prevented += 1;
+      }
+    });
+    await flushPromises();
+
+    expect(prevented).toBe(1);
+    expect(browser.download.saved).toEqual([
+      {
+        text: '{"identifierProfile":"support_safe"}',
+        mimeType: "application/json",
+        filename: "radius-environment-operation-diagnostics.json"
+      }
+    ]);
     expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toBe("");
     expect(browser.els[DIAGNOSTIC_IDS.status].textContent).toBe(
       "Diagnostic snapshot download started."
     );
     expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("none");
     expect(browser.els[DIAGNOSTIC_IDS.open].focusCount).toBe(1);
+  });
+
+  it("does not save a non-success support-safe response", async () => {
+    const browser = setup();
+    openDiagnostic(browser);
+    browser.net.handle("/api/operations/op-1/diagnostics", () =>
+      textResponse('{"code":"operation-diagnostics-unavailable"}', false, 409)
+    );
+
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    await flushPromises();
+
+    expect(browser.download.saved).toEqual([]);
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("flex");
+    expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toContain(
+      "could not download the support-safe diagnostic snapshot"
+    );
+    expect(browser.logger.errors[0]?.message).toBe(
+      "Radius could not download support-safe diagnostics."
+    );
+  });
+
+  it("keeps the dialog open when the host cannot save support-safe diagnostics", async () => {
+    const browser = setup();
+    browser.download.available = false;
+    openDiagnostic(browser);
+    browser.net.handle("/api/operations/op-1/diagnostics", () =>
+      textResponse('{"identifierProfile":"support_safe"}')
+    );
+
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    await flushPromises();
+
+    expect(browser.download.saved).toEqual([]);
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("flex");
+    expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toContain(
+      "host could not save the support-safe diagnostic snapshot"
+    );
+  });
+
+  it("aborts an in-flight support-safe download when identifiers are requested", async () => {
+    const browser = setup();
+    openDiagnostic(browser);
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle(
+      "/api/operations/op-1/diagnostics",
+      () => pending.promise
+    );
+    browser.net.handle(diagnosticPreviewUrl(), () =>
+      jsonResponse(DIAGNOSTIC_PREVIEW)
+    );
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    const include = browser.els[
+      DIAGNOSTIC_IDS.includeIdentifiers
+    ] as FakeInputElement;
+    include.checked = true;
+    include.dispatch("change");
+    pending.resolve(textResponse('{"identifierProfile":"support_safe"}'));
+    await flushPromises();
+
+    expect(browser.net.aborted).toBe(1);
+    expect(browser.download.saved).toEqual([]);
+    expect(browser.els[DIAGNOSTIC_IDS.repository].textContent).toBe(
+      "octo/widgets"
+    );
   });
 
   it("ignores a stale resume-prompt rejection once a newer session has started", async () => {
