@@ -221,6 +221,14 @@ Both were found by reading the production code, and both would otherwise cause a
 
 **Workflow publication has two paths, and only one touches the default branch.** When the token lacks `workflow` scope the product does not commit to the default branch at all; it creates a `radius/setup-<env>-workflows-<suffix>` branch and opens a pull request ([`create-environment-workflow-committer.ts:230`](../../packages/adapter-canvas/src/server/routes/create-environment-workflow-committer.ts)). So a clean-slate or leak check that compares only the default-branch head to the pinned baseline reports clean while a branch and an open pull request leak; those checks must cover both. It also means the end-to-end GitHub App must hold `workflows: write`. Without it the journey quietly takes the pull-request path and passes without ever testing the committed-workflow path it claims to cover — a green run proving the wrong thing.
 
+The fallback branch name is only partly derivable, so assert its `radius/setup-<env>-workflows-` prefix rather than an exact name. The suffix is the operation id with its `op_` prefix removed and truncated to twelve characters, but it falls back to a timestamp when no mutation-recovery context is present, and a previously recorded branch takes precedence over the derived one ([`create-environment-workflow-committer.ts:211`](../../packages/adapter-canvas/src/server/routes/create-environment-workflow-committer.ts)).
+
+#### What the product writes into the GitHub Environment
+
+Stage one asserts these, so they are recorded here rather than rediscovered per layer. [`create-environment-workflow-publisher.ts:164`](../../packages/adapter-canvas/src/server/routes/create-environment-workflow-publisher.ts) writes seven variables: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_AKS_CLUSTER_NAME`, `AZURE_LOCATION`, and `KUBERNETES_NAMESPACE`.
+
+The cluster variable is `AZURE_AKS_CLUSTER_NAME`, not `AKS_CLUSTER_NAME`. The shorter name is an easy assumption to write and a live run is the only thing that would catch it, which is precisely the feedback this tier is slowest to give.
+
 ### API design (if applicable)
 
 No public API change. No route, canvas action, tool, `plugin.json` entry, or `packages/core` export is added or modified. The new surfaces are test-internal:
@@ -262,8 +270,8 @@ N/A. No change. `REQUIRED_STAGED_FILES` is read by tests but not modified.
 No production change. Test-only:
 
 - `canvas-harness.ts` gains `mode` and `workspacePath`. Cloud mode skips fake-CLI generation, the `PATH` prepend, and `fetch` interception, and takes `GH_TOKEN` from the environment. Credential-store isolation stays active in both modes, so a cloud run still never reads a developer's real credentials.
-- `test/e2e-cloud/` holds the fixture, the pinned baseline constant, the conformance check, and the specs.
-- `playwright.cloud.config.ts` mirrors the existing config with its own output directory, `retries: 0` because later stages are destructive, and a longer timeout.
+- `test/e2e-cloud/` holds the fixture, the pinned baseline constant, the conformance check, and the specs. Playwright specs there must be named `*.cloud.spec.ts`. `vitest.config.ts` collects `test/e2e-cloud/**/*.test.ts`, so a spec named `.test.ts` is picked up by Vitest, which cannot run it. The two file sets share a directory and are separated only by this naming rule.
+- `playwright.cloud.config.ts` mirrors the existing config with its own output directory, `retries: 0` because later stages are destructive, and a longer timeout. Add it to the `lint` script's file list in the same change — that script enumerates config files by name, so a new one is silently unlinted until it is listed.
 - `package.json` gains `test:cloud`.
 
 #### Shared adapter — packages/adapter-shared (if applicable)
