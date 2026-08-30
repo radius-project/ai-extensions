@@ -1327,6 +1327,288 @@ describe("createCloudFixture", () => {
     });
   });
 
+  describe("absence assertions", () => {
+    const SUBJECT = "repo:fixture-owner/fixture-repo:environment:radtest-run";
+    const APP_LIST_RESULT = JSON.stringify([
+      { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+    ]);
+
+    async function observedHarness(stubs: FakeCommandStub[] = []) {
+      const harness = await createHarness([
+        {
+          tool: "az",
+          match: APP_LIST,
+          respond: { stdout: APP_LIST_RESULT },
+          times: 1
+        },
+        {
+          tool: "gh",
+          match: ["api", ENVIRONMENT_PATH],
+          respond: { stdout: '{"name":"radtest"}' },
+          times: 1
+        },
+        {
+          tool: "az",
+          match: ROLE_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { principalId: "sp-1", roleDefinitionName: "Contributor" }
+            ])
+          },
+          times: 1
+        },
+        {
+          tool: "az",
+          match: FIC_LIST,
+          respond: {
+            stdout: JSON.stringify([{ name: "fc", subject: SUBJECT }])
+          },
+          times: 1
+        },
+        ...stubs
+      ]);
+      await harness.fixture.assertGitHubEnvironmentExists();
+      await harness.fixture.assertRoleAssignmentExists("sp-1");
+      await harness.fixture.assertFederatedCredentialExists(SUBJECT);
+      return harness;
+    }
+
+    describe("refuses to answer before presence was established", () => {
+      it.each([
+        [
+          "the GitHub Environment",
+          (fixture: CloudFixture) => fixture.assertGitHubEnvironmentAbsent(),
+          new RegExp(`GitHub Environment "${ENVIRONMENT}"`)
+        ],
+        [
+          "the app registration",
+          (fixture: CloudFixture) => fixture.assertAppRegistrationAbsent(),
+          new RegExp(`app registration "${APP_NAME}"`)
+        ],
+        [
+          "a federated credential",
+          (fixture: CloudFixture) =>
+            fixture.assertFederatedCredentialAbsent(SUBJECT),
+          /federated credential for subject/
+        ],
+        [
+          "a role assignment",
+          (fixture: CloudFixture) => fixture.assertRoleAssignmentAbsent("sp-1"),
+          /role assignment for principal sp-1/
+        ]
+      ])(
+        "for %s, because a product that never created it would pass too",
+        async (_label, assertAbsent, subject) => {
+          const { fixture } = await createHarness();
+
+          const error = await captureError(assertAbsent(fixture));
+          expect(error.message).toMatch(/never observed it present/);
+          expect(error.message).toMatch(subject);
+        }
+      );
+    });
+
+    describe("assertGitHubEnvironmentAbsent", () => {
+      it("resolves once the environment is gone", async () => {
+        const { fixture } = await observedHarness([
+          { tool: "gh", match: ["api", ENVIRONMENT_PATH], respond: NOT_FOUND }
+        ]);
+
+        await expect(
+          fixture.assertGitHubEnvironmentAbsent()
+        ).resolves.toBeUndefined();
+      });
+
+      it("polls until the deletion becomes visible", async () => {
+        const { fixture, fake } = await observedHarness([
+          {
+            tool: "gh",
+            match: ["api", ENVIRONMENT_PATH],
+            respond: { stdout: '{"name":"radtest"}' },
+            times: 1
+          },
+          { tool: "gh", match: ["api", ENVIRONMENT_PATH], respond: NOT_FOUND }
+        ]);
+
+        await expect(
+          fixture.assertGitHubEnvironmentAbsent()
+        ).resolves.toBeUndefined();
+        expect(fake.waits).toEqual([1000]);
+      });
+
+      it("fails when the product left the environment standing", async () => {
+        const { fixture } = await observedHarness([
+          {
+            tool: "gh",
+            match: ["api", ENVIRONMENT_PATH],
+            respond: { stdout: '{"name":"radtest"}' }
+          }
+        ]);
+
+        await expect(fixture.assertGitHubEnvironmentAbsent()).rejects.toThrow(
+          /waiting for the product to delete GitHub Environment .* it still exists\./
+        );
+      });
+
+      it("distinguishes an unreadable answer from a deleted environment", async () => {
+        const { fixture } = await observedHarness([
+          {
+            tool: "gh",
+            match: ["api", ENVIRONMENT_PATH],
+            respond: { code: 1, stdout: "rate limit exceeded" }
+          }
+        ]);
+
+        await expect(fixture.assertGitHubEnvironmentAbsent()).rejects.toThrow(
+          /Could not determine whether GitHub Environment .* still exists .* gh exited 1: rate limit exceeded/
+        );
+      });
+
+      it("does not read an unrelated Not Found phrase as deletion", async () => {
+        const { fixture } = await observedHarness([
+          {
+            tool: "gh",
+            match: ["api", ENVIRONMENT_PATH],
+            respond: {
+              code: 1,
+              stderr: "Not Found while resolving the configured GitHub host"
+            }
+          }
+        ]);
+
+        await expect(fixture.assertGitHubEnvironmentAbsent()).rejects.toThrow(
+          /Could not determine whether GitHub Environment .* still exists .* gh exited 1: Not Found while resolving/
+        );
+      });
+    });
+
+    describe("assertAppRegistrationAbsent", () => {
+      it("resolves once no registration with the product's name remains", async () => {
+        const { fixture } = await observedHarness([
+          { tool: "az", match: APP_LIST, respond: { stdout: "[]" } }
+        ]);
+
+        await expect(
+          fixture.assertAppRegistrationAbsent()
+        ).resolves.toBeUndefined();
+      });
+
+      it("names the registrations still standing when the wait expires", async () => {
+        const { fixture } = await observedHarness([
+          { tool: "az", match: APP_LIST, respond: { stdout: APP_LIST_RESULT } }
+        ]);
+
+        await expect(fixture.assertAppRegistrationAbsent()).rejects.toThrow(
+          /to be deleted; 1 still exist\(s\) \(app-1\)\./
+        );
+      });
+
+      it("propagates a failing lookup rather than reading it as absence", async () => {
+        const { fixture } = await observedHarness([
+          failing("az", APP_LIST, "AADSTS700016")
+        ]);
+
+        await expect(fixture.assertAppRegistrationAbsent()).rejects.toThrow(
+          /AADSTS700016/
+        );
+      });
+    });
+
+    describe("assertFederatedCredentialAbsent", () => {
+      it("resolves once the credential is gone from the registration", async () => {
+        const { fixture } = await observedHarness([
+          { tool: "az", match: APP_LIST, respond: { stdout: APP_LIST_RESULT } },
+          { tool: "az", match: FIC_LIST, respond: { stdout: "[]" } }
+        ]);
+
+        await expect(
+          fixture.assertFederatedCredentialAbsent(SUBJECT)
+        ).resolves.toBeUndefined();
+      });
+
+      it("treats a deleted registration as the strongest form of absence", async () => {
+        const { fixture, fake } = await observedHarness([
+          { tool: "az", match: APP_LIST, respond: { stdout: "[]" } }
+        ]);
+        const listCalls = () =>
+          fake.commands
+            .commandLines("az")
+            .filter((line) => line.includes("federated-credential")).length;
+        const before = listCalls();
+
+        await expect(
+          fixture.assertFederatedCredentialAbsent(SUBJECT)
+        ).resolves.toBeUndefined();
+        expect(listCalls()).toBe(before);
+      });
+
+      it("reports a credential the product failed to remove", async () => {
+        const { fixture } = await observedHarness([
+          { tool: "az", match: APP_LIST, respond: { stdout: APP_LIST_RESULT } },
+          {
+            tool: "az",
+            match: FIC_LIST,
+            respond: {
+              stdout: JSON.stringify([{ name: "fc", subject: SUBJECT }])
+            }
+          }
+        ]);
+
+        await expect(
+          fixture.assertFederatedCredentialAbsent(SUBJECT)
+        ).rejects.toThrow(/still carries 1 credential\(s\)\./);
+      });
+    });
+
+    describe("assertRoleAssignmentAbsent", () => {
+      it("resolves once the principal holds nothing in scope", async () => {
+        const { fixture } = await observedHarness([
+          { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" } }
+        ]);
+
+        await expect(
+          fixture.assertRoleAssignmentAbsent("sp-1")
+        ).resolves.toBeUndefined();
+      });
+
+      it("ignores assignments belonging to other principals", async () => {
+        const { fixture } = await observedHarness([
+          {
+            tool: "az",
+            match: ROLE_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                { principalId: "sp-2", roleDefinitionName: "Contributor" }
+              ])
+            }
+          }
+        ]);
+
+        await expect(
+          fixture.assertRoleAssignmentAbsent("sp-1")
+        ).resolves.toBeUndefined();
+      });
+
+      it("reports assignments the product failed to remove, matching case-insensitively", async () => {
+        const { fixture } = await observedHarness([
+          {
+            tool: "az",
+            match: ROLE_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                { principalId: "SP-1", roleDefinitionName: "Contributor" }
+              ])
+            }
+          }
+        ]);
+
+        await expect(
+          fixture.assertRoleAssignmentAbsent("sp-1")
+        ).rejects.toThrow(/to be removed; 1 remain\(s\)\./);
+      });
+    });
+  });
+
   describe("reclaimLeakedProductArtifacts", () => {
     it("reclaims nothing when the world is already clean", async () => {
       const { fixture, fake } = await createHarness();

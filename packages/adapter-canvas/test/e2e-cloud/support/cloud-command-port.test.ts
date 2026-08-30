@@ -7,6 +7,7 @@ import {
   createNodeCloudFixturePorts,
   describeError,
   expectSuccess,
+  isGitHubApiNotFound,
   normalizeAzureCommandResult,
   normalizeCommandResult,
   parseJsonArray,
@@ -150,6 +151,37 @@ describe("normalizeCommandResult", () => {
         stderr: ""
       });
     });
+  });
+});
+
+describe("isGitHubApiNotFound", () => {
+  it.each([
+    [
+      "the standard stderr form",
+      { code: 1, stderr: "gh: Not Found (HTTP 404)" }
+    ],
+    ["the stdout status form", { code: 1, stdout: "HTTP 404: Not Found" }],
+    [
+      "a 404 line after another diagnostic",
+      { code: 1, stderr: "request failed\ngh: Not Found (HTTP 404)" }
+    ]
+  ])("recognizes %s", (_label, output) => {
+    expect(isGitHubApiNotFound(result(output))).toBe(true);
+  });
+
+  it.each([
+    ["a successful body", { code: 0, stdout: "HTTP 404: historical result" }],
+    [
+      "a bare phrase",
+      { code: 1, stderr: "Not Found while resolving hostname" }
+    ],
+    ["a different status", { code: 1, stderr: "gh: Not Found (HTTP 403)" }],
+    [
+      "an embedded status",
+      { code: 1, stderr: "request failed after HTTP 404: retry exhausted" }
+    ]
+  ])("rejects %s", (_label, output) => {
+    expect(isGitHubApiNotFound(result(output))).toBe(false);
   });
 });
 
