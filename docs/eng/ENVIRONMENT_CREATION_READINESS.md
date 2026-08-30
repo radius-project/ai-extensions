@@ -7,10 +7,10 @@ This record tracks issue [#308](https://github.com/radius-project/ai-extensions/
 | Field                               | Value                                                   |
 |-------------------------------------|---------------------------------------------------------|
 | Diagnostic and recovery baseline    | `7d1c6a69c6c6fddec819d6ad8d8b75e6b001f2c6` (#617 merge) |
-| #308 implementation commit          | Record the final commit after this refresh              |
+| #308 implementation commit          | `4ab58893fe8034dc399f7cd59ef923979aa38092`              |
 | Release-candidate version           | `NOT RUN` - no immutable candidate is designated        |
 | Installation source and attestation | `NOT RUN`                                               |
-| Record last refreshed               | 2026-08-28                                              |
+| Record last refreshed               | 2026-08-30                                              |
 
 Before final qualification, record the final #308 commit and identify one immutable plugin version, ref, artifact digest, and attestation. `main`, `edge`, or an arbitrary commit is not implicitly the release candidate.
 
