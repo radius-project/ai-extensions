@@ -9,6 +9,7 @@ import {
   expectSuccess,
   normalizeCommandResult,
   parseJsonArray,
+  parseJsonObject,
   type CloudCommandResult
 } from "./cloud-command-port.js";
 
@@ -159,6 +160,64 @@ describe("parseJsonArray", () => {
   );
 });
 
+describe("parseJsonObject", () => {
+  const CONTEXT = "kubectl get deployments -n radius-demo";
+
+  it("parses a JSON object from stdout", () => {
+    expect(
+      parseJsonObject(
+        result({ stdout: '{"items":[{"kind":"Deployment"}]}' }),
+        CONTEXT
+      )
+    ).toEqual({ items: [{ kind: "Deployment" }] });
+  });
+
+  it("parses an object with no keys", () => {
+    expect(parseJsonObject(result({ stdout: "{}" }), CONTEXT)).toEqual({});
+  });
+
+  it("propagates a command failure instead of parsing its error text", () => {
+    expect(() =>
+      parseJsonObject(
+        result({ code: 1, stderr: "Unable to connect to the server" }),
+        CONTEXT
+      )
+    ).toThrow(`${CONTEXT} failed with exit code 1: Unable to connect`);
+  });
+
+  it.each([
+    ["an entirely empty body", ""],
+    ["whitespace only", "  \n "]
+  ])(
+    "refuses to read %s as an empty listing, which would look like a successful delete",
+    (_label, stdout) => {
+      expect(() => parseJsonObject(result({ stdout }), CONTEXT)).toThrow(
+        `${CONTEXT} returned no output to parse as JSON.`
+      );
+    }
+  );
+
+  it("rejects malformed JSON rather than reporting no workloads", () => {
+    expect(() =>
+      parseJsonObject(result({ stdout: "{not json" }), CONTEXT)
+    ).toThrow(new RegExp(`${CONTEXT} returned output that is not valid JSON`));
+  });
+
+  it.each([
+    ["an array", "[]", "a JSON array"],
+    ["a string", '"nope"', "a JSON string"],
+    ["a number", "12", "a JSON number"],
+    ["null", "null", "null"]
+  ])(
+    "rejects %s where an object was expected",
+    (_label, stdout, description) => {
+      expect(() => parseJsonObject(result({ stdout }), CONTEXT)).toThrow(
+        `${CONTEXT} returned ${description} where a JSON object was expected.`
+      );
+    }
+  );
+});
+
 describe("createNodeCloudFixturePorts", () => {
   it("creates and removes a workspace directory under the system temp root", async () => {
     const ports = createNodeCloudFixturePorts();
@@ -224,12 +283,17 @@ describe("createNodeCloudFixturePorts", () => {
     expect(ok.stdout.trim()).toBe("true");
   });
 
-  it("exposes az and gh runners that resolve rather than reject when the tool is absent", async () => {
+  it("exposes az, gh, and kubectl runners that resolve rather than reject when the tool is absent", async () => {
     const ports = createNodeCloudFixturePorts();
 
-    // No Azure or GitHub CLI is assumed here. Whether the tool exists or not,
-    // the contract under test is the same: the port resolves with a result.
-    for (const run of [ports.commands.runAz, ports.commands.runGh]) {
+    // No Azure, GitHub, or Kubernetes CLI is assumed here. Whether the tool
+    // exists or not, the contract under test is the same: the port resolves
+    // with a result.
+    for (const run of [
+      ports.commands.runAz,
+      ports.commands.runGh,
+      ports.commands.runKubectl
+    ]) {
       const outcome = await run(["--version"]);
       expect(typeof outcome.code).toBe("number");
       expect(typeof outcome.stdout).toBe("string");

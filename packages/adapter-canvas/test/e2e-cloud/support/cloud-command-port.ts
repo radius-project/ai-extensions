@@ -1,10 +1,10 @@
 // The seam between the cloud fixture and the outside world.
 //
-// Nothing in `test/e2e-cloud/` calls `execFile` directly. Every `az`, `gh`, and
-// `git` invocation goes through a port, so each branch of the fixture — a
-// missing resource, a failed command, malformed output, a partially built
-// fixture — is provable on a machine with no Azure or GitHub credentials at
-// all. The real run passes `createNodeCloudFixturePorts()`; this is not a
+// Nothing in `test/e2e-cloud/` calls `execFile` directly. Every `az`, `gh`,
+// `git`, and `kubectl` invocation goes through a port, so each branch of the
+// fixture — a missing resource, a failed command, malformed output, a partially
+// built fixture — is provable on a machine with no Azure or GitHub credentials
+// at all. The real run passes `createNodeCloudFixturePorts()`; this is not a
 // test-only hook.
 //
 // The result shape and the "resolve for a non-zero exit rather than reject"
@@ -35,6 +35,15 @@ export interface CloudCommandPort {
   runAz(args: readonly string[]): Promise<CloudCommandResult>;
   runGh(args: readonly string[]): Promise<CloudCommandResult>;
   runGit(args: readonly string[], cwd: string): Promise<CloudCommandResult>;
+  /**
+   * Queries a Kubernetes cluster.
+   *
+   * Callers pass `--kubeconfig <path>` as ordinary argv rather than setting a
+   * `KUBECONFIG` environment variable, so a cluster probe can never be
+   * redirected by whatever the surrounding process happened to export — on a
+   * developer machine that is usually a personal cluster.
+   */
+  runKubectl(args: readonly string[]): Promise<CloudCommandResult>;
 }
 
 export interface CloudFixturePorts {
@@ -114,7 +123,8 @@ export function createNodeCloudFixturePorts(): CloudFixturePorts {
     commands: {
       runAz: (args) => runTool("az", args),
       runGh: (args) => runTool("gh", args),
-      runGit: (args, cwd) => runTool("git", args, cwd)
+      runGit: (args, cwd) => runTool("git", args, cwd),
+      runKubectl: (args) => runTool("kubectl", args)
     },
     makeWorkspaceDir: (prefix) =>
       fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`)),
@@ -194,7 +204,39 @@ export function parseJsonArray(
 
 function describeJsonKind(value: unknown): string {
   if (value === null) return "null";
+  if (Array.isArray(value)) return "a JSON array";
   return `a JSON ${typeof value}`;
+}
+
+/**
+ * Parses a successful command's stdout as a JSON object.
+ *
+ * The object counterpart of `parseJsonArray`, and strict for the same reason:
+ * `kubectl get -o json` answers with an object carrying `items`, and reading an
+ * unparseable body as an empty object would report "no workloads" — which is
+ * simultaneously how a deploy fails and how a delete succeeds.
+ */
+export function parseJsonObject(
+  result: CloudCommandResult,
+  context: string
+): Record<string, unknown> {
+  expectSuccess(result, context);
+  const text = result.stdout.trim();
+  if (!text) throw new Error(`${context} returned no output to parse as JSON.`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(
+      `${context} returned output that is not valid JSON: ${describeError(error)}`,
+      { cause: error }
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error(
+      `${context} returned ${describeJsonKind(parsed)} where a JSON object was expected.`
+    );
+  return parsed as Record<string, unknown>;
 }
 
 /**

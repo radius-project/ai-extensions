@@ -20,6 +20,7 @@ import {
   describeError,
   expectSuccess,
   parseJsonArray,
+  parseJsonObject,
   type CloudCommandPort,
   type CloudCommandResult,
   type CloudFixturePorts
@@ -36,6 +37,11 @@ import {
   shortenUniqueId,
   WORKFLOW_FALLBACK_BRANCH_PREFIX
 } from "./fixture-repository.js";
+import {
+  radiusApplicationSelector,
+  readKubernetesWorkloads,
+  type KubernetesWorkload
+} from "./deploy-journey.js";
 
 /** The Entra application the product creates, as the fixture observed it. */
 export interface AppRegistrationRecord {
@@ -64,6 +70,57 @@ export interface CloudFixture {
   assertFederatedCredentialExists(subject: string): Promise<void>;
   assertRoleAssignmentExists(principalId: string): Promise<void>;
   assertGitHubEnvironmentExists(): Promise<void>;
+  /**
+   * Waits until the GitHub Environment is gone.
+   *
+   * Stage five's evidence. Deliberately a mirror of
+   * `assertGitHubEnvironmentExists`, so the pair states the whole semantic
+   * distinction between deleting a deployment and deleting an environment.
+   */
+  assertGitHubEnvironmentAbsent(): Promise<void>;
+  /**
+   * Waits until no app registration with the product's name remains.
+   *
+   * Not called by any stage yet. `environments.ts` deletes only the GitHub
+   * Environment, so the Entra application, its federated credentials and its
+   * role assignment are currently orphaned by delete-environment. Asserting
+   * that leak as expected behaviour would document a bug as a contract and
+   * invert the day it is fixed, so this and the two mirrors below wait for
+   * PR #398 to make cloud cleanup the product's actual behaviour.
+   */
+  assertAppRegistrationAbsent(): Promise<void>;
+  /** Waits until the app registration carries no credential for the subject. */
+  assertFederatedCredentialAbsent(subject: string): Promise<void>;
+  /** Waits until no role assignment for the principal remains in scope. */
+  assertRoleAssignmentAbsent(principalId: string): Promise<void>;
+  /**
+   * Waits until Radius has rendered the application onto the target cluster.
+   *
+   * The only evidence of a deploy that GitHub cannot fabricate. Resolves with
+   * the workloads it found so a caller can report what actually landed.
+   */
+  assertApplicationWorkloadsPresent(
+    application: string,
+    namespace: string
+  ): Promise<readonly KubernetesWorkload[]>;
+  /**
+   * Waits until no workload for the application remains on the target cluster.
+   *
+   * A namespace that no longer exists counts as absence; anything else that
+   * cannot answer is raised, because "absent" is the answer that lets stage
+   * three pass.
+   */
+  assertApplicationWorkloadsAbsent(
+    application: string,
+    namespace: string
+  ): Promise<void>;
+  /** Reads the workloads currently labelled for the application, without waiting. */
+  readApplicationWorkloads(
+    application: string,
+    namespace: string
+  ): Promise<readonly KubernetesWorkload[]>;
+  /** Whether a namespace exists on the target cluster right now. */
+  namespaceExists(namespace: string): Promise<boolean>;
   /**
    * Best-effort removal of product-created state left behind by this run.
    *
@@ -231,6 +288,101 @@ export async function createCloudFixture(
   }
 
   let disposed = false;
+  // Fetched on first use rather than at construction, so a run that never makes
+  // a cluster assertion — stage one on its own — spends no time on credentials
+  // it will not use, and every existing fixture scenario keeps its exact
+  // command sequence.
+  let kubeconfigPath = "";
+
+  const clusterKubeconfig = async (): Promise<string> => {
+    if (kubeconfigPath) return kubeconfigPath;
+    const directory = await ports.makeWorkspaceDir(
+      `radtest-canvas-kube-${uniqueId}`
+    );
+    // Registered before the credential fetch, so a failed fetch still leaves a
+    // directory teardown behind it rather than an orphan under the temp root.
+    unwind.push({
+      describe: `remove kubeconfig directory ${directory}`,
+      run: () => ports.removeDir(directory)
+    });
+    const candidate = `${directory}/kubeconfig`;
+    expectSuccess(
+      await commands.runAz([
+        "aks",
+        "get-credentials",
+        "--resource-group",
+        resourceGroup,
+        "--name",
+        clusterName,
+        "--subscription",
+        subscriptionId,
+        "--file",
+        candidate,
+        "--overwrite-existing",
+        "--only-show-errors"
+      ]),
+      `az aks get-credentials ${clusterName}`
+    );
+    kubeconfigPath = candidate;
+    return kubeconfigPath;
+  };
+
+  const listWorkloads = async (
+    application: string,
+    namespace: string
+  ): Promise<readonly KubernetesWorkload[] | "no-namespace"> => {
+    const kubeconfig = await clusterKubeconfig();
+    const context = `kubectl get deployments -n ${namespace}`;
+    const result = await commands.runKubectl([
+      "--kubeconfig",
+      kubeconfig,
+      "get",
+      "deployments",
+      "--namespace",
+      namespace,
+      "--selector",
+      radiusApplicationSelector(application),
+      "--output",
+      "json"
+    ]);
+    // Before `rad deploy` first runs there is no application namespace at all,
+    // which is a legitimate "nothing deployed" rather than a probe that failed.
+    if (result.code !== 0) {
+      if (isMissingNamespace(result)) return "no-namespace";
+      throw new Error(
+        `${context} failed with exit code ${result.code}: ${(
+          result.stderr || result.stdout
+        ).trim()}`
+      );
+    }
+    return readKubernetesWorkloads(parseJsonObject(result, context));
+  };
+
+  /**
+   * Artifacts this run has independently observed in place.
+   *
+   * An absence assertion is vacuous unless presence came first. A helper that
+   * merely fails to find something cannot tell "the product deleted it" from
+   * "the product never created it", and read the second way a broken create
+   * silently becomes a passing delete. The mirrors below refuse to answer at
+   * all until this run has seen the artifact for itself.
+   */
+  const observedPresent = new Set<string>();
+  const APP_REGISTRATION_KEY = "app-registration";
+  const GITHUB_ENVIRONMENT_KEY = "github-environment";
+  const federatedCredentialKey = (subject: string) =>
+    `federated-credential:${subject}`;
+  const roleAssignmentKey = (principalId: string) =>
+    `role-assignment:${principalId.toLowerCase()}`;
+
+  const requireObservedPresent = (key: string, description: string): void => {
+    if (observedPresent.has(key)) return;
+    throw new Error(
+      `Refusing to assert that ${description} is absent: this run never observed it present, so its absence ` +
+        "would prove nothing about the operation under test — a product that never created it would pass " +
+        "just as readily as one that correctly deleted it. Assert presence first."
+    );
+  };
 
   const fixture: CloudFixture = {
     uniqueId,
@@ -265,7 +417,7 @@ export async function createCloudFixture(
     },
 
     async assertAppRegistrationExists() {
-      return pollForValue({
+      const app = await pollForValue({
         ports,
         timeoutMs: assertionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
@@ -282,6 +434,8 @@ export async function createCloudFixture(
         timeoutMessage: () =>
           `Timed out after ${assertionTimeoutMs}ms waiting for the product to create an app registration named "${expectedAppName}".`
       });
+      observedPresent.add(APP_REGISTRATION_KEY);
+      return app;
     },
 
     async assertFederatedCredentialExists(subject) {
@@ -324,6 +478,7 @@ export async function createCloudFixture(
           );
         }
       });
+      observedPresent.add(federatedCredentialKey(subject));
     },
 
     async assertRoleAssignmentExists(principalId) {
@@ -358,6 +513,7 @@ export async function createCloudFixture(
               )
             ].join(", ")}.`)
       });
+      observedPresent.add(roleAssignmentKey(principalId));
     },
 
     async assertGitHubEnvironmentExists() {
@@ -380,6 +536,180 @@ export async function createCloudFixture(
         timeoutMessage: () =>
           `Timed out after ${assertionTimeoutMs}ms waiting for the product to create ` +
           `GitHub Environment "${environmentName}" in ${repository}.`
+      });
+      observedPresent.add(GITHUB_ENVIRONMENT_KEY);
+    },
+
+    async assertGitHubEnvironmentAbsent() {
+      requireObservedPresent(
+        GITHUB_ENVIRONMENT_KEY,
+        `GitHub Environment "${environmentName}" in ${repository}`
+      );
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          const probe = await commands.runGh([
+            "api",
+            `repos/${repository}/environments/${environmentName}`
+          ]);
+          if (isNotFound(probe)) return true;
+          if (probe.code === 0) return undefined;
+          throw new Error(
+            `Could not determine whether GitHub Environment "${environmentName}" still exists in ${repository}: ` +
+              `gh exited ${probe.code}: ${(probe.stderr || probe.stdout).trim()}`
+          );
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for the product to delete ` +
+          `GitHub Environment "${environmentName}" from ${repository}; it still exists.`
+      });
+    },
+
+    async assertAppRegistrationAbsent() {
+      requireObservedPresent(
+        APP_REGISTRATION_KEY,
+        `app registration "${expectedAppName}"`
+      );
+      let found: AppRegistrationRecord[] = [];
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          found = [...(await listAppRegistrations(commands, expectedAppName))];
+          return found.length === 0 ? true : undefined;
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for app registration "${expectedAppName}" to be ` +
+          `deleted; ${found.length} still exist(s) (${found
+            .map((app) => app.appId)
+            .join(", ")}).`
+      });
+    },
+
+    async assertFederatedCredentialAbsent(subject) {
+      requireObservedPresent(
+        federatedCredentialKey(subject),
+        `the federated credential for subject "${subject}"`
+      );
+      const apps = await listAppRegistrations(commands, expectedAppName);
+      // No application at all is the strongest form of the credential's
+      // absence, and is what a complete cloud cleanup would leave behind.
+      const app = apps[0];
+      if (!app) return;
+      let remaining: Array<{ name: string; subject: string }> = [];
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          remaining = await listFederatedCredentials(commands, app.objectId);
+          return (
+              remaining.some((credential) => credential.subject === subject)
+            ) ?
+              undefined
+            : true;
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for app registration ${app.appId} to drop its ` +
+          `federated credential for subject "${subject}"; it still carries ${remaining.length} credential(s).`
+      });
+    },
+
+    async assertRoleAssignmentAbsent(principalId) {
+      requireObservedPresent(
+        roleAssignmentKey(principalId),
+        `the role assignment for principal ${principalId} at or below ${scope}`
+      );
+      let remaining: Array<{
+        principalId: string;
+        roleDefinitionName: string;
+      }> = [];
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          remaining = (await listRoleAssignments(commands, scope)).filter(
+            (assignment) =>
+              assignment.principalId.toLowerCase() === principalId.toLowerCase()
+          );
+          return remaining.length === 0 ? true : undefined;
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for the role assignment(s) for principal ` +
+          `${principalId} at or below ${scope} to be removed; ${remaining.length} remain(s).`
+      });
+    },
+
+    async namespaceExists(namespace) {
+      const kubeconfig = await clusterKubeconfig();
+      const context = `kubectl get namespace ${namespace}`;
+      const result = await commands.runKubectl([
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "namespace",
+        namespace,
+        "--output",
+        "name"
+      ]);
+      if (result.code === 0) return true;
+      if (isMissingNamespace(result)) return false;
+      throw new Error(
+        `${context} failed with exit code ${result.code}: ${(
+          result.stderr || result.stdout
+        ).trim()}`
+      );
+    },
+
+    async readApplicationWorkloads(application, namespace) {
+      const workloads = await listWorkloads(application, namespace);
+      return workloads === "no-namespace" ? [] : workloads;
+    },
+
+    async assertApplicationWorkloadsPresent(application, namespace) {
+      let lastSeen: readonly KubernetesWorkload[] | "no-namespace" = [];
+      return pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          lastSeen = await listWorkloads(application, namespace);
+          if (lastSeen === "no-namespace" || lastSeen.length === 0)
+            return undefined;
+          return lastSeen;
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for Radius to render application "${application}" ` +
+          `into namespace "${namespace}" on cluster ${clusterName}. ` +
+          (lastSeen === "no-namespace" ?
+            "The namespace does not exist, so the deploy never reached this cluster."
+          : "The namespace exists but carries no workload labelled for the application.")
+      });
+    },
+
+    async assertApplicationWorkloadsAbsent(application, namespace) {
+      let lastSeen: readonly KubernetesWorkload[] = [];
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          const workloads = await listWorkloads(application, namespace);
+          // A namespace that no longer exists is the strongest form of absence.
+          if (workloads === "no-namespace") return true;
+          lastSeen = workloads;
+          return workloads.length === 0 ? true : undefined;
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for the delete to remove application ` +
+          `"${application}" from namespace "${namespace}" on cluster ${clusterName}; ` +
+          `${lastSeen.length} workload(s) remain: ${lastSeen
+            .map((workload) => `"${workload.name}"`)
+            .join(", ")}.`
       });
     },
 
@@ -918,6 +1248,19 @@ async function readDefaultBranchSha(
  */
 function isNotFound(result: CloudCommandResult): boolean {
   return /HTTP 404|Not Found/i.test(`${result.stderr}\n${result.stdout}`);
+}
+
+/**
+ * Whether a `kubectl` failure means the namespace is absent.
+ *
+ * Matched narrowly on the API server's own phrasing. An unreachable cluster, an
+ * expired credential, or a forbidden request must never be read as absence,
+ * because absence is what lets stage three declare the delete complete.
+ */
+function isMissingNamespace(result: CloudCommandResult): boolean {
+  return /namespaces? "[^"]*" not found/i.test(
+    `${result.stderr}\n${result.stdout}`
+  );
 }
 
 function sameSha(left: string, right: string): boolean {

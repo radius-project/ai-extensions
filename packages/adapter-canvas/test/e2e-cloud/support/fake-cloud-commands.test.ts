@@ -179,6 +179,34 @@ describe("createFakeCloudCommands", () => {
     expect(fake.calls[0].args).toEqual(["version"]);
   });
 
+  it("routes kubectl through the same stub matching and recording", async () => {
+    const fake = createFakeCloudCommands([
+      {
+        tool: "kubectl",
+        match: ["get", "deployments"],
+        respond: { stdout: '{"items":[]}' }
+      }
+    ]);
+
+    await expect(
+      fake.port.runKubectl([
+        "--kubeconfig",
+        "/tmp/kubeconfig",
+        "get",
+        "deployments",
+        "-n",
+        "default-app"
+      ])
+    ).resolves.toMatchObject({ stdout: '{"items":[]}' });
+    await expect(fake.port.runKubectl(["delete", "ns", "x"])).rejects.toThrow(
+      "no stub for: kubectl delete ns x"
+    );
+    expect(fake.commandLines("kubectl")).toEqual([
+      "--kubeconfig /tmp/kubeconfig get deployments -n default-app",
+      "delete ns x"
+    ]);
+  });
+
   it("summarises invocations per tool as readable command lines", async () => {
     const fake = createFakeCloudCommands([
       { tool: "az", match: [], respond: {} },
@@ -191,6 +219,7 @@ describe("createFakeCloudCommands", () => {
     expect(fake.commandLines("az")).toEqual(["group create -n rg"]);
     expect(fake.commandLines("gh")).toEqual(["api repos/o/r"]);
     expect(fake.commandLines("git")).toEqual([]);
+    expect(fake.commandLines("kubectl")).toEqual([]);
   });
 });
 
