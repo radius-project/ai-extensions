@@ -267,7 +267,10 @@ export function expectedFederatedCredentialSubjects(
       reason: `${input.fullName} did not report positive numeric owner and repository ids, which the immutable subject form requires.`
     };
 
-  const prefix = input.customization.subClaimPrefix?.replace(/^repo:/, "");
+  const prefix = input.customization.subClaimPrefix?.replace(
+    /^(?:repo|repository):/,
+    ""
+  );
   const immutableSlug =
     prefix && prefix.includes("@") ?
       prefix
@@ -360,6 +363,8 @@ export interface EnvironmentVariableExpectation {
   readonly subscriptionId: string;
   readonly resourceGroup: string;
   readonly cluster: string;
+  readonly location: string;
+  readonly namespace: string;
 }
 
 export interface EnvironmentIdentityInput {
@@ -409,7 +414,9 @@ export function findEnvironmentIdentityProblems(
     ["AZURE_TENANT_ID", input.expected.tenantId],
     ["AZURE_SUBSCRIPTION_ID", input.expected.subscriptionId],
     ["AZURE_RESOURCE_GROUP", input.expected.resourceGroup],
-    ["AZURE_AKS_CLUSTER_NAME", input.expected.cluster]
+    ["AZURE_AKS_CLUSTER_NAME", input.expected.cluster],
+    ["AZURE_LOCATION", input.expected.location],
+    ["KUBERNETES_NAMESPACE", input.expected.namespace]
   ] as const) {
     const actual = input.variables.get(name);
     if (actual === undefined)
@@ -513,8 +520,11 @@ export function selectFallbackBranches(
   const names: string[] = [];
   for (const entry of payload) {
     const item = asRecord(entry);
-    if (typeof item?.name === "string" && item.name.startsWith(prefix))
-      names.push(item.name);
+    const rawName =
+      typeof item?.name === "string" ? item.name
+      : typeof item?.ref === "string" ? item.ref.replace(/^refs\/heads\//, "")
+      : "";
+    if (rawName.startsWith(prefix)) names.push(rawName);
   }
   return names;
 }
@@ -535,7 +545,10 @@ export function selectFallbackPullRequests(
     );
   const prefix = workflowFallbackBranchPrefix(environmentName);
   const numbers: number[] = [];
-  for (const entry of payload) {
+  const entries = payload.flatMap((page) =>
+    Array.isArray(page) ? page : [page]
+  );
+  for (const entry of entries) {
     const item = asRecord(entry);
     const head = asRecord(item?.head);
     if (
@@ -565,15 +578,30 @@ export interface OperationSnapshot {
 /**
  * Narrows one `/api/operations/{id}` poll.
  *
- * An unreadable payload is reported as a non-terminal empty state so the poll
- * keeps waiting and eventually times out, rather than a single malformed
- * response ending the wait and being read as a failure of the product.
+ * An unreadable payload fails immediately. Treating it as a non-terminal state
+ * would turn a stable route or schema failure into an ambiguous 20-minute
+ * timeout.
  */
 export function readOperationSnapshot(payload: unknown): OperationSnapshot {
   const operation = asRecord(asRecord(payload)?.operation);
-  const state =
-    typeof operation?.state === "string" ? operation.state.trim() : "";
-  const error = typeof operation?.error === "string" ? operation.error : "";
+  if (!operation)
+    throw new Error(
+      'The operation status response carried no readable "operation" object.'
+    );
+  if (typeof operation.state !== "string" || operation.state.trim() === "")
+    throw new Error(
+      'The operation status response carried no usable "operation.state".'
+    );
+  if (
+    operation.error !== undefined &&
+    operation.error !== null &&
+    typeof operation.error !== "string"
+  )
+    throw new Error(
+      'The operation status response carried a non-string "operation.error".'
+    );
+  const state = operation.state.trim();
+  const error = typeof operation.error === "string" ? operation.error : "";
   return {
     state,
     terminal: TERMINAL_OPERATION_STATES.includes(state),
