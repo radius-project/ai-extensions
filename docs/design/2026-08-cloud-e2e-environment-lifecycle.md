@@ -45,7 +45,7 @@ Success means one thing: a nightly run that fails when the product breaks the cl
 - **Making this a required check.** It is slow, costs money, and depends on Azure and GitHub being up. `live-tests.yml` already sets the opt-in, scheduled, non-blocking precedent.
 - **Testing AWS.** Azure is where credential provisioning is most involved. AWS follows once the shape is proven.
 - **Replacing hermetic tests.** This layer covers only facts that require a real cloud.
-- **Deploy and deletion stages.** They depend on environment-deletion work that is not yet merged, and ship as follow-up pull requests.
+- **Deploy and deletion stages.** They ship as follow-up pull requests. Only the environment-deletion stage depends on work that is not yet merged; the deploy and delete-deployment stages do not, for the reasons set out in the development plan.
 
 ### User scenarios
 
@@ -325,7 +325,7 @@ N/A. No change.
 
 #### Build & packaging (if applicable)
 
-- `.github/workflows/cloud-e2e.yml`: `schedule`, `workflow_dispatch`, and `merge_group`. Deliberately not `pull_request_target` — Radius needs it because cloud tests gate its pull requests; ours do not, and omitting it removes the fork supply-chain risk entirely.
+- `.github/workflows/cloud-e2e.yml`: `schedule` and `workflow_dispatch`, with `merge_group` deliberately deferred rather than adopted (see the open question below). Deliberately not `pull_request_target` — Radius needs it because cloud tests gate its pull requests; ours do not, and omitting it removes the fork supply-chain risk entirely.
 - A small cleanup workflow for what the Radius purge cannot cover: leaked Entra applications older than six hours, stale Environments, and resetting the fixture default branch.
 - Resource groups are deliberately not swept by us. Radius's purge job already deletes groups matching `^radtest-` older than six hours, twice daily, in this subscription. Naming ours `radtest-canvas-<uid>` makes that our safety net for free. This is a cross-repository dependency and is recorded as one.
 
@@ -404,16 +404,19 @@ A stack of pull requests, each independently mergeable and leaving the repositor
 1. **Service-principal identity support.** Teach the setup route to resolve a caller that is a service principal as well as one that is a user, with hermetic tests for both. The only production change in the stack, and a prerequisite for any journey run by a CI runner.
 1. **Create-environment journey.** Stage one end to end, plus the Playwright config and script.
 1. **CI.** The scheduled workflow, the cleanup workflow, and the runbook.
-1. **Deploy and deletion journeys.** Deferred until environment-deletion work is merged.
+1. **Deploy and delete-deployment journeys.** Stages two and three.
+1. **Delete-environment journey.** Stage four. Deferred until environment-deletion work is merged.
 
 Upstream `wellknown` changes gate step 6 only. Steps 2 through 5 can be developed against a personal subscription, and steps 2 through 4 need no cloud access at all.
+
+Splitting the last step is deliberate, because treating deletion as one unit would defer more than the dependency justifies. Deleting a deployment and deleting an environment are separate route families with separate owners: [`deployments.ts:784`](../../packages/adapter-canvas/src/server/routes/deployments.ts) registers `POST /api/delete-deployment`, and [`environments.ts:864`](../../packages/adapter-canvas/src/server/routes/environments.ts) registers `POST /api/delete-environment`. The pending environment-deletion work changes the environments family and adds two services beneath it, but touches no file in the deployments family. Its only contact with the deploy path is an optional `correlationId` argument added to `findWorkflowRun`, which is inert when omitted. Stages two and three are therefore unblocked; only stage four genuinely waits, because the cloud cleanup it asserts is precisely what that work introduces.
 
 ## Open questions
 
 1. **Is `Application.ReadWrite.OwnedBy` enough when the caller is a service principal rather than a user?** Two risks were folded together here. The identity half is resolved; the permission half is now largely answered from documentation and from the product's own code, leaving a narrow timing risk. The *identity* risk is understood: `az ad signed-in-user show` ([`azure-auto-setup-application.ts:161`](../../packages/adapter-canvas/src/server/routes/azure-auto-setup-application.ts)) calls Microsoft Graph `/me`, which does not exist for a service principal, and the route fails closed rather than falling back — so Create Environment aborts with `app-owner-lookup-failed`. Step 4 of the development plan fixes that by resolving the principal type from `az account show` and taking the object id from `az ad sp show` for a service principal. On permission, [Microsoft's note for the grant](https://learn.microsoft.com/en-us/graph/permissions-reference) says it allows the same operations as `Application.ReadWrite.All`, but only on applications and service principals the caller owns, and additionally allows tenant-wide `GET /applications` and `GET /servicePrincipals`. A service principal that creates an application is automatically added as its owner, and the route already assumes exactly that: [`azure-oidc.ts:268`](../../packages/adapter-canvas/src/azure-oidc.ts) records that creating an app commonly auto-assigns the creator as owner, so the explicit owner-add legitimately reports "already exists" and the owner-list check then confirms it. Every later Entra call in the flow (owner add and list, federated-credential list, create, show, update and delete, tag read, app delete) targets that owned application, and the tenant-wide read allowance covers both the reuse-path lookups and `az ad sp show`. What is left is timing rather than authorization: Entra replication for a newly created application. The product already retries propagation lag ([`azure-auto-setup-credentials.ts:599`](../../packages/adapter-canvas/src/server/routes/azure-auto-setup-credentials.ts)), so this is a tuning risk rather than a blocker. Confirm on a personal subscription before proposing the Terraform change.
 1. **Should the fixture repository live in `radius-project` or a test-only organization?** `radius-project` keeps the App installation narrow but puts a deliberately mutable repository beside production ones.
 1. **What nightly spend is acceptable?** The per-run cluster dominates. If it is too expensive, the second long-lived cluster alternative should be revisited.
-1. **Should `merge_group` be a trigger initially?** It gives pre-merge signal but makes the merge queue depend on Azure availability. Starting with `schedule` and `workflow_dispatch` only is more conservative.
+1. **Should `merge_group` be a trigger initially?** **Resolved: no.** It gives pre-merge signal but makes the merge queue depend on Azure availability, and an outage would then block merges rather than merely lose a night's signal. Step 6 ships `schedule` and `workflow_dispatch` only. Adding `merge_group` later is a one-line change once the tier has a track record, so the conservative order costs nothing and the reverse would be disruptive.
 
 ## Alternatives considered
 
