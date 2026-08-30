@@ -1,4 +1,5 @@
 import type {
+  AzureAutoSetupCommandResult,
   AzureAutoSetupDependencies,
   AzureAutoSetupExternalPort,
   AzureAutoSetupOperation,
@@ -6,6 +7,40 @@ import type {
   AzureAutoSetupTempFilePort
 } from "../../../src/server/routes/azure-auto-setup-types.js";
 import { successfulSelectedGhExecutor } from "./selected-gh.js";
+
+/** Joined-argv prefix of the `az account show` caller-identity projection. */
+export const CALLER_IDENTITY_COMMAND_PREFIX = "account show --query {type:";
+
+/**
+ * How a fake `az` should answer the caller-identity projection.
+ *
+ * `stdout` overrides the projection payload verbatim so a suite can drive the
+ * malformed and unexpected-principal branches; `code`/`stderr` drive the
+ * command-failure branch.
+ */
+export interface FakeCallerIdentity {
+  type?: string;
+  name?: string;
+  stdout?: string;
+  code?: string | number;
+  stderr?: string;
+}
+
+/** Build the `az account show` result a fake `az` returns for a caller. */
+export function callerIdentityResult(
+  identity: FakeCallerIdentity = {}
+): AzureAutoSetupCommandResult {
+  return {
+    code: identity.code ?? 0,
+    stdout:
+      identity.stdout ??
+      JSON.stringify({
+        type: identity.type ?? "user",
+        name: identity.name ?? "dev@contoso.com"
+      }),
+    stderr: identity.stderr ?? ""
+  };
+}
 
 export interface AzureAutoSetupDependencyOverrides extends Omit<
   Partial<AzureAutoSetupDependencies>,
