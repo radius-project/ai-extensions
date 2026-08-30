@@ -257,6 +257,19 @@ describe.sequential("cliExec", () => {
   // Real directories because the adapter resolves a bare Windows command name
   // through the filesystem. Supplying PATH and PATHEXT explicitly keeps the
   // resolution independent of whichever CLIs the host machine has installed.
+  //
+  // Windows reports PATHEXT in upper case and resolves paths case-insensitively,
+  // so a real lower-case `aws.exe` satisfies its `.EXE` entry. These tests only
+  // pretend to be Windows and run against the host filesystem, which is
+  // case-sensitive on Linux CI, so the fixture names are built from the same
+  // entries the test supplies instead of relying on the host to fold case. Real
+  // case folding is covered where it genuinely happens, by the native Windows
+  // process integration suite, whose lower-case fixtures resolve against the
+  // machine's own upper-case PATHEXT.
+  const NATIVE_EXTENSION = ".EXE";
+  const SHIM_EXTENSION = ".CMD";
+  const WINDOWS_PATHEXT = `.COM;${NATIVE_EXTENSION};.BAT;${SHIM_EXTENSION}`;
+
   let nativeDir: string;
   let shimDir: string;
   let emptyDir: string;
@@ -264,7 +277,7 @@ describe.sequential("cliExec", () => {
 
   const pathEnv = (searchPath: string): NodeJS.ProcessEnv => ({
     PATH: searchPath,
-    PATHEXT: ".COM;.EXE;.BAT;.CMD"
+    PATHEXT: WINDOWS_PATHEXT
   });
 
   beforeAll(() => {
@@ -274,8 +287,8 @@ describe.sequential("cliExec", () => {
     emptyDir = join(pathRoot, "empty");
     for (const dir of [nativeDir, shimDir, emptyDir]) mkdirSync(dir);
     for (const command of ["aws", "kubectl"]) {
-      writeFileSync(join(nativeDir, `${command}.exe`), "");
-      writeFileSync(join(shimDir, `${command}.cmd`), "");
+      writeFileSync(join(nativeDir, `${command}${NATIVE_EXTENSION}`), "");
+      writeFileSync(join(shimDir, `${command}${SHIM_EXTENSION}`), "");
     }
   });
 
@@ -643,13 +656,15 @@ describe.sequential("cliExec", () => {
     cliExec(
       "aws",
       ["sts"],
-      { env: { PATH: shimDir, PATHEXT: ".COM;.EXE" } },
+      { env: { PATH: shimDir, PATHEXT: `.COM;${NATIVE_EXTENSION}` } },
       vi.fn()
     );
 
     expect(childProcess.execFile.mock.calls[0][0]).toBe("aws");
   });
 
+  // Exercises the production default, which lists its entries in the same upper
+  // case Windows itself uses, so the fixture extension matches it exactly.
   it("falls back to the default PATHEXT when the child environment omits it", async () => {
     const { cliExec } = await loadGh("win32");
 
