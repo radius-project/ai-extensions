@@ -129,6 +129,7 @@ export interface FakeFixturePortsOptions {
   readonly workspaceDir?: string;
   readonly makeWorkspaceDir?: (prefix: string) => Promise<string>;
   readonly removeDir?: (dir: string) => Promise<void>;
+  readonly wait?: (milliseconds: number) => Promise<void>;
 }
 
 export interface FakeFixturePorts {
@@ -136,6 +137,8 @@ export interface FakeFixturePorts {
   readonly commands: FakeCloudCommands;
   /** Directories `removeDir` was asked to delete, in order. */
   readonly removed: readonly string[];
+  /** Poll delays requested by the fixture, in order. */
+  readonly waits: readonly number[];
 }
 
 /** The whole port surface, fake, with the filesystem and clock pinned. */
@@ -144,8 +147,9 @@ export function createFakeFixturePorts(
 ): FakeFixturePorts {
   const commands = createFakeCloudCommands(options.stubs ?? []);
   const removed: string[] = [];
+  const waits: number[] = [];
   const workspaceDir = options.workspaceDir ?? "/tmp/radtest-workspace";
-  const now = options.now ?? new Date("2026-08-29T00:00:00.000Z");
+  let now = options.now ?? new Date("2026-08-29T00:00:00.000Z");
   const uniqueId = options.uniqueId ?? "run0000000a";
 
   return {
@@ -159,10 +163,18 @@ export function createFakeFixturePorts(
           removed.push(dir);
           return Promise.resolve();
         }),
-      now: () => now,
+      wait:
+        options.wait ??
+        ((milliseconds) => {
+          waits.push(milliseconds);
+          now = new Date(now.getTime() + milliseconds);
+          return Promise.resolve();
+        }),
+      now: () => new Date(now),
       newUniqueId: () => uniqueId
     },
     commands,
-    removed
+    removed,
+    waits
   };
 }

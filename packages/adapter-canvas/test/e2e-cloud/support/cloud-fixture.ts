@@ -87,11 +87,15 @@ export interface CloudFixtureOptions {
   readonly baselineSha?: string;
   /** Node count for the discovery-target cluster. One is enough. */
   readonly nodeCount?: number;
+  readonly assertionTimeoutMs?: number;
+  readonly assertionPollIntervalMs?: number;
 }
 
 const DEFAULT_LOCATION = "westus3";
 const DEFAULT_NODE_COUNT = 1;
 const CLUSTER_NODE_SIZE = "Standard_B2s";
+const DEFAULT_ASSERTION_TIMEOUT_MS = 30_000;
+const DEFAULT_ASSERTION_POLL_INTERVAL_MS = 1_000;
 
 interface UnwindStep {
   readonly describe: string;
@@ -112,6 +116,14 @@ export async function createCloudFixture(
   const defaultBranch = options.defaultBranch ?? FIXTURE_REPO_DEFAULT_BRANCH;
   const baselineSha = options.baselineSha ?? FIXTURE_BASELINE_SHA;
   const nodeCount = options.nodeCount ?? DEFAULT_NODE_COUNT;
+  const assertionTimeoutMs = requirePositiveNumber(
+    options.assertionTimeoutMs ?? DEFAULT_ASSERTION_TIMEOUT_MS,
+    "Assertion timeout"
+  );
+  const assertionPollIntervalMs = requirePositiveNumber(
+    options.assertionPollIntervalMs ?? DEFAULT_ASSERTION_POLL_INTERVAL_MS,
+    "Assertion poll interval"
+  );
 
   const uniqueId = shortenUniqueId(ports.newUniqueId());
   const resourceGroup = resourceGroupName(uniqueId);
@@ -207,7 +219,14 @@ export async function createCloudFixture(
       `git reset --hard ${baselineSha}`
     );
   } catch (error) {
-    await unwindAll(unwind);
+    const cleanupFailures = await unwindAll(unwind);
+    if (cleanupFailures.length > 0)
+      throw new Error(
+        `Cloud fixture construction failed: ${describeError(error)}\n` +
+          "Cleanup after the construction failure also failed:\n" +
+          cleanupFailures.map((failure) => `  - ${failure}`).join("\n"),
+        { cause: error }
+      );
     throw error;
   }
 
@@ -246,60 +265,91 @@ export async function createCloudFixture(
     },
 
     async assertAppRegistrationExists() {
-      const apps = await listAppRegistrations(commands, expectedAppName);
-      if (apps.length === 0)
-        throw new Error(
-          `Expected the product to have created an app registration named "${expectedAppName}", but none exists.`
-        );
-      if (apps.length > 1)
-        throw new Error(
-          `Expected exactly one app registration named "${expectedAppName}", but found ${apps.length} ` +
-            `(${apps.map((app) => app.appId).join(", ")}). The product does not scope this name per run, ` +
-            "so a concurrent run against the same fixture repository is the likely cause."
-        );
-      return apps[0];
+      return pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          const apps = await listAppRegistrations(commands, expectedAppName);
+          if (apps.length > 1)
+            throw new Error(
+              `Expected exactly one app registration named "${expectedAppName}", but found ${apps.length} ` +
+                `(${apps.map((app) => app.appId).join(", ")}). The product does not scope this name per run, ` +
+                "so a concurrent run against the same fixture repository is the likely cause."
+            );
+          return apps[0];
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for the product to create an app registration named "${expectedAppName}".`
+      });
     },
 
     async assertFederatedCredentialExists(subject) {
       const app = await fixture.assertAppRegistrationExists();
-      const credentials = await listFederatedCredentials(
-        commands,
-        app.objectId
-      );
-      if (credentials.some((credential) => credential.subject === subject))
-        return;
-      // Entra compares subjects case-sensitively, so a case-only difference is
-      // a real product defect and not a near miss worth passing.
-      const caseOnly = credentials.filter(
-        (credential) =>
-          credential.subject.toLowerCase() === subject.toLowerCase()
-      );
-      const detail =
-        caseOnly.length > 0 ?
-          ` A credential differing only by letter casing exists (${caseOnly
-            .map((credential) => `"${credential.subject}"`)
-            .join(
-              ", "
-            )}); Entra would reject a token presenting the expected subject.`
-        : credentials.length === 0 ?
-          " The app registration carries no federated credentials at all."
-        : ` Existing subjects: ${credentials
-            .map((credential) => `"${credential.subject}"`)
-            .join(", ")}.`;
-      throw new Error(
-        `Expected app registration ${app.appId} to carry a federated credential for subject "${subject}".${detail}`
-      );
+      let credentials: Array<{ name: string; subject: string }> = [];
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          credentials = await listFederatedCredentials(commands, app.objectId);
+          return (
+              credentials.some((credential) => credential.subject === subject)
+            ) ?
+              true
+            : undefined;
+        },
+        timeoutMessage: () => {
+          // Entra compares subjects case-sensitively, so a case-only difference
+          // remains a real product defect when the bounded wait expires.
+          const caseOnly = credentials.filter(
+            (credential) =>
+              credential.subject.toLowerCase() === subject.toLowerCase()
+          );
+          const detail =
+            caseOnly.length > 0 ?
+              ` A credential differing only by letter casing exists (${caseOnly
+                .map((credential) => `"${credential.subject}"`)
+                .join(
+                  ", "
+                )}); Entra would reject a token presenting the expected subject.`
+            : credentials.length === 0 ?
+              " The app registration carries no federated credentials at all."
+            : ` Existing subjects: ${credentials
+                .map((credential) => `"${credential.subject}"`)
+                .join(", ")}.`;
+          return (
+            `Timed out after ${assertionTimeoutMs}ms waiting for app registration ${app.appId} ` +
+            `to carry a federated credential for subject "${subject}".${detail}`
+          );
+        }
+      });
     },
 
     async assertRoleAssignmentExists(principalId) {
-      const assignments = await listRoleAssignments(commands, scope);
-      const matching = assignments.filter(
-        (assignment) =>
-          assignment.principalId.toLowerCase() === principalId.toLowerCase()
-      );
-      if (matching.length > 0) return;
-      throw new Error(
-        `Expected a role assignment for principal ${principalId} at or below ${scope}, but found ` +
+      let assignments: Array<{
+        principalId: string;
+        roleDefinitionName: string;
+      }> = [];
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          assignments = await listRoleAssignments(commands, scope);
+          return (
+              assignments.some(
+                (assignment) =>
+                  assignment.principalId.toLowerCase() ===
+                  principalId.toLowerCase()
+              )
+            ) ?
+              true
+            : undefined;
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for a role assignment for principal ` +
+          `${principalId} at or below ${scope}; found ` +
           (assignments.length === 0 ?
             "no role assignments at all."
           : `only assignments for ${[
@@ -307,23 +357,30 @@ export async function createCloudFixture(
                 assignments.map((assignment) => assignment.principalId)
               )
             ].join(", ")}.`)
-      );
+      });
     },
 
     async assertGitHubEnvironmentExists() {
-      const probe = await commands.runGh([
-        "api",
-        `repos/${repository}/environments/${environmentName}`
-      ]);
-      if (probe.code === 0) return;
-      if (isNotFound(probe))
-        throw new Error(
-          `Expected the product to have created GitHub Environment "${environmentName}" in ${repository}, but it does not exist.`
-        );
-      throw new Error(
-        `Could not determine whether GitHub Environment "${environmentName}" exists in ${repository}: ` +
-          `gh exited ${probe.code}: ${(probe.stderr || probe.stdout).trim()}`
-      );
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          const probe = await commands.runGh([
+            "api",
+            `repos/${repository}/environments/${environmentName}`
+          ]);
+          if (probe.code === 0) return true;
+          if (isNotFound(probe)) return undefined;
+          throw new Error(
+            `Could not determine whether GitHub Environment "${environmentName}" exists in ${repository}: ` +
+              `gh exited ${probe.code}: ${(probe.stderr || probe.stdout).trim()}`
+          );
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for the product to create ` +
+          `GitHub Environment "${environmentName}" in ${repository}.`
+      });
     },
 
     async reclaimLeakedProductArtifacts() {
@@ -414,9 +471,33 @@ export async function createCloudFixture(
           ).trim()}`
         );
 
+      // Close pull requests before removing their head branches so cleanup does
+      // not rely on GitHub implicitly changing pull-request state.
+      const pulls = await listOpenPullRequests(commands, repository).catch(
+        (error: unknown) => {
+          failures.push(`list open pull requests: ${describeError(error)}`);
+          return [] as OpenPullRequest[];
+        }
+      );
+      for (const pull of pulls.filter((candidate) =>
+        candidate.headRef.startsWith(WORKFLOW_FALLBACK_BRANCH_PREFIX)
+      ))
+        await attempt(`pull request #${pull.number}`, async () => {
+          expectSuccess(
+            await commands.runGh([
+              "api",
+              "--method",
+              "PATCH",
+              `repos/${repository}/pulls/${pull.number}`,
+              "-f",
+              "state=closed"
+            ]),
+            `gh api PATCH pulls/${pull.number}`
+          );
+        });
+
       // A leaked `radius/setup-*` branch poisons the next run's clean slate the
-      // same way a leaked Entra application does. Deleting the ref also closes
-      // any pull request opened from it.
+      // same way a leaked Entra application does.
       const branches = await listWorkflowFallbackBranches(
         commands,
         repository
@@ -512,6 +593,25 @@ interface LeakProbeInput {
   readonly environmentName: string;
   readonly expectedAppName: string;
   readonly scope: string;
+}
+
+interface PollForValueOptions<T> {
+  readonly ports: Pick<CloudFixturePorts, "now" | "wait">;
+  readonly timeoutMs: number;
+  readonly intervalMs: number;
+  readonly probe: () => Promise<T | undefined>;
+  readonly timeoutMessage: () => string;
+}
+
+async function pollForValue<T>(options: PollForValueOptions<T>): Promise<T> {
+  const deadline = options.ports.now().getTime() + options.timeoutMs;
+  while (true) {
+    const value = await options.probe();
+    if (value !== undefined) return value;
+    const remaining = deadline - options.ports.now().getTime();
+    if (remaining <= 0) throw new Error(options.timeoutMessage());
+    await options.ports.wait(Math.min(options.intervalMs, remaining));
+  }
 }
 
 async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
@@ -749,23 +849,39 @@ async function listWorkflowFallbackBranches(
   );
 }
 
+interface OpenPullRequest {
+  readonly number: number;
+  readonly title: string;
+  readonly headRef: string;
+}
+
 async function listOpenPullRequests(
   commands: CloudCommandPort,
   repository: string
-): Promise<Array<{ number: number; title: string; headRef: string }>> {
+): Promise<OpenPullRequest[]> {
   const context = `gh api open pull requests in ${repository}`;
-  const entries = parseJsonArray(
-    await commands.runGh([
-      "api",
-      `repos/${repository}/pulls?state=open&per_page=100`
-    ]),
-    context
-  );
+  const result = await commands.runGh([
+    "api",
+    "--paginate",
+    "--slurp",
+    `repos/${repository}/pulls?state=open&per_page=100`
+  ]);
+  expectSuccess(result, context);
+  if (!result.stdout.trim())
+    throw new Error(`${context} returned an empty response instead of JSON.`);
+  const pages = parseJsonArray(result, context);
+  const entries = pages.flatMap((page, index) => {
+    if (!Array.isArray(page))
+      throw new Error(
+        `${context} returned page ${index} with JSON type "${typeof page}" where an array was expected.`
+      );
+    return page;
+  });
   return entries.map((entry, index) => {
     const record = asRecord(entry, context, index);
     const head = asRecord(record.head ?? {}, context, index);
     return {
-      number: typeof record.number === "number" ? record.number : index,
+      number: requirePositiveInteger(record.number, "number", context, index),
       title: typeof record.title === "string" ? record.title : "(untitled)",
       headRef: typeof head.ref === "string" ? head.ref : "(unknown)"
     };
@@ -835,5 +951,24 @@ function requireString(
 
 function requireValue(value: string, message: string): string {
   if (!value || !value.trim()) throw new Error(message);
+  return value;
+}
+
+function requirePositiveInteger(
+  value: unknown,
+  field: string,
+  context: string,
+  index: number
+): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0)
+    throw new Error(
+      `${context} returned an entry at index ${index} with no usable "${field}".`
+    );
+  return value;
+}
+
+function requirePositiveNumber(value: number, label: string): number {
+  if (!Number.isFinite(value) || value <= 0)
+    throw new Error(`${label} must be a positive finite number.`);
   return value;
 }
