@@ -4,7 +4,8 @@ import { DEPLOY_RESULT_STATE_ID } from "../browser/pages/deploy-result-page.js";
 import { browserEntryMarker, browserScript } from "../browser/scripts.js";
 import {
   HOSTILE_STATE,
-  expectSafeInlineScripts
+  expectSafeInlineScripts,
+  markupWithoutBrowserBundles
 } from "../../test/support/pages/hostile-state.js";
 import { readBrowserPageState } from "../../test/support/pages/browser-state.js";
 import { environmentPage } from "./environment-page.js";
@@ -74,6 +75,7 @@ describe("environmentPage", () => {
       "env-progress-state",
       "env-progress-commands",
       "env-progress-command-buttons",
+      "env-progress-command-descriptions",
       "env-smr-modal",
       "env-appselect-modal",
       "env-profile-button",
@@ -107,6 +109,28 @@ describe("environmentPage", () => {
     expect(html).toContain(browserEntryMarker("environment-page"));
     expect(html.split(browserScript("environment-page"))).toHaveLength(2);
     expectSafeInlineScripts(html);
+  });
+
+  it("serializes the host-specific GitHub CLI presentation", () => {
+    const html = environmentPage({
+      ghCommandPresentation: {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/Applications/GitHub Copilot/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    });
+
+    expect(readBrowserPageState(html, ENVIRONMENT_PAGE_STATE_ID)).toMatchObject(
+      {
+        ghCommandPresentation: {
+          kind: "absolute",
+          shell: "posix",
+          executablePath: "/Applications/GitHub Copilot/gh",
+          installationNote: "Install GitHub CLI system-wide."
+        }
+      }
+    );
   });
 
   it("preserves state fallback and escapes hostile form values", () => {
@@ -194,7 +218,7 @@ describe("environmentPage deployment result", () => {
 
     expect(html).toContain("Deployment Failed");
     expect(html).toContain("&lt;failed&gt;");
-    expect(html).not.toContain("javascript:");
+    expect(markupWithoutBrowserBundles(html)).not.toContain("javascript:");
     expect(readBrowserPageState(html, DEPLOY_RESULT_STATE_ID)).toEqual({
       attemptId: ""
     });

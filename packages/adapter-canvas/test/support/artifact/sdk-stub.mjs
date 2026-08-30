@@ -1,5 +1,18 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
+
 let joinCount = 0;
 let joinedDeclaration;
+
+const REQUIRED_SKILL_FILES = [
+  "SKILL.md",
+  "scripts/promote-app-model.mjs",
+  "scripts/validate-bicep.mjs",
+  "scripts/write-app-origin.mjs",
+  "../radius-app-graph/references/source-code-references.md"
+];
+const LEGACY_INLINED_HEADING =
+  "# radius-app-bicep skill (bundled with the Radius extension)";
 
 function json(value) {
   return JSON.parse(JSON.stringify(value));
@@ -22,9 +35,16 @@ export async function joinSession(declaration) {
   const generateApp = declaration.tools.find(
     (tool) => tool.name === "radius_generate_app"
   );
-  const bundledSkill = await generateApp?.handler({
+  const bootstrapText = await generateApp?.handler({
     repoPath: process.env.RADIUS_ARTIFACT_WORKSPACE
   });
+  const bootstrap = JSON.parse(String(bootstrapText));
+  const artifactPath = resolve(process.env.RADIUS_ARTIFACT_PATH);
+  const artifactDir = dirname(artifactPath);
+  const skillBase = String(bootstrap.skillBase);
+  const packageVersion = JSON.parse(
+    readFileSync(join(artifactDir, "package.json"), "utf8")
+  ).version;
   await send({
     type: "registered",
     snapshot: {
@@ -55,13 +75,22 @@ export async function joinSession(declaration) {
           callable: typeof hook === "function"
         }))
         .sort((left, right) => left.name.localeCompare(right.name)),
-      bundledSkill: {
-        hasSkill: String(bundledSkill).includes("# radius-app-bicep skill"),
-        hasCustomTypes: String(bundledSkill).includes(
-          "Reference: references/custom-resource-types.md"
+      bootstrap: {
+        fields: Object.keys(bootstrap),
+        skill: bootstrap.skill,
+        repoPathMatchesWorkspace:
+          bootstrap.repoPath === process.env.RADIUS_ARTIFACT_WORKSPACE,
+        skillBaseRelativeToArtifact: relative(
+          artifactDir,
+          skillBase
+        ).replaceAll("\\", "/"),
+        skillVersionMatchesPackage: bootstrap.skillVersion === packageVersion,
+        instruction: bootstrap.instruction,
+        requiredFiles: REQUIRED_SKILL_FILES.filter((requiredFile) =>
+          existsSync(join(skillBase, requiredFile))
         ),
-        hasSourceReferences: String(bundledSkill).includes(
-          "Reference: ../radius-app-graph/references/source-code-references.md"
+        containsLegacyInlinedHeading: String(bootstrapText).includes(
+          LEGACY_INLINED_HEADING
         )
       }
     }

@@ -41,6 +41,7 @@ describe("graph diff page browser entry", () => {
       jsonResponse({ branches: [], workspaceBranch: "" })
     );
     browser.scope.radiusRenderGraph = vi.fn();
+    browser.scope.radiusSetGraphError = vi.fn();
 
     installGraphDiffPageEntry(browser.scope);
     installGraphDiffPageEntry(browser.scope);

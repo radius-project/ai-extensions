@@ -7,6 +7,8 @@ export default defineConfig({
       "src/gh*.test.ts",
       "src/workspace.test.ts",
       "src/server/create-canvas-server.test.ts",
+      "src/server/services/discovery.test.ts",
+      "src/server/services/github-environment-variable-rollback.test.ts",
       "src/browser/{heartbeat,lifecycle,repositories}.test.ts",
       "src/browser/environment/**/*.test.ts",
       "src/browser/pages/**/*.test.ts",

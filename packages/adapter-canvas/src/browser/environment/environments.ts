@@ -164,7 +164,7 @@ export function environmentRowsMarkup(
         `<td class="rad-table__creds">${escapeBrowserHtml(credentials)}</td>` +
         '<td class="rad-table__actions">' +
         `<button class="rad-link js-edit-env" data-env="${name}" style="background:none; border:none; padding:0; margin:0; font:inherit; cursor:pointer;">edit</button>` +
-        `<button class="rad-btn rad-btn--neutral js-deploy-apps" data-env="${name}" style="margin:0;">Deploy Apps</button>` +
+        `<button class="rad-btn rad-btn--neutral js-plan-deployment" data-env="${name}" style="margin:0;">Plan Deployment</button>` +
         `<button class="rad-btn rad-btn--danger-outline js-delete-env" data-env="${name}" style="margin:0;">Delete Env</button>` +
         "</td></tr>"
       );
@@ -359,12 +359,12 @@ export function initializeEnvironmentPane(
     }
     for (const button of context.dom.all(
       context.dom.document,
-      ".js-deploy-apps"
+      ".js-plan-deployment"
     )) {
       bind(rows, button, "click", () => {
         const name = button.getAttribute("data-env") ?? "";
         context.nav.assign(
-          `/?page=deploying${name ? `&env=${encodeURIComponent(name)}` : ""}`
+          `/?page=planned${name ? `&env=${encodeURIComponent(name)}` : ""}`
         );
       });
     }

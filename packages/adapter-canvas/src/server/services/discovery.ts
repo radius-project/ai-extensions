@@ -16,6 +16,8 @@ export interface DiscoveryResult {
 export interface DiscoveryRequest {
   subscriptionId?: string;
   provider?: string;
+  resourceGroup?: string;
+  cluster?: string;
 }
 
 export interface DiscoveryDependencies {
@@ -25,7 +27,32 @@ export interface DiscoveryDependencies {
     options: { timeout: number }
   ): Promise<string>;
   isUuid(value: unknown): boolean;
+  createTemporaryKubeconfig(): {
+    readonly path: string;
+    remove(): void;
+  };
 }
+
+const AZURE_RESOURCE_GROUP_PATTERN =
+  /^(?=.{1,90}$)[A-Za-z0-9._()-]*[A-Za-z0-9_()-]$/;
+const AKS_CLUSTER_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?$/;
+
+// One budget for every `az` query this service issues. On Windows the Azure CLI
+// is an `az.cmd` batch shim that cmd.exe starts through a fresh Python
+// interpreter, so a trivial call costs ~24s before it does any work. The old
+// per-call budgets (20s for the credential fetch, 30s for the list queries) were
+// set from Unix timings: 20s killed `az aks get-credentials` with SIGTERM and no
+// output on every Windows run, which emptied the Namespace picker, and 30s left
+// the list queries only ~6s of margin on the same measurement. 45s is ~1.9x the
+// measured worst case, which absorbs a cold interpreter start on a loaded
+// machine while still bounding each child process. These budgets are sequential:
+// a selected-cluster request can wait at most 145s without a subscription context
+// switch, or 155s with one, if every child exhausts its budget.
+const AZURE_CLI_TIMEOUT_MS = 45000;
+
+// The measured namespace listing completes in about 0.5s, so 10s retains ample
+// headroom even when the Windows process adapter launches kubectl through cmd.exe.
+const KUBECTL_TIMEOUT_MS = 10000;
 
 function record(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -80,13 +107,34 @@ export async function discoverResources(
       error: `Invalid subscriptionId "${data.subscriptionId}" (expected a GUID).`,
       clusters: [],
       resourceGroups: [],
-      namespaces: ["default"],
+      namespaces: [],
       vpcs: [],
       subnets: []
     };
   }
 
   if (data.provider === "azure") {
+    const resourceGroup = optionalString(data.resourceGroup).trim();
+    const cluster = optionalString(data.cluster).trim();
+    const invalidTarget =
+      (
+        resourceGroup !== "" &&
+        !AZURE_RESOURCE_GROUP_PATTERN.test(resourceGroup)
+      ) ?
+        "Invalid Azure resource group name."
+      : cluster !== "" && !AKS_CLUSTER_PATTERN.test(cluster) ?
+        "Invalid AKS cluster name."
+      : "";
+    if (invalidTarget !== "") {
+      return {
+        error: invalidTarget,
+        clusters: [],
+        resourceGroups: [],
+        namespaces: [],
+        vpcs: [],
+        subnets: []
+      };
+    }
     // Set tenant/subscription context before querying
     if (data.subscriptionId) {
       try {
@@ -97,7 +145,9 @@ export async function discoverResources(
         );
       } catch {
         // Best-effort: an unselectable subscription still gets queried below
-        // with an explicit `--subscription` argument.
+        // with an explicit `--subscription` argument. Deliberately keeps its own
+        // short budget rather than AZURE_CLI_TIMEOUT_MS, because its failure is
+        // already handled and a longer wait would only delay the real queries.
       }
     }
     const subArgs =
@@ -114,7 +164,7 @@ export async function discoverResources(
           "json",
           ...subArgs
         ],
-        { timeout: 30000 }
+        { timeout: AZURE_CLI_TIMEOUT_MS }
       );
       result.clusters = discoveryItems(JSON.parse(aksJson));
     } catch (e) {
@@ -134,7 +184,7 @@ export async function discoverResources(
           "json",
           ...subArgs
         ],
-        { timeout: 30000 }
+        { timeout: AZURE_CLI_TIMEOUT_MS }
       );
       result.resourceGroups = discoveryItems(JSON.parse(rgJson));
     } catch (e) {
@@ -142,43 +192,53 @@ export async function discoverResources(
       result.errors = result.errors || {};
       result.errors.resourceGroups = errorMessage(e).slice(0, 800);
     }
-    // If we got a cluster, try to get namespaces from it
-    if (result.clusters.length > 0) {
+    if (resourceGroup && cluster) {
+      const kubeconfig = dependencies.createTemporaryKubeconfig();
+      // Name the step unconditionally. The runner currently flattens process
+      // failures into Error, so this service cannot distinguish a timeout from
+      // authentication, authorization, connectivity, or target lookup failures.
+      let failedStep = "az aks get-credentials failed";
       try {
-        const rg =
-          result.resourceGroups.length > 0 ? result.resourceGroups[0].id : "";
-        const clusterName = result.clusters[0].id;
-        if (rg && clusterName) {
-          await dependencies.runCli(
-            "az",
-            [
-              "aks",
-              "get-credentials",
-              "--name",
-              clusterName,
-              "--resource-group",
-              rg,
-              "--overwrite-existing"
-            ],
-            { timeout: 20000 }
-          );
-          const nsJson = await dependencies.runCli(
-            "kubectl",
-            ["get", "namespaces", "-o", "jsonpath={.items[*].metadata.name}"],
-            { timeout: 10000 }
-          );
-          result.namespaces = nsJson
-            .replace(/"/g, "")
-            .split(" ")
-            .filter(Boolean);
-        } else {
-          result.namespaces = ["default", "kube-system", "radius-system"];
-        }
-      } catch {
-        result.namespaces = ["default", "kube-system", "radius-system"];
+        await dependencies.runCli(
+          "az",
+          [
+            "aks",
+            "get-credentials",
+            "--name",
+            cluster,
+            "--resource-group",
+            resourceGroup,
+            "--file",
+            kubeconfig.path,
+            "--overwrite-existing",
+            ...subArgs
+          ],
+          { timeout: AZURE_CLI_TIMEOUT_MS }
+        );
+        failedStep = "kubectl get namespaces failed";
+        const nsJson = await dependencies.runCli(
+          "kubectl",
+          [
+            "--kubeconfig",
+            kubeconfig.path,
+            "get",
+            "namespaces",
+            "-o",
+            "jsonpath={.items[*].metadata.name}"
+          ],
+          { timeout: KUBECTL_TIMEOUT_MS }
+        );
+        result.namespaces = nsJson.replace(/"/g, "").split(" ").filter(Boolean);
+      } catch (e) {
+        result.namespaces = [];
+        result.errors = result.errors || {};
+        result.errors.namespaces = `${failedStep}: ${errorMessage(e)}`.slice(
+          0,
+          800
+        );
+      } finally {
+        kubeconfig.remove();
       }
-    } else {
-      result.namespaces = ["default", "kube-system", "radius-system"];
     }
   } else {
     try {

@@ -27,13 +27,9 @@ Before invoking this skill:
 
 Open the canvas hub and use the deployed-application view:
 
-Before opening the canvas, confirm that a repository is attached to the current session. If none is attached, stop without creating state and ask: "Which configured repository should I delete the Radius deployment or environment from?" Retry from the beginning after the repository is available.
-
 1. Reuse the existing Radius canvas instanceId when one is open; otherwise use `radius-panel`: `open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "environment", repo: "<owner/repo>" } })`
 2. Select the environment (and, for a deployment delete, the deployed application).
 3. Click **Delete Deployment** to tear down the app, or use the environment's delete control to remove the GitHub environment. Live status streams until success / failure / timeout.
-
-> **Canvas not opening?** If `open_canvas` reports that the `radius` canvas is unavailable or failed to load, stop deletion and run `radius-fix-canvas-installation`. After repair, reload extensions or restart the app and retry. If the installed plugin files are missing or corrupt, respond: "The Radius plugin didn't load completely, so I can't show its view in the sidebar. Reinstalling usually fixes this: remove the Radius plugin from the Plugins settings page, add it again, then restart the Copilot app."
 
 The extension keeps the committed delete workflow files current before dispatching, so a run never executes a drifted copy.
 

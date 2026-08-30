@@ -1,4 +1,5 @@
 import { hasVerificationOperationMarker } from "./verification-run-identity.js";
+import { githubCredentialSourceLabel } from "./github-credential-source.js";
 
 export interface PullRequestState {
   branch: string;
@@ -31,20 +32,20 @@ export function hasWorkflowRunTrigger(workflow: unknown): boolean {
 
 export async function planCredentialVerification({
   targetRepo,
+  defaultBranch,
   prState,
   pullRequestUrl = "",
   verifyWorkflowPath = ".github/workflows/radius-verify-credentials.yml",
   dispatcherWorkflowPath = ".github/workflows/run-rad-commands.yml",
-  fetchFile,
-  resolveDefaultBranch
+  fetchFile
 }: {
   targetRepo: string;
+  defaultBranch: string;
   prState: PullRequestState | null;
   pullRequestUrl?: string;
   verifyWorkflowPath?: string;
   dispatcherWorkflowPath?: string;
   fetchFile: FetchFile;
-  resolveDefaultBranch: (repo: string) => Promise<string | null | undefined>;
 }): Promise<CredentialVerificationPlan> {
   if (!prState) {
     // The dispatch runs against the default branch here, so the workflow that
@@ -53,24 +54,21 @@ export async function planCredentialVerification({
     // declare it, and GitHub answers that with a 422 the journal reads as a
     // conclusive refusal — failing setup with a message about the dispatch
     // rather than the template.
-    const directBranch = (await resolveDefaultBranch(targetRepo)) || "main";
     const directWorkflow = await fetchFile(
       targetRepo,
       verifyWorkflowPath,
-      directBranch
+      defaultBranch
     );
     return {
       shouldDispatch: true,
-      ref: "",
-      defaultBranch: "",
+      ref: defaultBranch,
+      defaultBranch,
       pullRequestUrl: "",
       skipReason: "",
       supportsOperationMarker: hasVerificationOperationMarker(directWorkflow)
     };
   }
 
-  const defaultBranch =
-    (await resolveDefaultBranch(targetRepo)) || prState.base || "main";
   // `verifyExists` and `dispatcherChains` are questions about the default
   // branch: whether the workflow has landed, and whether merging would chain a
   // deploy off it. Marker support is a question about the ref the dispatch
@@ -132,4 +130,78 @@ export function buildVerifyWorkflowDispatchArgs({
     targetRepo,
     ...(ref ? ["--ref", ref] : [])
   ];
+}
+
+export function describeVerificationDispatch({
+  login,
+  credentialSource,
+  workflowFile,
+  targetRepo,
+  envName,
+  ref
+}: {
+  login: string;
+  credentialSource: "injected" | "keyring";
+  workflowFile: string;
+  targetRepo: string;
+  envName: string;
+  ref: string;
+}): string {
+  return (
+    `Credential verification dispatch is configured for @${login} using ${githubCredentialSourceLabel(credentialSource)}: ` +
+    `workflow "${workflowFile}", environment "${envName}", repository "${targetRepo}", ref "${ref}".`
+  );
+}
+
+export interface VerifyWorkflowRunIdentity {
+  runId: string;
+  runUrl: string;
+}
+
+export function parseVerifyWorkflowRunUrl(
+  stdout: string,
+  {
+    targetRepo,
+    host = "github.com"
+  }: {
+    targetRepo: string;
+    host?: string;
+  }
+): VerifyWorkflowRunIdentity {
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length !== 1) {
+    throw new Error("GitHub CLI did not return exactly one workflow run URL.");
+  }
+  const [owner, repo, extra] = targetRepo.split("/");
+  if (!owner || !repo || extra) {
+    throw new Error("The target GitHub repository is invalid.");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(lines[0]);
+  } catch {
+    throw new Error("GitHub CLI returned a malformed workflow run URL.");
+  }
+  const expectedPath = `/${owner}/${repo}/actions/runs/`;
+  const runId =
+    parsed.pathname.startsWith(expectedPath) ?
+      parsed.pathname.slice(expectedPath.length)
+    : "";
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.hostname.toLowerCase() !== host.toLowerCase() ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    !/^[1-9]\d*$/.test(runId)
+  ) {
+    throw new Error(
+      "GitHub CLI returned a workflow run URL for an unexpected location."
+    );
+  }
+  return { runId, runUrl: parsed.toString() };
 }

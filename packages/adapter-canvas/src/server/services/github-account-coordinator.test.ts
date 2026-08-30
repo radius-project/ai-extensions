@@ -153,16 +153,27 @@ describe("GitHub account coordinator", () => {
   it("does not overwrite an account changed externally during work", async () => {
     let activeLogin = "original";
     const events: string[] = [];
-    const coordinator = createGitHubAccountCoordinator({
-      createExecutor: async (login) => executor(login, "keyring", true, events),
-      getActiveKeyringLogin: async () => activeLogin,
-      switchKeyringAccount: async (login) => {
-        activeLogin = login;
-        events.push(`switch:${login}`);
-        return { ok: true };
+    const coordinator = createGitHubAccountCoordinator(
+      {
+        createExecutor: async (login) =>
+          executor(login, "keyring", true, events),
+        getActiveKeyringLogin: async () => activeLogin,
+        switchKeyringAccount: async (login) => {
+          activeLogin = login;
+          events.push(`switch:${login}`);
+          return { ok: true };
+        },
+        resetIdentityCache: () => events.push("reset")
       },
-      resetIdentityCache: () => events.push("reset")
-    });
+      {
+        ghCommandPresentation: {
+          kind: "absolute",
+          shell: "posix",
+          executablePath: "/opt/Copilot Tools/gh",
+          installationNote: "Install GitHub CLI system-wide."
+        }
+      }
+    );
 
     const result = await coordinator.withSelectedAccount(
       "selected",
@@ -176,7 +187,10 @@ describe("GitHub account coordinator", () => {
     expect(result.restoration).toMatchObject({
       state: "changed_externally",
       originalLogin: "original",
-      currentLogin: "external"
+      currentLogin: "external",
+      guidance: expect.stringContaining(
+        "'/opt/Copilot Tools/gh' auth switch --hostname github.com --user original"
+      )
     });
     expect(events).not.toContain("switch:original");
     expect(events.at(-1)).toBe("reset");

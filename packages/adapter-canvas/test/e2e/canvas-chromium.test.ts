@@ -2,26 +2,29 @@ import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import {
+  azureDiscoveryCommands,
   baseCanvasState,
   CREDENTIAL_SENTINEL,
   defaultFakeCliScenario,
   expect,
   PLACEHOLDER_SECRET,
   PROFILE_NAME,
+  PROFILE_SUBSCRIPTION_ID,
   REPOSITORY,
   test,
   WORKTREE_BRANCH,
-  type CanvasHarness
+  type CanvasHarness,
+  type FakeCliCommand
 } from "./support/canvas-harness.js";
 import type { Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 // Bound to the production constants so the retry cadence is exercised at the
 // value the compiled browser bundle actually schedules, not a copy of it.
 import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
+import { GRAPH_RETRY_MS } from "../../src/browser/pages/graph-page.js";
 import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
-const VALID_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
 const SOURCE_FILE = "src/web/app.ts";
 const SOURCE_LINE = 12;
 const REMOVED_SOURCE_FILE = "src/web/worker.ts";
@@ -743,6 +746,156 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(status).toContainText("The graph comparison is current.");
   });
 
+  test("stops the modeled graph after a terminal modeling refusal @safety", async ({
+    page,
+    canvas
+  }) => {
+    await canvas.seedState({
+      ...baseCanvasState(canvas.workspacePath),
+      graphLoaded: true,
+      graphResources: [{ id: "app/web" }]
+    });
+    await page.clock.install();
+    let requests = 0;
+    const refusal = `${REPOSITORY} has no Dockerfile on ${WORKTREE_BRANCH}.`;
+    await page.route("**/api/load-graph", async (route) => {
+      requests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          appBicepUnsupported: true,
+          error: refusal
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+
+    await expect(page.locator("#graph-container .status.error")).toHaveText(
+      `Unable to refresh the application graph: ${refusal}`
+    );
+    await expect(
+      page.locator("#graph-container .status.error")
+    ).toHaveAttribute("role", "alert");
+    await expect(page.locator("#graph-refresh-status")).toBeHidden();
+    await expect(page.locator("#graph-guidance")).toBeHidden();
+    await expect(page.locator("#deploy-app-btn")).toBeDisabled();
+    await expect(page.locator("#progress-steps")).toHaveCount(0);
+    await page.clock.fastForward(GRAPH_RETRY_MS * 2);
+    expect(requests).toBe(1);
+  });
+
+  test("clears active modeled progress when a terminal refusal arrives @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let releaseRefusal!: () => void;
+    const refusalGate = new Promise<void>((resolve) => {
+      releaseRefusal = resolve;
+    });
+    let reportRequestReached!: () => void;
+    const requestReached = new Promise<void>((resolve) => {
+      reportRequestReached = resolve;
+    });
+    await page.route("**/api/load-graph", async (route) => {
+      reportRequestReached();
+      await refusalGate;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          appBicepUnsupported: true,
+          error: `${REPOSITORY} has no Dockerfile on ${WORKTREE_BRANCH}.`
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+    await requestReached;
+    await expect(page.locator("#graph-status")).toBeVisible();
+    await expect(page.locator("#progress-steps")).toBeVisible();
+    await expect(page.locator("#progress-steps")).toContainText(
+      "Check for an application model"
+    );
+
+    releaseRefusal();
+    await expect(page.locator("#graph-container .status.error")).toBeVisible();
+    await expect(page.locator("#graph-status")).toBeHidden();
+    await expect(page.locator("#progress-steps")).toHaveCount(0);
+  });
+
+  test("stops the planned graph after a terminal modeling refusal @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let requests = 0;
+    const refusal = `${REPOSITORY} has no Dockerfile on ${WORKTREE_BRANCH}.`;
+    await page.route("**/api/plan-graph", async (route) => {
+      requests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          appBicepUnsupported: true,
+          error: refusal
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "planned");
+
+    await expect(page.locator("#graph-container .status.error")).toHaveText(
+      refusal
+    );
+    await expect(page.locator("#plan-status")).toBeHidden();
+    await expect(page.locator("#plan-btn")).toBeDisabled();
+    await expect(page.locator("#progress-steps")).toHaveCount(0);
+    await page.clock.fastForward(PLAN_RETRY_MS * 2);
+    expect(requests).toBe(1);
+  });
+
+  test("stops the graph diff and hides stale summaries after a terminal modeling refusal @safety", async ({
+    page,
+    canvas
+  }) => {
+    await canvas.seedState({
+      ...baseCanvasState(canvas.workspacePath),
+      diffTargetRepo: REPOSITORY,
+      diffBase: DIFF_BASE_BRANCH,
+      diffHead: WORKTREE_BRANCH,
+      diffResources: [{ id: "app/web", diffStatus: "unchanged" }],
+      branches: [DIFF_BASE_BRANCH, WORKTREE_BRANCH]
+    });
+    await page.clock.install();
+    let requests = 0;
+    const refusal = `${REPOSITORY} has no Dockerfile on ${WORKTREE_BRANCH}.`;
+    await page.route("**/api/diff-branches", async (route) => {
+      requests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          appBicepUnsupported: true,
+          error: refusal
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph-diff");
+
+    await expect(page.locator("#graph-container .status.error")).toHaveText(
+      refusal
+    );
+    await expect(page.locator("#diff-status")).toBeHidden();
+    await expect(page.locator("#graph-diff-summary")).toBeHidden();
+    await expect(page.locator("#diff-progress-steps")).toBeEmpty();
+    await page.clock.fastForward(DIFF_RETRY_MS * 2);
+    expect(requests).toBe(1);
+  });
+
   // A retry that re-armed the expired wait would loop forever, so the request
   // that follows the wait must not ask the server to restart it.
   test("does not restart an expired model wait from a diff retry @safety", async ({
@@ -773,6 +926,15 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }) => {
+    await canvas.seedState({
+      ...baseCanvasState(canvas.workspacePath),
+      ghCommandPresentation: {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/opt/Copilot Tools/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    });
     // No account can supply the workflow scope, so the injected token stays in
     // effect and the acting account is the one the warning must name.
     await canvas.setGitHubKeyringScopes(["repo"]);
@@ -798,12 +960,53 @@ test.describe("Radius Canvas in Chromium", () => {
     // disclosure, and it is reachable by keyboard.
     const repair = page.locator("#env-gh-repair");
     await expect(repair).toBeVisible();
-    await expect(repair).toContainText("gh auth switch");
+    await expect(repair).toContainText("'/opt/Copilot Tools/gh' auth switch");
+    await expect(note).toContainText("Install GitHub CLI system-wide.");
     const runButton = repair.getByRole("button", { name: COMMAND_RUN_LABEL });
     await expect(repair.getByRole("button", { name: "Copy" })).toBeVisible();
     await runButton.focus();
     await expect(runButton).toBeFocused();
     await canvas.expectCliInvoked("gh");
+  });
+
+  test("plans a deployment for an existing environment from its row", async ({
+    page,
+    canvas
+  }) => {
+    await page.route("**/api/list-environments**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          environments: [
+            {
+              name: "fixture-environment",
+              provider: "azure",
+              status: "success"
+            }
+          ]
+        })
+      });
+    });
+    await gotoCanvas(page, canvas, "environment");
+
+    const row = page
+      .getByRole("row")
+      .filter({ hasText: "fixture-environment" });
+    const plan = row.getByRole("button", { name: "Plan Deployment" });
+    await expect(plan).toBeVisible();
+    await expect(row.getByRole("button", { name: "Deploy Apps" })).toHaveCount(
+      0
+    );
+    await expectNoWcagViolations(page);
+
+    await plan.focus();
+    await page.keyboard.press("Enter");
+
+    await expect(page).toHaveURL(/page=planned&env=fixture-environment(?:&|$)/);
+    await expect(page.locator("#planned-env")).toHaveValue(
+      "fixture-environment"
+    );
   });
 
   test("recovers from the scope warning when Re-check is activated by keyboard", async ({
@@ -882,6 +1085,99 @@ test.describe("Radius Canvas in Chromium", () => {
     await expectNoWcagViolations(page);
   });
 
+  test("queries namespaces from the selected AKS cluster and surfaces refresh failure", async ({
+    page,
+    canvas
+  }) => {
+    const scenario = defaultFakeCliScenario();
+    const selected = {
+      id: "aks-selected",
+      name: "AKS Selected",
+      resourceGroup: "rg-selected"
+    };
+    const resourceCommands: FakeCliCommand[] = azureDiscoveryCommands({
+      subscriptionId: PROFILE_SUBSCRIPTION_ID,
+      clusters: [
+        { id: "aks-first", name: "AKS First", resourceGroup: "rg-first" },
+        selected
+      ],
+      selected,
+      namespaces: ["default", "selected-team"]
+    });
+    scenario.commands.push(...resourceCommands);
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "environment");
+    await openEnvironmentWizard(page);
+
+    const resourceGroup = page.getByLabel("Resource Group", { exact: true });
+    const cluster = page.getByLabel("Cluster", { exact: true });
+    const namespace = page.locator("#azure-namespace-select");
+    await expect(resourceGroup).toContainText(selected.resourceGroup);
+    await resourceGroup.selectOption(selected.resourceGroup);
+    await expect(cluster.locator("option")).toHaveText([
+      "Select AKS cluster…",
+      selected.name,
+      "+ Enter custom..."
+    ]);
+    await expect(cluster).toHaveValue(selected.id);
+    await expect(namespace).toBeDisabled();
+    await expect(namespace).toContainText("selected-team");
+    await expect(namespace).toBeEnabled();
+    await expect(namespace).toHaveValue("default");
+    await namespace.selectOption("selected-team");
+
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "az" &&
+            call.args.includes("get-credentials") &&
+            call.args.includes("aks-selected") &&
+            call.args.includes("rg-selected") &&
+            call.args.includes("--file") &&
+            call.args.includes("--overwrite-existing") &&
+            call.args.includes(PROFILE_SUBSCRIPTION_ID)
+        )
+      )
+      .toBe(true);
+    expect(
+      (await canvas.cliCalls()).some(
+        (call) =>
+          call.tool === "az" &&
+          call.args.includes("get-credentials") &&
+          call.args.includes("aks-first")
+      )
+    ).toBe(false);
+
+    // Second to last by construction: the factory appends the credential and
+    // namespace commands in the order discovery issues them. Throwing rather
+    // than skipping keeps a shape change here from silently turning the refresh
+    // failure below into an assertion about a scenario that never changed.
+    const credentials = resourceCommands.at(-2);
+    if (!credentials?.argsPrefix?.includes("get-credentials")) {
+      throw new Error("discovery stubs no longer end with the namespace step");
+    }
+    credentials.exitCode = 1;
+    credentials.stderr = "selected cluster unavailable";
+    await canvas.setScenario(scenario);
+    await page.getByRole("button", { name: "Refresh" }).click();
+    await expect(namespace).toBeDisabled();
+    await expect(namespace).toHaveValue("");
+    await expect(namespace.locator("option")).toHaveText(
+      "Discovering namespaces…"
+    );
+
+    await expect(page.locator("#azure-discover-status")).toContainText(
+      "Discovery failed: az aks get-credentials failed: selected cluster unavailable"
+    );
+    await expect(namespace).toBeEnabled();
+    await expect(namespace.locator("option")).toHaveCount(2);
+    await expect(namespace).not.toContainText("default");
+    await expect(namespace).not.toContainText("selected-team");
+    await namespace.selectOption("__custom__");
+    await expect(page.locator("#azure-namespace-custom")).toBeVisible();
+  });
+
   test("verifies Azure credentials through the fake az boundary and keeps secret-shaped stderr out of the page @safety", async ({
     page,
     canvas
@@ -904,7 +1200,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.getByRole("button", { name: "New Credential Profile" }).click();
     await page.getByLabel("Profile Name").fill("failing-azure");
     await page.getByLabel("Tenant ID").fill(VALID_TENANT_ID);
-    await page.getByLabel("Subscription ID").fill(VALID_SUBSCRIPTION_ID);
+    await page.getByLabel("Subscription ID").fill(PROFILE_SUBSCRIPTION_ID);
     const verifyResponse = page.waitForResponse(
       (response) =>
         new URL(response.url()).pathname === "/api/verify-azure-login" &&
@@ -932,7 +1228,7 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBeEnabled();
     expect(bodyFor(canvas, "/api/verify-azure-login")).toEqual({
       tenantId: VALID_TENANT_ID,
-      subscriptionId: VALID_SUBSCRIPTION_ID
+      subscriptionId: PROFILE_SUBSCRIPTION_ID
     });
     expect(verifyPayload).not.toContain(PLACEHOLDER_SECRET);
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
@@ -1070,7 +1366,106 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
   });
 
-  test("retries restored verification through the selected account and exact run identity @safety", async ({
+  test("follows the latest setup detail until the user scrolls up", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let stepCount = 12;
+    const operationPayload = (stepCount: number) => ({
+      operation: {
+        operationId: "op_scroll_follow",
+        environment: "fixture-environment",
+        provider: "azure",
+        state: "running",
+        terminalState: null,
+        summary: "Creating fixture-environment…",
+        currentStage: "provision",
+        stages: [{ state: "running", label: "Provision" }],
+        steps: Array.from({ length: stepCount }, (_, index) => ({
+          state: index === stepCount - 1 ? "running" : "succeeded",
+          label: `Setup detail ${index + 1}`
+        })),
+        failure: null,
+        cleanup: null,
+        verification: null,
+        inputRequired: null,
+        startedAt: new Date(0).toISOString(),
+        endedAt: null,
+        terminal: null
+      }
+    });
+    await page.route("**/api/operations**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(operationPayload(stepCount))
+      });
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+    const details = page.locator("#env-progress-details");
+    const steps = page.locator("#env-progress-steps");
+    await expect(details).toBeVisible();
+    await steps.evaluate((element) => {
+      Reflect.set(Reflect.get(element, "style"), "maxHeight", "48px");
+    });
+    await details.locator("summary").click();
+    await expect
+      .poll(() =>
+        steps.evaluate(
+          (element) =>
+            Number(Reflect.get(element, "scrollHeight")) -
+            Number(Reflect.get(element, "scrollTop")) -
+            Number(Reflect.get(element, "clientHeight"))
+        )
+      )
+      .toBeLessThanOrEqual(4);
+
+    await steps.hover();
+    await page.mouse.wheel(0, -1000);
+    await expect
+      .poll(() =>
+        steps.evaluate((element) => Number(Reflect.get(element, "scrollTop")))
+      )
+      .toBe(0);
+    stepCount = 13;
+    await page.clock.fastForward(1500);
+    await expect(steps).toContainText("Setup detail 13");
+    await expect
+      .poll(() =>
+        steps.evaluate((element) => Number(Reflect.get(element, "scrollTop")))
+      )
+      .toBe(0);
+
+    await steps.hover();
+    await page.mouse.wheel(0, 1000);
+    await expect
+      .poll(() =>
+        steps.evaluate(
+          (element) =>
+            Number(Reflect.get(element, "scrollHeight")) -
+            Number(Reflect.get(element, "scrollTop")) -
+            Number(Reflect.get(element, "clientHeight"))
+        )
+      )
+      .toBeLessThanOrEqual(4);
+    stepCount = 14;
+    await page.clock.fastForward(1500);
+    await expect(steps).toContainText("Setup detail 14");
+    await expect
+      .poll(() =>
+        steps.evaluate(
+          (element) =>
+            Number(Reflect.get(element, "scrollHeight")) -
+            Number(Reflect.get(element, "scrollTop")) -
+            Number(Reflect.get(element, "clientHeight"))
+        )
+      )
+      .toBeLessThanOrEqual(4);
+  });
+
+  test("retries verification through the selected account and returned run URL @safety", async ({
     page,
     canvas
   }) => {
@@ -1086,7 +1481,7 @@ test.describe("Radius Canvas in Chromium", () => {
           "list",
           "--workflow=radius-verify-credentials.yml",
           "--limit",
-          "10",
+          "1",
           "--json",
           "databaseId",
           "--repo",
@@ -1111,7 +1506,7 @@ test.describe("Radius Canvas in Chromium", () => {
           WORKTREE_BRANCH
         ],
         env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: ""
+        stdout: `https://github.com/${REPOSITORY}/actions/runs/41`
       },
       {
         tool: "gh",
@@ -1204,8 +1599,165 @@ test.describe("Radius Canvas in Chromium", () => {
         })
       ]
     });
+    expect(
+      (await canvas.cliCalls()).filter(
+        (call) =>
+          call.tool === "gh" &&
+          call.args[0] === "run" &&
+          call.args.includes(
+            "databaseId,createdAt,displayTitle,event,headBranch"
+          )
+      )
+    ).toEqual([]);
     await expect(page.locator("body")).toContainText("Environment created");
     await expectNoWcagViolations(page);
+  });
+
+  test("stops an interrupted setup before offering exact-run cancellation by keyboard @safety", async ({
+    page,
+    canvas
+  }) => {
+    const operationId = await canvas.seedInterruptedVerification();
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      {
+        tool: "gh",
+        args: ["run", "view", "39", "--json", "status", "--repo", REPOSITORY],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: '{"status":"in_progress"}'
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          "--method",
+          "POST",
+          `repos/${REPOSITORY}/actions/runs/39/cancel`
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: ""
+      }
+    );
+    await canvas.setScenario(scenario);
+    await page.goto(
+      `${canvas.baseUrl}/?page=environment&operationId=${operationId}`
+    );
+
+    await expect(page.locator("#env-progress-title")).toContainText(
+      "Environment setup was interrupted"
+    );
+    await expect(
+      page.getByRole("button", { name: "Continue setup" })
+    ).toBeVisible();
+    const stop = page.getByRole("button", { name: "Stop setup" });
+    await expect(stop).toBeVisible();
+    await expect(stop).toHaveAttribute(
+      "title",
+      "Radius stops this setup. If its exact GitHub Actions run is still active, you can cancel it next."
+    );
+    await expect(stop).toHaveAccessibleDescription(
+      "Radius stops this setup. If its exact GitHub Actions run is still active, you can cancel it next."
+    );
+    await expect(
+      page.getByRole("button", { name: "Cancel workflow" })
+    ).toHaveCount(0);
+    await stop.focus();
+    await page.keyboard.press("Enter");
+
+    const cancelWorkflow = page.getByRole("button", {
+      name: "Cancel workflow"
+    });
+    await expect(cancelWorkflow).toBeVisible();
+    await expect(cancelWorkflow).toHaveAccessibleDescription(
+      "Radius cancels only the exact GitHub Actions run recorded for this setup."
+    );
+    await expect(
+      page.getByRole("button", { name: "Roll back created resources" })
+    ).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Exit setup" })).toHaveCount(
+      0
+    );
+    await expect(
+      page.getByRole("button", { name: "Abandon setup" })
+    ).toHaveAccessibleDescription(
+      "Radius closes this setup without deleting resources that may still be used by external work. You can start Create Environment again, but you may need to remove or reuse the remaining resources manually."
+    );
+    await cancelWorkflow.focus();
+    await page.keyboard.press("Enter");
+
+    const dialog = page.locator("#env-rollback-modal");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAccessibleName(
+      "Cancel the verification workflow?"
+    );
+    await expectNoWcagViolations(page);
+    const confirm = dialog.getByRole("button", { name: "Cancel workflow" });
+    await confirm.focus();
+    await page.keyboard.press("Enter");
+
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "gh" &&
+            JSON.stringify(call.args) ===
+              JSON.stringify([
+                "api",
+                "--method",
+                "POST",
+                `repos/${REPOSITORY}/actions/runs/39/cancel`
+              ])
+        )
+      )
+      .toBe(true);
+    await expect(
+      page.getByRole("button", { name: "Check workflow status" })
+    ).toBeVisible({ timeout: 15_000 });
+  });
+
+  test("abandons an interrupted setup without waiting for the active workflow @safety", async ({
+    page,
+    canvas
+  }) => {
+    const operationId = await canvas.seedInterruptedVerification();
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push({
+      tool: "gh",
+      args: ["run", "view", "39", "--json", "status", "--repo", REPOSITORY],
+      env: { GH_TOKEN: "fixture-repo-token" },
+      stdout: '{"status":"in_progress"}'
+    });
+    await canvas.setScenario(scenario);
+    await page.goto(
+      `${canvas.baseUrl}/?page=environment&operationId=${operationId}`
+    );
+
+    await page.getByRole("button", { name: "Stop setup" }).click();
+    const abandon = page.getByRole("button", { name: "Abandon setup" });
+    await expect(abandon).toBeVisible();
+    await abandon.click();
+
+    const dialog = page.locator("#env-rollback-modal");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAccessibleName(
+      "Abandon setup and leave remaining resources?"
+    );
+    await expect(dialog).toContainText("Radius will keep");
+    await expect(dialog).toContainText(
+      "the command you are confirming leaves it in place"
+    );
+    await expectNoWcagViolations(page);
+    await dialog.getByRole("button", { name: "Abandon setup" }).click();
+
+    await expect(page.locator("#env-progress-panel")).toBeHidden();
+    await expect(page.locator("#new-env-btn")).toBeVisible();
+    expect(
+      (await canvas.cliCalls()).some(
+        (call) =>
+          call.tool === "gh" &&
+          call.args.some((arg) => arg.endsWith("/actions/runs/39/cancel"))
+      )
+    ).toBe(false);
   });
 
   test("sends the worktree branch the page selected when Deploy is activated @safety", async ({
@@ -1576,37 +2128,152 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }) => {
-    let pings = 0;
+    let pingStatus = 200;
     let navigations = 0;
     page.on("framenavigated", (frame) => {
       if (frame === page.mainFrame()) navigations += 1;
     });
-    await gotoCanvas(page, canvas, "planned");
-    await expectNoWcagViolations(page);
-    await page.route("**/api/ping", async (route) => {
-      pings += 1;
+    const heartbeatUrl = `${canvas.baseUrl}/api/ping`;
+    await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    // Counting pings at the Playwright route handler is what made this test
+    // flaky (#541): route.fulfill() resolves once Chromium has been handed the
+    // response, not once the page has finished handling it, so the next focus
+    // could still hit the in-flight guard (heartbeat.ts:61) and be dropped.
+    // These browser-side counters bracket the real promise chain instead.
+    await page.addInitScript((url: string) => {
+      const originalFetch = globalThis.fetch;
+      let startedPings = 0;
+      let observedPings = 0;
+      let completedPings = 0;
+      const publish = (name: string, read: () => number): void => {
+        Object.defineProperty(globalThis, name, { get: read });
+      };
+      publish("__radiusStartedHeartbeatPings", () => startedPings);
+      publish("__radiusObservedHeartbeatPings", () => observedPings);
+      publish("__radiusCompletedHeartbeatPings", () => completedPings);
+      globalThis.fetch = async (...args): Promise<Response> => {
+        const input = args[0];
+        // A Request input stringifies to "[object Request]", which resolves
+        // against the base instead of throwing, so the wrapper would silently
+        // stop matching and every counter would flatline. Read the URL off
+        // each input shape explicitly.
+        const rawUrl =
+          typeof input === "string" ? input
+          : input instanceof URL ? input.href
+          : input.url;
+        if (new URL(rawUrl, url).href !== url) return originalFetch(...args);
+
+        startedPings += 1;
+        const response = await originalFetch(...args);
+        const ok = response.ok;
+        let observed = false;
+        Object.defineProperty(response, "ok", {
+          configurable: true,
+          get() {
+            if (!observed) {
+              observed = true;
+              observedPings += 1;
+              // `ok` is read first by isHttpResponse (context.ts:142) and again
+              // by heartbeat.ts:82. Everything left in the chain after those
+              // reads -- the .then, the .catch, and the .finally that clears
+              // the in-flight guard (heartbeat.ts:107-111) -- is a microtask,
+              // so a macrotask queued here cannot run before the guard is
+              // clear. If either reader stops touching `ok`, this counter stays
+              // at 0 and the polls below time out instead of passing by luck.
+              setTimeout(() => {
+                completedPings += 1;
+              }, 0);
+            }
+            return ok;
+          }
+        });
+        return response;
+      };
+    }, heartbeatUrl);
+    await page.route(heartbeatUrl, async (route) => {
       await route.fulfill({
-        status: pings <= 2 ? 503 : 200,
+        status: pingStatus,
         contentType: "application/json",
         body: "{}"
       });
     });
+    await gotoCanvas(page, canvas, "planned");
+    await expectNoWcagViolations(page);
+    // Load-bearing, not a duplicated line: the first load and the axe scan run
+    // on a live clock and consume an unpredictable share of the 5s heartbeat
+    // interval, so a ping can still be outstanding here. Reloading restarts the
+    // interval from a known point before the clock is frozen.
+    await gotoCanvas(page, canvas, "planned");
+    const currentTime = await page.evaluate<number>("Date.now()");
+    // pauseAt rejects a non-future time ("Cannot fast-forward to the past")
+    // because real time advances between the read above and this call, so the
+    // offset cannot be dropped. pauseAt also runs the timers it crosses, which
+    // can start an interval ping; settleHeartbeat below drains it before any
+    // baseline is read.
+    await page.clock.pauseAt(currentTime + 1_000);
+
+    const readCounter = async (name: string): Promise<number> =>
+      page.evaluate<number>(`window.${name}`);
+    // Quiescent means every started ping has also completed, i.e. heartbeat.ts
+    // has cleared `inFlight`. Pumping the paused clock lets the completion
+    // markers, which are macrotasks, run.
+    const settleHeartbeat = async (): Promise<void> => {
+      await expect
+        .poll(async () => {
+          await page.clock.runFor(0);
+          const started = await readCounter("__radiusStartedHeartbeatPings");
+          const completed = await readCounter(
+            "__radiusCompletedHeartbeatPings"
+          );
+          return started - completed;
+        })
+        .toBe(0);
+    };
+    await settleHeartbeat();
+
+    const overlay = page.locator("#radius-reconnect-overlay");
     const initialNavigations = navigations;
-    await page.evaluate("window.dispatchEvent(new Event('focus'))");
-    await expect.poll(() => pings).toBe(1);
-    await expect(page.locator("#radius-reconnect-overlay")).toBeHidden();
-    await page.evaluate("window.dispatchEvent(new Event('focus'))");
-    await expect.poll(() => pings).toBe(2);
-    await expect(page.locator("#radius-reconnect-overlay")).toBeVisible();
-    const recoveryNavigation = page.waitForNavigation({
-      waitUntil: "domcontentloaded"
-    });
+    const baselinePings = await readCounter("__radiusStartedHeartbeatPings");
+    const focusForPing = async (): Promise<void> => {
+      const beforeObserved = await readCounter(
+        "__radiusObservedHeartbeatPings"
+      );
+      const beforeCompleted = await readCounter(
+        "__radiusCompletedHeartbeatPings"
+      );
+      await page.evaluate("window.dispatchEvent(new Event('focus'))");
+      await expect
+        .poll(() => readCounter("__radiusObservedHeartbeatPings"))
+        .toBe(beforeObserved + 1);
+      await settleHeartbeat();
+      expect(await readCounter("__radiusCompletedHeartbeatPings")).toBe(
+        beforeCompleted + 1
+      );
+    };
+
+    pingStatus = 503;
+    await focusForPing();
+    await expect(overlay).toBeHidden();
+    await focusForPing();
+    await expect(overlay).toBeVisible();
+    expect(navigations - initialNavigations).toBe(0);
+    // Absolute, not a delta: with the clock paused these two focus pings are
+    // the only ones that may exist. A delta check absorbs a ping the test never
+    // asked for, which is the class of failure #541 started as.
+    expect(await readCounter("__radiusStartedHeartbeatPings")).toBe(
+      baselinePings + 2
+    );
+
+    pingStatus = 200;
+    // Dispatching from a timer keeps page.evaluate from racing the execution
+    // context teardown that the recovery reload causes. The clock is paused, so
+    // the runFor(0) on the next line is what actually fires that timer; the two
+    // lines have to stay together.
     await page.evaluate(
       "setTimeout(() => window.dispatchEvent(new Event('focus')), 0)"
     );
-    await recoveryNavigation;
-    await expect.poll(() => pings).toBe(3);
+    await page.clock.runFor(0);
+    await page.waitForURL(`${canvas.baseUrl}/?page=planned`);
     await expect.poll(() => navigations - initialNavigations).toBe(1);
-    await expect(page).toHaveURL(/page=planned/);
   });
 });

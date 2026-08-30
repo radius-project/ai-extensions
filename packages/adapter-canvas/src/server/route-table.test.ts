@@ -94,6 +94,8 @@ const productionHandlers = {
     acquireForRetry: () => ({ ok: true }),
     persistOperations: () => Promise.resolve(),
     checkPullRequestMerge: () => Promise.resolve({ state: "open" }),
+    inspectVerificationWorkflow: () => Promise.resolve("inactive"),
+    cancelVerificationWorkflow: () => Promise.resolve("inactive"),
     schedule: () => true,
     invalidateEnvironmentListing: () => {}
   }),
@@ -151,6 +153,10 @@ const productionHandlers = {
     runAz: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
     runCli: () => Promise.resolve(""),
     isUuid: () => false,
+    createTemporaryKubeconfig: () => ({
+      path: "/tmp/radius-kubeconfig-test",
+      remove: () => {}
+    }),
     parseServedReposFromSubjects: () => []
   }),
   ...createAzureAutoSetupRoutes(createAzureAutoSetupTestDependencies()),
@@ -211,6 +217,7 @@ const productionHandlers = {
   }),
   ...createRemediationRoutes(
     productionRemediationDependencies({
+      presentRemediation: (remediation) => remediation,
       runSessionPrompt: () => Promise.resolve({ status: 200 }),
       errorMessage: (error) => String(error)
     })
@@ -396,6 +403,7 @@ const productionHandlers = {
     tempFile: { write: () => "", remove: () => {} },
     setCanonicalEnvironment: () => {},
     recordGitHubEnvironment: () => {},
+    recordGitHubEnvironmentVariable: () => {},
     promoteCreatedGitHubEnvironment: () => false,
     envListCacheDelete: () => {},
     ociStateBackend: "oci",
@@ -465,6 +473,7 @@ describe("server route ownership boundary", () => {
       "POST /api/operations/:operationId/abandon",
       "POST /api/operations/:operationId/stop",
       "POST /api/operations/:operationId/continue",
+      "POST /api/operations/:operationId/cancel-workflow",
       "POST /api/operations/:operationId/rollback",
       "POST /api/operations/:operationId/exit",
       "POST /api/operations/:operationId/retry/:retryKind"

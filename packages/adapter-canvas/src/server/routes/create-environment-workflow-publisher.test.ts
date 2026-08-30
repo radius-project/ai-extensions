@@ -227,6 +227,26 @@ describe("buildManualRoleAssignmentGuidance", () => {
 });
 
 describe("describeWorkflowCommitFailure", () => {
+  it("uses the bundled GitHub CLI path for workflow-scope guidance", () => {
+    const failure = describeWorkflowCommitFailure(
+      "verify",
+      VERIFY_WORKFLOW_PATH,
+      "octo/app",
+      "missing workflow scope",
+      {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/opt/Copilot Tools/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(failure.error).toContain(
+      "'/opt/Copilot Tools/gh' auth refresh -h github.com -s workflow"
+    );
+    expect(failure.error).toContain("Install GitHub CLI system-wide.");
+  });
+
   it("points at the missing token scope when that is what gh reported", () => {
     const failure = describeWorkflowCommitFailure(
       "verify",

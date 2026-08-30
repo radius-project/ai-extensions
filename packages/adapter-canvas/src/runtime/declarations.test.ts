@@ -158,6 +158,16 @@ describe("RU-03: tool declarations", () => {
     }
   });
 
+  it("documents both generate-app response shapes", () => {
+    const declaration = RADIUS_TOOL_DECLARATIONS.find(
+      (tool) => tool.name === "radius_generate_app"
+    )!;
+
+    expect(declaration.description).toContain("returns one JSON object");
+    expect(declaration.description).toContain("optional ambiguity brief");
+    expect(declaration.description).toContain("returns a Markdown refusal");
+  });
+
   it("requires repo/baseBranch/headBranch on radius_generate_pr_diff_markdown", () => {
     const decl = RADIUS_TOOL_DECLARATIONS.find(
       (t) => t.name === "radius_generate_pr_diff_markdown"

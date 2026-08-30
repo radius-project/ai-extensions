@@ -192,6 +192,28 @@ describe("canvas pages over real loopback HTTP", () => {
     }
   );
 
+  it("serves stable graph context markers for terminal browser failures", async () => {
+    resetState({
+      contextRepo: "octo/app",
+      graphTargetRepo: "octo/app",
+      graphBranch: "feature/x",
+      graphLoaded: true,
+      graphResources: [{ id: "app/web" }],
+      diffTargetRepo: "octo/app",
+      diffBase: "main",
+      diffHead: "feature/x",
+      diffResources: [{ id: "app/web", diffStatus: "unchanged" }]
+    });
+
+    const graph = await get("/?page=graph");
+    const diff = await get("/?page=graph-diff");
+
+    expect(graph.status).toBe(200);
+    expect(graph.body).toContain('id="graph-guidance"');
+    expect(diff.status).toBe(200);
+    expect(diff.body).toContain('id="graph-diff-summary"');
+  });
+
   it("falls back to the environment page for a page value it does not know", async () => {
     resetState({ contextRepo: "octo/app" });
 
@@ -265,7 +287,9 @@ describe("canvas pages over real loopback HTTP", () => {
     const response = await get("/?page=graph");
 
     expect(response.body).not.toMatch(/<script[^>]+src=/);
-    expect(response.body).not.toContain('rel="stylesheet"');
+    // Matched as an element, not a substring: the inlined React bundle carries
+    // a `link[rel="stylesheet"]` query selector of its own.
+    expect(response.body).not.toMatch(/<link[^>]+rel="stylesheet"/);
     expect(response.body).not.toContain("unpkg.com");
   });
 

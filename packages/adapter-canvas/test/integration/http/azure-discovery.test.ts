@@ -7,6 +7,11 @@ import {
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createAzureDiscoveryRoutes } from "../../../src/server/routes/azure-discovery.js";
+import {
+  azureDiscoveryContract,
+  commandLine,
+  temporaryKubeconfigDouble
+} from "../../support/azure-discovery-contract.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 
@@ -34,8 +39,15 @@ interface AzResult {
 }
 
 const CLI = {
-  aks: "az aks list --query [].{id:name, name:name, resourceGroup:resourceGroup} -o json",
-  groups: "az group list --query [].{id:name, name:name} -o json",
+  aks: commandLine(azureDiscoveryContract().aksList),
+  groups: commandLine(azureDiscoveryContract().groupList),
+  credentials: (cluster: string, rg: string) =>
+    commandLine(
+      azureDiscoveryContract({ cluster, resourceGroup: rg }).getCredentials!
+    ),
+  namespaces: commandLine(
+    azureDiscoveryContract({ cluster: "c", resourceGroup: "rg" }).namespaces!
+  ),
   eks: "aws eks list-clusters --query clusters --output json",
   vpcs: "aws ec2 describe-vpcs --query Vpcs[].{id:VpcId, name:VpcId} --output json",
   subnets:
@@ -79,6 +91,7 @@ function start(): {
         return Promise.resolve(scripted);
       },
       isUuid,
+      createTemporaryKubeconfig: () => temporaryKubeconfigDouble(),
       parseServedReposFromSubjects: (subjects) =>
         parseServedReposFromSubjects(subjects as Iterable<unknown>)
     })
@@ -204,28 +217,41 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
     const { cli } = start();
     cli.set(
       CLI.aks,
-      JSON.stringify([{ id: "aks-1", name: "aks-1", resourceGroup: "rg-1" }])
+      JSON.stringify([
+        { id: "aks-first", name: "aks-first", resourceGroup: "rg-first" },
+        {
+          id: "aks-selected",
+          name: "aks-selected",
+          resourceGroup: "rg-selected"
+        }
+      ])
     );
-    cli.set(CLI.groups, JSON.stringify([{ id: "rg-1", name: "rg-1" }]));
     cli.set(
-      "az aks get-credentials --name aks-1 --resource-group rg-1 --overwrite-existing",
-      ""
+      CLI.groups,
+      JSON.stringify([
+        { id: "rg-first", name: "rg-first" },
+        { id: "rg-selected", name: "rg-selected" }
+      ])
     );
-    cli.set(
-      "kubectl get namespaces -o jsonpath={.items[*].metadata.name}",
-      '"default" "radius-system"'
-    );
+    cli.set(CLI.credentials("aks-selected", "rg-selected"), "");
+    cli.set(CLI.namespaces, '"default" "radius-system"');
     const entry = await container!.getOrCreate("panel-a");
 
     const response = await fetch(`${entry.baseUrl}/api/discover`, {
       method: "POST",
-      body: JSON.stringify({ provider: "azure" })
+      body: JSON.stringify({
+        provider: "azure",
+        resourceGroup: "rg-selected",
+        cluster: "aks-selected"
+      })
     });
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/json");
     expect(await response.text()).toBe(
-      '{"clusters":[{"id":"aks-1","name":"aks-1","resourceGroup":"rg-1"}],' +
-        '"resourceGroups":[{"id":"rg-1","name":"rg-1","resourceGroup":""}],' +
+      '{"clusters":[{"id":"aks-first","name":"aks-first","resourceGroup":"rg-first"},' +
+        '{"id":"aks-selected","name":"aks-selected","resourceGroup":"rg-selected"}],' +
+        '"resourceGroups":[{"id":"rg-first","name":"rg-first","resourceGroup":""},' +
+        '{"id":"rg-selected","name":"rg-selected","resourceGroup":""}],' +
         '"namespaces":["default","radius-system"],"vpcs":[],"subnets":[]}'
     );
 
@@ -234,7 +260,7 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
     expect(got.status).toBe(404);
   });
 
-  it("answers 200 with the refusal shape for a bad subscriptionId and a bad body", async () => {
+  it("answers 200 with the refusal shape for unsafe discovery inputs and a bad body", async () => {
     // Nothing is scripted on `runCli`, so any spawn attempt throws: both of
     // these must be refused before the CLI is reached.
     start();
@@ -248,7 +274,21 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
     expect(refused.headers.get("content-type")).toBe("application/json");
     expect(await refused.text()).toBe(
       '{"error":"Invalid subscriptionId \\"x&calc\\" (expected a GUID).",' +
-        '"clusters":[],"resourceGroups":[],"namespaces":["default"],"vpcs":[],"subnets":[]}'
+        '"clusters":[],"resourceGroups":[],"namespaces":[],"vpcs":[],"subnets":[]}'
+    );
+
+    const unsafeTarget = await fetch(`${entry.baseUrl}/api/discover`, {
+      method: "POST",
+      body: JSON.stringify({
+        provider: "azure",
+        resourceGroup: 'rg" & whoami & "',
+        cluster: "-aks-option"
+      })
+    });
+    expect(unsafeTarget.status).toBe(200);
+    expect(await unsafeTarget.text()).toBe(
+      '{"error":"Invalid Azure resource group name.",' +
+        '"clusters":[],"resourceGroups":[],"namespaces":[],"vpcs":[],"subnets":[]}'
     );
 
     const malformed = await fetch(`${entry.baseUrl}/api/discover`, {
