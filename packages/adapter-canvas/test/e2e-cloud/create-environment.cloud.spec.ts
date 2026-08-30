@@ -1,4 +1,5 @@
-// Stage one of the cloud journey: creating an environment for real.
+// The cloud journey's environment lifecycle: creating an environment for real,
+// then deleting it.
 //
 // Everything below runs against a real Azure subscription and a real GitHub
 // repository. Nothing is faked, which is the point — the fake-CLI suite already
@@ -14,14 +15,23 @@
 //    cloud result.
 // 2. **It contains no logic.** Every decision — the skip gate, the expected
 //    federated-credential subjects, which workflow publication path was taken,
-//    whether the GitHub Environment names the right identity — lives in
-//    `support/create-environment-journey.ts` behind unit tests, because a rule
+//    whether the GitHub Environment names the right identity, whether a delete
+//    actually succeeded — lives in `support/create-environment-journey.ts` or
+//    `support/delete-environment-journey.ts` behind unit tests, because a rule
 //    written here could only ever be checked by a nightly run against real
 //    infrastructure.
 //
-// Stage one only: create. Deploy and delete are later stages and are not
-// started here, so this file never destroys anything the product made — the
-// fixture's own reclamation does that, after the assertions.
+// The stages are ordered and share one fixture, so the describe runs serially:
+// stage two deletes what stage one created, and a stage-one failure must skip
+// stage two rather than delete an environment that was never built. Deploying an
+// application, and deleting that deployment, are a separate lifecycle and are not
+// started here.
+//
+// Stage two proves the inverse of stage one, which is the only reason either
+// means much: the same Environment the product created is the one it removes.
+// Absence on its own would prove nothing — a product that never created the
+// Environment would satisfy it just as readily — so the fixture refuses to make
+// an absence assertion until this run has observed the artifact present.
 import { expect, test, type Page } from "@playwright/test";
 import { CanvasHarness } from "../e2e/support/canvas-harness.js";
 import {
@@ -54,6 +64,11 @@ import {
   workflowFallbackBranchPrefix
 } from "./support/create-environment-journey.js";
 import {
+  DELETE_ENVIRONMENT_PATH,
+  describeProblems,
+  findDeleteEnvironmentSuccessProblems
+} from "./support/delete-environment-journey.js";
+import {
   describeUnprovisionedFixtureRepository,
   isFixtureRepositoryProvisioned,
   resolveFixtureLocation
@@ -68,6 +83,11 @@ const KUBERNETES_NAMESPACE = "default";
 // workflows. Twenty minutes is generous rather than optimistic: a timeout here
 // reports as a product failure, so it must never be the first thing to give.
 const OPERATION_TIMEOUT_MS = 20 * 60 * 1000;
+
+// Deleting a free environment is one `gh api --method DELETE` behind a
+// confirmation dialog, so it is bounded far more tightly than creation. The
+// budget covers GitHub's own propagation rather than any product work.
+const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
 
 const gate = evaluateCreateEnvironmentGate({
   cloudE2eFlag: process.env.RADIUS_CLOUD_E2E,
@@ -134,7 +154,7 @@ async function createCredentialProfile(
   await expect(page.locator("#cred-landing")).toBeVisible();
 }
 
-test.describe("Radius Canvas creates an environment against real cloud", () => {
+test.describe("Radius Canvas manages an environment's lifecycle against real cloud", () => {
   test.describe.configure({ mode: "serial" });
   test.skip(!gate.enabled, skipReason);
 
@@ -162,10 +182,16 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
     fixture = undefined;
     if (!current) return;
     try {
+      // Stage two deletes the GitHub Environment, so on a complete run this
+      // reclaims only what the product leaks: the Entra application, its
+      // credentials and its role assignment, which delete-environment does not
+      // yet remove. On a run that failed before stage two it still reclaims the
+      // Environment as well. `dispose()` then removes the fixture's own Azure
+      // resources, which it names directly rather than deriving from GitHub.
       const reclaimed = await current.reclaimLeakedProductArtifacts();
       if (reclaimed.length > 0)
         console.info(
-          `Cleaned up this stage-one run's product-created artifacts: ${reclaimed.join(", ")}.`
+          `Cleaned up this run's product-created artifacts: ${reclaimed.join(", ")}.`
         );
     } finally {
       await current.dispose();
@@ -374,6 +400,95 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
           defaultBranch: cloud.defaultBranch
         })
       ).toBe("committed");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  test("deletes the GitHub Environment it created", async ({
+    page
+  }, testInfo) => {
+    testInfo.setTimeout(DELETE_TIMEOUT_MS + 5 * 60 * 1000);
+    const cloud = fixture;
+    if (!cloud) throw new Error("The cloud fixture was not created.");
+
+    const harness = await CanvasHarness.create({
+      page,
+      title: "cloud-delete-environment",
+      mode: "cloud",
+      workspacePath: cloud.workspacePath,
+      initialPage: "environment"
+    });
+
+    try {
+      await harness.seedState(
+        cloudCanvasState({
+          repository: cloud.repository,
+          branch: cloud.defaultBranch,
+          workspacePath: cloud.workspacePath
+        })
+      );
+      await page.goto(`${harness.baseUrl}/?page=environment`);
+      await page.waitForLoadState("domcontentloaded");
+
+      // The row has to come from the product's own `/api/list-environments`.
+      // Posting the delete directly would prove the route works while leaving
+      // an environment the page cannot even see undeleted.
+      const deleteButton = page.locator(
+        `.js-delete-env[data-env="${cloud.environmentName}"]`
+      );
+      await expect(deleteButton).toBeVisible({ timeout: DELETE_TIMEOUT_MS });
+      await deleteButton.click();
+
+      await expect(page.locator("#env-confirm-title")).toHaveText(
+        "Delete environment?"
+      );
+      await expect(page.locator("#env-confirm-message")).toContainText(
+        cloud.environmentName
+      );
+
+      const deleteResponse = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === DELETE_ENVIRONMENT_PATH &&
+          response.request().method() === "POST"
+      );
+      await page.locator("#env-confirm-ok").click();
+      const response = await deleteResponse;
+      const problems = findDeleteEnvironmentSuccessProblems({
+        status: response.status(),
+        payload: (await response.json()) as unknown,
+        environmentName: cloud.environmentName
+      });
+      expect(
+        problems,
+        describeProblems(
+          problems,
+          "The product refused to delete a free environment:"
+        )
+      ).toEqual([]);
+
+      // The product's own report that it believes the environment is gone.
+      await expect(deleteButton).toHaveCount(0, { timeout: DELETE_TIMEOUT_MS });
+
+      // The proof. GitHub is asked directly, and the fixture refuses to answer
+      // unless stage one observed this same Environment present first.
+      await cloud.assertGitHubEnvironmentAbsent();
+
+      // Deleting an environment currently removes the GitHub Environment and
+      // nothing else, so the Entra application stage one created, its two
+      // federated credentials and its role assignment are all orphaned. That is
+      // the bug PR #398, "Clean up cloud state on environment deletion", fixes.
+      // Asserting the leak here would encode it as the contract and invert the
+      // day #398 merges, so the mirrors that would prove the cleanup are built
+      // and unit-tested but left uncalled. Once #398 is in, delete this comment
+      // and add, using stage one's `app.appId` and `principalId`:
+      //   await cloud.assertAppRegistrationAbsent();
+      //   for (const subject of subjects.required)
+      //     await cloud.assertFederatedCredentialAbsent(subject);
+      //   await cloud.assertRoleAssignmentAbsent(principalId);
+      // The fixture's own reclamation in `dispose()` still runs either way; it
+      // works from Azure resource names, not from the GitHub Environment, so
+      // this stage neither replaces it nor breaks it.
     } finally {
       await harness.cleanup();
     }

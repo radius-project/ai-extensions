@@ -18,7 +18,7 @@
 //   Those two share a variable name, and confusing them would make every later
 //   stage authenticate as the privileged runner identity and pass.
 import type { CanvasState } from "../../../src/shared.js";
-import { describeError } from "./cloud-command-port.js";
+import { describeError, isGitHubApiNotFound } from "./cloud-command-port.js";
 
 /** The verify workflow the product publishes, named as a stable anchor. */
 export const VERIFY_WORKFLOW_PATH =
@@ -651,8 +651,7 @@ export function readWorkflowDirectory(
   context: string
 ): string[] {
   if (result.code !== 0) {
-    if (/HTTP 404|Not Found/i.test(`${result.stderr}\n${result.stdout}`))
-      return [];
+    if (isGitHubApiNotFound(result)) return [];
     throw new Error(
       `${context} failed with exit code ${result.code}: ${(
         result.stderr || result.stdout
