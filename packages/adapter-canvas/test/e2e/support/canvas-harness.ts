@@ -20,6 +20,15 @@ export const E2E_TMP_ROOT = path.resolve(
   ".tmp"
 );
 const WINDOWS_SHIM_ROOT = path.join(E2E_TMP_ROOT, ".windows-shim");
+// packages/adapter-canvas/test/e2e/support -> repository root.
+const REPOSITORY_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
+  "..",
+  ".."
+);
 export const CREDENTIAL_STORE_PATH = path.join(
   E2E_TMP_ROOT,
   "credential-cache.json"
@@ -150,9 +159,19 @@ export interface HarnessProcessPlanInput {
 
 export interface HarnessProcessPlan {
   readonly env: Record<string, string>;
+  /** Variables the caller must delete; omitting them would leave a stale value. */
+  readonly unsetEnv: readonly string[];
   readonly useFakeCli: boolean;
   readonly interceptFetch: boolean;
 }
+
+const FAKE_CLI_ENV_KEYS = [
+  "RADIUS_FAKE_CLI_SCRIPT",
+  "RADIUS_FAKE_CLI_SCENARIO",
+  "RADIUS_FAKE_CLI_LOG",
+  "RADIUS_RAD_BINARY",
+  "RADIUS_RAD_SKIP_VERSION_CHECK"
+] as const;
 
 /**
  * Resolves every process-level difference between the two modes in one place,
@@ -173,12 +192,23 @@ export function planHarnessProcess(
       throw new Error(
         "Cloud mode requires GH_TOKEN. Export a token for the fixture repository before running the cloud suite."
       );
+    // A leaked fake-mode token would authenticate nothing while looking real,
+    // so cloud mode fails closed rather than reporting an opaque gh failure.
+    if (token === PLACEHOLDER_SECRET)
+      throw new Error(
+        "Cloud mode received the fake-mode placeholder token. Export a real token for the fixture repository."
+      );
     // PATH is left alone so the real tools resolve, and the fake-CLI variables
-    // are omitted rather than blanked: a stale value would silently redirect a
-    // real invocation back into the shim.
+    // are unset rather than blanked: an inherited value would silently redirect
+    // a real invocation back into the shim.
     env.GH_TOKEN = token;
     env.GITHUB_TOKEN = token;
-    return { env, useFakeCli: false, interceptFetch: false };
+    return {
+      env,
+      unsetEnv: [...FAKE_CLI_ENV_KEYS],
+      useFakeCli: false,
+      interceptFetch: false
+    };
   }
 
   if (!input.fakeScript || !input.scenarioPath || !input.cliLogPath)
@@ -201,7 +231,21 @@ export function planHarnessProcess(
   // The shim has no version to report. A real `rad` must answer the product's
   // version check, so cloud mode deliberately leaves this unset.
   env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
-  return { env, useFakeCli: true, interceptFetch: true };
+  return { env, unsetEnv: [], useFakeCli: true, interceptFetch: true };
+}
+
+/**
+ * Applies a plan to a process environment. Deleting `unsetEnv` before the
+ * assignment is the point: an inherited `RADIUS_FAKE_CLI_*` value would
+ * otherwise survive into cloud mode and redirect a real invocation into the
+ * shim, and an omitted key cannot clear one.
+ */
+export function applyHarnessProcessPlan(
+  plan: HarnessProcessPlan,
+  env: NodeJS.ProcessEnv = process.env
+): void {
+  for (const key of plan.unsetEnv) delete env[key];
+  Object.assign(env, plan.env);
 }
 
 export interface HarnessWorkspacePlan {
@@ -225,10 +269,23 @@ export function assertFakeModeAvailable(
     );
 }
 
+function isSameOrInside(parent: string, candidate: string): boolean {
+  const relative = path.relative(parent, candidate);
+  return (
+    relative === "" ||
+    (!relative.startsWith("..") && !path.isAbsolute(relative))
+  );
+}
+
 export function resolveHarnessWorkspace(input: {
   mode: CanvasHarnessMode;
   rootDir: string;
   workspacePath?: string;
+  /**
+   * The checkout running the suite. A cloud harness commits, pushes, and
+   * deploys from its workspace, so the two must be disjoint.
+   */
+  repositoryRoot?: string;
 }): HarnessWorkspacePlan {
   if (input.mode === "cloud") {
     if (!input.workspacePath)
@@ -239,7 +296,18 @@ export function resolveHarnessWorkspace(input: {
       throw new Error(
         `Cloud mode requires an absolute workspacePath; received "${input.workspacePath}".`
       );
-    return { path: input.workspacePath, createRadiusDirectory: false };
+    const workspacePath = path.resolve(input.workspacePath);
+    const repositoryRoot =
+      input.repositoryRoot ? path.resolve(input.repositoryRoot) : undefined;
+    if (
+      repositoryRoot &&
+      (isSameOrInside(repositoryRoot, workspacePath) ||
+        isSameOrInside(workspacePath, repositoryRoot))
+    )
+      throw new Error(
+        `Cloud mode refuses to run against the checkout under test; workspacePath "${workspacePath}" overlaps "${repositoryRoot}". Clone the fixture repository to a disposable directory instead.`
+      );
+    return { path: workspacePath, createRadiusDirectory: false };
   }
   if (input.workspacePath)
     throw new Error("workspacePath is only supported in cloud mode.");
@@ -247,6 +315,25 @@ export function resolveHarnessWorkspace(input: {
     path: path.join(input.rootDir, "workspace"),
     createRadiusDirectory: true
   };
+}
+
+/**
+ * The caller owns the clone's lifecycle: the harness never deletes or resets a
+ * directory it did not create. Cloud mode still refuses to start against a
+ * directory that is not a git worktree, because a real `gh` or `rad` run there
+ * would fail far from the cause.
+ */
+export async function assertCloudWorkspaceClone(
+  workspacePath: string,
+  access: (target: string) => Promise<void> = (target) => fs.access(target)
+): Promise<void> {
+  try {
+    await access(path.join(workspacePath, ".git"));
+  } catch {
+    throw new Error(
+      `Cloud mode requires workspacePath to be a git clone; "${workspacePath}" has no .git entry.`
+    );
+  }
 }
 
 export interface RecordedRequest {
@@ -262,7 +349,11 @@ interface CanvasHarnessOptions {
   initialPage?: string;
   /** Defaults to "fake", so every existing suite is unaffected. */
   mode?: CanvasHarnessMode;
-  /** Cloud mode only: an absolute path to a real clone to run against. */
+  /**
+   * Cloud mode only: an absolute path to a real clone to run against, disjoint
+   * from the checkout running the suite. The caller owns its lifecycle; the
+   * harness never deletes or resets a directory it did not create.
+   */
   workspacePath?: string;
 }
 
@@ -1166,9 +1257,11 @@ export class CanvasHarness {
       const workspace = resolveHarnessWorkspace({
         mode,
         rootDir: rootParent,
-        workspacePath: options.workspacePath
+        workspacePath: options.workspacePath,
+        repositoryRoot: REPOSITORY_ROOT
       });
       const workspacePath = workspace.path;
+      if (mode === "cloud") await assertCloudWorkspaceClone(workspacePath);
       await fs.mkdir(fakeBin, { recursive: true });
       await fs.mkdir(ghConfig, { recursive: true });
       if (workspace.createRadiusDirectory)
@@ -1200,7 +1293,7 @@ export class CanvasHarness {
         credentialsFile: process.env.RADIUS_CREDENTIALS_FILE,
         githubToken: process.env.GH_TOKEN
       });
-      Object.assign(process.env, plan.env);
+      applyHarnessProcessPlan(plan);
       if (plan.interceptFetch)
         globalThis.fetch = createHarnessFetch(originalFetch);
 
@@ -1445,6 +1538,7 @@ export class CanvasHarness {
   // different topology than the shared fixture. Accepts either raw `rad` JSON
   // text or the parsed object.
   async setAppGraph(graph: string | object): Promise<void> {
+    this.assertFakeMode("setAppGraph");
     const text = typeof graph === "string" ? graph : JSON.stringify(graph);
     const raw = await fs.readFile(this.scenarioPath, "utf8");
     const scenario = JSON.parse(raw) as FakeCliScenario;
@@ -1468,6 +1562,9 @@ export class CanvasHarness {
   // cached decision is dropped here: without that reset the next resolution
   // would answer from the token state that existed before this call.
   setGitHubToken(value: string | null): void {
+    // Cloud mode's token authenticates real GitHub calls; replacing or clearing
+    // it here would silently change the identity a real deploy runs under.
+    this.assertFakeMode("setGitHubToken");
     if (value === null) {
       delete process.env.GH_TOKEN;
       delete process.env.GITHUB_TOKEN;
@@ -1485,6 +1582,7 @@ export class CanvasHarness {
   // through the scenario keeps the decision deterministic instead of depending
   // on which probe resolved first.
   async setGitHubKeyringScopes(scopes: readonly string[]): Promise<void> {
+    this.assertFakeMode("setGitHubKeyringScopes");
     const raw = await fs.readFile(this.scenarioPath, "utf8");
     const scenario = JSON.parse(raw) as FakeCliScenario;
     const commands = scenario.commands.map((command) => {
@@ -1522,6 +1620,9 @@ export class CanvasHarness {
   }
 
   async expectCliInvoked(tool: string): Promise<void> {
+    // Guard before polling: a throw raised inside the poll callback would be
+    // reported as a timeout instead of the mode mismatch that caused it.
+    this.assertFakeMode("expectCliInvoked");
     await expect
       .poll(async () =>
         (await this.cliCalls()).some((call) => call.tool === tool)
