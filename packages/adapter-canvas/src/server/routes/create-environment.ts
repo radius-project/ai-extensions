@@ -1086,15 +1086,18 @@ export async function handleCreateEnvironment(
     // The guidance waited for the plan: whether merging is what starts
     // verification is exactly what `planCredentialVerification` and the
     // credential check just decided, so it is stated once, here, instead of
-    // being predicted at pull-request time and patched afterwards.
+    // being predicted at pull-request time and patched afterwards. The marker
+    // follows the same decision, because a dispatch from the setup branch
+    // finishes with `actionRequired` false and owes the customer nothing.
     if (prState && pullRequestOpened) {
-      steps.push(
-        `👉 ${describePullRequestNextStep({
-          verifiesNow: verifyPlan.shouldDispatch && credentialsComplete,
-          baseBranch: prState.base,
-          ref: verifyPlan.ref
-        })}`
-      );
+      const verifiesNow = verifyPlan.shouldDispatch && credentialsComplete;
+      const nextStep = describePullRequestNextStep({
+        verifiesNow,
+        baseBranch: prState.base,
+        ref: verifyPlan.ref
+      });
+      if (verifiesNow) steps.push(`ℹ️ ${nextStep}`);
+      else steps.push(`👉 ${nextStep}`);
     }
     if (!verifyPlan.shouldDispatch) {
       verifySkipReason =

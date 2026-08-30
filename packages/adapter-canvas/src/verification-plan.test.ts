@@ -192,7 +192,7 @@ describe("dispatch narration", () => {
 });
 
 describe("pull request next step", () => {
-  it("tells the customer verification already started when it dispatches now", () => {
+  it("tells the customer setup is not blocked when verification dispatches now", () => {
     expect(
       describePullRequestNextStep({
         verifiesNow: true,
@@ -200,8 +200,9 @@ describe("pull request next step", () => {
         ref: "radius/setup-dev-workflows-abc"
       })
     ).toBe(
-      'Credential verification runs now against branch "radius/setup-dev-workflows-abc"; ' +
-        'merge the pull request above to finish setup and enable deploys from "main".'
+      'Credential verification runs now against branch "radius/setup-dev-workflows-abc", ' +
+        "so setup is not blocked on the merge. Merging the pull request above puts the " +
+        'workflows on "main".'
     );
   });
 
@@ -237,6 +238,18 @@ describe("pull request next step", () => {
       expect(running.test(now) && waiting.test(now)).toBe(false);
       expect(running.test(later) && waiting.test(later)).toBe(false);
     }
+  });
+
+  // `actionRequired` is false when verification dispatches, so that wording
+  // must not describe setup as unfinished work the customer still owes.
+  it("does not call setup unfinished when verification dispatches now", () => {
+    expect(
+      describePullRequestNextStep({
+        verifiesNow: true,
+        baseBranch: "main",
+        ref: "setup"
+      })
+    ).not.toContain("to finish setup");
   });
 
   it("names the branch verification runs against only when it runs now", () => {

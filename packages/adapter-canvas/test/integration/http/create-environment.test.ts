@@ -2547,8 +2547,9 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
   // The guidance and the dispatch steps answer the same question, so the
   // regression worth guarding is not the wording but the pair: the customer
   // must never be told verification waits for the merge in the same run that
-  // dispatches it.
-  it("tells the customer verification already started when it dispatches from the branch", async () => {
+  // dispatches it. The marker is part of that answer, because this run reports
+  // `actionRequired: false` and so owes the customer no action.
+  it("reports an informational next step when it dispatches from the branch", async () => {
     const harness = start({
       ...protectedScript,
       files: {
@@ -2557,23 +2558,27 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       }
     });
 
-    await post({ repo: "octo/app" });
+    const response = await post({ repo: "octo/app" });
 
-    expect(harness.steps.filter((step) => step.startsWith("👉"))).toEqual([
-      '👉 Credential verification runs now against branch "radius/setup-dev-workflows-op-http"; ' +
-        'merge the pull request above to finish setup and enable deploys from "main".'
-    ]);
+    expect(await response.json()).toMatchObject({ actionRequired: false });
+    expect(harness.steps).toContain(
+      'ℹ️ Credential verification runs now against branch "radius/setup-dev-workflows-op-http", ' +
+        "so setup is not blocked on the merge. Merging the pull request above puts the " +
+        'workflows on "main".'
+    );
+    expect(harness.steps.filter((step) => step.startsWith("👉"))).toEqual([]);
     expect(
       harness.steps.some((step) => step.includes("run once it lands"))
     ).toBe(false);
     expect(harness.steps).toContain("✅ Credentials verification dispatched.");
   });
 
-  it("tells the customer merging starts verification when it does not dispatch", async () => {
+  it("prompts for the merge when it does not dispatch", async () => {
     const harness = start(protectedScript);
 
-    await post({ repo: "octo/app" });
+    const response = await post({ repo: "octo/app" });
 
+    expect(await response.json()).toMatchObject({ actionRequired: true });
     expect(harness.steps.filter((step) => step.startsWith("👉"))).toEqual([
       "👉 Merge the pull request above to finish setup; credential verification " +
         'and deploys run once it lands on "main".'
@@ -2595,6 +2600,11 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     await post({ repo: "octo/app" });
 
     expect(harness.steps.filter((step) => step.startsWith("👉"))).toEqual([]);
+    expect(
+      harness.steps.some((step) =>
+        step.includes("Merge the pull request above")
+      )
+    ).toBe(false);
   });
 
   it("keeps the branch and asks the user to open the pull request manually when the API refuses", async () => {

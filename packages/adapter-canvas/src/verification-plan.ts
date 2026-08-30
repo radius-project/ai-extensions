@@ -155,9 +155,10 @@ export function describeVerificationDispatch({
 
 // The pull-request guidance and the verification outcome are the same answer
 // told twice, so they are derived from one decision rather than predicted
-// before `planCredentialVerification` has made it. Verification can run from
-// the setup branch immediately, and guidance that always promises it waits for
-// the merge contradicts the dispatch steps that follow it.
+// before `planCredentialVerification` has made it. A dispatch from the setup
+// branch finishes the operation with `actionRequired` false and blanks the
+// pull request, so the guidance states what merging does rather than repeating
+// the blocking wording the waiting case owes the customer.
 export function describePullRequestNextStep({
   verifiesNow,
   baseBranch,
@@ -168,7 +169,7 @@ export function describePullRequestNextStep({
   ref: string;
 }): string {
   return verifiesNow ?
-      `Credential verification runs now against branch "${ref}"; merge the pull request above to finish setup and enable deploys from "${baseBranch}".`
+      `Credential verification runs now against branch "${ref}", so setup is not blocked on the merge. Merging the pull request above puts the workflows on "${baseBranch}".`
     : `Merge the pull request above to finish setup; credential verification and deploys run once it lands on "${baseBranch}".`;
 }
 
