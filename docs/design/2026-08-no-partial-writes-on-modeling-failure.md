@@ -83,7 +83,11 @@ A staging directory left behind by an interrupted run is removed the next time m
 
 `.radius/.staging-*` is added to the repository's ignore rules, and during implementation this moved from the start of a run to the publish step. Writing it at the start meant a run that failed had to un-write it on every failure path — including the ones where the run record is gone and there is nothing left to say what to restore — so "a failed run leaves `.radius/` byte-identical" depended on a revert being correct everywhere. Writing it only on the path that already modifies `.radius/` means a failed run has nothing outside its staging directory to undo, and the guarantee holds by construction.
 
-The cost of that choice is real and worth stating: a run interrupted before it publishes leaves its staging directory untracked, so it does show up in the user's `git status` until the next run sweeps it up. That is visible and harmless, and it is a better trade than a revert that can get it wrong.
+The cost of that choice was real and worth stating: a run interrupted before it publishes leaves its staging directory untracked, so it does show up in the user's `git status` until the next run sweeps it up.
+
+That cost turned out to have a sharper edge than "visible and harmless", and [#616](https://github.com/radius-project/ai-extensions/pull/616) closed it. Because the rule is only written on the publish path, a repository where no run has ever finished has no rule at all, so an interrupted run leaves `.radius/.staging-<runId>/` untracked *and un-ignored* — and a bulk `git add -A`, which is what an agent committing on the user's behalf does, sweeps the half-written model into a commit. "Visible in `git status`" assumes a person reading it and choosing what to commit, which is not the flow this product is built around.
+
+A staging directory now carries its own `.gitignore` containing `*`, written as the directory is created, so it is invisible to git from the moment it exists rather than from the moment it publishes. That file sits inside the directory every failure path already deletes, so nothing has to remember to undo it and the byte-identical guarantee is untouched — which is exactly the objection that kept the rule off the `--begin` path. The publish-time rule above stays as the repository-level copy.
 
 ### Failure and retry
 

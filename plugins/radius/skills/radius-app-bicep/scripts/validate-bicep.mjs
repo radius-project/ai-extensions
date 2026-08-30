@@ -570,6 +570,168 @@ function checkSourceCodeReferences(
   return failed;
 }
 
+// Kubernetes substitutes `$(NAME)` in a container environment value only from
+// variables earlier in the container's environment list, and the containers
+// recipe builds that list with `items()`, which sorts by key. So authoring
+// order in the `env` map decides nothing, and a plain value that reads another
+// plain value whose key does not sort before it is never substituted: the
+// workload receives the literal `$(NAME)` text and fails at runtime with a
+// value that looks deliberate. That is worth catching here, because the model
+// compiles and deploys either way.
+//
+// Only the case the compiled template proves is reported. A `secretKeyRef`
+// variable is emitted ahead of every plain value by that recipe whatever it is
+// called, and a name that is not in this `env` map at all may come from the
+// image, the platform, or connection projection. Neither can be judged from the
+// template, so neither is flagged — this check has no opinion it cannot support.
+// The reference grammar the kubelet actually applies: everything between `$(`
+// and the first `)` is the name, whatever it contains, because
+// tryReadVariableName scans to the closer rather than matching an identifier.
+// Kubernetes environment names are wider than C identifiers too (`.` and `-`
+// are valid), and Radius does not restrict `env` keys at all, so a narrower
+// pattern here would skip `$(DB.PASSWORD)` and let exactly the failure this
+// check exists to catch through. Matching the closer keeps the two in step; a
+// name that is not a modeled variable is filtered later by `plainValues`.
+const RUNTIME_VARIABLE_PATTERN = /(\$*)\$\(([^)]*)\)/gu;
+
+function expandedVariableNames(value) {
+  // A name repeated in one value is one fact about that value, so it is
+  // reported once rather than once per occurrence.
+  const names = new Set();
+  for (const match of value.matchAll(RUNTIME_VARIABLE_PATTERN)) {
+    // Kubernetes collapses `$$` to a literal `$`, so `$$(NAME)` is text rather
+    // than an expansion. An odd number of leading `$` leaves one unpaired to
+    // open the expansion; an even number does not.
+    if (match[1].length % 2 === 0) {
+      names.add(match[2]);
+    }
+  }
+  return names;
+}
+
+// Whether `referenced` is emitted at or after `name`, and therefore cannot be
+// substituted into it. The recipe sorts with `items()`, so this asks where the
+// two keys fall in that sort — but the check fails a build, so it answers only
+// when the answer does not depend on how the sort treats letter case. Ordinary
+// environment names settle it either way; a pair that disagrees stays silent
+// rather than risk rejecting a model that would have deployed.
+function emittedAtOrAfter(referenced, name) {
+  if (referenced === name) {
+    return true;
+  }
+  return (
+    referenced > name &&
+    referenced.toUpperCase() > name.toUpperCase() &&
+    referenced.toLowerCase() > name.toLowerCase()
+  );
+}
+
+function plainEnvironmentValues(env) {
+  const values = new Map();
+  for (const [name, entry] of Object.entries(env)) {
+    if (
+      entry !== null &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      "value" in entry
+    ) {
+      values.set(name, entry.value);
+    }
+  }
+  return values;
+}
+
+function checkRuntimeVariableExpansion(
+  template,
+  app,
+  parentPath = "",
+  parameterValues = new Map()
+) {
+  let failed = false;
+  for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
+    const resourcePath = parentPath ? `${parentPath}.${symbol}` : symbol;
+    if (resource?.type === "Microsoft.Resources/deployments") {
+      const nestedTemplate = resource?.properties?.template;
+      if (
+        nestedTemplate !== null &&
+        typeof nestedTemplate === "object" &&
+        !Array.isArray(nestedTemplate)
+      ) {
+        const nestedParameterValues = new Map();
+        for (const [name, argument] of Object.entries(
+          resource?.properties?.parameters ?? {}
+        )) {
+          nestedParameterValues.set(
+            name,
+            resolveTemplateString(argument?.value, template, parameterValues)
+          );
+        }
+        if (
+          checkRuntimeVariableExpansion(
+            nestedTemplate,
+            app,
+            resourcePath,
+            nestedParameterValues
+          )
+        ) {
+          failed = true;
+        }
+      }
+      continue;
+    }
+    if (
+      typeof resource?.type !== "string" ||
+      !resource.type.startsWith("Radius.Compute/containers@")
+    ) {
+      continue;
+    }
+    const containers = resource?.properties?.properties?.containers;
+    if (
+      containers === null ||
+      typeof containers !== "object" ||
+      Array.isArray(containers)
+    ) {
+      continue;
+    }
+    for (const [containerKey, container] of Object.entries(containers)) {
+      const env = container?.env;
+      if (env === null || typeof env !== "object" || Array.isArray(env)) {
+        continue;
+      }
+      const plainValues = plainEnvironmentValues(env);
+      for (const [name, rawValue] of plainValues) {
+        const value = resolveTemplateString(
+          rawValue,
+          template,
+          parameterValues
+        );
+        if (typeof value !== "string") {
+          continue;
+        }
+        for (const referenced of expandedVariableNames(value)) {
+          // Not a plain value in this container: emitted ahead of every plain
+          // value, or supplied from outside the template. Nothing to prove.
+          if (!plainValues.has(referenced)) {
+            continue;
+          }
+          if (!emittedAtOrAfter(referenced, name)) {
+            continue;
+          }
+          const advice =
+            referenced === name ?
+              "a variable cannot read itself"
+            : `bind it with valueFrom.secretKeyRef, which the recipe emits ahead of every plain value, if it is a recipe-generated credential; a developer-supplied @secure() value has to stay a plain value, so its key must sort before ${JSON.stringify(name)} — report the conflict when the application dictates both names`;
+          report(
+            `${app}: error runtime-variable: ${resourcePath}.properties.containers.${containerKey}.env.${name}: reads $(${referenced}), which the containers recipe emits at or after it, so it is never substituted; ${advice}.`
+          );
+          failed = true;
+        }
+      }
+    }
+  }
+  return failed;
+}
+
 const executable = process.platform === "win32" ? "bicep.exe" : "bicep";
 const bicep = path.join(
   os.homedir(),
@@ -630,10 +792,15 @@ function check(app) {
 
   const invalidBuildSource = checkContainerImageBuildSources(template, app);
   const invalidSourceReference = checkSourceCodeReferences(template, app);
+  const unresolvedRuntimeVariable = checkRuntimeVariableExpansion(
+    template,
+    app
+  );
   return (
       compilerFindings.some(isFailure) ||
         invalidBuildSource ||
-        invalidSourceReference
+        invalidSourceReference ||
+        unresolvedRuntimeVariable
     ) ?
       1
     : 0;
