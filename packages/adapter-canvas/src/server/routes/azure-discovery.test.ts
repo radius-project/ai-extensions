@@ -720,13 +720,14 @@ describe("azure-discovery routes (SU-08)", () => {
         vpcs: [],
         subnets: []
       });
-      // The per-call timeouts are part of the contract with the runner.
+      // The per-call timeouts are part of the contract with the runner. Every
+      // `az` query shares one Windows-sized budget; kubectl is a native binary.
       expect(cli.calls).toEqual([
-        { line: CLI.aks(), timeout: 30000 },
-        { line: CLI.groups(), timeout: 30000 },
+        { line: CLI.aks(), timeout: 45000 },
+        { line: CLI.groups(), timeout: 45000 },
         {
           line: CLI.credentials("aks-selected", "rg-selected"),
-          timeout: 20000
+          timeout: 45000
         },
         { line: CLI.namespaces, timeout: 10000 }
       ]);
@@ -805,9 +806,15 @@ describe("azure-discovery routes (SU-08)", () => {
     });
 
     it("reports namespace discovery failures without a static fallback", async () => {
-      for (const failing of [
-        CLI.credentials("aks-1", "rg-1"),
-        CLI.namespaces
+      for (const { failing, label } of [
+        {
+          failing: CLI.credentials("aks-1", "rg-1"),
+          label: "az aks get-credentials failed: kube down"
+        },
+        {
+          failing: CLI.namespaces,
+          label: "kubectl get namespaces failed: kube down"
+        }
       ]) {
         const cli = cliFake({
           [CLI.aks()]: JSON.stringify([
@@ -835,7 +842,9 @@ describe("azure-discovery routes (SU-08)", () => {
           errors?: Record<string, string>;
         };
         expect(parsed.namespaces, failing).toEqual([]);
-        expect(parsed.errors?.namespaces, failing).toBe("kube down");
+        // The step label and its limit are what tell a user whose call was
+        // killed with no output which stage ran out of budget.
+        expect(parsed.errors?.namespaces, failing).toBe(label);
       }
     });
 
