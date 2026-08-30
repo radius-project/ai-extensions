@@ -285,6 +285,28 @@ export function handleOperationById(
   );
 }
 
+function sendDiagnosticJson(
+  context: CanvasRequestContext,
+  status: number,
+  payload: unknown,
+  attachment = false
+): void {
+  context.response.setHeader("Content-Type", "application/json");
+  context.response.setHeader("Cache-Control", "no-store");
+  if (attachment) {
+    context.response.setHeader(
+      "Content-Disposition",
+      'attachment; filename="radius-environment-operation-diagnostics.json"'
+    );
+  }
+  context.response.writeHead(status);
+  context.response.end(
+    attachment ?
+      `${JSON.stringify(payload, null, 2)}\n`
+    : JSON.stringify(payload)
+  );
+}
+
 export function handleOperationDiagnostics(
   context: CanvasRequestContext,
   dependencies: OperationsStatusDependencies
@@ -296,40 +318,27 @@ export function handleOperationDiagnostics(
   try {
     operationId = decodeURIComponent(rawOperationId);
   } catch {
-    context.response.setHeader("Content-Type", "application/json");
-    context.response.setHeader("Cache-Control", "no-store");
-    context.response.writeHead(400);
-    context.response.end(
-      JSON.stringify({
-        error: "Invalid operation identifier.",
-        code: "invalid-operation-id"
-      })
-    );
+    sendDiagnosticJson(context, 400, {
+      error: "Invalid operation identifier.",
+      code: "invalid-operation-id"
+    });
     return;
   }
 
   const operation = dependencies.get(operationId);
-  context.response.setHeader("Content-Type", "application/json");
-  context.response.setHeader("Cache-Control", "no-store");
   if (!operation) {
-    context.response.writeHead(404);
-    context.response.end(
-      JSON.stringify({
-        error: "Unknown operation.",
-        code: "unknown-operation"
-      })
-    );
+    sendDiagnosticJson(context, 404, {
+      error: "Unknown operation.",
+      code: "unknown-operation"
+    });
     return;
   }
   if (!operationDiagnosticAvailable(operation)) {
-    context.response.writeHead(409);
-    context.response.end(
-      JSON.stringify({
-        error:
-          "Diagnostics are available after Stop is requested, while Radius is waiting for input, or after the operation finishes.",
-        code: "operation-diagnostics-unavailable"
-      })
-    );
+    sendDiagnosticJson(context, 409, {
+      error:
+        "Diagnostics are available after Stop is requested, while Radius is waiting for input, or after the operation finishes.",
+      code: "operation-diagnostics-unavailable"
+    });
     return;
   }
 
@@ -340,26 +349,20 @@ export function handleOperationDiagnostics(
       identifiers !== "preview" &&
       identifiers !== "include"
     ) {
-      context.response.writeHead(400);
-      context.response.end(
-        JSON.stringify({
-          error: "Invalid diagnostic identifier profile.",
-          code: "invalid-diagnostic-profile"
-        })
-      );
+      sendDiagnosticJson(context, 400, {
+        error: "Invalid diagnostic identifier profile.",
+        code: "invalid-diagnostic-profile"
+      });
       return;
     }
     if (identifiers === "preview") {
       const contextualIdentifiers = createOperationDiagnosticContext(operation);
-      context.response.writeHead(200);
-      context.response.end(
-        JSON.stringify({
-          contextualIdentifiers,
-          contextFingerprint: operationDiagnosticContextFingerprint(
-            contextualIdentifiers
-          )
-        })
-      );
+      sendDiagnosticJson(context, 200, {
+        contextualIdentifiers,
+        contextFingerprint: operationDiagnosticContextFingerprint(
+          contextualIdentifiers
+        )
+      });
       return;
     }
     if (identifiers === "include") {
@@ -371,14 +374,11 @@ export function handleOperationDiagnostics(
         context.url.searchParams.get("contextFingerprint") !==
         expectedFingerprint
       ) {
-        context.response.writeHead(409);
-        context.response.end(
-          JSON.stringify({
-            error:
-              "The contextual identifiers changed after review. Review them again before downloading.",
-            code: "diagnostic-context-changed"
-          })
-        );
+        sendDiagnosticJson(context, 409, {
+          error:
+            "The contextual identifiers changed after review. Review them again before downloading.",
+          code: "diagnostic-context-changed"
+        });
         return;
       }
     }
@@ -388,20 +388,12 @@ export function handleOperationDiagnostics(
       now: dependencies.now(),
       includeContext: identifiers === "include"
     });
-    context.response.setHeader(
-      "Content-Disposition",
-      'attachment; filename="radius-environment-operation-diagnostics.json"'
-    );
-    context.response.writeHead(200);
-    context.response.end(`${JSON.stringify(diagnostic, null, 2)}\n`);
+    sendDiagnosticJson(context, 200, diagnostic, true);
   } catch {
-    context.response.writeHead(500);
-    context.response.end(
-      JSON.stringify({
-        error: "Radius could not create operation diagnostics.",
-        code: "operation-diagnostics-failed"
-      })
-    );
+    sendDiagnosticJson(context, 500, {
+      error: "Radius could not create operation diagnostics.",
+      code: "operation-diagnostics-failed"
+    });
   }
 }
 

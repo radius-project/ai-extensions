@@ -1431,6 +1431,9 @@ test.describe("Radius Canvas in Chromium", () => {
     });
     await expect(diagnosticDialog).toBeHidden();
     await expect(diagnosticButton).toBeFocused();
+    await expect(page.locator("#env-progress-diagnostics-status")).toHaveText(
+      "Diagnostic snapshot download started."
+    );
 
     await diagnosticButton.click();
     await expect(diagnosticDialog).toBeVisible();
@@ -1473,6 +1476,9 @@ test.describe("Radius Canvas in Chromium", () => {
     });
     await expect(diagnosticDialog).toBeHidden();
     await expect(diagnosticButton).toBeFocused();
+    await expect(page.locator("#env-progress-diagnostics-status")).toHaveText(
+      "Diagnostic snapshot download started."
+    );
 
     await page.route(
       `**/api/operations/${result.operationId}/diagnostics`,

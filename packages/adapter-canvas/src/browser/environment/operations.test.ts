@@ -1658,6 +1658,7 @@ describe("diagnostic snapshot review", () => {
   });
 
   it.each([
+    DIAGNOSTIC_IDS.announcement,
     DIAGNOSTIC_IDS.status,
     DIAGNOSTIC_IDS.repository,
     DIAGNOSTIC_IDS.preview,
@@ -4216,7 +4217,10 @@ describe("stale response ordering and operation identity", () => {
         filename: "radius-environment-operation-diagnostics.json"
       }
     ]);
-    expect(browser.els[DIAGNOSTIC_IDS.status].textContent).toBe(
+    expect(browser.els[DIAGNOSTIC_IDS.announcement].textContent).toBe(
+      "Diagnostic snapshot download started."
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.status].textContent).not.toBe(
       "Diagnostic snapshot download started."
     );
     expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("none");
@@ -4392,7 +4396,10 @@ describe("stale response ordering and operation identity", () => {
       }
     ]);
     expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toBe("");
-    expect(browser.els[DIAGNOSTIC_IDS.status].textContent).toBe(
+    expect(browser.els[DIAGNOSTIC_IDS.announcement].textContent).toBe(
+      "Diagnostic snapshot download started."
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.status].textContent).not.toBe(
       "Diagnostic snapshot download started."
     );
     expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("none");

@@ -282,6 +282,7 @@ describe("environmentPage — stop, continue and rollback styling", () => {
     expect(markup).toContain(
       ".env-progress__diagnostics .rad-btn { margin-top:0; }"
     );
+    expect(markup).toContain(".env-progress__diagnostics-status { width:100%;");
     expect(markup).toContain(
       ".env-progress__bottom-buttons:empty { display:none; }"
     );

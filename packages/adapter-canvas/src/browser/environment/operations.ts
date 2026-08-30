@@ -105,6 +105,7 @@ export const DIAGNOSTIC_IDS = {
   githubLogin: "env-diagnostics-github-login",
   reviewBlock: "env-diagnostics-review-block",
   reviewedIdentifiers: "env-diagnostics-reviewed-identifiers",
+  announcement: "env-progress-diagnostics-status",
   status: "env-diagnostics-status",
   error: "env-diagnostics-error",
   cancel: "env-diagnostics-cancel",
@@ -1327,11 +1328,54 @@ export function initializeEnvironmentOperations(
     if (banner) banner.style.display = "none";
   }
 
+  function createDialogFocusTrap(
+    dialogId: string,
+    selector: string,
+    close: () => void
+  ): { bind(): void; unbind(): void } {
+    let bound = false;
+    const keydown: DomEventListener = (event) => {
+      const dialog = dom.byId(dialogId);
+      if (!dialog) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = dom.all(dialog, selector);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = context.focus.active();
+      if (event.shiftKey === true && (active === first || active === null)) {
+        event.preventDefault();
+        last.focus();
+        return;
+      }
+      if (event.shiftKey !== true && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    return {
+      bind() {
+        if (bound) return;
+        dom.document.addEventListener("keydown", keydown);
+        bound = true;
+      },
+      unbind() {
+        if (!bound) return;
+        dom.document.removeEventListener("keydown", keydown);
+        bound = false;
+      }
+    };
+  }
+
   // ---------------- Diagnostic snapshot review ----------------
 
   let diagnosticOperationId = "";
   let diagnosticReturnFocus: DomElement | null = null;
-  let diagnosticKeydownBound = false;
   let diagnosticContextReady = false;
   let diagnosticContextFingerprint = "";
   let diagnosticPreviewGeneration = 0;
@@ -1343,6 +1387,11 @@ export function initializeEnvironmentOperations(
   function setDiagnosticStatus(message: string): void {
     const status = dom.byId(DIAGNOSTIC_IDS.status);
     if (status) status.textContent = message;
+  }
+
+  function setDiagnosticAnnouncement(message: string): void {
+    const status = dom.byId(DIAGNOSTIC_IDS.announcement);
+    if (status && status.textContent !== message) status.textContent = message;
   }
 
   function setDiagnosticError(message: string): void {
@@ -1362,49 +1411,11 @@ export function initializeEnvironmentOperations(
     download.setAttribute("aria-disabled", "false");
   }
 
-  function diagnosticFocusable(dialog: DomElement): readonly DomElement[] {
-    return dom.all(
-      dialog,
-      "button:not([disabled]), input:not([disabled]), a[href]"
-    );
-  }
-
-  const diagnosticKeydown: DomEventListener = (event) => {
-    const dialog = dom.byId(DIAGNOSTIC_IDS.modal);
-    if (!dialog) return;
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeDiagnosticDialog();
-      return;
-    }
-    if (event.key !== "Tab") return;
-    const focusable = diagnosticFocusable(dialog);
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const active = context.focus.active();
-    if (event.shiftKey === true && (active === first || active === null)) {
-      event.preventDefault();
-      last.focus();
-      return;
-    }
-    if (event.shiftKey !== true && active === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
-
-  function bindDiagnosticKeydown(): void {
-    if (diagnosticKeydownBound) return;
-    dom.document.addEventListener("keydown", diagnosticKeydown);
-    diagnosticKeydownBound = true;
-  }
-
-  function unbindDiagnosticKeydown(): void {
-    if (!diagnosticKeydownBound) return;
-    dom.document.removeEventListener("keydown", diagnosticKeydown);
-    diagnosticKeydownBound = false;
-  }
+  const diagnosticFocusTrap = createDialogFocusTrap(
+    DIAGNOSTIC_IDS.modal,
+    "button:not([disabled]), input:not([disabled]), a[href]",
+    closeDiagnosticDialog
+  );
 
   function abortDiagnosticPreview(): void {
     diagnosticPreviewGeneration += 1;
@@ -1424,7 +1435,7 @@ export function initializeEnvironmentOperations(
     if (dialog) dialog.style.display = "none";
     abortDiagnosticPreview();
     abortDiagnosticDownload();
-    unbindDiagnosticKeydown();
+    diagnosticFocusTrap.unbind();
     diagnosticContextReady = false;
     diagnosticContextFingerprint = "";
   }
@@ -1567,9 +1578,10 @@ export function initializeEnvironmentOperations(
     diagnosticContextFingerprint = "";
     setDiagnosticStatus("");
     setDiagnosticError("");
+    setDiagnosticAnnouncement("");
     refreshDiagnosticDownload();
     dialog.style.display = "flex";
-    bindDiagnosticKeydown();
+    diagnosticFocusTrap.bind();
     dom.byId(DIAGNOSTIC_IDS.title)?.focus();
   }
 
@@ -1628,7 +1640,7 @@ export function initializeEnvironmentOperations(
       })
       .then(() => {
         if (generation !== diagnosticDownloadGeneration) return;
-        setDiagnosticStatus("Diagnostic snapshot download started.");
+        setDiagnosticAnnouncement("Diagnostic snapshot download started.");
         closeDiagnosticDialog();
       })
       .catch((error: unknown) => {
@@ -1699,7 +1711,6 @@ export function initializeEnvironmentOperations(
     readonly op: OperationRecord;
   } | null = null;
   let rollbackReturnFocus: DomElement | null = null;
-  let rollbackKeydownBound = false;
 
   function setRollbackList(
     items: readonly string[],
@@ -1709,51 +1720,16 @@ export function initializeEnvironmentOperations(
     setStateList(items, listId, blockId);
   }
 
-  function rollbackFocusable(dialog: DomElement): readonly DomElement[] {
-    return dom.all(dialog, "button:not([disabled])");
-  }
-
   // Focus stays inside the dialog while it is open. A Tab that escapes to the
   // page behind a modal leaves a keyboard user operating controls they cannot
   // see, which is the specific failure the trap exists to prevent.
-  const rollbackKeydown: DomEventListener = (event) => {
-    const dialog = dom.byId(ROLLBACK_IDS.modal);
-    if (!dialog) return;
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeRollbackDialog();
-      return;
-    }
-    if (event.key !== "Tab") return;
-    const focusable = rollbackFocusable(dialog);
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const active = context.focus.active();
-    if (event.shiftKey === true && (active === first || active === null)) {
-      event.preventDefault();
-      last.focus();
-      return;
-    }
-    if (event.shiftKey !== true && active === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
+  const rollbackFocusTrap = createDialogFocusTrap(
+    ROLLBACK_IDS.modal,
+    "button:not([disabled])",
+    closeRollbackDialog
+  );
 
-  function bindRollbackKeydown(): void {
-    if (rollbackKeydownBound) return;
-    dom.document.addEventListener("keydown", rollbackKeydown);
-    rollbackKeydownBound = true;
-  }
-
-  function unbindRollbackKeydown(): void {
-    if (!rollbackKeydownBound) return;
-    dom.document.removeEventListener("keydown", rollbackKeydown);
-    rollbackKeydownBound = false;
-  }
-
-  scope.onTeardown(unbindRollbackKeydown);
+  scope.onTeardown(rollbackFocusTrap.unbind);
 
   function openRollbackDialog(
     action: OperationAction,
@@ -1801,14 +1777,14 @@ export function initializeEnvironmentOperations(
       cancel.textContent = action.cancelLabel || DEFAULT_ROLLBACK_CANCEL;
     }
     dialog.style.display = "flex";
-    bindRollbackKeydown();
+    rollbackFocusTrap.bind();
     titleEl?.focus();
   }
 
   function dismissRollbackDialog(): void {
     const dialog = dom.byId(ROLLBACK_IDS.modal);
     if (dialog) dialog.style.display = "none";
-    unbindRollbackKeydown();
+    rollbackFocusTrap.unbind();
     rollbackPending = null;
   }
 
@@ -2133,6 +2109,7 @@ export function initializeEnvironmentOperations(
         dismissDiagnosticDialog();
         diagnosticReturnFocus = null;
       }
+      setDiagnosticAnnouncement("");
       diagnosticOperationId = "";
       container.style.display = "none";
       return false;
@@ -2143,6 +2120,7 @@ export function initializeEnvironmentOperations(
     ) {
       dismissDiagnosticDialog();
       diagnosticReturnFocus = null;
+      setDiagnosticAnnouncement("");
     }
     diagnosticOperationId = op.operationId;
     container.style.display = "flex";

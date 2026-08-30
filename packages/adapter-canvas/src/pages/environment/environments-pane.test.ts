@@ -167,6 +167,9 @@ describe("environmentsPaneMarkup", () => {
       "Captures this paused or unsuccessful state in a local, redacted JSON file. Radius does not upload it."
     );
     expect(html).toContain(
+      'id="env-progress-diagnostics-status" class="env-progress__diagnostics-status" role="status" aria-live="polite"'
+    );
+    expect(html).toContain(
       'id="env-diagnostics-modal" role="dialog" aria-modal="true" aria-labelledby="env-diagnostics-title" aria-describedby="env-diagnostics-intro"'
     );
     expect(html).toContain(
@@ -176,8 +179,9 @@ describe("environmentsPaneMarkup", () => {
       '<label for="env-diagnostics-reviewed-identifiers">I reviewed these identifiers</label>'
     );
     expect(html).toContain(
-      'id="env-diagnostics-download" class="rad-btn rad-btn--primary" href="" download="radius-environment-operation-diagnostics.json" aria-disabled="true"'
+      'id="env-diagnostics-download" class="rad-btn rad-btn--primary" download="radius-environment-operation-diagnostics.json" aria-disabled="true"'
     );
+    expect(html).not.toContain('id="env-diagnostics-download" href=""');
   });
 
   it("renders the five partial-state groups as separate named blocks", () => {

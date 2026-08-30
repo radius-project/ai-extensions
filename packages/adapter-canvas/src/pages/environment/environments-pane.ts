@@ -100,6 +100,7 @@ export function environmentsPaneMarkup(
       <div id="env-progress-diagnostics" class="env-progress__diagnostics" style="display:none;">
         <button type="button" id="env-progress-diagnostics-open" class="rad-btn rad-btn--secondary" aria-describedby="env-progress-diagnostics-note">Download diagnostic snapshot</button>
         <span id="env-progress-diagnostics-note" class="env-progress__diagnostics-note">Captures this paused or unsuccessful state in a local, redacted JSON file. Radius does not upload it.</span>
+        <span id="env-progress-diagnostics-status" class="env-progress__diagnostics-status" role="status" aria-live="polite"></span>
       </div>
       <!-- Resource inventory stays inside Details while work is active. The
            renderer exposes it only for a terminal decision state — a stopped or
@@ -176,7 +177,7 @@ export function environmentsPaneMarkup(
       <div id="env-diagnostics-error" class="env-diagnostics__error" role="alert"></div>
       <div class="env-diagnostics__buttons">
         <button type="button" id="env-diagnostics-cancel" class="rad-btn rad-btn--neutral">Cancel</button>
-        <a id="env-diagnostics-download" class="rad-btn rad-btn--primary" href="" download="radius-environment-operation-diagnostics.json" aria-disabled="true">Download snapshot</a>
+        <a id="env-diagnostics-download" class="rad-btn rad-btn--primary" download="radius-environment-operation-diagnostics.json" aria-disabled="true">Download snapshot</a>
       </div>
     </div>
   </div>

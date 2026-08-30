@@ -203,6 +203,7 @@ ${confirmDialogMarkup()}
 .env-progress__diagnostics { margin-top:10px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 .env-progress__diagnostics .rad-btn { margin-top:0; }
 .env-progress__diagnostics-note { font-size:12px; color:var(--rad-text-tertiary); line-height:1.45; }
+.env-progress__diagnostics-status { width:100%; font-size:12px; color:var(--rad-text); line-height:1.45; }
 .env-diagnostics__panel { background:var(--rad-surface); color:var(--rad-text); border:1px solid var(--rad-stroke); border-radius:12px; box-shadow:0 8px 30px var(--rad-shadow); padding:22px 26px; max-width:620px; width:92%; max-height:80vh; overflow:auto; display:flex; flex-direction:column; gap:12px; }
 .env-diagnostics__title { font-size:15px; font-weight:600; line-height:1.4; color:var(--rad-text); }
 .env-diagnostics__intro, .env-diagnostics__list, .env-diagnostics__warning, .env-diagnostics__status { margin:0; font-size:12px; color:var(--rad-text-tertiary); line-height:1.5; }
