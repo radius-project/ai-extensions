@@ -29,9 +29,30 @@
 // can claim.
 export const STAGING_DIR_PREFIX = ".staging-";
 
-// Ignore rule written into `.radius/.gitignore`, so a run interrupted before it
-// could clean up cannot leave untracked noise in the user's `git status`.
+// Ignore rule written into `.radius/.gitignore` when a run publishes, so the
+// repository carries a durable rule for `.radius/.staging-*`.
+//
+// This is NOT what keeps an interrupted run out of the user's `git status`.
+// It is only written on the publish path, so until some run succeeds the
+// repository has no rule at all. A staging directory hides itself from the
+// moment it is created instead — see `STAGING_SELF_IGNORE_FILE` — and this
+// pattern is the belt-and-braces copy at the repository level.
 export const STAGING_IGNORE_PATTERN = `${STAGING_DIR_PREFIX}*/`;
+
+// Ignore file a run writes INSIDE its own staging directory, as the directory is
+// created, and the contents that go in it. `*` excludes every entry in the
+// directory including the ignore file itself, so the whole run is invisible to
+// git from the moment it exists rather than from the moment it publishes.
+//
+// It lives inside the directory every failure path already deletes, so no
+// failure path has to remember to undo it. That is what lets an in-flight run be
+// hidden without weakening "a failed run leaves `.radius/` byte-identical",
+// which a file written outside the staging directory at `--begin` would.
+//
+// It is never published: `publishableFiles` moves a fixed required set plus an
+// explicit artifact allowlist, and this file is in neither.
+export const STAGING_SELF_IGNORE_FILE = ".gitignore";
+export const STAGING_SELF_IGNORE = "*\n";
 
 // Files every published run holds.
 export const REQUIRED_STAGED_FILES: readonly string[] = [
