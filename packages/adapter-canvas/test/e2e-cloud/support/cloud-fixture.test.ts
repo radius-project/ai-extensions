@@ -34,8 +34,21 @@ const NOT_FOUND = {
   stderr: "gh: Not Found (HTTP 404)"
 } as const;
 
-const APP_LIST: readonly string[] = ["ad", "app", "list", "--display-name"];
-const SP_LIST: readonly string[] = ["ad", "sp", "list"];
+const EXACT_NAME_FILTER = `displayName eq '${APP_NAME}'`;
+const APP_LIST: readonly string[] = [
+  "ad",
+  "app",
+  "list",
+  "--filter",
+  EXACT_NAME_FILTER
+];
+const SP_LIST: readonly string[] = [
+  "ad",
+  "sp",
+  "list",
+  "--filter",
+  EXACT_NAME_FILTER
+];
 const FIC_LIST: readonly string[] = [
   "ad",
   "app",
@@ -318,20 +331,21 @@ describe("createCloudFixture", () => {
       await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
     });
 
-    it("queries the app registration name the product would choose", async () => {
+    it("queries the exact app and service-principal name the product would choose", async () => {
       const { fixture, fake } = await createHarness();
       await fixture.assertCleanSlate();
 
-      expect(
-        fake.commands
-          .commandLines("az")
-          .some((line) => line.includes(`--display-name ${APP_NAME}`))
-      ).toBe(true);
-      expect(
-        fake.commands
-          .commandLines("az")
-          .some((line) => line.includes(`--scope ${SCOPE}`))
-      ).toBe(true);
+      const lines = fake.commands.commandLines("az");
+      expect(lines).toContain(
+        `ad app list --filter ${EXACT_NAME_FILTER} --query [].{appId:appId,id:id,displayName:displayName} -o json`
+      );
+      expect(lines).toContain(
+        `ad sp list --filter ${EXACT_NAME_FILTER} --query [].{id:id} -o json`
+      );
+      expect(lines.some((line) => line.includes("--display-name"))).toBe(false);
+      expect(lines.some((line) => line.includes(`--scope ${SCOPE}`))).toBe(
+        true
+      );
     });
 
     it("reports a leaked app registration", async () => {
@@ -1000,6 +1014,12 @@ describe("createCloudFixture", () => {
       const { fixture, fake } = await createHarness([
         {
           tool: "az",
+          match: SP_LIST,
+          respond: { stdout: '[{"id":"sp-1"}]' }
+        },
+        { tool: "az", match: ["ad", "sp", "delete"], respond: {} },
+        {
+          tool: "az",
           match: APP_LIST,
           respond: {
             stdout: JSON.stringify([
@@ -1028,6 +1048,7 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        "service principal sp-1",
         "app registration app-1",
         `GitHub environment ${ENVIRONMENT}`,
         "branch radius/setup-a",
@@ -1042,16 +1063,32 @@ describe("createCloudFixture", () => {
       expect(lines).toContain(
         `api --method PATCH ${DEFAULT_REF_PATH} -f sha=${BASELINE} -F force=true`
       );
-      // Deleting the application removes its service principal and federated
-      // credentials, so neither gets a redundant delete of its own.
+      // Service principals are removed explicitly so an orphan cannot survive
+      // after its application is already gone.
+      expect(fake.commands.commandLines("az")).toContain(
+        "ad sp delete --id sp-1 --output none"
+      );
       expect(fake.commands.commandLines("az")).toContain(
         "ad app delete --id obj-1 --output none"
       );
-      expect(
-        fake.commands
-          .commandLines("az")
-          .some((line) => line.includes("sp delete"))
-      ).toBe(false);
+    });
+
+    it("reclaims an orphaned service principal when no application remains", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "az",
+          match: SP_LIST,
+          respond: { stdout: '[{"id":"orphan-sp"}]' }
+        },
+        { tool: "az", match: ["ad", "sp", "delete"], respond: {} }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        "service principal orphan-sp"
+      ]);
+      expect(fake.commands.commandLines("az")).toContain(
+        "ad sp delete --id orphan-sp --output none"
+      );
     });
 
     it("leaves a default branch already at the baseline alone", async () => {
@@ -1121,6 +1158,50 @@ describe("createCloudFixture", () => {
       );
       expect(fake.commands.commandLines("gh")).toContain(
         `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
+      );
+    });
+
+    it("records a failing service-principal listing without abandoning the rest", async () => {
+      const { fixture, fake } = await createHarness([
+        failing("az", SP_LIST, "Graph unavailable"),
+        {
+          tool: "gh",
+          match: ["api", MATCHING_REFS_PATH],
+          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' }
+        },
+        { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /list service principals: .*Graph unavailable/
+      );
+      expect(fake.commands.commandLines("gh")).toContain(
+        `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
+      );
+    });
+
+    it("records a stuck service principal and continues reclaiming applications", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: SP_LIST,
+          respond: { stdout: '[{"id":"sp-1"}]' }
+        },
+        failing("az", ["ad", "sp", "delete"], "principal is locked"),
+        {
+          tool: "az",
+          match: APP_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
+        },
+        { tool: "az", match: ["ad", "app", "delete"], respond: {} }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /service principal sp-1: .*principal is locked.*Reclaimed before failing: app registration app-1/s
       );
     });
 
