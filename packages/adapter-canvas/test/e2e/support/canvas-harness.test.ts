@@ -11,11 +11,15 @@ import {
   TEST_KUBECONFIG_PATH
 } from "../../support/azure-discovery-contract.js";
 import {
+  applyHarnessProcessPlan,
+  assertCloudWorkspaceClone,
   assertFakeModeAvailable,
   azureDiscoveryCommands,
   CREDENTIAL_STORE_PATH,
+  E2E_TMP_ROOT,
   fakeCliArgsMatch,
   FAKE_CLI_TOOLS,
+  PLACEHOLDER_SECRET,
   planHarnessProcess,
   removeDirectoryWithRetries,
   replaceSharedCredentials,
@@ -567,6 +571,7 @@ describe("planHarnessProcess in cloud mode", () => {
       "RADIUS_RAD_SKIP_VERSION_CHECK"
     ]) {
       expect(Object.hasOwn(plan.env, key)).toBe(false);
+      expect(plan.unsetEnv).toContain(key);
     }
   });
 
@@ -594,6 +599,74 @@ describe("planHarnessProcess in cloud mode", () => {
     expect(() =>
       planHarnessProcess({ ...CLOUD_PLAN_INPUT, githubToken })
     ).toThrow(/Cloud mode requires GH_TOKEN/);
+  });
+
+  it("refuses the fake-mode placeholder token", () => {
+    expect(() =>
+      planHarnessProcess({
+        ...CLOUD_PLAN_INPUT,
+        githubToken: PLACEHOLDER_SECRET
+      })
+    ).toThrow(/placeholder token/);
+  });
+
+  it("refuses a placeholder token surrounded by whitespace", () => {
+    expect(() =>
+      planHarnessProcess({
+        ...CLOUD_PLAN_INPUT,
+        githubToken: ` ${PLACEHOLDER_SECRET}\n`
+      })
+    ).toThrow(/placeholder token/);
+  });
+});
+
+describe("applyHarnessProcessPlan", () => {
+  it("clears an inherited fake CLI variable in cloud mode", () => {
+    const env: NodeJS.ProcessEnv = {
+      PATH: "/usr/bin",
+      RADIUS_FAKE_CLI_SCRIPT: "/stale/fake-cli.mjs",
+      RADIUS_RAD_BINARY: "/stale/bin/rad",
+      RADIUS_RAD_SKIP_VERSION_CHECK: "1"
+    };
+
+    applyHarnessProcessPlan(planHarnessProcess(CLOUD_PLAN_INPUT), env);
+
+    expect(env.RADIUS_FAKE_CLI_SCRIPT).toBeUndefined();
+    expect(env.RADIUS_RAD_BINARY).toBeUndefined();
+    expect(env.RADIUS_RAD_SKIP_VERSION_CHECK).toBeUndefined();
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.GH_TOKEN).toBe("gho_realtoken");
+  });
+
+  it("keeps the fake CLI variables it just planned", () => {
+    const env: NodeJS.ProcessEnv = { PATH: "/usr/bin" };
+
+    applyHarnessProcessPlan(planHarnessProcess(FAKE_PLAN_INPUT), env);
+
+    expect(env.RADIUS_FAKE_CLI_SCRIPT).toBe("/tmp/e2e/fake-cli.mjs");
+    expect(env.PATH).toBe(`/tmp/root/bin${path.delimiter}/usr/bin`);
+  });
+
+  it("defaults to the current process environment", () => {
+    const original = process.env.RADIUS_FAKE_CLI_SCRIPT;
+    process.env.RADIUS_FAKE_CLI_SCRIPT = "/stale/fake-cli.mjs";
+    const originalToken = process.env.GH_TOKEN;
+    try {
+      applyHarnessProcessPlan({
+        env: { GH_TOKEN: "gho_applied" },
+        unsetEnv: ["RADIUS_FAKE_CLI_SCRIPT"],
+        useFakeCli: false,
+        interceptFetch: false
+      });
+
+      expect(process.env.RADIUS_FAKE_CLI_SCRIPT).toBeUndefined();
+      expect(process.env.GH_TOKEN).toBe("gho_applied");
+    } finally {
+      if (original === undefined) delete process.env.RADIUS_FAKE_CLI_SCRIPT;
+      else process.env.RADIUS_FAKE_CLI_SCRIPT = original;
+      if (originalToken === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = originalToken;
+    }
   });
 });
 
@@ -674,6 +747,85 @@ describe("resolveHarnessWorkspace", () => {
         workspacePath: "fixture-clone"
       })
     ).toThrow(/absolute workspacePath/);
+  });
+
+  it.each([
+    ["the checkout itself", (root: string) => root],
+    [
+      "a directory inside the checkout",
+      (root: string) => path.join(root, "packages", "clone")
+    ],
+    ["an ancestor of the checkout", (root: string) => path.dirname(root)]
+  ])(
+    "refuses a cloud workspace that is %s, which a real deploy would mutate",
+    (_name, pick) => {
+      const repositoryRoot = path.resolve("/repos", "ai-extensions");
+
+      expect(() =>
+        resolveHarnessWorkspace({
+          mode: "cloud",
+          rootDir: path.join("/tmp", "root"),
+          workspacePath: pick(repositoryRoot),
+          repositoryRoot
+        })
+      ).toThrow(/overlaps/);
+    }
+  );
+
+  it("accepts a clone that is a sibling of the checkout", () => {
+    const repositoryRoot = path.resolve("/repos", "ai-extensions");
+    const clone = path.resolve("/repos", "fixture-clone");
+
+    const plan = resolveHarnessWorkspace({
+      mode: "cloud",
+      rootDir: path.join("/tmp", "root"),
+      workspacePath: clone,
+      repositoryRoot
+    });
+
+    expect(plan.path).toBe(clone);
+  });
+
+  it("normalizes a traversing clone path before comparing it", () => {
+    const repositoryRoot = path.resolve("/repos", "ai-extensions");
+
+    expect(() =>
+      resolveHarnessWorkspace({
+        mode: "cloud",
+        rootDir: path.join("/tmp", "root"),
+        workspacePath: path.join(repositoryRoot, "..", "ai-extensions", "sub"),
+        repositoryRoot
+      })
+    ).toThrow(/overlaps/);
+  });
+});
+
+describe("assertCloudWorkspaceClone", () => {
+  it("accepts a directory carrying a git entry", async () => {
+    const seen: string[] = [];
+
+    await expect(
+      assertCloudWorkspaceClone(path.resolve("/repos", "clone"), async (t) => {
+        seen.push(t);
+      })
+    ).resolves.toBeUndefined();
+    expect(seen).toEqual([path.join(path.resolve("/repos", "clone"), ".git")]);
+  });
+
+  it("refuses a directory that is not a clone", async () => {
+    await expect(
+      assertCloudWorkspaceClone(path.resolve("/tmp", "empty"), () =>
+        Promise.reject(new Error("ENOENT"))
+      )
+    ).rejects.toThrow(/has no .git entry/);
+  });
+
+  it("reports a missing directory through the real filesystem", async () => {
+    await expect(
+      assertCloudWorkspaceClone(
+        path.join(E2E_TMP_ROOT, "definitely-absent-clone")
+      )
+    ).rejects.toThrow(/requires workspacePath to be a git clone/);
   });
 });
 
