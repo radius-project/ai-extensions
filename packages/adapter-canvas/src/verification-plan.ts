@@ -153,24 +153,33 @@ export function describeVerificationDispatch({
   );
 }
 
+// What the customer's pull request is actually waiting on, once the plan, the
+// cloud credentials, and the dispatch have all had their say. The three cases
+// are distinct next actions, so a boolean would fold the credential blocker
+// into the merge prompt and tell the customer to merge when merging is not
+// what unblocks them.
+export type PullRequestNextStep =
+  "verification-running" | "awaiting-merge" | "awaiting-credentials";
+
 // The pull-request guidance and the verification outcome are the same answer
 // told twice, so they are derived from one decision rather than predicted
-// before `planCredentialVerification` has made it. A dispatch from the setup
-// branch finishes the operation with `actionRequired` false and blanks the
-// pull request, so the guidance states what merging does rather than repeating
-// the blocking wording the waiting case owes the customer.
+// before `planCredentialVerification`, the credential check, and the dispatch
+// have made it. Only `awaiting-merge` may promise that merging starts
+// verification, because it is the only case where that is true.
 export function describePullRequestNextStep({
-  verifiesNow,
+  outcome,
   baseBranch,
   ref
 }: {
-  verifiesNow: boolean;
+  outcome: PullRequestNextStep;
   baseBranch: string;
   ref: string;
 }): string {
-  return verifiesNow ?
-      `Credential verification runs now against branch "${ref}", so setup is not blocked on the merge. Merging the pull request above puts the workflows on "${baseBranch}".`
-    : `Merge the pull request above to finish setup; credential verification and deploys run once it lands on "${baseBranch}".`;
+  if (outcome === "verification-running")
+    return `Credential verification is running against branch "${ref}", so it is not waiting for the merge. Merging the pull request above puts the workflows on "${baseBranch}".`;
+  if (outcome === "awaiting-credentials")
+    return `Merging the pull request above puts the workflows on "${baseBranch}", but credential verification is waiting on the cloud credentials above, not on the merge.`;
+  return `Merge the pull request above to finish setup; credential verification and deploys run once it lands on "${baseBranch}".`;
 }
 
 export interface VerifyWorkflowRunIdentity {

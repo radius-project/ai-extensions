@@ -192,24 +192,23 @@ describe("dispatch narration", () => {
 });
 
 describe("pull request next step", () => {
-  it("tells the customer setup is not blocked when verification dispatches now", () => {
+  it("reports verification as running when the dispatch already went out", () => {
     expect(
       describePullRequestNextStep({
-        verifiesNow: true,
+        outcome: "verification-running",
         baseBranch: "main",
         ref: "radius/setup-dev-workflows-abc"
       })
     ).toBe(
-      'Credential verification runs now against branch "radius/setup-dev-workflows-abc", ' +
-        "so setup is not blocked on the merge. Merging the pull request above puts the " +
-        'workflows on "main".'
+      'Credential verification is running against branch "radius/setup-dev-workflows-abc", ' +
+        'so it is not waiting for the merge. Merging the pull request above puts the workflows on "main".'
     );
   });
 
   it("tells the customer merging is what starts verification when it waits", () => {
     expect(
       describePullRequestNextStep({
-        verifiesNow: false,
+        outcome: "awaiting-merge",
         baseBranch: "main",
         ref: "radius/setup-dev-workflows-abc"
       })
@@ -219,47 +218,68 @@ describe("pull request next step", () => {
     );
   });
 
-  // The two messages are the same claim with opposite answers, so the thing
-  // worth pinning is that they can never both be true of one operation.
-  it("never promises verification waits for the merge while it is running now", () => {
-    const waiting = /run once it lands/;
-    const running = /runs now against branch/;
+  // Merging is not what unblocks this customer, so the guidance must not spend
+  // its one sentence telling them to merge "to finish setup".
+  it("names the credentials, not the merge, as the blocker when they are incomplete", () => {
+    const message = describePullRequestNextStep({
+      outcome: "awaiting-credentials",
+      baseBranch: "main",
+      ref: "radius/setup-dev-workflows-abc"
+    });
+    expect(message).toBe(
+      'Merging the pull request above puts the workflows on "main", but credential ' +
+        "verification is waiting on the cloud credentials above, not on the merge."
+    );
+    expect(message).not.toContain("to finish setup");
+  });
+
+  // Only one of the three outcomes may promise that merging starts
+  // verification, because it is the only one where that is true.
+  it("promises verification follows the merge in exactly one outcome", () => {
+    const outcomes = [
+      "verification-running",
+      "awaiting-merge",
+      "awaiting-credentials"
+    ] as const;
+    const promising = outcomes.filter((outcome) =>
+      /run once it lands/.test(
+        describePullRequestNextStep({ outcome, baseBranch: "main", ref: "x" })
+      )
+    );
+    expect(promising).toEqual(["awaiting-merge"]);
+  });
+
+  // The two claims are opposites, so no single message may make both.
+  it("never says verification waits for the merge while it is already running", () => {
     for (const baseBranch of ["main", "trunk"]) {
-      const now = describePullRequestNextStep({
-        verifiesNow: true,
-        baseBranch,
-        ref: "setup"
-      });
-      const later = describePullRequestNextStep({
-        verifiesNow: false,
-        baseBranch,
-        ref: "setup"
-      });
-      expect(running.test(now) && waiting.test(now)).toBe(false);
-      expect(running.test(later) && waiting.test(later)).toBe(false);
+      for (const outcome of [
+        "verification-running",
+        "awaiting-merge",
+        "awaiting-credentials"
+      ] as const) {
+        const message = describePullRequestNextStep({
+          outcome,
+          baseBranch,
+          ref: "setup"
+        });
+        expect(
+          /is running against branch/.test(message) &&
+            /run once it lands/.test(message)
+        ).toBe(false);
+      }
     }
   });
 
-  // `actionRequired` is false when verification dispatches, so that wording
-  // must not describe setup as unfinished work the customer still owes.
-  it("does not call setup unfinished when verification dispatches now", () => {
-    expect(
-      describePullRequestNextStep({
-        verifiesNow: true,
-        baseBranch: "main",
-        ref: "setup"
-      })
-    ).not.toContain("to finish setup");
-  });
-
-  it("names the branch verification runs against only when it runs now", () => {
-    expect(
-      describePullRequestNextStep({
-        verifiesNow: false,
-        baseBranch: "main",
-        ref: "radius/setup-dev-workflows-abc"
-      })
-    ).not.toContain("radius/setup-dev-workflows-abc");
+  it("names the branch verification runs against only when it is running", () => {
+    for (const outcome of ["awaiting-merge", "awaiting-credentials"] as const) {
+      expect(
+        describePullRequestNextStep({
+          outcome,
+          baseBranch: "main",
+          ref: "radius/setup-dev-workflows-abc"
+        })
+      ).not.toContain("radius/setup-dev-workflows-abc");
+    }
   });
 });
 

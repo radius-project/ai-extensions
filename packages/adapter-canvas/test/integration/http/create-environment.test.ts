@@ -2544,7 +2544,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     ).toBe(true);
   });
 
-  // The guidance and the dispatch steps answer the same question, so the
+  // The guidance and the steps around it answer the same question, so the
   // regression worth guarding is not the wording but the pair: the customer
   // must never be told verification waits for the merge in the same run that
   // dispatches it. The marker is part of that answer, because this run reports
@@ -2562,15 +2562,22 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
 
     expect(await response.json()).toMatchObject({ actionRequired: false });
     expect(harness.steps).toContain(
-      'ℹ️ Credential verification runs now against branch "radius/setup-dev-workflows-op-http", ' +
-        "so setup is not blocked on the merge. Merging the pull request above puts the " +
-        'workflows on "main".'
+      '\u2139\ufe0f Credential verification is running against branch "radius/setup-dev-workflows-op-http", ' +
+        'so it is not waiting for the merge. Merging the pull request above puts the workflows on "main".'
     );
-    expect(harness.steps.filter((step) => step.startsWith("👉"))).toEqual([]);
+    expect(
+      harness.steps.filter((step) => step.startsWith("\u{1F449}"))
+    ).toEqual([]);
     expect(
       harness.steps.some((step) => step.includes("run once it lands"))
     ).toBe(false);
-    expect(harness.steps).toContain("✅ Credentials verification dispatched.");
+    // The claim is only honest once the dispatch was accepted, so it must
+    // follow it rather than predict it.
+    expect(
+      harness.steps.indexOf("\u2705 Credentials verification dispatched.")
+    ).toBeLessThan(
+      harness.steps.findIndex((step) => step.includes("is running against"))
+    );
   });
 
   it("prompts for the merge when it does not dispatch", async () => {
@@ -2579,16 +2586,85 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     const response = await post({ repo: "octo/app" });
 
     expect(await response.json()).toMatchObject({ actionRequired: true });
-    expect(harness.steps.filter((step) => step.startsWith("👉"))).toEqual([
-      "👉 Merge the pull request above to finish setup; credential verification " +
+    expect(
+      harness.steps.filter((step) => step.startsWith("\u{1F449}"))
+    ).toEqual([
+      "\u{1F449} Merge the pull request above to finish setup; credential verification " +
         'and deploys run once it lands on "main".'
     ]);
     expect(
-      harness.steps.some((step) => step.includes("runs now against branch"))
+      harness.steps.some((step) => step.includes("is running against"))
     ).toBe(false);
     expect(
       harness.ghCalls.some((call) => call.startsWith("workflow run "))
     ).toBe(false);
+  });
+
+  // Merging is not what unblocks this run: verification was skipped because the
+  // cloud credentials are incomplete, and the operation finishes asking for
+  // those. Promising that verification follows the merge would repeat the
+  // contradiction one step above the skip that refutes it.
+  it("names the credentials as the blocker when they are incomplete", async () => {
+    const harness = start({
+      ...protectedScript,
+      files: {
+        ".github/workflows/radius-verify-credentials.yml":
+          "on: workflow_dispatch\njobs:\n"
+      },
+      azureCredential: () => ({ clientId: "c", tenantId: "t" })
+    });
+
+    await post({ repo: "octo/app" });
+
+    expect(
+      harness.steps.filter((step) => step.startsWith("\u{1F449}"))
+    ).toEqual([
+      '\u{1F449} Merging the pull request above puts the workflows on "main", but credential ' +
+        "verification is waiting on the cloud credentials above, not on the merge."
+    ]);
+    expect(
+      harness.steps.some((step) => step.includes("run once it lands"))
+    ).toBe(false);
+    expect(harness.finished).toMatchObject([
+      {
+        state: "action_required",
+        options: { terminal: { reason: "credentials-incomplete" } }
+      }
+    ]);
+  });
+
+  // A rejected dispatch fails the request before the guidance, so no run can
+  // claim verification is going when it never started.
+  it("claims nothing about verification when the dispatch is rejected", async () => {
+    const harness = start({
+      ...protectedScript,
+      gh: [
+        ...(protectedScript.gh ?? []),
+        {
+          match: /^workflow run /,
+          result: { code: 1, stderr: "HTTP 422: workflow does not exist" }
+        }
+      ],
+      files: {
+        ".github/workflows/radius-verify-credentials.yml":
+          "on: workflow_dispatch\njobs:\n"
+      }
+    });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(response.status).toBe(400);
+    expect(
+      harness.steps.some((step) => step.includes("is running against"))
+    ).toBe(false);
+    expect(
+      harness.steps.filter((step) => step.startsWith("\u{1F449}"))
+    ).toEqual([]);
+    expect(
+      harness.steps.some((step) =>
+        step.startsWith("\u274C Could not dispatch verify workflow")
+      )
+    ).toBe(true);
   });
 
   it("gives no merge guidance when the pull request was never opened", async () => {
@@ -2599,7 +2675,9 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
 
     await post({ repo: "octo/app" });
 
-    expect(harness.steps.filter((step) => step.startsWith("👉"))).toEqual([]);
+    expect(
+      harness.steps.filter((step) => step.startsWith("\u{1F449}"))
+    ).toEqual([]);
     expect(
       harness.steps.some((step) =>
         step.includes("Merge the pull request above")

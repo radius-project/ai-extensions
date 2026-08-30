@@ -52,7 +52,8 @@ import { selectedEnvironmentReader } from "../services/github-environment.js";
 import { runVerificationDispatch } from "../services/verification-dispatch.js";
 import {
   describeVerificationDispatch,
-  describePullRequestNextStep
+  describePullRequestNextStep,
+  type PullRequestNextStep
 } from "../../verification-plan.js";
 
 // Seam 4 of the `POST /api/create-environment` slice: the seven-step use case.
@@ -1083,22 +1084,6 @@ export async function handleCreateEnvironment(
         pullRequestUrl: null
       });
     }
-    // The guidance waited for the plan: whether merging is what starts
-    // verification is exactly what `planCredentialVerification` and the
-    // credential check just decided, so it is stated once, here, instead of
-    // being predicted at pull-request time and patched afterwards. The marker
-    // follows the same decision, because a dispatch from the setup branch
-    // finishes with `actionRequired` false and owes the customer nothing.
-    if (prState && pullRequestOpened) {
-      const verifiesNow = verifyPlan.shouldDispatch && credentialsComplete;
-      const nextStep = describePullRequestNextStep({
-        verifiesNow,
-        baseBranch: prState.base,
-        ref: verifyPlan.ref
-      });
-      if (verifiesNow) steps.push(`ℹ️ ${nextStep}`);
-      else steps.push(`👉 ${nextStep}`);
-    }
     if (!verifyPlan.shouldDispatch) {
       verifySkipReason =
         verifyPlan.skipReason ||
@@ -1299,6 +1284,26 @@ export async function handleCreateEnvironment(
         entry.state.verifyRunId = verifyRunId;
         entry.state.verifyRunUrl = verifyRunUrl;
       }
+    }
+
+    // The guidance waited for the whole decision, not just the plan. Every
+    // path that skipped or failed the dispatch has already returned by here,
+    // so this is the one place that knows what the pull request is actually
+    // waiting on rather than predicting it. The marker follows the same
+    // decision: an observation when verification is already running, a prompt
+    // only when the customer genuinely owes an action.
+    if (prState && pullRequestOpened) {
+      const outcome: PullRequestNextStep =
+        !verifyPlan.shouldDispatch ? "awaiting-merge"
+        : !credentialsComplete ? "awaiting-credentials"
+        : "verification-running";
+      const nextStep = describePullRequestNextStep({
+        outcome,
+        baseBranch: prState.base,
+        ref: verificationRef
+      });
+      if (outcome === "verification-running") steps.push(`ℹ️ ${nextStep}`);
+      else steps.push(`👉 ${nextStep}`);
     }
 
     const actionRequired = !verifyPlan.shouldDispatch;
