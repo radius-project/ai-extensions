@@ -10,7 +10,10 @@ import {
   buildAppOwnerListArgs,
   buildAppTagPatchArgs,
   buildAppTagShowArgs,
+  buildCallerIdentityArgs,
   buildRadiusAppProvenanceTags,
+  buildServicePrincipalObjectIdArgs,
+  buildSignedInUserObjectIdArgs,
   isServiceManagementReferenceError,
   isAppOwnerAlreadyAssignedError,
   fetchGitHubJson,
@@ -21,6 +24,7 @@ import {
   isAzResourceNotFound,
   missingRequiredAppTags,
   parseAppTags,
+  parseCallerIdentity,
   parseRadiusAppProvenanceTags,
   decideRadiusAppOwnership,
   isRadiusProvenanceMatch,
@@ -143,6 +147,135 @@ describe("buildAppCreateArgs", () => {
     const i = args.indexOf("--service-management-reference");
     expect(i).toBeGreaterThan(-1);
     expect(args[i + 1]).toBe(UUID);
+  });
+});
+
+describe("caller identity resolution", () => {
+  it("builds the argv that projects the authenticated principal's type and name", () => {
+    expect(buildCallerIdentityArgs()).toEqual([
+      "account",
+      "show",
+      "--query",
+      "{type:user.type,name:user.name}",
+      "-o",
+      "json"
+    ]);
+  });
+
+  it("builds the argv reading a signed-in user's Graph object id", () => {
+    expect(buildSignedInUserObjectIdArgs()).toEqual([
+      "ad",
+      "signed-in-user",
+      "show",
+      "--query",
+      "id",
+      "-o",
+      "tsv"
+    ]);
+  });
+
+  it("builds the argv resolving a service principal object id from its app id", () => {
+    expect(buildServicePrincipalObjectIdArgs({ appId: UUID })).toEqual([
+      "ad",
+      "sp",
+      "show",
+      "--id",
+      UUID,
+      "--query",
+      "id",
+      "-o",
+      "tsv"
+    ]);
+  });
+
+  it.each([
+    ["a lowercase type", '{"type":"user","name":"dev@contoso.com"}'],
+    ["a mixed-case type", '{"type":"User","name":"dev@contoso.com"}'],
+    ["a padded type", '  {"type":" user ","name":"dev@contoso.com"}  ']
+  ])("classifies %s as a signed-in user", (_label, stdout) => {
+    expect(parseCallerIdentity(stdout)).toEqual({ kind: "user" });
+  });
+
+  it.each([
+    ["an exact type", `{"type":"servicePrincipal","name":"${UUID}"}`],
+    ["a lowercase type", `{"type":"serviceprincipal","name":"${UUID}"}`],
+    ["a padded app id", `{"type":"servicePrincipal","name":"  ${UUID}  "}`]
+  ])(
+    "classifies %s as a service principal and keeps its app id",
+    (_label, stdout) => {
+      expect(parseCallerIdentity(stdout)).toEqual({
+        kind: "servicePrincipal",
+        appId: UUID
+      });
+    }
+  );
+
+  it("refuses a service principal whose name is not an application id", () => {
+    const identity = parseCallerIdentity(
+      '{"type":"servicePrincipal","name":"systemAssignedIdentity"}'
+    );
+    expect(identity.kind).toBe("unsupported");
+    expect(identity.kind === "unsupported" && identity.reason).toContain(
+      "systemAssignedIdentity"
+    );
+  });
+
+  it("refuses a service principal with no name at all", () => {
+    const identity = parseCallerIdentity('{"type":"servicePrincipal"}');
+    expect(identity.kind).toBe("unsupported");
+    expect(identity.kind === "unsupported" && identity.reason).toContain(
+      "not an application id"
+    );
+  });
+
+  it("names an unexpected principal type in the refusal", () => {
+    const identity = parseCallerIdentity('{"type":"managedIdentity"}');
+    expect(identity.kind).toBe("unsupported");
+    expect(identity.kind === "unsupported" && identity.reason).toContain(
+      "managedidentity"
+    );
+  });
+
+  it.each([
+    ["a null user projection", '{"type":null,"name":null}'],
+    ["a blank type", '{"type":"   ","name":"dev@contoso.com"}'],
+    ["a non-string type", '{"type":7}']
+  ])("refuses %s", (_label, stdout) => {
+    const identity = parseCallerIdentity(stdout);
+    expect(identity.kind).toBe("unsupported");
+    expect(identity.kind === "unsupported" && identity.reason).toContain(
+      "no caller identity type"
+    );
+  });
+
+  it.each([
+    ["empty output", ""],
+    ["whitespace-only output", "   "],
+    ["a JSON null", "null"],
+    ["a JSON array", "[]"],
+    ["a JSON scalar", '"user"']
+  ])("refuses %s as no identity at all", (_label, stdout) => {
+    const identity = parseCallerIdentity(stdout);
+    expect(identity.kind).toBe("unsupported");
+    expect(identity.kind === "unsupported" && identity.reason).toContain(
+      "no caller identity"
+    );
+  });
+
+  it.each([
+    ["malformed JSON", "{oops"],
+    ["a CLI error banner", "ERROR: Please run 'az login'"]
+  ])("refuses %s as unreadable", (_label, stdout) => {
+    const identity = parseCallerIdentity(stdout);
+    expect(identity.kind).toBe("unsupported");
+    expect(identity.kind === "unsupported" && identity.reason).toContain(
+      "unreadable caller identity"
+    );
+  });
+
+  it("refuses a missing payload without throwing", () => {
+    expect(parseCallerIdentity(undefined).kind).toBe("unsupported");
+    expect(parseCallerIdentity(null).kind).toBe("unsupported");
   });
 });
 
@@ -1051,7 +1184,7 @@ describe("decideExistingClientId", () => {
     ).toEqual({ action: "reuse" });
   });
 
-  it("reports that the current signed-in user is not listed as an owner", () => {
+  it("reports that the current Azure CLI identity is not listed as an owner", () => {
     const result = decideExistingClientId({
       clientId: "abc",
       showStatus: "found",
@@ -1062,7 +1195,7 @@ describe("decideExistingClientId", () => {
       code: "app-registration-not-owned"
     });
     expect(result.reason).toContain(
-      "The current signed-in user is not listed as one of this App Registration's owners."
+      "The current Azure CLI identity is not listed as one of this App Registration's owners."
     );
   });
 
@@ -1086,7 +1219,7 @@ describe("decideExistingClientId", () => {
       code: "app-registration-radius-orphaned",
       radiusOrphan: true
     });
-    expect(result.reason).toContain("current signed-in user is not listed");
+    expect(result.reason).toContain("current Azure CLI identity is not listed");
     expect(result.reason).toContain("clean it up manually");
   });
 
@@ -1302,7 +1435,7 @@ describe("decideAppSelection", () => {
     const r = decideAppSelection({ ownedMatches: [], hasUnownedMatch: true });
     expect(r.action).toBe("error");
     expect(r.code).toBe("app-registration-not-owned");
-    expect(r.reason).toContain("current signed-in user is not listed");
+    expect(r.reason).toContain("current Azure CLI identity is not listed");
   });
 
   it("reuses the single owned match", () => {
@@ -1346,7 +1479,7 @@ describe("decideAppSelection", () => {
     const r = decideAppSelection({ ownedMatches: [A], explicitAppId: "zzz" });
     expect(r.action).toBe("error");
     expect(r.code).toBe("app-registration-not-owned");
-    expect(r.reason).toContain("current signed-in user is not listed");
+    expect(r.reason).toContain("current Azure CLI identity is not listed");
   });
 
   it("surfaces Radius-orphan guidance when an explicit unowned app matches Radius provenance", () => {
@@ -1454,7 +1587,7 @@ describe("decideAppSelection", () => {
     expect(r.radiusOrphan).toBe(true);
     expect(r.reason).toBeDefined();
     expect(r.reason!.toLowerCase()).toContain(
-      "current signed-in user is not listed as one of its owners"
+      "current azure cli identity is not listed as one of its owners"
     );
     expect(r.reason).toContain("orphaned");
     expect(r.reason).toContain("manual");
@@ -1466,7 +1599,7 @@ describe("decideAppSelection", () => {
     expect(r.code).toBe("app-registration-not-owned");
     expect(r.reason).toBeDefined();
     expect(r.reason!.toLowerCase()).toContain(
-      "current signed-in user is not listed as one of this app registration's owners"
+      "current azure cli identity is not listed as one of this app registration's owners"
     );
     expect(r.reason).not.toContain("another user");
   });
@@ -1493,7 +1626,7 @@ describe("Radius provenance ownership decisions", () => {
   it("reuses any owned app regardless of Radius provenance", () => {
     expect(
       decideRadiusAppOwnership({
-        ownedBySignedInUser: true,
+        ownedByCaller: true,
         radiusProvenance: {
           tags: [
             "radius-managed",
@@ -1509,7 +1642,7 @@ describe("Radius provenance ownership decisions", () => {
 
   it("returns the orphaned cleanup guidance for same-repo/environment Radius apps", () => {
     const r = decideRadiusAppOwnership({
-      ownedBySignedInUser: false,
+      ownedByCaller: false,
       radiusProvenance: {
         tags: [
           "radius-managed",
@@ -1523,7 +1656,7 @@ describe("Radius provenance ownership decisions", () => {
     expect(r.action).toBe("error");
     expect(r.code).toBe("app-registration-radius-orphaned");
     expect(r.radiusOrphan).toBe(true);
-    expect(r.reason).toContain("current signed-in user is not listed");
+    expect(r.reason).toContain("current Azure CLI identity is not listed");
     expect(r.reason).toContain("orphaned");
     expect(r.reason).toContain("manual");
   });

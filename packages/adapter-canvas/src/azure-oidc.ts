@@ -229,6 +229,118 @@ export function buildAppCreateArgs({
   return args;
 }
 
+/**
+ * Which principal the Azure CLI is authenticated as.
+ *
+ * `unsupported` carries the reason Radius will surface, because every consumer
+ * of this type drives a destructive setup path that must fail closed rather
+ * than guess an identity.
+ */
+export type CallerIdentity =
+  | { kind: "user" }
+  | { kind: "servicePrincipal"; appId: string }
+  | { kind: "unsupported"; reason: string };
+
+/**
+ * Build the argv for the `az account show` projection that reports the
+ * authenticated principal's type and name.
+ *
+ * The type is read up front rather than inferred from a failed
+ * `az ad signed-in-user show`: that command is Microsoft Graph `/me`, which
+ * does not exist for a service principal, and matching its error text would
+ * reclassify a genuine permission denial as "this must be a service principal".
+ */
+export function buildCallerIdentityArgs(): string[] {
+  return [
+    "account",
+    "show",
+    "--query",
+    "{type:user.type,name:user.name}",
+    "-o",
+    "json"
+  ];
+}
+
+/** Build the argv reading the signed-in human user's Entra object id. */
+export function buildSignedInUserObjectIdArgs(): string[] {
+  return ["ad", "signed-in-user", "show", "--query", "id", "-o", "tsv"];
+}
+
+/**
+ * Build the argv reading a service principal's Entra object id from its app id.
+ *
+ * `az account show` reports a service principal's `user.name` as its appId,
+ * while owner add and owner list both speak object ids.
+ *
+ * This is the same argv as `resolveServicePrincipalObjectId` in
+ * `server/routes/azure-auto-setup-credentials.ts`, deliberately without its
+ * propagation-retry loop: that call reads the service principal of an
+ * application the flow just created, where Entra replication can lag, whereas
+ * the caller's own service principal already exists. A failure here means a
+ * missing Graph permission, the wrong tenant, or a broken login, so it must
+ * fail closed immediately rather than retry a real error slowly.
+ */
+export function buildServicePrincipalObjectIdArgs({
+  appId
+}: {
+  appId: string;
+}): string[] {
+  return ["ad", "sp", "show", "--id", appId, "--query", "id", "-o", "tsv"];
+}
+
+/** Parse the `az account show` caller projection into a principal type. */
+export function parseCallerIdentity(stdout: unknown): CallerIdentity {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(stdout ?? "").trim() || "null");
+  } catch {
+    return {
+      kind: "unsupported",
+      reason:
+        'Azure CLI returned an unreadable caller identity from "az account show". Run "az login" and retry.'
+    };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return {
+      kind: "unsupported",
+      reason:
+        'Azure CLI reported no caller identity from "az account show". Run "az login" and retry.'
+    };
+  }
+  const caller = parsed as { type?: unknown; name?: unknown };
+  const type =
+    typeof caller.type === "string" ? caller.type.trim().toLowerCase() : "";
+  const name = typeof caller.name === "string" ? caller.name.trim() : "";
+  if (!type) {
+    return {
+      kind: "unsupported",
+      reason:
+        'Azure CLI reported no caller identity type from "az account show". Run "az login" and retry.'
+    };
+  }
+  if (type === "user") return { kind: "user" };
+  if (type === "serviceprincipal") {
+    // A managed identity also reports `servicePrincipal`, but names itself
+    // `systemAssignedIdentity` rather than an appId, so there is nothing to
+    // resolve an object id from.
+    if (!isUuid(name)) {
+      return {
+        kind: "unsupported",
+        reason:
+          `Azure CLI is authenticated as a service principal whose name ("${name}") is not an application id, ` +
+          'so Radius cannot resolve its Entra object id. Sign in with "az login --service-principal -u <appId>" and retry.'
+      };
+    }
+    return { kind: "servicePrincipal", appId: name };
+  }
+  return {
+    kind: "unsupported",
+    reason:
+      `Azure CLI reported an unsupported caller identity type ("${type}"). ` +
+      "Radius supports a signed-in user or a service principal."
+  };
+}
+
 /** Build the argv for `az ad app owner add`. */
 export function buildAppOwnerAddArgs({
   appId,
@@ -397,26 +509,26 @@ export function isRadiusProvenanceMatch(
  * Pure ownership classification for the Radius-tagged-app reuse path.
  *
  * - Owned apps always reuse, regardless of any Radius tags.
- * - Radius-tagged repo/environment matches that the signed-in user does not
- *   own get a dedicated orphaning message with manual cleanup guidance.
- * - Everything else falls back to the precise "signed-in user is not listed as
- *   an owner" message.
+ * - Radius-tagged repo/environment matches that the calling Azure CLI identity
+ *   does not own get a dedicated orphaning message with manual cleanup guidance.
+ * - Everything else falls back to the precise "Azure CLI identity is not listed
+ *   as an owner" message.
  */
 export function decideRadiusAppOwnership({
-  ownedBySignedInUser,
+  ownedByCaller,
   radiusProvenance
 }: {
-  ownedBySignedInUser: boolean;
+  ownedByCaller: boolean;
   radiusProvenance?: RadiusAppProvenanceInput;
 }): RadiusAppOwnershipDecision {
-  if (ownedBySignedInUser) return { action: "reuse" };
+  if (ownedByCaller) return { action: "reuse" };
 
   if (isRadiusProvenanceMatch(radiusProvenance)) {
     return {
       action: "error",
       code: "app-registration-radius-orphaned",
       reason:
-        "A Radius-tagged App Registration already exists for this repository/environment, but the current signed-in user is not listed as one of its owners. " +
+        "A Radius-tagged App Registration already exists for this repository/environment, but the current Azure CLI identity is not listed as one of its owners. " +
         "It may be a leftover from a previous Radius setup that was orphaned. Ask an administrator or current owner to review the owners and Radius tags and clean it up manually if needed. " +
         "This flow will not reclaim, delete, or add owners.",
       radiusOrphan: true
@@ -427,7 +539,7 @@ export function decideRadiusAppOwnership({
     action: "error",
     code: "app-registration-not-owned",
     reason:
-      "The current signed-in user is not listed as one of this App Registration's owners. " +
+      "The current Azure CLI identity is not listed as one of this App Registration's owners. " +
       "Setup will not reuse it. " +
       "Choose an owned application or create a new one."
   };
@@ -495,7 +607,7 @@ export function decideAppSelection({
     const picked = owned.find((m) => norm(m.appId) === norm(explicitAppId));
     if (picked) return { action: "reuse", appId: picked.appId };
     const decision = decideRadiusAppOwnership({
-      ownedBySignedInUser: false,
+      ownedByCaller: false,
       radiusProvenance
     });
     return {
@@ -512,7 +624,7 @@ export function decideAppSelection({
   if (owned.length === 0) {
     if (hasUnownedMatch) {
       const decision = decideRadiusAppOwnership({
-        ownedBySignedInUser: false,
+        ownedByCaller: false,
         radiusProvenance
       });
       return {
@@ -752,7 +864,7 @@ export function isAzResourceNotFound(stderr: unknown): boolean {
  *   `showStatus` is the classified result of `az ad app show --id <clientId>`.
  * @returns {{action:'reuse'|'error'|'fallthrough'|'fatal', code?:string, reason?:string, radiusOrphan?:boolean}}
  *   - reuse: the wired app exists and is owned — use it directly.
- *   - error: exists but the current signed-in user is not listed as an owner — do NOT repoint.
+ *   - error: exists but the current Azure CLI identity is not listed as an owner — do NOT repoint.
  *   - fatal `client-id-lookup-failed`: a real lookup failure (not a not-found).
  *   - fallthrough: no clientId, or a not-found (stale var) — use the name lookup.
  */
@@ -779,7 +891,7 @@ export function decideExistingClientId({
   if (showStatus === "found") {
     if (owned) return { action: "reuse" };
     const decision = decideRadiusAppOwnership({
-      ownedBySignedInUser: false,
+      ownedByCaller: false,
       radiusProvenance
     });
     return {
