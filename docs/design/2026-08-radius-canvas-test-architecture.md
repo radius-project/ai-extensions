@@ -156,7 +156,7 @@ Already testable modules such as `operations.ts`, `verification-plan.ts`, `bicep
 
 Higher-level tests complement unit tests; they do not replace them. A policy belongs in a unit test, its HTTP representation belongs in HTTP integration, and a critical journey is added only when the failure can escape across the interface and server boundary.
 
-Every layer above is hermetic: it contacts no network, credential, or mutable external resource. Cloud E2E is the deliberate exception, because the extension's most consequential behavior is the external side effects it performs — creating an Azure identity, federating it to GitHub, and later removing both. A fake cloud can prove the right commands were sent but never that they were accepted, so that one class of failure is invisible to every other layer. It is therefore kept off the pull request path and run on a schedule; see the [Cloud E2E design](./2026-08-cloud-e2e-environment-lifecycle.md).
+Every layer above except Cloud E2E is hermetic: it contacts no network, credential, or mutable external resource. Cloud E2E is the deliberate exception, because the extension's most consequential behavior is the external side effects it performs — creating an Azure identity, federating it to GitHub, and later removing both. A fake cloud can prove the right commands were sent but never that they were accepted, so that one class of failure is invisible to every other layer. It is therefore kept off the pull request path and run on a schedule; see the [Cloud E2E design](./2026-08-cloud-e2e-environment-lifecycle.md).
 
 ### Regression classes and prevention
 
