@@ -42,6 +42,8 @@ export interface CloudFixturePorts {
   /** Returns an absolute directory the fixture may clone into and later delete. */
   readonly makeWorkspaceDir: (prefix: string) => Promise<string>;
   readonly removeDir: (dir: string) => Promise<void>;
+  /** Injected so eventual-consistency polling is deterministic under test. */
+  readonly wait: (milliseconds: number) => Promise<void>;
   /** Injected so the resource group's `creationTime` tag is assertable. */
   readonly now: () => Date;
   /** Injected so per-run resource names are deterministic under test. */
@@ -117,6 +119,8 @@ export function createNodeCloudFixturePorts(): CloudFixturePorts {
     makeWorkspaceDir: (prefix) =>
       fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`)),
     removeDir: (dir) => fs.rm(dir, { recursive: true, force: true }),
+    wait: (milliseconds) =>
+      new Promise((resolve) => setTimeout(resolve, milliseconds)),
     now: () => new Date(),
     newUniqueId: () => randomUUID()
   };

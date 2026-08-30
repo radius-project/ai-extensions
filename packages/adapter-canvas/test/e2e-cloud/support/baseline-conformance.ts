@@ -11,6 +11,7 @@
 // each file missing, a listing that fails, a compile that fails, a compile that
 // warns — is provable without a network call or a bicep binary.
 import { REQUIRED_STAGED_FILES } from "@radius-project/core/modeling";
+import path from "node:path";
 
 /** The result of compiling the baseline's `app.bicep`. */
 export interface BaselineCompileResult {
@@ -32,6 +33,58 @@ export interface BaselineConformanceResult {
   readonly diagnostics: readonly string[];
   /** A single reviewable explanation, empty when the baseline conforms. */
   readonly summary: string;
+}
+
+export interface BaselineWorkspaceCompilePorts {
+  readTextFile(path: string): Promise<string>;
+  buildGraph(
+    content: string,
+    definitionFile: string,
+    options: {
+      readonly log: (message: string) => void;
+      readonly radArtifactsDir: string;
+    }
+  ): Promise<readonly unknown[]>;
+}
+
+/**
+ * Compiles the checked-out baseline with its committed `.radius` artifacts.
+ *
+ * Passing `radArtifactsDir` is essential: it makes `buildGraphViaRad` consume
+ * the repository's own bicepconfig.json and local extension artifacts instead
+ * of deriving a fallback config that the real journey would never use.
+ */
+export async function compileBaselineWorkspace(
+  workspacePath: string,
+  radiusDirectory: string,
+  ports: BaselineWorkspaceCompilePorts
+): Promise<BaselineCompileResult> {
+  const diagnostics: string[] = [];
+  const radArtifactsDir = path.join(workspacePath, radiusDirectory);
+  const definitionFile = `${radiusDirectory.replace(/\\/g, "/")}/app.bicep`;
+  try {
+    const content = await ports.readTextFile(
+      path.join(radArtifactsDir, "app.bicep")
+    );
+    const resources = await ports.buildGraph(content, definitionFile, {
+      log: (message) => diagnostics.push(message),
+      radArtifactsDir
+    });
+    if (resources.length === 0)
+      return {
+        ok: false,
+        diagnostics: [...diagnostics, "The baseline compiled to no resources."]
+      };
+    return { ok: true, diagnostics };
+  } catch (error) {
+    return {
+      ok: false,
+      diagnostics: [
+        ...diagnostics,
+        error instanceof Error ? error.message : String(error)
+      ]
+    };
+  }
 }
 
 /**

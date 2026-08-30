@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { createCloudFixture, type CloudFixture } from "./cloud-fixture.js";
+import {
+  createCloudFixture,
+  type CloudFixture,
+  type CloudFixtureOptions
+} from "./cloud-fixture.js";
 import {
   createFakeFixturePorts,
   type FakeCommandStub,
@@ -28,6 +32,9 @@ const COMMITS_PATH = `repos/${REPOSITORY}/commits/${BRANCH}`;
 const MATCHING_REFS_PATH = `repos/${REPOSITORY}/git/matching-refs/heads/radius/setup-`;
 const PULLS_PATH = `repos/${REPOSITORY}/pulls?state=open&per_page=100`;
 const DEFAULT_REF_PATH = `repos/${REPOSITORY}/git/refs/heads/${BRANCH}`;
+
+const pullPages = (...pages: readonly unknown[][]): string =>
+  JSON.stringify(pages);
 
 const NOT_FOUND = {
   code: 1,
@@ -81,7 +88,11 @@ function baselineStubs(): FakeCommandStub[] {
       match: ["api", MATCHING_REFS_PATH],
       respond: { stdout: "[]" }
     },
-    { tool: "gh", match: ["api", PULLS_PATH], respond: { stdout: "[]" } }
+    {
+      tool: "gh",
+      match: ["api", PULLS_PATH],
+      respond: { stdout: pullPages([]) }
+    }
   ];
 }
 
@@ -92,7 +103,8 @@ interface Harness {
 
 async function createHarness(
   overrides: readonly FakeCommandStub[] = [],
-  portOptions: Parameters<typeof createFakeFixturePorts>[0] = {}
+  portOptions: Parameters<typeof createFakeFixturePorts>[0] = {},
+  fixtureOptions: Partial<CloudFixtureOptions> = {}
 ): Promise<Harness> {
   const fake = createFakeFixturePorts({
     uniqueId: UNIQUE_ID,
@@ -102,6 +114,7 @@ async function createHarness(
     stubs: [...overrides, ...baselineStubs()]
   });
   const fixture = await createCloudFixture({
+    ...fixtureOptions,
     subscriptionId: SUBSCRIPTION,
     repository: REPOSITORY,
     defaultBranch: BRANCH,
@@ -150,6 +163,44 @@ async function captureError(work: Promise<unknown>): Promise<Error> {
 
 describe("createCloudFixture", () => {
   describe("construction", () => {
+    it.each([
+      ["zero timeout", { assertionTimeoutMs: 0 }, "Assertion timeout"],
+      [
+        "non-finite timeout",
+        { assertionTimeoutMs: Number.POSITIVE_INFINITY },
+        "Assertion timeout"
+      ],
+      [
+        "zero poll interval",
+        { assertionPollIntervalMs: 0 },
+        "Assertion poll interval"
+      ],
+      [
+        "non-finite poll interval",
+        { assertionPollIntervalMs: Number.NaN },
+        "Assertion poll interval"
+      ]
+    ] as const)(
+      "rejects a %s before issuing an external command",
+      async (_label, fixtureOptions, expectedMessage) => {
+        const fake = createFakeFixturePorts({ stubs: baselineStubs() });
+
+        await expect(
+          createCloudFixture({
+            subscriptionId: SUBSCRIPTION,
+            repository: REPOSITORY,
+            defaultBranch: BRANCH,
+            baselineSha: BASELINE,
+            ports: fake.ports,
+            ...fixtureOptions
+          })
+        ).rejects.toThrow(
+          `${expectedMessage} must be a positive finite number.`
+        );
+        expect(fake.commands.calls).toEqual([]);
+      }
+    );
+
     it("provisions the run's resource group, cluster, and pinned clone", async () => {
       const { fixture, fake } = await createHarness();
 
@@ -312,7 +363,7 @@ describe("createCloudFixture", () => {
       expect(fake.commands.commandLines("az").at(-1)).toContain("group delete");
     });
 
-    it("reports the original failure even when teardown also fails", async () => {
+    it("reports the original failure and every failed construction unwind", async () => {
       const { attempt } = expectConstructionToFail(
         [
           failing("git", ["reset", "--hard"], "unknown revision"),
@@ -321,7 +372,14 @@ describe("createCloudFixture", () => {
         { removeDir: () => Promise.reject(new Error("EBUSY")) }
       );
 
-      await expect(attempt).rejects.toThrow(/unknown revision/);
+      const error = await captureError(attempt);
+      expect(error.message).toContain("unknown revision");
+      expect(error.message).toContain(`remove workspace ${WORKSPACE}`);
+      expect(error.message).toContain("EBUSY");
+      expect(error.message).toContain(
+        `delete resource group ${RESOURCE_GROUP}`
+      );
+      expect(error.message).toContain("group is locked");
     });
   });
 
@@ -345,6 +403,9 @@ describe("createCloudFixture", () => {
       expect(lines.some((line) => line.includes("--display-name"))).toBe(false);
       expect(lines.some((line) => line.includes(`--scope ${SCOPE}`))).toBe(
         true
+      );
+      expect(fake.commands.commandLines("gh")).toContain(
+        `api --paginate --slurp ${PULLS_PATH}`
       );
     });
 
@@ -571,33 +632,92 @@ describe("createCloudFixture", () => {
           tool: "gh",
           match: ["api", PULLS_PATH],
           respond: {
-            stdout: JSON.stringify([
-              {
-                number: 7,
-                title: "Add Radius workflows",
-                head: { ref: "radius/setup-radtest-abc-workflows-1a2b" }
-              }
-            ])
+            stdout: pullPages(
+              [
+                {
+                  number: 7,
+                  title: "Add Radius workflows",
+                  head: { ref: "radius/setup-radtest-abc-workflows-1a2b" }
+                }
+              ],
+              [
+                {
+                  number: 8,
+                  title: "Second page",
+                  head: { ref: "radius/setup-second" }
+                }
+              ]
+            )
           }
         }
       ]);
 
-      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+      const error = await captureError(fixture.assertCleanSlate());
+      expect(error.message).toMatch(
         /open pull request #7 \("Add Radius workflows", head "radius\/setup-radtest-abc-workflows-1a2b"\)/
+      );
+      expect(error.message).toMatch(
+        /open pull request #8 \("Second page", head "radius\/setup-second"\)/
       );
     });
 
-    it("describes a pull request with missing fields rather than dropping it", async () => {
+    it("reports placeholders when an open pull request omits optional details", async () => {
       const { fixture } = await createHarness([
         {
           tool: "gh",
           match: ["api", PULLS_PATH],
-          respond: { stdout: "[{}]" }
+          respond: { stdout: pullPages([{ number: 7 }]) }
         }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /open pull request #0 \("\(untitled\)", head "\(unknown\)"\)/
+        /open pull request #7 \("\(untitled\)", head "\(unknown\)"\)/
+      );
+    });
+
+    it.each([
+      ["a missing number", undefined],
+      ["a non-integer number", 1.5],
+      ["a non-positive number", 0]
+    ])("rejects an open pull request with %s", async (_label, number) => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh",
+          match: ["api", PULLS_PATH],
+          respond: { stdout: pullPages([{ number }]) }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        /open pull requests .* no usable "number"/
+      );
+    });
+
+    it("rejects an empty successful pull-request response", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh",
+          match: ["api", PULLS_PATH],
+          respond: { stdout: "" }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        /open pull requests .* empty response instead of JSON/
+      );
+    });
+
+    it("rejects a paginated pull-request response whose page is not an array", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh",
+          match: ["api", PULLS_PATH],
+          respond: { stdout: JSON.stringify([{ number: 7 }]) }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        /open pull requests .* page 0 with JSON type "object"/
       );
     });
 
@@ -644,7 +764,9 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", PULLS_PATH],
-          respond: { stdout: '[{"number":3,"title":"t","head":{"ref":"r"}}]' }
+          respond: {
+            stdout: pullPages([{ number: 3, title: "t", head: { ref: "r" } }])
+          }
         }
       ]);
 
@@ -774,9 +896,42 @@ describe("createCloudFixture", () => {
 
       await expect(fixture.assertAppRegistrationExists()).rejects.toThrow(
         new RegExp(
-          `Expected the product to have created an app registration named "${APP_NAME}", but none exists`
+          `Timed out after 30000ms.*app registration named "${APP_NAME}"`
         )
       );
+    });
+
+    it("polls until the app registration becomes visible", async () => {
+      const { fixture, fake } = await createHarness([
+        { tool: "az", match: APP_LIST, respond: { stdout: "[]" }, times: 1 },
+        {
+          tool: "az",
+          match: APP_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
+        }
+      ]);
+
+      await expect(
+        fixture.assertAppRegistrationExists()
+      ).resolves.toMatchObject({ appId: "app-1" });
+      expect(fake.waits).toEqual([1000]);
+    });
+
+    it("uses the remaining timeout for the final poll interval", async () => {
+      const { fixture, fake } = await createHarness(
+        [],
+        {},
+        { assertionTimeoutMs: 1500, assertionPollIntervalMs: 1000 }
+      );
+
+      await expect(fixture.assertAppRegistrationExists()).rejects.toThrow(
+        /Timed out after 1500ms/
+      );
+      expect(fake.waits).toEqual([1000, 500]);
     });
 
     it("blames a concurrent run when the repository-scoped name is duplicated", async () => {
@@ -799,13 +954,14 @@ describe("createCloudFixture", () => {
     });
 
     it("propagates a failing lookup", async () => {
-      const { fixture } = await createHarness([
+      const { fixture, fake } = await createHarness([
         failing("az", APP_LIST, "not logged in")
       ]);
 
       await expect(fixture.assertAppRegistrationExists()).rejects.toThrow(
         /not logged in/
       );
+      expect(fake.waits).toEqual([]);
     });
   });
 
@@ -843,6 +999,33 @@ describe("createCloudFixture", () => {
           .commandLines("az")
           .some((line) => line.includes("federated-credential list --id obj-1"))
       ).toBe(true);
+    });
+
+    it("polls until the federated credential becomes visible", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "az",
+          match: APP_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
+        },
+        { tool: "az", match: FIC_LIST, respond: { stdout: "[]" }, times: 1 },
+        {
+          tool: "az",
+          match: FIC_LIST,
+          respond: {
+            stdout: JSON.stringify([{ name: "env", subject: SUBJECT }])
+          }
+        }
+      ]);
+
+      await expect(
+        fixture.assertFederatedCredentialExists(SUBJECT)
+      ).resolves.toBeUndefined();
+      expect(fake.waits).toEqual([1000]);
     });
 
     it("reports the subjects that do exist when the expected one does not", async () => {
@@ -894,7 +1077,7 @@ describe("createCloudFixture", () => {
 
       await expect(
         fixture.assertFederatedCredentialExists(SUBJECT)
-      ).rejects.toThrow(/app registration named ".*", but none exists/);
+      ).rejects.toThrow(/Timed out after 30000ms.*app registration named/s);
     });
   });
 
@@ -917,11 +1100,31 @@ describe("createCloudFixture", () => {
       ).resolves.toBeUndefined();
     });
 
+    it("polls until the role assignment becomes visible", async () => {
+      const { fixture, fake } = await createHarness([
+        { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" }, times: 1 },
+        {
+          tool: "az",
+          match: ROLE_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { principalId: "sp-1", roleDefinitionName: "Contributor" }
+            ])
+          }
+        }
+      ]);
+
+      await expect(
+        fixture.assertRoleAssignmentExists("sp-1")
+      ).resolves.toBeUndefined();
+      expect(fake.waits).toEqual([1000]);
+    });
+
     it("fails plainly when the group carries no assignments", async () => {
       const { fixture } = await createHarness();
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
-        /but found no role assignments at all/
+        /found no role assignments at all/
       );
     });
 
@@ -970,12 +1173,33 @@ describe("createCloudFixture", () => {
       ).resolves.toBeUndefined();
     });
 
+    it("polls until the GitHub Environment becomes visible", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh",
+          match: ["api", ENVIRONMENT_PATH],
+          respond: NOT_FOUND,
+          times: 1
+        },
+        {
+          tool: "gh",
+          match: ["api", ENVIRONMENT_PATH],
+          respond: { stdout: '{"name":"radtest"}' }
+        }
+      ]);
+
+      await expect(
+        fixture.assertGitHubEnvironmentExists()
+      ).resolves.toBeUndefined();
+      expect(fake.waits).toEqual([1000]);
+    });
+
     it("fails when the environment is genuinely absent", async () => {
       const { fixture } = await createHarness();
 
       await expect(fixture.assertGitHubEnvironmentExists()).rejects.toThrow(
         new RegExp(
-          `Expected the product to have created GitHub Environment "${ENVIRONMENT}" in ${REPOSITORY}, but it does not exist`
+          `Timed out after 30000ms.*GitHub Environment "${ENVIRONMENT}"`
         )
       );
     });
@@ -1043,6 +1267,19 @@ describe("createCloudFixture", () => {
           match: ["api", COMMITS_PATH],
           respond: { stdout: "d".repeat(40) }
         },
+        {
+          tool: "gh",
+          match: ["api", PULLS_PATH],
+          respond: {
+            stdout: pullPages([
+              {
+                number: 7,
+                title: "Add Radius workflows",
+                head: { ref: "radius/setup-a" }
+              }
+            ])
+          }
+        },
         { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} },
         { tool: "gh", match: ["api", "--method", "PATCH"], respond: {} }
       ]);
@@ -1051,6 +1288,7 @@ describe("createCloudFixture", () => {
         "service principal sp-1",
         "app registration app-1",
         `GitHub environment ${ENVIRONMENT}`,
+        "pull request #7",
         "branch radius/setup-a",
         `${BRANCH} reset to ${BASELINE}`
       ]);
@@ -1061,7 +1299,19 @@ describe("createCloudFixture", () => {
         `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
       );
       expect(lines).toContain(
+        `api --method PATCH repos/${REPOSITORY}/pulls/7 -f state=closed`
+      );
+      expect(lines).toContain(
         `api --method PATCH ${DEFAULT_REF_PATH} -f sha=${BASELINE} -F force=true`
+      );
+      expect(
+        lines.indexOf(
+          `api --method PATCH repos/${REPOSITORY}/pulls/7 -f state=closed`
+        )
+      ).toBeLessThan(
+        lines.indexOf(
+          `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
+        )
       );
       // Service principals are removed explicitly so an orphan cannot survive
       // after its application is already gone.
@@ -1089,6 +1339,63 @@ describe("createCloudFixture", () => {
       expect(fake.commands.commandLines("az")).toContain(
         "ad sp delete --id orphan-sp --output none"
       );
+    });
+
+    it("closes an open pull request even when its branch is already gone", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh",
+          match: ["api", PULLS_PATH],
+          respond: {
+            stdout: pullPages([
+              {
+                number: 9,
+                title: "Stale setup",
+                head: { ref: "radius/setup-deleted" }
+              }
+            ])
+          }
+        },
+        {
+          tool: "gh",
+          match: ["api", "--method", "PATCH", `repos/${REPOSITORY}/pulls/9`],
+          respond: {}
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        "pull request #9"
+      ]);
+      expect(fake.commands.commandLines("gh")).toContain(
+        `api --method PATCH repos/${REPOSITORY}/pulls/9 -f state=closed`
+      );
+    });
+
+    it("does not close an open pull request the product did not create", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh",
+          match: ["api", PULLS_PATH],
+          respond: {
+            stdout: pullPages([
+              {
+                number: 10,
+                title: "Human change",
+                head: { ref: "feature/human" }
+              }
+            ])
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual(
+        []
+      );
+      expect(
+        fake.commands
+          .commandLines("gh")
+          .some((line) => line.includes("pulls/10"))
+      ).toBe(false);
     });
 
     it("leaves a default branch already at the baseline alone", async () => {
@@ -1240,6 +1547,49 @@ describe("createCloudFixture", () => {
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
         /list workflow fallback branches: .*HTTP 500/
+      );
+    });
+
+    it("records a failing pull-request listing", async () => {
+      const { fixture } = await createHarness([
+        failing("gh", ["api", PULLS_PATH], "HTTP 500")
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /list open pull requests: .*HTTP 500/
+      );
+    });
+
+    it("records a failing pull-request close and continues cleanup", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh",
+          match: ["api", PULLS_PATH],
+          respond: {
+            stdout: pullPages([
+              {
+                number: 9,
+                title: "Stale setup",
+                head: { ref: "radius/setup-deleted" }
+              }
+            ])
+          }
+        },
+        {
+          tool: "gh",
+          match: ["api", "--method", "PATCH", `repos/${REPOSITORY}/pulls/9`],
+          respond: { code: 1, stderr: "HTTP 403" }
+        },
+        {
+          tool: "gh",
+          match: ["api", COMMITS_PATH],
+          respond: { stdout: "e".repeat(40) }
+        },
+        { tool: "gh", match: ["api", "--method", "PATCH"], respond: {} }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /pull request #9: .*HTTP 403.*Reclaimed before failing: main reset/s
       );
     });
 

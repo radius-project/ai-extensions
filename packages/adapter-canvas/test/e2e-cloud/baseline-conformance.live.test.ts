@@ -10,16 +10,15 @@
 // actually compile, resolved against the same managed `rad` and the same Radius
 // extension reference.
 import { describe, expect, it } from "vitest";
+import { promises as fs } from "node:fs";
 import { buildGraphViaRad } from "@radius-project/adapter-shared";
 import {
   assertBaselineConformance,
-  type BaselineCompileResult
+  compileBaselineWorkspace
 } from "./support/baseline-conformance.js";
 import {
   createNodeCloudFixturePorts,
-  describeError,
   expectSuccess,
-  parseJsonArray,
   type CloudCommandPort
 } from "./support/cloud-command-port.js";
 import {
@@ -33,73 +32,85 @@ import {
 const ENABLED =
   !!process.env.RADIUS_CLOUD_E2E && isFixtureRepositoryProvisioned();
 
-const APP_BICEP = `${FIXTURE_RADIUS_DIRECTORY}/app.bicep`;
-
 async function listBaselineFiles(
-  commands: CloudCommandPort
+  commands: CloudCommandPort,
+  workspacePath: string
 ): Promise<string[]> {
-  const context = `gh api git/trees of ${FIXTURE_REPOSITORY}@${FIXTURE_BASELINE_SHA}`;
-  const paths = parseJsonArray(
-    await commands.runGh([
-      "api",
-      `repos/${FIXTURE_REPOSITORY}/git/trees/${FIXTURE_BASELINE_SHA}?recursive=1`,
-      "--jq",
-      '[.tree[] | select(.type == "blob") | .path]'
-    ]),
-    context
-  );
+  const paths = expectSuccess(
+    await commands.runGit(
+      ["ls-tree", "-r", "--name-only", "HEAD", "--", FIXTURE_RADIUS_DIRECTORY],
+      workspacePath
+    ),
+    `git ls-tree of ${FIXTURE_REPOSITORY}@${FIXTURE_BASELINE_SHA}`
+  )
+    .stdout.split(/\r?\n/)
+    .filter(Boolean);
   const prefix = `${FIXTURE_RADIUS_DIRECTORY}/`;
   return paths
-    .filter(
-      (entry): entry is string =>
-        typeof entry === "string" && entry.startsWith(prefix)
-    )
+    .filter((entry) => entry.startsWith(prefix))
     .map((entry) => entry.slice(prefix.length));
-}
-
-async function compileBaseline(
-  commands: CloudCommandPort
-): Promise<BaselineCompileResult> {
-  const content = expectSuccess(
-    await commands.runGh([
-      "api",
-      `repos/${FIXTURE_REPOSITORY}/contents/${APP_BICEP}?ref=${FIXTURE_BASELINE_SHA}`,
-      "--header",
-      "Accept: application/vnd.github.raw"
-    ]),
-    `gh api contents/${APP_BICEP}@${FIXTURE_BASELINE_SHA}`
-  ).stdout;
-
-  const diagnostics: string[] = [];
-  try {
-    const resources = await buildGraphViaRad(content, APP_BICEP, {
-      log: (message: string) => diagnostics.push(message)
-    });
-    // An application that compiles to nothing is not a usable journey subject,
-    // so it is a conformance failure rather than a silent pass.
-    if (resources.length === 0)
-      return {
-        ok: false,
-        diagnostics: [...diagnostics, "The baseline compiled to no resources."]
-      };
-    return { ok: true, diagnostics };
-  } catch (error) {
-    return { ok: false, diagnostics: [...diagnostics, describeError(error)] };
-  }
 }
 
 describe.skipIf(!ENABLED)(
   `pinned baseline of ${FIXTURE_REPOSITORY}@${FIXTURE_BASELINE_SHA.slice(0, 8)}`,
   () => {
     it("carries every required staged file and still compiles", async () => {
-      const commands = createNodeCloudFixturePorts().commands;
+      const ports = createNodeCloudFixturePorts();
+      const workspacePath = await ports.makeWorkspaceDir(
+        "radtest-canvas-conformance"
+      );
+      let failure: unknown;
+      try {
+        expectSuccess(
+          await ports.commands.runGh([
+            "repo",
+            "clone",
+            FIXTURE_REPOSITORY,
+            workspacePath
+          ]),
+          `gh repo clone ${FIXTURE_REPOSITORY}`
+        );
+        expectSuccess(
+          await ports.commands.runGit(
+            ["reset", "--hard", FIXTURE_BASELINE_SHA],
+            workspacePath
+          ),
+          `git reset --hard ${FIXTURE_BASELINE_SHA}`
+        );
 
-      const result = await assertBaselineConformance({
-        listBaselineFiles: () => listBaselineFiles(commands),
-        compileBaseline: () => compileBaseline(commands)
-      });
+        const result = await assertBaselineConformance({
+          listBaselineFiles: () =>
+            listBaselineFiles(ports.commands, workspacePath),
+          compileBaseline: () =>
+            compileBaselineWorkspace(workspacePath, FIXTURE_RADIUS_DIRECTORY, {
+              readTextFile: (file) => fs.readFile(file, "utf8"),
+              buildGraph: buildGraphViaRad
+            })
+        });
+        expect(result.ok).toBe(true);
+      } catch (error) {
+        failure = error;
+      }
 
-      expect(result.ok).toBe(true);
+      try {
+        await ports.removeDir(workspacePath);
+      } catch (cleanupError) {
+        if (failure)
+          throw new AggregateError(
+            [failure, cleanupError],
+            `Baseline conformance and cleanup both failed for ${workspacePath}.`,
+            { cause: cleanupError }
+          );
+        throw new Error(
+          `Baseline conformance failed to remove ${workspacePath}: ${
+            cleanupError instanceof Error ?
+              cleanupError.message
+            : String(cleanupError)
+          }`,
+          { cause: cleanupError }
+        );
+      }
+      if (failure) throw failure;
     }, 300_000);
   }
 );

@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import { REQUIRED_STAGED_FILES } from "@radius-project/core/modeling";
 import {
   assertBaselineConformance,
+  compileBaselineWorkspace,
   evaluateBaselineConformance,
   type BaselineCompileResult,
   type BaselineConformancePorts
 } from "./baseline-conformance.js";
+import path from "node:path";
 
 const ALL_FILES = [...REQUIRED_STAGED_FILES];
 
@@ -178,6 +180,95 @@ describe("assertBaselineConformance", () => {
         ports({ compile: { ok: true, diagnostics: [] } })
       )
     ).resolves.toMatchObject({ ok: true, compiled: true });
+  });
+
+  describe("compileBaselineWorkspace", () => {
+    it("compiles with the committed Radius artifacts directory", async () => {
+      const calls: Array<{
+        definitionFile: string;
+        radArtifactsDir: string;
+      }> = [];
+
+      await expect(
+        compileBaselineWorkspace("/tmp/fixture", ".radius", {
+          readTextFile: (file) => {
+            expect(file).toBe(
+              path.join("/tmp/fixture", ".radius", "app.bicep")
+            );
+            return Promise.resolve("extension radius");
+          },
+          buildGraph: (_content, definitionFile, options) => {
+            options.log("compiled with repository config");
+            calls.push({
+              definitionFile,
+              radArtifactsDir: options.radArtifactsDir
+            });
+            return Promise.resolve([{ type: "Applications.Core/containers" }]);
+          }
+        })
+      ).resolves.toEqual({
+        ok: true,
+        diagnostics: ["compiled with repository config"]
+      });
+
+      expect(calls).toEqual([
+        {
+          definitionFile: ".radius/app.bicep",
+          radArtifactsDir: path.join("/tmp/fixture", ".radius")
+        }
+      ]);
+    });
+
+    it("normalizes Windows separators in the graph definition path", async () => {
+      const definitions: string[] = [];
+
+      await compileBaselineWorkspace("C:\\fixture", ".radius\\nested", {
+        readTextFile: () => Promise.resolve("extension radius"),
+        buildGraph: (_content, definitionFile) => {
+          definitions.push(definitionFile);
+          return Promise.resolve([{}]);
+        }
+      });
+
+      expect(definitions).toEqual([".radius/nested/app.bicep"]);
+    });
+
+    it("reports an unreadable application file", async () => {
+      await expect(
+        compileBaselineWorkspace("/tmp/fixture", ".radius", {
+          readTextFile: () => Promise.reject(new Error("EACCES")),
+          buildGraph: () =>
+            Promise.reject(new Error("buildGraph must not be called"))
+        })
+      ).resolves.toEqual({ ok: false, diagnostics: ["EACCES"] });
+    });
+
+    it("reports compiler diagnostics and a thrown failure", async () => {
+      await expect(
+        compileBaselineWorkspace("/tmp/fixture", ".radius", {
+          readTextFile: () => Promise.resolve("extension radius"),
+          buildGraph: (_content, _definitionFile, options) => {
+            options.log("BCP081");
+            return Promise.reject("compile failed");
+          }
+        })
+      ).resolves.toEqual({
+        ok: false,
+        diagnostics: ["BCP081", "compile failed"]
+      });
+    });
+
+    it("rejects a baseline that compiles to no visible resources", async () => {
+      await expect(
+        compileBaselineWorkspace("/tmp/fixture", ".radius", {
+          readTextFile: () => Promise.resolve("extension radius"),
+          buildGraph: () => Promise.resolve([])
+        })
+      ).resolves.toEqual({
+        ok: false,
+        diagnostics: ["The baseline compiled to no resources."]
+      });
+    });
   });
 
   it("throws the summary when a required file is missing", async () => {
