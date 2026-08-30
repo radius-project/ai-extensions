@@ -50,7 +50,8 @@ import {
   readServicePrincipalObjectId,
   readWorkflowDirectory,
   selectFallbackBranches,
-  selectFallbackPullRequests
+  selectFallbackPullRequests,
+  workflowFallbackBranchPrefix
 } from "./support/create-environment-journey.js";
 import {
   describeUnprovisionedFixtureRepository,
@@ -59,6 +60,7 @@ import {
 
 const PROFILE_NAME = "cloud-e2e";
 const WORKFLOW_DIRECTORY = ".github/workflows";
+const KUBERNETES_NAMESPACE = "default";
 
 // Creating an environment provisions an Entra application, a service principal,
 // two federated credentials, a role assignment, a GitHub Environment and its
@@ -71,7 +73,7 @@ const gate = evaluateCreateEnvironmentGate({
   fixtureProvisioned: isFixtureRepositoryProvisioned(),
   unprovisionedReason: describeUnprovisionedFixtureRepository(),
   subscriptionId: process.env.AZURE_SUBSCRIPTION_ID,
-  githubToken: process.env.GH_TOKEN || process.env.GITHUB_TOKEN
+  githubToken: process.env.GH_TOKEN
 });
 const skipReason = gate.enabled ? "" : gate.reason;
 
@@ -155,10 +157,8 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
     try {
       const reclaimed = await current.reclaimLeakedProductArtifacts();
       if (reclaimed.length > 0)
-        // Visible rather than silent: a product artifact this run had to clean
-        // up is the next run's failed clean slate.
-        console.warn(
-          `Reclaimed product-created artifacts after the cloud journey: ${reclaimed.join(", ")}.`
+        console.info(
+          `Cleaned up this stage-one run's product-created artifacts: ${reclaimed.join(", ")}.`
         );
     } finally {
       await current.dispose();
@@ -221,6 +221,9 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
       await page
         .getByLabel("Cluster", { exact: true })
         .selectOption(cloud.clusterName);
+      await page
+        .locator("#azure-namespace-select")
+        .selectOption(KUBERNETES_NAMESPACE);
 
       const operationResponse = page.waitForResponse(
         (response) =>
@@ -317,7 +320,9 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
             tenantId: account.tenantId,
             subscriptionId: cloud.subscriptionId,
             resourceGroup: cloud.resourceGroup,
-            cluster: cloud.clusterName
+            cluster: cloud.clusterName,
+            location: cloud.location,
+            namespace: KUBERNETES_NAMESPACE
           }
         })
       ).toEqual([]);
@@ -333,15 +338,23 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
         fallbackBranches: selectFallbackBranches(
           await runGh(
             ports.commands,
-            ["api", `repos/${cloud.repository}/branches?per_page=100`],
-            "gh api the repository's branches"
+            [
+              "api",
+              `repos/${cloud.repository}/git/matching-refs/heads/${workflowFallbackBranchPrefix(cloud.environmentName)}`
+            ],
+            "gh api this environment's workflow fallback branches"
           ),
           cloud.environmentName
         ),
         openPullRequests: selectFallbackPullRequests(
           await runGh(
             ports.commands,
-            ["api", `repos/${cloud.repository}/pulls?state=open&per_page=100`],
+            [
+              "api",
+              "--paginate",
+              "--slurp",
+              `repos/${cloud.repository}/pulls?state=open&per_page=100`
+            ],
             "gh api the repository's open pull requests"
           ),
           cloud.environmentName
