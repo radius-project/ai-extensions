@@ -218,6 +218,31 @@ describe("createFakeFixturePorts", () => {
     await expect(fake.ports.makeWorkspaceDir("x")).resolves.toBe("/clones/one");
   });
 
+  it("advances its clock when the fixture waits", async () => {
+    const fake = createFakeFixturePorts();
+
+    await fake.ports.wait(1250);
+    await fake.ports.wait(250);
+
+    expect(fake.waits).toEqual([1250, 250]);
+    expect(fake.ports.now().toISOString()).toBe("2026-08-29T00:00:01.500Z");
+  });
+
+  it("lets a test override polling waits", async () => {
+    const waits: number[] = [];
+    const fake = createFakeFixturePorts({
+      wait: (milliseconds) => {
+        waits.push(milliseconds);
+        return Promise.resolve();
+      }
+    });
+
+    await fake.ports.wait(25);
+
+    expect(waits).toEqual([25]);
+    expect(fake.waits).toEqual([]);
+  });
+
   it("records directories the fixture asked to remove", async () => {
     const fake = createFakeFixturePorts();
 
