@@ -1185,6 +1185,12 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         if (line.startsWith("ad app list ")) {
           return { code: 0, stdout: "[]", stderr: "" };
         }
+        if (line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX)) {
+          return callerIdentityResult();
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return { code: 0, stdout: USER_ID, stderr: "" };
+        }
         if (line.startsWith("ad app create ")) {
           return { code: 0, stdout: APP_ID, stderr: "" };
         }
