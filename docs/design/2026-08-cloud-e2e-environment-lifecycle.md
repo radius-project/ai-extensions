@@ -213,6 +213,47 @@ These are **not** stored in `ai-extensions` and copied in at run time. They are 
 
 The cost is cross-repository atomicity: a product change needing an `app.bicep` change cannot land in one pull request. Mitigated by pinning the baseline commit SHA in a single `ai-extensions` constant, so updating the application is a deliberate, reviewable SHA bump — and that SHA doubles as the cleanup reset target. A conformance check asserts the pinned baseline still has the three files and still compiles, so an upstream Radius change cannot silently rot the fixture into an unexplained overnight failure.
 
+##### What the baseline commit contains
+
+| Path                       | Purpose                                                                                                                                                                                                    |
+|----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `.radius/app.bicep`        | The pre-modeled application. Kept to one container on a publicly pullable image, so the fixture needs no registry credentials and each run stays cheap.                                                    |
+| `.radius/bicepconfig.json` | Read from the repository itself ([`workspace.ts:664`](../../packages/adapter-canvas/src/workspace.ts)). A file copied in at run time would exercise the built-in fallback instead of the path a user hits. |
+| `.radius/app.origin.json`  | Provenance. Deletion keys destructive decisions off it, so it is committed like source, never fabricated.                                                                                                  |
+| `README.md`                | States that the repository is machine-owned, that `ai-extensions` pins its default-branch SHA, and that any commit or open pull request breaks the suite until that pin is bumped.                         |
+
+Nothing else. In particular the baseline carries no `.github/workflows/` — publishing those is the behaviour under test, and a pre-existing copy would let a run pass without the product having done anything — and no `.github/dependabot.yml`.
+
+##### Repository settings
+
+Two facts drive most of these. The clean-slate probe compares the default-branch head against the pinned SHA, and it treats **any** open pull request as a leak — `pulls?state=open`, unfiltered by author or branch.
+
+| Setting                                 | Value                                 | Why                                                                                                                                                                                                                                                         |
+|-----------------------------------------|---------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Default branch                          | `main`, frozen at the pinned baseline | The probe compares its head to the pinned SHA.                                                                                                                                                                                                              |
+| Branch protection and rulesets          | **None** on the default branch        | The product commits workflow files straight to it. Protection would divert every run onto the pull-request fallback, so the suite would quietly stop testing the path it claims to cover. Cleanup also resets the branch to the baseline.                   |
+| Dependabot version and security updates | **Disabled**                          | One Dependabot pull request makes every run report a leak and fail.                                                                                                                                                                                         |
+| Actions                                 | Enabled                               | Deployment dispatches the published workflows. Safe to leave on: the product refuses to publish a workflow triggered by anything but `workflow_dispatch` ([`infra.ts:191`](../../packages/adapter-canvas/src/infra.ts)), so committing them starts nothing. |
+| Issues, projects, wiki, discussions     | Disabled                              | Nothing reads them, and they invite human activity the pinned baseline cannot tolerate.                                                                                                                                                                     |
+| Merge queue                             | Disabled                              | It creates refs and runs that the probes would report as leaks.                                                                                                                                                                                             |
+| Automatically delete head branches      | Enabled                               | Cheap insurance against a leaked `radius/setup-*` fallback branch.                                                                                                                                                                                          |
+| Human write access                      | None                                  | A human commit silently breaks every run until someone bumps the pinned SHA.                                                                                                                                                                                |
+
+##### GitHub App permissions
+
+The dedicated App is installed on this repository alone. It needs to commit workflow files, manage the Environment and its variables, poll dispatched runs, and clean up after the fallback path:
+
+| Permission    | Level | Used for                                                                                                   |
+|---------------|-------|------------------------------------------------------------------------------------------------------------|
+| Contents      | write | Committing workflows to the default branch, and resetting that branch to the baseline during cleanup.      |
+| Workflows     | write | Required for any commit touching `.github/workflows/`. Without it the product silently takes the fallback. |
+| Environments  | write | Creating and deleting the Environment.                                                                     |
+| Variables     | write | Writing the environment variables the journey asserts.                                                     |
+| Actions       | read  | Polling dispatched workflow runs.                                                                          |
+| Pull requests | write | The fallback path, and closing what it leaves behind.                                                      |
+
+Confirm each name against the REST documentation for the endpoint before creating the App — the table states the capability required, and GitHub has split some of these into separate permissions over time.
+
 #### Two product behaviours the fixture must respect
 
 Both were found by reading the production code, and both would otherwise cause a leaked run to report clean.
