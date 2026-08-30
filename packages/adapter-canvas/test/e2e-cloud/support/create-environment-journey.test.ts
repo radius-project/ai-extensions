@@ -282,6 +282,22 @@ describe("expectedFederatedCredentialSubjects", () => {
     });
   });
 
+  it("accepts GitHub's repository-prefixed immutable slug", () => {
+    expect(
+      expectedFederatedCredentialSubjects({
+        ...base,
+        customization: {
+          useDefault: true,
+          useImmutableSubject: true,
+          subClaimPrefix: "repository:renamed@111/moved@222"
+        }
+      })
+    ).toEqual({
+      supported: true,
+      required: ["repo:renamed@111/moved@222:environment:radtest-abc"]
+    });
+  });
+
   it("accepts numeric ids reported as strings", () => {
     const result = expectedFederatedCredentialSubjects({
       ...base,
@@ -306,10 +322,8 @@ describe("expectedFederatedCredentialSubjects", () => {
       fullName,
       customization: { useDefault: true }
     });
-    expect(result).toEqual({
-      supported: false,
-      reason: expect.stringContaining(expected) as unknown as string
-    });
+    expect(result.supported).toBe(false);
+    if (!result.supported) expect(result.reason).toContain(expected);
   });
 
   it("refuses a repository that customizes its subject claims", () => {
@@ -446,7 +460,9 @@ describe("findEnvironmentIdentityProblems", () => {
     tenantId: "tenant-1",
     subscriptionId: "sub-1",
     resourceGroup: "radtest-canvas-abc",
-    cluster: "aks-abc"
+    cluster: "aks-abc",
+    location: "westus3",
+    namespace: "default"
   };
   const complete = (clientId: string): ReadonlyMap<string, string> =>
     new Map([
@@ -454,7 +470,9 @@ describe("findEnvironmentIdentityProblems", () => {
       ["AZURE_TENANT_ID", expected.tenantId],
       ["AZURE_SUBSCRIPTION_ID", expected.subscriptionId],
       ["AZURE_RESOURCE_GROUP", expected.resourceGroup],
-      ["AZURE_AKS_CLUSTER_NAME", expected.cluster]
+      ["AZURE_AKS_CLUSTER_NAME", expected.cluster],
+      ["AZURE_LOCATION", expected.location],
+      ["KUBERNETES_NAMESPACE", expected.namespace]
     ]);
 
   it("accepts an environment wired to the created application", () => {
@@ -512,7 +530,8 @@ describe("findEnvironmentIdentityProblems", () => {
         ["AZURE_CLIENT_ID", "app-1"],
         ["AZURE_TENANT_ID", "other-tenant"],
         ["AZURE_SUBSCRIPTION_ID", expected.subscriptionId],
-        ["AZURE_RESOURCE_GROUP", "someone-elses-group"]
+        ["AZURE_RESOURCE_GROUP", "someone-elses-group"],
+        ["AZURE_LOCATION", "eastus"]
       ]),
       createdAppId: "app-1",
       expected
@@ -520,7 +539,9 @@ describe("findEnvironmentIdentityProblems", () => {
     expect(problems).toEqual([
       'AZURE_TENANT_ID is "other-tenant"; expected "tenant-1".',
       'AZURE_RESOURCE_GROUP is "someone-elses-group"; expected "radtest-canvas-abc".',
-      'AZURE_AKS_CLUSTER_NAME is absent; expected "aks-abc".'
+      'AZURE_AKS_CLUSTER_NAME is absent; expected "aks-abc".',
+      'AZURE_LOCATION is "eastus"; expected "westus3".',
+      'KUBERNETES_NAMESPACE is absent; expected "default".'
     ]);
   });
 });
@@ -608,6 +629,18 @@ describe("selectFallbackBranches", () => {
     ).toEqual(["radius/setup-radtest-abc-workflows-1234"]);
   });
 
+  it("reads refs returned by the matching-refs endpoint", () => {
+    expect(
+      selectFallbackBranches(
+        [
+          { ref: "refs/heads/radius/setup-radtest-abc-workflows-1234" },
+          { ref: "refs/heads/feature/other" }
+        ],
+        "radtest-abc"
+      )
+    ).toEqual(["radius/setup-radtest-abc-workflows-1234"]);
+  });
+
   it("rejects a non-array listing", () => {
     expect(() => selectFallbackBranches(null, "radtest-abc")).toThrow(
       /array of branches/
@@ -632,6 +665,23 @@ describe("selectFallbackPullRequests", () => {
           },
           { head: { ref: "radius/setup-radtest-abc-workflows-3" } },
           { number: 20 }
+        ],
+        "radtest-abc"
+      )
+    ).toEqual([17]);
+  });
+
+  it("flattens pages returned by gh --paginate --slurp", () => {
+    expect(
+      selectFallbackPullRequests(
+        [
+          [
+            {
+              number: 17,
+              head: { ref: "radius/setup-radtest-abc-workflows-1234" }
+            }
+          ],
+          [{ number: 18, head: { ref: "feature/other" } }]
         ],
         "radtest-abc"
       )
@@ -667,19 +717,24 @@ describe("readOperationSnapshot", () => {
   });
 
   it.each([
-    ["a payload with no operation", {}],
-    ["a non-object payload", null],
-    ["a non-string state", { operation: { state: 7, error: 7 } }]
-  ])(
-    "keeps polling after %s rather than reading it as a result",
-    (_label, payload) => {
-      expect(readOperationSnapshot(payload)).toEqual({
-        state: "",
-        terminal: false,
-        error: ""
-      });
-    }
-  );
+    ["a payload with no operation", {}, /operation" object/],
+    ["a non-object payload", null, /operation" object/],
+    ["a non-string state", { operation: { state: 7 } }, /operation.state/],
+    ["a blank state", { operation: { state: " " } }, /operation.state/],
+    [
+      "a non-string error",
+      { operation: { state: "failed", error: 7 } },
+      /operation.error/
+    ]
+  ])("rejects %s", (_label, payload, expected) => {
+    expect(() => readOperationSnapshot(payload)).toThrow(expected);
+  });
+
+  it("accepts a null error as absent", () => {
+    expect(
+      readOperationSnapshot({ operation: { state: "running", error: null } })
+    ).toEqual({ state: "running", terminal: false, error: "" });
+  });
 });
 
 describe("parseJsonPayload", () => {
