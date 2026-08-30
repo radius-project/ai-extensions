@@ -428,6 +428,7 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
   });
 
   it("fails closed over HTTP when the caller identity cannot be established", async () => {
+    const azCalls: string[] = [];
     const operation: AzureAutoSetupOperation = {
       operationId: "op-identity",
       repo: "octo/app",
@@ -455,10 +456,17 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
             if (path === "/repos/octo/app/actions/oidc/customization/sub") {
               return { ok: false, status: 404, json: null };
             }
+            if (
+              path ===
+              "/repos/octo/app/environments/dev/variables/AZURE_CLIENT_ID"
+            ) {
+              return { ok: false, status: 404, json: null };
+            }
             throw new Error(`unscripted GitHub call: ${path}`);
           },
           runAz: async (args) => {
             const line = args.join(" ");
+            azCalls.push(line);
             if (line.startsWith("account set "))
               return { code: 0, stdout: "", stderr: "" };
             if (line === "account show --output json") {
@@ -468,15 +476,15 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
                 stderr: ""
               };
             }
+            if (line.startsWith("ad app list ")) {
+              return { code: 0, stdout: "[]", stderr: "" };
+            }
             if (line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX)) {
               return {
                 code: 1,
                 stdout: "",
                 stderr: "Please run 'az login' to setup account."
               };
-            }
-            if (line.startsWith(`ad app show --id ${APP_ID} `)) {
-              return { code: 0, stdout: "app-object", stderr: "" };
             }
             throw new Error(`unscripted az call: ${line}`);
           }
@@ -491,7 +499,7 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
         "Content-Type": "application/json",
         "X-Radius-Server-Owned": "token-a"
       },
-      body: JSON.stringify(VALID_BODY)
+      body: JSON.stringify(CREATE_BODY)
     });
     expect(response.status).toBe(400);
     const payload = (await response.json()) as {
@@ -500,5 +508,8 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     };
     expect(payload.code).toBe("app-owner-lookup-failed");
     expect(payload.error).toContain("Please run 'az login'");
+    expect(azCalls.some((line) => line.startsWith("ad app create "))).toBe(
+      false
+    );
   });
 });

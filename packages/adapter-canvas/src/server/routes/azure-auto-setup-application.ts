@@ -444,6 +444,9 @@ export async function resolveAzureAutoSetupApplication({
       let unownedRadiusProvenance: RadiusAppProvenanceInput | undefined;
       for (const match of matches) {
         if (!match || !match.appId) continue;
+        // The exact journal reconciliation below owns recovery. Candidate
+        // ownership must not resolve caller identity before that durable state.
+        if (recoveringApplicationCreate) continue;
         const ownership = await isOwnedByCaller(match.appId);
         if (!ownership.ok) {
           await fail(
@@ -535,16 +538,32 @@ export async function resolveAzureAutoSetupApplication({
           return null;
         }
       } else {
+        const forwardCreate = providerMutationWillWrite(
+          operation,
+          applicationMutationKind,
+          applicationMutationTarget
+        );
+        let callerBeforeCreate: { ok: true; id: string } | null = null;
+        if (forwardCreate) {
+          const caller = await getCallerObjectId();
+          if (!caller.ok) {
+            await fail(
+              400,
+              "Failed to read the Azure CLI identity from Microsoft Entra before creating the App Registration: " +
+                caller.stderr,
+              "app-owner-lookup-failed",
+              { steps, azError: caller.stderr }
+            );
+            return null;
+          }
+          callerBeforeCreate = caller;
+        }
         steps.push(`Creating Entra app registration: ${appName}...`);
         // Only a forward create is stoppable. A journaled attempt that reaches
         // here to be reconciled is a read, and stopping before it would strand
         // the provenance of a request nobody saw answered.
         if (
-          providerMutationWillWrite(
-            operation,
-            applicationMutationKind,
-            applicationMutationTarget
-          ) &&
+          forwardCreate &&
           !(await stopBoundary("before-app-registration-create"))
         )
           return null;
@@ -716,7 +735,7 @@ export async function resolveAzureAutoSetupApplication({
         });
         if (!(await checkpoint("after-app-registration-create"))) return null;
 
-        const caller = await getCallerObjectId();
+        const caller = callerBeforeCreate ?? (await getCallerObjectId());
         if (!caller.ok) {
           await rollbackCreatedAppAndFail(
             "Failed to read the Azure CLI identity from Microsoft Entra after creating the App Registration: " +

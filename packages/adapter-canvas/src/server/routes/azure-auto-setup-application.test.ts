@@ -345,6 +345,8 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       runAz: async (args) => {
         const line = args.join(" ");
         if (line.startsWith("ad app list ")) return command({ stdout: "[]" });
+        if (line.startsWith("ad signed-in-user show "))
+          return command({ stdout: USER_ID });
         if (line.startsWith("ad app create ")) {
           return command({
             code: 1,
@@ -424,6 +426,8 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
           expect(line).toContain("radius-custom");
           return command({ stdout: "[]" });
         }
+        if (line.startsWith("ad signed-in-user show "))
+          return command({ stdout: USER_ID });
         if (line.startsWith("ad app create ")) {
           return command({
             code: 1,
@@ -1007,6 +1011,8 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
               )
           });
         }
+        if (line.startsWith("ad signed-in-user show "))
+          return command({ stdout: USER_ID });
         if (line.startsWith("ad app create ")) {
           createCalls += 1;
           return command({ code: 1, timedOut: true });
@@ -1377,6 +1383,77 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     ).toBe("rollback_pending");
   });
 
+  it("fails through rollback when caller identity is unavailable after reconciling a create", async () => {
+    const azCalls: string[] = [];
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        azCalls.push(line);
+        if (line.startsWith("ad app list ")) {
+          return command({
+            stdout: JSON.stringify([
+              {
+                appId: APP_ID,
+                displayName: "radius-deploy-octo-app",
+                tags: []
+              }
+            ])
+          });
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return command({ code: 1, stderr: "user unavailable" });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+    const operation = test.input.workflow
+      .operation as AzureAutoSetupOperation & {
+      recoveryState?: string;
+    };
+    operation.recoveryState = "provider_reconciliation_pending";
+    const mutation = prepareProviderMutation(operation, {
+      kind: "azure_application.create",
+      target: "octo/app:dev:radius-deploy-octo-app"
+    });
+    settleProviderMutation(
+      operation,
+      mutation.mutationId,
+      "outcome_unknown",
+      "The provider request ended without a response.",
+      APP_ID
+    );
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toBeNull();
+    expect(test.failures[0]).toMatchObject({
+      code: "app-owner-lookup-failed"
+    });
+    expect(String(test.failures[0]?.error)).toContain("user unavailable");
+    expect(operation).toMatchObject({
+      providerRecovery: {
+        mutations: [
+          expect.objectContaining({
+            status: "confirmed",
+            providerId: APP_ID
+          })
+        ]
+      }
+    });
+    expect(azCalls.slice(0, 3)).toEqual([
+      expect.stringMatching(/^ad app list /),
+      expect.stringMatching(/^ad app list /),
+      expect.stringMatching(/^ad signed-in-user show /)
+    ]);
+    expect(
+      azCalls.some(
+        (line) =>
+          line.startsWith("ad app create ") ||
+          line.startsWith("ad app owner add ")
+      )
+    ).toBe(false);
+  });
+
   it("reconciles timed-out owner and provenance mutations before continuing", async () => {
     const requiredTags = buildRadiusAppProvenanceTags({
       repo: "octo/app",
@@ -1389,11 +1466,10 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
         if (line.startsWith("ad app list ")) {
           return command({ stdout: "[]" });
         }
+        if (line.startsWith("ad signed-in-user show "))
+          return command({ stdout: USER_ID });
         if (line.startsWith("ad app create ")) {
           return command({ stdout: APP_ID });
-        }
-        if (line.startsWith("ad signed-in-user show ")) {
-          return command({ stdout: USER_ID });
         }
         if (line.startsWith("ad app owner add ")) {
           return command({ code: 1, timedOut: true });
@@ -1453,11 +1529,10 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
         if (line.startsWith("ad app list ")) {
           return command({ stdout: "[]" });
         }
+        if (line.startsWith("ad signed-in-user show "))
+          return command({ stdout: USER_ID });
         if (line.startsWith("ad app create ")) {
           return command({ stdout: APP_ID });
-        }
-        if (line.startsWith("ad signed-in-user show ")) {
-          return command({ stdout: USER_ID });
         }
         if (line.startsWith("ad app owner add ")) return command();
         if (line.startsWith("ad app owner list ")) {
@@ -1499,6 +1574,12 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       origin: "this_operation",
       appId: APP_ID
     });
+    const callerObjectId = azCalls.findIndex((line) =>
+      line.startsWith("ad signed-in-user show ")
+    );
+    expect(
+      azCalls.filter((line) => line.startsWith("ad signed-in-user show "))
+    ).toHaveLength(1);
     const create = azCalls.findIndex((line) =>
       line.startsWith("ad app create ")
     );
@@ -1514,10 +1595,17 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     const tagShow = azCalls.findIndex(
       (line) => line.startsWith("ad app show ") && line.includes("--query tags")
     );
-    expect([create, ownerAdd, ownerList, tagPatch, tagShow]).toEqual(
-      [...[create, ownerAdd, ownerList, tagPatch, tagShow]].sort(
-        (left, right) => left - right
-      )
+    expect([
+      callerObjectId,
+      create,
+      ownerAdd,
+      ownerList,
+      tagPatch,
+      tagShow
+    ]).toEqual(
+      [
+        ...[callerObjectId, create, ownerAdd, ownerList, tagPatch, tagShow]
+      ].sort((left, right) => left - right)
     );
   });
 
@@ -1528,6 +1616,8 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
         if (line.startsWith("ad app list ")) {
           return command({ stdout: "[]" });
         }
+        if (line.startsWith("ad signed-in-user show "))
+          return command({ stdout: USER_ID });
         if (line.startsWith("ad app create ")) {
           return command({
             code: 1,
@@ -1552,6 +1642,8 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
           lists += 1;
           return command({ stdout: "[]" });
         }
+        if (line.startsWith("ad signed-in-user show "))
+          return command({ stdout: USER_ID });
         if (line.startsWith("ad app create ")) {
           return command({ stdout: "not-an-app-id" });
         }
@@ -1584,6 +1676,8 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
         if (line.startsWith("ad app list ")) {
           return command({ stdout: "[]" });
         }
+        if (line.startsWith("ad signed-in-user show "))
+          return command({ stdout: USER_ID });
         if (line.startsWith("ad app create ")) {
           return command({ stdout: APP_ID });
         }
@@ -1639,7 +1733,6 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
   );
 
   it.each([
-    ["signed-in-user", "app-owner-lookup-failed"],
     ["owner-add", "app-owner-add-failed"],
     ["owner-list", "app-owner-lookup-failed"],
     ["owner-missing", "app-owner-verify-failed"],
@@ -1661,13 +1754,10 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
           if (line.startsWith("ad app list ")) {
             return command({ stdout: "[]" });
           }
+          if (line.startsWith("ad signed-in-user show "))
+            return command({ stdout: USER_ID });
           if (line.startsWith("ad app create ")) {
             return command({ stdout: APP_ID });
-          }
-          if (line.startsWith("ad signed-in-user show ")) {
-            return stage === "signed-in-user" ?
-                command({ code: 1, stderr: "user unavailable" })
-              : command({ stdout: USER_ID });
           }
           if (line.startsWith("ad app owner add ")) {
             return stage === "owner-add" ?
@@ -1731,11 +1821,10 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
         if (line.startsWith("ad app list ")) {
           return command({ stdout: "[]" });
         }
+        if (line.startsWith("ad signed-in-user show "))
+          return command({ stdout: USER_ID });
         if (line.startsWith("ad app create ")) {
           return command({ stdout: APP_ID });
-        }
-        if (line.startsWith("ad signed-in-user show ")) {
-          return command({ stdout: USER_ID });
         }
         if (line.startsWith("ad app owner add ")) {
           return command({
@@ -1766,6 +1855,8 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
         if (line.startsWith("ad app list ")) {
           return command({ stdout: "[]" });
         }
+        if (line.startsWith("ad signed-in-user show "))
+          return command({ stdout: USER_ID });
         if (line.startsWith("ad app create ")) {
           return command({
             code: 1,
@@ -1973,7 +2064,7 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
             return command({ stdout: "[]" });
           throw new Error(`unscripted az call: ${line}`);
         },
-        overrides: { explicitAppId: APP_ID }
+        overrides: { createNewApp: true }
       });
 
       expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
@@ -1999,7 +2090,7 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
   ])(
     "fails closed when the object id lookup fails for %s",
     async (_label, identity, _objectId) => {
-      const { test } = createJourney(identity, USER_ID, {
+      const { test, azCalls } = createJourney(identity, USER_ID, {
         identityLookup: command({ code: 1, stderr: "directory unavailable" })
       });
 
@@ -2010,6 +2101,9 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
       expect(String(test.failures[0]?.error)).toContain(
         "directory unavailable"
       );
+      expect(azCalls.some((line) => line.startsWith("ad app create "))).toBe(
+        false
+      );
     }
   );
 
@@ -2019,7 +2113,7 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
   ])(
     "fails closed when Microsoft Entra returns an empty object id for %s",
     async (_label, identity) => {
-      const { test } = createJourney(identity, USER_ID, {
+      const { test, azCalls } = createJourney(identity, USER_ID, {
         identityLookup: command({ stdout: "  \n" })
       });
 
@@ -2029,6 +2123,9 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
       });
       expect(String(test.failures[0]?.error)).toContain(
         "returned no object id for the current Azure CLI identity"
+      );
+      expect(azCalls.some((line) => line.startsWith("ad app create "))).toBe(
+        false
       );
     }
   );
