@@ -7,7 +7,7 @@ This record tracks issue [#308](https://github.com/radius-project/ai-extensions/
 | Field                               | Value                                                   |
 |-------------------------------------|---------------------------------------------------------|
 | Diagnostic and recovery baseline    | `7d1c6a69c6c6fddec819d6ad8d8b75e6b001f2c6` (#617 merge) |
-| #308 implementation commit          | `4ab58893fe8034dc399f7cd59ef923979aa38092`              |
+| #308 implementation commit          | `6f10418479a65894ea1575f4fee96e6a8a75572d`              |
 | Release-candidate version           | `NOT RUN` - no immutable candidate is designated        |
 | Installation source and attestation | `NOT RUN`                                               |
 | Record last refreshed               | 2026-08-30                                              |
