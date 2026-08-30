@@ -288,6 +288,23 @@ export function normalizeCommandResult(
 }
 
 /**
+ * Whether a failed `gh api` call carries GitHub CLI's HTTP 404 diagnostic.
+ *
+ * A bare "Not Found" is not enough: DNS, configuration, and wrapper failures
+ * can contain those words without proving that GitHub answered for the
+ * requested resource. Successful commands cannot report absence either, even
+ * when their response body happens to mention an earlier HTTP 404.
+ */
+export function isGitHubApiNotFound(result: CloudCommandResult): boolean {
+  if (result.code === 0) return false;
+  return `${result.stderr}\n${result.stdout}`
+    .split(/\r?\n/)
+    .some((line) =>
+      /^(?:gh:\s.*\(HTTP 404\)|HTTP 404(?::.*)?)$/i.test(line.trim())
+    );
+}
+
+/**
  * The production wiring. Deliberately branch-free: it holds no fixture logic,
  * so the code a credentialed run exercises but this suite cannot is as small as
  * it can be made.
