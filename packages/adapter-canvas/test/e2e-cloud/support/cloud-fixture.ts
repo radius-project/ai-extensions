@@ -342,8 +342,33 @@ export async function createCloudFixture(
         }
       };
 
-      // Deleting the application removes its service principal and federated
-      // credentials with it, so they need no separate step.
+      // Delete service principals explicitly before applications. Application
+      // deletion normally cascades, but an orphaned principal can survive after
+      // its application is already gone and would otherwise wedge every later
+      // clean-slate check.
+      const principals = await listServicePrincipals(
+        commands,
+        expectedAppName
+      ).catch((error: unknown) => {
+        failures.push(`list service principals: ${describeError(error)}`);
+        return [] as Array<{ objectId: string }>;
+      });
+      for (const principal of principals)
+        await attempt(`service principal ${principal.objectId}`, async () => {
+          expectSuccess(
+            await commands.runAz([
+              "ad",
+              "sp",
+              "delete",
+              "--id",
+              principal.objectId,
+              "--output",
+              "none"
+            ]),
+            `az ad sp delete ${principal.objectId}`
+          );
+        });
+
       const apps = await listAppRegistrations(commands, expectedAppName).catch(
         (error: unknown) => {
           failures.push(`list app registrations: ${describeError(error)}`);
@@ -574,14 +599,14 @@ async function listAppRegistrations(
   commands: CloudCommandPort,
   displayName: string
 ): Promise<AppRegistrationRecord[]> {
-  const context = `az ad app list --display-name ${displayName}`;
+  const context = `az ad app list --filter displayName eq '${displayName}'`;
   const entries = parseJsonArray(
     await commands.runAz([
       "ad",
       "app",
       "list",
-      "--display-name",
-      displayName,
+      "--filter",
+      `displayName eq '${displayName}'`,
       "--query",
       "[].{appId:appId,id:id,displayName:displayName}",
       "-o",
@@ -608,14 +633,14 @@ async function listServicePrincipals(
   commands: CloudCommandPort,
   displayName: string
 ): Promise<Array<{ objectId: string }>> {
-  const context = `az ad sp list --display-name ${displayName}`;
+  const context = `az ad sp list --filter displayName eq '${displayName}'`;
   const entries = parseJsonArray(
     await commands.runAz([
       "ad",
       "sp",
       "list",
-      "--display-name",
-      displayName,
+      "--filter",
+      `displayName eq '${displayName}'`,
       "--query",
       "[].{id:id}",
       "-o",
