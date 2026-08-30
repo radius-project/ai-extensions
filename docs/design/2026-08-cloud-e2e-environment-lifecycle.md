@@ -270,6 +270,10 @@ Stage one asserts these, so they are recorded here rather than rediscovered per 
 
 The cluster variable is `AZURE_AKS_CLUSTER_NAME`, not `AKS_CLUSTER_NAME`. The shorter name is an easy assumption to write and a live run is the only thing that would catch it, which is precisely the feedback this tier is slowest to give.
 
+Those seven are not the whole set, and the omission matters beyond bookkeeping. [`create-environment.ts:723`](../../packages/adapter-canvas/src/server/routes/create-environment.ts) writes four more unconditionally — `RADIUS_MANAGED`, `RADIUS_STATE_BACKEND`, `RADIUS_STATE_REGISTRY`, and `RADIUS_STATE_ARCHIVE` — plus `RADIUS_CREDENTIAL_PROFILE` when the environment was created from a named profile. The three `RADIUS_STATE_*` values form one backend contract and are written in a single mutation attempt for that reason: a backend selected without the registry and archive needed to read it is a broken environment, not a partially configured one.
+
+The deploy and delete workflows **require** that set. Without it `rad startup` fails before it reaches `rad deploy`, so these are not variables stage one merely happens to write — they are a precondition of stages two and three. A journey that asserted only the seven Azure variables would report a healthy environment that cannot deploy.
+
 ### API design (if applicable)
 
 No public API change. No route, canvas action, tool, `plugin.json` entry, or `packages/core` export is added or modified. The new surfaces are test-internal:
@@ -416,6 +420,8 @@ A stack of pull requests, each independently mergeable and leaving the repositor
 Upstream `wellknown` changes gate step 6 only. Steps 2 through 5 can be developed against a personal subscription, and steps 2 through 4 need no cloud access at all.
 
 Splitting the last step is deliberate, because treating deletion as one unit would defer more than the dependency justifies. Deleting a deployment and deleting an environment are separate route families with separate owners: [`deployments.ts:784`](../../packages/adapter-canvas/src/server/routes/deployments.ts) registers `POST /api/delete-deployment`, and [`environments.ts:864`](../../packages/adapter-canvas/src/server/routes/environments.ts) registers `POST /api/delete-environment`. The pending environment-deletion work changes the environments family and adds two services beneath it, but touches no file in the deployments family. Its only contact with the deploy path is an optional `correlationId` argument added to `findWorkflowRun`, which is inert when omitted. Stages two and three are therefore unblocked; only stage four genuinely waits, because the cloud cleanup it asserts is precisely what that work introduces.
+
+One deliverable of step 3 is deliberately left unwired. `baseline-conformance.ts` is written and unit-tested but no journey calls it, because `compileBaselineWorkspace()` reaches `buildGraphViaRad` and therefore needs a real `rad` binary on the runner — which step 6 concluded was unnecessary and did not install. Recording this as a deferral rather than leaving it to read as an oversight: activating the conformance check is a step 6 change to the runner image before it is a journey change, and any later stage that renders a planned graph inherits the same requirement.
 
 ## Open questions
 
