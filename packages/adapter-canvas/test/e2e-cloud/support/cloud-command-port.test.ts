@@ -192,6 +192,12 @@ describe("createNodeCloudFixturePorts", () => {
     expect(ports.newUniqueId()).toMatch(/^[0-9a-f-]{36}$/);
   });
 
+  it("supplies a real polling delay", async () => {
+    const ports = createNodeCloudFixturePorts();
+
+    await expect(ports.wait(0)).resolves.toBeUndefined();
+  });
+
   it("reports a non-zero exit rather than rejecting", async () => {
     const ports = createNodeCloudFixturePorts();
 
