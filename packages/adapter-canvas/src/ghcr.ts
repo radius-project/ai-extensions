@@ -11,6 +11,8 @@ import {
 export interface GhCredentials {
   token: string;
   username: string;
+  source?: "keyring" | "injected-token";
+  scopes?: readonly string[];
 }
 
 interface HttpResponse {
@@ -161,8 +163,12 @@ const OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json";
 const OCI_EMPTY_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json";
 function packageAuthGuidance(
   presentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION,
-  scopes = "read:packages,write:packages"
+  scopes = "read:packages,write:packages",
+  credentialSource?: GhCredentials["source"]
 ): string {
+  if (credentialSource === "injected-token") {
+    return `The selected package credential comes from GH_TOKEN or GITHUB_TOKEN, so gh auth refresh cannot change it. Update that injected token to include ${scopes}, or remove it and sign in to the selected account with GitHub CLI. ${presentation.installationNote}`.trim();
+  }
   const switchCommand = displayGhCommand(presentation, [
     "auth",
     "switch",
@@ -395,10 +401,11 @@ function validateLocation(
 function packageAuthError(
   message: string,
   presentation: GhCommandPresentation,
-  scopes?: string
+  scopes?: string,
+  credentialSource?: GhCredentials["source"]
 ): GhcrAuthError {
   return new GhcrAuthError(
-    `${message}. ${packageAuthGuidance(presentation, scopes)}`
+    `${message}. ${packageAuthGuidance(presentation, scopes, credentialSource)}`
   );
 }
 
@@ -1123,6 +1130,18 @@ export async function deleteGHCRStatePackage({
     ghCommandPresentation
   );
   if (existingValue === GITHUB_NOT_FOUND) {
+    const scopes = auth.scopes || [];
+    if (
+      !scopes.includes("read:packages") ||
+      !scopes.includes("delete:packages")
+    ) {
+      throw packageAuthError(
+        "GitHub returned HTTP 404 for the state package, but the selected credential does not prove read and delete package access",
+        ghCommandPresentation,
+        "read:packages,delete:packages",
+        auth.source
+      );
+    }
     return { outcome: "not_found", registry };
   }
   validatePackage(
@@ -1145,7 +1164,8 @@ export async function deleteGHCRStatePackage({
       throw packageAuthError(
         `GitHub Packages API rejected package deletion (HTTP ${response.status})`,
         ghCommandPresentation,
-        "delete:packages"
+        "delete:packages",
+        auth.source
       );
     }
     if (!response.ok && response.status !== 404) {

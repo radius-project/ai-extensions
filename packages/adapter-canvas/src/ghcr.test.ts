@@ -396,7 +396,12 @@ function createDeletionHarness({
 const deleteOptions = {
   targetRepository: "acme/app",
   registry: "ghcr.io/acme/app-radius-state-dev-123456789abc",
-  credentials: { username: "octocat", token: "keyring-token" },
+  credentials: {
+    username: "octocat",
+    token: "keyring-token",
+    source: "keyring" as const,
+    scopes: ["read:packages", "delete:packages"]
+  },
   apiBaseUrl: "https://api.test",
   sleep: async () => {}
 };
@@ -449,6 +454,46 @@ test("treats Packages API-confirmed initial absence as idempotent success", asyn
   assert.equal(
     harness.calls.some((call) => call.method === "DELETE"),
     false
+  );
+});
+
+test("fails closed when a package 404 is masked by insufficient credential scopes", async () => {
+  const harness = createDeletionHarness({ metadata: null });
+
+  await assert.rejects(
+    deleteGHCRStatePackage({
+      ...deleteOptions,
+      credentials: {
+        username: "octocat",
+        token: "keyring-token",
+        source: "keyring",
+        scopes: ["read:packages"]
+      },
+      fetchImpl: harness.fetchImpl
+    }),
+    /does not prove read and delete package access.*read:packages,delete:packages/
+  );
+  assert.equal(
+    harness.calls.some((call) => call.method === "DELETE"),
+    false
+  );
+});
+
+test("gives source-aware guidance for an injected credential denied deletion", async () => {
+  const harness = createDeletionHarness({ deleteStatus: 403 });
+
+  await assert.rejects(
+    deleteGHCRStatePackage({
+      ...deleteOptions,
+      credentials: {
+        username: "octocat",
+        token: "injected-token",
+        source: "injected-token",
+        scopes: ["read:packages", "delete:packages"]
+      },
+      fetchImpl: harness.fetchImpl
+    }),
+    /GH_TOKEN or GITHUB_TOKEN.*gh auth refresh cannot change it/
   );
 });
 
@@ -515,6 +560,22 @@ test("fails closed while the package remains after a rejected deletion", async (
       confirmationAttempts: 2
     }),
     /still present after deletion.*HTTP 500/
+  );
+});
+
+test("fails closed when GitHub accepts deletion but the package remains", async () => {
+  const harness = createDeletionHarness({
+    deleteStatus: 204,
+    disappearAfterReads: Number.POSITIVE_INFINITY
+  });
+
+  await assert.rejects(
+    deleteGHCRStatePackage({
+      ...deleteOptions,
+      fetchImpl: harness.fetchImpl,
+      confirmationAttempts: 2
+    }),
+    /still present after deletion/
   );
 });
 

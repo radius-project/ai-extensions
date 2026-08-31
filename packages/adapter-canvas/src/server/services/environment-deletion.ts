@@ -430,8 +430,8 @@ export async function runEnvironmentDeletion(
           stage: STAGE_DELETE_STATE_PACKAGE,
           stepSeq: null,
           message:
-            `${message} Retry deletion after granting delete:packages access, ` +
-            `or delete "${statePackage}" manually in GitHub Packages and retry to confirm it is gone.`,
+            `${message} Resolve the reported package access, visibility, or repository-link issue, then retry deletion. ` +
+            `Only delete "${statePackage}" manually after GitHub shows that it is private or internal and linked to "${repo}".`,
           classification: "user-fixable",
           evidence: null
         }

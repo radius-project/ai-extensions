@@ -73,6 +73,7 @@ export interface GhPackageCredentials {
   token: string;
   username: string;
   source: Exclude<GhPackageCredentialSource, "unavailable">;
+  scopes?: readonly string[];
 }
 
 type GhPackageCredentialResolution =
@@ -519,15 +520,18 @@ function ensurePackageCredential(): Promise<GhPackageCredentialResolution> {
           "No GitHub account is available for package setup. Sign in with GitHub CLI, then retry."
       };
     }
-    const hasKeyringEntry = snapshot.keyringAccts.some(
-      (a) => a.login === login
-    );
-    if (hasKeyringEntry) {
+    const keyringAccount = snapshot.keyringAccts.find((a) => a.login === login);
+    if (keyringAccount) {
       const token = await ghKeyringTokenForUser(login);
       if (token) {
         return {
           ok: true,
-          credentials: { token, username: login, source: "keyring" }
+          credentials: {
+            token,
+            username: login,
+            source: "keyring",
+            scopes: [...keyringAccount.scopes]
+          }
         };
       }
     }
@@ -539,7 +543,8 @@ function ensurePackageCredential(): Promise<GhPackageCredentialResolution> {
         credentials: {
           token: injected,
           username: login,
-          source: "injected-token"
+          source: "injected-token",
+          scopes: [...(snapshot.tokenAcct?.scopes || [])]
         }
       };
     }
@@ -1145,7 +1150,7 @@ export async function getGhPackageCredentials({
 }: {
   fresh?: boolean;
 } = {}): Promise<GhPackageCredentials> {
-  if (fresh) _ghPackageCredentialPromise = null;
+  if (fresh) resetGhIdentityCache();
   const resolution = await ensurePackageCredential();
   if (!resolution.ok) throw new Error(resolution.error);
   return resolution.credentials;

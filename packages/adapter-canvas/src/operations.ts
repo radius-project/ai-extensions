@@ -46,10 +46,11 @@ import { redactGhCredentials } from "./gh.js";
 // post-commit rollback closed instead of guessing.
 // records load with a zero deletion-attempt count and no command, while an older
 // extension rejects a newer record instead of dropping an in-flight retry.
-// Version 6 adds the GitHub environment-variable artifact ledger.
-export const OPERATION_SCHEMA_VERSION = 6;
+// Version 6 adds the GitHub environment-variable artifact ledger. Version 7
+// adds the GHCR state-package stage to resumable environment deletion records.
+export const OPERATION_SCHEMA_VERSION = 7;
 export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([
-  1, 2, 3, 4, 5, 6
+  1, 2, 3, 4, 5, 6, 7
 ]);
 
 // `deleted` is written only after a cleanup attempt proved the resource is gone
@@ -5646,6 +5647,29 @@ export function fromPersistedOperation(value: any): any {
   }
   if (!Array.isArray(record.stages) || !Array.isArray(record.steps)) {
     throw new Error("Invalid persisted operation stages or steps.");
+  }
+  if (
+    record.schemaVersion < 7 &&
+    record.kind === OPERATION_KIND_DELETE &&
+    record.state !== "succeeded" &&
+    !record.stages.some(
+      (stage: { id?: unknown }) => stage.id === STAGE_DELETE_STATE_PACKAGE
+    )
+  ) {
+    const statePackageStage = {
+      id: STAGE_DELETE_STATE_PACKAGE,
+      label: STAGE_LABELS[STAGE_DELETE_STATE_PACKAGE],
+      state: "pending"
+    };
+    const reviewIndex = record.stages.findIndex(
+      (stage: { id?: unknown }) => stage.id === STAGE_REVIEW_APP_REGISTRATION
+    );
+    record.stages.splice(
+      reviewIndex < 0 ? record.stages.length : reviewIndex,
+      0,
+      statePackageStage
+    );
+    record.requiresDurableRewrite = true;
   }
   record.control = readOperationControl(value.control);
   record.providerRecovery = readProviderRecovery(value.providerRecovery);

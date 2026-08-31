@@ -27,6 +27,9 @@ import {
   shouldStop,
   sanitizeResumeTarget,
   OPERATION_SCHEMA_VERSION,
+  OPERATION_KIND_DELETE,
+  buildDeleteStages,
+  STAGE_DELETE_STATE_PACKAGE,
   STAGE_VERIFY,
   toClientView,
   canStartRollback,
@@ -912,6 +915,53 @@ describe("cooperative control functional coverage", () => {
     expect(recovered.state).toBe("input_required");
     expect(recovered.recoveryState).toBe("waiting_input");
     expect(legacyRecoveryQuarantine(recovered)).toBeNull();
+  });
+
+  it("durably adds the state-package stage to a retryable version 6 deletion with warnings", async () => {
+    const { first, filePath, restart } = await persistedRegistries();
+    const op = createOperation({
+      provider: "azure",
+      repo: "contoso/store",
+      environment: "dev",
+      kind: OPERATION_KIND_DELETE,
+      stages: buildDeleteStages()
+    });
+    op.context = { githubLogin: "alice" };
+    op.request = {
+      repo: "contoso/store",
+      environment: "dev",
+      provider: "azure",
+      clientId: "app-1",
+      tenantId: "tenant-1",
+      repoId: 42
+    };
+    first.start(op);
+    finish(op, "succeeded_with_warnings");
+    await first.persist();
+
+    const envelope = JSON.parse(await fs.readFile(filePath, "utf8"));
+    envelope.operations[0].schemaVersion = 6;
+    envelope.operations[0].stages = envelope.operations[0].stages.filter(
+      (stage) => stage.id !== STAGE_DELETE_STATE_PACKAGE
+    );
+    await fs.writeFile(filePath, JSON.stringify(envelope, null, 2));
+
+    const recovered = (await restart()).get(op.operationId);
+
+    expect(
+      recovered.stages.find((stage) => stage.id === STAGE_DELETE_STATE_PACKAGE)
+    ).toMatchObject({ state: "pending" });
+    expect(
+      JSON.parse(await fs.readFile(filePath, "utf8")).operations[0]
+    ).toMatchObject({
+      schemaVersion: OPERATION_SCHEMA_VERSION,
+      stages: expect.arrayContaining([
+        expect.objectContaining({
+          id: STAGE_DELETE_STATE_PACKAGE,
+          state: "pending"
+        })
+      ])
+    });
   });
 
   it("keeps the browser view free of secrets, evidence, and the private ledger", async () => {

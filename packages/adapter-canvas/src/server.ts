@@ -376,6 +376,7 @@ import {
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { runEnvironmentDeletion } from "./server/services/environment-deletion.js";
+import { createStatePackageDeletion } from "./server/services/state-package-deletion.js";
 import {
   recordCredentialProvenance,
   listCredentialProvenanceForClient,
@@ -5737,6 +5738,12 @@ function createInstanceRequestCoordinator(
     const op = operations.get(operationId);
     if (!op) return;
     if (op.kind === "delete") {
+      const deleteStatePackage = createStatePackageDeletion({
+        stateRegistryForEnvironment,
+        getCredentials: getGhPackageCredentials,
+        deletePackage: deleteGHCRStatePackage,
+        ghCommandPresentation: GH_COMMAND_PRESENTATION
+      });
       await runEnvironmentDeletion(op, {
         deleteRadiusEnvironment: (input, onHeartbeat) =>
           deleteRadiusEnvironmentViaWorkflow(
@@ -5783,20 +5790,7 @@ function createInstanceRequestCoordinator(
         },
         deleteGitHubEnvironment: (input) =>
           deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
-        deleteStatePackage: async (input) => {
-          const registry = stateRegistryForEnvironment(
-            input.repo,
-            input.environment
-          );
-          const credentials = await getGhPackageCredentials({ fresh: true });
-          const outcome = await deleteGHCRStatePackage({
-            targetRepository: input.repo,
-            registry,
-            credentials,
-            ghCommandPresentation: GH_COMMAND_PRESENTATION
-          });
-          return outcome.outcome;
-        },
+        deleteStatePackage,
         withCredentialProvenanceLock,
         readCredentialProvenance: (clientId) =>
           listCredentialProvenanceForClient(clientId),

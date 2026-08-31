@@ -263,11 +263,15 @@ describe("runEnvironmentDeletion — GHCR state package", () => {
 
     expect(op.state).toBe("failed_partial");
     expect(op.failure.code).toBe("state-package-delete-failed");
-    expect(op.failure.message).toContain("delete:packages");
     expect(op.failure.message).toContain(
-      'delete "ghcr.io/octo/app-radius-state-dev-'
+      "Resolve the reported package access, visibility, or repository-link issue"
     );
-    expect(op.failure.message).toContain("manually in GitHub Packages");
+    expect(op.failure.message).toContain(
+      'Only delete "ghcr.io/octo/app-radius-state-dev-'
+    );
+    expect(op.failure.message).toContain(
+      'private or internal and linked to "octo/app"'
+    );
     expect(stage(op, STAGE_DELETE_RADIUS_ENV)).toBe("succeeded");
     expect(stage(op, STAGE_DELETE_CREDENTIAL)).toBe("succeeded");
     expect(stage(op, STAGE_DELETE_GITHUB_ENV)).toBe("succeeded");
