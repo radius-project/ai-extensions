@@ -120,6 +120,7 @@ function prepareBuildWorkspace(
       "junction"
     );
   }
+  copyFileSync(join(REPO_ROOT, "LICENSE"), join(workspaceRoot, "LICENSE"));
 
   const sourcePlugin = join(REPO_ROOT, "plugins", "radius");
   const workspacePlugin = join(workspaceRoot, "plugins", "radius");
@@ -292,10 +293,12 @@ describe("P0-C built Radius extension artifact", () => {
       "package.json",
       "plugin.json",
       "README.md",
+      "LICENSE",
       "THIRD-PARTY-NOTICES.txt",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-bicep/scripts/show-radius-type.mjs",
+      "skills/radius-app-bicep/scripts/validate-bicep.mjs",
       "skills/radius-app-graph/references/source-code-references.md"
     ];
     if (existsSync(SOURCE_CHANGELOG)) packagedPaths.push("CHANGELOG.md");
@@ -371,6 +374,9 @@ describe("P0-C built Radius extension artifact", () => {
     );
     const expectedPackage = structuredClone(sourcePackage);
     expectedPackage.version = builtPackage.version;
+    // Repository-only scripts do not ship: the installed plugin cannot run them.
+    delete expectedPackage.scripts;
+    delete expectedPackage.devDependencies;
     for (const section of [
       "dependencies",
       "devDependencies",
@@ -405,6 +411,9 @@ describe("P0-C built Radius extension artifact", () => {
     expect(readFileSync(join(DIST, "README.md"), "utf8")).toBe(
       readFileSync(join(REPO_ROOT, "plugins", "radius", "README.md"), "utf8")
     );
+    expect(readFileSync(join(DIST, "LICENSE"), "utf8")).toBe(
+      readFileSync(join(REPO_ROOT, "LICENSE"), "utf8")
+    );
     for (const sourceSkill of filesUnder(
       join(REPO_ROOT, "plugins", "radius", "skills")
     )) {
@@ -433,7 +442,8 @@ describe("P0-C built Radius extension artifact", () => {
       "===== dagre@0.8.5 =====",
       "===== @reactflow/core@11.11.4 =====",
       "===== graphlib@2.1.8 =====",
-      "===== lodash@4.18.1 ====="
+      "===== lodash@4.18.1 =====",
+      "===== yaml@2.9.0 ====="
     ]) {
       expect(notices).toContain(marker);
     }
@@ -510,6 +520,7 @@ describe("P0-C built Radius extension artifact", () => {
       "heartbeat",
       "operation-chip",
       "graph-chip",
+      "deploy-chip",
       "deploy-result-page",
       "environment-page",
       "deploying-page",

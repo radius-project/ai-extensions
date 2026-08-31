@@ -27,23 +27,23 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
   BASE_UPSTREAM: Record<string, string>;
 }>(() => {
   const BASE_UPSTREAM: Record<string, string> = {
-    // Minimal stand-ins for radius-project/radius/.github/extension templates.
-    // Carries the `on: workflow_dispatch: inputs:` block the real upstream
-    // template has. Production always dispatches with `-f environment=`, so a
-    // template without it would 422, and the operation marker is inserted into
-    // that same inputs block.
+    // Minimal stand-ins for radius-project/ai-extensions/.github/extension
+    // templates. Carries the `on: workflow_dispatch: inputs:` block the real
+    // upstream template has. Production always dispatches with `-f environment=`,
+    // so a template without it would 422, and the operation marker is inserted
+    // into that same inputs block.
     "verify-azure.yml":
-      "name: verify\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/radius/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
+      "name: verify\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
     "verify-aws.yml":
-      "name: verify\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/radius/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
+      "name: verify\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
     "run-rad-commands.yml":
       "name: deploy\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\n  workflow_run:\n    workflows: [verify]\n    types: [completed]\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/run-rad-commands-azure.yml\n  aws:\n    uses: ./.github/workflows/run-rad-commands-aws.yml\n",
     "run-rad-commands-azure.yml":
-      "name: deploy-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\nenv:\n  APP_FILE: '{{APP_FILE}}'\njobs:\n  a:\n    uses: radius-project/radius/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}\n",
+      "name: deploy-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\nenv:\n  APP_FILE: '{{APP_FILE}}'\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}\n",
     "delete-application.yml":
       "name: delete\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/delete-azure.yml\n  aws:\n    uses: ./.github/workflows/delete-aws.yml\n",
     "delete-azure.yml":
-      "name: delete-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\njobs:\n  a:\n    uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
+      "name: delete-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
   };
   return {
     BASE_UPSTREAM,
@@ -152,6 +152,16 @@ jobs:
     expect(() =>
       configureVerifyOperationMarker("name: verify\njobs:\n  v:\n    run: x\n")
     ).toThrow(/no longer exposes/u);
+  });
+
+  it("renders the same marked workflow when a template ref is pinned", async () => {
+    // The live suite pins the fetch to a branch head sha so it reads the ported
+    // tree before it merges; the same render must hold for an explicit ref.
+    expect(
+      hasVerificationOperationMarker(
+        await generateVerifyWorkflow("dev", "azure", "some-sha")
+      )
+    ).toBe(true);
   });
 });
 

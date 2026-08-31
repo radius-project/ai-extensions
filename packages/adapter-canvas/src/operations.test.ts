@@ -2114,6 +2114,86 @@ describe("client projection", () => {
     expect(JSON.stringify(view)).not.toContain("ignore previous instructions");
   });
 
+  it("persists and projects only a structured failure remediation", () => {
+    const op = newOp();
+    finish(op, "failed", {
+      failure: {
+        code: "github-scopes-missing",
+        message: "GitHub access is missing.",
+        classification: "user-fixable",
+        remediation: {
+          id: "github-account-scopes",
+          params: { login: "octocat", packages: "true", unsafe: 1 }
+        }
+      }
+    });
+
+    const restored = fromPersistedOperation(toPersistedOperation(op));
+
+    expect(restored.failure.remediation).toEqual({
+      id: "github-account-scopes",
+      params: { login: "octocat", packages: "true" }
+    });
+    expect(toClientView(restored).failure.remediation).toEqual({
+      id: "github-account-scopes",
+      params: { login: "octocat", packages: "true" }
+    });
+  });
+
+  it.each(["repo", ["repo"], 7])(
+    "treats non-record remediation params as empty when params=%j",
+    (params) => {
+      const op = newOp();
+      finish(op, "failed", {
+        failure: {
+          code: "github-scopes-missing",
+          message: "GitHub access is missing.",
+          classification: "user-fixable",
+          remediation: {
+            id: "github-account-scopes",
+            params
+          }
+        }
+      });
+
+      const restored = fromPersistedOperation(toPersistedOperation(op));
+
+      expect(restored.failure.remediation).toEqual({
+        id: "github-account-scopes",
+        params: {}
+      });
+      expect(toClientView(restored).failure.remediation).toEqual({
+        id: "github-account-scopes",
+        params: {}
+      });
+    }
+  );
+
+  it.each([
+    ["absent", undefined, null],
+    ["null", null, null],
+    ["non-numeric", "later", null],
+    ["numeric", 4, 4]
+  ])(
+    "projects a %s failure stepSeq without inventing step zero",
+    (_name, stepSeq, expected) => {
+      const op = newOp();
+      finish(op, "failed", {
+        failure: {
+          code: "github-scopes-missing",
+          message: "GitHub access is missing.",
+          classification: "user-fixable",
+          stepSeq
+        }
+      });
+
+      expect(toClientView(op).failure.stepSeq).toBe(expected);
+      expect(
+        fromPersistedOperation(toPersistedOperation(op)).failure.stepSeq
+      ).toBe(expected);
+    }
+  );
+
   it("names created resources with safe labels rather than the private ledger", () => {
     const op = newOp();
     recordAzureApp(op, {
@@ -2376,7 +2456,7 @@ describe("client projection", () => {
         kind: "github_environment",
         target: "contoso/store:dev",
         action:
-          "Radius cannot prove it created this GitHub environment, so it was left in place. Delete it yourself if this setup should be rolled back."
+          "Radius left this GitHub environment in place because it could not verify that this setup created it. To finish deleting the setup, review the GitHub environment and delete it manually if it belongs to this setup."
       }
     ]);
     expect(view.cleanup.retainedArtifacts).toEqual([
@@ -4494,7 +4574,7 @@ describe("durable stop", () => {
     expect(op.control.stop.requestedAt).toBeTruthy();
     expect(shouldStop(op)).toBe(true);
     expect(isStopPending(op)).toBe(true);
-    expect(summarize(op)).toBe("Stopping dev setup after the current step…");
+    expect(summarize(op)).toBe("Pausing dev setup after the current step…");
   });
 
   it("keeps the first request time when the customer clicks twice", () => {
@@ -5769,11 +5849,14 @@ describe("control record guard rails", () => {
     const op = newOp();
     requestStop(op);
     stopAtBoundary(op, "after-app-registration");
-    expect(summarize(op)).toBe('Creating environment "dev" was stopped.');
+    expect(summarize(op)).toBe('Creating environment "dev" was paused.');
     expect(toClientView(op).stop).toMatchObject({
       requested: true,
       boundary: "after-app-registration"
     });
+    expect(toClientView(op).terminal.userMessage).toBe(
+      "Radius finished the step that was already running, recorded what changed, and paused before the next one."
+    );
   });
 });
 
@@ -5848,12 +5931,12 @@ function stoppedWithReusedIdentity(overrides = {}) {
 }
 
 describe("stopped operations offer continuing and rolling back", () => {
-  it("projects Continue setup before Roll back created resources", () => {
+  it("projects Continue setup before Delete setup", () => {
     const op = stoppedWithCreatedResources();
     const actions = projectOperationActions(op);
     expect(actions.map((entry) => [entry.id, entry.label])).toEqual([
       ["continue-setup", "Continue setup"],
-      ["rollback", "Roll back created resources"],
+      ["rollback", "Delete setup"],
       ["exit-setup", "Exit setup"]
     ]);
     expect(actions[0]).toMatchObject({
@@ -5870,9 +5953,9 @@ describe("stopped operations offer continuing and rolling back", () => {
       requiresConfirmation: true,
       method: "POST",
       path: `/api/operations/${op.operationId}/rollback`,
-      confirmTitle: "Roll back resources created by this setup?",
-      confirmLabel: "Roll back resources",
-      cancelLabel: "Keep resources"
+      confirmTitle: "Delete this setup and its created resources?",
+      confirmLabel: "Delete setup",
+      cancelLabel: "Keep setup"
     });
   });
 
@@ -5917,7 +6000,7 @@ describe("stopped operations offer continuing and rolling back", () => {
     const actions = projectOperationActions(stopped);
     expect(actions.map((entry) => entry.label)).toEqual([
       "Retry setup",
-      "Roll back created resources",
+      "Delete setup",
       "Exit setup"
     ]);
     expect(projectOperationHeadline(stopped)).toMatchObject({
@@ -5947,7 +6030,7 @@ describe("stopped operations offer continuing and rolling back", () => {
     const actions = projectOperationActions(op);
     expect(actions.map((entry) => entry.label)).toEqual([
       "Continue setup",
-      "Retry rollback",
+      "Retry deletion",
       "Exit setup"
     ]);
     expect(actions[1]).toMatchObject({
@@ -5965,7 +6048,7 @@ describe("stopped operations offer continuing and rolling back", () => {
     ]);
     expect(projectOperationHeadline(op)).toMatchObject({
       code: "rollback-incomplete",
-      title: "Rollback finished with items still present"
+      title: "Deletion finished with items still present"
     });
   });
 
@@ -5973,11 +6056,11 @@ describe("stopped operations offer continuing and rolling back", () => {
     const op = stoppedWithCreatedResources();
     expect(projectOperationHeadline(op)).toEqual({
       code: "stopped",
-      title: "Environment setup stopped",
+      title: "Environment setup paused",
       message:
-        "Radius stopped before the next setup step. Review what exists, then roll it back or continue setup."
+        "Radius paused before the next setup step. Review what exists, then delete this setup or continue setup."
     });
-    expect(toClientView(op).headline.title).toBe("Environment setup stopped");
+    expect(toClientView(op).headline.title).toBe("Environment setup paused");
   });
 });
 
@@ -6131,7 +6214,7 @@ describe("rollback eligibility", () => {
     expect(projectActionGuidance(op)).toContainEqual({
       code: "rollback-nothing-owned",
       message:
-        "Radius did not create any resources in this attempt, so there is nothing to roll back."
+        "Radius did not create any resources in this attempt, so there is nothing to delete."
     });
     // The unprovable environment stays a manual action rather than a target.
     expect(
@@ -6180,9 +6263,11 @@ describe("rollback eligibility", () => {
       (entry) => entry.id === "rollback"
     );
     expect(action).toMatchObject({
-      label: "Roll back environment setup",
+      label: "Delete setup",
       scope: "post_commit",
-      confirmLabel: "Roll back setup"
+      confirmTitle: "Delete this setup and its created resources?",
+      confirmLabel: "Delete setup",
+      cancelLabel: "Keep setup"
     });
     expect(action.preview.removes).toContainEqual({
       kind: "workflow_file",
@@ -6250,7 +6335,7 @@ describe("rollback eligibility", () => {
     expect(projectActionGuidance(op)).toContainEqual({
       code: "setup-continue-rolled-back",
       message:
-        "Radius rolled back what this attempt created. Start a new environment setup when you are ready."
+        "Radius deleted what this attempt created. Start a new environment setup when you are ready."
     });
   });
 
@@ -6359,12 +6444,12 @@ describe("a running rollback owns the operation", () => {
     expect(projectOperationActions(op)).toEqual([]);
     expect(projectNextTransition(op)).toEqual({
       code: "rolling-back",
-      message: "Rolling back created resources…"
+      message: "Deleting setup resources…"
     });
-    expect(summarize(op)).toBe("Rolling back the resources created for dev…");
+    expect(summarize(op)).toBe("Deleting setup resources for dev…");
     expect(projectOperationHeadline(op)).toMatchObject({
       code: "rolling-back",
-      title: "Rolling back created resources…"
+      title: "Deleting setup resources…"
     });
   });
 
@@ -6405,9 +6490,11 @@ describe("a running rollback owns the operation", () => {
     finish(op, "cancelled", { terminal: { reason: "rollback-complete" } });
     expect(projectOperationHeadline(op)).toMatchObject({
       code: "rollback-complete",
-      title: "Rollback complete"
+      title: "Setup deleted"
     });
-    expect(summarize(op)).toBe('Rolled back the resources created for "dev".');
+    expect(summarize(op)).toBe(
+      'Deleted the setup resources created for "dev".'
+    );
   });
 });
 
@@ -7105,7 +7192,7 @@ describe("a rollback that removed nothing", () => {
 
     expect(projectOperationHeadline(op)).toMatchObject({
       code: "rollback-blocked",
-      title: "Rollback stopped before removing anything"
+      title: "Deletion stopped before removing anything"
     });
   });
 });
@@ -7909,7 +7996,7 @@ describe("an unprovable Service Principal", () => {
       kind: "service_principal",
       target: "Service Principal for radius-deploy (app-1)",
       action:
-        "Radius could not prove whether it created this Service Principal — the principal was absent before setup ran and present afterwards, but the create command did not report success — so it was left in place. Review it and delete it yourself if this setup should be rolled back."
+        "Radius left this Service Principal in place because it could not verify that this setup created it: the principal was absent before setup ran and present afterward, but the create command did not report success. To finish deleting the setup, review the Service Principal and delete it manually if it belongs to this setup."
     });
     expect(summary.reused).toEqual([]);
   });
@@ -7946,7 +8033,7 @@ describe("reuse is explained in the customer's terms", () => {
 
   it("names an earlier Radius setup as the source when the tags prove it", () => {
     expect(reusedWith("radius_earlier_setup")).toBe(
-      "An earlier Radius setup for this repository and environment created this App Registration, and this attempt reused it instead of creating a second one. Rolling back this attempt does not remove it."
+      "An earlier Radius setup for this repository and environment created this App Registration, and this attempt reused it instead of creating a second one. Deleting this setup does not remove it."
     );
   });
 
@@ -7991,7 +8078,7 @@ describe("reuse is explained in the customer's terms", () => {
       target: "radius-deploy (app-1)",
       reason: "reused",
       action:
-        "An earlier Radius setup for this repository and environment created this App Registration, and this attempt reused it instead of creating a second one. Rolling back this attempt does not remove it."
+        "An earlier Radius setup for this repository and environment created this App Registration, and this attempt reused it instead of creating a second one. Deleting this setup does not remove it."
     });
   });
 

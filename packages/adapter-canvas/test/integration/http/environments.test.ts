@@ -7,6 +7,7 @@ import { createEnvironmentListingCache } from "../../../src/server/services/envi
 import { deleteGitHubEnvironmentIdempotent } from "../../../src/server/services/github-environment.js";
 import { runEnvironmentDeletion } from "../../../src/server/services/environment-deletion.js";
 import { cleanupGitHubEnvironmentArtifact } from "../../../src/server.js";
+import { redactGhCredentials } from "../../../src/gh.js";
 import {
   buildDeleteStages,
   createOperation,
@@ -69,6 +70,8 @@ function listingScript(environments: string): CliScript {
 interface ListResult {
   status: number;
   cacheControl: string | null;
+  contentType: string | null;
+  rawBody: string;
   body: unknown;
 }
 
@@ -110,6 +113,7 @@ async function start(
   const dependencies: Partial<EnvironmentsDependencies> = {
     errorMessage: (error) =>
       error instanceof Error ? error.message : String(error),
+    redactDiagnostic: (value) => redactGhCredentials(value, {}),
     repoMatchesWorkspace: () => false,
     readInstanceEntry: () => undefined,
     resolveRepoAppName: async () => "store",
@@ -216,10 +220,13 @@ async function start(
           REPO
         )}`
       );
+      const rawBody = await response.text();
       return {
         status: response.status,
         cacheControl: response.headers.get("cache-control"),
-        body: await response.json()
+        contentType: response.headers.get("content-type"),
+        rawBody,
+        body: JSON.parse(rawBody) as unknown
       };
     },
     async deleteEnvironment(environment) {
@@ -295,6 +302,56 @@ function environmentReader(stillThere: boolean) {
     return stillThere ? ENV_PRESENT : ENV_GONE;
   };
 }
+
+describe("environment listing diagnostics", () => {
+  it("redacts GitHub credentials over HTTP and does not cache the failure", async () => {
+    const credential = "ghp_fixture_secret";
+    const harness = await start({
+      ["/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100"]:
+        { stdout: "" },
+      ["/repos/octo/app/environments?per_page=100"]: {
+        error: new Error("authentication failed"),
+        stderr: `gh: authentication failed using ${credential}`
+      }
+    });
+
+    const failed = await harness.list();
+
+    expect(failed.status).toBe(200);
+    expect(failed.contentType).toMatch(/^application\/json\b/);
+    expect(failed.body).toEqual({
+      environments: [],
+      error: "gh: authentication failed using [REDACTED]"
+    });
+    expect(failed.rawBody).not.toContain(credential);
+
+    harness.setScript(listingScript(""));
+    const recovered = await harness.list();
+
+    expect(recovered.status).toBe(200);
+    expect(recovered.body).toEqual({ environments: [] });
+  });
+
+  it("bounds a browser-visible diagnostic over HTTP", async () => {
+    const harness = await start({
+      ["/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100"]:
+        { stdout: "" },
+      ["/repos/octo/app/environments?per_page=100"]: {
+        error: new Error("failed"),
+        stderr: "x".repeat(2001)
+      }
+    });
+
+    const failed = await harness.list();
+
+    expect(failed.status).toBe(200);
+    expect(failed.body).toEqual({
+      environments: [],
+      error: `${"x".repeat(2000)}...`
+    });
+    expect(failed.rawBody).not.toContain("x".repeat(2001));
+  });
+});
 
 describe("environment listing cache after environment cleanup", () => {
   it("serves a repeat listing from the cache within the TTL", async () => {

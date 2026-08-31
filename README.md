@@ -126,7 +126,7 @@ guidelines and more, head over to the
 
 ## Releasing
 
-[Changesets](https://changesets.dev/) drives the release: add a changeset with your pull request, and every merge to `main` refreshes the rolling `edge` channel. When a maintainer runs the **Release** workflow, Changesets opens a release pull request; merging it validates and publishes the exact source commit, creates the canonical `radius@<version>` source tag and immutable `radius/v<version>` artifact tag, and moves the stable `latest` channel. Follow the [release runbook](./docs/eng/RELEASE_RUNBOOK.md) to cut one, or see [`RELEASING.md`](./docs/eng/RELEASING.md) for the full release flow.
+[Changesets](https://changesets.dev/) drives independent plugin versions and changelogs. Every merge to `main` refreshes each plugin's rolling `<plugin>@edge` channel. The **Release** workflow can prepare one plugin or every pending plugin; merging its scope-labelled PR validates the exact version diff, builds behind shared gates, publishes attested assets on zero-history `releases/<plugin>/v<version>` branches, and moves only that plugin's `<plugin>@latest` channel. GitHub immutable-release enforcement is an optional repository-variable switch. Follow the [release runbook](./docs/eng/RELEASE_RUNBOOK.md) to cut one, or see [`RELEASING.md`](./docs/eng/RELEASING.md) for the full lifecycle.
 
 ## Code of conduct
 

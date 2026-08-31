@@ -4,7 +4,7 @@ Files here are **captured verbatim from real runs of the producer**, not hand-wr
 
 ## Why this matters
 
-The producer (`radius-project/radius`, the `publish-deploy-status` composite action) and this consumer are in different repositories. A coordinated rename in both is fine. A one-sided change in the **consumer** is the dangerous case: the reader stops recognizing what the producer emits, the Deployed tab renders an empty graph, and nothing anywhere turns red. That failure mode is exactly what the previous GHCR transport suffered from, and it is why lookup now confirms identity from the payload rather than from a name derived twice.
+The producer (`radius-project/ai-extensions`, the `publish-deploy-status` composite action under `.github/extension/`) and this consumer now live in the same repository. That makes a coordinated rename in both easy, but a one-sided change in the **consumer** is still the dangerous case: the reader stops recognizing what the producer emits, the Deployed tab renders an empty graph, and nothing anywhere turns red. That failure mode is exactly what the previous GHCR transport suffered from, and it is why lookup now confirms identity from the payload rather than from a name derived twice.
 
 `deploy-artifacts.test.ts` parses these fixtures through the real reader code. The producer has the mirror-image test asserting it still emits this shape.
 

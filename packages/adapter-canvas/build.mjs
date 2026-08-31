@@ -15,7 +15,7 @@
 
 import * as esbuild from "esbuild";
 import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import {
   copyFileSync,
   cpSync,
@@ -25,6 +25,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync
 } from "node:fs";
 import { homedir } from "node:os";
@@ -71,6 +72,10 @@ const pluginSources = ["plugin.json", "package.json", "README.md", "skills"];
 // build but not in a plain local one.
 const optionalPluginSources = ["CHANGELOG.md"];
 
+// esbuild refuses a file it has no loader for, so an unlisted extension added
+// to the plugin tree fails the build instead of silently not shipping.
+const pluginAssetLoaders = { ".json": "copy", ".md": "copy", ".mjs": "copy" };
+
 // CI stamps an edge version (e.g. 0.1.0-edge-0b33186) so a published
 // build is distinguishable from a release. A local build leaves the version in
 // the source manifests alone.
@@ -79,18 +84,24 @@ const stampedVersion = process.env.PLUGIN_VERSION?.trim();
 function writeThirdPartyNotices(inputs) {
   const packages = new Map();
   for (const input of inputs) {
-    if (!/[\\/]node_modules[\\/]/.test(input)) continue;
+    if (!/(?:^|[\\/])node_modules[\\/]/.test(input)) continue;
     let current = dirname(input);
-    while (!existsSync(join(current, "package.json"))) {
+    let manifest;
+    while (true) {
+      const manifestPath = join(current, "package.json");
+      if (existsSync(manifestPath)) {
+        const candidate = JSON.parse(readFileSync(manifestPath, "utf8"));
+        if (candidate.name && candidate.version) {
+          manifest = candidate;
+          break;
+        }
+      }
       const parent = dirname(current);
       if (parent === current) {
         throw new Error(`Unable to locate package metadata for "${input}".`);
       }
       current = parent;
     }
-    const manifest = JSON.parse(
-      readFileSync(join(current, "package.json"), "utf8")
-    );
     const key = `${manifest.name}@${manifest.version}`;
     if (packages.has(key)) continue;
     packages.set(key, {
@@ -99,17 +110,19 @@ function writeThirdPartyNotices(inputs) {
     });
   }
   if (packages.size === 0) {
-    throw new Error(
-      "The browser bundles contained no third-party package inputs."
-    );
+    throw new Error("The bundles contained no third-party package inputs.");
   }
 
   const notices = [...packages.values()]
-    .sort(
-      (a, b) =>
-        String(a.manifest.name).localeCompare(String(b.manifest.name)) ||
-        String(a.manifest.version).localeCompare(String(b.manifest.version))
-    )
+    .sort((a, b) => {
+      const left = `${a.manifest.name}\0${a.manifest.version}`;
+      const right = `${b.manifest.name}\0${b.manifest.version}`;
+      return (
+        left < right ? -1
+        : left > right ? 1
+        : 0
+      );
+    })
     .map(({ manifest, root }) => {
       const licensePath = [
         "LICENSE",
@@ -133,23 +146,42 @@ function writeThirdPartyNotices(inputs) {
   );
 }
 
-async function assembleDist() {
+// esbuild globs are POSIX-style and match files, so a directory has to become a
+// recursive pattern.
+function pluginAssetEntryPoint(from) {
+  const pattern = from.split(sep).join("/");
+  return statSync(from).isDirectory() ? `${pattern}/**/*` : pattern;
+}
+
+async function assembleDist(bundleInputs) {
+  const entryPoints = [];
   for (const entry of pluginSources) {
     const from = join(pluginDir, entry);
     if (!existsSync(from)) {
       throw new Error(`Missing required plugin source: ${from}`);
     }
-    cpSync(from, join(distDir, entry), { recursive: true });
+    entryPoints.push(pluginAssetEntryPoint(from));
   }
   for (const entry of optionalPluginSources) {
     const from = join(pluginDir, entry);
-    if (!existsSync(from)) continue;
-    cpSync(from, join(distDir, entry), { recursive: true });
+    if (existsSync(from)) entryPoints.push(pluginAssetEntryPoint(from));
   }
+
+  // The copy loader reproduces each file verbatim, so the same tool that emits
+  // the bundle also lays out the rest of dist/.
+  await esbuild.build({
+    entryPoints,
+    outbase: pluginDir,
+    outdir: distDir,
+    loader: pluginAssetLoaders,
+    logLevel: "silent"
+  });
+  copyFileSync(join(repoRoot, "LICENSE"), join(distDir, "LICENSE"));
   copyStaticWorkflows();
+
   const distPackage = join(distDir, "package.json");
+  stripRepositoryScripts(distPackage);
   resolveCatalogSpecifiers(distPackage);
-  writeThirdPartyNotices(browserBundleInputs);
   stampVersion(distPackage, stampedVersion);
   // The manifest the host reads must advertise the version the package ships,
   // including when a rebuild runs without PLUGIN_VERSION.
@@ -157,7 +189,7 @@ async function assembleDist() {
     join(distDir, "plugin.json"),
     JSON.parse(readFileSync(distPackage, "utf8")).version
   );
-  await esbuild.build({
+  const resolverBuild = await esbuild.build({
     entryPoints: [radiusTypeResolver],
     outfile: join(
       distDir,
@@ -171,12 +203,27 @@ async function assembleDist() {
     platform: "node",
     target,
     charset: "utf8",
+    metafile: true,
     legalComments: "none",
     logLevel: "silent",
     banner: {
       js: "// AUTO-GENERATED by packages/adapter-canvas/build.mjs — do not edit by hand."
     }
   });
+  writeThirdPartyNotices([
+    ...bundleInputs,
+    ...browserBundleInputs,
+    ...Object.keys(resolverBuild.metafile.inputs)
+  ]);
+}
+
+// The plugin package declares its own `build` script so CI can build any plugin
+// by name, but that script is meaningless outside this workspace.
+function stripRepositoryScripts(manifestPath) {
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  delete manifest.scripts;
+  delete manifest.devDependencies;
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 // The environment-delete workflow (issue #303) is authored as static YAML in
@@ -190,6 +237,8 @@ const staticWorkflowFiles = [
   "delete-environment-azure.yml"
 ];
 
+// Copied rather than routed through the esbuild asset loaders above, which
+// deliberately accept only the plugin's own .json/.md/.mjs sources.
 function copyStaticWorkflows() {
   const sourceDir = join(repoRoot, ".github", "extension");
   const targetDir = join(distDir, "workflows");
@@ -354,7 +403,7 @@ const finalizePlugin = {
   setup(build) {
     build.onEnd(async (result) => {
       if (result.errors.length > 0) return;
-      await assembleDist();
+      await assembleDist(Object.keys(result.metafile?.inputs ?? {}));
       if (isInstall && isWatch) installToLocal();
     });
   }
@@ -451,6 +500,7 @@ const options = {
   // regardless. Costs ~12 KB.
   keepNames: true,
   sourcemap: true,
+  metafile: true,
   // The SDK is resolved by the loader at runtime — never bundle it.
   external: ["@github/copilot-sdk", "@github/copilot-sdk/extension"],
   legalComments: "none",

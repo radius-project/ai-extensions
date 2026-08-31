@@ -632,7 +632,7 @@ This section identifies implementation boundaries; this design does not implemen
 
 Stage 1 does not require core product logic. Generated Delete workflows remain owned by [`packages/core/src/workflows/delete.ts`](../../packages/core/src/workflows/delete.ts), and the conservative resolver relies only on existing GitHub history.
 
-Stage 2 requires a coordinated contract with the workflow templates fetched from `radius-project/radius/.github/extension`. Those templates are the source of truth; `packages/core` fills their placeholders and should test that supported templates retain the phase protocol. The protocol must not depend on prose step names. If the recovery policy later becomes useful to another adapter, the pure state model and allowed-action reducer may move into `packages/core`; GitHub record parsing remains in Canvas because it depends on adapter-specific GitHub APIs and workflow filenames.
+Stage 2 requires a coordinated contract with the workflow templates fetched from `radius-project/ai-extensions/.github/extension`. Those templates are the source of truth; `packages/core` fills their placeholders and should test that supported templates retain the phase protocol. The protocol must not depend on prose step names. If the recovery policy later becomes useful to another adapter, the pure state model and allowed-action reducer may move into `packages/core`; GitHub record parsing remains in Canvas because it depends on adapter-specific GitHub APIs and workflow filenames.
 
 #### Canvas adapter — packages/adapter-canvas (if applicable)
 
@@ -940,7 +940,7 @@ Stage 1 is complete when every safely classified current workflow run can use co
 ### Stage 2: Workflow phase protocol
 
 1. **Choose the durable carrier**: Decide whether the versioned phase event lives in GitHub deployment-status history, a bounded run artifact, or another GitHub record with adequate retention and ordering.
-2. **Publish the protocol upstream**: Update the generated workflow templates in `radius-project/radius` to emit and persist preparation, authentication, resource-mutation, and resource-teardown boundaries for Azure and AWS.
+2. **Publish the protocol upstream**: Update the generated workflow templates in `radius-project/ai-extensions` to emit and persist preparation, authentication, resource-mutation, and resource-teardown boundaries for Azure and AWS.
 3. **Consume the protocol in Canvas**: Validate the version and identity, associate events with the correct run and target, and refine `cloudResourceAssessment` only from trusted markers.
 4. **Prove compatibility**: Test old runs without markers, mixed histories, malformed markers, unsupported versions, missing artifacts, retention expiry, and out-of-order retrieval. Missing or unsupported phase evidence falls back to Stage 1 conservative behavior when the remaining history is complete; malformed supported evidence and contradictory evidence fail closed.
 

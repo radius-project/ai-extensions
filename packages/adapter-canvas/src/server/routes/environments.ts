@@ -30,6 +30,18 @@ export type {
   DeleteStartResult
 } from "./environments-types.js";
 import { classifyProvider } from "../../provider-classification.js";
+
+const BROWSER_DIAGNOSTIC_MAX_LENGTH = 2000;
+
+function browserVisibleDiagnostic(
+  value: string,
+  dependencies: EnvironmentsDependencies
+): string {
+  const diagnostic = dependencies.redactDiagnostic(value).trim();
+  return diagnostic.length > BROWSER_DIAGNOSTIC_MAX_LENGTH ?
+      `${diagnostic.slice(0, BROWSER_DIAGNOSTIC_MAX_LENGTH)}...`
+    : diagnostic;
+}
 // Parameters for the app.bicep the deploy will run against. Resolves the branch
 // the same way the deploy route does (caller's selection, else the repo default)
 // and locates `.radius/app.bicep` then `app.bicep`. Every failure degrades to a
@@ -507,8 +519,10 @@ export async function handleListEnvironments(
             if (err) {
               resolve({
                 error:
-                  (stderr || err.message || "").trim() ||
-                  "Failed to list environments."
+                  browserVisibleDiagnostic(
+                    (stderr || err.message || "").trim(),
+                    dependencies
+                  ) || "Failed to list environments."
               });
               return;
             }
@@ -688,7 +702,12 @@ export async function handleListEnvironments(
       : "";
     dependencies.kickoffWorkflowSync(repo, managedEnvironments, workingBranch);
   } catch (e) {
-    respond({ environments: [], error: dependencies.errorMessage(e) });
+    respond({
+      environments: [],
+      error:
+        browserVisibleDiagnostic(dependencies.errorMessage(e), dependencies) ||
+        "Failed to list environments."
+    });
   }
 }
 

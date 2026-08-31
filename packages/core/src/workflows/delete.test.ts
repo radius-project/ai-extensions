@@ -13,7 +13,7 @@ import {
 } from "./delete.js";
 
 // Minimal stand-ins for the delete templates the generator fills. The
-// application-delete templates are fetched from radius-project/radius; the
+// application-delete templates are fetched from radius-project/ai-extensions; the
 // environment-delete templates (dispatcher + provider) are static ai-extensions
 // assets. The dispatchers only use the workflow_dispatch `{{ENV}}` default; the
 // provider workflows also pin their composite actions to `{{RADIUS_REF}}`, and
@@ -52,7 +52,7 @@ env:
 jobs:
   delete:
     steps:
-      - uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}
+      - uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}
       - name: ${DELETE_ENV_GUARD_STEP_NAME}
         run: rad application list --output json
 `,
@@ -64,7 +64,7 @@ env:
 jobs:
   delete:
     steps:
-      - uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}
+      - uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}
 `,
   [DELETE_AWS_FILE]: `name: delete-aws
 on:
@@ -74,7 +74,7 @@ env:
 jobs:
   delete:
     steps:
-      - uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}
+      - uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}
 `
 };
 
@@ -172,7 +172,7 @@ describe("generateDeleteWorkflow", () => {
       DELETE_ENV_AZURE_FILE
     ]) {
       expect(files[file]).toContain(
-        `radius-project/radius/.github/extension/actions/delete-resource@${DELETE_RADIUS_REF}`
+        `radius-project/ai-extensions/.github/extension/actions/delete-resource@${DELETE_RADIUS_REF}`
       );
       expect(files[file]).not.toContain("{{RADIUS_REF}}");
     }
@@ -235,7 +235,7 @@ describe("generateDeleteWorkflow", () => {
 
   it("names the upstream source in the missing-template error", () => {
     expect(() => generateDeleteWorkflow("prod", {})).toThrow(
-      `radius-project/radius/.github/extension at "${DELETE_RADIUS_REF}"`
+      `radius-project/ai-extensions/.github/extension at "${DELETE_RADIUS_REF}"`
     );
   });
 
