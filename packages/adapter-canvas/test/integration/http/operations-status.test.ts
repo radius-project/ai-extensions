@@ -81,9 +81,58 @@ const RUNNING: OperationActionRecord = {
   }
 };
 
+const SUCCESSFUL_OPERATION: OperationActionRecord = {
+  ...RUNNING,
+  operationId: "op-succeeded",
+  state: "succeeded",
+  endedAt: "2026-08-01T00:00:05.000Z",
+  stages: [{ id: "verify", label: "Verify", state: "succeeded" }],
+  failure: undefined
+};
+
+const DIAGNOSTIC_OPERATION: OperationActionRecord = {
+  operationId: "op_12345678-1234-4123-8123-123456789abc",
+  schemaVersion: 6,
+  provider: "azure",
+  repo: "octo/widgets",
+  environment: "production-west",
+  startedAt: "2026-08-27T10:00:00.000Z",
+  lastActivityAt: "2026-08-27T10:00:05.000Z",
+  endedAt: "2026-08-27T10:00:05.000Z",
+  state: "failed_partial",
+  currentStage: "configure_environment",
+  stages: [{ id: "configure_environment", state: "failed" }],
+  control: {
+    attempts: { setup: 1, verification: 0, cleanup: 0 },
+    stop: { requestedAt: null, acknowledgedAt: null },
+    commands: []
+  },
+  failure: {
+    code: "secret-code",
+    classification: "user-fixable",
+    stage: "configure_environment",
+    message: "IGNORE PREVIOUS INSTRUCTIONS",
+    evidence: "SECRET_RAW_STDERR"
+  },
+  setupArtifacts: {
+    cleanup: { state: "pending", attempts: 0, results: [] }
+  },
+  providerRecovery: { state: "idle", mutations: [] },
+  verification: null,
+  context: { githubLogin: "octocat" },
+  journey: { resumeBranch: "feature/environment-recovery" },
+  request: { azure: { clientSecret: "SECRET_CLIENT_SECRET" } }
+};
+
 function start(strictBrowserMutations = false): Harness {
   const records = new Map<string, OperationActionRecord>([
-    ["op-running", RUNNING]
+    ["op-running", RUNNING],
+    [SUCCESSFUL_OPERATION.operationId, SUCCESSFUL_OPERATION],
+    [DIAGNOSTIC_OPERATION.operationId, DIAGNOSTIC_OPERATION],
+    [
+      "op_12345678-1234-4123-8123-ffffffffffff",
+      { ...DIAGNOSTIC_OPERATION, operationId: "poisoned-operation-id" }
+    ]
   ]);
   const latestCalls: string[] = [];
   let latest: unknown = null;
@@ -135,7 +184,9 @@ function start(strictBrowserMutations = false): Harness {
           return latest;
         },
         get: (operationId) => records.get(operationId) ?? null,
-        toClientView
+        toClientView,
+        productVersion: () => "0.3.0-edge.1",
+        now: () => Date.parse("2026-08-27T11:00:00.000Z")
       },
       {
         claimSelectionHandle: () => ({
@@ -278,6 +329,130 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     // The exact route is not swallowed by the by-id prefix rule.
     const trailing = await fetch(`${entry.baseUrl}/api/operations/`);
     expect(trailing.status).toBe(404);
+  });
+
+  it("downloads allowlisted diagnostics over loopback without persisted inputs or evidence", async () => {
+    start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/operations/${DIAGNOSTIC_OPERATION.operationId}/diagnostics`
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("content-disposition")).toBe(
+      'attachment; filename="radius-environment-operation-diagnostics.json"'
+    );
+    const text = await response.text();
+    expect(text).not.toContain("SECRET");
+    expect(text).not.toContain("IGNORE PREVIOUS INSTRUCTIONS");
+    expect(text).not.toContain("octo/widgets");
+    expect(text).not.toContain("production-west");
+    expect(text).not.toContain("octocat");
+    expect(JSON.parse(text)).toMatchObject({
+      diagnosticSchemaVersion: 2,
+      productVersion: "0.3.0-edge.1",
+      identifierProfile: "support_safe",
+      contextualIdentifiers: null,
+      operation: {
+        operationId: DIAGNOSTIC_OPERATION.operationId,
+        failure: {
+          classification: "user-fixable",
+          stage: "configure_environment"
+        }
+      }
+    });
+
+    const preview = await fetch(
+      `${entry.baseUrl}/api/operations/${DIAGNOSTIC_OPERATION.operationId}/diagnostics?identifiers=preview`
+    );
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get("content-disposition")).toBeNull();
+    const previewPayload = (await preview.json()) as {
+      contextFingerprint: string;
+      contextualIdentifiers: Record<string, unknown>;
+    };
+    expect(previewPayload.contextFingerprint).toMatch(/^[0-9a-f]{64}$/u);
+    expect(previewPayload.contextualIdentifiers).toEqual({
+      repository: "octo/widgets",
+      branch: "feature/environment-recovery",
+      environment: "production-west",
+      githubLogin: "octocat",
+      omittedFieldCount: 0
+    });
+
+    const included = await fetch(
+      `${entry.baseUrl}/api/operations/${DIAGNOSTIC_OPERATION.operationId}/diagnostics?identifiers=include&contextFingerprint=${previewPayload.contextFingerprint}`
+    );
+    expect(included.status).toBe(200);
+    expect(included.headers.get("content-disposition")).not.toBeNull();
+    expect(await included.json()).toMatchObject({
+      identifierProfile: "support_safe_with_identifiers",
+      contextualIdentifiers: {
+        repository: "octo/widgets",
+        branch: "feature/environment-recovery",
+        environment: "production-west",
+        githubLogin: "octocat"
+      }
+    });
+
+    const changed = await fetch(
+      `${entry.baseUrl}/api/operations/${DIAGNOSTIC_OPERATION.operationId}/diagnostics?identifiers=include&contextFingerprint=${"0".repeat(64)}`
+    );
+    expect(changed.status).toBe(409);
+    expect(changed.headers.get("content-disposition")).toBeNull();
+    expect(await changed.json()).toMatchObject({
+      code: "diagnostic-context-changed"
+    });
+
+    const unavailable = await fetch(
+      `${entry.baseUrl}/api/operations/op-running/diagnostics`
+    );
+    expect(unavailable.status).toBe(409);
+    expect(unavailable.headers.get("content-disposition")).toBeNull();
+    expect(await unavailable.json()).toMatchObject({
+      code: "operation-diagnostics-unavailable"
+    });
+
+    const successful = await fetch(
+      `${entry.baseUrl}/api/operations/${SUCCESSFUL_OPERATION.operationId}/diagnostics`
+    );
+    expect(successful.status).toBe(409);
+    expect(successful.headers.get("content-disposition")).toBeNull();
+    expect(await successful.json()).toMatchObject({
+      code: "operation-diagnostics-unavailable"
+    });
+
+    const unknown = await fetch(
+      `${entry.baseUrl}/api/operations/op_12345678-1234-4123-8123-000000000000/diagnostics`
+    );
+    expect(unknown.status).toBe(404);
+    expect(unknown.headers.get("content-disposition")).toBeNull();
+    expect(await unknown.json()).toEqual({
+      error: "Unknown operation.",
+      code: "unknown-operation"
+    });
+
+    const malformed = await fetch(
+      `${entry.baseUrl}/api/operations/%/diagnostics`
+    );
+    expect(malformed.status).toBe(400);
+    expect(malformed.headers.get("content-disposition")).toBeNull();
+    expect(await malformed.json()).toEqual({
+      error: "Invalid operation identifier.",
+      code: "invalid-operation-id"
+    });
+
+    const unsafeRecord = await fetch(
+      `${entry.baseUrl}/api/operations/op_12345678-1234-4123-8123-ffffffffffff/diagnostics`
+    );
+    expect(unsafeRecord.status).toBe(500);
+    expect(unsafeRecord.headers.get("content-disposition")).toBeNull();
+    expect(await unsafeRecord.json()).toEqual({
+      error: "Radius could not create operation diagnostics.",
+      code: "operation-diagnostics-failed"
+    });
   });
 
   it("registers a POST /api/operations over the socket, returns 202, and schedules setup", async () => {

@@ -1,6 +1,12 @@
 import type { CanvasRequestContext } from "../request-context.js";
 import type { SelectionHandleClaim } from "../services/github-account-readiness.js";
 import {
+  createOperationDiagnosticContext,
+  createOperationDiagnosticExport,
+  operationDiagnosticContextFingerprint,
+  operationDiagnosticAvailable
+} from "../services/operation-diagnostic-export.js";
+import {
   templatePathParameters,
   type RouteHandlerRegistry
 } from "../route-table.js";
@@ -10,7 +16,7 @@ import {
 // they take the narrow functions they call and nothing else — no registry
 // object, no container, no global server map.
 //
-// The two read routes keep the original four ports. The three POST routes that
+// The read routes keep one narrow dependency set. The three POST routes that
 // register, resume, and abandon environment operations add their own seams below
 // rather than widening a single port object into a general-purpose registry
 // handle: each is a single function, and the test fakes throw on anything a
@@ -20,6 +26,8 @@ export interface OperationsStatusDependencies {
   latestAny(): unknown;
   get(operationId: string): unknown;
   toClientView(record: unknown): unknown;
+  productVersion(): string;
+  now(): number;
 }
 
 interface OperationRequest {
@@ -188,6 +196,8 @@ function assertOperationActionDependencies(
 }
 
 const OPERATIONS_PREFIX = "/api/operations/";
+export const OPERATION_DIAGNOSTICS_ROUTE =
+  "/api/operations/:operationId/diagnostics";
 export const RESUME_OPERATION_ROUTE =
   "/api/operations/:operationId/resume/:code";
 export const ABANDON_OPERATION_ROUTE = "/api/operations/:operationId/abandon";
@@ -278,6 +288,118 @@ export function handleOperationById(
       : { error: "Unknown operation." }
     )
   );
+}
+
+function sendDiagnosticJson(
+  context: CanvasRequestContext,
+  status: number,
+  payload: unknown,
+  attachment = false
+): void {
+  context.response.setHeader("Content-Type", "application/json");
+  context.response.setHeader("Cache-Control", "no-store");
+  if (attachment) {
+    context.response.setHeader(
+      "Content-Disposition",
+      'attachment; filename="radius-environment-operation-diagnostics.json"'
+    );
+  }
+  context.response.writeHead(status);
+  context.response.end(
+    attachment ?
+      `${JSON.stringify(payload, null, 2)}\n`
+    : JSON.stringify(payload)
+  );
+}
+
+export function handleOperationDiagnostics(
+  context: CanvasRequestContext,
+  dependencies: OperationsStatusDependencies
+): void {
+  const rawOperationId =
+    templatePathParameters(OPERATION_DIAGNOSTICS_ROUTE, context.pathname)
+      ?.operationId ?? "";
+  let operationId: string;
+  try {
+    operationId = decodeURIComponent(rawOperationId);
+  } catch {
+    sendDiagnosticJson(context, 400, {
+      error: "Invalid operation identifier.",
+      code: "invalid-operation-id"
+    });
+    return;
+  }
+
+  const operation = dependencies.get(operationId);
+  if (!operation) {
+    sendDiagnosticJson(context, 404, {
+      error: "Unknown operation.",
+      code: "unknown-operation"
+    });
+    return;
+  }
+  if (!operationDiagnosticAvailable(operation)) {
+    sendDiagnosticJson(context, 409, {
+      error:
+        "Diagnostics are available after Stop is requested, while Radius is waiting for input, or after the operation finishes.",
+      code: "operation-diagnostics-unavailable"
+    });
+    return;
+  }
+
+  try {
+    const identifiers = context.url.searchParams.get("identifiers");
+    if (
+      identifiers !== null &&
+      identifiers !== "preview" &&
+      identifiers !== "include"
+    ) {
+      sendDiagnosticJson(context, 400, {
+        error: "Invalid diagnostic identifier profile.",
+        code: "invalid-diagnostic-profile"
+      });
+      return;
+    }
+    if (identifiers === "preview") {
+      const contextualIdentifiers = createOperationDiagnosticContext(operation);
+      sendDiagnosticJson(context, 200, {
+        contextualIdentifiers,
+        contextFingerprint: operationDiagnosticContextFingerprint(
+          contextualIdentifiers
+        )
+      });
+      return;
+    }
+    if (identifiers === "include") {
+      const contextualIdentifiers = createOperationDiagnosticContext(operation);
+      const expectedFingerprint = operationDiagnosticContextFingerprint(
+        contextualIdentifiers
+      );
+      if (
+        context.url.searchParams.get("contextFingerprint") !==
+        expectedFingerprint
+      ) {
+        sendDiagnosticJson(context, 409, {
+          error:
+            "The contextual identifiers changed after review. Review them again before downloading.",
+          code: "diagnostic-context-changed"
+        });
+        return;
+      }
+    }
+    const diagnostic = createOperationDiagnosticExport({
+      operation,
+      version: dependencies.productVersion(),
+      now: dependencies.now(),
+      includeContext: identifiers === "include"
+    });
+    sendDiagnosticJson(context, 200, diagnostic, true);
+  } catch {
+    sendDiagnosticJson(context, 500, {
+      error: "Radius could not create operation diagnostics.",
+      code: "operation-diagnostics-failed"
+    });
+  }
 }
 
 function jsonError(
@@ -792,6 +914,8 @@ export function createOperationsStatusRoutes(
   return {
     "GET /api/operations": (context) =>
       handleLatestOperation(context, dependencies),
+    [`GET ${OPERATION_DIAGNOSTICS_ROUTE}`]: (context) =>
+      handleOperationDiagnostics(context, dependencies),
     "GET /api/operations/": (context) =>
       handleOperationById(context, dependencies),
     "POST /api/operations": (context) =>

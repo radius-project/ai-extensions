@@ -127,7 +127,9 @@ function start(): Harness {
         latest: () => null,
         latestAny: () => null,
         get: (operationId) => records.get(operationId) ?? null,
-        toClientView
+        toClientView,
+        productVersion: () => "0.0.0",
+        now: () => 0
       },
       {
         isValidRepoSlug: (value) =>

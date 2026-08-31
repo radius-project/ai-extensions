@@ -19,6 +19,7 @@ Edge needs nothing from you. The rest of this page is the stable release.
 - At least one changeset must be pending, or the workflow stops with nothing to release.
 - The previous release must have finished. If its run failed partway, re-run that run first - see [If something fails](#if-something-fails).
 - You need write access to the repository to start the workflow.
+- For a release candidate that includes Azure environment creation, complete [Environment creation readiness](./ENVIRONMENT_CREATION_READINESS.md). A record with `BLOCKED` or `NOT RUN` production gates is not release approval.
 
 Each of these is enforced by the workflow, so a mistake here fails fast rather than shipping something wrong.
 
