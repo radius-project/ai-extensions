@@ -55,7 +55,8 @@ import {
 } from "./support/create-environment-journey.js";
 import {
   describeUnprovisionedFixtureRepository,
-  isFixtureRepositoryProvisioned
+  isFixtureRepositoryProvisioned,
+  resolveFixtureLocation
 } from "./support/fixture-repository.js";
 
 const PROFILE_NAME = "cloud-e2e";
@@ -143,6 +144,12 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
     if (!gate.enabled) return;
     fixture = await createCloudFixture({
       subscriptionId: process.env.AZURE_SUBSCRIPTION_ID || "",
+      // CI publishes the region; locally it is absent and the fixture's own
+      // default applies. Validated in the helper rather than here, so this file
+      // keeps containing no logic a nightly run would be the first to check.
+      location: resolveFixtureLocation(
+        process.env.AIEXT_CLOUD_E2E_AZURE_LOCATION
+      ),
       ports
     });
     // Turns every assertion below from an observation into a proof: none of the
