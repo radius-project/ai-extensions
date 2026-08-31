@@ -36,9 +36,15 @@ import {
   executeRecoverableMutation,
   providerMutationWillWrite
 } from "../services/provider-mutation-recovery.js";
+import {
+  azureRetryDelayMs,
+  isRetryableAzureReadFailure
+} from "./azure-auto-setup-credentials.js";
 
 export const ENTRA_APP_RETENTION_NOTICE =
   "Radius retains this app registration if you later delete the environment; environment deletion removes only that environment's federated identity credential.";
+
+const CALLER_IDENTITY_LOOKUP_ATTEMPTS = 6;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -172,12 +178,31 @@ export async function resolveAzureAutoSetupApplication({
     if (identity.kind === "unsupported") {
       return { ok: false, stderr: identity.reason };
     }
-    const lookup = await runAz(
+    const lookupArgs =
       identity.kind === "servicePrincipal" ?
         buildServicePrincipalObjectIdArgs({ appId: identity.appId })
-      : buildSignedInUserObjectIdArgs()
-    );
-    if (lookup.code !== 0) return { ok: false, stderr: lookup.stderr };
+      : buildSignedInUserObjectIdArgs();
+    let lookup = await runAz(lookupArgs);
+    for (
+      let attempt = 1;
+      lookup.code !== 0 &&
+      lookup.code !== "0" &&
+      attempt < CALLER_IDENTITY_LOOKUP_ATTEMPTS;
+      attempt++
+    ) {
+      const detail = lookup.stderr || lookup.stdout;
+      if (!isRetryableAzureReadFailure(detail)) break;
+      const delay = azureRetryDelayMs(detail, 2000 * attempt);
+      if (delay === null) break;
+      await dependencies.sleep(delay);
+      lookup = await runAz(lookupArgs);
+    }
+    if (lookup.code !== 0 && lookup.code !== "0") {
+      return {
+        ok: false,
+        stderr: lookup.stderr || lookup.stdout
+      };
+    }
     const id = lookup.stdout.trim().toLowerCase();
     // An empty id compares unequal to every owner, which would turn a failed
     // read into a silent "not owned". Ownership gates destructive setup here.
@@ -186,6 +211,13 @@ export async function resolveAzureAutoSetupApplication({
         ok: false,
         stderr:
           "Microsoft Entra returned no object id for the current Azure CLI identity."
+      };
+    }
+    if (!isUuid(id)) {
+      return {
+        ok: false,
+        stderr:
+          "Microsoft Entra returned an invalid object id for the current Azure CLI identity."
       };
     }
     callerObjectId = id;
@@ -549,7 +581,7 @@ export async function resolveAzureAutoSetupApplication({
           if (!caller.ok) {
             await fail(
               400,
-              "Failed to read the Azure CLI identity from Microsoft Entra before creating the App Registration: " +
+              "Failed to resolve the current Azure CLI identity before creating the App Registration: " +
                 caller.stderr,
               "app-owner-lookup-failed",
               { steps, azError: caller.stderr }
@@ -738,7 +770,7 @@ export async function resolveAzureAutoSetupApplication({
         const caller = callerBeforeCreate ?? (await getCallerObjectId());
         if (!caller.ok) {
           await rollbackCreatedAppAndFail(
-            "Failed to read the Azure CLI identity from Microsoft Entra after creating the App Registration: " +
+            "Failed to resolve the current Azure CLI identity after creating the App Registration: " +
               caller.stderr,
             "app-owner-lookup-failed",
             caller.stderr

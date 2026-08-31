@@ -28,6 +28,7 @@ const APP_ID = "33333333-3333-3333-3333-333333333333";
 const USER_ID = "44444444-4444-4444-4444-444444444444";
 const SP_APP_ID = "55555555-5555-5555-5555-555555555555";
 const SP_OBJECT_ID = "66666666-6666-6666-6666-666666666666";
+const OTHER_OBJECT_ID = "77777777-7777-7777-7777-777777777777";
 const SERVICE_PRINCIPAL: FakeCallerIdentity = {
   type: "servicePrincipal",
   name: SP_APP_ID
@@ -75,6 +76,7 @@ function harness(
     // full call sequence.
     identity?: FakeCallerIdentity | null;
     runGitHubJson?: AzureAutoSetupWorkflow["runGitHubJson"];
+    sleep?: AzureAutoSetupApplicationInput["dependencies"]["sleep"];
     persist?: () => Promise<void>;
     finish?: AzureAutoSetupApplicationInput["dependencies"]["operations"]["finish"];
     report?: AzureAutoSetupApplicationInput["dependencies"]["operations"]["report"];
@@ -97,6 +99,7 @@ function harness(
     currentStage: "authorize_identity"
   };
   const dependencies = createAzureAutoSetupTestDependencies({
+    ...(options.sleep ? { sleep: options.sleep } : {}),
     operations: {
       persist:
         options.persist ??
@@ -151,7 +154,10 @@ function harness(
     steps: workflow.steps,
     input: {
       workflow,
-      dependencies: { operations: dependencies.operations },
+      dependencies: {
+        operations: dependencies.operations,
+        sleep: dependencies.sleep
+      },
       oidc: OIDC,
       environment: "dev",
       explicitAppId: "",
@@ -1067,10 +1073,10 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
           return command({ code: 1, timedOut: true });
         }
         if (line.startsWith("ad signed-in-user show ")) {
-          return command({ stdout: "different-ambient-principal" });
+          return command({ stdout: OTHER_OBJECT_ID });
         }
         if (line.startsWith("ad app owner list ")) {
-          return command({ stdout: "different-ambient-principal" });
+          return command({ stdout: OTHER_OBJECT_ID });
         }
         if (line.startsWith("ad app owner add ")) return command();
         if (line.startsWith("rest --method PATCH ")) return command();
@@ -1131,10 +1137,10 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
           return command({ code: 1, timedOut: true });
         }
         if (line.startsWith("ad signed-in-user show ")) {
-          return command({ stdout: "changed-principal" });
+          return command({ stdout: OTHER_OBJECT_ID });
         }
         if (line.startsWith("ad app owner list ")) {
-          return command({ stdout: "changed-principal" });
+          return command({ stdout: OTHER_OBJECT_ID });
         }
         if (line.startsWith("ad app owner add ")) {
           ownerAdds += 1;
@@ -1429,7 +1435,9 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     expect(test.failures[0]).toMatchObject({
       code: "app-owner-lookup-failed"
     });
-    expect(String(test.failures[0]?.error)).toContain("user unavailable");
+    expect(String(test.failures[0]?.error)).toContain(
+      "Failed to resolve the current Azure CLI identity after creating the App Registration: user unavailable"
+    );
     expect(operation).toMatchObject({
       providerRecovery: {
         mutations: [
@@ -1887,13 +1895,16 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
     ownerObjectId: string,
     overrides: {
       identityLookup?: AzureAutoSetupCommandResult;
+      identityLookups?: AzureAutoSetupCommandResult[];
       ownerAdd?: AzureAutoSetupCommandResult;
       ownerList?: AzureAutoSetupCommandResult;
+      sleep?: AzureAutoSetupApplicationInput["dependencies"]["sleep"];
     } = {}
   ): { test: Harness; azCalls: string[] } {
     const azCalls: string[] = [];
     const test = harness({
       identity: null,
+      ...(overrides.sleep ? { sleep: overrides.sleep } : {}),
       runAz: async (args) => {
         const line = args.join(" ");
         azCalls.push(line);
@@ -1904,7 +1915,11 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
           line.startsWith("ad signed-in-user show ") ||
           line.startsWith("ad sp show ")
         ) {
-          return overrides.identityLookup ?? command({ stdout: ownerObjectId });
+          return (
+            overrides.identityLookups?.shift() ??
+            overrides.identityLookup ??
+            command({ stdout: ownerObjectId })
+          );
         }
         if (line.startsWith("ad app list ")) return command({ stdout: "[]" });
         if (line.startsWith("ad app create "))
@@ -2072,6 +2087,9 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
         code: "app-owner-lookup-failed"
       });
       expect(String(test.failures[0]?.error)).toContain(expectedDetail);
+      expect(String(test.failures[0]?.error)).toContain(
+        "Failed to resolve the current Azure CLI identity before creating the App Registration"
+      );
       expect(
         azCalls.some(
           (line) =>
@@ -2129,6 +2147,115 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
       );
     }
   );
+
+  it.each([
+    ["a signed-in user", { type: "user" } as FakeCallerIdentity],
+    ["a service principal", SERVICE_PRINCIPAL]
+  ])(
+    "fails closed before creating an App Registration when Microsoft Entra returns a malformed object id for %s",
+    async (_label, identity) => {
+      const { test, azCalls } = createJourney(identity, USER_ID, {
+        identityLookup: command({ stdout: "not-an-object-id" })
+      });
+
+      expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+      expect(test.failures[0]).toMatchObject({
+        code: "app-owner-lookup-failed"
+      });
+      expect(String(test.failures[0]?.error)).toContain(
+        "returned an invalid object id for the current Azure CLI identity"
+      );
+      expect(azCalls.some((line) => line.startsWith("ad app create "))).toBe(
+        false
+      );
+    }
+  );
+
+  it("retries a transient service-principal object-id lookup before creating the App Registration", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      identityLookups: [
+        command({ code: 1, stderr: "HTTP 429\nRetry-After: 0" }),
+        command({ stdout: SP_OBJECT_ID })
+      ],
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toMatchObject({ clientId: APP_ID, state: "created" });
+    expect(
+      azCalls.filter((line) => line.startsWith("ad sp show "))
+    ).toHaveLength(2);
+    expect(sleeps).toEqual([0]);
+  });
+
+  it("does not retry an authorization failure while resolving a service principal", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      identityLookup: command({
+        code: 1,
+        stderr: "HTTP 403 Authorization_RequestDenied"
+      }),
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+    expect(
+      azCalls.filter((line) => line.startsWith("ad sp show "))
+    ).toHaveLength(1);
+    expect(sleeps).toEqual([]);
+    expect(azCalls.some((line) => line.startsWith("ad app create "))).toBe(
+      false
+    );
+  });
+
+  it("does not retry when a transient failure requests an excessive delay", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      identityLookup: command({
+        code: 1,
+        stderr: "HTTP 429\nRetry-After: 11"
+      }),
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+    expect(
+      azCalls.filter((line) => line.startsWith("ad sp show "))
+    ).toHaveLength(1);
+    expect(sleeps).toEqual([]);
+    expect(azCalls.some((line) => line.startsWith("ad app create "))).toBe(
+      false
+    );
+  });
+
+  it("stops retrying a transient service-principal lookup at the bounded attempt limit", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      identityLookups: Array.from({ length: 6 }, () =>
+        command({ code: 1, stderr: "HTTP 503 service unavailable" })
+      ),
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
+    expect(
+      azCalls.filter((line) => line.startsWith("ad sp show "))
+    ).toHaveLength(6);
+    expect(sleeps).toEqual([2000, 4000, 6000, 8000, 10000]);
+    expect(azCalls.some((line) => line.startsWith("ad app create "))).toBe(
+      false
+    );
+  });
 
   it("rolls back when the owner add is denied for a service principal", async () => {
     const { test } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {

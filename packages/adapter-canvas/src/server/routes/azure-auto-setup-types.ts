@@ -235,7 +235,7 @@ export interface AzureAutoSetupWorkflow {
 
 export interface AzureAutoSetupApplicationInput {
   workflow: AzureAutoSetupWorkflow;
-  dependencies: {
+  dependencies: Pick<AzureAutoSetupDependencies, "sleep"> & {
     operations: Pick<
       AzureAutoSetupOperationLifecyclePort,
       "persist" | "report" | "finish"
