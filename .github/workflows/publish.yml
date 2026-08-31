@@ -67,7 +67,10 @@ jobs:
       # enough and this stays well ahead of the build matrix.
       - name: List the plugins
         id: list
-        run: echo "names=$(node scripts/plugins.mjs --json)" >>"$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          names="$(node scripts/plugins.mjs --json)"
+          echo "names=$names" >>"$GITHUB_OUTPUT"
 
   build:
     needs: plugins

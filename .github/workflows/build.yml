@@ -53,7 +53,10 @@ jobs:
         id: plugins
         env:
           REQUESTED: ${{ inputs.plugins }}
-        run: echo "names=$(node scripts/plugins.mjs --select "$REQUESTED")" >>"$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          names="$(node scripts/plugins.mjs --select "$REQUESTED")"
+          echo "names=$names" >>"$GITHUB_OUTPUT"
 
   static-checks:
     name: Static checks
