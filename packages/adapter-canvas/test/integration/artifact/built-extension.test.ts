@@ -445,6 +445,79 @@ describe("P0-C built Radius extension artifact", () => {
     }
   });
 
+  it("packages the managed-secret modeling contract in executable examples and platform rules", () => {
+    assertCurrentArtifact();
+    const readGuidance = (relativePath: string): string =>
+      readFileSync(join(DIST_SKILL, relativePath), "utf8");
+    const bicepBlocks = filesUnder(DIST_SKILL)
+      .filter((path) => path.endsWith(".md"))
+      .flatMap((path) => [
+        ...readFileSync(path, "utf8").matchAll(
+          /```bicep\r?\n([\s\S]*?)\r?\n```/gu
+        )
+      ])
+      .map((match) => match[1]);
+
+    const todoExample = readGuidance("references/todo-list-app-example.md");
+    const mysqlExample = bicepBlocks.find(
+      (block) =>
+        block.includes(
+          "resource mysqlClientCredentials 'Radius.Security/secrets"
+        ) && block.includes("MYSQL_PASSWORD:")
+    );
+    expect(mysqlExample).toBeDefined();
+    expect(mysqlExample).toMatch(
+      /password:\s*\{\s*value:\s*mysqlPassword\s*\}/u
+    );
+    expect(mysqlExample).toMatch(
+      /MYSQL_PASSWORD:\s*\{\s*valueFrom:\s*\{\s*secretKeyRef:\s*\{\s*secretName:\s*mysqlClientCredentials\.name\s*key:\s*'password'/u
+    );
+    expect(mysqlExample).not.toContain("connections:");
+    expect(todoExample).toContain(
+      "The same `mysqlPassword` parameter supplies the MySQL resource's schema-defined sensitive input"
+    );
+    expect(todoExample).toContain(
+      "no authored-Secret connection migration is implied"
+    );
+
+    const connectionGuidance = readGuidance(
+      "references/connection-conventions.md"
+    );
+    const redisExample = bicepBlocks.find(
+      (block) =>
+        block.includes("redis:") && block.includes("source: redisCache.id")
+    );
+    expect(redisExample).toBeDefined();
+    expect(redisExample).not.toMatch(
+      /Radius\.Security\/secrets|properties\.secrets\.name/u
+    );
+    expect(connectionGuidance).toContain(
+      "If the Redis Recipe declares `url` in `result.secrets`, the connection injects secret-backed `CONNECTION_REDIS_URL`"
+    );
+    expect(connectionGuidance).toContain(
+      "If compatibility cannot be proven, preserve or use the existing schema-supported wiring"
+    );
+    expect(connectionGuidance).toContain(
+      "Do not automatically rewrite an existing working `app.bicep`"
+    );
+    expect(connectionGuidance).toContain(
+      "Azure Container Instances (ACI) behavior is unchanged"
+    );
+    expect(connectionGuidance).toContain(
+      "An explicit `env` entry wins when it has the same name as a generated connection variable"
+    );
+    expect(connectionGuidance).toContain(
+      "Set `disableDefaultEnvVars: true` on a connection only when all generated variables from that connection must be suppressed"
+    );
+
+    expect(bicepBlocks.length).toBeGreaterThan(0);
+    for (const block of bicepBlocks) {
+      expect(block).not.toMatch(
+        /^\s*(?:accessKey|apiKey|clientSecret|connectionString|password|secretKey|token)\s*:\s*(?:['"]|\{\s*value:\s*['"])/imu
+      );
+    }
+  });
+
   it("packages each page module exactly once", () => {
     assertCurrentArtifact();
     const bundle = readFileSync(ARTIFACT, "utf8");

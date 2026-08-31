@@ -81,17 +81,17 @@ connections: {
 
 This connection injects secret-backed `CONNECTION_DATABASE_PASSWORD`. The `PASSWORD` suffix is the uppercased authored `password` data key. Preserve the exact key required by the source contract, and choose a Secret resource name that does not collide with a Recipe-owned Kubernetes Secret.
 
-For a Recipe-generated credential, connect only to the producer:
+For a Recipe-generated credential, connect only to the producer. For example, a Redis consumer connects directly to the Redis resource:
 
 ```bicep
 connections: {
-  database: {
-    source: database.id
+  redis: {
+    source: redisCache.id
   }
 }
 ```
 
-If the Recipe declares `password` in `result.secrets`, the connection injects secret-backed `CONNECTION_DATABASE_PASSWORD`. The suffix is the uppercased exact result key; do not connect to `database.properties.secrets.name` or invent a different suffix.
+If the Redis Recipe declares `url` in `result.secrets`, the connection injects secret-backed `CONNECTION_REDIS_URL`. The suffix is the uppercased exact result key; do not author a wrapper Secret, connect to `redisCache.properties.secrets.name`, or invent a different suffix.
 
 ## Source expects native configuration
 

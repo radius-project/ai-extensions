@@ -36,6 +36,43 @@ The requested profile runs the application with MySQL instead of its default SQL
 7. Verify that the target Environment registers Recipes for every emitted extensible type.
 8. Match `containerPort` to the inspected process listener. The loopback-only Compose mapping is not external-client ingress evidence.
 
+## Credential wiring excerpt
+
+```bicep
+@secure()
+param mysqlPassword string
+
+resource mysqlClientCredentials 'Radius.Security/secrets@2025-08-01-preview' = {
+  name: 'mysql-client-credentials'
+  properties: {
+    environment: environment
+    application: app.id
+    data: {
+      password: {
+        value: mysqlPassword
+      }
+    }
+  }
+}
+
+containers: {
+  todo: {
+    env: {
+      MYSQL_PASSWORD: {
+        valueFrom: {
+          secretKeyRef: {
+            secretName: mysqlClientCredentials.name
+            key: 'password'
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+This excerpt shows only the developer-owned credential path. The same `mysqlPassword` parameter supplies the MySQL resource's schema-defined sensitive input in the complete model. The native `MYSQL_PASSWORD` binding remains explicit, and no authored-Secret connection migration is implied.
+
 ## Completion checks
 
 - The selected MySQL type and source-built workload are both emitted.
