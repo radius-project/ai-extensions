@@ -2021,7 +2021,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await expectNoWcagViolations(page);
   });
 
-  test("stops an interrupted setup before offering exact-run cancellation by keyboard @safety", async ({
+  test("pauses an interrupted setup before offering exact-run cancellation and deletion by keyboard @safety", async ({
     page,
     canvas
   }) => {
@@ -2057,14 +2057,14 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(
       page.getByRole("button", { name: "Continue setup" })
     ).toBeVisible();
-    const stop = page.getByRole("button", { name: "Stop setup" });
+    const stop = page.getByRole("button", { name: "Pause setup" });
     await expect(stop).toBeVisible();
     await expect(stop).toHaveAttribute(
       "title",
-      "Radius stops this setup. If its exact GitHub Actions run is still active, you can cancel it next."
+      "Radius pauses this setup. If its exact GitHub Actions run is still active, you can cancel it next."
     );
     await expect(stop).toHaveAccessibleDescription(
-      "Radius stops this setup. If its exact GitHub Actions run is still active, you can cancel it next."
+      "Radius pauses this setup. If its exact GitHub Actions run is still active, you can cancel it next."
     );
     await expect(
       page.getByRole("button", { name: "Cancel workflow" })
@@ -2084,7 +2084,7 @@ test.describe("Radius Canvas in Chromium", () => {
       "Radius cancels only the exact GitHub Actions run recorded for this setup."
     );
     await expect(
-      page.getByRole("button", { name: "Roll back created resources" })
+      page.getByRole("button", { name: "Delete setup" })
     ).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Exit setup" })).toHaveCount(
       0
@@ -2122,9 +2122,53 @@ test.describe("Radius Canvas in Chromium", () => {
         )
       )
       .toBe(true);
+    const workflowStatus = scenario.commands.find(
+      (command) =>
+        command.tool === "gh" &&
+        JSON.stringify(command.args) ===
+          JSON.stringify([
+            "run",
+            "view",
+            "39",
+            "--json",
+            "status",
+            "--repo",
+            REPOSITORY
+          ])
+    );
+    if (!workflowStatus) throw new Error("Expected workflow status command.");
+    workflowStatus.stdout = '{"status":"completed"}';
+    await canvas.setScenario(scenario);
+
+    const checkWorkflow = page.getByRole("button", {
+      name: "Check workflow status"
+    });
+    await expect(checkWorkflow).toBeVisible({ timeout: 15_000 });
+    await checkWorkflow.focus();
+    await page.keyboard.press("Enter");
+
+    const deleteSetup = page.getByRole("button", { name: "Delete setup" });
+    await expect(deleteSetup).toBeVisible();
+    await expect(deleteSetup).toHaveAccessibleDescription(
+      "Radius reverts the workflow files it committed with a new commit, then removes the GitHub environment and cloud identity it created. It checks first that every file is still exactly what it wrote and stops without removing anything if it is not. This cannot be undone."
+    );
+    await deleteSetup.focus();
+    await page.keyboard.press("Enter");
+
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAccessibleName(
+      "Delete this setup and its created resources?"
+    );
     await expect(
-      page.getByRole("button", { name: "Check workflow status" })
-    ).toBeVisible({ timeout: 15_000 });
+      dialog.getByRole("button", { name: "Keep setup" })
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Delete setup" })
+    ).toBeVisible();
+    await expectNoWcagViolations(page);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(deleteSetup).toBeFocused();
   });
 
   test("abandons an interrupted setup without waiting for the active workflow @safety", async ({
@@ -2144,7 +2188,7 @@ test.describe("Radius Canvas in Chromium", () => {
       `${canvas.baseUrl}/?page=environment&operationId=${operationId}`
     );
 
-    await page.getByRole("button", { name: "Stop setup" }).click();
+    await page.getByRole("button", { name: "Pause setup" }).click();
     const abandon = page.getByRole("button", { name: "Abandon setup" });
     await expect(abandon).toBeVisible();
     await abandon.click();

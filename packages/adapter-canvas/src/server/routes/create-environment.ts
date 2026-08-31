@@ -638,7 +638,7 @@ export async function handleCreateEnvironment(
     if (!defaultBranch) {
       await fail(
         400,
-        `Could not determine the default branch for ${targetRepo}, so Radius did not commit workflow files with guessed rollback provenance.`,
+        `Could not determine the default branch for ${targetRepo}, so Radius did not commit workflow files with guessed deletion provenance.`,
         "default-branch-unavailable",
         { steps }
       );

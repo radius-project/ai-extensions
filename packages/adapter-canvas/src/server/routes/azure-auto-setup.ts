@@ -405,7 +405,7 @@ export async function handleAzureAutoSetup(
         respond(context, 409, {
           error:
             previousCleanup ?
-              `An earlier setup for ${targetRepo} must finish rollback before a new setup can start.`
+              `An earlier setup for ${targetRepo} must finish deletion before a new setup can start.`
             : `Setup is already running for ${targetRepo}.`,
           code:
             previousCleanup ?

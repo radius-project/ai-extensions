@@ -84,7 +84,7 @@ describe("operation chip labelling", () => {
     ["action_required", "dev needs you", "rad-opchip--warn"],
     ["failed", "dev setup failed", "rad-opchip--failed"],
     ["failed_partial", "dev setup failed", "rad-opchip--failed"],
-    ["cancelled", "dev setup stopped", ""],
+    ["cancelled", "dev setup paused", ""],
     ["unheard-of", "", ""]
   ])("renders %s", (state, text, tone) => {
     const status = {

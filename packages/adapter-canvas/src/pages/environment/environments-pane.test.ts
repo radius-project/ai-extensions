@@ -365,7 +365,7 @@ describe("environmentsPaneMarkup — stop, continue and rollback", () => {
       '<div id="env-rollback-modal" role="dialog" aria-modal="true" aria-labelledby="env-rollback-title" aria-describedby="env-rollback-intro"'
     );
     expect(html).toContain(
-      '<div id="env-rollback-title" class="env-rollback__title" tabindex="-1">Roll back resources created by this setup?</div>'
+      '<div id="env-rollback-title" class="env-rollback__title" tabindex="-1">Delete this setup and its created resources?</div>'
     );
     // Hidden until the customer asks for it, so nothing destructive is one
     // stray click away.
@@ -375,10 +375,10 @@ describe("environmentsPaneMarkup — stop, continue and rollback", () => {
 
   it("names the destructive confirmation and the safe way out", () => {
     expect(html).toContain(
-      '<button type="button" id="env-rollback-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Keep resources</button>'
+      '<button type="button" id="env-rollback-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Keep setup</button>'
     );
     expect(html).toContain(
-      '<button type="button" id="env-rollback-confirm" class="rad-btn rad-btn--danger" style="margin:0;">Roll back resources</button>'
+      '<button type="button" id="env-rollback-confirm" class="rad-btn rad-btn--danger" style="margin:0;">Delete setup</button>'
     );
     // Cancel comes first in the DOM, so the destructive control is never the
     // first thing a keyboard user lands on after the title.
@@ -409,8 +409,8 @@ describe("environmentsPaneMarkup — stop, continue and rollback", () => {
     );
   });
 
-  it("describes rollback-eligible resources in customer terms", () => {
-    expect(html).toContain("Created by Radius and available to roll back");
+  it("describes deletion-eligible resources in customer terms", () => {
+    expect(html).toContain("Created by Radius and available to delete");
     expect(html).not.toContain("Retained for a retry");
   });
 });

@@ -1530,7 +1530,12 @@ export class CanvasHarness {
     operationModule.recordCommittedWorkflowFile(operation, {
       path: ".github/workflows/radius-verify-credentials.yml",
       mode: "default_branch",
-      branch: WORKTREE_BRANCH
+      branch: WORKTREE_BRANCH,
+      commitSha: "c".repeat(40),
+      blobSha: "b".repeat(40),
+      contentSha256: "d".repeat(64),
+      previousBlobSha: null,
+      previousBlobKnown: true
     });
     operationModule.recordCommitState(operation, {
       mode: "default_branch",

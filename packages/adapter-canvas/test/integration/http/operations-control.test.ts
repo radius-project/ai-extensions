@@ -348,7 +348,7 @@ describe("operation controls real-loopback HIT", () => {
     expect(createResponse.status).toBe(409);
     expect(await createResponse.json()).toEqual({
       error:
-        "An earlier setup for contoso/store must finish rollback before a new setup can start.",
+        "An earlier setup for contoso/store must finish deletion before a new setup can start.",
       code: "previous-cleanup-required",
       operationId: old.operationId
     });
@@ -361,7 +361,7 @@ describe("operation controls real-loopback HIT", () => {
       `/api/operations/${encodeURIComponent(old.operationId)}`
     );
     const rollback = action(prior, "rollback");
-    expect(rollback?.label).toBe("Roll back created resources");
+    expect(rollback?.label).toBe("Delete setup");
     if (!rollback) throw new Error("Expected rollback action.");
 
     const rollbackResponse = await post(entry.baseUrl, rollback.path);
@@ -613,10 +613,10 @@ describe("stop, then continue or roll back, over the socket", () => {
     // 2. The stopped record projects both paths, forward first.
     const view = await poll(entry.baseUrl, `/api/operations/${op.operationId}`);
     expect(view.terminalState).toBe("cancelled");
-    expect(view.headline.title).toBe("Environment setup stopped");
+    expect(view.headline.title).toBe("Environment setup paused");
     expect(view.actions.map((entry) => entry.label)).toEqual([
       "Continue setup",
-      "Roll back created resources",
+      "Delete setup",
       "Exit setup"
     ]);
 
@@ -750,7 +750,7 @@ describe("stop, then continue or roll back, over the socket", () => {
     expect(during.actions).toEqual([]);
     expect(during.nextTransition).toEqual({
       code: "rolling-back",
-      message: "Rolling back created resources…"
+      message: "Deleting setup resources…"
     });
   });
 
@@ -843,7 +843,7 @@ describe("stop, then continue or roll back, over the socket", () => {
       "exit-setup"
     ]);
     const rollback = action(view, "rollback");
-    expect(rollback?.label).toBe("Roll back environment setup");
+    expect(rollback?.label).toBe("Delete setup");
     expect(rollback?.scope).toBe("post_commit");
     expect(rollback?.preview.removes[0]).toEqual({
       kind: "workflow_file",
@@ -924,7 +924,7 @@ describe("exiting a setup over the socket", () => {
     const op = seed(harness, stoppedSetup({ includeEnvironment: true }));
 
     const view = await poll(entry.baseUrl, `/api/operations/${op.operationId}`);
-    expect(view.summary).toBe('Creating environment "dev" was stopped.');
+    expect(view.summary).toBe('Creating environment "dev" was paused.');
     const exit = action(view, "exit-setup");
     // A deletion is confirmed against the server's own preview before it runs.
     expect(exit).toMatchObject({

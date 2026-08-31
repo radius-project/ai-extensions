@@ -491,7 +491,7 @@ async function deleteOne(
     path: file.path,
     branch: ref,
     blobSha,
-    message: `Roll back Radius environment setup: remove ${file.path}`
+    message: `Delete Radius environment setup: remove ${file.path}`
   });
   return removed.ok ?
       { ok: true, step: `✅ Removed workflow "${file.path}" from "${ref}".` }
@@ -525,7 +525,7 @@ async function restoreOne(
     branch: ref,
     blobSha,
     contentBase64: blob.contentBase64,
-    message: `Roll back Radius environment setup: restore ${file.path}`
+    message: `Delete Radius environment setup: restore ${file.path}`
   });
   return restored.ok ?
       { ok: true, step: `✅ Restored the previous "${file.path}" on "${ref}".` }

@@ -61,7 +61,7 @@ export function operationChipLabel(status: OperationStatus): string {
     case "failed_partial":
       return `${environment} setup failed`;
     case "cancelled":
-      return `${environment} setup stopped`;
+      return `${environment} setup paused`;
     default:
       return "";
   }

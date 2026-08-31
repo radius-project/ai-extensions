@@ -421,7 +421,7 @@ function sendStartConflict(
   jsonError(context, 409, {
     error:
       previousCleanup ?
-        `An earlier setup for ${repo} must finish rollback before a new setup can start.`
+        `An earlier setup for ${repo} must finish deletion before a new setup can start.`
       : `Setup is already running for ${repo}.`,
     code:
       previousCleanup ? "previous-cleanup-required" : "operation-in-progress",

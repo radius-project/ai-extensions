@@ -1023,7 +1023,7 @@ describe("initializeEnvironmentPage", () => {
                   {
                     id: "stop",
                     kind: "stop",
-                    label: "Stop Setup",
+                    label: "Pause setup",
                     path: "/api/operations/op-1/stop",
                     description: "Stop at the next safe boundary."
                   }
@@ -1184,7 +1184,7 @@ describe("initializeEnvironmentPage", () => {
       return jsonResponse(
         {
           error:
-            "An earlier setup must finish rollback first. Then create a new environment for contoso/store.",
+            "An earlier setup must finish deletion first. Then create a new environment for contoso/store.",
           code: "previous-cleanup-required",
           operationId: "op-cleanup"
         },
@@ -1211,7 +1211,7 @@ describe("initializeEnvironmentPage", () => {
             {
               id: "rollback",
               kind: "rollback",
-              label: "Roll back resources",
+              label: "Delete setup",
               description:
                 "Finish rollback before creating another environment.",
               path: "/api/operations/op-cleanup/rollback",

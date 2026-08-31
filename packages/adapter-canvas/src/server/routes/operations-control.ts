@@ -280,16 +280,16 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   "setup-continue-request-missing": FORWARD_REQUEST_MISSING,
   "setup-continue-ownership-ambiguous": FORWARD_OWNERSHIP_AMBIGUOUS,
   "setup-continue-rolled-back":
-    "Radius rolled back what this attempt created, so there is nothing left to continue from. Start a new environment setup.",
+    "Radius deleted what this attempt created, so there is nothing left to continue from. Start a new environment setup.",
   "rollback-not-available":
-    "Only a stopped, partially failed, or unfinished setup can be rolled back.",
+    "Only a paused, partially failed, or unfinished setup can be deleted.",
   "rollback-environment-verified":
     "Credential verification succeeded for this environment, so it is finished setup. Remove it with Delete Environment instead.",
   "rollback-provenance-incomplete": PROVENANCE_INCOMPLETE,
   "rollback-nothing-owned":
     "Radius did not create any resources it can prove it owns in this attempt.",
   "rollback-already-attempted":
-    "Radius already ran a rollback for this attempt. Use the rollback retry for anything still present.",
+    "Radius already attempted deletion for this setup. Use Retry deletion for anything still present.",
   "cleanup-retry-not-retryable":
     "The last cleanup attempt did not leave anything Radius can safely retry.",
   "cleanup-retry-provenance-incomplete": PROVENANCE_INCOMPLETE,
@@ -414,7 +414,7 @@ export async function handleStopOperation(
       rollbackRetryAttempt(operation, snapshot);
       sendJson(context, 500, {
         error:
-          "Radius could not save the stop request, so nothing was stopped. Try again.",
+          "Radius could not save the pause request, so nothing was paused. Try again.",
         code: "operation-stop-persist-failed",
         operationId,
         detail: errorMessage(error)
@@ -482,7 +482,7 @@ export async function handleStopOperation(
   if (result.outcome === "terminal") {
     sendJson(context, 409, {
       error:
-        "This operation already finished, so there is nothing left to stop.",
+        "This operation already finished, so there is nothing left to pause.",
       code: "operation-already-terminal",
       operationId,
       operation: clientView(operation)
@@ -506,7 +506,7 @@ export async function handleStopOperation(
     rollbackRetryAttempt(operation, snapshot);
     sendJson(context, 500, {
       error:
-        "Radius could not save the stop request, so nothing was stopped. Try again.",
+        "Radius could not save the pause request, so nothing was paused. Try again.",
       code: "operation-stop-persist-failed",
       operationId,
       detail: errorMessage(error)
@@ -549,7 +549,7 @@ export async function handleCancelWorkflow(
   if (operation.state !== "cancelled" || !runId) {
     sendJson(context, 409, {
       error:
-        "Stop setup before cancelling its exact verification workflow run.",
+        "Pause setup before cancelling its exact verification workflow run.",
       code: "workflow-cancel-not-available",
       operationId,
       operation: clientView(operation)
@@ -902,7 +902,7 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     schedulerMiss: "restore-terminal",
     persistFailureCode: "operation-rollback-persist-failed",
     persistFailureMessage:
-      "Radius could not save the rollback request, so no cleanup began. Try again."
+      "Radius could not save the delete request, so no cleanup began. Try again."
   },
   setup: {
     name: "setup",
