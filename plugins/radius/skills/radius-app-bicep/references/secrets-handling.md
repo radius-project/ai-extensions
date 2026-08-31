@@ -121,13 +121,13 @@ Applications often require one URL or config value that embeds a secret. Bicep i
 3. Make sure the helper actually reaches the container's environment before the value that reads it. Authoring order does not decide this — see below.
 4. Compose the final app-native value in the container runtime or let the application construct it. The final key and syntax must exactly match the selected pinned-source contract.
 
-For a non-URL format, the application or entrypoint can compose a generated secret-backed variable such as `CONNECTION_DATABASE_PASSWORD` with separately bound nonsecret values. When preserving a pre-existing native name instead, bind the same `@secure()` parameter explicitly while retaining the authored-secret connection:
+For a non-URL format, the application or entrypoint can compose a generated secret-backed variable such as `CONNECTION_DATABASE_PASSWORD` with separately bound nonsecret values. When preserving a pre-existing native name for a Recipe-generated credential instead, bind the declared Recipe result through an explicit `secretKeyRef`:
 
 ```bicep
 env: {
   APP_DATABASE_OPTIONS: {
     // cache is the resource symbol; substitute your actual resource
-    value: 'host=${cache.properties.host};******'
+    value: 'host=${cache.properties.host};password=$(DB_PASSWORD)'
   }
   DB_PASSWORD: {
     valueFrom: {
