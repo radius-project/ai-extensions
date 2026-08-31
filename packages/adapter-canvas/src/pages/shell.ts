@@ -1,7 +1,8 @@
 // Canvas adapter — the shared HTML document shell. Owns the document head,
 // theme tokens, top navigation, always-on client
 // scripts (repo/branch context, graph rendering, delete dialog, heartbeat,
-// operation chip), and the feedback widget that every page renders inside.
+// operation chip, graph chip, deploy chip), and the feedback widget that every
+// page renders inside.
 
 import { browserScriptTag, browserStyleTag } from "../browser/scripts.js";
 import { escapeHtml } from "../shared.js";
@@ -56,6 +57,7 @@ ${feedbackWidget()}
 ${browserScriptTag("heartbeat")}
 ${browserScriptTag("operation-chip")}
 ${browserScriptTag("graph-chip")}
+${browserScriptTag("deploy-chip")}
 </body>
 </html>`;
 }
