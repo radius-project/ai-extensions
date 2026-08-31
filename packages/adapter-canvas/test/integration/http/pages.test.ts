@@ -164,6 +164,19 @@ describe("canvas pages over real loopback HTTP", () => {
     }
   });
 
+  it("serves only discovered Azure infrastructure selectors with namespace creation guidance", async () => {
+    resetState({ contextRepo: "octo/app" });
+
+    const response = await get("/?page=environment");
+
+    expect(response.body).toContain(
+      "Select an existing Azure resource group and AKS cluster, then choose the Kubernetes namespace for this environment. To use a new namespace, enter its name and Radius will create it during environment setup."
+    );
+    expect(response.body).not.toContain('id="azure-rg-custom"');
+    expect(response.body).not.toContain('id="azure-cluster-custom"');
+    expect(response.body).toContain('id="azure-namespace-custom"');
+  });
+
   // The diff page carries the worktree branch to the browser so each node can be
   // routed to a local file or a github.com URL; through the real server this is
   // the only place that value is produced.
