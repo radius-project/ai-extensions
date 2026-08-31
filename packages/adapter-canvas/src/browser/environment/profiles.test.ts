@@ -238,6 +238,21 @@ function profilesResponse(profiles: readonly CredentialProfile[]) {
   return jsonResponse({ profiles });
 }
 
+function identityResponse() {
+  return jsonResponse({
+    actingLogin: "alice",
+    displayLogin: "alice",
+    accounts: [
+      {
+        login: "alice",
+        hasWorkflow: true,
+        hasPackages: true,
+        switchable: true
+      }
+    ]
+  });
+}
+
 function readinessResponse(
   input: {
     ready?: boolean;
@@ -1505,20 +1520,7 @@ describe("github identity loading and rendering", () => {
     async (ready, summary, color) => {
       const page = renderProfilesPage();
       const { deps } = makeDeps();
-      page.browser.net.handle(IDENTITY_URL(), () =>
-        jsonResponse({
-          actingLogin: "alice",
-          displayLogin: "alice",
-          accounts: [
-            {
-              login: "alice",
-              hasWorkflow: true,
-              hasPackages: true,
-              switchable: true
-            }
-          ]
-        })
-      );
+      page.browser.net.handle(IDENTITY_URL(), identityResponse);
       page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
         jsonResponse({
           readiness: {
@@ -1560,20 +1562,7 @@ describe("github identity loading and rendering", () => {
       mutationNonce: undefined,
       environmentName: () => "   "
     });
-    page.browser.net.handle(IDENTITY_URL(), () =>
-      jsonResponse({
-        actingLogin: "alice",
-        displayLogin: "alice",
-        accounts: [
-          {
-            login: "alice",
-            hasWorkflow: true,
-            hasPackages: true,
-            switchable: true
-          }
-        ]
-      })
-    );
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
     const requests: Array<{ nonce: string; environment: string }> = [];
     page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, (init) => {
       requests.push({
@@ -1641,7 +1630,7 @@ describe("github identity loading and rendering", () => {
 
     expect(changes.at(-1)).toBeNull();
     expect(fakeText(page.noteEl)).toBe(
-      "Re-check GitHub access for this environment."
+      "GitHub access will be checked automatically."
     );
     expect(page.recheckBtn.disabled).toBe(false);
   });
@@ -1944,20 +1933,7 @@ describe("github identity loading and rendering", () => {
 
     environment = "production";
     handle?.invalidateReadiness();
-    resolveIdentity(
-      jsonResponse({
-        actingLogin: "alice",
-        displayLogin: "alice",
-        accounts: [
-          {
-            login: "alice",
-            hasWorkflow: true,
-            hasPackages: true,
-            switchable: true
-          }
-        ]
-      })
-    );
+    resolveIdentity(identityResponse());
     await identityLoad;
 
     expect(checks).toBe(0);
@@ -1994,20 +1970,7 @@ describe("github identity loading and rendering", () => {
     environment = "   ";
     handle?.invalidateReadiness();
     page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS);
-    resolveIdentity(
-      jsonResponse({
-        actingLogin: "alice",
-        displayLogin: "alice",
-        accounts: [
-          {
-            login: "alice",
-            hasWorkflow: true,
-            hasPackages: true,
-            switchable: true
-          }
-        ]
-      })
-    );
+    resolveIdentity(identityResponse());
     await identityLoad;
     await flushPromises();
 
@@ -2040,20 +2003,7 @@ describe("github identity loading and rendering", () => {
     handle?.invalidateReadiness();
     page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS);
     expect(bodies).toEqual([]);
-    resolveIdentity(
-      jsonResponse({
-        actingLogin: "alice",
-        displayLogin: "alice",
-        accounts: [
-          {
-            login: "alice",
-            hasWorkflow: true,
-            hasPackages: true,
-            switchable: true
-          }
-        ]
-      })
-    );
+    resolveIdentity(identityResponse());
     await identityLoad;
 
     expect(bodies).toEqual([
@@ -2065,20 +2015,7 @@ describe("github identity loading and rendering", () => {
     const page = renderProfilesPage();
     let environment = "dev";
     const { deps } = makeDeps({ environmentName: () => environment });
-    page.browser.net.handle(IDENTITY_URL(), () =>
-      jsonResponse({
-        actingLogin: "alice",
-        displayLogin: "alice",
-        accounts: [
-          {
-            login: "alice",
-            hasWorkflow: true,
-            hasPackages: true,
-            switchable: true
-          }
-        ]
-      })
-    );
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
     const handle = setupIdentity(page, deps);
     await handle?.loadGithubIdentity();
     const bodies: unknown[] = [];
@@ -2094,6 +2031,9 @@ describe("github identity loading and rendering", () => {
 
     environment = "production";
     handle?.invalidateReadiness();
+    expect(fakeText(page.noteEl)).toBe(
+      "GitHub access will be checked automatically."
+    );
     expect(page.browser.clock.timeouts).toBe(1);
     page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS - 1);
     expect(bodies).toEqual([]);
@@ -2112,20 +2052,7 @@ describe("github identity loading and rendering", () => {
   it("does not schedule an automatic check for a blank environment name", async () => {
     const page = renderProfilesPage();
     const { deps } = makeDeps({ environmentName: () => "   " });
-    page.browser.net.handle(IDENTITY_URL(), () =>
-      jsonResponse({
-        actingLogin: "alice",
-        displayLogin: "alice",
-        accounts: [
-          {
-            login: "alice",
-            hasWorkflow: true,
-            hasPackages: true,
-            switchable: true
-          }
-        ]
-      })
-    );
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
     const handle = setupIdentity(page, deps);
     await handle?.loadGithubIdentity();
     let checks = 0;
@@ -2145,24 +2072,34 @@ describe("github identity loading and rendering", () => {
     );
   });
 
-  it("drops a scheduled check when the captured name no longer matches the input", async () => {
+  it("checks the current name after a programmatic input change", async () => {
     const page = renderProfilesPage();
     let environment = "staging";
     const { deps } = makeDeps({ environmentName: () => environment });
-    page.browser.net.handle(IDENTITY_URL(), () =>
-      jsonResponse({
-        actingLogin: "alice",
-        displayLogin: "alice",
-        accounts: [
-          {
-            login: "alice",
-            hasWorkflow: true,
-            hasPackages: true,
-            switchable: true
-          }
-        ]
-      })
-    );
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
+    const handle = setupIdentity(page, deps);
+    await handle?.loadGithubIdentity();
+    const bodies: unknown[] = [];
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, (init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return readinessResponse();
+    });
+
+    handle?.invalidateReadiness();
+    environment = "production";
+    page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS);
+    await flushPromises();
+
+    expect(bodies).toEqual([
+      { login: "alice", repo: "octo/cat", environment: "production" }
+    ]);
+  });
+
+  it("does not check a programmatically cleared name", async () => {
+    const page = renderProfilesPage();
+    let environment = "staging";
+    const { deps } = makeDeps({ environmentName: () => environment });
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
     const handle = setupIdentity(page, deps);
     await handle?.loadGithubIdentity();
     let checks = 0;
@@ -2172,7 +2109,7 @@ describe("github identity loading and rendering", () => {
     });
 
     handle?.invalidateReadiness();
-    environment = "production";
+    environment = "   ";
     page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS);
     await flushPromises();
 
@@ -2183,20 +2120,7 @@ describe("github identity loading and rendering", () => {
     const page = renderProfilesPage();
     let environment = "dev";
     const { deps } = makeDeps({ environmentName: () => environment });
-    page.browser.net.handle(IDENTITY_URL(), () =>
-      jsonResponse({
-        actingLogin: "alice",
-        displayLogin: "alice",
-        accounts: [
-          {
-            login: "alice",
-            hasWorkflow: true,
-            hasPackages: true,
-            switchable: true
-          }
-        ]
-      })
-    );
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
     const handle = setupIdentity(page, deps);
     await handle?.loadGithubIdentity();
     let checks = 0;
@@ -2222,20 +2146,7 @@ describe("github identity loading and rendering", () => {
     const page = renderProfilesPage();
     let environment = "dev";
     const { deps } = makeDeps({ environmentName: () => environment });
-    page.browser.net.handle(IDENTITY_URL(), () =>
-      jsonResponse({
-        actingLogin: "alice",
-        displayLogin: "alice",
-        accounts: [
-          {
-            login: "alice",
-            hasWorkflow: true,
-            hasPackages: true,
-            switchable: true
-          }
-        ]
-      })
-    );
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
     const handle = setupIdentity(page, deps);
     await handle?.loadGithubIdentity();
     let checks = 0;
@@ -2259,20 +2170,7 @@ describe("github identity loading and rendering", () => {
     const page = renderProfilesPage();
     let environment = "dev";
     const { deps } = makeDeps({ environmentName: () => environment });
-    page.browser.net.handle(IDENTITY_URL(), () =>
-      jsonResponse({
-        actingLogin: "alice",
-        displayLogin: "alice",
-        accounts: [
-          {
-            login: "alice",
-            hasWorkflow: true,
-            hasPackages: true,
-            switchable: true
-          }
-        ]
-      })
-    );
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
     const handle = setupIdentity(page, deps);
     await handle?.loadGithubIdentity();
     page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
@@ -2298,20 +2196,7 @@ describe("github identity loading and rendering", () => {
       const page = renderProfilesPage();
       let environment = "dev";
       const { deps } = makeDeps({ environmentName: () => environment });
-      page.browser.net.handle(IDENTITY_URL(), () =>
-        jsonResponse({
-          actingLogin: "alice",
-          displayLogin: "alice",
-          accounts: [
-            {
-              login: "alice",
-              hasWorkflow: true,
-              hasPackages: true,
-              switchable: true
-            }
-          ]
-        })
-      );
+      page.browser.net.handle(IDENTITY_URL(), identityResponse);
       const handle = setupIdentity(page, deps);
       await handle?.loadGithubIdentity();
       let settle:

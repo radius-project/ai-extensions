@@ -879,12 +879,13 @@ export function initializeCredentialProfilesPanel(
       }
       renderGithubIdentity();
       const environment = deps.environmentName().trim();
+      // A pending debounce owns the account check for the edited environment.
       if (
         selectedGithubLogin &&
         environmentRecheckTimer === null &&
         (!environmentNameInvalidated || environment !== "")
       ) {
-        await checkGitHubAccount(selectedGithubLogin, environment || "dev");
+        await checkGitHubAccount(selectedGithubLogin);
       }
     } catch {
       if (!scope.active || generation !== githubRequestGeneration) return;
@@ -931,11 +932,19 @@ export function initializeCredentialProfilesPanel(
     githubReadiness = null;
     checking = loadingIdentityGeneration === githubRequestGeneration;
     deps.onReadinessChange?.(null);
+    const environment = deps.environmentName().trim();
+    const canScheduleRecheck =
+      environment !== "" &&
+      (selectedGithubLogin !== "" || loadingIdentityGeneration !== null);
     if (noteEl && selectedGithubLogin) {
       setChildren(
         context.dom,
         noteEl,
-        textNote("Re-check GitHub access for this environment.")
+        textNote(
+          canScheduleRecheck ?
+            "GitHub access will be checked automatically."
+          : "Re-check GitHub access for this environment."
+        )
       );
       noteEl.style.color = "var(--rad-warning, #9a6700)";
       noteEl.style.display = "";
@@ -945,21 +954,14 @@ export function initializeCredentialProfilesPanel(
       recheckBtn.style.display = "";
       recheckBtn.textContent = "Re-check";
     }
-    const environment = deps.environmentName().trim();
-    if (
-      environment === "" ||
-      (selectedGithubLogin === "" && loadingIdentityGeneration === null)
-    ) {
-      return;
-    }
+    if (!canScheduleRecheck) return;
     environmentRecheckTimer = scope.after(
       GITHUB_ENVIRONMENT_RECHECK_DELAY_MS,
       () => {
         environmentRecheckTimer = null;
-        if (deps.environmentName().trim() !== environment) return;
-        if (selectedGithubLogin !== "") {
-          void checkGitHubAccount(selectedGithubLogin, environment);
-        }
+        const currentEnvironment = deps.environmentName().trim();
+        if (currentEnvironment === "" || selectedGithubLogin === "") return;
+        void checkGitHubAccount(selectedGithubLogin, currentEnvironment);
       }
     );
   };
