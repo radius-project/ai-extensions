@@ -574,6 +574,14 @@ Success rules:
 - Error messages distinguish created, reused, removed, retained, and ambiguous resources.
 - A bare resource identifier is prefixed with its resource type.
 
+### Local diagnostic download
+
+**Download diagnostic snapshot** appears inside the operation's Details disclosure only at stable, non-success decision points: after Stop is requested, while Radius is waiting for input, or after a terminal outcome such as failure, cancellation, or external action required. A successful setup, including success with warnings, does not show the control. Normal forward progress, retry, reconciliation, and cleanup keep the link hidden so the page does not invite snapshots of rapidly changing state. A stalled operation first reaches its durable failed state; a customer who needs support before then can request Stop and download after the request is recorded. The default profile follows `GET /api/operations/{operationId}/diagnostics` as a non-cached local attachment. The browser does not upload either profile or persist another diagnostic record.
+
+The diagnostic builder is independent of both the persisted operation serializer and the browser projection. It selects each output field from a closed schema and emits only the generated operation ID, installed plugin and operation schema versions, lifecycle and stage states, timing, bounded counts, failure classification, cleanup outcomes, provider-recovery statuses, verification-dispatch state, and the allowlisted state of the saved verification workflow. Unknown future enum values become the fixed value `unknown` and increment an omission count.
+
+The review dialog defaults to the `support_safe` profile, which excludes repository and environment names, account and branch context, cloud and GitHub resource identities, persisted inputs, labels, targets, URLs, command lines, environment variables, idempotency keys, stdout, stderr, logs, evidence, messages, and step text. The customer may explicitly choose **Include contextual identifiers**, review the server-built repository, branch, environment, and GitHub login preview, and confirm that review before the `support_safe_with_identifiers` profile becomes downloadable. The preview carries an opaque fingerprint over those four values. The server rebuilds the values at download time and refuses the download if the fingerprint no longer matches. The browser checks the final response before saving the exact returned bytes through a temporary object URL; it never submits identifier values or saves an error response as the diagnostic file. Credential-profile names and worktree paths are never read into either profile. Secret exclusion and prompt-injection handling are tested as separate controls.
+
 ## Alignment guidance for other Radius progress experiences
 
 Other long-running Radius experiences should align with these rules:
@@ -607,6 +615,8 @@ Other long-running Radius experiences should align with these rules:
 - [`packages/adapter-canvas/src/operations.ts`](../../packages/adapter-canvas/src/operations.ts)
 - [`packages/adapter-canvas/src/server/routes/operations-control.ts`](../../packages/adapter-canvas/src/server/routes/operations-control.ts)
 - [`packages/adapter-canvas/src/server/services/cleanup-commands.ts`](../../packages/adapter-canvas/src/server/services/cleanup-commands.ts)
+- [`packages/adapter-canvas/src/server/services/operation-diagnostic-export.ts`](../../packages/adapter-canvas/src/server/services/operation-diagnostic-export.ts)
+- [`packages/adapter-canvas/src/server/routes/operations-status.ts`](../../packages/adapter-canvas/src/server/routes/operations-status.ts)
 - [`packages/adapter-canvas/src/server/services/workflow-rollback.ts`](../../packages/adapter-canvas/src/server/services/workflow-rollback.ts)
 - [`packages/adapter-canvas/src/server.ts`](../../packages/adapter-canvas/src/server.ts)
 - [`packages/adapter-canvas/src/pages/environment/environments-pane.ts`](../../packages/adapter-canvas/src/pages/environment/environments-pane.ts)

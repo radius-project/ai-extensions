@@ -91,9 +91,11 @@ export function createAzureAutoSetupTestDependencies(
       setCloudContext: () => {},
       requireInput: () => {},
       resumeAfterInput: () => {},
+      withCredentialProvenanceLock: async (work) => work(),
       recordAzureApp: () => {},
       recordServicePrincipal: () => {},
       recordCreatedFederatedCredential: () => {},
+      recordFederatedCredentialProvenance: async () => {},
       recordCreatedRoleAssignment: () => {},
       ...operationOverrides
     },

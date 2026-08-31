@@ -150,6 +150,7 @@ function orchestrationHarness(
   };
   const events: string[] = [];
   const failures: AzureAutoSetupFailureInput[] = [];
+  const writtenCredentialFiles: string[] = [];
   const runAz =
     options.runAz ??
     (async (args: string[]): Promise<AzureAutoSetupCommandResult> => {
@@ -182,8 +183,18 @@ function orchestrationHarness(
           code: 0,
           stdout: JSON.stringify([
             {
+              id: "fic-dev",
               name: "dev",
-              subject: "repo:octo/app:environment:dev"
+              subject: "repo:octo/app:environment:dev",
+              issuer: "https://token.actions.githubusercontent.com",
+              audiences: ["api://AzureADTokenExchange"]
+            },
+            {
+              id: "fic-dev-immutable",
+              name: "dev-immutable",
+              subject: "repo:octo@7/app@5:environment:dev",
+              issuer: "https://token.actions.githubusercontent.com",
+              audiences: ["api://AzureADTokenExchange"]
             }
           ]),
           stderr: ""
@@ -191,6 +202,17 @@ function orchestrationHarness(
       }
       if (line.includes("federated-credential create")) {
         return { code: 0, stdout: "", stderr: "" };
+      }
+      // Our credential setup re-reads the just-created federated credential to
+      // verify and record its provenance. Echo the written credential document
+      // so the live identity matches the required subject/issuer/audiences.
+      if (line.includes("federated-credential show")) {
+        const contents = JSON.parse(writtenCredentialFiles.at(-1) || "{}");
+        return {
+          code: 0,
+          stdout: JSON.stringify({ id: "fic-created", ...contents }),
+          stderr: ""
+        };
       }
       if (line.startsWith("role assignment create ")) {
         return { code: 1, stdout: "", stderr: "already exists" };
@@ -257,7 +279,9 @@ function orchestrationHarness(
     },
     tempFile: {
       createPath: () => "C:\\temp\\fic.json",
-      write: () => {},
+      write: (_path: string, contents: string) => {
+        writtenCredentialFiles.push(contents);
+      },
       remove: () => {}
     },
     ensureServicePrincipal:
@@ -1260,6 +1284,17 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       }
       if (command.includes("federated-credential create")) {
         return { code: 0, stdout: "", stderr: "" };
+      }
+      if (command.includes("federated-credential show")) {
+        const contents = JSON.parse(written.at(-1) || "{}");
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            id: "fic-dev",
+            ...contents
+          }),
+          stderr: ""
+        };
       }
       if (command.startsWith("role assignment create ")) {
         return { code: 0, stdout: "", stderr: "" };

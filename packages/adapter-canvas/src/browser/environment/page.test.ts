@@ -9,6 +9,7 @@ import {
 import { DISCOVER_ENDPOINT, DISCOVERY_PANEL_ENTRY_KEY } from "./discovery.js";
 import {
   ENVIRONMENTS_ENTRY_KEY,
+  ENVIRONMENT_DELETE_PATH,
   ENVIRONMENT_LIST_PATH
 } from "./environments.js";
 import {
@@ -31,6 +32,7 @@ import {
   createFakeElement,
   createFakeInput,
   createFakeSelect,
+  fakeText,
   flushPromises,
   jsonResponse,
   textResponse
@@ -103,6 +105,10 @@ const REQUIRED_ELEMENTS = [
   "env-table-body",
   "env-error-banner",
   "env-error-banner-text",
+  "env-success-banner",
+  "env-success-banner-text",
+  "env-warning-banner",
+  "env-warning-banner-text",
   "cred-landing",
   "cred-form",
   "cred-panel-azure",
@@ -125,6 +131,12 @@ const REQUIRED_ELEMENTS = [
   "env-profile-value",
   "env-profile-options",
   PROGRESS_IDS.panel,
+  PROGRESS_IDS.commands,
+  PROGRESS_IDS.commandButtons,
+  PROGRESS_IDS.commandNote,
+  PROGRESS_IDS.actions,
+  PROGRESS_IDS.bottomButtons,
+  PROGRESS_IDS.dismiss,
   "deploy-status",
   "new-env-btn",
   "cancel-env-btn",
@@ -1011,7 +1023,7 @@ describe("initializeEnvironmentPage", () => {
                   {
                     id: "stop",
                     kind: "stop",
-                    label: "Stop setup",
+                    label: "Stop Setup",
                     path: "/api/operations/op-1/stop",
                     description: "Stop at the next safe boundary."
                   }
@@ -1382,5 +1394,498 @@ describe("initializeEnvironmentPage", () => {
         (call) => call.url === "/api/operations/late-op"
       )
     ).toBe(false);
+  });
+
+  it("follows an environment deletion through the shared progress panel", async () => {
+    const page = fixture();
+    const remove = createFakeInput("delete-row");
+    remove.setAttribute("data-env", "dev");
+    page.browser.document.addSelectorAll(".js-delete-env", [remove]);
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [{ name: "dev", status: "success", provider: "azure" }]
+        })
+    );
+    let deleteRequested = false;
+    let operationPolls = 0;
+    page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () => {
+      deleteRequested = true;
+      return jsonResponse({ success: true }, true, 202);
+    });
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => {
+        if (!deleteRequested) return jsonResponse({ operation: null });
+        operationPolls += 1;
+        const terminal = operationPolls >= 2;
+        return jsonResponse({
+          operation: {
+            operationId: "del-1",
+            environment: "dev",
+            provider: "azure",
+            state: terminal ? "succeeded" : "running",
+            terminalState: terminal ? "succeeded" : null,
+            summary: "Deleting dev…"
+          }
+        });
+      }
+    );
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    remove.dispatch("click");
+    // The row click opens the in-DOM confirmation; confirming it performs the
+    // delete (native modals are suppressed under the canvas host).
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+
+    const deleteCall = page.browser.net.calls.find(
+      (entry) => entry.url === ENVIRONMENT_DELETE_PATH
+    );
+    expect(JSON.parse(String(deleteCall?.init?.body))).toEqual({
+      repo: "octo/app",
+      environment: "dev"
+    });
+    // The optimistic delete record opens the shared progress panel while the
+    // operation is tracked.
+    expect(page.elements[PROGRESS_IDS.panel].style.display).toBe("");
+
+    const listCallsBefore = page.browser.net.calls.filter((entry) =>
+      entry.url.includes(ENVIRONMENT_LIST_PATH)
+    ).length;
+    page.browser.clock.tick(1600);
+    await flushPromises();
+
+    // Reaching a terminal state reloads the environment table.
+    expect(operationPolls).toBeGreaterThanOrEqual(2);
+    const listCallsAfter = page.browser.net.calls.filter((entry) =>
+      entry.url.includes(ENVIRONMENT_LIST_PATH)
+    ).length;
+    expect(listCallsAfter).toBeGreaterThan(listCallsBefore);
+
+    teardown();
+  });
+
+  it("shows an app-registration acknowledgement dialog after an azure delete succeeds", async () => {
+    const page = fixture();
+    const remove = createFakeInput("delete-row");
+    remove.setAttribute("data-env", "dev");
+    page.browser.document.addSelectorAll(".js-delete-env", [remove]);
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [{ name: "dev", status: "success", provider: "azure" }]
+        })
+    );
+    let deleteRequested = false;
+    let operationPolls = 0;
+    page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () => {
+      deleteRequested = true;
+      return jsonResponse({ success: true }, true, 202);
+    });
+    page.browser.net.handle(`${OPERATIONS_PATH}/del-1/dismiss`, () =>
+      jsonResponse({ operationId: "del-1" })
+    );
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => {
+        if (!deleteRequested) return jsonResponse({ operation: null });
+        operationPolls += 1;
+        const terminal = operationPolls >= 2;
+        return jsonResponse({
+          operation: {
+            operationId: "del-1",
+            kind: "delete",
+            environment: "dev",
+            provider: "azure",
+            state: terminal ? "succeeded" : "running",
+            terminalState: terminal ? "succeeded" : null,
+            summary: "Deleting dev…"
+          }
+        });
+      }
+    );
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    remove.dispatch("click");
+    // Confirm the initial delete prompt to kick off the operation.
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(1600);
+    await flushPromises();
+    await flushPromises();
+
+    // On success the same modal is reused to acknowledge that the Entra app
+    // registration was intentionally left in place.
+    expect(page.elements["env-confirm-modal"].style.display).toBe("flex");
+    expect(page.elements["env-confirm-title"].textContent).toBe(
+      "Environment deleted"
+    );
+    const acknowledgement = fakeText(page.elements["env-confirm-message"]);
+    expect(acknowledgement).not.toContain("reported warnings");
+    expect(acknowledgement).toContain(
+      "Microsoft Entra app registration was not deleted"
+    );
+    expect(acknowledgement).toContain("delete it in the Azure portal.");
+    expect(acknowledgement).not.toContain("yourself");
+    const portalLink = page.elements["env-confirm-message"].children[1];
+    expect(portalLink?.textContent).toBe("Azure portal");
+    expect(portalLink?.getAttribute("href")).toBe(
+      "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade"
+    );
+    expect(portalLink?.getAttribute("target")).toBe("_blank");
+    expect(portalLink?.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(page.elements["env-confirm-ok"].textContent).toBe("Done");
+    // The acknowledgement is a single-button dialog: cancel is hidden.
+    expect(page.elements["env-confirm-cancel"].style.display).toBe("none");
+    // Dismissing the acknowledgement closes the modal.
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+    expect(page.elements["env-confirm-modal"].style.display).toBe("none");
+
+    teardown();
+  });
+
+  it("uses warning-aware wording when an azure delete succeeds with warnings", async () => {
+    const page = fixture();
+    const remove = createFakeInput("delete-row");
+    remove.setAttribute("data-env", "dev");
+    page.browser.document.addSelectorAll(".js-delete-env", [remove]);
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [{ name: "dev", status: "success", provider: "azure" }]
+        })
+    );
+    let deleteRequested = false;
+    let operationPolls = 0;
+    let dismissed = false;
+    page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () => {
+      deleteRequested = true;
+      return jsonResponse({ success: true }, true, 202);
+    });
+    page.browser.net.handle(`${OPERATIONS_PATH}/del-1/dismiss`, () => {
+      dismissed = true;
+      return jsonResponse({ operationId: "del-1" });
+    });
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => {
+        if (!deleteRequested) return jsonResponse({ operation: null });
+        operationPolls += 1;
+        const terminal = operationPolls >= 2;
+        return jsonResponse({
+          operation: {
+            operationId: "del-1",
+            kind: "delete",
+            environment: "dev",
+            provider: "azure",
+            state: terminal ? "succeeded_with_warnings" : "running",
+            terminalState: terminal ? "succeeded_with_warnings" : null,
+            summary: "Deleting dev…"
+          }
+        });
+      }
+    );
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    page.elements["env-success-banner"].style.display = "flex";
+    page.elements["env-success-banner-text"].textContent =
+      "Successfully configured Azure Environment windows";
+    remove.dispatch("click");
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+    expect(page.elements["env-success-banner"].style.display).toBe("none");
+    page.browser.clock.tick(1600);
+    await flushPromises();
+    await flushPromises();
+
+    // A warnings outcome does not claim a clean deletion: the title and body
+    // both flag that some cleanup steps reported warnings.
+    expect(page.elements["env-confirm-modal"].style.display).toBe("flex");
+    expect(page.elements["env-confirm-title"].textContent).toBe(
+      "Environment deleted with warnings"
+    );
+    expect(fakeText(page.elements["env-confirm-message"])).toContain(
+      "reported warnings"
+    );
+    expect(fakeText(page.elements["env-confirm-message"])).toContain(
+      "Microsoft Entra app registration was not deleted"
+    );
+
+    // Acknowledging the warning leaves both choices available in the panel:
+    // retry the unfinished cleanup or explicitly exit the completed deletion.
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+    expect(dismissed).toBe(false);
+    expect(page.elements[PROGRESS_IDS.dismiss].textContent).toBe("Exit");
+    expect(page.elements[PROGRESS_IDS.dismiss].style.display).toBe("");
+
+    page.elements[PROGRESS_IDS.dismiss].dispatch("click");
+    await flushPromises();
+    expect(dismissed).toBe(true);
+    expect(page.elements[PROGRESS_IDS.panel].style.display).toBe("none");
+
+    teardown();
+  });
+
+  it("keeps a clean azure delete panel on acknowledgement and dismisses it from the panel's own button so it stays gone after navigation", async () => {
+    const page = fixture();
+    const remove = createFakeInput("delete-row");
+    remove.setAttribute("data-env", "dev");
+    page.browser.document.addSelectorAll(".js-delete-env", [remove]);
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [{ name: "dev", status: "success", provider: "azure" }]
+        })
+    );
+    let deleteRequested = false;
+    let dismissed = false;
+    let operationPolls = 0;
+    page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () => {
+      deleteRequested = true;
+      return jsonResponse({ success: true }, true, 202);
+    });
+    page.browser.net.handle(`${OPERATIONS_PATH}/del-1/dismiss`, () => {
+      dismissed = true;
+      return jsonResponse({ operationId: "del-1" });
+    });
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => {
+        // Once dismissed, the server reports nothing for the repo — the exact
+        // condition a returning user's resume must honor.
+        if (!deleteRequested || dismissed) {
+          return jsonResponse({ operation: null });
+        }
+        operationPolls += 1;
+        const terminal = operationPolls >= 2;
+        return jsonResponse({
+          operation: {
+            operationId: "del-1",
+            kind: "delete",
+            environment: "dev",
+            provider: "azure",
+            state: terminal ? "succeeded" : "running",
+            terminalState: terminal ? "succeeded" : null,
+            summary: "Deleting dev…"
+          }
+        });
+      }
+    );
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    remove.dispatch("click");
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(1600);
+    await flushPromises();
+    await flushPromises();
+
+    // The succeeded panel is on screen alongside the acknowledgement dialog.
+    expect(page.elements[PROGRESS_IDS.panel].style.display).not.toBe("none");
+
+    // Acknowledging the notice ("Done") only closes the dialog. It must NOT
+    // dismiss the operation or tear the panel down — the panel keeps its own
+    // "OK" button as the single control that ends a finished deletion.
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+    expect(dismissed).toBe(false);
+    expect(page.elements["env-confirm-modal"].style.display).toBe("none");
+    expect(page.elements[PROGRESS_IDS.panel].style.display).not.toBe("none");
+    expect(page.elements[PROGRESS_IDS.dismiss].textContent).toBe("OK");
+    expect(page.elements[PROGRESS_IDS.dismiss].style.display).toBe("");
+
+    // Clicking the panel's own OK button dismisses the operation and hides it.
+    page.elements[PROGRESS_IDS.dismiss].dispatch("click");
+    await flushPromises();
+    expect(dismissed).toBe(true);
+    expect(page.elements[PROGRESS_IDS.panel].style.display).toBe("none");
+
+    teardown();
+
+    // Returning to the page (a fresh mount) must not resurface the dismissed
+    // panel: the server now reports no operation for the repo.
+    const rejoin = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+    expect(page.elements[PROGRESS_IDS.panel].style.display).toBe("none");
+
+    rejoin();
+  });
+
+  it("shows the acknowledgement dialog when rejoining a running azure delete", async () => {
+    const page = fixture();
+    page.browser.document.addSelectorAll(".js-delete-env", []);
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [{ name: "dev", status: "success", provider: "azure" }]
+        })
+    );
+    // The operation is already running when the panel loads (resume path) and
+    // then terminates while we poll.
+    let operationPolls = 0;
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => {
+        operationPolls += 1;
+        const terminal = operationPolls >= 3;
+        return jsonResponse({
+          operation: {
+            operationId: "del-1",
+            kind: "delete",
+            environment: "dev",
+            provider: "azure",
+            state: terminal ? "succeeded" : "running",
+            terminalState: terminal ? "succeeded" : null,
+            summary: "Deleting dev…"
+          }
+        });
+      }
+    );
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+    page.browser.clock.tick(1600);
+    await flushPromises();
+    await flushPromises();
+    page.browser.clock.tick(1600);
+    await flushPromises();
+    await flushPromises();
+
+    // Even though the user never clicked delete this session, rejoining a
+    // delete operation still surfaces the app-registration acknowledgement.
+    expect(page.elements["env-confirm-modal"].style.display).toBe("flex");
+    expect(page.elements["env-confirm-title"].textContent).toBe(
+      "Environment deleted"
+    );
+    expect(fakeText(page.elements["env-confirm-message"])).toContain(
+      "Microsoft Entra app registration was not deleted"
+    );
+
+    teardown();
+  });
+
+  it("does not show the acknowledgement dialog when an azure delete fails", async () => {
+    const page = fixture();
+    const remove = createFakeInput("delete-row");
+    remove.setAttribute("data-env", "dev");
+    page.browser.document.addSelectorAll(".js-delete-env", [remove]);
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [{ name: "dev", status: "success", provider: "azure" }]
+        })
+    );
+    let deleteRequested = false;
+    let operationPolls = 0;
+    page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () => {
+      deleteRequested = true;
+      return jsonResponse({ success: true }, true, 202);
+    });
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => {
+        if (!deleteRequested) return jsonResponse({ operation: null });
+        operationPolls += 1;
+        const terminal = operationPolls >= 2;
+        return jsonResponse({
+          operation: {
+            operationId: "del-1",
+            environment: "dev",
+            provider: "azure",
+            state: terminal ? "failed" : "running",
+            terminalState: terminal ? "failed" : null,
+            summary: "Deleting dev…"
+          }
+        });
+      }
+    );
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    remove.dispatch("click");
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+    expect(page.elements["env-confirm-modal"].style.display).toBe("none");
+    page.browser.clock.tick(1600);
+    await flushPromises();
+    await flushPromises();
+
+    expect(operationPolls).toBeGreaterThanOrEqual(2);
+    expect(page.elements["env-confirm-modal"].style.display).toBe("none");
+
+    teardown();
+  });
+
+  it("does not show the acknowledgement dialog after an aws delete succeeds", async () => {
+    const page = fixture();
+    const remove = createFakeInput("delete-row");
+    remove.setAttribute("data-env", "dev");
+    page.browser.document.addSelectorAll(".js-delete-env", [remove]);
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [{ name: "dev", status: "success", provider: "aws" }]
+        })
+    );
+    let deleteRequested = false;
+    let operationPolls = 0;
+    page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () => {
+      deleteRequested = true;
+      return jsonResponse({ success: true }, true, 202);
+    });
+    page.browser.net.handle(
+      `${OPERATIONS_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => {
+        if (!deleteRequested) return jsonResponse({ operation: null });
+        operationPolls += 1;
+        const terminal = operationPolls >= 2;
+        return jsonResponse({
+          operation: {
+            operationId: "del-1",
+            environment: "dev",
+            provider: "aws",
+            state: terminal ? "succeeded" : "running",
+            terminalState: terminal ? "succeeded" : null,
+            summary: "Deleting dev…"
+          }
+        });
+      }
+    );
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    remove.dispatch("click");
+    page.elements["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+    // The initial delete confirmation closes and no acknowledgement replaces it.
+    expect(page.elements["env-confirm-modal"].style.display).toBe("none");
+    page.browser.clock.tick(1600);
+    await flushPromises();
+    await flushPromises();
+
+    expect(operationPolls).toBeGreaterThanOrEqual(2);
+    expect(page.elements["env-confirm-modal"].style.display).toBe("none");
+
+    teardown();
   });
 });
