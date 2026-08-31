@@ -41,11 +41,11 @@ name: Release
 #
 # Release assets, one set per released plugin:
 #
-#   <plugin>-plugin-<version>.tar.gz          the installable plugin tree
-#   <plugin>-plugin-<version>.spdx.json       SPDX 2.3 SBOM from `pnpm sbom`
-#   <plugin>-awesome-copilot-<version>.zip    the files for a manual PR against
-#                                             github/awesome-copilot, pinned to
-#                                             the artifact branch commit SHA
+#   <plugin>-plugin.tar.gz          the installable plugin tree
+#   <plugin>-plugin.spdx.json       SPDX 2.3 SBOM from `pnpm sbom`
+#   <plugin>-awesome-copilot.zip    the files for a manual PR against
+#                                   github/awesome-copilot, pinned to the
+#                                   artifact branch commit SHA
 #
 # Assets are attached to a draft before publication. This works for mutable
 # releases now and is ready for GitHub immutable releases when the repository
@@ -447,8 +447,8 @@ jobs:
           rm -rf "$RUNNER_TEMP/package"
           mkdir -p "$staging"
           cp -R "$PLUGIN_DIST/." "$staging/"
-          tarfile="$RUNNER_TEMP/$PLUGIN_NAME-plugin-$VERSION.tar"
-          tarball="$RUNNER_TEMP/$PLUGIN_NAME-plugin-$VERSION.tar.gz"
+          tarfile="$RUNNER_TEMP/${PLUGIN_TARBALL%.gz}"
+          tarball="$RUNNER_TEMP/$PLUGIN_TARBALL"
           tar --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
             -cf "$tarfile" -C "$RUNNER_TEMP/package" "$PLUGIN_NAME"
           gzip -n "$tarfile"
@@ -463,7 +463,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          path="$RUNNER_TEMP/$PLUGIN_NAME-plugin-$VERSION.spdx.json"
+          path="$RUNNER_TEMP/$PLUGIN_SBOM"
           # Native pnpm SPDX includes run-specific IDs and timestamps. A retry
           # of any already immutable release reuses its published SBOM instead
           # of manufacturing a different document for the same release.
@@ -584,7 +584,7 @@ jobs:
           # afterwards. The generator writes both `source.ref` and `source.sha`
           # as this full 40-character SHA.
           listing="$RUNNER_TEMP/awesome-copilot"
-          archive="$RUNNER_TEMP/$PLUGIN_NAME-awesome-copilot-$VERSION.zip"
+          archive="$RUNNER_TEMP/$PLUGIN_AWESOME_COPILOT"
           rm -rf "$listing" "$archive"
           node scripts/awesome-copilot.mjs \
             --out "$listing" \

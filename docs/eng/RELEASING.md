@@ -148,11 +148,11 @@ Each released plugin produces its own complete set:
 | `<plugin>/v<version>` tag                                | `release.yml` | no by workflow               | Points at the pinned artifact branch and marks publication complete.                    |
 | `releases/<plugin>/latest` branch, `<plugin>@latest` tag | `release.yml` | yes                          | Stable install target: force-moved to the newest stable release of that plugin.         |
 
-| Release asset                            | Built by                      | Contents                                                           |
-|------------------------------------------|-------------------------------|--------------------------------------------------------------------|
-| `<plugin>-plugin-<version>.tar.gz`       | `release.yml`                 | The installable `plugins/<plugin>/dist/` tree, attested.           |
-| `<plugin>-plugin-<version>.spdx.json`    | `pnpm sbom`                   | SPDX 2.3 SBOM of the workspace dependency graph, attested.         |
-| `<plugin>-awesome-copilot-<version>.zip` | `scripts/awesome-copilot.mjs` | The four files for a manual `github/awesome-copilot` pull request. |
+| Release asset                  | Built by                      | Contents                                                           |
+|--------------------------------|-------------------------------|--------------------------------------------------------------------|
+| `<plugin>-plugin.tar.gz`       | `release.yml`                 | The installable `plugins/<plugin>/dist/` tree, attested.           |
+| `<plugin>-plugin.spdx.json`    | `pnpm sbom`                   | SPDX 2.3 SBOM of the workspace dependency graph, attested.         |
+| `<plugin>-awesome-copilot.zip` | `scripts/awesome-copilot.mjs` | The four files for a manual `github/awesome-copilot` pull request. |
 
 The SPDX document is written directly by [`pnpm sbom`](https://pnpm.io/cli/sbom) using `--filter <plugin>`, so pnpm supplies the selected plugin root plus its dependency, license, download, and checksum data without a repository normalization pass. The plugin declares its build adapter as a workspace `devDependency`, ensuring browser libraries inlined by esbuild appear in that native dependency graph.
 
@@ -164,7 +164,7 @@ A plugin's two branches carry an identical `plugins/<plugin>/dist/`; they differ
 
 ### Listing a plugin on github/awesome-copilot
 
-[`github/awesome-copilot`](https://github.com/github/awesome-copilot) lists plugins hosted elsewhere in its own `plugins/external.json` and in the marketplace catalog it serves. Both files carry the *same* entry object, so every release builds them and ships them as `<plugin>-awesome-copilot-<version>.zip`:
+[`github/awesome-copilot`](https://github.com/github/awesome-copilot) lists plugins hosted elsewhere in its own `plugins/external.json` and in the marketplace catalog it serves. Both files carry the *same* entry object, so every release builds them and ships them as `<plugin>-awesome-copilot.zip`:
 
 ```text
 .github/plugin/marketplace.json   { "plugins": [ <entry> ] }
@@ -187,7 +187,7 @@ Every file in an edge plugin tree is a provenance subject. For stable releases, 
 
 ```bash
 gh release download 'radius@0.1.0' --pattern 'radius-plugin-*'
-gh attestation verify radius-plugin-0.1.0.tar.gz --repo radius-project/ai-extensions
+gh attestation verify radius-plugin.tar.gz --repo radius-project/ai-extensions
 ```
 
 The SPDX asset is pnpm's native selected-plugin document. It lists the workspace dependency closure with registry locations, licenses, integrity checksums, and pnpm's own document identity.

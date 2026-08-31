@@ -390,9 +390,9 @@ async function verifyCompletion(args) {
     fail(`${refs.PLUGIN_SOURCE_TAG} does not have a published GitHub release`);
   }
   const expectedAssets = [
-    `${plugin.name}-plugin-${version}.tar.gz`,
-    `${plugin.name}-plugin-${version}.spdx.json`,
-    `${plugin.name}-awesome-copilot-${version}.zip`
+    refs.PLUGIN_TARBALL,
+    refs.PLUGIN_SBOM,
+    refs.PLUGIN_AWESOME_COPILOT
   ].sort();
   const actualAssets = (release.assets ?? []).map((asset) => asset.name).sort();
   if (JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {

@@ -46,7 +46,7 @@ gh release view "radius@<version>"
 git ls-remote origin "refs/tags/radius@latest" "refs/tags/radius/v<version>"
 ```
 
-Each released plugin gets its own release carrying three assets: the deterministic plugin tarball, native pnpm SPDX SBOM, and `<plugin>-awesome-copilot-<version>.zip`. CI downloads and checks all three before writing the completion tag. Every install branch is also checked to be a zero-parent orphan commit that GitHub signed. Then install or update the plugin from the marketplace and confirm it reports the new version.
+Each released plugin gets its own release carrying three static asset names: `<plugin>-plugin.tar.gz`, `<plugin>-plugin.spdx.json`, and `<plugin>-awesome-copilot.zip`. CI downloads and checks all three before writing the completion tag. Every install branch is also checked to be a zero-parent orphan commit that GitHub signed. Then install or update the plugin from the marketplace and confirm it reports the new version.
 
 Every commit and tag the release wrote should show a **Verified** badge, attributed to the release GitHub App. Confirm it from the command line with:
 
@@ -57,7 +57,7 @@ gh api "repos/{owner}/{repo}/commits/$(git rev-parse refs/tags/radius/v<version>
 
 ## Refresh the awesome-copilot listing
 
-Optional, and only after the release has shipped. Download `<plugin>-awesome-copilot-<version>.zip` from the release; it contains the `.github/plugin/marketplace.json` and `plugins/external.json` entries already pinned to this release's artifact commit SHA, plus the released `plugins/<plugin>/plugin.json` and `README.md` for the reviewer.
+Optional, and only after the release has shipped. Download `<plugin>-awesome-copilot.zip` from the release; it contains the `.github/plugin/marketplace.json` and `plugins/external.json` entries already pinned to this release's artifact commit SHA, plus the released `plugins/<plugin>/plugin.json` and `README.md` for the reviewer.
 
 The release package assumes this repository is public when the listing is submitted to `github/awesome-copilot`.
 

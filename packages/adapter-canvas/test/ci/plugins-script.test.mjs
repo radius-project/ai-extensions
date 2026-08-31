@@ -136,12 +136,34 @@ describe("scripts/plugins.mjs", () => {
       PLUGIN_DIR: "plugins/radius-aws",
       PLUGIN_DIST: "plugins/radius-aws/dist",
       PLUGIN_ARTIFACT: "plugin-dist-radius-aws",
+      PLUGIN_TARBALL: "radius-aws-plugin.tar.gz",
+      PLUGIN_SBOM: "radius-aws-plugin.spdx.json",
+      PLUGIN_AWESOME_COPILOT: "radius-aws-awesome-copilot.zip",
       PLUGIN_CHANNEL_BRANCH: "releases/radius-aws/latest",
       PLUGIN_CHANNEL_TAG: "radius-aws@latest",
       PLUGIN_SOURCE_TAG: "radius-aws@2.1.0",
       PLUGIN_ARTIFACT_TAG: "radius-aws/v2.1.0",
       PLUGIN_PINNED_BRANCH: "releases/radius-aws/v2.1.0"
     });
+  });
+
+  it("keeps release asset names static across versions", () => {
+    const root = writeRepository({ radius: "radius" });
+    const assets = (version) => {
+      const result = env(root, "--env", "radius", "--version", version);
+      return [
+        result.PLUGIN_TARBALL,
+        result.PLUGIN_SBOM,
+        result.PLUGIN_AWESOME_COPILOT
+      ];
+    };
+
+    expect(assets("1.2.0")).toEqual([
+      "radius-plugin.tar.gz",
+      "radius-plugin.spdx.json",
+      "radius-awesome-copilot.zip"
+    ]);
+    expect(assets("9.0.0")).toEqual(assets("1.2.0"));
   });
 
   it("emits only the names the caller asked for", () => {
@@ -151,7 +173,10 @@ describe("scripts/plugins.mjs", () => {
       "PLUGIN_NAME",
       "PLUGIN_DIR",
       "PLUGIN_DIST",
-      "PLUGIN_ARTIFACT"
+      "PLUGIN_ARTIFACT",
+      "PLUGIN_TARBALL",
+      "PLUGIN_SBOM",
+      "PLUGIN_AWESOME_COPILOT"
     ]);
     expect(env(root, "--env", "radius", "--channel", "edge")).toMatchObject({
       PLUGIN_CHANNEL_BRANCH: "releases/radius/edge",

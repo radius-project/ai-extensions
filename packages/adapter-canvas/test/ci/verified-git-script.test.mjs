@@ -133,9 +133,9 @@ async function completionApi({
   catalogRef = "releases/radius/v1.2.0",
   releaseDraft = false,
   releaseAssets = [
-    "radius-plugin-1.2.0.tar.gz",
-    "radius-plugin-1.2.0.spdx.json",
-    "radius-awesome-copilot-1.2.0.zip"
+    "radius-plugin.tar.gz",
+    "radius-plugin.spdx.json",
+    "radius-awesome-copilot.zip"
   ]
 } = {}) {
   const calls = [];
@@ -816,9 +816,9 @@ describe("scripts/verified-git.mjs", () => {
         "an extra release asset",
         {
           releaseAssets: [
-            "radius-plugin-1.2.0.tar.gz",
-            "radius-plugin-1.2.0.spdx.json",
-            "radius-awesome-copilot-1.2.0.zip",
+            "radius-plugin.tar.gz",
+            "radius-plugin.spdx.json",
+            "radius-awesome-copilot.zip",
             "unexpected.txt"
           ]
         },

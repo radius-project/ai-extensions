@@ -166,7 +166,7 @@ The SBOM is native [`pnpm sbom`](https://pnpm.io/cli/sbom) output filtered to th
 
 ### 3a. The awesome-copilot listing asset
 
-[`github/awesome-copilot`](https://github.com/github/awesome-copilot) lists plugins hosted elsewhere in `plugins/external.json` and in the marketplace catalog it serves, both carrying the same entry object. `scripts/awesome-copilot.mjs` derives that entry from this repository's catalog and the selected released manifest, and ships `<plugin>-awesome-copilot-<version>.zip` holding exactly four files:
+[`github/awesome-copilot`](https://github.com/github/awesome-copilot) lists plugins hosted elsewhere in `plugins/external.json` and in the marketplace catalog it serves, both carrying the same entry object. `scripts/awesome-copilot.mjs` derives that entry from this repository's catalog and the selected released manifest, and ships `<plugin>-awesome-copilot.zip` holding exactly four files:
 
 | Path in the zip                   | Content                                  |
 |-----------------------------------|------------------------------------------|
