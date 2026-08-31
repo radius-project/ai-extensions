@@ -3,7 +3,11 @@
 name: Build
 
 # Runs the full check suite and produces the installable plugin at
-# plugins/radius/dist, uploaded as the `plugin-dist` artifact.
+# plugins/<plugin>/dist, uploaded as the `plugin-dist-<plugin>` artifact.
+#
+# One call runs shared validation once and builds every requested plugin in a
+# matrix. The publishing workflows pass a JSON selection; direct pull requests
+# discover all plugins automatically.
 #
 # Triggered directly for pull requests, and called by publish.yml (edge channel,
 # on every push to main) and release.yml (release channel, on demand) so a
@@ -19,18 +23,38 @@ on:
           `release` ships the version already committed to the manifests.
         type: string
         default: edge
+      plugins:
+        description: >-
+          JSON array of plugin names to build. Empty discovers every plugin.
+        type: string
+        default: ""
       ref:
         description: Git ref or commit to build. Defaults to the triggering ref.
         type: string
         default: ""
-    outputs:
-      version:
-        description: Version stamped into the built plugin manifests.
-        value: ${{ jobs.build.outputs.version }}
-
 permissions: {}
 
 jobs:
+  plugin-matrix:
+    name: Resolve the plugin matrix
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      names: ${{ steps.plugins.outputs.names }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Select the plugins
+        id: plugins
+        env:
+          REQUESTED: ${{ inputs.plugins }}
+        run: echo "names=$(node scripts/plugins.mjs --select "$REQUESTED")" >>"$GITHUB_OUTPUT"
+
   static-checks:
     name: Static checks
     runs-on: ubuntu-latest
@@ -154,22 +178,16 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  build:
-    name: Build plugin dist
+  node-tests:
+    name: Node tests and coverage
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    outputs:
-      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.sha }}
-          # `changeset version` looks up the commit that added each changeset. In
-          # a shallow clone it recovers by running `git fetch --deepen`, which
-          # cannot authenticate once the checkout credential is dropped below.
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Install pnpm
@@ -206,6 +224,61 @@ jobs:
       - name: Check progress demo bundle
         run: pnpm --filter @radius-project/adapter-canvas run demo:check
 
+  build-gate:
+    name: Shared release gate
+    needs: [static-checks, windows-process-integration, canvas-chromium, node-tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Record successful shared validation
+        run: echo "shared validation passed" >"$RUNNER_TEMP/build-gate"
+
+      - name: Upload shared release gate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-gate
+          path: ${{ runner.temp }}/build-gate
+          if-no-files-found: error
+
+  build:
+    name: Build ${{ matrix.plugin }} dist
+    needs: plugin-matrix
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: ${{ fromJSON(needs.plugin-matrix.outputs.names) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          # `changeset version` looks up the commit that added each changeset. In
+          # a shallow clone it recovers by running `git fetch --deepen`, which
+          # cannot authenticate once the checkout credential is dropped below.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Every plugin-scoped name - directory, dist path, artifact - comes from
+      # the registry, so no workflow hard-codes a plugin.
+      - name: Resolve the plugin
+        run: node scripts/plugins.mjs --env "${{ matrix.plugin }}" >>"$GITHUB_ENV"
+
       # edge:    Changesets owns versioning, so ask it what the next release
       #          will be instead of guessing from the manifest. --snapshot
       #          stamps the calculated version (see snapshot.useCalculatedVersion
@@ -215,9 +288,9 @@ jobs:
       #          precedes and above the last stable release, and names the
       #          source commit so a published build is traceable. Precedence
       #          between two edge builds is lexical, not chronological, and
-      #          nothing reads it: installs resolve the moving `edge` ref and
-      #          publish.yml orders builds by git ancestry. This rewrites
-      #          plugins/radius/package.json and .changeset/config.json in the
+      #          nothing reads it: installs resolve the moving `<plugin>@edge`
+      #          ref and publish.yml orders builds by git ancestry. This rewrites
+      #          plugins/<plugin>/package.json and .changeset/config.json in the
       #          CI workspace only — nothing is committed. An ephemeral patch
       #          changeset makes documentation-only pushes snapshot the next
       #          patch when no package changeset is pending; an existing minor
@@ -231,7 +304,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$CHANNEL" = "release" ]; then
-            version="$(node scripts/version.mjs)"
+            version="$(node scripts/version.mjs --plugin "$PLUGIN_NAME")"
           elif [ "$CHANNEL" = "edge" ]; then
             # Only the version is read back, so drop the changelog generator:
             # @changesets/changelog-github costs one GitHub GraphQL lookup per
@@ -240,36 +313,43 @@ jobs:
             jq '.changelog = false' .changeset/config.json >"$config"
             mv "$config" .changeset/config.json
 
-            pnpm exec changeset add --patch radius \
+            pnpm exec changeset add --patch "$PLUGIN_NAME" \
               --message 'Publish the current commit to the rolling edge channel.'
-            pnpm exec changeset version --snapshot edge
-            version="$(node scripts/version.mjs)"
+            node scripts/release-version.mjs \
+              --plugin "$PLUGIN_NAME" --snapshot edge
+            version="$(node scripts/version.mjs --plugin "$PLUGIN_NAME")"
           else
             echo "::error::Unsupported build channel: $CHANNEL"
             exit 1
           fi
-          echo "Stamping plugin dist as ${version}"
+          echo "Stamping $PLUGIN_NAME dist as ${version}"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
+      # Each plugin package owns a `build` script that assembles its own dist/.
       - name: Build
         env:
           PLUGIN_VERSION: ${{ steps.version.outputs.version }}
-        run: pnpm run build
+        run: pnpm --filter "$PLUGIN_NAME" run build
 
       # Runs against the exact bundle uploaded below. This intentionally stays
       # after Build rather than relying on a pre-existing workspace artifact.
       # It reruns the build itself, so it needs the same stamp to leave dist/
-      # byte-identical to what Build produced.
+      # byte-identical to what Build produced. Optional: a plugin declares the
+      # script only if it has artifact-level checks.
       - name: Run built-artifact smoke tests
         env:
           PLUGIN_VERSION: ${{ steps.version.outputs.version }}
-        run: pnpm run test:integration:artifact
-      - name: Verify Bicep checker is packaged
-        run: test -f plugins/radius/dist/skills/radius-app-bicep/scripts/validate-bicep.mjs
+        run: pnpm --filter "$PLUGIN_NAME" run --if-present test:artifact
+
+      - name: Verify the plugin dist is complete
+        run: >-
+          node scripts/validate-plugin-dist.mjs
+          --plugin "$PLUGIN_NAME"
+          --version "${{ steps.version.outputs.version }}"
 
       - name: Upload plugin dist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: plugin-dist
-          path: plugins/radius/dist
+          name: ${{ env.PLUGIN_ARTIFACT }}
+          path: ${{ env.PLUGIN_DIST }}
           if-no-files-found: error

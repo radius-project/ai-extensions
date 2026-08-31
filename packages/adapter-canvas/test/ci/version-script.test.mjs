@@ -12,9 +12,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-const VERSION_SCRIPT = fileURLToPath(
-  new URL("../../../../scripts/version.mjs", import.meta.url)
-);
+const SCRIPTS = ["version.mjs", "plugins.mjs"].map((name) => [
+  name,
+  fileURLToPath(new URL(`../../../../scripts/${name}`, import.meta.url))
+]);
 
 const MANIFEST = ".github/plugin/marketplace.json";
 const PLUGIN_MANIFEST = "plugins/radius/plugin.json";
@@ -25,18 +26,18 @@ const SNAPSHOT = "0.5.0-edge-0b33186";
 
 const temporaryRepositories = [];
 
-const objectSource = (ref) => ({
+const objectSource = (ref, name = "radius") => ({
   source: "github",
   repo: "radius-project/ai-extensions",
-  path: "plugins/radius/dist",
+  path: `plugins/${name}/dist`,
   ref
 });
 
-const catalogEntry = (source, name = "radius") => ({
+const catalogEntry = (source, name = "radius", version = RELEASED) => ({
   name,
   source,
   description: "Model, visualize, and deploy applications with Radius.",
-  version: RELEASED,
+  version,
   repository: "https://github.com/radius-project/ai-extensions",
   license: "Apache-2.0",
   keywords: ["radius", "canvas"]
@@ -46,32 +47,45 @@ function writeJson(file, value) {
   writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-function writeRepository(plugins) {
+/** Adds a plugin directory the registry will discover. */
+function writePlugin(root, name, version = RELEASED) {
+  mkdirSync(join(root, "plugins", name), { recursive: true });
+  writeJson(join(root, "plugins", name, "package.json"), {
+    name,
+    version,
+    private: true
+  });
+  writeJson(join(root, "plugins", name, "plugin.json"), {
+    name,
+    version,
+    skills: "./skills/",
+    extensions: "."
+  });
+  writeFileSync(join(root, "plugins", name, "README.md"), `${name}\n`);
+}
+
+function writeRepository(
+  plugins,
+  { metadataVersion = RELEASED, pluginDirs } = {}
+) {
   const root = mkdtempSync(join(tmpdir(), "radius-version-"));
   temporaryRepositories.push(root);
 
   mkdirSync(join(root, "scripts"));
-  mkdirSync(join(root, "plugins", "radius"), { recursive: true });
   mkdirSync(join(root, ".github", "plugin"), { recursive: true });
 
-  // The script resolves the repository from its own location, so publishing
-  // against a fixture means copying it rather than running it in place.
-  copyFileSync(VERSION_SCRIPT, join(root, "scripts", "version.mjs"));
+  // The scripts resolve the repository from their own location, so exercising
+  // them against a fixture means copying them rather than running in place.
+  for (const [name, source] of SCRIPTS) {
+    copyFileSync(source, join(root, "scripts", name));
+  }
 
-  writeJson(join(root, SOURCE_OF_TRUTH), {
-    name: "radius",
-    version: RELEASED,
-    private: true
-  });
-  writeJson(join(root, PLUGIN_MANIFEST), {
-    name: "radius",
-    version: RELEASED,
-    skills: "./skills/",
-    extensions: "."
-  });
+  for (const entry of pluginDirs ?? plugins) {
+    writePlugin(root, entry.name, entry.version);
+  }
   writeJson(join(root, MANIFEST), {
     name: "radius-plugins",
-    metadata: { description: "Radius plugins.", version: RELEASED },
+    metadata: { description: "Radius plugins.", version: metadataVersion },
     plugins
   });
 
@@ -97,9 +111,143 @@ afterEach(() => {
   }
 });
 
+describe("scripts/version.mjs across several plugins", () => {
+  const twoPlugins = () =>
+    writeRepository(
+      [
+        catalogEntry(objectSource("radius@latest"), "radius", "0.4.0"),
+        catalogEntry(
+          objectSource("radius-aws@latest", "radius-aws"),
+          "radius-aws",
+          "1.2.0"
+        )
+      ],
+      { metadataVersion: "1.2.0" }
+    );
+
+  it("requires a plugin once more than one can be meant", () => {
+    const result = runVersion(twoPlugins());
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("--plugin is required");
+    expect(result.stderr).toContain("radius, radius-aws");
+  });
+
+  it("reads each plugin's own source of truth", () => {
+    const root = twoPlugins();
+
+    expect(runVersion(root, "--plugin", "radius").stdout).toBe("0.4.0");
+    expect(runVersion(root, "--plugin", "radius-aws").stdout).toBe("1.2.0");
+  });
+
+  it("releases one plugin without touching the other", () => {
+    const root = twoPlugins();
+
+    expect(
+      runVersion(root, "--set", "0.5.0", "--plugin", "radius").status
+    ).toBe(0);
+
+    const catalog = readJson(root, MANIFEST);
+    const entry = (name) => catalog.plugins.find((p) => p.name === name);
+    expect(entry("radius").version).toBe("0.5.0");
+    expect(entry("radius").source.ref).toBe("radius@latest");
+    expect(entry("radius-aws").version).toBe("1.2.0");
+    expect(entry("radius-aws").source.ref).toBe("radius-aws@latest");
+    expect(readJson(root, "plugins/radius/plugin.json").version).toBe("0.5.0");
+    expect(readJson(root, "plugins/radius-aws/plugin.json").version).toBe(
+      "1.2.0"
+    );
+  });
+
+  it("leaves the independently versioned marketplace metadata alone", () => {
+    const root = twoPlugins();
+
+    expect(
+      runVersion(root, "--set", "2.0.0", "--plugin", "radius").status
+    ).toBe(0);
+    expect(readJson(root, MANIFEST).metadata.version).toBe("1.2.0");
+
+    expect(
+      runVersion(root, "--set", "1.3.0", "--plugin", "radius-aws").status
+    ).toBe(0);
+    expect(readJson(root, MANIFEST).metadata.version).toBe("1.2.0");
+  });
+
+  it("preserves explicit marketplace metadata during a repository-wide sync", () => {
+    const root = twoPlugins();
+    const catalog = readJson(root, MANIFEST);
+    catalog.metadata.description = "A different marketplace description.";
+    writeJson(join(root, MANIFEST), catalog);
+
+    expect(runVersion(root, "--sync").status).toBe(0);
+    expect(readJson(root, MANIFEST).metadata).toEqual({
+      description: "A different marketplace description.",
+      version: "1.2.0"
+    });
+  });
+
+  it("only retargets the edge entry of the plugin being published", () => {
+    const root = twoPlugins();
+
+    expect(
+      runVersion(
+        root,
+        "--set",
+        SNAPSHOT,
+        "--plugin",
+        "radius-aws",
+        "--channel",
+        "edge"
+      ).status
+    ).toBe(0);
+
+    const catalog = readJson(root, MANIFEST);
+    const entry = (name) => catalog.plugins.find((p) => p.name === name);
+    expect(entry("radius-aws").source.ref).toBe("radius-aws@edge");
+    expect(entry("radius-aws").version).toBe(SNAPSHOT);
+    expect(entry("radius").source.ref).toBe("radius@latest");
+    expect(entry("radius").version).toBe("0.4.0");
+  });
+
+  it("reports every drifted file, whichever plugin owns it", () => {
+    const root = twoPlugins();
+    writeJson(join(root, "plugins", "radius-aws", "plugin.json"), {
+      name: "radius-aws",
+      version: "0.0.1"
+    });
+
+    const result = runVersion(root, "--check");
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("plugins/radius-aws/plugin.json#version");
+    expect(result.stderr).toContain('expected "1.2.0"');
+  });
+
+  it("repairs every plugin at once", () => {
+    const root = twoPlugins();
+    writeJson(join(root, "plugins", "radius-aws", "plugin.json"), {
+      name: "radius-aws",
+      version: "0.0.1"
+    });
+
+    expect(runVersion(root, "--sync").status).toBe(0);
+    expect(runVersion(root, "--check", "--plugin", "radius").status).toBe(0);
+    expect(readJson(root, "plugins/radius-aws/plugin.json").version).toBe(
+      "1.2.0"
+    );
+  });
+
+  it("rejects a plugin the repository does not ship", () => {
+    const result = runVersion(twoPlugins(), "--plugin", "radius-gcp");
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('no plugin named "radius-gcp"');
+  });
+});
+
 describe("scripts/version.mjs --set --channel edge", () => {
   it("stamps the snapshot version and pins the catalog at the edge ref", () => {
-    const root = writeRepository([catalogEntry(objectSource("edge"))]);
+    const root = writeRepository([catalogEntry(objectSource("radius@edge"))]);
 
     const result = runVersion(root, "--set", SNAPSHOT, "--channel", "edge");
 
@@ -110,23 +258,23 @@ describe("scripts/version.mjs --set --channel edge", () => {
     expect(catalog.plugins).toHaveLength(1);
     expect(catalog.plugins[0].name).toBe("radius");
     expect(catalog.plugins[0].version).toBe(SNAPSHOT);
-    expect(catalog.plugins[0].source.ref).toBe("edge");
+    expect(catalog.plugins[0].source.ref).toBe("radius@edge");
   });
 
   it("retargets a catalog whose default channel has switched to latest", () => {
-    const root = writeRepository([catalogEntry(objectSource("latest"))]);
+    const root = writeRepository([catalogEntry(objectSource("radius@latest"))]);
 
     expect(
       runVersion(root, "--set", SNAPSHOT, "--channel", "edge").status
     ).toBe(0);
 
     const catalog = readJson(root, MANIFEST);
-    expect(catalog.plugins[0].source.ref).toBe("edge");
+    expect(catalog.plugins[0].source.ref).toBe("radius@edge");
     expect(catalog.plugins[0].version).toBe(SNAPSHOT);
   });
 
   it("leaves the plugin manifest, source of truth and catalog metadata alone", () => {
-    const root = writeRepository([catalogEntry(objectSource("edge"))]);
+    const root = writeRepository([catalogEntry(objectSource("radius@edge"))]);
 
     expect(
       runVersion(root, "--set", SNAPSHOT, "--channel", "edge").status
@@ -138,31 +286,31 @@ describe("scripts/version.mjs --set --channel edge", () => {
   });
 
   it("preserves the rest of the catalog entry", () => {
-    const root = writeRepository([catalogEntry(objectSource("edge"))]);
+    const root = writeRepository([catalogEntry(objectSource("radius@edge"))]);
 
     expect(
       runVersion(root, "--set", SNAPSHOT, "--channel", "edge").status
     ).toBe(0);
 
     const entry = readJson(root, MANIFEST).plugins[0];
-    expect(entry.source).toEqual(objectSource("edge"));
+    expect(entry.source).toEqual(objectSource("radius@edge"));
     expect(entry.keywords).toEqual(["radius", "canvas"]);
     expect(entry.license).toBe("Apache-2.0");
   });
 
   it("reports the written file on stderr so stdout stays the version", () => {
-    const root = writeRepository([catalogEntry(objectSource("edge"))]);
+    const root = writeRepository([catalogEntry(objectSource("radius@edge"))]);
 
     const result = runVersion(root, "--set", SNAPSHOT, "--channel", "edge");
 
     expect(result.stdout).toBe(SNAPSHOT);
-    expect(result.stderr).toContain(`updated ${MANIFEST} -> ${SNAPSHOT}`);
+    expect(result.stderr).toContain(`updated ${MANIFEST}`);
   });
 });
 
 describe("scripts/version.mjs --set (stable)", () => {
   it("derives every version without retargeting the catalog ref", () => {
-    const root = writeRepository([catalogEntry(objectSource("latest"))]);
+    const root = writeRepository([catalogEntry(objectSource("radius@latest"))]);
 
     const result = runVersion(root, "--set", "0.5.0");
 
@@ -172,17 +320,18 @@ describe("scripts/version.mjs --set (stable)", () => {
     expect(readJson(root, PLUGIN_MANIFEST).version).toBe("0.5.0");
 
     const catalog = readJson(root, MANIFEST);
-    expect(catalog.metadata.version).toBe("0.5.0");
+    expect(catalog.metadata.version).toBe(RELEASED);
     expect(catalog.plugins[0].version).toBe("0.5.0");
-    expect(catalog.plugins[0].source.ref).toBe("latest");
+    expect(catalog.plugins[0].source.ref).toBe("radius@latest");
   });
 });
 
 describe("scripts/version.mjs rejects a catalog it cannot publish", () => {
   it("fails when the radius entry is missing", () => {
-    const root = writeRepository([
-      catalogEntry(objectSource("edge"), "radius-preview")
-    ]);
+    const root = writeRepository(
+      [catalogEntry(objectSource("radius@edge"), "radius-preview")],
+      { pluginDirs: [{ name: "radius" }] }
+    );
     const before = readFileSync(join(root, MANIFEST), "utf8");
 
     const result = runVersion(root, "--set", SNAPSHOT, "--channel", "edge");
@@ -206,13 +355,13 @@ describe("scripts/version.mjs rejects a catalog it cannot publish", () => {
     expect(result.status).not.toBe(0);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain(
-      `"radius" needs an object source for an edge publish in ${MANIFEST}`
+      `"radius" needs an object source for a channel publish in ${MANIFEST}`
     );
     expect(readFileSync(join(root, MANIFEST), "utf8")).toBe(before);
   });
 
   it("fails before writing when the catalog is not readable", () => {
-    const root = writeRepository([catalogEntry(objectSource("edge"))]);
+    const root = writeRepository([catalogEntry(objectSource("radius@edge"))]);
     rmSync(join(root, MANIFEST));
 
     const result = runVersion(root, "--set", SNAPSHOT, "--channel", "edge");
@@ -226,7 +375,7 @@ describe("scripts/version.mjs rejects a catalog it cannot publish", () => {
     ["not a semver version", ["--set", "edge-latest", "--channel", "edge"]],
     ["an unknown channel", ["--set", SNAPSHOT, "--channel", "nightly"]]
   ])("fails when %s is requested", (_label, args) => {
-    const root = writeRepository([catalogEntry(objectSource("edge"))]);
+    const root = writeRepository([catalogEntry(objectSource("radius@edge"))]);
     const before = readFileSync(join(root, MANIFEST), "utf8");
 
     const result = runVersion(root, ...args);

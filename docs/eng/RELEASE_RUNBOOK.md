@@ -9,7 +9,9 @@ The short version, for whoever is cutting the release. [`RELEASING.md`](./RELEAS
 | **edge**   | automatically, on every merge to `main` | `0.2.0-edge-0b33186` | `radius` (the default for now) |
 | **latest** | only when you cut a release             | `0.2.0`              | `radius` (after stable launch) |
 
-Edge is the rolling preview: it exists so a change can be tried the moment it lands, and it is never the recommendation for real use. `latest` is the supported channel. The marketplace exposes one plugin identity, `radius`, and its `source.ref` on `main` selects the default channel. It points to `edge` for now; after the first stable release, change that one field to `latest`. Generated edge catalogs continue to point to edge, so the switch does not retire the preview channel. Both channels are moving refs, and every release is also frozen at `releases/radius/v<version>` for anyone who needs to pin an exact version.
+Edge is the rolling preview: it exists so a change can be tried the moment it lands, and it is never the recommendation for real use. `latest` is the supported channel and always names that plugin's newest stable release. The marketplace lists one entry per plugin, and each entry's `source.ref` on `main` selects its default channel. Today the only plugin is `radius`, pointing at `radius@edge`; after its first stable release, change that one field to `radius@latest`. Generated edge catalogs continue to point to edge, so the switch does not retire the preview channel. Both channels are moving refs - branch `releases/<plugin>/<channel>` and tag `<plugin>@<channel>` - and every release is also frozen at `releases/<plugin>/v<version>` for anyone who needs to pin an exact version.
+
+Plugins release **independently**: cutting `radius` never touches another plugin's refs, and pending changesets for the others stay queued for their own release.
 
 Edge needs nothing from you. The rest of this page is the stable release.
 
@@ -18,6 +20,8 @@ Edge needs nothing from you. The rest of this page is the stable release.
 - You do not pick the version or write the changelog. Changesets derives both from the `.changeset/*.md` files that merged since the last release.
 - At least one changeset must be pending, or the workflow stops with nothing to release.
 - The previous release must have finished. If its run failed partway, re-run that run first - see [If something fails](#if-something-fails).
+- Immutable releases are optional. To enforce them later, enable the GitHub setting and set repository variable `REQUIRE_IMMUTABLE_RELEASES=true`.
+- The release GitHub App needs Contents and Pull requests write permissions. It writes every commit and tag the release publishes, which is what makes them show as **Verified**. It additionally needs Administration read only when immutable enforcement is enabled.
 - You need write access to the repository to start the workflow.
 - For a release candidate that includes Azure environment creation, complete [Environment creation readiness](./ENVIRONMENT_CREATION_READINESS.md). A record with `BLOCKED` or `NOT RUN` production gates is not release approval.
 
@@ -25,9 +29,9 @@ Each of these is enforced by the workflow, so a mistake here fails fast rather t
 
 ## Cut the release
 
-1. **Start it.** GitHub → **Actions** → **Release** → **Run workflow**, from `main`.
-2. **Wait for the release pull request.** It is titled `chore(release): version packages` on the `changeset-release/main` branch, and its body lists everything that will ship.
-3. **Review it** like any other pull request. It should contain only the version bump, the changelog entry, the derived manifests, and deletion of the consumed `.changeset/*.md` files. Read the changelog the way a user would and fix the wording here if it needs it. To include one more change, land it on `main` with its changeset and re-run step 1 - the same pull request updates in place.
+1. **Start it.** GitHub → **Actions** → **Release** → **Run workflow**, from `main`. Leave **plugin** empty to release everything with a pending changeset, or type one plugin name to release only that one.
+2. **Wait for the release pull request.** Its title names the selected plugin scope and it uses the `changeset-release/main` branch. Only one scope can have an open release PR; a differently scoped dispatch fails instead of overwriting it.
+3. **Review it** like any other pull request. It should contain only the selected version bumps, changelog entries, derived manifests, and deletion of the consumed changesets. Read each changelog the way a user would. To include one more change for the same scope, land it on `main` with its changeset and re-run step 1; the same pull request updates in place.
 4. **Merge it.** This is the point of no return: merging is what publishes.
 5. **Watch the Release run** that the merge triggers. It rebuilds and re-checks that exact commit before it touches anything public.
 
@@ -39,13 +43,31 @@ The workflow run summary lists every ref it wrote. To check independently:
 
 ```bash
 gh release view "radius@<version>"
-git ls-remote origin refs/tags/latest "refs/tags/radius/v<version>"
+git ls-remote origin "refs/tags/radius@latest" "refs/tags/radius/v<version>"
 ```
 
-Then install or update the `radius` plugin from the marketplace and confirm it reports the new version.
+Each released plugin gets its own release carrying three assets: the deterministic plugin tarball, native pnpm SPDX SBOM, and `<plugin>-awesome-copilot-<version>.zip`. CI downloads and checks all three before writing the completion tag. Every install branch is also checked to be a zero-parent orphan commit that GitHub signed. Then install or update the plugin from the marketplace and confirm it reports the new version.
+
+Every commit and tag the release wrote should show a **Verified** badge, attributed to the release GitHub App. Confirm it from the command line with:
+
+```bash
+gh api "repos/{owner}/{repo}/commits/$(git rev-parse refs/tags/radius/v<version>)" \
+  --jq .commit.verification
+```
+
+## Refresh the awesome-copilot listing
+
+Optional, and only after the release has shipped. Download `<plugin>-awesome-copilot-<version>.zip` from the release; it contains the `.github/plugin/marketplace.json` and `plugins/external.json` entries already pinned to this release's artifact commit SHA, plus the released `plugins/<plugin>/plugin.json` and `README.md` for the reviewer.
+
+The release package assumes this repository is public when the listing is submitted to `github/awesome-copilot`.
+
+- **Not listed yet?** Open [github/awesome-copilot](https://github.com/github/awesome-copilot)'s **external plugin issue form** and copy the fields out of the entry. Public contributors may not open a pull request for a first listing.
+- **Already listed?** Fork `main`, splice the entry from each file into the corresponding file, and open a pull request. Their automation re-runs the quality gates against the pinned SHA.
 
 ## If something fails
 
-Re-run **the same failed run**. Do not push a new commit to force it, and do not create the tags or branches by hand. The publish is written to be resumable: it redoes only what did not finish, refuses to overwrite anything already published, and never moves the stable channel back to an older release. A fresh run cannot stand in for the original, because the signed build provenance is tied to the run that produced the artifact.
+Re-run **the same failed run**. Do not push a new commit to force it, and do not create the tags or branches by hand — a human-made ref would be unsigned, and the workflow refuses to reuse an install branch GitHub has not verified. The publish is written to be resumable: it redoes only what did not finish, refuses to overwrite anything already published, and never moves the stable channel back to an older release. A fresh run cannot stand in for the original, because the signed build provenance is tied to the run that produced the artifact.
 
-If the release itself turns out to be broken, do not rewrite it - published refs are immutable. Fix it on `main` and cut the next version.
+For a mutable published release, a rerun reconciles assets with `--clobber` before checking them. For any actually immutable release, the workflow reuses its native SBOM and verifies protected assets without modifying them. If that verification fails, fix the problem on `main` and cut the next version.
+
+If a release turns out to be broken, fix it on `main` and cut the next version. Do not rewrite versioned branches or completion tags even while GitHub releases are operating in mutable mode.

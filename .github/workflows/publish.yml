@@ -2,19 +2,31 @@
 ---
 name: Publish
 
-# Publishes the radius plugin to a generated `releases/edge` branch so installs
-# get the whole plugin — skills, plugin.json, and the compiled canvas bundle —
-# without committing the git-ignored build output to main.
+# Publishes every plugin in this monorepo to its own generated
+# `releases/<plugin>/edge` branch so installs get the whole plugin — skills,
+# plugin.json, and the compiled canvas bundle — without committing the
+# git-ignored build output to main.
 #
-# The build itself is not repeated here: this reuses build.yml (same checks,
-# same artifact) and downloads its `plugin-dist` output. On every push to main
-# it force-recreates `releases/edge` as an ORPHAN branch holding only that
-# directory plus the marketplace catalog — one root commit, no source, no
-# history — then atomically moves the branch and `edge` tag onto it. A stale
+# The plugin list comes from `scripts/plugins.mjs`, which discovers every
+# directory under `plugins/`, so adding a plugin needs no change here. Each one
+# builds and publishes as an independent matrix leg.
+#
+# The build itself is not repeated: this reuses build.yml (same checks, same
+# artifact) and downloads its `plugin-dist-<plugin>` output. On every push to
+# main it force-recreates the channel branch as an ORPHAN holding only that
+# plugin's dist plus the marketplace catalog — one root commit, no source, no
+# history — then moves the branch and `<plugin>@edge` tag onto it. A stale
 # manual rerun is skipped when a newer main commit is already published.
 #
-# The catalog ships alongside the plugin on `releases/edge` so
-# `marketplace add OWNER/REPO#releases/edge` advertises exactly what is
+# That commit and tag are created through the GitHub API as the automation
+# GitHub App, so GitHub signs them and both publish as Verified. Nothing is
+# committed or tagged on the runner, which has no signing key.
+#
+# Every published ref is namespaced by plugin name — `releases/<plugin>/<channel>`
+# and `<plugin>@<channel>` — so plugins never collide.
+#
+# The catalog ships alongside the plugin on `releases/<plugin>/edge` so
+# `marketplace add OWNER/REPO#releases/<plugin>/edge` advertises exactly what is
 # published there. Nothing is pushed back to main: the main ruleset grants
 # GitHub Actions no bypass, so this workflow only writes refs that carry no
 # rules.
@@ -38,27 +50,54 @@ concurrency:
   queue: max
 
 jobs:
+  plugins:
+    name: Resolve the plugin list
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      names: ${{ steps.list.outputs.names }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The registry uses only Node built-ins, so the runner's own Node is
+      # enough and this stays well ahead of the build matrix.
+      - name: List the plugins
+        id: list
+        run: echo "names=$(node scripts/plugins.mjs --json)" >>"$GITHUB_OUTPUT"
+
   build:
+    needs: plugins
     uses: ./.github/workflows/build.yml
     permissions:
       contents: read
       pull-requests: read
     with:
       channel: edge
+      plugins: ${{ needs.plugins.outputs.names }}
       ref: ${{ github.sha }}
 
   publish:
-    name: Publish to edge
-    needs: build
+    name: Publish ${{ matrix.plugin }} to edge
+    needs: [plugins, build]
+    if: always() && needs.plugins.result == 'success'
+    strategy:
+      # Each plugin owns distinct refs and artifacts, so one failure must not
+      # cancel or serialize the rest.
+      fail-fast: false
+      matrix:
+        plugin: ${{ fromJSON(needs.plugins.outputs.names) }}
     runs-on: ubuntu-latest
     permissions:
-      contents: write # force-update releases/edge and the edge tag
+      contents: read # the app token writes the channel branch and tag
       id-token: write # OIDC token used to sign the build provenance
       attestations: write # record the provenance attestation for the bundle
+      artifact-metadata: write # link attested subjects to artifact records
     env:
-      DIST: plugins/radius/dist
       MANIFEST: .github/plugin/marketplace.json
-      VERSION: ${{ needs.build.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,21 +105,35 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The reusable workflow uploads this only after every shared test and
+      # static gate passes. A failed sibling plugin does not remove it.
+      - name: Download shared release gate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: build-gate
+          path: ${{ runner.temp }}/build-gate
+
+      - name: Resolve the plugin refs
+        run: |
+          node scripts/plugins.mjs \
+            --env "${{ matrix.plugin }}" --channel edge >>"$GITHUB_ENV"
+
       - name: Download plugin dist
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: plugin-dist
-          path: plugins/radius/dist
+          name: ${{ env.PLUGIN_ARTIFACT }}
+          path: ${{ env.PLUGIN_DIST }}
 
+      # The version is read back out of the artifact: a matrixed build job has
+      # no per-leg outputs addressable from here, and the artifact is the thing
+      # actually being published.
       - name: Verify the build artifacts are present
         run: |
           set -euo pipefail
-          for f in "$DIST/plugin.json" "$DIST/package.json" "$DIST/extension.mjs" "$DIST/extension.mjs.map"; do
-            if [ ! -f "$f" ]; then
-              echo "::error::Expected build artifact $f was missing from plugin-dist."
-              exit 1
-            fi
-          done
+          version="$(jq -er .version "$PLUGIN_DIST/package.json")"
+          node scripts/validate-plugin-dist.mjs \
+            --plugin "$PLUGIN_NAME" --version "$version"
+          echo "VERSION=$version" >>"$GITHUB_ENV"
 
       # build.yml ran in this same workflow run, so the provenance this records
       # describes the run that actually produced the bundle. Attesting before
@@ -88,33 +141,46 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: ${{ env.DIST }}/extension.mjs
+          subject-path: ${{ env.PLUGIN_DIST }}/**/*
 
-      - name: Publish plugin dist to releases/edge branch and edge tag
+      # Everything this workflow publishes is created through the GitHub API as
+      # the automation app, because that is the only way the objects come out
+      # Verified: a runner holds no signing key, so anything it commits or tags
+      # itself is unsigned. GitHub signs on the app's behalf instead.
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_MANAGER_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_MANAGER_BOT_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Publish plugin dist to the edge branch and tag
         env:
+          # gh reads GH_TOKEN first, so the read-only workflow token still
+          # serves the gh and git calls below; only the app token writes refs.
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           gh auth setup-git
 
           # A manually rerun workflow keeps its original GITHUB_SHA and may run
           # after newer pushes have already published. Permit same-source retries
           # and forward progress, but never roll the channel back or cross a
           # rewritten/divergent main history.
-          if git ls-remote --exit-code --heads origin "refs/heads/releases/edge" >/dev/null 2>&1; then
+          if git ls-remote --exit-code --heads origin "refs/heads/$PLUGIN_CHANNEL_BRANCH" >/dev/null 2>&1; then
             git fetch --no-tags origin \
-              "+refs/heads/releases/edge:refs/remotes/origin/releases/edge"
-            current_message="$(git log -1 --format=%s refs/remotes/origin/releases/edge)"
+              "+refs/heads/$PLUGIN_CHANNEL_BRANCH:refs/remotes/origin/$PLUGIN_CHANNEL_BRANCH"
+            current_message="$(git log -1 --format=%s "refs/remotes/origin/$PLUGIN_CHANNEL_BRANCH")"
             if [[ "$current_message" != *" for "* ]]; then
-              echo "::error::releases/edge does not record its source commit: $current_message"
+              echo "::error::$PLUGIN_CHANNEL_BRANCH does not record its source commit: $current_message"
               exit 1
             fi
             current_source="${current_message##* for }"
             if [[ ! "$current_source" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "::error::releases/edge records an invalid source commit: $current_source"
+              echo "::error::$PLUGIN_CHANNEL_BRANCH records an invalid source commit: $current_source"
               exit 1
             fi
 
@@ -126,16 +192,16 @@ jobs:
             if ! git cat-file -e "$current_source^{commit}" 2>/dev/null; then
               git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
               if [ "$GITHUB_SHA" != "$(git rev-parse refs/remotes/origin/main)" ]; then
-                echo "::error::Published edge source $current_source is no longer in main's history, and $GITHUB_SHA is not main's current tip. Re-run Publish for the newest commit on main to re-baseline releases/edge."
+                echo "::error::Published edge source $current_source is no longer in main's history, and $GITHUB_SHA is not main's current tip. Re-run Publish for the newest commit on main to re-baseline $PLUGIN_CHANNEL_BRANCH."
                 exit 1
               fi
-              echo "::notice::Published edge source $current_source is no longer in main's history; re-baselining releases/edge on $GITHUB_SHA."
+              echo "::notice::Published edge source $current_source is no longer in main's history; re-baselining $PLUGIN_CHANNEL_BRANCH on $GITHUB_SHA."
             elif [ "$current_source" != "$GITHUB_SHA" ]; then
               if git merge-base --is-ancestor "$current_source" "$GITHUB_SHA"; then
                 : # This run moves edge forward.
               elif git merge-base --is-ancestor "$GITHUB_SHA" "$current_source"; then
-                echo "::notice::releases/edge already publishes newer source $current_source; skipping stale rerun for $GITHUB_SHA."
-                echo "Skipped stale edge rerun for \`$GITHUB_SHA\`; \`releases/edge\` already publishes \`$current_source\`." >>"$GITHUB_STEP_SUMMARY"
+                echo "::notice::$PLUGIN_CHANNEL_BRANCH already publishes newer source $current_source; skipping stale rerun for $GITHUB_SHA."
+                echo "Skipped stale edge rerun for \`$GITHUB_SHA\`; \`$PLUGIN_CHANNEL_BRANCH\` already publishes \`$current_source\`." >>"$GITHUB_STEP_SUMMARY"
                 exit 0
               else
                 echo "::error::Published edge source $current_source and candidate $GITHUB_SHA have divergent histories."
@@ -145,31 +211,28 @@ jobs:
           fi
 
           # Ship the catalog alongside the plugin so `marketplace add
-          # OWNER/REPO#releases/edge` advertises exactly what is published here.
-          # This also rewrites the source manifests, which are never staged below.
-          node scripts/version.mjs --set "$VERSION" --channel edge
+          # OWNER/REPO#releases/<plugin>/edge` advertises exactly what is
+          # published here. This also rewrites the source manifests, which are
+          # never among the published paths below.
+          node scripts/version.mjs \
+            --set "$VERSION" --plugin "$PLUGIN_NAME" --channel edge
 
-          # releases/edge is an ORPHAN branch carrying only the built plugin and
+          # The channel branch is an ORPHAN carrying only the built plugin and
           # its catalog: no source, no history, one root commit per publish.
-          # --orphan starts an unborn branch with the old tree still staged, so
-          # clear the index and re-add just what ships. The source commit it was
-          # built from is recorded in the commit message.
-          git branch -D releases/edge 2>/dev/null || true
-          git checkout --orphan releases/edge
-          git rm -rfq --cached .
-          git add -f "$DIST" "$MANIFEST"
-          git commit -m "chore(release): publish ${VERSION} for ${GITHUB_SHA}"
+          # Naming the two paths explicitly is what keeps anything else out of
+          # the published tree, and the API refuses to move on unless GitHub
+          # signed the commit and wrote it without parents. The source commit it
+          # was built from is recorded in the commit message.
+          commit="$(node scripts/verified-git.mjs commit \
+            --message "chore(release): publish ${PLUGIN_NAME}@${VERSION} for ${GITHUB_SHA}" \
+            --path "$PLUGIN_DIST" --path "$MANIFEST" | jq -r .commit)"
 
-          unexpected="$(git ls-tree -r --name-only HEAD | grep -v "^$DIST/" | grep -vFx "$MANIFEST" || true)"
-          if [ -n "$unexpected" ]; then
-            echo "::error::releases/edge must contain only $DIST and $MANIFEST; found:"
-            echo "$unexpected"
-            exit 1
-          fi
-
-          # Move the branch and tag atomically so both names always resolve to
-          # the same artifact commit.
-          git tag -f edge HEAD
-          git push --atomic --force origin \
-            HEAD:refs/heads/releases/edge \
-            refs/tags/edge
+          # Both names resolve to that one verified commit. They can no longer
+          # move in a single atomic push, so the branch every install reads
+          # lands first and the next run reconciles a failure in between.
+          node scripts/verified-git.mjs ref \
+            --name "refs/heads/$PLUGIN_CHANNEL_BRANCH" --sha "$commit" --force
+          node scripts/verified-git.mjs tag \
+            --name "$PLUGIN_CHANNEL_TAG" \
+            --message "${PLUGIN_NAME}@${VERSION}" \
+            --target "$commit" --force
