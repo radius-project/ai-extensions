@@ -224,11 +224,11 @@ Registry-credentials rules:
 
 ### Choosing build.platforms
 
-Omitting `build.platforms` builds `linux/amd64` and `linux/arm64`. Both come from one BuildKit instance, so every platform other than the builder's own needs either cross-compilation in the Dockerfile or emulation in the builder. Do not rely on emulation: the `containerImages` type definition states there is no QEMU/binfmt fallback, and a Dockerfile that cannot cross-compile produces an image whose manifest claims an architecture its binaries do not match, which fails at runtime with `exec format error`. Decide from the Dockerfile's own cross-compilation strategy and never assume emulation covers a gap.
+Omitting `build.platforms` builds `linux/amd64` and `linux/arm64`. Both come from one BuildKit instance, so every platform other than the builder's own needs cross-compilation in the Dockerfile; the `containerImages` type definition states there is no QEMU/binfmt emulation fallback. Without cross-compilation, a target-platform `RUN` can fail during the build with `exec format error`, while build-platform output copied into another platform's image can build cleanly and fail only at runtime. Decide from the Dockerfile's own cross-compilation strategy and never assume emulation covers either gap.
 
 Decide for each `containerImages` resource separately. A repository that builds several images usually mixes safe and unsafe ones, and pinning them all to the least capable Dockerfile discards architecture support the others have.
 
-Read the Dockerfile named by `build.dockerfile` (default `Dockerfile`) at the modeled commit. An image builds correctly for a platform when BOTH of the following hold.
+Read the Dockerfile named by `build.dockerfile` (default `Dockerfile`) at the modeled commit. An image builds correctly for a platform when ALL of the following hold.
 
 **A. The final image is not fixed to one architecture.**
 
@@ -246,30 +246,34 @@ Consider each stage that contributes to the final image: the final stage's own `
 
 An artifact is safe when it is architecture-neutral, or when it is architecture-specific and correctly targeted. The canonical correct pattern satisfies both: `FROM --platform=$BUILDPLATFORM golang AS build` compiling with `GOARCH=$TARGETARCH`, copied into an unpinned final stage. That build stage is pinned, but it targets the requested architecture, so the artifact is correct — a pinned build stage is not by itself a problem.
 
-A `RUN` in an UNPINNED stage already executes inside a container of the requested platform, so whatever it compiles or installs is target-architecture by construction and satisfies B without needing `TARGETARCH`. An ordinary single-stage image that runs `pip install` or `yarn install` is therefore not cross-build-unsafe, even when a dependency is native. What such a build needs is a builder that can execute target-platform tooling, and that is a property of the builder rather than a defect in the Dockerfile: it either succeeds, or it fails loudly during the build. Do not pin an image for this reason. This is a different failure from the one this procedure exists to catch — a mismatched artifact produces an image that builds cleanly, claims an architecture it does not have, and only fails when the container starts.
+A `RUN` in an UNPINNED stage would execute inside a container of the requested platform, so whatever it compiles or installs is target-architecture by construction and satisfies B without needing `TARGETARCH`. That establishes artifact correctness only when the stage can execute; apply C separately.
 
 `COPY --from` an external image rather than a stage (`COPY --from=golang:1.22`) is safe when that image publishes the requested platform, and fixes the artifact when it is single-arch or digest-pinned to one platform.
 
+**C. Every `RUN` can execute on the builder for the requested platform.**
+
+The builder is `linux/amd64` and has no QEMU/binfmt emulation. A `RUN` is executable when its stage uses `FROM --platform=$BUILDPLATFORM` or is otherwise fixed to `linux/amd64`. A `RUN` in a plain unpinned stage or a `$TARGETPLATFORM` stage requires the builder to execute target-platform binaries, so it is not buildable for `linux/arm64` even if its output would satisfy B. This includes ordinary single-stage images that run `yarn install`, `pip install`, `apt-get`, or any other command. Pin such images to `linux/amd64`; otherwise their arm64 build fails with `exec format error`.
+
 Verdict:
 
-- **A and B hold for both default platforms** — omit `build.platforms` and keep the multi-arch default.
-- **Either fails, and the image can still be built for `linux/amd64`** — set `build.platforms: ['linux/amd64']`. Report which images were pinned, why, and that a pinned image will not run on an arm64 cluster until its Dockerfile cross-compiles. Do NOT pin silently.
+- **A, B, and C hold for both default platforms** — omit `build.platforms` and keep the multi-arch default.
+- **Any test fails, and the image can still be built for `linux/amd64`** — set `build.platforms: ['linux/amd64']`. Report which images were pinned, why, and that a pinned image will not run on an arm64 cluster until its Dockerfile cross-compiles. Do NOT pin silently.
 - **The image is fixed to an architecture other than the builder's** — a final stage pinned to `linux/arm64`, or a hardcoded non-amd64 target — then `linux/amd64` is not buildable either. Do not emit a platform the Dockerfile cannot honor; report the packaging gap.
 - **The Dockerfile cannot be read** at the modeled commit — report that the decision could not be made rather than guessing.
 
 Do not infer from the language alone. Go is not automatically safe (`CGO_ENABLED=1` against a C dependency is not), and Python is not automatically unsafe (a pure-Python service, or one whose dependencies ship target wheels, cross-builds fine).
 
-| Pattern                                                                                       | Verdict                                                             |
-|-----------------------------------------------------------------------------------------------|---------------------------------------------------------------------|
-| `FROM --platform=$BUILDPLATFORM` build stage, `GOARCH=$TARGETARCH`, unpinned distroless final | Omit — pinned build stage, correctly targeted artifact              |
-| Wheels built with `g++` in a `$BUILDPLATFORM` stage, final stage `FROM base` inheriting it    | `['linux/amd64']` — A fails                                         |
-| `node-gyp` addons compiled in a build stage, copied into unpinned `alpine`                    | `['linux/amd64']` — B fails                                         |
-| `npm run build` static bundle from a `$BUILDPLATFORM` stage, copied into `nginx`              | Omit — artifact is architecture-neutral                             |
-| Single unpinned stage running `yarn install` or `pip install` with a native dependency        | Omit — the stage runs as the target platform, so its output matches |
-| `FROM --platform=$TARGETPLATFORM` final stage                                                 | Not a pin; judge on B alone                                         |
-| `pip install --platform manylinux2014_aarch64 --only-binary=:all:`                            | Omit — prebuilt target wheel, nothing compiled                      |
-| Rust `cargo build --target=<triple derived from TARGETARCH>`                                  | Omit — correctly targeted without a `GOARCH`-style variable         |
-| Final stage `FROM --platform=linux/arm64`                                                     | Report packaging gap — `linux/amd64` is not buildable either        |
+| Pattern                                                                                       | Verdict                                                        |
+|-----------------------------------------------------------------------------------------------|----------------------------------------------------------------|
+| `FROM --platform=$BUILDPLATFORM` build stage, `GOARCH=$TARGETARCH`, unpinned distroless final | Omit — pinned build stage, correctly targeted artifact         |
+| Wheels built with `g++` in a `$BUILDPLATFORM` stage, final stage `FROM base` inheriting it    | `['linux/amd64']` — A fails                                    |
+| `node-gyp` addons compiled in a build stage, copied into unpinned `alpine`                    | `['linux/amd64']` — B fails                                    |
+| `npm run build` static bundle from a `$BUILDPLATFORM` stage, copied into `nginx`              | Omit — artifact is architecture-neutral                        |
+| Single unpinned stage running `yarn install` or `pip install`                                 | `['linux/amd64']` — C fails without target-platform emulation  |
+| `FROM --platform=$TARGETPLATFORM` final stage                                                 | Not a pin; judge on B and C                                    |
+| `pip install --platform manylinux2014_aarch64 --only-binary=:all:` in a build-platform stage  | Omit — executable build stage installs a prebuilt target wheel |
+| Rust `cargo build --target=<triple derived from TARGETARCH>` in a build-platform stage        | Omit — executable stage produces correctly targeted output     |
+| Final stage `FROM --platform=linux/arm64`                                                     | Report packaging gap — `linux/amd64` is not buildable either   |
 
 ## Radius.Data/* structure
 
