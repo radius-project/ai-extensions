@@ -51,7 +51,7 @@ const LIVE = !!process.env.RUN_LIVE_WORKFLOW_TESTS;
 // changes, including the eventual removal of the duplicated tree.
 const RADIUS_PARITY_REF =
   process.env.RADIUS_PARITY_REF?.trim() ||
-  "921e55c69ab19ed160ded2d19a9126b57e15f82b";
+  "745ce9cc0fa6391a7de73cf9eb894521b1cb3053";
 
 const RADIUS_REPO = "radius-project/radius";
 const EXTENSION_DIR = ".github/extension";
