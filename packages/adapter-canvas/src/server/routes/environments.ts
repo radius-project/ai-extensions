@@ -25,8 +25,11 @@ export type {
   EnvironmentRunDetail,
   EnvironmentBicepParam,
   EnvironmentsCliExec,
-  EnvironmentsDependencies
+  EnvironmentsDependencies,
+  DeleteOperationRecord,
+  DeleteStartResult
 } from "./environments-types.js";
+import { classifyProvider } from "../../provider-classification.js";
 // Parameters for the app.bicep the deploy will run against. Resolves the branch
 // the same way the deploy route does (caller's selection, else the repo default)
 // and locates `.radius/app.bicep` then `app.bicep`. Every failure degrades to a
@@ -120,6 +123,20 @@ export async function handleDeleteEnvironment(
       );
       return;
     }
+    const existingDelete = dependencies.activeDeleteOperation(repo, envName);
+    if (existingDelete) {
+      response.setHeader("Content-Type", "application/json");
+      response.writeHead(409);
+      response.end(
+        JSON.stringify({
+          error: `Deletion is already running for environment "${envName}".`,
+          code: "delete-operation-in-progress",
+          operationId: existingDelete.operationId,
+          operation: dependencies.toClientView(existingDelete)
+        })
+      );
+      return;
+    }
     // Guard: an environment must not be deleted while an application is still
     // deployed to it (its cloud resources would be orphaned). Require the app
     // deployment to be torn down first and point the client at the app-deletion
@@ -189,31 +206,146 @@ export async function handleDeleteEnvironment(
       );
       return;
     }
+    // Deleting an environment is now an async operation (issue #303): it tears
+    // down the Radius environment on the cluster, removes the per-environment
+    // federated credential, deletes the GitHub environment, and — when the app
+    // registration is left unused — prompts before deleting it. The work runs
+    // in the background under the same OperationRecord + progress-panel model as
+    // environment creation, so the route only starts it and returns 202.
+    let target: {
+      provider: string;
+      clientId: string;
+      tenantId: string;
+      repoId: number;
+    };
     try {
-      await dependencies.runCommand(
-        "gh",
-        [
-          "api",
-          "--method",
-          "DELETE",
-          "/repos/" + repo + "/environments/" + encodeURIComponent(envName)
-        ],
-        { timeout: 20000 }
-      );
+      target = await dependencies.discoverEnvironmentTarget(repo, envName);
     } catch (e) {
+      // Fail closed: without the provider/identity we cannot clean up the cloud
+      // artifacts, so refuse rather than delete only the GitHub environment and
+      // silently orphan the federated credential.
       response.setHeader("Content-Type", "application/json");
-      response.writeHead(500);
+      response.writeHead(503);
       response.end(
         JSON.stringify({
-          error: "Could not delete environment: " + dependencies.errorMessage(e)
+          error: `Could not read the configuration for environment "${envName}" (${dependencies.errorMessage(
+            e
+          )}). The environment was not deleted — please try again.`
         })
       );
       return;
     }
-    dependencies.envListCacheDelete(repo);
+    const provider = target.provider;
+    // Radius only supports deleting Azure-backed environments today. Stage 1's
+    // Radius-environment teardown dispatches the Azure-only delete workflow, so
+    // a non-Azure (e.g. AWS) environment cannot be torn down here and would fail
+    // deep in the runner with a generic error. Refuse up front with a clear,
+    // provider-specific message so the user knows the environment was left in
+    // place and can remove it manually, rather than starting an operation that
+    // is guaranteed to fail closed.
+    if (provider !== "azure") {
+      response.setHeader("Content-Type", "application/json");
+      response.writeHead(400);
+      response.end(
+        JSON.stringify({
+          error:
+            provider === "aws" ?
+              `Deleting AWS environments isn't supported yet. "${envName}" was not deleted. Remove its resources in AWS and delete the GitHub environment manually.`
+            : `Deleting this environment isn't supported: Radius can only delete Azure-backed environments today. "${envName}" was not deleted.`,
+          code: "provider-unsupported"
+        })
+      );
+      return;
+    }
+    const clientId = target.clientId;
+    // Provider is guaranteed "azure" here (every other provider returned above),
+    // and an environment is only classified Azure when its canonical
+    // AZURE_CLIENT_ID variable is present, so the client id was readable and the
+    // Azure credential/app-registration cleanup stages always run. The flag is
+    // kept rather than inlined to `true` so the stage set stays explicit at the
+    // one place it is decided.
+    const includeAzureCleanup = provider === "azure";
+    const op = dependencies.createOperation({
+      kind: "delete",
+      provider,
+      repo,
+      environment: envName,
+      stages: dependencies.buildDeleteStages({ includeAzureCleanup })
+    });
+    op.request = {
+      repo,
+      repoId: target.repoId,
+      environment: envName,
+      provider,
+      clientId,
+      tenantId: target.tenantId
+    };
+    const started = dependencies.startOperation(op);
+    if (!started.ok) {
+      response.setHeader("Content-Type", "application/json");
+      response.writeHead(409);
+      response.end(
+        JSON.stringify({
+          error: `An operation is already running for ${repo}.`,
+          code: "operation-in-progress",
+          operationId: started.conflict.operationId
+        })
+      );
+      return;
+    }
+    try {
+      await dependencies.persistOperations();
+    } catch (e) {
+      dependencies.finish(op, "failed", {
+        failure: {
+          code: "operation-registration-persist-failed",
+          stage: op.currentStage,
+          stepSeq: null,
+          message: "Radius could not durably register the delete operation.",
+          classification: "unknown",
+          evidence: dependencies.errorMessage(e)
+        }
+      });
+      response.setHeader("Content-Type", "application/json");
+      response.writeHead(500);
+      response.end(
+        JSON.stringify({
+          error:
+            "Radius could not durably register the delete operation. Nothing was deleted.",
+          code: "operation-registration-persist-failed"
+        })
+      );
+      return;
+    }
+    const statusUrl = `/api/operations/${encodeURIComponent(op.operationId)}`;
     response.setHeader("Content-Type", "application/json");
-    response.writeHead(200);
-    response.end(JSON.stringify({ success: true }));
+    response.setHeader("Location", statusUrl);
+    response.writeHead(202);
+    response.end(
+      JSON.stringify({
+        operationId: op.operationId,
+        statusUrl,
+        operation: dependencies.toClientView(op)
+      })
+    );
+    const scheduled = dependencies.scheduleEnvironmentOperation(
+      context.instanceId,
+      op
+    );
+    if (!scheduled) {
+      dependencies.finish(op, "failed", {
+        failure: {
+          code: "operation-scheduling-failed",
+          stage: op.currentStage,
+          stepSeq: null,
+          message:
+            "Radius accepted the delete operation but could not start any work for it.",
+          classification: "unknown",
+          evidence: `No server-owned task runner was available for instance ${context.instanceId}.`
+        }
+      });
+      await dependencies.persistOperations().catch(() => {});
+    }
   } catch (e) {
     response.setHeader("Content-Type", "application/json");
     response.writeHead(400);
@@ -236,23 +368,70 @@ const AWS_CONFIG_VARIABLES = {
   subnetIds: "RADIUS_SUBNET_IDS"
 } as const;
 
+// Overlays a synthetic "deleting" status onto the environment named by an
+// in-progress delete operation, leaving every other environment untouched.
+// Applied at response time (never cached) so the marker appears the instant a
+// deletion starts and clears the instant it reaches a terminal state. Returns a
+// shallow copy so the cached listing keeps the environments' real statuses for
+// when the deletion finishes or fails. `deleting` is not a status the
+// verify-credentials lookup can ever produce, so it never collides with a real
+// value.
+export function overlayDeletingStatus(
+  payload: unknown,
+  deletingEnvironment: string
+): unknown {
+  if (
+    deletingEnvironment === "" ||
+    payload === null ||
+    typeof payload !== "object" ||
+    !Array.isArray((payload as { environments?: unknown }).environments)
+  ) {
+    return payload;
+  }
+  const source = payload as {
+    environments: unknown[];
+    [key: string]: unknown;
+  };
+  return {
+    ...source,
+    environments: source.environments.map((environment) => {
+      if (
+        environment !== null &&
+        typeof environment === "object" &&
+        (environment as { name?: unknown }).name === deletingEnvironment
+      ) {
+        return {
+          ...(environment as Record<string, unknown>),
+          status: "deleting"
+        };
+      }
+      return environment;
+    })
+  };
+}
+
 // The environment picker's listing. Repo-scoped, short-TTL cached, and filtered
 // to environments this extension created (tagged RADIUS_MANAGED). Status comes
 // from the verify-credentials workflow only, not app deployments. Every response
 // carries `Content-Type` then `Cache-Control: no-store` (header order is
 // observable), and only successful listings are cached so a failure can recover
-// on retry.
+// on retry. An in-progress delete is overlaid live (never cached) so the UI
+// fails closed on the environment being torn down.
 export async function handleListEnvironments(
   context: CanvasRequestContext,
   dependencies: EnvironmentsDependencies
 ): Promise<void> {
   const { response, url } = context;
   const repo = url.searchParams.get("repo") || "";
+  const deletingEnvironment =
+    repo ? dependencies.activeDeleteEnvironment(repo) : "";
   const respond = (payload: unknown): void => {
     response.setHeader("Content-Type", "application/json");
     response.setHeader("Cache-Control", "no-store");
     response.writeHead(200);
-    response.end(JSON.stringify(payload));
+    response.end(
+      JSON.stringify(overlayDeletingStatus(payload, deletingEnvironment))
+    );
   };
   if (!repo) {
     respond({ environments: [] });
@@ -427,10 +606,7 @@ export async function handleListEnvironments(
         }
         if (!("RADIUS_MANAGED" in vars)) return null;
 
-        let provider = "";
-        const varNames = Object.keys(vars).join("\n");
-        if (/AZURE_/.test(varNames)) provider = "azure";
-        else if (/AWS_/.test(varNames)) provider = "aws";
+        let provider: string = classifyProvider(vars);
 
         const credentialProfile = vars.RADIUS_CREDENTIAL_PROFILE || "";
 

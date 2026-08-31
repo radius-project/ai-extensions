@@ -30,7 +30,7 @@ Restart your Copilot session after installing so the skills and Radius Canvas be
 | `radius-app-graph`               | Build, refresh, or diff the Radius application graph.                                                                                                                           |
 | `radius-environment`             | Create and verify an AWS/Azure deploy environment and its OIDC trust.                                                                                                           |
 | `radius-deploy`                  | Deploy (or troubleshoot) an app via the generated GitHub Actions workflow.                                                                                                      |
-| `radius-delete`                  | Delete a deployed app via the generated GitHub Actions workflow, or remove a GitHub deploy environment.                                                                         |
+| `radius-delete`                  | Delete a deployed app via the generated GitHub Actions workflow, or delete a deploy environment and clean up its cloud state.                                                   |
 | `radius-fix-canvas-installation` | Repair a missing Radius Canvas after install/update by copying the canvas files into the app's probed `extensions/` folder (temporary workaround for a GitHub Copilot app bug). |
 
 ### Radius Canvas

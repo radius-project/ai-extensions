@@ -18,12 +18,14 @@ import {
   enterStage,
   finish,
   finishSucceeded,
+  dismissOperation,
   hasWarnings,
   hasUnfinishedCleanupAuthority,
   isTerminalState,
   requestStop,
   requireInput,
   resumeAfterInput,
+  touchOperation,
   setExecutionActive,
   recordAzureApp,
   recordCommitState,
@@ -39,6 +41,7 @@ import {
   reconcileArtifactProvenance,
   recordServicePrincipal,
   reconcileRestoredOperation,
+  fromPersistedOperation,
   sanitizeResumeTarget,
   setCanonicalEnvironment,
   setCloudContext,
@@ -47,13 +50,15 @@ import {
   summarize,
   toClientView,
   toPersistedOperation,
-  fromPersistedOperation,
   acceptCommand,
+  applyDeletionRetry,
   applyStopRequest,
   ambiguousSetupOwnership,
   beginRetryAttempt,
   buildCommandId,
   canContinueSetup,
+  canDismissOperation,
+  canRetryDeletion,
   canRetryCleanup,
   canRetrySetup,
   legacyRecoveryQuarantine,
@@ -102,6 +107,7 @@ import {
   workflowRollbackTargets,
   githubEnvironmentVariableRollbackTargets,
   canExitSetup,
+  matchDeleteOperationEnvironment,
   hasSurvivingCreatedArtifacts,
   isSetupExited,
   hasPendingVerificationAcquisition,
@@ -113,7 +119,14 @@ import {
   OPERATION_SCHEMA_VERSION,
   STAGE_AUTHORIZE_IDENTITY,
   STAGE_CONFIGURE_ENVIRONMENT,
-  STAGE_VERIFY
+  STAGE_VERIFY,
+  buildDeleteStages,
+  OPERATION_KIND_CREATE,
+  OPERATION_KIND_DELETE,
+  STAGE_DELETE_RADIUS_ENV,
+  STAGE_DELETE_CREDENTIAL,
+  STAGE_DELETE_GITHUB_ENV,
+  STAGE_REVIEW_APP_REGISTRATION
 } from "./operations.js";
 
 describe("provider mutation recovery journal", () => {
@@ -1204,6 +1217,26 @@ function addSafeResumeRequest(op) {
   return op;
 }
 
+function newDeleteOp(requestOverrides = {}) {
+  const op = createOperation({
+    provider: "azure",
+    repo: "contoso/store",
+    environment: "dev",
+    kind: OPERATION_KIND_DELETE,
+    stages: buildDeleteStages({ includeAzureCleanup: true })
+  });
+  op.request = {
+    repo: op.repo,
+    environment: op.environment,
+    provider: op.provider,
+    clientId: "app-1",
+    tenantId: "tenant-1",
+    repoId: 42,
+    ...requestOverrides
+  };
+  return op;
+}
+
 describe("canonical environment identity", () => {
   it("keeps operation identity stable while canonicalizing downstream requests", () => {
     const op = newOp({ environment: "production" });
@@ -1443,6 +1476,64 @@ describe("stage inventory", () => {
     op.stages[0].state = "warning";
     enterStage(op, STAGE_VERIFY);
     expect(op.stages[0].state).toBe("warning");
+  });
+});
+
+describe("delete stage inventory", () => {
+  it("lists the full Azure teardown sequence in order", () => {
+    const stages = buildDeleteStages();
+    expect(stages.map((s) => s.id)).toEqual([
+      STAGE_DELETE_RADIUS_ENV,
+      STAGE_DELETE_CREDENTIAL,
+      STAGE_DELETE_GITHUB_ENV,
+      STAGE_REVIEW_APP_REGISTRATION
+    ]);
+    expect(
+      stages.every((s) => typeof s.label === "string" && s.label.length > 0)
+    ).toBe(true);
+    expect(stages.every((s) => s.state === "pending")).toBe(true);
+  });
+
+  it("omits the Azure-only credential and app-registration stages for non-Azure providers", () => {
+    const stages = buildDeleteStages({ includeAzureCleanup: false });
+    expect(stages.map((s) => s.id)).toEqual([
+      STAGE_DELETE_RADIUS_ENV,
+      STAGE_DELETE_GITHUB_ENV
+    ]);
+  });
+});
+
+describe("operation kind", () => {
+  it("defaults to the create kind", () => {
+    expect(newOp().kind).toBe(OPERATION_KIND_CREATE);
+  });
+
+  it("stamps the delete kind when requested", () => {
+    const op = newOp({ kind: OPERATION_KIND_DELETE });
+    expect(op.kind).toBe(OPERATION_KIND_DELETE);
+  });
+
+  it("rejects an unknown kind and falls back to create", () => {
+    const op = newOp({ kind: "sideways" });
+    expect(op.kind).toBe(OPERATION_KIND_CREATE);
+  });
+
+  it("surfaces the kind in the client projection", () => {
+    const created = newOp();
+    const deleted = newOp({ kind: OPERATION_KIND_DELETE });
+    expect(toClientView(created).kind).toBe(OPERATION_KIND_CREATE);
+    expect(toClientView(deleted).kind).toBe(OPERATION_KIND_DELETE);
+  });
+
+  it("round-trips the kind through persistence", () => {
+    const op = newOp({ kind: OPERATION_KIND_DELETE });
+    expect(toPersistedOperation(op).kind).toBe(OPERATION_KIND_DELETE);
+  });
+
+  it("treats a persisted record with no kind as a create for backward compatibility", () => {
+    const op = newOp();
+    delete op.kind;
+    expect(toClientView(op).kind).toBe(OPERATION_KIND_CREATE);
   });
 });
 
@@ -1894,6 +1985,98 @@ describe("summaries and announcements", () => {
     expect(announcementLevel("failed_partial")).toBe("warning");
     expect(announcementLevel("failed")).toBe("error");
   });
+
+  it("words the summary for a delete operation rather than a create", () => {
+    const running = newOp({
+      kind: OPERATION_KIND_DELETE,
+      stages: buildDeleteStages()
+    });
+    enterStage(running, STAGE_DELETE_RADIUS_ENV);
+    expect(summarize(running)).toBe(
+      "Deleting dev — delete radius environment…"
+    );
+
+    const succeeded = newOp({
+      kind: OPERATION_KIND_DELETE,
+      stages: buildDeleteStages()
+    });
+    finishSucceeded(succeeded);
+    expect(summarize(succeeded)).toBe('Environment "dev" deleted.');
+
+    const withWarnings = newOp({
+      kind: OPERATION_KIND_DELETE,
+      stages: buildDeleteStages()
+    });
+    addStep(withWarnings, { label: "a", warning: { code: "x", message: "y" } });
+    finishSucceeded(withWarnings);
+    expect(summarize(withWarnings)).toBe(
+      'Environment "dev" deleted, with 1 warning.'
+    );
+
+    const failed = newOp({
+      kind: OPERATION_KIND_DELETE,
+      stages: buildDeleteStages()
+    });
+    finish(failed, "failed", {
+      failure: { code: "boom", message: "no" }
+    });
+    expect(summarize(failed)).toBe('Deleting environment "dev" failed.');
+  });
+
+  it("words every terminal and fallback state for a delete operation", () => {
+    const make = (mutate: (op: ReturnType<typeof newOp>) => void) => {
+      const op = newOp({
+        kind: OPERATION_KIND_DELETE,
+        stages: buildDeleteStages()
+      });
+      mutate(op);
+      return op;
+    };
+
+    // succeeded_with_warnings pluralises correctly for more than one warning.
+    const twoWarnings = make((op) => {
+      addStep(op, { label: "a", warning: { code: "x", message: "y" } });
+      addStep(op, { label: "b", warning: { code: "z", message: "w" } });
+      finishSucceeded(op);
+    });
+    expect(summarize(twoWarnings)).toBe(
+      'Environment "dev" deleted, with 2 warnings.'
+    );
+
+    // action_required uses the terminal user message when present, else a
+    // delete-worded fallback.
+    const actionWithMessage = make((op) => {
+      op.state = "action_required";
+      op.terminal = { userMessage: "Approve the teardown PR." };
+    });
+    expect(summarize(actionWithMessage)).toBe("Approve the teardown PR.");
+    const actionFallback = make((op) => {
+      op.state = "action_required";
+      op.terminal = null;
+    });
+    expect(summarize(actionFallback)).toBe(
+      'Deleting "dev" needs one more step from you.'
+    );
+
+    const failedPartial = make((op) => {
+      op.state = "failed_partial";
+    });
+    expect(summarize(failedPartial)).toBe(
+      'Deleting environment "dev" failed partway through — some resources may remain.'
+    );
+
+    const cancelled = make((op) => {
+      op.state = "cancelled";
+    });
+    expect(summarize(cancelled)).toBe(
+      'Deleting environment "dev" was stopped.'
+    );
+
+    const unknown = make((op) => {
+      op.state = "some-unknown-state";
+    });
+    expect(summarize(unknown)).toBe("");
+  });
 });
 
 describe("client projection", () => {
@@ -2313,6 +2496,17 @@ describe("registry", () => {
     });
   });
 
+  it("matches active deletion environments without affecting setup operations", () => {
+    const deletion = newDeleteOp();
+    deletion.environment = "  Dev  ";
+    expect(matchDeleteOperationEnvironment(deletion, "dev")).toBe(deletion);
+    expect(matchDeleteOperationEnvironment(deletion, "prod")).toBeNull();
+    expect(
+      matchDeleteOperationEnvironment(newOp({ environment: "dev" }), "dev")
+    ).toBeNull();
+    expect(matchDeleteOperationEnvironment(null, "dev")).toBeNull();
+  });
+
   it("allows a new operation once a successful previous operation is terminal", () => {
     const reg = createRegistry();
     const first = newOp();
@@ -2704,6 +2898,71 @@ describe("registry", () => {
     expect(reg.running("contoso/store")).toBeNull();
   });
 
+  it("keeps a dismissed terminal record in history without redisplaying it", () => {
+    const reg = createRegistry({
+      clock: () => new Date("2026-08-25T21:00:00.000Z").getTime()
+    });
+    const older = newOp();
+    older.operationId = "older-operation";
+    older.startedAt = "2026-08-25T20:50:00.000Z";
+    older.lastActivityAt = older.startedAt;
+    reg.start(older);
+    finishSucceeded(older);
+    older.endedAt = "2026-08-25T20:51:00.000Z";
+    const op = newDeleteOp();
+    reg.start(op);
+    for (const stage of op.stages) stage.state = "succeeded";
+    finishSucceeded(op);
+    op.endedAt = "2026-08-25T20:55:00.000Z";
+
+    dismissOperation(op);
+
+    expect(reg.latest(op.repo)).toBeNull();
+    expect(reg.latestAny()).toBeNull();
+    expect(reg.get(op.operationId)).toBe(op);
+    expect(reg.get(older.operationId)).toBe(older);
+    expect(fromPersistedOperation(toPersistedOperation(op)).dismissedAt).toBe(
+      op.dismissedAt
+    );
+  });
+
+  it("dismisses a completed deletion with warnings even when retry remains available", () => {
+    const op = newDeleteOp();
+    op.stages[0].state = "succeeded";
+    op.stages[1].state = "warning";
+    finish(op, "succeeded_with_warnings");
+
+    expect(canDismissOperation(op)).toBe(true);
+    dismissOperation(op);
+    expect(op.dismissedAt).toEqual(expect.any(String));
+  });
+
+  it("does not dismiss a failed partial deletion that still offers retry", () => {
+    const op = newDeleteOp();
+    finish(op, "failed_partial", {
+      failure: { code: "credential-delete-failed" }
+    });
+
+    expect(canDismissOperation(op)).toBe(false);
+    dismissOperation(op);
+    expect(op.dismissedAt).toBeUndefined();
+  });
+
+  it("redisplays a dismissed operation when retry reopens it", () => {
+    const op = newDeleteOp();
+    finish(op, "failed_partial", {
+      failure: { code: "credential-delete-failed" }
+    });
+    dismissOperation(op);
+    const retrySnapshot = snapshotRetryState(op);
+
+    beginRetryAttempt(op, "deletion");
+    expect(op.dismissedAt).toBeNull();
+
+    rollbackRetryAttempt(op, retrySnapshot);
+    expect(op.dismissedAt).toBe(retrySnapshot.dismissedAt);
+  });
+
   it("prefers the running operation over an older finished one", () => {
     const reg = createRegistry();
     const done = newOp();
@@ -2747,6 +3006,65 @@ describe("registry", () => {
       operationId: op.operationId,
       recoveryState: "waiting_input"
     });
+  });
+
+  it("serializes saves so a newer dismissal cannot be overwritten", async () => {
+    const saved: any[] = [];
+    const releases: Array<() => void> = [];
+    const store = {
+      load: () => Promise.resolve(null),
+      save(envelope: any) {
+        saved.push(envelope);
+        return new Promise<void>((resolve) => {
+          releases.push(resolve);
+        });
+      }
+    };
+    const reg = createRegistry({ store });
+    const op = newOp();
+    reg.put(op);
+    finishSucceeded(op);
+
+    const terminalSave = reg.persist();
+    await Promise.resolve();
+    dismissOperation(op);
+    const dismissalSave = reg.persist();
+
+    expect(saved).toHaveLength(1);
+    releases.shift()?.();
+    await terminalSave;
+    await Promise.resolve();
+    expect(saved).toHaveLength(2);
+    releases.shift()?.();
+    await dismissalSave;
+
+    expect(saved[0].operations[0].dismissedAt).toBeUndefined();
+    expect(saved[1].operations[0].dismissedAt).toBe(op.dismissedAt);
+  });
+
+  it("hydrates a mid-stage delete operation as resumable through the store", async () => {
+    let envelope = null;
+    const store = {
+      async load() {
+        return envelope;
+      },
+      async save(next) {
+        envelope = structuredClone(next);
+      }
+    };
+    const first = createRegistry({ store });
+    const op = newDeleteOp();
+    enterStage(op, STAGE_DELETE_CREDENTIAL);
+    first.put(op);
+    await first.persist();
+
+    const restored = createRegistry({ store });
+    await restored.hydrate();
+    const back = restored.get(op.operationId);
+    expect(back.state).toBe("running");
+    expect(back.endedAt).toBeNull();
+    expect(back.recoveryState).toBe("interrupted");
+    expect(back.request).toMatchObject({ clientId: "app-1" });
   });
 
   it("skips invalid persisted records, reports them, and rewrites a clean envelope", async () => {
@@ -3317,6 +3635,67 @@ describe("startup reconciliation", () => {
     expect(canStartRollback(op).ok).toBe(true);
     expect(canExitSetup(op).ok).toBe(true);
   });
+
+  it("persists a typed delete-recovery request for delete operations only", () => {
+    const del = newDeleteOp({
+      credentialConsumerRetirementReady: true
+    });
+    const record = toPersistedOperation(del);
+    expect(record.deleteRecovery).toMatchObject({
+      repo: "contoso/store",
+      environment: "dev",
+      provider: "azure",
+      clientId: "app-1",
+      tenantId: "tenant-1",
+      repoId: 42,
+      credentialConsumerRetirementReady: true
+    });
+    // The broad, secret-bearing `request` itself is never persisted.
+    expect(record.request).toBeUndefined();
+
+    const create = newOp();
+    create.request = { clientId: "app-1" };
+    expect(toPersistedOperation(create).deleteRecovery).toBeUndefined();
+  });
+
+  it("keeps a mid-stage delete operation live so the recovery scheduler resumes it", () => {
+    const op = newDeleteOp();
+    enterStage(op, STAGE_DELETE_CREDENTIAL);
+    // Round-trip through the store: the broad request is dropped, the typed
+    // deleteRecovery survives.
+    const restored = fromPersistedOperation(toPersistedOperation(op));
+    expect(restored.request).toBeUndefined();
+    expect(restored.deleteRecovery).toMatchObject({
+      clientId: "app-1",
+      tenantId: "tenant-1",
+      repoId: 42
+    });
+
+    reconcileRestoredOperation(restored);
+
+    expect(restored.state).toBe("running");
+    expect(restored.endedAt).toBeNull();
+    expect(restored.recoveryState).toBe("interrupted");
+    // The clientId the later stages need is rebuilt from deleteRecovery.
+    expect(restored.request).toMatchObject({
+      clientId: "app-1",
+      tenantId: "tenant-1",
+      repoId: 42
+    });
+    // The interrupted stage is reset to pending so the resume-safe runner re-runs it.
+    expect(
+      restored.stages.find((s) => s.id === STAGE_DELETE_CREDENTIAL).state
+    ).toBe("pending");
+  });
+
+  it("falls back to failed_partial for a delete op with no recoverable request", () => {
+    const op = newDeleteOp();
+    delete op.request;
+    const restored = fromPersistedOperation(toPersistedOperation(op));
+    expect(restored.deleteRecovery).toBeUndefined();
+    reconcileRestoredOperation(restored);
+    expect(restored.state).toBe("failed_partial");
+  });
 });
 
 describe("keepalive predicate", () => {
@@ -3541,6 +3920,36 @@ describe("keepalive predicate", () => {
     op.verification = { dispatchedAt: Date.now() - 20 * 60 * 1000 };
     op.lastActivityAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
     expect(isStale(op)).toBe(true);
+  });
+});
+
+describe("touchOperation", () => {
+  it("refreshes lastActivityAt so a heartbeat keeps a live op from going stale", () => {
+    const op = newOp();
+    op.lastActivityAt = new Date(Date.now() - 20 * 60 * 1000).toISOString();
+    expect(isStale(op)).toBe(true);
+    touchOperation(op);
+    expect(isStale(op)).toBe(false);
+  });
+
+  it("writes the provided timestamp", () => {
+    const op = newOp();
+    const now = new Date("2026-08-20T12:00:00Z").toISOString();
+    touchOperation(op, now);
+    expect(op.lastActivityAt).toBe(now);
+  });
+
+  it("leaves a terminal record untouched", () => {
+    const op = newOp();
+    finishSucceeded(op);
+    const before = op.lastActivityAt;
+    touchOperation(op, new Date(Date.now() + 60 * 1000).toISOString());
+    expect(op.lastActivityAt).toBe(before);
+  });
+
+  it("is a no-op for a nullish operation", () => {
+    expect(touchOperation(null)).toBeNull();
+    expect(touchOperation(undefined)).toBeUndefined();
   });
 });
 
@@ -4185,6 +4594,25 @@ describe("durable stop", () => {
     expect(restored.recoveryState).toBe("stopped");
     expect(restored.control.stop.boundary).toBe("restart_recovery");
   });
+
+  it("never cancels a delete operation through the restart stop boundary", () => {
+    // A delete op exposes no stop control, but a stop recorded against it (via a
+    // crafted request) must not be honored through the create-side cancel path
+    // on restart: that would strand a half-deleted environment because the
+    // delete recovery scheduler skips terminal records. The delete resume branch
+    // owns the restart instead, keeping the op live and recoverable.
+    const op = newDeleteOp();
+    for (const stage of op.stages) {
+      if (stage.id === op.currentStage) stage.state = "running";
+    }
+    requestStop(op);
+    const restored = reconcileRestoredOperation(
+      fromPersistedOperation(toPersistedOperation(op))
+    );
+    expect(restored.state).not.toBe("cancelled");
+    expect(isTerminalState(restored.state)).toBe(false);
+    expect(restored.recoveryState).toBe("interrupted");
+  });
 });
 
 describe("command identity and idempotency", () => {
@@ -4303,7 +4731,12 @@ describe("schema version 2 migration", () => {
       ]
     });
     expect(control.commands.map((entry) => entry.commandId)).toEqual(["ok"]);
-    expect(control.attempts).toEqual({ setup: 1, verification: 3, cleanup: 0 });
+    expect(control.attempts).toEqual({
+      setup: 1,
+      verification: 3,
+      cleanup: 0,
+      deletion: 0
+    });
     expect(control.outcomes).toHaveLength(1);
     expect(control.stop.acknowledgedAt).toBeNull();
     expect(readOperationControl(null)).toEqual(createOperationControl());
@@ -4328,6 +4761,7 @@ describe("schema version 2 migration", () => {
       idempotency: { "idem:op_1:retry_setup:2:setup": "setup" },
       outcomes: []
     });
+
     expect(control.commands).toEqual([
       {
         kind: "retry_setup",
@@ -4342,6 +4776,49 @@ describe("schema version 2 migration", () => {
     ]);
     expect(control).not.toHaveProperty("idempotency");
     expect(control.attempts.setup).toBe(2);
+  });
+
+  it("restores the durable deletion retry command and attempt history", () => {
+    const control = readOperationControl({
+      attempts: { setup: 1, verification: 0, cleanup: 0, deletion: 2 },
+      commands: [
+        {
+          kind: "retry_deletion",
+          commandId: "op_delete:retry_deletion:2:delete_federated_credential",
+          attempt: 2,
+          target: "delete_federated_credential",
+          state: "running",
+          acceptedAt: "2026-01-01T00:00:00.000Z",
+          completedAt: null,
+          outcome: null
+        }
+      ],
+      outcomes: [
+        {
+          kind: "deletion",
+          attempt: 1,
+          state: "failed_partial",
+          code: "credential-delete-failed",
+          recordedAt: "2026-01-01T00:00:00.000Z"
+        }
+      ]
+    });
+
+    expect(control.attempts.deletion).toBe(2);
+    expect(control.commands).toEqual([
+      expect.objectContaining({
+        kind: "retry_deletion",
+        state: "running",
+        attempt: 2
+      })
+    ]);
+    expect(control.outcomes).toEqual([
+      expect.objectContaining({
+        kind: "deletion",
+        state: "failed_partial",
+        code: "credential-delete-failed"
+      })
+    ]);
   });
 
   it("creates the control record on demand for a legacy in-memory operation", () => {
@@ -4873,6 +5350,125 @@ describe("action projection", () => {
     expect(stop.description).toContain("before the next step");
     requestStop(op);
     expect(projectOperationActions(op)[0].pending).toBe(true);
+  });
+
+  it("offers no setup or pause controls for a live delete operation", () => {
+    const running = newDeleteOp();
+    expect(projectOperationActions(running)).toEqual([]);
+    requestStop(running);
+    expect(projectOperationActions(running)).toEqual([]);
+  });
+
+  it("offers only Retry deletion when teardown has unfinished stages", () => {
+    const failed = newDeleteOp();
+    enterStage(failed, failed.stages[0].id);
+    setStageState(failed, failed.stages[0].id, "failed");
+    finish(failed, "failed_partial", {
+      failure: { code: "operation-stalled" }
+    });
+    expect(projectOperationActions(failed)).toEqual([
+      expect.objectContaining({
+        id: "retry-deletion",
+        kind: "retry_deletion",
+        label: "Retry Deletion",
+        path: `/api/operations/${failed.operationId}/retry/deletion`,
+        requiresConfirmation: false,
+        resumeFrom: failed.stages[0].id
+      })
+    ]);
+
+    const succeeded = newDeleteOp();
+    for (const stage of succeeded.stages) stage.state = "succeeded";
+    finishSucceeded(succeeded);
+    expect(projectOperationActions(succeeded)).toEqual([]);
+  });
+
+  it("projects deletion language even when legacy setup commands are present", () => {
+    const failed = newDeleteOp();
+    enterStage(failed, failed.stages[0].id);
+    setStageState(failed, failed.stages[0].id, "failed");
+    failed.control.commands.push({
+      kind: "retry_setup",
+      commandId: `${failed.operationId}:retry_setup:2:setup`,
+      attempt: 2,
+      target: "setup",
+      state: "finished",
+      acceptedAt: failed.startedAt,
+      completedAt: failed.startedAt,
+      outcome: "failed_partial"
+    });
+    finish(failed, "failed_partial", {
+      failure: { code: "radius-env-delete-failed" }
+    });
+
+    expect(projectOperationHeadline(failed)).toEqual({
+      code: "deletion-incomplete",
+      title: "Deletion could not continue",
+      message:
+        "Radius stopped at Delete Radius environment. Review the error, then retry deletion. Completed stages will be skipped."
+    });
+    expect(projectActionGuidance(failed)).toEqual([]);
+  });
+
+  it("projects an active deletion retry before generic deletion progress", () => {
+    const op = newDeleteOp();
+    op.control.commands.push({
+      kind: "retry_deletion",
+      commandId: `${op.operationId}:retry_deletion:1:${op.stages[0].id}`,
+      attempt: 1,
+      target: op.stages[0].id,
+      state: "accepted",
+      acceptedAt: op.startedAt,
+      completedAt: null,
+      outcome: null
+    });
+
+    expect(projectNextTransition(op)).toEqual({
+      code: "retrying-deletion",
+      message: "Retrying the unfinished environment deletion steps…"
+    });
+  });
+
+  it("resets only unfinished delete stages for a retry", () => {
+    const op = newDeleteOp();
+    op.stages[0].state = "succeeded";
+    op.stages[1].state = "failed";
+    op.stages[2].state = "skipped";
+    op.stages[3].state = "succeeded";
+    addStep(op, {
+      stage: op.stages[0].id,
+      kind: "mutation",
+      label: "Radius environment deleted",
+      state: "succeeded"
+    });
+    addStep(op, {
+      stage: op.stages[1].id,
+      kind: "warning",
+      label: "Credential delete failed",
+      state: "warning"
+    });
+    finish(op, "failed_partial", {
+      failure: { code: "credential-delete-failed" }
+    });
+
+    expect(canRetryDeletion(op)).toMatchObject({
+      ok: true,
+      resumeFrom: op.stages[1].id
+    });
+    beginRetryAttempt(op, "deletion");
+    applyDeletionRetry(op);
+
+    expect(op.stages.map((stage) => stage.state)).toEqual([
+      "succeeded",
+      "pending",
+      "pending",
+      "succeeded"
+    ]);
+    expect(op.currentStage).toBe(op.stages[1].id);
+    expect(op.steps.map((step) => step.label)).toEqual([
+      "Radius environment deleted"
+    ]);
+    expect(op.control.attempts.deletion).toBe(1);
   });
 
   it("explains the immediate stop while a prompt is open", () => {
