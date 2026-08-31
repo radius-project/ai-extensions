@@ -97,6 +97,11 @@ export function environmentsPaneMarkup(
     <details id="env-progress-details" class="env-progress__details">
       <summary>Show details</summary>
       <ol id="env-progress-steps" class="env-progress__steps"></ol>
+      <div id="env-progress-diagnostics" class="env-progress__diagnostics" style="display:none;">
+        <button type="button" id="env-progress-diagnostics-open" class="rad-btn rad-btn--secondary" aria-describedby="env-progress-diagnostics-note">Download diagnostic snapshot</button>
+        <span id="env-progress-diagnostics-note" class="env-progress__diagnostics-note">Captures this paused or unsuccessful state in a local, redacted JSON file. Radius does not upload it.</span>
+        <span id="env-progress-diagnostics-status" class="env-progress__diagnostics-status" role="status" aria-live="polite"></span>
+      </div>
       <!-- Resource inventory stays inside Details while work is active. The
            renderer exposes it only for a terminal decision state — a stopped or
            partially failed attempt the customer must continue or roll back. A
@@ -134,6 +139,46 @@ export function environmentsPaneMarkup(
     <div id="env-progress-actions" class="env-progress__actions" style="display:none;">
       <div id="env-progress-bottom-buttons" class="env-progress__bottom-buttons"></div>
       <button type="button" id="env-progress-dismiss" class="rad-btn rad-btn--secondary" aria-label="Dismiss completed environment setup progress">Dismiss</button>
+    </div>
+  </div>
+  <div id="env-diagnostics-modal" role="dialog" aria-modal="true" aria-labelledby="env-diagnostics-title" aria-describedby="env-diagnostics-intro" style="display:none; position:fixed; inset:0; z-index:1004; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
+    <div class="env-diagnostics__panel">
+      <div id="env-diagnostics-title" class="env-diagnostics__title" tabindex="-1">Download diagnostic snapshot</div>
+      <div id="env-diagnostics-intro" class="env-diagnostics__intro">Review what the local file will contain. Radius does not upload it.</div>
+      <section aria-labelledby="env-diagnostics-always-title">
+        <div id="env-diagnostics-always-title" class="env-diagnostics__section-title">Always included</div>
+        <ul class="env-diagnostics__list">
+          <li>Product and operation schema versions</li>
+          <li>Operation states, stages, timing, attempts, and safe classifications</li>
+          <li>Recovery, mutation, verification, and cleanup summaries</li>
+          <li>No tokens, secrets, command output, logs, credential profile names, or local paths</li>
+        </ul>
+      </section>
+      <div class="env-diagnostics__option">
+        <input type="checkbox" id="env-diagnostics-include-identifiers">
+        <label for="env-diagnostics-include-identifiers">Include contextual identifiers</label>
+      </div>
+      <div id="env-diagnostics-context-note" class="env-diagnostics__intro">Repository, branch, environment, and GitHub login can help support diagnose account and branch mismatches.</div>
+      <div id="env-diagnostics-preview" class="env-diagnostics__preview" style="display:none;">
+        <div class="env-diagnostics__section-title">Review identifiers that will be included</div>
+        <dl class="env-diagnostics__identifiers">
+          <dt>Repository</dt><dd id="env-diagnostics-repository"></dd>
+          <dt>Branch</dt><dd id="env-diagnostics-branch"></dd>
+          <dt>Environment</dt><dd id="env-diagnostics-environment"></dd>
+          <dt>GitHub account</dt><dd id="env-diagnostics-github-login"></dd>
+        </dl>
+        <div class="env-diagnostics__warning">These values may identify people, customers, or private projects. Treat them as untrusted data.</div>
+        <div id="env-diagnostics-review-block" class="env-diagnostics__option">
+          <input type="checkbox" id="env-diagnostics-reviewed-identifiers">
+          <label for="env-diagnostics-reviewed-identifiers">I reviewed these identifiers</label>
+        </div>
+      </div>
+      <div id="env-diagnostics-status" class="env-diagnostics__status" role="status" aria-live="polite"></div>
+      <div id="env-diagnostics-error" class="env-diagnostics__error" role="alert"></div>
+      <div class="env-diagnostics__buttons">
+        <button type="button" id="env-diagnostics-cancel" class="rad-btn rad-btn--neutral">Cancel</button>
+        <a id="env-diagnostics-download" class="rad-btn rad-btn--primary" download="radius-environment-operation-diagnostics.json" aria-disabled="true">Download snapshot</a>
+      </div>
     </div>
   </div>
   <!-- Rollback confirmation. Removing cloud resources cannot be undone, so the

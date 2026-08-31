@@ -12,6 +12,8 @@ Manual testing remains required only where local fakes cannot prove the behavior
 
 Use disposable Azure and GitHub resources for these checks. Automated tests remain authoritative for deterministic state transitions and persistence behavior.
 
+The complete opt-in live matrix, evidence fields, restart and rollback protocols, and honest gate statuses live in [`docs/eng/ENVIRONMENT_CREATION_READINESS.md`](../../docs/eng/ENVIRONMENT_CREATION_READINESS.md). Do not run those cases without the recorded environment, identity, cost, cleanup, and operator approvals. Customer and support recovery guidance, including the local diagnostic download and manual-cleanup order, lives in [`docs/eng/ENVIRONMENT_CREATION_SUPPORT.md`](../../docs/eng/ENVIRONMENT_CREATION_SUPPORT.md).
+
 ## Chromium Canvas checks
 
 Install the supported browser once with `pnpm exec playwright install chromium`, then run `pnpm run test:chromium`.

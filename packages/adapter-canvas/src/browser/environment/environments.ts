@@ -47,6 +47,12 @@ export interface EnvironmentPaneDependencies {
   ): void;
   currentInfraSelection?(provider: "azure" | "aws"): EnvironmentInfrastructure;
   canSubmit?(): boolean;
+  // Deletion is an async operation (Radius env delete, credential cleanup,
+  // GitHub env delete, app-registration cleanup). The page composes the
+  // operation-progress controller, so once the request is accepted the pane
+  // hands the environment and provider back to follow it to a terminal state
+  // in the shared progress panel.
+  startDeleteProgress(environment: string, provider: string): void;
 }
 
 export interface EnvironmentDecisionPort {
@@ -99,6 +105,7 @@ export function environmentStatusMarkup(status: string): string {
     failed: "Failed",
     pending: "Pending",
     unverified: "Unverified",
+    deleting: "Deleting…",
     unknown: "Available"
   };
   return labels[status] ?? labels.pending;
@@ -156,6 +163,12 @@ export function environmentRowsMarkup(
       const provider = environment.provider || "—";
       const credentials = environment.credentialProfile || "—";
       const name = escapeBrowserHtml(environment.name);
+      // A delete already running for this environment fails closed: the Delete
+      // action is greyed out so a second deletion can't be started on top of
+      // the first while cleanup is in flight.
+      const deleting = environment.status === "deleting";
+      const deleteAttrs =
+        deleting ? ' disabled title="This environment is being deleted."' : "";
       return (
         "<tr>" +
         `<td class="rad-table__env">${name}</td>` +
@@ -165,7 +178,7 @@ export function environmentRowsMarkup(
         '<td class="rad-table__actions">' +
         `<button class="rad-link js-edit-env" data-env="${name}" style="background:none; border:none; padding:0; margin:0; font:inherit; cursor:pointer;">edit</button>` +
         `<button class="rad-btn rad-btn--neutral js-plan-deployment" data-env="${name}" style="margin:0;">Plan Deployment</button>` +
-        `<button class="rad-btn rad-btn--danger-outline js-delete-env" data-env="${name}" style="margin:0;">Delete Env</button>` +
+        `<button class="rad-btn rad-btn--danger-outline js-delete-env" data-env="${name}" style="margin:0;"${deleteAttrs}>Delete Env</button>` +
         "</td></tr>"
       );
     })
@@ -283,7 +296,11 @@ export function initializeEnvironmentPane(
     banner.scrollIntoView({ block: "nearest" });
   };
 
-  const deleteEnvironment = (name: string, button: DomElement): void => {
+  const deleteEnvironment = (
+    name: string,
+    provider: string,
+    button: DomElement
+  ): void => {
     setButtonState(button, true, "Deleting…");
     void context.net
       .fetch(ENVIRONMENT_DELETE_PATH, {
@@ -326,7 +343,11 @@ export function initializeEnvironmentPane(
             );
             return;
           }
-          loadEnvironmentTable();
+          // The request was accepted; deletion now runs as a tracked
+          // operation. Follow it in the shared progress panel instead of
+          // refreshing the table immediately, so cleanup and any failure are
+          // surfaced the same way as environment creation.
+          dependencies.startDeleteProgress(name, provider);
         },
         () => {
           if (!active) return;
@@ -373,13 +394,18 @@ export function initializeEnvironmentPane(
       ".js-delete-env"
     )) {
       bind(rows, button, "click", () => {
+        // A disabled Delete button (an environment mid-deletion) is inert: never
+        // start a second deletion on top of one already running.
+        if (Reflect.get(button, "disabled") === true) return;
         const name = button.getAttribute("data-env") ?? "";
         if (!name) return;
+        const environment = environmentRows.find((row) => row.name === name);
+        const provider = environment?.provider ?? "";
         options.confirmDialog?.show({
           title: "Delete environment?",
-          message: `This deletes the GitHub environment "${name}" and its Radius configuration. Applications already deployed to it must be deleted first.`,
+          message: `This deletes the GitHub environment "${name}", removes the Radius environment from the cluster, and permanently deletes the environment's federated credential from its Azure app registration (which may be shared). Applications already deployed to it must be deleted first.`,
           confirmLabel: "Delete environment",
-          onConfirm: () => deleteEnvironment(name, button)
+          onConfirm: () => deleteEnvironment(name, provider, button)
         });
       });
     }
@@ -416,7 +442,11 @@ export function initializeEnvironmentPane(
           body.innerHTML = environmentRowsMarkup(environments);
           wireRows();
           if (
-            environments.some((environment) => environment.status === "pending")
+            environments.some(
+              (environment) =>
+                environment.status === "pending" ||
+                environment.status === "deleting"
+            )
           ) {
             pollTimer = context.clock.setTimeout(
               loadEnvironmentTable,
@@ -624,6 +654,18 @@ export function initializeEnvironmentPane(
       const banner = context.dom.byId("env-action-banner");
       const text = context.dom.byId("env-action-banner-text");
       if (!banner || !text) return;
+      // A delete operation that stopped because the environment still has
+      // deployed applications carries a ready-to-render message; show it
+      // verbatim rather than the create-flow "is set up, one step left"
+      // guidance, which does not apply to a halted deletion.
+      if (readString(terminal, "code") === "environment-has-applications") {
+        text.textContent =
+          readString(terminal, "userMessage") ||
+          "This environment still has one or more deployed applications. Delete the application(s) first, then delete the environment.";
+        banner.style.display = "flex";
+        banner.scrollIntoView({ block: "nearest" });
+        return;
+      }
       const hasPullRequest = /^https:\/\/github\.com\//.test(pullRequestUrl);
       let html = `<strong>${escapeBrowserHtml(
         providerLabel(provider)
