@@ -85,7 +85,8 @@ function writeRepository({ catalog = marketplace(), manifest } = {}) {
   // tracked manifests beside the built dist it publishes from.
   writeJson(join(root, "plugins", "radius", "package.json"), {
     name: "radius",
-    version: VERSION
+    version: VERSION,
+    scripts: { "test:artifact": "echo tested" }
   });
   writeJson(join(root, "plugins", "radius", "plugin.json"), {
     name: "radius",
@@ -305,6 +306,30 @@ describe("scripts/awesome-copilot.mjs", () => {
 
     expect(status).toBe(1);
     expect(stderr).toContain("between 1 and 10 keywords");
+  });
+
+  it("accepts a keyword at awesome-copilot's 30-character limit", () => {
+    const catalog = marketplace();
+    catalog.plugins[0].keywords = ["k".repeat(30)];
+
+    expect(
+      run(writeRepository({ catalog }), "--out", "listing", "--sha", SHA).status
+    ).toBe(0);
+  });
+
+  it("rejects a keyword above awesome-copilot's 30-character limit", () => {
+    const catalog = marketplace();
+    catalog.plugins[0].keywords = ["k".repeat(31)];
+    const { status, stderr } = run(
+      writeRepository({ catalog }),
+      "--out",
+      "listing",
+      "--sha",
+      SHA
+    );
+
+    expect(status).toBe(1);
+    expect(stderr).toContain("30 characters or fewer");
   });
 
   it("rejects a catalog with no owner to attribute", () => {

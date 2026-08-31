@@ -32,7 +32,12 @@ function writeJson(path, value) {
 function writePlugin(root, name, version, changelogVersions = [version]) {
   const dir = join(root, "plugins", name);
   mkdirSync(dir, { recursive: true });
-  writeJson(join(dir, "package.json"), { name, version, private: true });
+  writeJson(join(dir, "package.json"), {
+    name,
+    version,
+    private: true,
+    scripts: { "test:artifact": "echo tested" }
+  });
   writeJson(join(dir, "plugin.json"), { name, version });
   writeFileSync(join(dir, "README.md"), `${name}\n`);
   writeFileSync(

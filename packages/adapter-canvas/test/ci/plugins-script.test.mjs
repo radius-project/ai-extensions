@@ -39,7 +39,8 @@ function writeRepository(plugins) {
     if (packaged === null) continue;
     writeJson(join(root, "plugins", dir, "package.json"), {
       name: packaged,
-      version: "1.0.0"
+      version: "1.0.0",
+      scripts: { "test:artifact": "echo tested" }
     });
     writeJson(join(root, "plugins", dir, "plugin.json"), { name: packaged });
     writeFileSync(join(root, "plugins", dir, "README.md"), `${packaged}\n`);
@@ -231,6 +232,29 @@ describe("scripts/plugins.mjs", () => {
       'must be named "radius" in package.json and plugin.json'
     );
   });
+
+  it.each([
+    ["missing", undefined],
+    ["empty", "  "],
+    ["non-string", 7]
+  ])(
+    "rejects a plugin with a %s built-artifact smoke test",
+    (_label, script) => {
+      const root = writeRepository({ radius: "radius" });
+      writeJson(join(root, "plugins", "radius", "package.json"), {
+        name: "radius",
+        version: "1.0.0",
+        ...(script === undefined ?
+          {}
+        : { scripts: { "test:artifact": script } })
+      });
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("must define scripts.test:artifact");
+    }
+  );
 
   it("rejects a partial plugin instead of silently skipping it", () => {
     const root = writeRepository({ radius: null });

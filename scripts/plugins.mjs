@@ -3,8 +3,8 @@
 //
 // Plugins are discovered, not configured. A directory under `plugins/` becomes
 // shippable when package.json and plugin.json agree on its ref-safe name and it
-// has a README. Adding `plugins/radius-aws/` is therefore enough for the release
-// workflows to pick it up.
+// has a README and a `test:artifact` script. Adding such a directory is enough
+// for the release workflows to pick it up.
 //
 // Naming convention, applied uniformly so a second plugin can never collide
 // with the first:
@@ -80,22 +80,28 @@ export function listPlugins() {
       fail(`${plugin.dir} is not a safe plugin/ref name`);
     }
 
-    let packaged;
+    let packageJson;
     let manifested;
     try {
-      packaged = JSON.parse(
+      packageJson = JSON.parse(
         readFileSync(join(repoRoot, plugin.packageFile), "utf8")
-      ).name;
+      );
       manifested = JSON.parse(
         readFileSync(join(repoRoot, plugin.manifestFile), "utf8")
       ).name;
     } catch (error) {
       fail(`${plugin.dir} has invalid JSON: ${error.message}`);
     }
-    if (packaged !== plugin.name || manifested !== plugin.name) {
+    if (packageJson.name !== plugin.name || manifested !== plugin.name) {
       fail(
         `${plugin.dir} must be named "${plugin.name}" in package.json and plugin.json`
       );
+    }
+    if (
+      typeof packageJson.scripts?.["test:artifact"] !== "string" ||
+      packageJson.scripts["test:artifact"].trim() === ""
+    ) {
+      fail(`${plugin.packageFile} must define scripts.test:artifact`);
     }
     plugins.push(plugin);
   }

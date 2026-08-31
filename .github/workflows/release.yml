@@ -607,8 +607,9 @@ jobs:
             publish_latest=0
             prerelease=(--prerelease)
           elif git ls-remote --exit-code --heads origin "refs/heads/$PLUGIN_CHANNEL_BRANCH" >/dev/null 2>&1; then
-            git fetch --no-tags origin "refs/heads/$PLUGIN_CHANNEL_BRANCH:refs/remotes/origin/$PLUGIN_CHANNEL_BRANCH"
-            current="$(git show "refs/remotes/origin/$PLUGIN_CHANNEL_BRANCH:$PLUGIN_DIST/package.json" | jq -r .version)"
+            current_artifact="$(node scripts/verified-git.mjs inspect-artifact \
+              --branch "$PLUGIN_CHANNEL_BRANCH" --plugin "$PLUGIN_NAME")"
+            current="$(jq -r .version <<<"$current_artifact")"
             if [ "$(node scripts/version.mjs --plugin "$PLUGIN_NAME" --compare "$current")" -lt 0 ]; then
               echo "::notice::$PLUGIN_CHANNEL_BRANCH already publishes $current; leaving the rolling stable refs alone."
               publish_latest=0

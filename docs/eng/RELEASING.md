@@ -10,7 +10,7 @@ Three things follow from that, and they are the things to understand before rele
 2. **There are two channels.** Every merge to `main` refreshes the rolling **edge** channel automatically. A **stable** release is cut deliberately: a maintainer runs the Release workflow, and merging the pull request it opens publishes the release.
 3. **Every published bundle is attested and inventoried, and every published object is signed.** Both channels record signed [build provenance](https://github.com/actions/attest), and stable releases ship native SPDX output from [`pnpm sbom`](https://pnpm.io/cli/sbom). Every commit and tag the release writes is created through the GitHub API as the repository automation GitHub App, so GitHub signs it and it publishes as **Verified**. GitHub immutable releases are optional for now: draft-first assembly works in either mode, and setting repository variable `REQUIRE_IMMUTABLE_RELEASES=true` enables fail-closed enforcement later.
 
-Every published ref is namespaced by plugin name - `releases/<plugin>/<channel>` for branches and `<plugin>@<channel>` for tags - and [`scripts/plugins.mjs`](../../scripts/plugins.mjs) is the only place those names are built. Plugins are **discovered**, not configured: a directory under `plugins/` with matching `package.json` and `plugin.json` names plus a README is a shippable plugin. Names are restricted to the ref-safe external-plugin form. Adding `plugins/radius-aws/` needs no workflow change; each plugin versions, releases, and publishes independently.
+Every published ref is namespaced by plugin name - `releases/<plugin>/<channel>` for branches and `<plugin>@<channel>` for tags - and [`scripts/plugins.mjs`](../../scripts/plugins.mjs) is the only place those names are built. Plugins are **discovered**, not configured: a directory under `plugins/` with matching `package.json` and `plugin.json` names, a README, and a `test:artifact` script is a shippable plugin. Names are restricted to the ref-safe external-plugin form. Adding `plugins/radius-aws/` needs no workflow change; each plugin versions, releases, and publishes independently.
 
 | Channel    | Install ref                                                 | Version              | Refreshed                    |
 |------------|-------------------------------------------------------------|----------------------|------------------------------|
@@ -46,7 +46,7 @@ Each plugin package owns a `build` script that assembles its own `plugins/<name>
 | `.github/plugin/marketplace.json` `metadata`   | Independent marketplace version; plugin release commands preserve it.       |
 | `packages/*/package.json`                      | Not versioned - ignored by Changesets.                                      |
 
-`pnpm run version` remains the all-plugin local command. The release workflow uses `scripts/release-version.mjs`, which invokes the Changesets CLI directly with argv-safe `--ignore` arguments for every plugin outside the selected scope, then runs the same manifest synchronization. CI runs `pnpm run version:check`; `pnpm run version:sync` repairs drift across all plugins.
+`pnpm run version` remains the all-plugin local command. The release workflow uses `scripts/release-version.mjs`, which temporarily extends `.changeset/config.json`'s existing ignore list with every plugin outside the selected scope, invokes the Changesets CLI without `--ignore`, restores the original config bytes even when versioning fails, and then runs the same manifest synchronization. The temporary config is necessary because Changesets rejects CLI `--ignore` when the checked-in config already ignores internal packages. CI runs `pnpm run version:check`; `pnpm run version:sync` repairs drift across all plugins.
 
 Per-plugin commands take `--plugin <name>`. It may be omitted only while the repo ships exactly one plugin; the moment a second appears, every caller must say which one it means rather than silently acting on the wrong one.
 
@@ -108,7 +108,7 @@ graph LR
 Nothing in the release pipeline is keyed to `radius`, so a second plugin is a directory, not a workflow change:
 
 1. Create `plugins/<name>/` with a `package.json`, `plugin.json`, and non-empty `README.md`. Both manifest names must equal the lowercase, ref-safe directory name; consecutive `.` or `-` separators are rejected.
-2. Give that `package.json` a `build` script that assembles `plugins/<name>/dist/`.
+2. Give that `package.json` a `build` script that assembles `plugins/<name>/dist/` and a `test:artifact` script that smoke-tests the built output.
 3. Add its entry to `.github/plugin/marketplace.json` with `source.ref` of `<name>@edge`, then run `pnpm run version:sync`.
 
 `scripts/plugins.mjs` discovers it from there: `pnpm run version:check` covers it, the publish matrix builds and ships its own `releases/<name>/edge` and `<name>@edge`, and **Actions → Release** can cut it independently of every other plugin.

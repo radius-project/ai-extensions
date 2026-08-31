@@ -38,7 +38,11 @@ function repository({
     copyFileSync(source, join(root, "scripts", name));
   }
 
-  writeJson(join(plugin, "package.json"), { name: "radius", version: "1.2.0" });
+  writeJson(join(plugin, "package.json"), {
+    name: "radius",
+    version: "1.2.0",
+    scripts: { "test:artifact": "echo tested" }
+  });
   writeJson(join(plugin, "plugin.json"), { name: "radius", version: "1.2.0" });
   writeFileSync(join(plugin, "README.md"), "Radius source\n");
   writeJson(join(dist, "package.json"), {

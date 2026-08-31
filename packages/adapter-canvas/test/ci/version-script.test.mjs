@@ -53,7 +53,8 @@ function writePlugin(root, name, version = RELEASED) {
   writeJson(join(root, "plugins", name, "package.json"), {
     name,
     version,
-    private: true
+    private: true,
+    scripts: { "test:artifact": "echo tested" }
   });
   writeJson(join(root, "plugins", name, "plugin.json"), {
     name,

@@ -337,12 +337,11 @@ jobs:
       # Runs against the exact bundle uploaded below. This intentionally stays
       # after Build rather than relying on a pre-existing workspace artifact.
       # It reruns the build itself, so it needs the same stamp to leave dist/
-      # byte-identical to what Build produced. Optional: a plugin declares the
-      # script only if it has artifact-level checks.
+      # byte-identical to what Build produced.
       - name: Run built-artifact smoke tests
         env:
           PLUGIN_VERSION: ${{ steps.version.outputs.version }}
-        run: pnpm --filter "$PLUGIN_NAME" run --if-present test:artifact
+        run: pnpm --filter "$PLUGIN_NAME" run test:artifact
 
       - name: Verify the plugin dist is complete
         run: >-

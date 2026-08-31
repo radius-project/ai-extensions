@@ -30,7 +30,8 @@ function writePlugin(root, name) {
   writeJson(join(dir, "package.json"), {
     name,
     version: "1.0.0",
-    private: true
+    private: true,
+    scripts: { "test:artifact": "echo tested" }
   });
   writeJson(join(dir, "plugin.json"), { name, version: "1.0.0" });
   writeFileSync(join(dir, "README.md"), `${name}\n`);

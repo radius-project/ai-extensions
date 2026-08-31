@@ -123,14 +123,17 @@ async function api({
 }
 
 async function completionApi({
+  artifactBranch = "releases/radius/v1.2.0",
   artifactTarget = COMMIT,
   sourceTarget = SOURCE,
   commitVerified = true,
   parents = [],
   commitSource = SOURCE,
+  commitVersion,
   packageVersion = "1.2.0",
   catalogVersion = "1.2.0",
-  catalogRef = "releases/radius/v1.2.0",
+  catalogRef,
+  catalogPath = "plugins/radius/dist",
   releaseDraft = false,
   releaseAssets = [
     "radius-plugin.tar.gz",
@@ -139,6 +142,8 @@ async function completionApi({
   ]
 } = {}) {
   const calls = [];
+  const publishedVersion = commitVersion ?? packageVersion;
+  const publishedRef = catalogRef ?? artifactBranch;
   const jsonBlob = (value) => ({
     encoding: "base64",
     content: Buffer.from(`${JSON.stringify(value)}\n`).toString("base64")
@@ -157,7 +162,7 @@ async function completionApi({
       };
 
       const refs = {
-        "/git/ref/heads/releases/radius/v1.2.0": {
+        [`/git/ref/heads/${artifactBranch}`]: {
           type: "commit",
           sha: COMMIT
         },
@@ -184,7 +189,7 @@ async function completionApi({
       }
       if (route === `GET /git/commits/${COMMIT}`) {
         return send(200, {
-          message: `chore(release): radius@1.2.0 for ${commitSource}`,
+          message: `chore(release): radius@${publishedVersion} for ${commitSource}`,
           tree: { sha: TREE },
           parents,
           verification: {
@@ -229,7 +234,7 @@ async function completionApi({
               {
                 name: "radius",
                 version: catalogVersion,
-                source: { ref: catalogRef }
+                source: { ref: publishedRef, path: catalogPath }
               }
             ]
           })
@@ -264,7 +269,7 @@ function repository() {
   mkdirSync(join(root, "plugins", "radius"), { recursive: true });
   writeFileSync(
     join(root, "plugins", "radius", "package.json"),
-    '{"name":"radius","version":"1.2.0"}\n'
+    '{"name":"radius","version":"1.2.0","scripts":{"test:artifact":"echo tested"}}\n'
   );
   writeFileSync(
     join(root, "plugins", "radius", "plugin.json"),
@@ -440,6 +445,24 @@ describe("scripts/verified-git.mjs", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("refusing to publish a symlink");
     expect(result.stderr).toContain("dist/link.json");
+  });
+
+  it("refuses a file reached through an ancestor symlink outside the repo", async () => {
+    const root = repository();
+    const outside = mkdtempSync(join(tmpdir(), "radius-outside-repo-"));
+    roots.push(outside);
+    writeFileSync(join(outside, "secret.txt"), "outside\n");
+    symlinkSync(
+      outside,
+      join(root, "linked"),
+      process.platform === "win32" ? "junction" : "dir"
+    );
+    const { url } = await api();
+
+    const result = await run(root, url, commitArgs(["linked/secret.txt"]));
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("resolves outside the repository");
   });
 
   it.each([
@@ -779,7 +802,12 @@ describe("scripts/verified-git.mjs", () => {
 
       expect(result).toEqual({
         status: 0,
-        stdout: JSON.stringify({ commit: COMMIT, tree: TREE }),
+        stdout: JSON.stringify({
+          commit: COMMIT,
+          tree: TREE,
+          version: "1.2.0",
+          source: SOURCE
+        }),
         stderr: ""
       });
     });
@@ -808,6 +836,11 @@ describe("scripts/verified-git.mjs", () => {
       [
         "the wrong catalog ref",
         { catalogRef: "radius@latest" },
+        "does not publish"
+      ],
+      [
+        "the wrong catalog path",
+        { catalogPath: "plugins/other/dist" },
         "does not publish"
       ],
       ["a draft release", { releaseDraft: true }, "published GitHub release"],
@@ -851,7 +884,38 @@ describe("scripts/verified-git.mjs", () => {
       ]);
 
       expect(result.status).toBe(0);
-      expect(JSON.parse(result.stdout)).toEqual({ commit: COMMIT, tree: TREE });
+      expect(JSON.parse(result.stdout)).toEqual({
+        commit: COMMIT,
+        tree: TREE,
+        version: "1.2.0",
+        source: SOURCE
+      });
+    });
+
+    it("inspects a verified latest artifact before exposing its version", async () => {
+      const root = repository();
+      const branch = "releases/radius/latest";
+      const { url } = await completionApi({
+        artifactBranch: branch,
+        packageVersion: "2.0.0",
+        catalogVersion: "2.0.0"
+      });
+
+      const result = await run(root, url, [
+        "inspect-artifact",
+        "--branch",
+        branch,
+        "--plugin",
+        "radius"
+      ]);
+
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        commit: COMMIT,
+        tree: TREE,
+        version: "2.0.0",
+        source: SOURCE
+      });
     });
   });
 });

@@ -25,6 +25,8 @@
 //         verified, so a tag written by anything else is never reused.
 //   node scripts/verified-git.mjs verify-artifact --branch <branch>
 //         --plugin <name> --version <version> --source <sha>
+//   node scripts/verified-git.mjs inspect-artifact --branch <branch>
+//         --plugin <name>
 //   node scripts/verified-git.mjs verify-completion --plugin <name>
 //         --version <version> --source <sha>
 //
@@ -32,7 +34,7 @@
 // require a token with contents read.
 // GITHUB_REPOSITORY and GITHUB_API_URL come from the workflow environment.
 
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pluginRefs, repoRoot, requirePlugin } from "./plugins.mjs";
 
@@ -149,6 +151,7 @@ function collectFile(absolute, path, files) {
 function collect(paths) {
   if (paths.length === 0) fail("at least one --path is required");
   const files = [];
+  const canonicalRoot = realpathSync(repoRoot);
   for (const declared of paths) {
     if (isAbsolute(declared)) {
       fail(`--path must be repository-relative: ${declared}`);
@@ -158,7 +161,17 @@ function collect(paths) {
     if (within === "" || within.startsWith("..") || isAbsolute(within)) {
       fail(`--path escapes the repository: ${declared}`);
     }
-    collectFile(target, within.split(sep).join("/"), files);
+    const declaredStats = lstatSync(target, { throwIfNoEntry: false });
+    if (!declaredStats) fail(`--path does not exist: ${declared}`);
+    if (declaredStats.isSymbolicLink()) {
+      fail(`refusing to publish a symlink: ${declared}`);
+    }
+    const canonicalTarget = realpathSync(target);
+    const canonicalWithin = relative(canonicalRoot, canonicalTarget);
+    if (canonicalWithin.startsWith("..") || isAbsolute(canonicalWithin)) {
+      fail(`--path resolves outside the repository: ${declared}`);
+    }
+    collectFile(canonicalTarget, within.split(sep).join("/"), files);
   }
   if (files.length === 0) fail("the given paths contain no files");
   return files.sort((a, b) => (a.path < b.path ? -1 : 1));
@@ -304,11 +317,6 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
     fail(`${branch} must point at a zero-parent commit`);
   }
 
-  const expectedMessage = `chore(release): ${plugin.name}@${version} for ${source}`;
-  if (commit.message !== expectedMessage) {
-    fail(`${branch} does not record ${plugin.name}@${version} from ${source}`);
-  }
-
   const treeSha = requireSha(commit.tree?.sha, `${branch} tree`);
   const tree = await api("GET", `/git/trees/${treeSha}?recursive=1`);
   if (tree.truncated === true || !Array.isArray(tree.tree)) {
@@ -330,8 +338,28 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
     files.find((entry) => entry.path === packagePath),
     packagePath
   );
-  if (packageJson.name !== plugin.name || packageJson.version !== version) {
+  if (
+    packageJson.name !== plugin.name ||
+    typeof packageJson.version !== "string" ||
+    packageJson.version.length === 0
+  ) {
+    fail(`${packagePath} does not identify a version of ${plugin.name}`);
+  }
+  const actualVersion = packageJson.version;
+  if (version !== undefined && actualVersion !== version) {
     fail(`${packagePath} does not identify ${plugin.name}@${version}`);
+  }
+
+  const messagePrefix = `chore(release): ${plugin.name}@${actualVersion} for `;
+  const actualSource =
+    commit.message?.startsWith(messagePrefix) ?
+      commit.message.slice(messagePrefix.length)
+    : undefined;
+  requireSha(actualSource, `${branch} recorded source`);
+  if (source !== undefined && actualSource !== source) {
+    fail(
+      `${branch} does not record ${plugin.name}@${actualVersion} from ${source}`
+    );
   }
 
   const marketplace = await readJsonBlob(
@@ -342,15 +370,21 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
     (entry) => entry.name === plugin.name
   );
   if (
-    catalogEntry?.version !== version ||
-    catalogEntry?.source?.ref !== branch
+    catalogEntry?.version !== actualVersion ||
+    catalogEntry?.source?.ref !== branch ||
+    catalogEntry?.source?.path !== plugin.distDir
   ) {
     fail(
-      `${MARKETPLACE} does not publish ${plugin.name}@${version} from ${branch}`
+      `${MARKETPLACE} does not publish ${plugin.name}@${actualVersion} from ${plugin.distDir} at ${branch}`
     );
   }
 
-  return { commit: commitSha, tree: treeSha };
+  return {
+    commit: commitSha,
+    tree: treeSha,
+    version: actualVersion,
+    source: actualSource
+  };
 }
 
 async function verifyArtifact(args) {
@@ -363,6 +397,12 @@ async function verifyArtifact(args) {
       await verifyArtifactState({ plugin, version, source, branch })
     )
   );
+}
+
+async function inspectArtifact(args) {
+  const plugin = requirePlugin(option(args, "--plugin"));
+  const branch = required(option(args, "--branch"), "--branch");
+  console.log(JSON.stringify(await verifyArtifactState({ plugin, branch })));
 }
 
 async function verifyCompletion(args) {
@@ -420,6 +460,9 @@ try {
       break;
     case "verify-artifact":
       await verifyArtifact(args);
+      break;
+    case "inspect-artifact":
+      await inspectArtifact(args);
       break;
     case "verify-completion":
       await verifyCompletion(args);

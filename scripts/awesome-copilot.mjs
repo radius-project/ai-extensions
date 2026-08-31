@@ -94,6 +94,10 @@ function buildEntry(marketplace, manifest, name, sha) {
   if (malformed.length > 0) {
     fail(`keywords must be lowercase and hyphenated: ${malformed.join(", ")}`);
   }
+  const oversized = keywords.filter((keyword) => String(keyword).length > 30);
+  if (oversized.length > 0) {
+    fail(`keywords must be 30 characters or fewer: ${oversized.join(", ")}`);
+  }
 
   const source = entry.source;
   if (!OWNER_REPO.test(String(source?.repo))) {
