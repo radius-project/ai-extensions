@@ -59,7 +59,12 @@ function commit(
 
 interface Journal {
   deleted: Array<{ path: string; branch: string; blobSha: string }>;
-  restored: Array<{ path: string; branch: string; contentBase64: string }>;
+  restored: Array<{
+    path: string;
+    branch: string;
+    contentBase64: string;
+    message: string;
+  }>;
   closed: number[];
   branches: string[];
 }
@@ -118,10 +123,10 @@ function ports(script: {
         journal.deleted.push({ path, branch, blobSha });
         return Promise.resolve({ ok: true });
       },
-      restoreFile: ({ path, branch, contentBase64 }) => {
+      restoreFile: ({ path, branch, contentBase64, message }) => {
         if (script.restoreFails === path)
           return Promise.resolve({ ok: false, detail: "HTTP 409" });
-        journal.restored.push({ path, branch, contentBase64 });
+        journal.restored.push({ path, branch, contentBase64, message });
         return Promise.resolve({ ok: true });
       },
       closePullRequest: ({ number }) => {
@@ -349,7 +354,12 @@ describe("runWorkflowRollback", () => {
     expect(outcome.blocked).toBe(false);
     expect(journal.deleted).toEqual([]);
     expect(journal.restored).toEqual([
-      { path: VERIFY_PATH, branch: "main", contentBase64: "cHJldmlvdXM=" }
+      {
+        path: VERIFY_PATH,
+        branch: "main",
+        contentBase64: "cHJldmlvdXM=",
+        message: `Restore workflow after deleting Radius environment setup: ${VERIFY_PATH}`
+      }
     ]);
     expect(outcome.results[0]?.outcome).toBe("restored");
   });

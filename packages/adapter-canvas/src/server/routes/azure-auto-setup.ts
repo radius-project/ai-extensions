@@ -21,6 +21,7 @@ import type {
   AzureAutoSetupWorkflow
 } from "./azure-auto-setup-types.js";
 import { ProviderMutationRecoveryError } from "../services/provider-mutation-recovery.js";
+import { setupStartConflictResponse } from "./operation-start-conflict.js";
 
 interface AzureAccountIdentity {
   subscriptionId: string;
@@ -401,18 +402,7 @@ export async function handleAzureAutoSetup(
       const started = dependencies.operations.start(operation);
       if (!started.ok) {
         operation = null;
-        const previousCleanup = started.reason === "previous-cleanup-required";
-        respond(context, 409, {
-          error:
-            previousCleanup ?
-              `An earlier setup for ${targetRepo} must finish deletion before a new setup can start.`
-            : `Setup is already running for ${targetRepo}.`,
-          code:
-            previousCleanup ?
-              "previous-cleanup-required"
-            : "operation-in-progress",
-          operationId: started.conflict.operationId
-        });
+        respond(context, 409, setupStartConflictResponse(targetRepo, started));
         return;
       }
       try {

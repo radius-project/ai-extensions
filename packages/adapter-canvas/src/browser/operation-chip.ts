@@ -2,6 +2,10 @@ import { beginEntry, NOOP_TEARDOWN } from "./lifecycle.js";
 import { isRecord, readString } from "./json.js";
 import type { BrowserTeardown } from "./lifecycle.js";
 import type { BrowserContext, DomElement } from "./ports.js";
+import {
+  isSetupDeletedReason,
+  SETUP_EXITED_REASON
+} from "../operation-terminal-reasons.js";
 
 // ─── Operation status chip ───────────────────────────────────────────────────
 // The ambient tier of the notification model. Environment creation takes
@@ -64,13 +68,10 @@ export function operationChipLabel(status: OperationStatus): string {
     case "failed_partial":
       return `${environment} setup failed`;
     case "cancelled":
-      if (
-        status.terminalReason === "rollback-complete" ||
-        status.terminalReason === "cleanup-complete"
-      ) {
+      if (isSetupDeletedReason(status.terminalReason)) {
         return `${environment} setup deleted`;
       }
-      if (status.terminalReason === "setup-exited") {
+      if (status.terminalReason === SETUP_EXITED_REASON) {
         return `${environment} setup closed`;
       }
       return `${environment} setup paused`;

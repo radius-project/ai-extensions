@@ -467,7 +467,7 @@ export async function handleStopOperation(
   ) {
     sendJson(context, 409, {
       error:
-        "Setup cannot be paused while deletion is already running. Wait for deletion to finish.",
+        "Setup cannot be paused while cleanup is running. Wait for cleanup to finish.",
       code: "operation-cleanup-not-stoppable",
       operationId,
       operation: clientView(operation)

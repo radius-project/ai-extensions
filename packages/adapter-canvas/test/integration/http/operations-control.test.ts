@@ -464,7 +464,9 @@ describe("operation controls real-loopback HIT", () => {
 
       expect(response.status).toBe(409);
       expect(await body(response)).toMatchObject({
-        code: "operation-cleanup-not-stoppable"
+        code: "operation-cleanup-not-stoppable",
+        error:
+          "Setup cannot be paused while cleanup is running. Wait for cleanup to finish."
       });
       expect(op.stopRequested).toBe(false);
       expect(harness.persistCalls).toEqual([]);

@@ -4438,7 +4438,7 @@ export async function cleanupGitHubEnvironmentArtifact(
   };
 
   if (artifact.state === "created_candidate") {
-    const detail = `GitHub environment "${target}" was left in place because a pre-create 404 followed by GitHub's idempotent PUT cannot prove this request created it. Review it manually and delete it yourself if this setup should be deleted.`;
+    const detail = `Radius left GitHub environment "${target}" in place because a pre-create 404 followed by GitHub's idempotent PUT could not verify that this setup created it. To finish deleting the setup, review the GitHub environment and delete it manually if it belongs to this setup.`;
     warnings.push(detail);
     steps?.push(`⚠️ ${detail}`);
     recordOutcome("skipped", detail);

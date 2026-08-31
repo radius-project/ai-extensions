@@ -2284,10 +2284,10 @@ function formatGitHubEnvironmentVariableLabel(variable: any): string {
 // that gap, so every retained entry carries the reason it is being kept.
 
 const UNPROVEN_GITHUB_ENVIRONMENT_ACTION =
-  "Radius cannot prove it created this GitHub environment, so it was left in place. Delete it yourself if this setup should be deleted.";
+  "Radius left this GitHub environment in place because it could not verify that this setup created it. To finish deleting the setup, review the GitHub environment and delete it manually if it belongs to this setup.";
 
 const UNPROVEN_SERVICE_PRINCIPAL_ACTION =
-  "Radius could not prove whether it created this Service Principal — the principal was absent before setup ran and present afterwards, but the create command did not report success — so it was left in place. Review it and delete it yourself if this setup should be deleted.";
+  "Radius left this Service Principal in place because it could not verify that this setup created it: the principal was absent before setup ran and present afterward, but the create command did not report success. To finish deleting the setup, review the Service Principal and delete it manually if it belongs to this setup.";
 
 const REUSE_NOUNS: Record<string, string> = {
   azure_app: "App Registration",
@@ -4386,6 +4386,8 @@ export function projectOperationHeadline(op: any): any {
   return null;
 }
 
+const PAUSE_SETUP_LABEL = "Pause setup";
+
 export function projectOperationActions(op: any): any[] {
   if (!op) return [];
   const base = `/api/operations/${encodeURIComponent(op.operationId)}`;
@@ -4431,7 +4433,7 @@ export function projectOperationActions(op: any): any[] {
       {
         id: "stop",
         kind: "stop",
-        label: "Pause setup",
+        label: PAUSE_SETUP_LABEL,
         placement: "row",
         tone: "neutral",
         requiresConfirmation: false,
@@ -4455,7 +4457,7 @@ export function projectOperationActions(op: any): any[] {
       {
         id: "stop",
         kind: "stop",
-        label: "Pause setup",
+        label: PAUSE_SETUP_LABEL,
         placement: "row",
         tone: "neutral",
         requiresConfirmation: false,

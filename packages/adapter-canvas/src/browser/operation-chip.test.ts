@@ -19,6 +19,10 @@ import {
   jsonResponse
 } from "../../test/support/browser/fakes.js";
 import type { BrowserContext, HttpResponse, StoragePort } from "./ports.js";
+import {
+  SETUP_DELETED_REASONS,
+  SETUP_EXITED_REASON
+} from "../operation-terminal-reasons.js";
 
 function setup() {
   const browser = createFakeBrowser();
@@ -91,9 +95,7 @@ describe("operation chip labelling", () => {
     ["failed", "", "dev setup failed", "rad-opchip--failed"],
     ["failed_partial", "", "dev setup failed", "rad-opchip--failed"],
     ["cancelled", "stopped-at-boundary", "dev setup paused", ""],
-    ["cancelled", "rollback-complete", "dev setup deleted", ""],
-    ["cancelled", "cleanup-complete", "dev setup deleted", ""],
-    ["cancelled", "setup-exited", "dev setup closed", ""],
+    ["cancelled", SETUP_EXITED_REASON, "dev setup closed", ""],
     ["unheard-of", "", "", ""]
   ])(
     "renders %s with terminal reason %s",
@@ -107,6 +109,21 @@ describe("operation chip labelling", () => {
       };
       expect(operationChipLabel(status)).toBe(text);
       expect(operationChipTone(state)).toBe(tone);
+    }
+  );
+
+  it.each(SETUP_DELETED_REASONS)(
+    "renders cancelled operations with terminal reason %s as deleted",
+    (terminalReason) => {
+      expect(
+        operationChipLabel({
+          operationId: "op-1",
+          state: "cancelled",
+          environment: "dev",
+          summary: "",
+          terminalReason
+        })
+      ).toBe("dev setup deleted");
     }
   );
 

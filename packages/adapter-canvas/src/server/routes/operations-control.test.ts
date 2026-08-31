@@ -501,7 +501,7 @@ describe("POST /api/operations/{id}/stop", () => {
       expect(out.payload()).toMatchObject({
         code: "operation-cleanup-not-stoppable",
         error:
-          "Setup cannot be paused while deletion is already running. Wait for deletion to finish."
+          "Setup cannot be paused while cleanup is running. Wait for cleanup to finish."
       });
       expect(op.stopRequested).toBe(false);
       expect(out.journal.persistCalls).toBe(0);

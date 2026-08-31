@@ -2453,7 +2453,7 @@ describe("client projection", () => {
         kind: "github_environment",
         target: "contoso/store:dev",
         action:
-          "Radius cannot prove it created this GitHub environment, so it was left in place. Delete it yourself if this setup should be deleted."
+          "Radius left this GitHub environment in place because it could not verify that this setup created it. To finish deleting the setup, review the GitHub environment and delete it manually if it belongs to this setup."
       }
     ]);
     expect(view.cleanup.retainedArtifacts).toEqual([
@@ -7924,7 +7924,7 @@ describe("an unprovable Service Principal", () => {
       kind: "service_principal",
       target: "Service Principal for radius-deploy (app-1)",
       action:
-        "Radius could not prove whether it created this Service Principal — the principal was absent before setup ran and present afterwards, but the create command did not report success — so it was left in place. Review it and delete it yourself if this setup should be deleted."
+        "Radius left this Service Principal in place because it could not verify that this setup created it: the principal was absent before setup ran and present afterward, but the create command did not report success. To finish deleting the setup, review the Service Principal and delete it manually if it belongs to this setup."
     });
     expect(summary.reused).toEqual([]);
   });

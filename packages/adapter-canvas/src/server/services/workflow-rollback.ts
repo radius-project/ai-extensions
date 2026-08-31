@@ -525,7 +525,7 @@ async function restoreOne(
     branch: ref,
     blobSha,
     contentBase64: blob.contentBase64,
-    message: `Delete Radius environment setup: restore ${file.path}`
+    message: `Restore workflow after deleting Radius environment setup: ${file.path}`
   });
   return restored.ok ?
       { ok: true, step: `✅ Restored the previous "${file.path}" on "${ref}".` }
