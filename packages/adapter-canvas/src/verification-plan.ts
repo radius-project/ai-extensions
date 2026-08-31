@@ -189,6 +189,31 @@ export function describePullRequestNextStep({
   return `Merge the pull request above to finish setup; credential verification and deploys run once it lands on "${baseBranch}".`;
 }
 
+// The terminal message the customer reads in the panel headline and the
+// operation chip, which must agree with the step above rather than making the
+// promise the step just withdrew. Only reached when the merge is outstanding,
+// so it turns on whether the credentials are outstanding too.
+export function describeMergeRequiredTerminal({
+  outcome,
+  branch,
+  baseBranch,
+  hasPullRequest
+}: {
+  outcome: PullRequestNextStep;
+  branch: string;
+  baseBranch: string;
+  hasPullRequest: boolean;
+}): string {
+  const alsoCredentials = outcome === "awaiting-merge-and-credentials";
+  if (hasPullRequest)
+    return alsoCredentials ?
+        "Merge the pull request and finish the cloud credentials to complete setup. Credential verification is waiting on both, so merging alone will not start it."
+      : "Merge the pull request to finish setup; credential verification and deploys run once it lands.";
+  return alsoCredentials ?
+      `Open and merge a pull request from "${branch}" into "${baseBranch}", and finish the cloud credentials, to complete setup. Credential verification is waiting on both, so merging alone will not start it.`
+    : `Open and merge a pull request from "${branch}" into "${baseBranch}" to finish setup.`;
+}
+
 export interface VerifyWorkflowRunIdentity {
   runId: string;
   runUrl: string;

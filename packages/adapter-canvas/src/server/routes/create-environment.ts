@@ -53,6 +53,7 @@ import { runVerificationDispatch } from "../services/verification-dispatch.js";
 import {
   describeVerificationDispatch,
   describePullRequestNextStep,
+  describeMergeRequiredTerminal,
   type PullRequestNextStep
 } from "../../verification-plan.js";
 
@@ -1291,23 +1292,26 @@ export async function handleCreateEnvironment(
     // so this is the one place that knows what the pull request is actually
     // waiting on rather than predicting it. The two blockers are independent,
     // so they are read separately: merging is only the last step when the
-    // credentials are already complete. The marker follows the same decision,
-    // an observation when verification is already running and a prompt only
-    // when the customer genuinely owes an action.
+    // credentials are already complete. The outcome is resolved once and read
+    // by both the step and the terminal message below, because a headline that
+    // promises what the step just withdrew is the same contradiction one layer
+    // up. The marker follows it too, an observation when verification is
+    // already running and a prompt only when the customer owes an action.
+    const awaitingMerge = !verifyPlan.shouldDispatch;
+    const awaitingCredentials = !credentialsComplete;
+    const nextStepOutcome: PullRequestNextStep =
+      awaitingMerge && awaitingCredentials ? "awaiting-merge-and-credentials"
+      : awaitingMerge ? "awaiting-merge"
+      : awaitingCredentials ? "awaiting-credentials"
+      : "verification-running";
     if (prState && pullRequestOpened) {
-      const awaitingMerge = !verifyPlan.shouldDispatch;
-      const awaitingCredentials = !credentialsComplete;
-      const outcome: PullRequestNextStep =
-        awaitingMerge && awaitingCredentials ? "awaiting-merge-and-credentials"
-        : awaitingMerge ? "awaiting-merge"
-        : awaitingCredentials ? "awaiting-credentials"
-        : "verification-running";
       const nextStep = describePullRequestNextStep({
-        outcome,
+        outcome: nextStepOutcome,
         baseBranch: prState.base,
         ref: verificationRef
       });
-      if (outcome === "verification-running") steps.push(`ℹ️ ${nextStep}`);
+      if (nextStepOutcome === "verification-running")
+        steps.push(`ℹ️ ${nextStep}`);
       else steps.push(`👉 ${nextStep}`);
     }
 
@@ -1330,16 +1334,13 @@ export async function handleCreateEnvironment(
           pullRequestUrl: pullRequestUrl || null,
           branch: prState?.branch || null,
           baseBranch: prState?.base || verifyPlan.defaultBranch || null,
-          userMessage:
-            pullRequestUrl ?
-              "Merge the pull request to finish setup; credential verification and deploys run once it lands."
-            : `Open and merge a pull request from "${
-                prState?.branch || "the setup branch"
-              }" into "${
-                prState?.base ||
-                verifyPlan.defaultBranch ||
-                "the default branch"
-              }" to finish setup.`
+          userMessage: describeMergeRequiredTerminal({
+            outcome: nextStepOutcome,
+            branch: prState?.branch || "the setup branch",
+            baseBranch:
+              prState?.base || verifyPlan.defaultBranch || "the default branch",
+            hasPullRequest: pullRequestUrl !== ""
+          })
         }
       });
       await dependencies.persistBestEffort({

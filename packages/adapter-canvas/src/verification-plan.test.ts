@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildVerifyWorkflowDispatchArgs,
+  describeMergeRequiredTerminal,
   describePullRequestNextStep,
   describeVerificationDispatch,
   hasWorkflowRunTrigger,
@@ -298,6 +299,92 @@ describe("pull request next step", () => {
           ref: "radius/setup-dev-workflows-abc"
         })
       ).not.toContain("radius/setup-dev-workflows-abc");
+    }
+  });
+});
+
+describe("merge-required terminal message", () => {
+  // The headline is more prominent than the step, so it must not promise what
+  // the step withdrew.
+  it("does not promise the merge starts verification when credentials also block", () => {
+    const message = describeMergeRequiredTerminal({
+      outcome: "awaiting-merge-and-credentials",
+      branch: "radius/setup-dev-workflows-abc",
+      baseBranch: "main",
+      hasPullRequest: true
+    });
+    expect(message).toBe(
+      "Merge the pull request and finish the cloud credentials to complete setup. " +
+        "Credential verification is waiting on both, so merging alone will not start it."
+    );
+    expect(message).not.toContain("run once it lands");
+  });
+
+  it("keeps the existing promise when the merge is the only blocker", () => {
+    expect(
+      describeMergeRequiredTerminal({
+        outcome: "awaiting-merge",
+        branch: "radius/setup-dev-workflows-abc",
+        baseBranch: "main",
+        hasPullRequest: true
+      })
+    ).toBe(
+      "Merge the pull request to finish setup; credential verification and deploys run once it lands."
+    );
+  });
+
+  it("names both blockers when the pull request must be opened by hand", () => {
+    expect(
+      describeMergeRequiredTerminal({
+        outcome: "awaiting-merge-and-credentials",
+        branch: "radius/setup-dev-workflows-abc",
+        baseBranch: "main",
+        hasPullRequest: false
+      })
+    ).toBe(
+      'Open and merge a pull request from "radius/setup-dev-workflows-abc" into "main", ' +
+        "and finish the cloud credentials, to complete setup. Credential verification is " +
+        "waiting on both, so merging alone will not start it."
+    );
+  });
+
+  it("keeps the existing manual instruction when the merge is the only blocker", () => {
+    expect(
+      describeMergeRequiredTerminal({
+        outcome: "awaiting-merge",
+        branch: "radius/setup-dev-workflows-abc",
+        baseBranch: "main",
+        hasPullRequest: false
+      })
+    ).toBe(
+      'Open and merge a pull request from "radius/setup-dev-workflows-abc" into "main" to finish setup.'
+    );
+  });
+
+  // The step and the headline are the same answer shown in two places, so the
+  // pair is what matters, not either string alone.
+  it("agrees with the step for every outcome that reaches it", () => {
+    for (const outcome of [
+      "awaiting-merge",
+      "awaiting-merge-and-credentials"
+    ] as const) {
+      const step = describePullRequestNextStep({
+        outcome,
+        baseBranch: "main",
+        ref: "setup"
+      });
+      const headline = describeMergeRequiredTerminal({
+        outcome,
+        branch: "setup",
+        baseBranch: "main",
+        hasPullRequest: true
+      });
+      expect(/run once it lands/.test(step)).toBe(
+        /run once it lands/.test(headline)
+      );
+      expect(/will not start it/.test(step)).toBe(
+        /will not start it/.test(headline)
+      );
     }
   });
 });

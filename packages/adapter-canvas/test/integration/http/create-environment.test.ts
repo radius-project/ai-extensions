@@ -2688,6 +2688,12 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(
       harness.steps.some((step) => step.includes("run once it lands"))
     ).toBe(false);
+    // The headline is what the panel and the chip show, so it must withdraw
+    // the same promise the step does rather than contradicting it.
+    expect(harness.finished[0]?.options?.terminal?.userMessage).toBe(
+      "Merge the pull request and finish the cloud credentials to complete setup. " +
+        "Credential verification is waiting on both, so merging alone will not start it."
+    );
     expect(
       harness.ghCalls.some((call) => call.startsWith("workflow run "))
     ).toBe(false);
