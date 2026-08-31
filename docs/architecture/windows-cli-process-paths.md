@@ -22,7 +22,8 @@ graph TD
 
     subgraph Windows["Windows execution branches"]
         GhExe["gh.exe direct<br/>unchanged"]
-        Cmd["cmd.exe /c<br/>non-gh blast radius"]
+        Native["execFile direct<br/>native executables"]
+        Cmd["cmd.exe /c<br/>batch shims only"]
     end
 
     subgraph External["External CLIs"]
@@ -48,16 +49,17 @@ graph TD
     RunCommand --> CliExec
 
     CliExec -->|gh command| GhExe
-    CliExec -->|az, aws, kubectl| Cmd
+    CliExec -->|az, .cmd, .bat| Cmd
+    CliExec -->|aws, kubectl| Native
     GhExe --> Gh
     Cmd --> Az
-    Cmd --> Aws
-    Cmd --> Kubectl
+    Native --> Aws
+    Native --> Kubectl
 
     classDef affected fill:#f8d7da,stroke:#842029,color:#842029;
     classDef unchanged fill:#d1e7dd,stroke:#0f5132,color:#0f5132;
-    class Cmd,Az,Aws,Kubectl affected;
-    class GhExe,Gh unchanged;
+    class Cmd,Az affected;
+    class GhExe,Gh,Native,Aws,Kubectl unchanged;
 ```
 
 ## Key Components
@@ -77,7 +79,9 @@ The affected route families reach `cliExec` through two concrete paths:
 1. Identity verification and discovery routes call the injected `runCommand`; Azure application discovery and auto-setup call `runCliCommand`. Both wrappers end at `cliExec`.
 2. Azure cleanup from `POST /api/create-environment` calls the injected `runAzCommand`, which is `runCliCommand("az", args)` in `server.ts`.
 
-On Windows, `cliExec` detects `gh` and invokes `gh.exe` directly. Every other current CLI command is routed through `cmd.exe /c`; that branch is where argument boundaries can be lost and where the planned fix applies. On macOS and Linux, `cliExec` invokes the requested executable directly with the original argv array.
+On Windows, `cliExec` detects `gh` and invokes `gh.exe` directly. Every other command is classified before it is spawned. `az`, and any command named with an explicit `.cmd` or `.bat` extension, run through `cmd.exe /c`; that branch is where argument boundaries can be lost and where the quoting fix applies. A bare name is resolved against `PATH` and `PATHEXT` the way `cmd.exe` would resolve it, and only routes through `cmd.exe` when the winning entry is itself a batch file. Everything else — `aws` and `kubectl` in practice — is launched directly with the original argv array, so no command interpreter ever sees those arguments. On macOS and Linux, `cliExec` invokes the requested executable directly with the original argv array.
+
+Resolving up front rather than retrying a failed direct launch matters for two reasons. It keeps one spawn per call, so the `ChildProcess` returned to callers is always the process that runs the command. And it never hands an unresolvable name to `cmd.exe`, whose search begins in the current directory: these children inherit the open repository as their working directory, so a repository carrying its own `kubectl.cmd` would otherwise be executed on any machine where the real CLI is absent.
 
 The failure reported in issue #384 follows this exact path:
 
@@ -137,7 +141,7 @@ The planned `gh.ts` change therefore does not alter Radius CLI execution, Bicep 
 
 ## Notable Details
 
-- The blast radius is broader than the one failing Graph PATCH because `cliExec` is shared by all current Windows `az`, `aws`, and `kubectl` calls.
-- The behavior change is narrower than the call graph: only the Windows non-`gh` command-line construction changes. Direct `gh.exe` and non-Windows execution remain on their existing branches.
+- The blast radius of the `cmd.exe` quoting rules is narrower than the shared adapter: only Windows `az` calls and explicitly named batch files reach the command interpreter. Windows `aws` and `kubectl` calls, direct `gh.exe`, and non-Windows execution stay on argv-preserving branches.
+- The behavior change is narrower than the call graph: only the Windows command-line construction changes. Direct `gh.exe` and non-Windows execution remain on their existing branches.
 - Input validation for UUIDs, repository slugs, and Azure resource names remains necessary defense in depth because `cmd.exe` is still a command interpreter, not a universal argv transport.
 - The highest compatibility risk is executable quoting. A plain `az` token must remain unquoted for `az.cmd` to resolve `%~dp0`; an explicit executable path containing spaces requires both executable quoting and whole-command wrapping.

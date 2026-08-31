@@ -437,7 +437,7 @@ func main() {
 
 async function createWindowsShim(fakeBin: string): Promise<void> {
   const output = await prepareWindowsShim();
-  for (const tool of ["gh", "rad"]) {
+  for (const tool of ["aws", "gh", "kubectl", "rad"]) {
     await fs.copyFile(output, path.join(fakeBin, `${tool}.exe`));
   }
 }

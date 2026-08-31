@@ -38,11 +38,15 @@ import { redactGhCredentials } from "./gh.js";
 // point can prove the files it would revert are still exactly what Radius wrote.
 // Version 4 distinguishes a path proven absent before setup from an older record
 // that never observed the previous path state. Version 5 adds the provider
-// mutation recovery journal. Versions 1 through 4 still load:
+// mutation recovery journal and deletion retry as a durable command and attempt
+// kind. Versions 1 through 4 still load:
 // `readOperationControl` and
 // `readSetupArtifactLedger` fill the new fields with safe defaults rather than
 // discarding the operation, and a default of "no provenance" fails a
 // post-commit rollback closed instead of guessing.
+// records load with a zero deletion-attempt count and no command, while an older
+// extension rejects a newer record instead of dropping an in-flight retry.
+// Version 6 adds the GitHub environment-variable artifact ledger.
 export const OPERATION_SCHEMA_VERSION = 6;
 export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([
   1, 2, 3, 4, 5, 6
@@ -239,13 +243,15 @@ export type OperationCommandKind =
   | "cancel_workflow"
   | "retry_setup"
   | "retry_verification"
+  | "retry_deletion"
   | "rollback"
   | "retry_cleanup"
   | "exit_setup";
 
 export type OperationCommandState = "accepted" | "running" | "finished";
 
-export type OperationAttemptKind = "setup" | "verification" | "cleanup";
+export type OperationAttemptKind =
+  "setup" | "verification" | "cleanup" | "deletion";
 
 export type OperationCommandRecord = {
   kind: OperationCommandKind;
@@ -268,6 +274,7 @@ export type OperationAttemptCounters = {
   setup: number;
   verification: number;
   cleanup: number;
+  deletion: number;
 };
 
 export type OperationOutcomeRecord = {
@@ -763,7 +770,7 @@ const MAX_RETAINED_OUTCOMES = 20;
 export function createOperationControl(): OperationControlRecord {
   return {
     stop: { requestedAt: null, acknowledgedAt: null, boundary: null },
-    attempts: { setup: 1, verification: 0, cleanup: 0 },
+    attempts: { setup: 1, verification: 0, cleanup: 0, deletion: 0 },
     commands: [],
     outcomes: []
   };
@@ -785,6 +792,7 @@ const COMMAND_KINDS = Object.freeze([
   "cancel_workflow",
   "retry_setup",
   "retry_verification",
+  "retry_deletion",
   "rollback",
   "retry_cleanup",
   "exit_setup"
@@ -807,7 +815,12 @@ const DISPOSAL_COMMAND_KINDS = Object.freeze([
   EXIT_COMMAND_KIND
 ]);
 const COMMAND_STATES = Object.freeze(["accepted", "running", "finished"]);
-const ATTEMPT_KINDS = Object.freeze(["setup", "verification", "cleanup"]);
+const ATTEMPT_KINDS = Object.freeze([
+  "setup",
+  "verification",
+  "cleanup",
+  "deletion"
+]);
 
 /**
  * Normalize a persisted control record, filling schema-version-1 gaps.
@@ -835,7 +848,8 @@ export function readOperationControl(value: any): OperationControlRecord {
   control.attempts = {
     setup: positiveInt(attempts.setup, 1),
     verification: positiveInt(attempts.verification, 0),
-    cleanup: positiveInt(attempts.cleanup, 0)
+    cleanup: positiveInt(attempts.cleanup, 0),
+    deletion: positiveInt(attempts.deletion, 0)
   };
   if (Array.isArray(value.commands)) {
     for (const entry of value.commands) {
@@ -988,6 +1002,30 @@ export function isTerminalState(state: any): boolean {
   return TERMINAL_STATES.includes(state);
 }
 
+export function canDismissOperation(op: any): boolean {
+  if (!op || !isTerminalState(op.state)) return false;
+  const actions = projectOperationActions(op);
+  const canExitCompletedDeletion =
+    op.kind === OPERATION_KIND_DELETE &&
+    op.state === "succeeded_with_warnings" &&
+    actions.every((action) => action.kind === "retry_deletion");
+  if (actions.length > 0 && !canExitCompletedDeletion) return false;
+  if (op.state === "succeeded" || op.state === "succeeded_with_warnings") {
+    return true;
+  }
+  return (
+    op.state === "cancelled" &&
+    projectOperationHeadline(op).code === "rollback-complete"
+  );
+}
+
+export function dismissOperation(op: any): any {
+  if (!canDismissOperation(op)) return op;
+  op.dismissedAt = nowIso();
+  op.lastActivityAt = op.dismissedAt;
+  return op;
+}
+
 // Stage ids are provider-neutral. What happens inside a stage is not, which is
 // exactly why steps are data supplied by the route rather than an interface
 // radius-core would have to model for a flow it does not execute.
@@ -995,11 +1033,35 @@ export const STAGE_AUTHORIZE_IDENTITY = "authorize_identity";
 export const STAGE_CONFIGURE_ENVIRONMENT = "configure_environment";
 export const STAGE_VERIFY = "verify";
 
+// Deletion stages. Environment deletion is a distinct journey from creation, so
+// it owns its own stage inventory rather than reusing the create stages: it
+// deletes the Radius environment on the cluster (via a dispatched workflow),
+// removes the per-environment federated credential, deletes the GitHub
+// environment, and finally reviews whether the app registration is now unused.
+export const STAGE_DELETE_RADIUS_ENV = "delete_radius_environment";
+export const STAGE_DELETE_CREDENTIAL = "delete_federated_credential";
+export const STAGE_DELETE_GITHUB_ENV = "delete_github_environment";
+export const STAGE_REVIEW_APP_REGISTRATION = "review_app_registration";
+
 const STAGE_LABELS = {
   [STAGE_AUTHORIZE_IDENTITY]: "Authorize deploy identity",
   [STAGE_CONFIGURE_ENVIRONMENT]: "Configure environment",
-  [STAGE_VERIFY]: "Verify credentials"
+  [STAGE_VERIFY]: "Verify credentials",
+  [STAGE_DELETE_RADIUS_ENV]: "Delete Radius environment",
+  [STAGE_DELETE_CREDENTIAL]: "Remove federated credential",
+  [STAGE_DELETE_GITHUB_ENV]: "Delete GitHub environment",
+  [STAGE_REVIEW_APP_REGISTRATION]: "Review app registration"
 };
+
+// The operation kinds. A create operation prepares credentials and an
+// environment; a delete operation tears them down. The runner and the progress
+// UI both branch on this discriminator.
+export const OPERATION_KIND_CREATE = "create";
+export const OPERATION_KIND_DELETE = "delete";
+const OPERATION_KINDS = Object.freeze([
+  OPERATION_KIND_CREATE,
+  OPERATION_KIND_DELETE
+]);
 
 // The canvas `page` enum (extension.ts inputSchema). A resume target is
 // client-influenced data that ends up as an argument to a host RPC, so it is
@@ -1046,6 +1108,24 @@ export function buildStages({
   if (includeIdentity) ids.push(STAGE_AUTHORIZE_IDENTITY);
   ids.push(STAGE_CONFIGURE_ENVIRONMENT);
   if (includeVerify) ids.push(STAGE_VERIFY);
+  return ids.map((id) => ({ id, label: STAGE_LABELS[id], state: "pending" }));
+}
+
+/**
+ * Build the stage inventory for a delete operation.
+ *
+ * `delete_federated_credential` and `review_app_registration` are Azure-only:
+ * an AWS environment has no federated credential to remove and no app
+ * registration to review, so those stages are absent rather than
+ * present-and-skipped (the same checklist-honesty rule `buildStages` follows).
+ */
+export function buildDeleteStages({
+  includeAzureCleanup = true
+}: any = {}): any[] {
+  const ids = [STAGE_DELETE_RADIUS_ENV];
+  if (includeAzureCleanup) ids.push(STAGE_DELETE_CREDENTIAL);
+  ids.push(STAGE_DELETE_GITHUB_ENV);
+  if (includeAzureCleanup) ids.push(STAGE_REVIEW_APP_REGISTRATION);
   return ids.map((id) => ({ id, label: STAGE_LABELS[id], state: "pending" }));
 }
 
@@ -1288,12 +1368,14 @@ export function createOperation({
   stages,
   journey,
   operationId,
-  startedAt
+  startedAt,
+  kind
 }: any = {}): any {
   const resumeTarget = sanitizeResumeTarget(journey && journey.resumeTarget);
   return {
     operationId: operationId || `op_${randomUUID()}`,
     schemaVersion: OPERATION_SCHEMA_VERSION,
+    kind: OPERATION_KINDS.includes(kind) ? kind : OPERATION_KIND_CREATE,
     provider: provider || "",
     repo: repo || "",
     environment: environment || "",
@@ -1347,6 +1429,19 @@ export function setStageState(op: any, stageId: any, state: any): any {
   if (!op) return op;
   const stage = op.stages.find((s) => s.id === stageId);
   if (stage) stage.state = state;
+  return op;
+}
+
+/**
+ * Refresh a live operation's activity timestamp without recording a step. Used
+ * as a heartbeat while a long-running background workflow (e.g. a 30-minute
+ * environment-delete run) is being polled, so the staleness sweep does not
+ * abandon the operation — and release its single-flight lock — while the
+ * workflow is still legitimately running.
+ */
+export function touchOperation(op: any, now = nowIso()): any {
+  if (!op || isTerminalState(op.state)) return op;
+  op.lastActivityAt = now;
   return op;
 }
 
@@ -2222,10 +2317,23 @@ function reuseExplanation(kind: string, origin: any): string {
 // derived from the fields that actually name the resource, and a result written
 // before this field existed is still matched through its recorded target.
 
-function normalizeIdentityPart(value: any): string {
+export function normalizeIdentityPart(value: any): string {
   return String(value == null ? "" : value)
     .trim()
     .toLowerCase();
+}
+
+export function matchDeleteOperationEnvironment(
+  operation: any,
+  environment: any
+): any {
+  return (
+      operation?.kind === OPERATION_KIND_DELETE &&
+        normalizeIdentityPart(operation.environment) ===
+          normalizeIdentityPart(environment)
+    ) ?
+      operation
+    : null;
 }
 
 /** The stable key for one cleanup-capable artifact, or "" when unidentifiable. */
@@ -3881,6 +3989,65 @@ export function hasUnfinishedCleanupAuthority(op: any): boolean {
   );
 }
 
+const DELETE_RETRY_TERMINAL_STATES = Object.freeze([
+  "failed",
+  "failed_partial",
+  "action_required",
+  "succeeded_with_warnings"
+]);
+
+/**
+ * Whether a terminal delete operation has unfinished teardown work to repeat.
+ *
+ * A successful stage is immutable evidence that its idempotent deletion already
+ * converged, so retry starts at the first failed, warning, or skipped stage and
+ * never reopens a fully successful deletion.
+ */
+export function canRetryDeletion(op: any): any {
+  if (!op) return { ok: false, code: "unknown-operation" };
+  if (op.kind !== OPERATION_KIND_DELETE)
+    return { ok: false, code: "deletion-retry-not-delete" };
+  if (!isTerminalState(op.state))
+    return { ok: false, code: "operation-active" };
+  if (!DELETE_RETRY_TERMINAL_STATES.includes(op.state))
+    return { ok: false, code: "deletion-retry-not-retryable" };
+  const stage = op.stages?.find((entry: any) =>
+    ["failed", "warning", "skipped"].includes(entry.state)
+  );
+  if (!stage) return { ok: false, code: "deletion-retry-nothing-unresolved" };
+  return {
+    ok: true,
+    code: "deletion-retry-allowed",
+    resumeFrom: stage.id,
+    target: stage.id
+  };
+}
+
+/**
+ * Position a reopened delete operation at its first unfinished stage.
+ *
+ * Completed stages remain succeeded and are skipped by the resume-safe runner.
+ * Output from stages being repeated is removed so an old warning cannot make a
+ * successful retry finish with warnings; the prior terminal verdict remains in
+ * the durable attempt-outcome history recorded by `beginRetryAttempt`.
+ */
+export function applyDeletionRetry(op: any): any {
+  const resetStages = new Set<string>();
+  let resumeFrom = "";
+  for (const stage of op.stages) {
+    if (stage.state === "succeeded") continue;
+    if (!resumeFrom) resumeFrom = stage.id;
+    stage.state = "pending";
+    resetStages.add(stage.id);
+  }
+  op.steps = (op.steps || []).filter(
+    (step: any) => !resetStages.has(String(step.stage || ""))
+  );
+  if (resumeFrom) op.currentStage = resumeFrom;
+  delete op.inputRequired;
+  return op;
+}
+
 // ─── Action projection ───────────────────────────────────────────────────────
 // The server decides what a customer may do; the page renders that list. Copying
 // eligibility rules into browser code is how the two surfaces drift apart, and a
@@ -4044,6 +4211,7 @@ const DETAIL_GUIDANCE_CODES = Object.freeze([
 
 export function projectActionGuidance(op: any): any[] {
   if (!op || !isTerminalState(op.state)) return [];
+  if (op.kind === OPERATION_KIND_DELETE) return [];
   if (op.state === "succeeded" || op.state === "succeeded_with_warnings")
     return [];
   // A closed setup has no path left to explain. Listing why a rollback is
@@ -4072,6 +4240,29 @@ export function projectActionGuidance(op: any): any[] {
  */
 export function projectOperationHeadline(op: any): any {
   if (!op) return null;
+  if (op.kind === OPERATION_KIND_DELETE) {
+    if (!isTerminalState(op.state)) {
+      return {
+        code: "deleting-environment",
+        title: "Deleting environment…",
+        message:
+          "Radius is completing the remaining deletion stages. Deletion cannot be stopped or rolled back."
+      };
+    }
+    if (op.state === "failed" || op.state === "failed_partial") {
+      const stage = op.stages.find(
+        (entry: any) => entry.id === op.currentStage
+      );
+      return {
+        code: "deletion-incomplete",
+        title: "Deletion could not continue",
+        message: `Radius stopped at ${
+          stage?.label || "an unfinished deletion stage"
+        }. Review the error, then retry deletion. Completed stages will be skipped.`
+      };
+    }
+    return null;
+  }
   if (isProviderRestartDecision(op)) {
     return {
       code: "setup-interrupted",
@@ -4197,6 +4388,29 @@ export function projectOperationHeadline(op: any): any {
 export function projectOperationActions(op: any): any[] {
   if (!op) return [];
   const base = `/api/operations/${encodeURIComponent(op.operationId)}`;
+  if (op.kind === OPERATION_KIND_DELETE) {
+    // Delete work is not pausable and cannot be rolled back. While it is live,
+    // project no setup controls; once it ends with unfinished work, offer only
+    // the deletion-specific retry that resumes its idempotent stage sequence.
+    const retry = canRetryDeletion(op);
+    if (!retry.ok) return [];
+    return [
+      {
+        id: "retry-deletion",
+        kind: "retry_deletion",
+        label: "Retry Deletion",
+        placement: "row",
+        tone: "primary",
+        requiresConfirmation: false,
+        description:
+          "Radius retries the unfinished deletion steps and skips everything already deleted.",
+        method: "POST",
+        path: `${base}/retry/deletion`,
+        pending: false,
+        resumeFrom: retry.resumeFrom
+      }
+    ];
+  }
   const control = op.control || createOperationControl();
   if (isProviderRestartDecision(op)) {
     return [
@@ -4240,7 +4454,7 @@ export function projectOperationActions(op: any): any[] {
       {
         id: "stop",
         kind: "stop",
-        label: "Stop setup",
+        label: "Stop Setup",
         placement: "row",
         tone: "neutral",
         requiresConfirmation: false,
@@ -4475,6 +4689,19 @@ export function projectOperationActions(op: any): any[] {
 export function projectNextTransition(op: any): any {
   if (!op || isTerminalState(op.state)) return null;
   const active = activeCommandKind(op);
+  if (op.kind === OPERATION_KIND_DELETE && active === "retry_deletion") {
+    return {
+      code: "retrying-deletion",
+      message: "Retrying the unfinished environment deletion steps…"
+    };
+  }
+  if (op.kind === OPERATION_KIND_DELETE) {
+    return {
+      code: "deleting-environment",
+      message:
+        "Deletion is running. If it fails, Retry deletion resumes from the unfinished stage."
+    };
+  }
   // Cleanup owns the record while it runs, and it is the one activity with no
   // action of its own — so it has to name itself or the panel would be silent.
   if (active === "rollback") {
@@ -4937,6 +5164,7 @@ export function beginRetryAttempt(op: any, kind: OperationAttemptKind): number {
   op.endedAt = null;
   op.failure = null;
   op.terminal = null;
+  op.dismissedAt = null;
   op.recoveryState = null;
   if (op.journey) op.journey.notifiedAt = null;
   op.lastActivityAt = nowIso();
@@ -4951,6 +5179,7 @@ export function rollbackRetryAttempt(op: any, snapshot: any): any {
   op.endedAt = snapshot.endedAt;
   op.failure = snapshot.failure;
   op.terminal = snapshot.terminal;
+  op.dismissedAt = snapshot.dismissedAt;
   op.recoveryState = snapshot.recoveryState;
   op.stopRequested = snapshot.stopRequested;
   op.stages = structuredClone(snapshot.stages);
@@ -4981,6 +5210,7 @@ export function snapshotRetryState(op: any): any {
     endedAt: op.endedAt,
     failure: op.failure ? structuredClone(op.failure) : null,
     terminal: op.terminal ? structuredClone(op.terminal) : null,
+    dismissedAt: op.dismissedAt ?? null,
     recoveryState: op.recoveryState ?? null,
     stopRequested: Boolean(op.stopRequested),
     stages: structuredClone(op.stages || []),
@@ -5008,6 +5238,7 @@ export function snapshotRetryState(op: any): any {
 export function summarize(op: any): string {
   if (!op) return "";
   const env = op.environment || "environment";
+  if (op.kind === OPERATION_KIND_DELETE) return summarizeDelete(op, env);
   if (isSetupExited(op)) {
     return latestCommand(op)?.outcome === ABANDON_COMMAND_OUTCOME ?
         `Abandoned the setup for "${env}".`
@@ -5064,6 +5295,41 @@ export function summarize(op: any): string {
         return `Rolled back the resources created for "${env}".`;
       return `Creating environment "${env}" was stopped.`;
     }
+    default:
+      return "";
+  }
+}
+
+// Delete operations reuse the create OperationRecord model, so the summary line
+// must be re-worded for teardown or the panel and the persisted timeline would
+// announce a deletion as "Environment X is ready".
+function summarizeDelete(op: any, env: string): string {
+  switch (op.state) {
+    case RUNNING_STATE: {
+      const stage = op.stages.find((s) => s.id === op.currentStage);
+      return `Deleting ${env} — ${
+        stage ? stage.label.toLowerCase() : "working"
+      }…`;
+    }
+    case "succeeded":
+      return `Environment "${env}" deleted.`;
+    case "succeeded_with_warnings": {
+      const n = op.steps.filter((s) => s.state === "warning").length;
+      return `Environment "${env}" deleted, with ${n} warning${
+        n === 1 ? "" : "s"
+      }.`;
+    }
+    case "action_required":
+      return (
+        (op.terminal && op.terminal.userMessage) ||
+        `Deleting "${env}" needs one more step from you.`
+      );
+    case "failed":
+      return `Deleting environment "${env}" failed.`;
+    case "failed_partial":
+      return `Deleting environment "${env}" failed partway through — some resources may remain.`;
+    case "cancelled":
+      return `Deleting environment "${env}" was stopped.`;
     default:
       return "";
   }
@@ -5238,6 +5504,7 @@ export function reconcileOperationLifecycle(op: any, now = Date.now()): any {
 const PERSISTED_OPERATION_KEYS = new Set([
   "operationId",
   "schemaVersion",
+  "kind",
   "provider",
   "repo",
   "environment",
@@ -5252,14 +5519,53 @@ const PERSISTED_OPERATION_KEYS = new Set([
   "setupArtifacts",
   "journey",
   "terminal",
+  "dismissedAt",
   "failure",
   "inputRequired",
   "resumeRequest",
+  "deleteRecovery",
   "resumeFrom",
   "verification",
   "control",
   "providerRecovery"
 ]);
+
+// The minimal, typed request needed to resume a delete operation after a
+// restart. The live delete op carries its inputs in a broad `op.request` (which
+// is deliberately NOT persisted — it can be large and may hold secrets), so a
+// hydrated delete op would otherwise lose the `clientId` its Azure-cleanup and
+// app-registration stages depend on. We persist only these scalar fields.
+interface PersistedDeleteRecovery {
+  repo?: string;
+  environment?: string;
+  provider?: string;
+  clientId?: string;
+  tenantId?: string;
+  repoId?: number;
+  credentialConsumerRetirementReady?: boolean;
+}
+
+function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
+  if (!request || typeof request !== "object") return null;
+  const out: PersistedDeleteRecovery = {};
+  for (const key of [
+    "repo",
+    "environment",
+    "provider",
+    "clientId",
+    "tenantId"
+  ] as const) {
+    if (typeof request[key] === "string") out[key] = request[key];
+  }
+  if (typeof request.credentialConsumerRetirementReady === "boolean") {
+    out.credentialConsumerRetirementReady =
+      request.credentialConsumerRetirementReady;
+  }
+  if (typeof request.repoId === "number" && Number.isFinite(request.repoId)) {
+    out.repoId = request.repoId;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
 
 function persistedFailure(failure: any): any {
   if (!failure) return null;
@@ -5283,6 +5589,15 @@ export function toPersistedOperation(op: any): any {
     if (op[key] !== undefined) record[key] = structuredClone(op[key]);
   }
   record.failure = persistedFailure(op.failure);
+  // Delete ops don't persist their broad `request`, so capture the typed
+  // minimum needed to resume them (clientId et al.) under `deleteRecovery`.
+  if (op.kind === OPERATION_KIND_DELETE) {
+    const recovery = persistedDeleteRecovery(op.request || op.deleteRecovery);
+    if (recovery) record.deleteRecovery = recovery;
+    else delete record.deleteRecovery;
+  } else {
+    delete record.deleteRecovery;
+  }
   record.control = readOperationControl(op.control);
   record.providerRecovery = readProviderRecovery(op.providerRecovery);
   // Written through the same normalizer the restore path uses, so a saved
@@ -5420,20 +5735,75 @@ export function reconcileRestoredOperation(op: any): any {
   // terminal shortcut below, because a record that already reached a terminal
   // state still offers rollback, retry-rollback, and exit from that state.
   if (quarantineUnrecoverableLegacy(op)) return op;
+  // Rebuild a delete op's working request from the persisted typed minimum so
+  // its Azure-cleanup stages still have the clientId, including when a terminal
+  // partial deletion is reopened through Retry deletion.
+  if (
+    op.kind === OPERATION_KIND_DELETE &&
+    !op.request &&
+    op.deleteRecovery &&
+    typeof op.deleteRecovery === "object"
+  ) {
+    op.request = structuredClone(op.deleteRecovery);
+  }
   if (isTerminalState(op.state)) return op;
   // A stop the customer already paid for outlives the process that was going to
   // honor it. Nothing is mid-flight after a restart, so the boundary is here.
-  if (shouldStop(op)) {
+  // Delete ops are excluded: they expose no stop control (see
+  // `projectOperationActions`) and their runner has no stop boundary, so a
+  // delete must never be terminalized through the create-side cancel path — it
+  // is resumed by the delete branch below instead.
+  if (op.kind !== OPERATION_KIND_DELETE && shouldStop(op)) {
     stopAtBoundary(op, "restart_recovery");
     op.recoveryState = "stopped";
     return op;
   }
   if (op.inputRequired) {
+    // Only create operations ever park on an input_required prompt (Azure
+    // auto-setup). Delete operations never enter input_required — the
+    // app-registration prompt was removed — so there is no delete branch here.
     if (op.resumeRequest) {
       op.state = INPUT_REQUIRED_STATE;
       op.recoveryState = "waiting_input";
       return op;
     }
+  }
+  // Preserve a live (mid-stage) delete operation instead of forcing it terminal.
+  // The delete runner is resume-safe — each stage re-runs only while it is still
+  // pending/running — so the delete recovery scheduler can pick it up and drive
+  // it to completion. Forcing `failed_partial` here would set `endedAt` and the
+  // scheduler would skip it, stranding the half-deleted environment.
+  if (op.kind === OPERATION_KIND_DELETE && op.request) {
+    for (const stage of op.stages || []) {
+      if (stage.state === "running") stage.state = "pending";
+    }
+    op.recoveryState = "interrupted";
+    return op;
+  }
+  // A delete operation that cannot be resumed (no persisted request or recovery
+  // minimum) has no create-side restart decision to offer. Terminalize it as a
+  // partial deletion so Retry deletion — not the provider-restart prompt — is
+  // what the panel surfaces. Delete ops never take the create-side
+  // `pauseForProviderRestart` fallback below.
+  if (op.kind === OPERATION_KIND_DELETE) {
+    const now = nowIso();
+    op.state = "failed_partial";
+    op.endedAt = now;
+    op.lastActivityAt = now;
+    op.failure = {
+      code: "operation-interrupted",
+      stage: op.currentStage,
+      stepSeq: null,
+      message:
+        "The Radius extension restarted before this deletion reached a durable terminal state. Existing resources were retained for a safe retry.",
+      classification: "user-fixable"
+    };
+    for (const stage of op.stages || []) {
+      if (stage.state === "running") stage.state = "failed";
+      else if (stage.state === "pending") stage.state = "skipped";
+    }
+    op.recoveryState = "interrupted";
+    return op;
   }
   if (hasPendingVerificationAcquisition(op)) {
     op.recoveryState = "verification_acquisition_pending";
@@ -5540,6 +5910,7 @@ export function createRegistry({
 } = {}): any {
   /** @type {Map<string, object>} */
   const byId = new Map();
+  let persistQueue = Promise.resolve();
 
   function prune() {
     const now = clock();
@@ -5631,7 +6002,10 @@ export function createRegistry({
       return restored;
     },
     async persist() {
-      await store.save(snapshot());
+      const envelope = snapshot();
+      const pending = persistQueue.then(() => store.save(envelope));
+      persistQueue = pending.catch(() => {});
+      await pending;
     },
     report(diagnostic) {
       store.report?.(diagnostic);
@@ -5707,7 +6081,8 @@ export function createRegistry({
     },
     /**
      * The record a returning user should be shown for a repo: whatever is
-     * running, else the most recent terminal record they have not yet seen.
+     * running, else the most recent terminal record unless they dismissed it.
+     * Older history must not reappear after the newest record is dismissed.
      */
     latest(repo) {
       const repositoryIdentity = normalizeIdentityPart(repo);
@@ -5723,7 +6098,7 @@ export function createRegistry({
         )
           best = op;
       }
-      return best;
+      return best?.dismissedAt ? null : best;
     },
     /**
      * The record to show a caller that has no repo in hand.
@@ -5746,7 +6121,7 @@ export function createRegistry({
         )
           best = op;
       }
-      return best;
+      return best?.dismissedAt ? null : best;
     },
     get(operationId) {
       const op = byId.get(operationId) || null;
@@ -5877,6 +6252,7 @@ export function toClientView(op: any): any {
   return {
     operationId: op.operationId,
     schemaVersion: op.schemaVersion,
+    kind: op.kind || OPERATION_KIND_CREATE,
     provider: op.provider,
     repo: op.repo,
     environment: op.environment,
