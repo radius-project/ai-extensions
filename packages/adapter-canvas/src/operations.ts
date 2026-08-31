@@ -31,6 +31,7 @@ import {
   type OperationStore
 } from "./operation-store.js";
 import { redactGhCredentials } from "./gh.js";
+import { remediationReference } from "./remediation-reference.js";
 
 // Version 2 adds the cooperative control record (stop, attempts, commands,
 // outcome history). Version 3 adds workflow provenance to the artifact ledger
@@ -5569,31 +5570,7 @@ function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
 
 function persistedFailure(failure: any): any {
   if (!failure) return null;
-  const remediationParams =
-    (
-      failure.remediation &&
-      failure.remediation.params &&
-      typeof failure.remediation.params === "object" &&
-      !Array.isArray(failure.remediation.params)
-    ) ?
-      failure.remediation.params
-    : {};
-  const remediation =
-    (
-      failure.remediation &&
-      typeof failure.remediation === "object" &&
-      typeof failure.remediation.id === "string" &&
-      failure.remediation.id
-    ) ?
-      {
-        id: failure.remediation.id,
-        params: Object.fromEntries(
-          Object.entries(remediationParams).filter(
-            (entry) => typeof entry[1] === "string"
-          )
-        )
-      }
-    : null;
+  const remediation = remediationReference(failure.remediation);
   return {
     code: String(failure.code || ""),
     stage: failure.stage == null ? null : String(failure.stage),

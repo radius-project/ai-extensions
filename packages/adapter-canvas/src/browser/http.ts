@@ -19,6 +19,8 @@ export async function requireSuccessfulJsonResponse(
     throw new ServerResponseError(fallbackMessage);
   }
   const serverMessage = readString(payload, "error");
+  // Some handlers report their own failures as HTTP 200 with an `error` field,
+  // so status alone does not distinguish a successful response.
   if (!response.ok || serverMessage !== "") {
     throw new ServerResponseError(serverMessage || fallbackMessage);
   }

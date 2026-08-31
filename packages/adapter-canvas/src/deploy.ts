@@ -12,6 +12,7 @@ import {
   displayGhCommand,
   type GhCommandPresentation
 } from "./gh-command-display.js";
+import { FORK_REPOSITORY_SETUP_GUIDANCE } from "./repository-access-guidance.js";
 
 type DeployStatus = "pending" | "in_progress" | "success" | "failed";
 
@@ -786,7 +787,7 @@ export function explainRepoAccessForEnvSetup(
         `Switch accounts with: ${switchCommand} (or sign in the account that has access), then retry. ${ghCommandPresentation.installationNote} `
       : `${ghCommandPresentation.installationNote} `) +
       "Note: gh auth switch changes your machine\u2019s active GitHub account for every tool in this terminal until you switch back. " +
-      "If you cannot get access to this repository and forking is allowed, fork it and start a new Copilot session from the fork\u2019s GitHub URL; setup then targets your fork rather than the original repository."
+      FORK_REPOSITORY_SETUP_GUIDANCE
     );
   }
   if (permissions && permissions.admin === true) return "";
@@ -815,7 +816,7 @@ export function explainRepoAccessForEnvSetup(
     haveClause +
     ". " +
     "Ask a repository or organization admin to grant you Admin (repo Settings \u2192 Collaborators and teams), then retry. " +
-    "If that is not possible and forking is allowed, fork the repository and start a new Copilot session from the fork\u2019s GitHub URL; setup then targets your fork rather than the original repository."
+    FORK_REPOSITORY_SETUP_GUIDANCE
   );
 }
 

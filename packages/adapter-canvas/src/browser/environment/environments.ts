@@ -1,7 +1,8 @@
 import { escapeBrowserHtml } from "../html.js";
-import { requireSuccessfulJsonResponse, ServerResponseError } from "../http.js";
+import { requireSuccessfulJsonResponse } from "../http.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { isRecord, readArray, readRecord, readString } from "../json.js";
+import { tableErrorRowMarkup } from "./table-error.js";
 import type { EnvironmentConfirmDialog } from "./confirm-dialog.js";
 import type { EnvironmentInfrastructure } from "./discovery.js";
 import type { BrowserTeardown } from "../lifecycle.js";
@@ -18,6 +19,7 @@ export const ENVIRONMENTS_ENTRY_KEY = "environment-environments";
 export const ENVIRONMENT_LIST_PATH = "/api/list-environments";
 export const ENVIRONMENT_DELETE_PATH = "/api/delete-environment";
 export const ENVIRONMENT_POLL_MS = 10000;
+const ENVIRONMENT_LIST_FAILURE = "Could not load environments.";
 
 export interface EnvironmentRecord {
   name: string;
@@ -432,7 +434,7 @@ export function initializeEnvironmentPane(
         listAbort ? { signal: listAbort.signal } : undefined
       )
       .then((response) =>
-        requireSuccessfulJsonResponse(response, "Could not load environments.")
+        requireSuccessfulJsonResponse(response, ENVIRONMENT_LIST_FAILURE)
       )
       .then(
         (payload) => {
@@ -462,11 +464,11 @@ export function initializeEnvironmentPane(
           ) {
             return;
           }
-          const message =
-            error instanceof ServerResponseError ?
-              error.message
-            : "Could not load environments.";
-          body.innerHTML = `<tr><td colspan="5" style="color:var(--rad-text-tertiary);">${escapeBrowserHtml(message)}</td></tr>`;
+          body.innerHTML = tableErrorRowMarkup(
+            error,
+            5,
+            ENVIRONMENT_LIST_FAILURE
+          );
         }
       );
   };

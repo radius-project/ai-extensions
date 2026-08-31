@@ -11,6 +11,7 @@ import { requireSuccessfulJsonResponse, ServerResponseError } from "../http.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { isRecord, readArray, readBoolean, readString } from "../json.js";
 import { environmentStatusMarkup, providerLabel } from "./environments.js";
+import { tableErrorRowMarkup } from "./table-error.js";
 import type { BrowserTeardown } from "../lifecycle.js";
 import type {
   BrowserContext,
@@ -39,6 +40,9 @@ export const CREDENTIAL_SAVE_PATH = "/api/save-credential-profile";
 export const GITHUB_IDENTITY_PATH = "/api/github-identity";
 export const VERIFY_AZURE_PATH = "/api/verify-azure-login";
 export const VERIFY_AWS_PATH = "/api/verify-aws-login";
+const CREDENTIAL_PROFILES_FAILURE = "Could not load credential profiles.";
+const CREDENTIAL_USAGE_FAILURE =
+  "Could not check which environments use this profile.";
 /**
  * Rebuild a remediation view from a server payload.
  *
@@ -600,10 +604,7 @@ export function initializeCredentialsPane(
         tableAbort ? { signal: tableAbort.signal } : undefined
       )
       .then((response) =>
-        requireSuccessfulJsonResponse(
-          response,
-          "Could not load credential profiles."
-        )
+        requireSuccessfulJsonResponse(response, CREDENTIAL_PROFILES_FAILURE)
       )
       .then(
         (payload) => {
@@ -620,11 +621,11 @@ export function initializeCredentialsPane(
           ) {
             return;
           }
-          const message =
-            error instanceof ServerResponseError ?
-              error.message
-            : "Could not load credential profiles.";
-          credTableBody.innerHTML = `<tr><td colspan="4" style="color:var(--rad-text-tertiary);">${escapeBrowserHtml(message)}</td></tr>`;
+          credTableBody.innerHTML = tableErrorRowMarkup(
+            error,
+            4,
+            CREDENTIAL_PROFILES_FAILURE
+          );
         }
       );
   };
@@ -738,10 +739,7 @@ export function initializeCredentialsPane(
     const usageRequest = context.net
       .fetch(`/api/list-environments?repo=${encodeURIComponent(options.repo)}`)
       .then((response) =>
-        requireSuccessfulJsonResponse(
-          response,
-          "Could not check which environments use this profile."
-        )
+        requireSuccessfulJsonResponse(response, CREDENTIAL_USAGE_FAILURE)
       )
       .then((payload) => {
         return {
@@ -765,15 +763,13 @@ export function initializeCredentialsPane(
     void usageRequest.then(({ usage, checked, failure }) => {
       if (!active) return;
       setButtonState(button, false, "Delete Profile");
-      const usageFailure =
-        "Could not check which environments use this profile.";
       options.confirmDialog?.show({
         title: "Delete credential profile?",
         message: `This deletes the credential profile "${name}". You will not be able to create new environments from it.${
           checked ? ""
-          : failure && failure !== usageFailure ?
-            `\n\n${usageFailure} ${failure}`
-          : `\n\n${usageFailure}`
+          : failure && failure !== CREDENTIAL_USAGE_FAILURE ?
+            `\n\n${CREDENTIAL_USAGE_FAILURE} ${failure}`
+          : `\n\n${CREDENTIAL_USAGE_FAILURE}`
         }`,
         usageLabel:
           usage.length === 1 ?

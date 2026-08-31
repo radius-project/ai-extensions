@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { stateRegistryForEnvironment } from "@radius-project/core";
+import { FORK_REPOSITORY_SETUP_GUIDANCE } from "../../repository-access-guidance.js";
 import {
   BARE_GH_COMMAND_PRESENTATION,
   presentedRemediationView,
@@ -294,7 +295,7 @@ function repairGuidance(
   }
   if (!repositoryReady) {
     return {
-      repair: `Grant @${login} repository administrator access, select an account that can administer this repository, or (if forking is allowed) fork the repository and start a new Copilot session from the fork's GitHub URL, which targets your fork rather than the original repository.`,
+      repair: `Grant @${login} repository administrator access or select an account that can administer this repository. ${FORK_REPOSITORY_SETUP_GUIDANCE}`,
       remediation: null
     };
   }

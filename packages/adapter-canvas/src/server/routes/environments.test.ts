@@ -947,6 +947,33 @@ describe("environments — list-environments", () => {
     });
   });
 
+  it("bounds browser-visible gh stderr", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+      [ENV_PATH.names("o/r")]: {
+        error: new Error("failed"),
+        stderr: "x".repeat(2001)
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        cliExec: cliFake(script)
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      environments: [],
+      error: `${"x".repeat(2000)}...`
+    });
+  });
+
   it("filters to RADIUS_MANAGED envs and derives provider and verify status", async () => {
     const script: CliScript = {
       [ENV_PATH.verifyRuns("o/r")]: {
@@ -1153,6 +1180,36 @@ describe("environments — list-environments", () => {
     expect(JSON.parse(recording.body)).toEqual({
       environments: [],
       error: "spawn failed"
+    });
+  });
+
+  it("uses a generic top-level error when redaction removes the diagnostic", async () => {
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    const cliExec = (
+      _command: string,
+      args: string[],
+      _options: { timeout: number },
+      callback: (error: Error | null, stdout: string, stderr: string) => void
+    ) => {
+      if (args.includes("--paginate")) throw new Error("sensitive");
+      callback(null, "", "");
+    };
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        cliExec,
+        redactDiagnostic: () => ""
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      environments: [],
+      error: "Failed to list environments."
     });
   });
 

@@ -330,6 +330,26 @@ describe("environment listing diagnostics", () => {
     expect(recovered.status).toBe(200);
     expect(recovered.body).toEqual({ environments: [] });
   });
+
+  it("bounds a browser-visible diagnostic over HTTP", async () => {
+    const harness = await start({
+      ["/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100"]:
+        { stdout: "" },
+      ["/repos/octo/app/environments?per_page=100"]: {
+        error: new Error("failed"),
+        stderr: "x".repeat(2001)
+      }
+    });
+
+    const failed = await harness.list();
+
+    expect(failed.status).toBe(200);
+    expect(failed.body).toEqual({
+      environments: [],
+      error: `${"x".repeat(2000)}...`
+    });
+    expect(failed.rawBody).not.toContain("x".repeat(2001));
+  });
 });
 
 describe("environment listing cache after environment cleanup", () => {

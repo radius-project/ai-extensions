@@ -86,10 +86,10 @@ export interface EnvironmentsCliExec {
 export interface EnvironmentsDependencies {
   // --- shared ---
   errorMessage(error: unknown): string;
-  // `list-environments` reports genuine failures to the browser, which renders
-  // them verbatim. Subprocess stderr and gh error text can carry the injected
-  // GH_TOKEN, so every diagnostic entering a browser-visible envelope is
-  // redacted here rather than trusting the caller to have done it.
+  // `list-environments` reports genuine listing failures to the browser, which
+  // renders them verbatim. Its subprocess stderr and gh error text can carry the
+  // injected GH_TOKEN, so those listing diagnostics are redacted through this
+  // seam rather than trusting the caller to have done it.
   redactDiagnostic(value: string): string;
   repoMatchesWorkspace(state: CanvasState, repo: string): boolean;
   // Returns undefined when the instance has no entry, matching the legacy
