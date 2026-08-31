@@ -319,7 +319,7 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
       }
     ]);
     expect(test.workflow.steps).toContain(
-      "\u2139\ufe0f The Service Principal was absent before this step and present after it, but the create command did not report success, so Radius cannot prove it created it and will not remove it during a rollback."
+      "\u2139\ufe0f The Service Principal was absent before this step and present after it, but the create command did not report success, so Radius cannot prove it created it and will not remove it during setup deletion."
     );
   });
 

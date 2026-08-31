@@ -50,7 +50,12 @@ import {
 } from "../services/provider-mutation-recovery.js";
 import { selectedEnvironmentReader } from "../services/github-environment.js";
 import { runVerificationDispatch } from "../services/verification-dispatch.js";
-import { describeVerificationDispatch } from "../../verification-plan.js";
+import {
+  describeVerificationDispatch,
+  describePullRequestNextStep,
+  describeMergeRequiredTerminal,
+  type PullRequestNextStep
+} from "../../verification-plan.js";
 
 // Seam 4 of the `POST /api/create-environment` slice: the seven-step use case.
 //
@@ -633,7 +638,7 @@ export async function handleCreateEnvironment(
     if (!defaultBranch) {
       await fail(
         400,
-        `Could not determine the default branch for ${targetRepo}, so Radius did not commit workflow files with guessed rollback provenance.`,
+        `Could not determine the default branch for ${targetRepo}, so Radius did not commit workflow files with guessed deletion provenance.`,
         "default-branch-unavailable",
         { steps }
       );
@@ -868,6 +873,7 @@ export async function handleCreateEnvironment(
     // don't exist on the default branch, so we skip dispatching the verify run
     // (it would 404) and tell the user to merge first.
     let pullRequestUrl = "";
+    let pullRequestOpened = false;
     const prState = committer.pullRequestState();
     if (prState) {
       const prTitle = "Add Radius deploy workflows for environment " + envName;
@@ -1023,12 +1029,8 @@ export async function handleCreateEnvironment(
           };
       if (pr.ok) {
         pullRequestUrl = pr.url || "";
+        pullRequestOpened = true;
         steps.push("✅ Opened pull request #" + pr.number + ": " + pr.url);
-        steps.push(
-          '👉 Merge the pull request above to finish setup; credential verification and deploys run once it lands on "' +
-            prState.base +
-            '".'
-        );
       } else {
         steps.push(
           '⚠️ Committed workflows to branch "' +
@@ -1285,6 +1287,34 @@ export async function handleCreateEnvironment(
       }
     }
 
+    // The guidance waited for the whole decision, not just the plan. Every
+    // path that skipped or failed the dispatch has already returned by here,
+    // so this is the one place that knows what the pull request is actually
+    // waiting on rather than predicting it. The two blockers are independent,
+    // so they are read separately: merging is only the last step when the
+    // credentials are already complete. The outcome is resolved once and read
+    // by both the step and the terminal message below, because a headline that
+    // promises what the step just withdrew is the same contradiction one layer
+    // up. The marker follows it too, an observation when verification is
+    // already running and a prompt only when the customer owes an action.
+    const awaitingMerge = !verifyPlan.shouldDispatch;
+    const awaitingCredentials = !credentialsComplete;
+    const nextStepOutcome: PullRequestNextStep =
+      awaitingMerge && awaitingCredentials ? "awaiting-merge-and-credentials"
+      : awaitingMerge ? "awaiting-merge"
+      : awaitingCredentials ? "awaiting-credentials"
+      : "verification-running";
+    if (prState && pullRequestOpened) {
+      const nextStep = describePullRequestNextStep({
+        outcome: nextStepOutcome,
+        baseBranch: prState.base,
+        ref: verificationRef
+      });
+      if (nextStepOutcome === "verification-running")
+        steps.push(`ℹ️ ${nextStep}`);
+      else steps.push(`👉 ${nextStep}`);
+    }
+
     const actionRequired = !verifyPlan.shouldDispatch;
     dependencies.recordCleanupState(operation, { state: "not_needed" });
     if (actionRequired) {
@@ -1304,16 +1334,13 @@ export async function handleCreateEnvironment(
           pullRequestUrl: pullRequestUrl || null,
           branch: prState?.branch || null,
           baseBranch: prState?.base || verifyPlan.defaultBranch || null,
-          userMessage:
-            pullRequestUrl ?
-              "Merge the pull request to finish setup; credential verification and deploys run once it lands."
-            : `Open and merge a pull request from "${
-                prState?.branch || "the setup branch"
-              }" into "${
-                prState?.base ||
-                verifyPlan.defaultBranch ||
-                "the default branch"
-              }" to finish setup.`
+          userMessage: describeMergeRequiredTerminal({
+            outcome: nextStepOutcome,
+            branch: prState?.branch || "the setup branch",
+            baseBranch:
+              prState?.base || verifyPlan.defaultBranch || "the default branch",
+            hasPullRequest: pullRequestUrl !== ""
+          })
         }
       });
       await dependencies.persistBestEffort({

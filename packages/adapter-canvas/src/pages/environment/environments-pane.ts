@@ -114,7 +114,7 @@ export function environmentsPaneMarkup(
           <ul id="env-progress-state-created" class="env-progress__failure-list"></ul>
         </div>
         <div id="env-progress-state-retained-block" class="env-progress__failure-block" style="display:none;">
-          <div class="env-progress__failure-label">Created by Radius and available to roll back</div>
+          <div class="env-progress__failure-label">Created by Radius and available to delete</div>
           <ul id="env-progress-state-retained" class="env-progress__failure-list"></ul>
         </div>
         <div id="env-progress-state-reused-block" class="env-progress__failure-block" style="display:none;">
@@ -187,7 +187,7 @@ export function environmentsPaneMarkup(
        the operation record; nothing here is reconstructed in the browser. -->
   <div id="env-rollback-modal" role="dialog" aria-modal="true" aria-labelledby="env-rollback-title" aria-describedby="env-rollback-intro" style="display:none; position:fixed; inset:0; z-index:1004; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
     <div class="env-rollback__panel">
-      <div id="env-rollback-title" class="env-rollback__title" tabindex="-1">Roll back resources created by this setup?</div>
+      <div id="env-rollback-title" class="env-rollback__title" tabindex="-1">Delete this setup and its created resources?</div>
       <div id="env-rollback-intro" class="env-rollback__intro">Radius removes only the resources it proved it created before the workflows were committed. This cannot be undone.</div>
       <div id="env-rollback-remove-block" class="env-progress__failure-block" style="display:none;">
         <div class="env-progress__failure-label">Radius will remove</div>
@@ -202,8 +202,8 @@ export function environmentsPaneMarkup(
         <ul id="env-rollback-manual" class="env-progress__failure-list"></ul>
       </div>
       <div class="env-rollback__buttons">
-        <button type="button" id="env-rollback-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Keep resources</button>
-        <button type="button" id="env-rollback-confirm" class="rad-btn rad-btn--danger" style="margin:0;">Roll back resources</button>
+        <button type="button" id="env-rollback-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Keep setup</button>
+        <button type="button" id="env-rollback-confirm" class="rad-btn rad-btn--danger" style="margin:0;">Delete setup</button>
       </div>
     </div>
   </div>

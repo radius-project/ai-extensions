@@ -1281,7 +1281,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
     expect(recording.status).toBe(409);
     expect(JSON.parse(recording.body)).toEqual({
       error:
-        "An earlier setup for octo/app must finish rollback before a new setup can start.",
+        "An earlier setup for octo/app must finish deletion before a new setup can start.",
       code: "previous-cleanup-required",
       operationId: "op-cleanup"
     });

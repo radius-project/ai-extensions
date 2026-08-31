@@ -18,7 +18,7 @@ Restart your Copilot session after installing so the skills and Radius Canvas be
 
 <!-- markdownlint-disable-next-line MD028 -->
 
-> **NOTE:** The canvas `extension.mjs` is a compiled build artifact that is not committed to `main`. CI rebuilds it on every merge, assembles the complete plugin into `plugins/radius/dist/`, and publishes that to a generated `releases/edge` branch (also tagged `edge`); the marketplace manifest pins the plugin `source` to that path and branch — so installing from the app delivers the skills and canvas without any manual build. See [`docs/design/2026-07-canvas-bundle-publishing.md`](../../docs/design/2026-07-canvas-bundle-publishing.md).
+> **NOTE:** The canvas `extension.mjs` is a compiled build artifact that is not committed to `main`. CI rebuilds it on every merge, assembles the complete plugin into `plugins/radius/dist/`, and publishes that to a generated `releases/radius/edge` branch (also tagged `radius@edge`); the marketplace manifest pins the plugin `source` to that path and branch — so installing from the app delivers the skills and canvas without any manual build. See [`docs/design/2026-07-canvas-bundle-publishing.md`](../../docs/design/2026-07-canvas-bundle-publishing.md).
 
 ## What's included
 

@@ -982,7 +982,7 @@ describe("the checkpoint every Azure mutation passes through", () => {
       {
         status: 409,
         code: "provider-rollback-pending",
-        error: expect.stringContaining("must roll back")
+        error: expect.stringContaining("must delete the setup resources")
       }
     ]);
   });
