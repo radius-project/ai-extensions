@@ -285,14 +285,14 @@ async function confirmProviderMutation<T>({
     onConfirmed?.(value, recovered);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    const guidance = `The provider mutation succeeded, but Radius could not record the rollback provenance: ${detail}`;
+    const guidance = `The provider mutation succeeded, but Radius could not record the deletion provenance: ${detail}`;
     settleProviderMutation(
       operation,
       mutation.mutationId,
       "manual_required",
       guidance
     );
-    await persistOrThrow(persist, "after rollback provenance recording failed");
+    await persistOrThrow(persist, "after deletion provenance recording failed");
     throw new ProviderMutationRecoveryError(
       guidance,
       "provider-mutation-manual-required"
@@ -559,7 +559,7 @@ export async function executeRecoverableMutation<T>(
       existingBefore.status === "manual_required")
   ) {
     throw new ProviderMutationRecoveryError(
-      "Radius has finished reconciling the interrupted provider request and must roll back before any further provider changes.",
+      "Radius has finished reconciling the interrupted provider request and must delete the setup resources before any further provider changes.",
       "provider-mutation-rollback-pending"
     );
   }

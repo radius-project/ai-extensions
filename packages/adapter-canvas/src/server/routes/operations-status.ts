@@ -1,5 +1,6 @@
 import type { CanvasRequestContext } from "../request-context.js";
 import type { SelectionHandleClaim } from "../services/github-account-readiness.js";
+import { setupStartConflictResponse } from "./operation-start-conflict.js";
 import {
   createOperationDiagnosticContext,
   createOperationDiagnosticExport,
@@ -417,16 +418,7 @@ function sendStartConflict(
   repo: string,
   started: OperationStartConflict
 ): void {
-  const previousCleanup = started.reason === "previous-cleanup-required";
-  jsonError(context, 409, {
-    error:
-      previousCleanup ?
-        `An earlier setup for ${repo} must finish rollback before a new setup can start.`
-      : `Setup is already running for ${repo}.`,
-    code:
-      previousCleanup ? "previous-cleanup-required" : "operation-in-progress",
-    operationId: started.conflict.operationId
-  });
+  jsonError(context, 409, setupStartConflictResponse(repo, started));
 }
 
 // Register a new environment-setup operation and hand back a status URL the
