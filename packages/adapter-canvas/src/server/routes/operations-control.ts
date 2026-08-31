@@ -7,11 +7,13 @@ import {
 import {
   acceptCommand,
   announceOperationTerminal,
+  applyDeletionRetry,
   applySetupResumePoint,
   applyStopRequest,
   beginRetryAttempt,
   canContinueSetup,
   canExitSetup,
+  canRetryDeletion,
   canRetryCleanup,
   canRetrySetup,
   canRetryVerification,
@@ -20,18 +22,26 @@ import {
   markVerificationRetryPrecondition,
   findActiveCommand,
   finish,
+  getOperationControl,
+  isProviderRestartDecision,
   markVerificationRetryAcquisition,
   rollbackRetryAttempt,
   setCommandState,
   setStageState,
   snapshotRetryState,
+  stopProviderRestartDecision,
+  setVerificationWorkflowState,
+  verificationWorkflowState,
   toClientView,
   EXIT_COMMAND_KIND,
   EXIT_COMMAND_OUTCOME,
+  OPERATION_KIND_DELETE,
+  ABANDON_COMMAND_OUTCOME,
   STAGE_VERIFY,
   type OperationAttemptKind,
   type OperationCommandKind,
-  type StopRequestOutcome
+  type StopRequestOutcome,
+  type VerificationWorkflowState
 } from "../../operations.js";
 import { errorMessage } from "../../runtime/util.js";
 import type { OperationRecord } from "./operations-status.js";
@@ -65,6 +75,8 @@ export const STOP_OPERATION_ROUTE = "/api/operations/:operationId/stop";
 export const CONTINUE_OPERATION_ROUTE = "/api/operations/:operationId/continue";
 export const ROLLBACK_OPERATION_ROUTE = "/api/operations/:operationId/rollback";
 export const EXIT_OPERATION_ROUTE = "/api/operations/:operationId/exit";
+export const CANCEL_WORKFLOW_ROUTE =
+  "/api/operations/:operationId/cancel-workflow";
 export const RETRY_OPERATION_ROUTE =
   "/api/operations/:operationId/retry/:retryKind";
 
@@ -87,7 +99,9 @@ type OperationCommandName =
 // the record it closes.
 export type OperationScheduleKind =
   | "setup_continuation"
+  | "verification_monitor"
   | "verification_retry"
+  | "deletion_retry"
   | "cleanup_retry"
   | "rollback"
   | "exit_setup";
@@ -100,8 +114,10 @@ type RetryEligibility = {
   target?: string;
   targets?: readonly unknown[];
   classification?: string;
+  recoveredVerification?: boolean;
   requiresMergedPullRequest?: boolean;
   pullRequestUrl?: string | null;
+  abandon?: boolean;
 };
 
 // Registering a command either accepts a new one or resolves to the saved one
@@ -148,6 +164,12 @@ export interface OperationsControlDependencies {
   // from the cached payload would keep showing the environment this setup left
   // behind under the status its last attempt wrote.
   invalidateEnvironmentListing(repo: string): void;
+  inspectVerificationWorkflow(
+    operation: OperationRecord
+  ): Promise<"active" | "inactive">;
+  cancelVerificationWorkflow(
+    operation: OperationRecord
+  ): Promise<"inactive" | "cancelling">;
 }
 
 // Typed views of the model's `any`-shaped exports, pinned once here so the
@@ -214,7 +236,9 @@ interface CommandSpec {
   // asked for it. Resolves true when it has already answered, so the reopen and
   // schedule below never run for it.
   settleWithoutWork?: (request: CommandRequest) => Promise<boolean>;
-  scheduleKind: OperationScheduleKind;
+  scheduleKind:
+    | OperationScheduleKind
+    | ((eligibility: RetryEligibility) => OperationScheduleKind);
   // A retry that no runner accepted is closed with a failure, preserving the
   // established contract. A first-choice command restores the terminal decision
   // the customer was looking at instead, because nothing ran at all.
@@ -329,7 +353,8 @@ function unknownOperation(context: CanvasRequestContext): void {
 async function resolveOperation(
   context: CanvasRequestContext,
   template: string,
-  dependencies: Pick<OperationsControlDependencies, "get">
+  dependencies: Pick<OperationsControlDependencies, "get">,
+  { allowDelete = false }: { allowDelete?: boolean } = {}
 ): Promise<{
   operationId: string;
   operation: OperationRecord;
@@ -341,6 +366,18 @@ async function resolveOperation(
   const operation = operationId ? dependencies.get(operationId) : null;
   if (!params || !operationId || !operation) {
     unknownOperation(context);
+    return null;
+  }
+  // Delete operations share this durable command route only for Retry deletion.
+  // Stop, setup retry/continue, rollback, and exit remain create-only controls.
+  if (operation.kind === OPERATION_KIND_DELETE && !allowDelete) {
+    sendJson(context, 409, {
+      error:
+        "This operation is a deletion and is not controlled through setup controls.",
+      code: "operation-not-setup-controllable",
+      operationId,
+      operation: clientView(operation)
+    });
     return null;
   }
   return { operationId, operation, params };
@@ -368,6 +405,58 @@ export async function handleStopOperation(
   );
   if (!resolved) return;
   const { operationId, operation } = resolved;
+  if (isProviderRestartDecision(operation)) {
+    const snapshot = snapshotRetryState(operation);
+    stopProviderRestartDecision(operation);
+    try {
+      await dependencies.persistOperations();
+    } catch (error) {
+      rollbackRetryAttempt(operation, snapshot);
+      sendJson(context, 500, {
+        error:
+          "Radius could not save the stop request, so nothing was stopped. Try again.",
+        code: "operation-stop-persist-failed",
+        operationId,
+        detail: errorMessage(error)
+      });
+      return;
+    }
+    try {
+      setVerificationWorkflowState(
+        operation,
+        await dependencies.inspectVerificationWorkflow(operation)
+      );
+      await dependencies.persistOperations();
+    } catch (error) {
+      setVerificationWorkflowState(operation, "unknown");
+      let persistError: unknown = null;
+      try {
+        await dependencies.persistOperations();
+      } catch (saveError) {
+        persistError = saveError;
+      }
+      sendJson(context, 200, {
+        operationId,
+        code: "operation-stopped-workflow-status-unknown",
+        detail:
+          persistError === null ?
+            errorMessage(error)
+          : `${errorMessage(error)} Radius also could not save the unknown workflow status: ${errorMessage(persistError)}`,
+        statusUrl: statusUrlFor(operationId),
+        operation: clientView(operation)
+      });
+      announceOperationTerminal(operation);
+      return;
+    }
+    announceOperationTerminal(operation);
+    sendJson(context, 200, {
+      operationId,
+      code: "operation-stopped",
+      statusUrl: statusUrlFor(operationId),
+      operation: clientView(operation)
+    });
+    return;
+  }
 
   const activeCommand = findActiveCommand(operation);
   if (
@@ -436,6 +525,150 @@ export async function handleStopOperation(
     statusUrl: statusUrlFor(operationId),
     operation: clientView(operation)
   });
+}
+
+export async function handleCancelWorkflow(
+  context: CanvasRequestContext,
+  dependencies: OperationsControlDependencies
+): Promise<void> {
+  const resolved = await resolveOperation(
+    context,
+    CANCEL_WORKFLOW_ROUTE,
+    dependencies
+  );
+  if (!resolved) return;
+  const { operationId, operation } = resolved;
+  const verification =
+    operation.verification && typeof operation.verification === "object" ?
+      operation.verification
+    : null;
+  const runId =
+    verification && "runId" in verification && verification.runId != null ?
+      String(verification.runId)
+    : "";
+  if (operation.state !== "cancelled" || !runId) {
+    sendJson(context, 409, {
+      error:
+        "Stop setup before cancelling its exact verification workflow run.",
+      code: "workflow-cancel-not-available",
+      operationId,
+      operation: clientView(operation)
+    });
+    return;
+  }
+  if (
+    verificationWorkflowState(operation) === "unknown" ||
+    verificationWorkflowState(operation) === "cancelling"
+  ) {
+    let state: VerificationWorkflowState;
+    try {
+      state = await dependencies.inspectVerificationWorkflow(operation);
+    } catch (error) {
+      sendJson(context, 502, {
+        error: "Radius could not read the verification workflow status.",
+        code: "workflow-status-read-failed",
+        operationId,
+        detail: errorMessage(error),
+        operation: clientView(operation)
+      });
+      return;
+    }
+    setVerificationWorkflowState(operation, state);
+    try {
+      await dependencies.persistOperations();
+    } catch (error) {
+      setVerificationWorkflowState(operation, "unknown");
+      sendJson(context, 500, {
+        error:
+          "Radius read the verification workflow status but could not save it. Try again.",
+        code: "workflow-status-persist-failed",
+        operationId,
+        detail: errorMessage(error),
+        operation: clientView(operation)
+      });
+      return;
+    }
+    sendJson(context, 200, {
+      operationId,
+      code: "workflow-status-checked",
+      statusUrl: statusUrlFor(operationId),
+      operation: clientView(operation)
+    });
+    return;
+  }
+  const snapshot = snapshotRetryState(operation);
+  const previousCancellationAttempts = (
+    getOperationControl(operation)?.commands ?? []
+  )
+    .filter(
+      (command) =>
+        command.kind === "cancel_workflow" && command.target === runId
+    )
+    .map((command) => command.attempt);
+  const cancellationAttempt =
+    previousCancellationAttempts.length === 0 ?
+      0
+    : Math.max(...previousCancellationAttempts) + 1;
+  const accepted = acceptOperationCommand(operation, {
+    kind: "cancel_workflow",
+    attempt: cancellationAttempt,
+    target: runId
+  });
+  setCommandState(operation, accepted.command.commandId, "running");
+  setVerificationWorkflowState(operation, "cancelling");
+  try {
+    await dependencies.persistOperations();
+  } catch (error) {
+    rollbackRetryAttempt(operation, snapshot);
+    sendJson(context, 500, {
+      error:
+        "Radius could not save the workflow cancellation request, so it did not contact GitHub. Try again.",
+      code: "workflow-cancel-persist-failed",
+      operationId,
+      detail: errorMessage(error)
+    });
+    return;
+  }
+  try {
+    const state = await dependencies.cancelVerificationWorkflow(operation);
+    setVerificationWorkflowState(operation, state);
+    setCommandState(operation, accepted.command.commandId, "finished", state);
+    await dependencies.persistOperations();
+    sendJson(context, state === "inactive" ? 200 : 202, {
+      operationId,
+      code:
+        state === "inactive" ? "workflow-cancelled" : (
+          "workflow-cancellation-pending"
+        ),
+      statusUrl: statusUrlFor(operationId),
+      operation: clientView(operation)
+    });
+  } catch (error) {
+    setVerificationWorkflowState(operation, "unknown");
+    setCommandState(
+      operation,
+      accepted.command.commandId,
+      "finished",
+      "failed"
+    );
+    let persistError: unknown = null;
+    try {
+      await dependencies.persistOperations();
+    } catch (saveError) {
+      persistError = saveError;
+    }
+    sendJson(context, 502, {
+      error:
+        "Radius could not confirm cancellation of the verification workflow.",
+      code: "workflow-cancel-failed",
+      operationId,
+      detail:
+        persistError === null ?
+          errorMessage(error)
+        : `${errorMessage(error)} Radius also could not save the workflow status: ${errorMessage(persistError)}`,
+      operation: clientView(operation)
+    });
+  }
 }
 
 /**
@@ -530,6 +763,38 @@ function enterVerifyStage(operation: OperationRecord): void {
 
 const applyResumePoint: CommandSpec["prepare"] = (operation, eligibility) =>
   applySetupResumePoint(operation, eligibility.resumeFrom);
+const applyDeleteResumePoint: CommandSpec["prepare"] = (operation) =>
+  applyDeletionRetry(operation);
+
+const requireCleanupExit: EligibilityCheck = (operation) => {
+  const eligibility = canExitSetup(operation);
+  if (!eligibility.ok || eligibility.abandon !== true) return eligibility;
+  return {
+    ok: false,
+    code: "operation-exit-requires-abandon",
+    detail:
+      "External work may still be using these resources. Review the setup again and choose Abandon setup to leave them in place."
+  };
+};
+
+const requireAbandonExit: EligibilityCheck = (operation) => {
+  const eligibility = canExitSetup(operation);
+  if (!eligibility.ok) return eligibility;
+  if (eligibility.abandon !== true) {
+    return {
+      ok: false,
+      code: "operation-abandon-not-available",
+      detail:
+        "Radius can safely clean up this setup. Review the setup again and choose Exit setup."
+    };
+  }
+  return {
+    ...eligibility,
+    targets: [],
+    target: "abandon",
+    abandon: true
+  };
+};
 
 const RETRY_PERSIST_FAILURE = {
   persistFailureCode: "operation-retry-persist-failed",
@@ -562,7 +827,14 @@ async function closeExitedSetup({
     target: eligibility.target ?? "exit"
   });
   const commandId = accepted.command.commandId;
-  setCommandState(operation, commandId, "finished", EXIT_COMMAND_OUTCOME);
+  setCommandState(
+    operation,
+    commandId,
+    "finished",
+    eligibility.abandon === true ?
+      ABANDON_COMMAND_OUTCOME
+    : EXIT_COMMAND_OUTCOME
+  );
   try {
     await dependencies.persistOperations();
   } catch (error) {
@@ -611,7 +883,10 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     eligibility: canContinueSetup,
     activeKinds: ["continue_setup", "retry_setup"],
     prepare: applyResumePoint,
-    scheduleKind: "setup_continuation",
+    scheduleKind: (eligibility) =>
+      eligibility.recoveredVerification ?
+        "verification_monitor"
+      : "setup_continuation",
     schedulerMiss: "restore-terminal",
     persistFailureCode: "operation-continue-persist-failed",
     persistFailureMessage:
@@ -658,6 +933,17 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     schedulerMiss: "close-operation",
     ...RETRY_PERSIST_FAILURE
   },
+  deletion: {
+    name: "deletion",
+    commandKind: "retry_deletion",
+    attemptKind: "deletion",
+    eligibility: canRetryDeletion,
+    activeKinds: ["retry_deletion"],
+    prepare: applyDeleteResumePoint,
+    scheduleKind: "deletion_retry",
+    schedulerMiss: "close-operation",
+    ...RETRY_PERSIST_FAILURE
+  },
   cleanup: {
     name: "cleanup",
     commandKind: "retry_cleanup",
@@ -674,7 +960,7 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     // Exit deletes through the cleanup ledger, so it advances the same attempt
     // counter a rollback does and its results select against the same attempt.
     attemptKind: "cleanup",
-    eligibility: canExitSetup,
+    eligibility: requireCleanupExit,
     // A second submission while the disposal is in flight resolves to the
     // command already running rather than deleting through the ledger twice.
     activeKinds: [EXIT_COMMAND_KIND],
@@ -689,8 +975,18 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
   }
 };
 
+const ABANDON_EXIT_COMMAND: CommandSpec = {
+  ...COMMANDS.exit,
+  eligibility: requireAbandonExit
+};
+
 function isRetryKind(value: string): value is OperationRetryKind {
-  return value === "setup" || value === "verification" || value === "cleanup";
+  return (
+    value === "setup" ||
+    value === "verification" ||
+    value === "cleanup" ||
+    value === "deletion"
+  );
 }
 
 /**
@@ -715,8 +1011,12 @@ async function runAcceptedCommand(
 ): Promise<void> {
   const lock = dependencies.acquireForRetry(operation);
   if (!lock.ok) {
+    const work =
+      operation.kind === OPERATION_KIND_DELETE ?
+        "environment operation"
+      : "setup";
     sendJson(context, 409, {
-      error: `Another setup is already running for ${String(operation.repo ?? "")}.`,
+      error: `Another ${work} is already running for ${String(operation.repo ?? "")}.`,
       code: "operation-in-progress",
       operationId: lock.conflict.operationId
     });
@@ -763,7 +1063,10 @@ async function runAcceptedCommand(
 
   const start = (): boolean =>
     dependencies.schedule({
-      kind: spec.scheduleKind,
+      kind:
+        typeof spec.scheduleKind === "function" ?
+          spec.scheduleKind(eligibility)
+        : spec.scheduleKind,
       instanceId: context.instanceId,
       operation,
       commandId
@@ -842,9 +1145,15 @@ async function runCommandRoute(
   selectSpec: (
     params: Readonly<Record<string, string>>,
     operationId: string
-  ) => CommandSpec | null
+  ) => CommandSpec | null,
+  options: { allowDelete?: boolean } = {}
 ): Promise<void> {
-  const resolved = await resolveOperation(context, route, dependencies);
+  const resolved = await resolveOperation(
+    context,
+    route,
+    dependencies,
+    options
+  );
   if (!resolved) return;
   const { operationId, operation, params } = resolved;
   const spec = selectSpec(params, operationId);
@@ -944,11 +1253,10 @@ export function handleExitOperation(
   context: CanvasRequestContext,
   dependencies: OperationsControlDependencies
 ): Promise<void> {
-  return runCommandRoute(
-    context,
-    dependencies,
-    EXIT_OPERATION_ROUTE,
-    () => COMMANDS.exit
+  return runCommandRoute(context, dependencies, EXIT_OPERATION_ROUTE, () =>
+    context.url.searchParams.get("mode") === "abandon" ?
+      ABANDON_EXIT_COMMAND
+    : COMMANDS.exit
   );
 }
 
@@ -957,6 +1265,10 @@ export function handleRetryOperation(
   context: CanvasRequestContext,
   dependencies: OperationsControlDependencies
 ): Promise<void> {
+  const pathRetryKind = decodeSegment(
+    templatePathParameters(RETRY_OPERATION_ROUTE, context.pathname)
+      ?.retryKind ?? ""
+  );
   return runCommandRoute(
     context,
     dependencies,
@@ -972,7 +1284,8 @@ export function handleRetryOperation(
         return null;
       }
       return COMMANDS[requestedKind];
-    }
+    },
+    { allowDelete: pathRetryKind === "deletion" }
   );
 }
 
@@ -1007,6 +1320,8 @@ export function createOperationsControlRoutes(
       runSerialized(context, STOP_OPERATION_ROUTE, handleStopOperation),
     [`POST ${CONTINUE_OPERATION_ROUTE}`]: (context) =>
       runSerialized(context, CONTINUE_OPERATION_ROUTE, handleContinueOperation),
+    [`POST ${CANCEL_WORKFLOW_ROUTE}`]: (context) =>
+      runSerialized(context, CANCEL_WORKFLOW_ROUTE, handleCancelWorkflow),
     [`POST ${ROLLBACK_OPERATION_ROUTE}`]: (context) =>
       runSerialized(context, ROLLBACK_OPERATION_ROUTE, handleRollbackOperation),
     [`POST ${EXIT_OPERATION_ROUTE}`]: (context) =>

@@ -75,6 +75,7 @@ describe("environmentPage", () => {
       "env-progress-state",
       "env-progress-commands",
       "env-progress-command-buttons",
+      "env-progress-command-descriptions",
       "env-smr-modal",
       "env-appselect-modal",
       "env-profile-button",
@@ -108,6 +109,28 @@ describe("environmentPage", () => {
     expect(html).toContain(browserEntryMarker("environment-page"));
     expect(html.split(browserScript("environment-page"))).toHaveLength(2);
     expectSafeInlineScripts(html);
+  });
+
+  it("serializes the host-specific GitHub CLI presentation", () => {
+    const html = environmentPage({
+      ghCommandPresentation: {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/Applications/GitHub Copilot/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    });
+
+    expect(readBrowserPageState(html, ENVIRONMENT_PAGE_STATE_ID)).toMatchObject(
+      {
+        ghCommandPresentation: {
+          kind: "absolute",
+          shell: "posix",
+          executablePath: "/Applications/GitHub Copilot/gh",
+          installationNote: "Install GitHub CLI system-wide."
+        }
+      }
+    );
   });
 
   it("preserves state fallback and escapes hostile form values", () => {
@@ -239,6 +262,35 @@ describe("environmentPage — stop, continue and rollback styling", () => {
       );
       expect(panelStyles).not.toContain(literal);
     }
+  });
+
+  it("styles the diagnostic review and disabled download from theme tokens", () => {
+    const markup = html();
+    expect(markup).toContain(
+      ".env-diagnostics__panel { background:var(--rad-surface)"
+    );
+    expect(markup).toContain(".env-diagnostics__identifiers { display:grid;");
+    expect(markup).toContain(
+      '.env-diagnostics__buttons a[aria-disabled="true"] { pointer-events:none; opacity:0.55; }'
+    );
+    expect(markup).toContain(
+      ".env-diagnostics__option { display:flex; align-items:center;"
+    );
+    expect(markup).toContain(
+      ".env-diagnostics__option label { margin:0; line-height:1.4; }"
+    );
+    expect(markup).toContain(
+      ".env-progress__diagnostics .rad-btn { margin-top:0; }"
+    );
+    expect(markup).toContain(".env-progress__diagnostics-status { width:100%;");
+    expect(markup).toContain(
+      ".env-progress__bottom-buttons:empty { display:none; }"
+    );
+    const panelStyles = markup.slice(
+      markup.indexOf(".env-diagnostics__panel"),
+      markup.indexOf(".env-progress__step")
+    );
+    expect(panelStyles).not.toContain("#fff;");
   });
 
   it("distinguishes a running rollback from a running setup without colour alone", () => {

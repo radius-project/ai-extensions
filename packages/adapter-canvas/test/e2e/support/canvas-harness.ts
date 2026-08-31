@@ -4,6 +4,10 @@ import { promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test as base, expect, type Page } from "@playwright/test";
+import {
+  azureDiscoveryContract,
+  type AzureDiscoveryCluster
+} from "../../support/azure-discovery-contract.js";
 import type { CanvasState, SharedCredentials } from "../../../src/shared.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
 
@@ -16,6 +20,15 @@ export const E2E_TMP_ROOT = path.resolve(
   ".tmp"
 );
 const WINDOWS_SHIM_ROOT = path.join(E2E_TMP_ROOT, ".windows-shim");
+// packages/adapter-canvas/test/e2e/support -> repository root.
+const REPOSITORY_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
+  "..",
+  ".."
+);
 export const CREDENTIAL_STORE_PATH = path.join(
   E2E_TMP_ROOT,
   "credential-cache.json"
@@ -27,7 +40,10 @@ export const WORKTREE_BRANCH = "feature/phase-6";
 export const PROFILE_NAME = "fixture-azure";
 const PROFILE_USER = "fixture-user";
 const PROFILE_TENANT_ID = "11111111-1111-1111-1111-111111111111";
-const PROFILE_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
+// The subscription every suite's fixture profile is provisioned with. Exported
+// so the browser suites name the one subscription once instead of each
+// declaring its own constant for the same value.
+export const PROFILE_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
 export const OPERATION_ID = "operation-fixture-1";
 
 type ServerModule = typeof import("../../../src/server.js");
@@ -66,6 +82,12 @@ export interface FakeCliCommand {
   tool: string;
   args?: string[];
   argsPrefix?: string[];
+  /**
+   * Pins the trailing arguments when a command embeds a value the harness
+   * cannot predict, such as the temporary kubeconfig path discovery generates.
+   * Combined with `argsPrefix` it leaves only the unpredictable span unchecked.
+   */
+  argsSuffix?: string[];
   env?: Record<string, "present" | "absent" | string>;
   exitCode?: number;
   stdout?: string;
@@ -73,11 +95,276 @@ export interface FakeCliCommand {
   writeFiles?: Array<{ path: string; content: string; executable?: boolean }>;
 }
 
+/**
+ * How the fake CLI decides a command models an invocation. Defined once and
+ * injected into the generated script by source, so a stub asserted against this
+ * predicate in a unit test is matched by exactly the same rule at runtime.
+ */
+export function fakeCliArgsMatch(
+  command: Pick<FakeCliCommand, "args" | "argsPrefix" | "argsSuffix">,
+  args: string[]
+): boolean {
+  if (Array.isArray(command.args)) {
+    return JSON.stringify(command.args) === JSON.stringify(args);
+  }
+  const prefix = command.argsPrefix;
+  const suffix = command.argsSuffix;
+  if (!Array.isArray(prefix) && !Array.isArray(suffix)) {
+    return args.length === 0;
+  }
+  const head = Array.isArray(prefix) ? prefix : [];
+  const tail = Array.isArray(suffix) ? suffix : [];
+  // Overlapping ends would let a short argument list satisfy both halves twice.
+  if (head.length + tail.length > args.length) return false;
+  return (
+    head.every((value, index) => args[index] === value) &&
+    tail.every(
+      (value, index) => args[args.length - tail.length + index] === value
+    )
+  );
+}
+
 export interface FakeCliScenario {
   commands: FakeCliCommand[];
 }
 
+export type FakeCliCommandOverride = (
+  command: FakeCliCommand
+) => FakeCliCommand;
+
 export const FAKE_CLI_TOOLS = ["gh", "rad", "az", "aws", "kubectl"] as const;
+
+// The failure payload a partial deletion records, matching the shape the
+// production delete runner writes (src/server/services/environment-deletion.ts).
+// The stage is supplied by the harness because only the runner knows the real
+// stage id of the operation the delete route created.
+export interface EnvironmentDeletionFailure {
+  code: string;
+  stepSeq: number | null;
+  message: string;
+  classification: string;
+  evidence: string | null;
+}
+
+// The terminal a driven deletion should reach: a clean success that walks every
+// stage to succeeded, or a partial failure that fails the first stage.
+export type EnvironmentDeletionOutcome =
+  | { state: "succeeded" }
+  | { state: "failed_partial"; failure: EnvironmentDeletionFailure };
+
+// Hands the test a release it can await: it resolves only once the runner has
+// entered the first stage and parked on its release promise, so a caller can
+// never drop the signal by firing it before the server-owned runner installed
+// the resolver.
+export interface DrivenEnvironmentDeletion {
+  release(): Promise<void>;
+}
+
+/**
+ * Which outside world the harness runs against.
+ *
+ * `fake` is every existing suite: generated CLI shims on `PATH`, a placeholder
+ * token, and intercepted registry traffic. `cloud` removes exactly those four
+ * substitutions so the same server, routes, and browser run against real
+ * `gh`, `az`, `rad`, and `kubectl`. Nothing above the seams changes.
+ */
+export type CanvasHarnessMode = "fake" | "cloud";
+
+export interface HarnessProcessPlanInput {
+  mode: CanvasHarnessMode;
+  fakeBin: string;
+  ghConfigDir: string;
+  /** Present only in fake mode; the generated shim script and its side files. */
+  fakeScript?: string;
+  scenarioPath?: string;
+  cliLogPath?: string;
+  pathKey: "PATH" | "Path";
+  currentPath: string;
+  isWindows: boolean;
+  /** The existing `RADIUS_CREDENTIALS_FILE`, preserved when already isolated. */
+  credentialsFile?: string;
+  /** Cloud mode only: the runner's GitHub token. */
+  githubToken?: string;
+}
+
+export interface HarnessProcessPlan {
+  readonly env: Record<string, string>;
+  /** Variables the caller must delete; omitting them would leave a stale value. */
+  readonly unsetEnv: readonly string[];
+  readonly useFakeCli: boolean;
+  readonly interceptFetch: boolean;
+}
+
+const FAKE_CLI_ENV_KEYS = [
+  "RADIUS_FAKE_CLI_SCRIPT",
+  "RADIUS_FAKE_CLI_SCENARIO",
+  "RADIUS_FAKE_CLI_LOG",
+  "RADIUS_RAD_BINARY",
+  "RADIUS_RAD_SKIP_VERSION_CHECK"
+] as const;
+
+/**
+ * Resolves every process-level difference between the two modes in one place,
+ * so the mode switch is a pure function with assertable output rather than a
+ * set of conditionals spread through construction.
+ */
+export function planHarnessProcess(
+  input: HarnessProcessPlanInput
+): HarnessProcessPlan {
+  const env: Record<string, string> = {
+    GH_CONFIG_DIR: input.ghConfigDir,
+    RADIUS_CREDENTIALS_FILE: input.credentialsFile || CREDENTIAL_STORE_PATH
+  };
+
+  if (input.mode === "cloud") {
+    const token = input.githubToken?.trim();
+    if (!token)
+      throw new Error(
+        "Cloud mode requires GH_TOKEN. Export a token for the fixture repository before running the cloud suite."
+      );
+    // A leaked fake-mode token would authenticate nothing while looking real,
+    // so cloud mode fails closed rather than reporting an opaque gh failure.
+    if (token === PLACEHOLDER_SECRET)
+      throw new Error(
+        "Cloud mode received the fake-mode placeholder token. Export a real token for the fixture repository."
+      );
+    // PATH is left alone so the real tools resolve, and the fake-CLI variables
+    // are unset rather than blanked: an inherited value would silently redirect
+    // a real invocation back into the shim.
+    env.GH_TOKEN = token;
+    env.GITHUB_TOKEN = token;
+    return {
+      env,
+      unsetEnv: [...FAKE_CLI_ENV_KEYS],
+      useFakeCli: false,
+      interceptFetch: false
+    };
+  }
+
+  if (!input.fakeScript || !input.scenarioPath || !input.cliLogPath)
+    throw new Error(
+      "Fake mode requires a generated CLI script, scenario path, and log path."
+    );
+
+  const nextPath = `${input.fakeBin}${path.delimiter}${input.currentPath}`;
+  env[input.pathKey] = nextPath;
+  env.PATH = nextPath;
+  env.GH_TOKEN = PLACEHOLDER_SECRET;
+  env.GITHUB_TOKEN = PLACEHOLDER_SECRET;
+  env.RADIUS_FAKE_CLI_SCRIPT = input.fakeScript;
+  env.RADIUS_FAKE_CLI_SCENARIO = input.scenarioPath;
+  env.RADIUS_FAKE_CLI_LOG = input.cliLogPath;
+  env.RADIUS_RAD_BINARY = path.join(
+    input.fakeBin,
+    input.isWindows ? "rad.exe" : "rad"
+  );
+  // The shim has no version to report. A real `rad` must answer the product's
+  // version check, so cloud mode deliberately leaves this unset.
+  env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
+  return { env, unsetEnv: [], useFakeCli: true, interceptFetch: true };
+}
+
+/**
+ * Applies a plan to a process environment. Deleting `unsetEnv` before the
+ * assignment is the point: an inherited `RADIUS_FAKE_CLI_*` value would
+ * otherwise survive into cloud mode and redirect a real invocation into the
+ * shim, and an omitted key cannot clear one.
+ */
+export function applyHarnessProcessPlan(
+  plan: HarnessProcessPlan,
+  env: NodeJS.ProcessEnv = process.env
+): void {
+  for (const key of plan.unsetEnv) delete env[key];
+  Object.assign(env, plan.env);
+}
+
+export interface HarnessWorkspacePlan {
+  readonly path: string;
+  /** Fake mode scaffolds an empty `.radius`; a clone already carries one. */
+  readonly createRadiusDirectory: boolean;
+}
+
+/**
+ * Fake-CLI helpers write or read files no real tool consults, so in cloud mode
+ * they would quietly do nothing and let a test assert against an empty log.
+ * Failing here keeps that mistake visible.
+ */
+export function assertFakeModeAvailable(
+  mode: CanvasHarnessMode,
+  operation: string
+): void {
+  if (mode !== "fake")
+    throw new Error(
+      `${operation} is only available in fake mode; this harness is in ${mode} mode.`
+    );
+}
+
+function isSameOrInside(parent: string, candidate: string): boolean {
+  const relative = path.relative(parent, candidate);
+  return (
+    relative === "" ||
+    (!relative.startsWith("..") && !path.isAbsolute(relative))
+  );
+}
+
+export function resolveHarnessWorkspace(input: {
+  mode: CanvasHarnessMode;
+  rootDir: string;
+  workspacePath?: string;
+  /**
+   * The checkout running the suite. A cloud harness commits, pushes, and
+   * deploys from its workspace, so the two must be disjoint.
+   */
+  repositoryRoot?: string;
+}): HarnessWorkspacePlan {
+  if (input.mode === "cloud") {
+    if (!input.workspacePath)
+      throw new Error(
+        "Cloud mode requires workspacePath, a clone of the fixture repository."
+      );
+    if (!path.isAbsolute(input.workspacePath))
+      throw new Error(
+        `Cloud mode requires an absolute workspacePath; received "${input.workspacePath}".`
+      );
+    const workspacePath = path.resolve(input.workspacePath);
+    const repositoryRoot =
+      input.repositoryRoot ? path.resolve(input.repositoryRoot) : undefined;
+    if (
+      repositoryRoot &&
+      (isSameOrInside(repositoryRoot, workspacePath) ||
+        isSameOrInside(workspacePath, repositoryRoot))
+    )
+      throw new Error(
+        `Cloud mode refuses to run against the checkout under test; workspacePath "${workspacePath}" overlaps "${repositoryRoot}". Clone the fixture repository to a disposable directory instead.`
+      );
+    return { path: workspacePath, createRadiusDirectory: false };
+  }
+  if (input.workspacePath)
+    throw new Error("workspacePath is only supported in cloud mode.");
+  return {
+    path: path.join(input.rootDir, "workspace"),
+    createRadiusDirectory: true
+  };
+}
+
+/**
+ * The caller owns the clone's lifecycle: the harness never deletes or resets a
+ * directory it did not create. Cloud mode still refuses to start against a
+ * directory that is not a git worktree, because a real `gh` or `rad` run there
+ * would fail far from the cause.
+ */
+export async function assertCloudWorkspaceClone(
+  workspacePath: string,
+  access: (target: string) => Promise<void> = (target) => fs.access(target)
+): Promise<void> {
+  try {
+    await access(path.join(workspacePath, ".git"));
+  } catch {
+    throw new Error(
+      `Cloud mode requires workspacePath to be a git clone; "${workspacePath}" has no .git entry.`
+    );
+  }
+}
 
 export interface RecordedRequest {
   method: string;
@@ -90,6 +377,14 @@ interface CanvasHarnessOptions {
   title: string;
   initialState?: CanvasState;
   initialPage?: string;
+  /** Defaults to "fake", so every existing suite is unaffected. */
+  mode?: CanvasHarnessMode;
+  /**
+   * Cloud mode only: an absolute path to a real clone to run against, disjoint
+   * from the checkout running the suite. The caller owns its lifecycle; the
+   * harness never deletes or resets a directory it did not create.
+   */
+  workspacePath?: string;
 }
 
 let serverModulePromise: Promise<ServerModule> | null = null;
@@ -172,7 +467,7 @@ func main() {
 
 async function createWindowsShim(fakeBin: string): Promise<void> {
   const output = await prepareWindowsShim();
-  for (const tool of ["gh", "rad"]) {
+  for (const tool of ["aws", "gh", "kubectl", "rad"]) {
     await fs.copyFile(output, path.join(fakeBin, `${tool}.exe`));
   }
 }
@@ -219,13 +514,7 @@ function envMatches(expected = {}) {
 }
 
 function argsMatch(command) {
-  if (Array.isArray(command.args)) {
-    return JSON.stringify(command.args) === JSON.stringify(args);
-  }
-  if (Array.isArray(command.argsPrefix)) {
-    return command.argsPrefix.every((value, index) => args[index] === value);
-  }
-  return args.length === 0;
+  return (${fakeCliArgsMatch.toString()})(command, args);
 }
 
 if (!scenarioPath) {
@@ -349,6 +638,11 @@ export function defaultFakeCliScenario(): FakeCliScenario {
     commands: [
       {
         tool: "gh",
+        args: ["--version"],
+        stdout: "gh version 2.87.0 (2026-02-19)"
+      },
+      {
+        tool: "gh",
         args: ["auth", "status", "--hostname", "github.com"],
         env: { GH_TOKEN: "present" },
         stdout: authStatus("acting-user", "GH_TOKEN", ["repo"])
@@ -405,6 +699,12 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         tool: "gh",
         args: ["api", "user", "--jq", ".login"],
         env: { GH_TOKEN: "fixture-acting-token" },
+        stdout: "acting-user"
+      },
+      {
+        tool: "gh",
+        args: ["api", "user", "--jq", ".login"],
+        env: { GH_TOKEN: PLACEHOLDER_SECRET },
         stdout: "acting-user"
       },
       {
@@ -645,6 +945,92 @@ export function defaultFakeCliScenario(): FakeCliScenario {
   };
 }
 
+export interface AzureDiscoveryFixture {
+  subscriptionId?: string;
+  clusters: AzureDiscoveryCluster[];
+  resourceGroups?: string[];
+  /**
+   * The cluster the UI selects, which must be one of `clusters`: discovery only
+   * reaches the credential and namespace commands for a cluster the listing
+   * actually offered. Omit it to model the listing steps alone.
+   */
+  selected?: AzureDiscoveryCluster;
+  namespaces?: string[];
+}
+
+// The path is generated per request by `createTemporaryKubeconfig`, so the
+// harness cannot spell it out. The stubs are built from the real contract
+// against this sentinel and then split around it, which pins every argument on
+// both sides of the generated path instead of stopping at it.
+const KUBECONFIG_SENTINEL = "<generated-kubeconfig>";
+
+function splitAroundKubeconfig(args: string[]): {
+  argsPrefix: string[];
+  argsSuffix: string[];
+} {
+  const index = args.indexOf(KUBECONFIG_SENTINEL);
+  if (index === -1) {
+    throw new Error("discovery contract no longer names a kubeconfig path");
+  }
+  return {
+    argsPrefix: args.slice(0, index),
+    argsSuffix: args.slice(index + 1)
+  };
+}
+
+/**
+ * Fake-CLI stubs for Azure discovery, built from the shared contract in
+ * `test/support/azure-discovery-contract.ts` so the browser suites model the
+ * same invocations the unit and integration suites assert against.
+ */
+export function azureDiscoveryCommands(
+  fixture: AzureDiscoveryFixture
+): FakeCliCommand[] {
+  if (
+    fixture.selected &&
+    !fixture.clusters.some((entry) => entry.id === fixture.selected?.id)
+  ) {
+    throw new Error(
+      `selected cluster "${fixture.selected.id}" is not in the fixture listing`
+    );
+  }
+  const contract = azureDiscoveryContract({
+    subscriptionId: fixture.subscriptionId,
+    cluster: fixture.selected?.id,
+    resourceGroup: fixture.selected?.resourceGroup,
+    kubeconfigPath: KUBECONFIG_SENTINEL
+  });
+  const resourceGroups =
+    fixture.resourceGroups ??
+    Array.from(new Set(fixture.clusters.map((entry) => entry.resourceGroup)));
+  const commands: FakeCliCommand[] = [];
+  if (contract.accountSet) {
+    commands.push({ ...contract.accountSet, stdout: "" });
+  }
+  commands.push(
+    { ...contract.aksList, stdout: JSON.stringify(fixture.clusters) },
+    {
+      ...contract.groupList,
+      stdout: JSON.stringify(resourceGroups.map((name) => ({ id: name, name })))
+    }
+  );
+  if (contract.getCredentials && contract.namespaces) {
+    commands.push(
+      {
+        tool: contract.getCredentials.tool,
+        ...splitAroundKubeconfig(contract.getCredentials.args),
+        stdout: ""
+      },
+      {
+        tool: contract.namespaces.tool,
+        ...splitAroundKubeconfig(contract.namespaces.args),
+        stdout: (fixture.namespaces ?? []).join(" ")
+      }
+    );
+  }
+  return commands;
+}
+
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -825,6 +1211,7 @@ export class CanvasHarness {
   readonly scenarioPath: string;
   readonly cliLogPath: string;
   readonly workspacePath: string;
+  readonly mode: CanvasHarnessMode;
   readonly requests: RecordedRequest[] = [];
   readonly externalRequests: string[] = [];
 
@@ -844,6 +1231,7 @@ export class CanvasHarness {
     scenarioPath: string;
     cliLogPath: string;
     workspacePath: string;
+    mode: CanvasHarnessMode;
     originalEnv: Record<string, string | undefined>;
     originalFetch: typeof fetch;
     serverModule: ServerModule;
@@ -857,6 +1245,7 @@ export class CanvasHarness {
     this.scenarioPath = input.scenarioPath;
     this.cliLogPath = input.cliLogPath;
     this.workspacePath = input.workspacePath;
+    this.mode = input.mode;
     this.originalEnv = input.originalEnv;
     this.originalFetch = input.originalFetch;
     this.serverModule = input.serverModule;
@@ -864,6 +1253,7 @@ export class CanvasHarness {
   }
 
   static async create(options: CanvasHarnessOptions): Promise<CanvasHarness> {
+    const mode: CanvasHarnessMode = options.mode ?? "fake";
     await fs.mkdir(E2E_TMP_ROOT, { recursive: true });
     const rootParent = await fs.mkdtemp(
       path.join(E2E_TMP_ROOT, `${sanitizeTitle(options.title)}-`)
@@ -894,36 +1284,48 @@ export class CanvasHarness {
     try {
       const fakeBin = path.join(rootParent, "bin");
       const ghConfig = path.join(rootParent, "gh-config");
-      const workspacePath = path.join(rootParent, "workspace");
+      const workspace = resolveHarnessWorkspace({
+        mode,
+        rootDir: rootParent,
+        workspacePath: options.workspacePath,
+        repositoryRoot: REPOSITORY_ROOT
+      });
+      const workspacePath = workspace.path;
+      if (mode === "cloud") await assertCloudWorkspaceClone(workspacePath);
       await fs.mkdir(fakeBin, { recursive: true });
       await fs.mkdir(ghConfig, { recursive: true });
-      await fs.mkdir(path.join(workspacePath, ".radius"), { recursive: true });
-      const fakeScript = await writeFakeCli(fakeBin);
+      if (workspace.createRadiusDirectory)
+        await fs.mkdir(path.join(workspacePath, ".radius"), {
+          recursive: true
+        });
+      const useFakeCli = mode === "fake";
+      const fakeScript = useFakeCli ? await writeFakeCli(fakeBin) : undefined;
       const scenarioPath = path.join(rootParent, "scenario.json");
       const cliLogPath = path.join(rootParent, "cli.log");
-      await fs.writeFile(
-        scenarioPath,
-        JSON.stringify({ commands: [] }),
-        "utf8"
-      );
+      if (useFakeCli)
+        await fs.writeFile(
+          scenarioPath,
+          JSON.stringify({ commands: [] }),
+          "utf8"
+        );
 
       const pathKey = process.platform === "win32" ? "Path" : "PATH";
-      process.env[pathKey] =
-        `${fakeBin}${path.delimiter}${process.env[pathKey] || process.env.PATH || ""}`;
-      process.env.PATH = process.env[pathKey];
-      process.env.GH_CONFIG_DIR = ghConfig;
-      process.env.GH_TOKEN = PLACEHOLDER_SECRET;
-      process.env.GITHUB_TOKEN = PLACEHOLDER_SECRET;
-      process.env.RADIUS_FAKE_CLI_SCRIPT = fakeScript;
-      process.env.RADIUS_FAKE_CLI_SCENARIO = scenarioPath;
-      process.env.RADIUS_FAKE_CLI_LOG = cliLogPath;
-      process.env.RADIUS_RAD_BINARY =
-        process.platform === "win32" ?
-          path.join(fakeBin, "rad.exe")
-        : path.join(fakeBin, "rad");
-      process.env.RADIUS_RAD_SKIP_VERSION_CHECK = "1";
-      process.env.RADIUS_CREDENTIALS_FILE ??= CREDENTIAL_STORE_PATH;
-      globalThis.fetch = createHarnessFetch(originalFetch);
+      const plan = planHarnessProcess({
+        mode,
+        fakeBin,
+        ghConfigDir: ghConfig,
+        fakeScript,
+        scenarioPath: useFakeCli ? scenarioPath : undefined,
+        cliLogPath: useFakeCli ? cliLogPath : undefined,
+        pathKey,
+        currentPath: process.env[pathKey] || process.env.PATH || "",
+        isWindows: process.platform === "win32",
+        credentialsFile: process.env.RADIUS_CREDENTIALS_FILE,
+        githubToken: process.env.GH_TOKEN
+      });
+      applyHarnessProcessPlan(plan);
+      if (plan.interceptFetch)
+        globalThis.fetch = createHarnessFetch(originalFetch);
 
       // All process and credential-store isolation is in place before the first
       // production import. shared.ts reads its store at module initialization.
@@ -942,22 +1344,31 @@ export class CanvasHarness {
       credentialIsolationVerified = true;
       ghModule.resetGhIdentityCache();
       await ghModule.primeGhIdentity().catch(() => undefined);
-      replaceSharedCredentials(sharedModule.sharedCredentials, {
-        profiles: {
-          [REPOSITORY]: [
-            {
-              name: PROFILE_NAME,
-              provider: "azure",
-              status: "verified",
-              user: PROFILE_USER,
-              tenantId: PROFILE_TENANT_ID,
-              tenantName: "Fixture tenant",
-              subscriptionId: PROFILE_SUBSCRIPTION_ID,
-              subscriptionName: "Fixture subscription"
+      // The fixture profile names a tenant and subscription that do not exist.
+      // Cloud mode is left with an empty store so the caller can seed the real
+      // ones; seeding fictional identifiers there would make the first real
+      // Azure call fail for a reason that has nothing to do with the product.
+      replaceSharedCredentials(
+        sharedModule.sharedCredentials,
+        useFakeCli ?
+          {
+            profiles: {
+              [REPOSITORY]: [
+                {
+                  name: PROFILE_NAME,
+                  provider: "azure",
+                  status: "verified",
+                  user: PROFILE_USER,
+                  tenantId: PROFILE_TENANT_ID,
+                  tenantName: "Fixture tenant",
+                  subscriptionId: PROFILE_SUBSCRIPTION_ID,
+                  subscriptionName: "Fixture subscription"
+                }
+              ]
             }
-          ]
-        }
-      });
+          }
+        : {}
+      );
 
       // The production SDK entry registers this hook to open a worktree file in
       // the editor canvas. The Chromium harness has no host SDK, so provide the
@@ -999,6 +1410,7 @@ export class CanvasHarness {
         scenarioPath,
         cliLogPath,
         workspacePath,
+        mode,
         originalEnv,
         originalFetch,
         serverModule,
@@ -1056,16 +1468,53 @@ export class CanvasHarness {
   }
 
   async setScenario(scenario: FakeCliScenario): Promise<void> {
+    this.assertFakeMode("setScenario");
     await fs.writeFile(this.scenarioPath, JSON.stringify(scenario, null, 2));
     this.ghModule.resetGhIdentityCache();
     await this.ghModule.primeGhIdentity().catch(() => undefined);
   }
 
+  /**
+   * Fake-CLI helpers write or read files no real tool consults, so in cloud
+   * mode they would quietly do nothing and let a test assert against an empty
+   * log. Failing here keeps that mistake visible.
+   */
+  private assertFakeMode(operation: string): void {
+    assertFakeModeAvailable(this.mode, operation);
+  }
+
+  async setScenarioOverrides(
+    scenario: FakeCliScenario,
+    overrides: readonly FakeCliCommandOverride[],
+    appendedCommands: readonly FakeCliCommand[] = []
+  ): Promise<void> {
+    const commands = scenario.commands.map((command) =>
+      overrides.reduce((overridden, override) => override(overridden), command)
+    );
+    await this.setScenario({
+      ...scenario,
+      commands: [...commands, ...appendedCommands]
+    });
+  }
+
   async seedRestartedVerificationFailure(): Promise<string> {
+    return this.seedRestartedVerification("failed");
+  }
+
+  async seedInterruptedVerification(): Promise<string> {
+    return this.seedRestartedVerification("interrupted");
+  }
+
+  private async seedRestartedVerification(
+    outcome: "failed" | "interrupted"
+  ): Promise<string> {
     const operationModule: OperationsModule =
       await import("../../../src/operations.js");
     const operation = operationModule.createOperation({
-      operationId: "op_chromium_verification",
+      operationId:
+        outcome === "failed" ?
+          "op_chromium_verification"
+        : "op_chromium_interrupted_verification",
       provider: "azure",
       repo: REPOSITORY,
       environment: "fixture-environment",
@@ -1099,15 +1548,17 @@ export class CanvasHarness {
       runId: "39",
       runUrl: `https://github.com/${REPOSITORY}/actions/runs/39`
     };
-    operationModule.finish(operation, "failed_partial", {
-      failure: {
-        code: "verify-run-failed",
-        stage: operationModule.STAGE_VERIFY,
-        message: "Credential verification failed.",
-        classification: "user-fixable",
-        evidence: "The controlled verification run failed."
-      }
-    });
+    if (outcome === "failed") {
+      operationModule.finish(operation, "failed_partial", {
+        failure: {
+          code: "verify-run-failed",
+          stage: operationModule.STAGE_VERIFY,
+          message: "Credential verification failed.",
+          classification: "user-fixable",
+          evidence: "The controlled verification run failed."
+        }
+      });
+    }
 
     const restored = operationModule.fromPersistedOperation(
       JSON.parse(JSON.stringify(operation))
@@ -1131,21 +1582,23 @@ export class CanvasHarness {
   // different topology than the shared fixture. Accepts either raw `rad` JSON
   // text or the parsed object.
   async setAppGraph(graph: string | object): Promise<void> {
+    this.assertFakeMode("setAppGraph");
     const text = typeof graph === "string" ? graph : JSON.stringify(graph);
     const raw = await fs.readFile(this.scenarioPath, "utf8");
     const scenario = JSON.parse(raw) as FakeCliScenario;
-    const commands = scenario.commands.map((command) => {
-      const isAppGraph =
-        command.tool === "rad" &&
-        command.argsPrefix?.[0] === "app" &&
-        command.argsPrefix?.[1] === "graph";
-      if (!isAppGraph) return command;
-      return {
-        ...command,
-        writeFiles: [{ path: "app-graph.json", content: text }]
-      };
-    });
-    await this.setScenario({ ...scenario, commands });
+    await this.setScenarioOverrides(scenario, [
+      (command) => {
+        const isAppGraph =
+          command.tool === "rad" &&
+          command.argsPrefix?.[0] === "app" &&
+          command.argsPrefix?.[1] === "graph";
+        if (!isAppGraph) return command;
+        return {
+          ...command,
+          writeFiles: [{ path: "app-graph.json", content: text }]
+        };
+      }
+    ]);
   }
 
   // The scenario distinguishes a token-authenticated single account from the
@@ -1154,6 +1607,9 @@ export class CanvasHarness {
   // cached decision is dropped here: without that reset the next resolution
   // would answer from the token state that existed before this call.
   setGitHubToken(value: string | null): void {
+    // Cloud mode's token authenticates real GitHub calls; replacing or clearing
+    // it here would silently change the identity a real deploy runs under.
+    this.assertFakeMode("setGitHubToken");
     if (value === null) {
       delete process.env.GH_TOKEN;
       delete process.env.GITHUB_TOKEN;
@@ -1171,30 +1627,33 @@ export class CanvasHarness {
   // through the scenario keeps the decision deterministic instead of depending
   // on which probe resolved first.
   async setGitHubKeyringScopes(scopes: readonly string[]): Promise<void> {
+    this.assertFakeMode("setGitHubKeyringScopes");
     const raw = await fs.readFile(this.scenarioPath, "utf8");
     const scenario = JSON.parse(raw) as FakeCliScenario;
-    const commands = scenario.commands.map((command) => {
-      const isKeyringStatus =
-        command.tool === "gh" &&
-        JSON.stringify(command.args) ===
-          JSON.stringify(["auth", "status", "--hostname", "github.com"]) &&
-        command.env?.GH_TOKEN === "absent";
-      if (!isKeyringStatus) return command;
-      return {
-        ...command,
-        stdout: [
-          authStatus("repo-user", "keyring", [...scopes]),
-          authStatus("acting-user", "keyring", [...scopes]).replace(
-            "Active account: true",
-            "Active account: false"
-          )
-        ].join("\n")
-      };
-    });
-    await this.setScenario({ ...scenario, commands });
+    await this.setScenarioOverrides(scenario, [
+      (command) => {
+        const isKeyringStatus =
+          command.tool === "gh" &&
+          JSON.stringify(command.args) ===
+            JSON.stringify(["auth", "status", "--hostname", "github.com"]) &&
+          command.env?.GH_TOKEN === "absent";
+        if (!isKeyringStatus) return command;
+        return {
+          ...command,
+          stdout: [
+            authStatus("repo-user", "keyring", [...scopes]),
+            authStatus("acting-user", "keyring", [...scopes]).replace(
+              "Active account: true",
+              "Active account: false"
+            )
+          ].join("\n")
+        };
+      }
+    ]);
   }
 
   async cliCalls(): Promise<Array<{ tool: string; args: string[] }>> {
+    this.assertFakeMode("cliCalls");
     try {
       const text = await fs.readFile(this.cliLogPath, "utf8");
       return text
@@ -1207,6 +1666,9 @@ export class CanvasHarness {
   }
 
   async expectCliInvoked(tool: string): Promise<void> {
+    // Guard before polling: a throw raised inside the poll callback would be
+    // reported as a timeout instead of the mode mismatch that caused it.
+    this.assertFakeMode("expectCliInvoked");
     await expect
       .poll(async () =>
         (await this.cliCalls()).some((call) => call.tool === tool)
@@ -1218,6 +1680,56 @@ export class CanvasHarness {
     runner: ((operationId: string) => Promise<void>) | null
   ): void {
     this.serverModule.setEnvironmentOperationTestRunner(runner);
+  }
+
+  // Drives the real delete OperationRecord the route creates to a terminal,
+  // exactly as the production runner does (environment-deletion.ts): enter every
+  // stage and finish. The completion is gated on the returned `release` so the
+  // progress poller first observes the operation running -- it ignores an
+  // operation already terminal on its first observation, treating it as a stale
+  // prior record. The created id is tracked for cleanup so a settled panel that
+  // was never dismissed cannot bleed into the next test.
+  driveEnvironmentDeletion(
+    outcome: EnvironmentDeletionOutcome
+  ): DrivenEnvironmentDeletion {
+    let releaseRunner: (() => void) | null = null;
+    let signalArrived: (() => void) | null = null;
+    const arrived = new Promise<void>((resolve) => {
+      signalArrived = resolve;
+    });
+    this.setEnvironmentOperationRunner(async (operationId: string) => {
+      const ops: OperationsModule = await import("../../../src/operations.js");
+      const op = ops.operations.get(operationId);
+      if (!op) throw new Error(`operation ${operationId} was never created`);
+      const [firstStage] = op.stages;
+      if (!firstStage)
+        throw new Error(`operation ${operationId} has no stages`);
+      this.seededOperationIds.add(operationId);
+      ops.enterStage(op, firstStage.id);
+      await new Promise<void>((resolve) => {
+        releaseRunner = resolve;
+        signalArrived?.();
+      });
+      if (outcome.state === "succeeded") {
+        for (const stage of op.stages) {
+          ops.enterStage(op, stage.id);
+          ops.setStageState(op, stage.id, "succeeded");
+        }
+        ops.finishSucceeded(op, "succeeded");
+      } else {
+        ops.setStageState(op, firstStage.id, "failed");
+        ops.finish(op, "failed_partial", {
+          failure: { ...outcome.failure, stage: firstStage.id }
+        });
+      }
+      await ops.operations.persist();
+    });
+    return {
+      release: async () => {
+        await arrived;
+        releaseRunner?.();
+      }
+    };
   }
 
   async cleanup(): Promise<void> {

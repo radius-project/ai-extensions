@@ -101,7 +101,7 @@ cmd.exe /c ""C:\Program Files\...\az.cmd" "version""
 
 The policy is necessarily asymmetric:
 
-1. Leave a simple executable name such as `az` or `aws` unquoted.
+1. Leave a simple executable name such as `az` unquoted.
 2. Quote every argument so the current validated command shapes retain their argument boundaries.
 3. Quote the executable only when it contains whitespace, quotes, or `cmd.exe` metacharacters.
 4. If the executable is quoted, wrap the entire command line in one additional pair of quotes.
@@ -119,7 +119,7 @@ az "rest" "--method" "PATCH" "--url" "https://...applications(appId='...')" "--b
 
 The complete string follows `/c`. The parenthesized Graph URL and the current provenance-tag JSON body retain their argument boundaries, while simple `az` stays unquoted. The encoder must also escape embedded quotes and runs of backslashes next to quotes or at the end of a value, which matters for JSON and Windows paths. Because `cmd.exe` remains a command interpreter rather than a true argv transport, callers must continue validating identifiers and other user-derived values instead of treating this encoding as a universal shell-safety boundary.
 
-All Windows non-`gh` calls share this branch: Azure login, discovery, App Registration and OIDC setup, role assignment, AWS identity and discovery, and `kubectl` namespace discovery. The call graph is broad, but the behavior change is narrow. Direct `gh.exe`, macOS/Linux execution, Radius CLI and Bicep spawning, core modeling, HTTP contracts, persisted state, workflows, and cloud semantics are unchanged.
+Only the Windows commands that actually need a command interpreter share this branch: Azure login, discovery, App Registration and OIDC setup, and role assignment, all of which run through the `az.cmd` launcher, plus any command named with an explicit `.cmd` or `.bat` extension and any bare name that `PATH` and `PATHEXT` resolve to a batch shim. AWS identity and discovery and `kubectl` namespace discovery normally resolve to native executables and are launched directly with their argv array, so the encoder never runs for them. Direct `gh.exe`, macOS/Linux execution, Radius CLI and Bicep spawning, core modeling, HTTP contracts, persisted state, workflows, and cloud semantics are unchanged.
 
 ## Why validation still matters
 
@@ -135,7 +135,7 @@ The strongest deterministic regression is a Windows process-integration test. It
 - the parenthesized Microsoft Graph URL followed by `--body` JSON;
 - spaces, embedded quotes, and trailing backslashes;
 - an executable path containing spaces;
-- an ordinary `aws` or `kubectl`-shaped invocation;
+- a bare name that `PATH` resolves to a batch shim, and a bare name that resolves to a native executable, proving the launcher is chosen correctly for an `aws`- or `kubectl`-shaped invocation;
 - a failing child process, proving exit and stderr propagation remain intact.
 
 One case must use production `buildAppTagPatchArgs()` so the exact issue #384 command crosses the process boundary without contacting Azure. The suite must run on `windows-latest`; changing `process.platform` on Linux cannot reproduce `cmd.exe` quote stripping. Together, encoder unit tests, a real Windows process test, and existing route tests cover the correct layers. Browser or live-Azure tests would be slower and less diagnostic because the relevant external dependency is the Windows command interpreter.
@@ -145,5 +145,5 @@ One case must use production `buildAppTagPatchArgs()` so the exact issue #384 co
 - `execFile` is shell-free only when the target executable itself is the final program. Starting `cmd.exe` explicitly introduces shell semantics even though Node's `shell` option remains false.
 - Windows has more than one parsing layer here: Node/libuv serializes arguments, `cmd.exe` parses command syntax, the batch file expands `%*`, and the Python runtime parses the final command line.
 - The executable and its arguments cannot use one universal quoting rule under `cmd.exe /c`.
-- The fix corrects the shared adapter boundary rather than special-casing one Graph URL, so the validated Azure, AWS, and Kubernetes argument shapes receive the same boundary preservation.
+- The fix corrects the shared adapter boundary rather than special-casing one Graph URL, so every validated argument shape keeps its boundaries: Azure through the encoder, and AWS and Kubernetes through a direct argv launch that never reaches a command interpreter.
 - Functional confidence requires running real Windows process semantics in CI; mocked calls alone prove construction, not interpretation.

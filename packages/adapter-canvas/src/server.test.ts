@@ -14,6 +14,7 @@ import {
   cleanupProviderRecoveryDisposition,
   cleanupGitHubEnvironmentArtifact,
   rollbackCommittedWorkflowFiles,
+  rollbackGitHubEnvironmentVariableArtifacts,
   guardStopBoundary,
   canReuseModeledGraph,
   DEPLOY_RAD_COMMANDS_STEP,
@@ -42,7 +43,6 @@ import {
   resolveCleanupGitHubContext,
   releaseDeploymentMutation,
   reopenProviderReconciliation,
-  resolveAcknowledgedVerificationRun,
   reserveDeploymentMutation,
   resolveDeploymentEnvironment,
   resolveDeployStatus,
@@ -69,6 +69,7 @@ import {
   recordCreatedFederatedCredential,
   recordCreatedRoleAssignment,
   recordGitHubEnvironment,
+  recordGitHubEnvironmentVariable,
   recordServicePrincipal,
   reconcileRestoredOperation,
   fromPersistedOperation,
@@ -84,6 +85,7 @@ import {
   cleanupTargetKey,
   unresolvedCleanupTargets
 } from "./operations.js";
+import { createHash } from "node:crypto";
 import type { CanvasState } from "./shared.js";
 import type {
   DeployRepairHandoffInput,
@@ -118,64 +120,6 @@ describe("DEPLOY_RAD_COMMANDS_STEP", () => {
 });
 
 describe("verification dispatch recovery", () => {
-  it("adopts an exact marked run after an acknowledged retry dispatch", async () => {
-    const pauses: number[] = [];
-
-    await expect(
-      resolveAcknowledgedVerificationRun({
-        operationMarker: "op_retry",
-        pause: async (milliseconds) => {
-          pauses.push(milliseconds);
-        },
-        discover: async () => ({ state: "applied", value: "4242" }),
-        actionsUrl:
-          "https://github.com/octo/app/actions/workflows/radius-verify.yml"
-      })
-    ).resolves.toEqual({ state: "applied", runId: "4242" });
-    expect(pauses).toEqual([5000]);
-  });
-
-  it("fails closed when an acknowledged retry cannot expose an exact run", async () => {
-    await expect(
-      resolveAcknowledgedVerificationRun({
-        operationMarker: "op_retry",
-        pause: async () => {},
-        discover: async () => {
-          throw new Error("run list unavailable");
-        },
-        actionsUrl:
-          "https://github.com/octo/app/actions/workflows/radius-verify.yml"
-      })
-    ).resolves.toMatchObject({
-      state: "manual_required",
-      guidance: expect.stringContaining(
-        "could not confirm the exact marked run"
-      )
-    });
-  });
-
-  it("does not inspect or adopt runs for an acknowledged legacy retry", async () => {
-    let inspected = false;
-    await expect(
-      resolveAcknowledgedVerificationRun({
-        operationMarker: "",
-        pause: async () => {
-          throw new Error("legacy retries must not wait for adoption");
-        },
-        discover: async () => {
-          inspected = true;
-          return { state: "applied", value: "unrelated" };
-        },
-        actionsUrl:
-          "https://github.com/octo/app/actions/workflows/radius-verify.yml"
-      })
-    ).resolves.toMatchObject({
-      state: "manual_required",
-      guidance: expect.stringContaining("does not expose")
-    });
-    expect(inspected).toBe(false);
-  });
-
   describe("in-process provider reconciliation", () => {
     it("atomically reopens a terminalized unknown outcome for the scheduler", () => {
       const operation = createOperation({ operationId: "op_recovery" });
@@ -271,6 +215,29 @@ describe("preflightGhcrPackageWriteAccess", () => {
     reason: "user-selected-keyring-account",
     accounts: [],
     ...overrides
+  });
+
+  it("uses the bundled GitHub CLI path when package credentials are unavailable", async () => {
+    const result = await preflightGhcrPackageWriteAccess(
+      async () => {
+        throw new Error("No GitHub account is available.");
+      },
+      async () => identity(),
+      undefined,
+      {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/Applications/GitHub Copilot/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected GHCR preflight to fail");
+    expect(result.error).toContain(
+      "'/Applications/GitHub Copilot/gh' auth login -h github.com -s read:packages -s write:packages"
+    );
+    expect(result.error).toContain("Install GitHub CLI system-wide.");
   });
 
   it("fails closed when the package credential username is blank", async () => {
@@ -1470,6 +1437,7 @@ describe("rollbackCommittedWorkflowFiles", () => {
       previousBlobSha: null,
       previousBlobKnown: true
     });
+
     return op;
   }
 
@@ -1654,6 +1622,73 @@ describe("rollbackCommittedWorkflowFiles", () => {
     });
 
     expect(deleted).toEqual([VERIFY_PATH]);
+  });
+});
+
+describe("rollbackGitHubEnvironmentVariableArtifacts", () => {
+  it("restores a previous value after the operation is persisted and reloaded", async () => {
+    const operation = newAzureOp();
+    recordGitHubEnvironmentVariable(operation, {
+      repo: "octo/app",
+      environment: "dev",
+      environmentProviderId: "env-1",
+      name: "AZURE_CLIENT_ID",
+      valueSha256: createHash("sha256").update("new").digest("hex"),
+      previousValue: "old",
+      previousKnown: true
+    });
+    const restored = fromPersistedOperation(toPersistedOperation(operation));
+    const calls: string[][] = [];
+
+    const outcome = await rollbackGitHubEnvironmentVariableArtifacts(restored, {
+      attempt: 1,
+      persist: async () => {},
+      run: async (args) => {
+        calls.push(args);
+        return (
+          args[1] === "/repos/octo/app/environments/dev" ?
+            {
+              code: 0,
+              stdout: JSON.stringify({ id: "env-1", name: "dev" }),
+              stderr: ""
+            }
+          : args[0] === "api" ?
+            {
+              code: 0,
+              stdout: JSON.stringify({
+                name: "AZURE_CLIENT_ID",
+                value: "new"
+              }),
+              stderr: ""
+            }
+          : { code: 0, stdout: "", stderr: "" }
+        );
+      }
+    });
+
+    expect(calls[4]).toEqual([
+      "variable",
+      "set",
+      "AZURE_CLIENT_ID",
+      "--body",
+      "old",
+      "--env",
+      "dev",
+      "--repo",
+      "octo/app"
+    ]);
+    expect(outcome).toMatchObject({
+      blocked: false,
+      results: [
+        {
+          artifactType: "github_environment_variable",
+          outcome: "restored"
+        }
+      ]
+    });
+    expect(restored.setupArtifacts.githubEnvironmentVariables[0].state).toBe(
+      "deleted"
+    );
   });
 });
 
@@ -2156,10 +2191,15 @@ describe("cleanupAzureSetupArtifacts", () => {
       );
       expect(hasUnfinishedCleanupAuthority(op)).toBe(false);
       // And it still refuses every destructive command, so the resource is
-      // named rather than deleted a second time.
+      // named rather than deleted a second time. The non-destructive abandonment
+      // path remains available so this record cannot trap the customer.
       expect(canStartRollback(op).ok).toBe(false);
       expect(canRetryCleanup(op).ok).toBe(false);
-      expect(canExitSetup(op).ok).toBe(false);
+      expect(canExitSetup(op)).toMatchObject({
+        ok: true,
+        abandon: true,
+        targets: []
+      });
     });
 
     it("names nothing when every delete settled", async () => {
@@ -4155,6 +4195,63 @@ describe("finalizeSetupFailure", () => {
       }
     ]);
     expect(op.state).toBe("failed_partial");
+  });
+
+  it("restores a configured variable before reporting automatic cleanup complete", async () => {
+    const op = newAzureOp();
+    recordGitHubEnvironment(op, {
+      state: "reused",
+      repo: "octo/app",
+      name: "dev",
+      providerId: "env-1"
+    });
+    recordGitHubEnvironmentVariable(op, {
+      repo: "octo/app",
+      environment: "dev",
+      environmentProviderId: "env-1",
+      name: "AZURE_CLIENT_ID",
+      valueSha256: createHash("sha256").update("new").digest("hex"),
+      previousValue: "old",
+      previousKnown: true
+    });
+
+    const failure = await finalizeSetupFailure(op, {
+      status: 400,
+      error: "later setup failure",
+      code: "later-setup-failure",
+      steps: [],
+      runGitHubVariable: async (args) =>
+        args[1] === "/repos/octo/app/environments/dev" ?
+          {
+            code: 0,
+            stdout: JSON.stringify({ id: "env-1", name: "dev" }),
+            stderr: ""
+          }
+        : args[0] === "api" ?
+          {
+            code: 0,
+            stdout: JSON.stringify({
+              name: "AZURE_CLIENT_ID",
+              value: "new"
+            }),
+            stderr: ""
+          }
+        : { code: 0, stdout: "", stderr: "" }
+    });
+
+    expect(failure.body.cleanup).toMatchObject({
+      state: "succeeded",
+      results: [
+        {
+          artifactType: "github_environment_variable",
+          outcome: "restored"
+        }
+      ]
+    });
+    expect(op.setupArtifacts.githubEnvironmentVariables[0].state).toBe(
+      "deleted"
+    );
+    expect(op.state).toBe("failed");
   });
 });
 

@@ -2,6 +2,11 @@ import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
 import { isUuid } from "../../azure-oidc.js";
+import {
+  azureDiscoveryContract,
+  commandLine,
+  temporaryKubeconfigDouble
+} from "../../../test/support/azure-discovery-contract.js";
 import { createRequestContext } from "../request-context.js";
 import {
   createAzureDiscoveryRoutes,
@@ -105,10 +110,7 @@ function dependencies(
       throw new Error("runCli not stubbed");
     },
     isUuid,
-    createTemporaryKubeconfig: () => ({
-      path: "/tmp/radius-kubeconfig-test",
-      remove: () => {}
-    }),
+    createTemporaryKubeconfig: () => temporaryKubeconfigDouble(),
     parseServedReposFromSubjects: () => {
       throw new Error("parseServedReposFromSubjects not stubbed");
     },
@@ -454,25 +456,31 @@ describe("azure-discovery routes (SU-08)", () => {
     };
 
     // Exact argv vectors, keyed on the joined command line exactly as the `az`
-    // fake above is. `sub` appends the `--subscription` pair the azure arm adds
-    // only when a subscription was supplied.
+    // fake above is, and built from the shared discovery contract so a change to
+    // `discovery.ts` cannot leave this script matching a stale command line.
+    // Passing a subscription id adds the `--subscription` pair the azure arm
+    // appends only when one was supplied.
     const CLI = {
-      accountSet: (id: string) => `az account set --subscription ${id}`,
-      aks: (sub = "") =>
-        "az aks list --query [].{id:name, name:name, resourceGroup:resourceGroup} -o json" +
-        sub,
-      groups: (sub = "") =>
-        "az group list --query [].{id:name, name:name} -o json" + sub,
-      credentials: (cluster: string, rg: string, sub = "") =>
-        `az aks get-credentials --name ${cluster} --resource-group ${rg} --file /tmp/radius-kubeconfig-test --overwrite-existing${sub}`,
-      namespaces:
-        "kubectl --kubeconfig /tmp/radius-kubeconfig-test get namespaces -o jsonpath={.items[*].metadata.name}",
+      accountSet: (id: string) =>
+        commandLine(azureDiscoveryContract({ subscriptionId: id }).accountSet!),
+      aks: (subscriptionId?: string) =>
+        commandLine(azureDiscoveryContract({ subscriptionId }).aksList),
+      groups: (subscriptionId?: string) =>
+        commandLine(azureDiscoveryContract({ subscriptionId }).groupList),
+      credentials: (cluster: string, rg: string, subscriptionId?: string) =>
+        commandLine(
+          azureDiscoveryContract({ cluster, resourceGroup: rg, subscriptionId })
+            .getCredentials!
+        ),
+      namespaces: commandLine(
+        azureDiscoveryContract({ cluster: "c", resourceGroup: "rg" })
+          .namespaces!
+      ),
       eks: "aws eks list-clusters --query clusters --output json",
       vpcs: "aws ec2 describe-vpcs --query Vpcs[].{id:VpcId, name:VpcId} --output json",
       subnets:
         "aws ec2 describe-subnets --query Subnets[].{id:SubnetId, name:SubnetId} --output json"
     };
-    const sub = (id: string) => ` --subscription ${id}`;
 
     interface CliCall {
       line: string;
@@ -590,8 +598,8 @@ describe("azure-discovery routes (SU-08)", () => {
       const padded = ` ${SUB} `;
       const cli = cliFake({
         [CLI.accountSet(padded)]: "",
-        [CLI.aks(sub(padded))]: "[]",
-        [CLI.groups(sub(padded))]: "[]"
+        [CLI.aks(padded)]: "[]",
+        [CLI.groups(padded)]: "[]"
       });
       const recording = await discover(
         JSON.stringify({ provider: "azure", subscriptionId: padded }),
@@ -601,8 +609,8 @@ describe("azure-discovery routes (SU-08)", () => {
       expect(recording.status).toBe(200);
       expect(cli.calls.map((call) => call.line)).toEqual([
         CLI.accountSet(padded),
-        CLI.aks(sub(padded)),
-        CLI.groups(sub(padded))
+        CLI.aks(padded),
+        CLI.groups(padded)
       ]);
       expect(JSON.parse(recording.body)).toEqual({
         clusters: [],
@@ -637,8 +645,8 @@ describe("azure-discovery routes (SU-08)", () => {
     it("swallows an account-set failure and still queries with an explicit subscription", async () => {
       const cli = cliFake({
         [CLI.accountSet(SUB)]: { throws: new Error("no such subscription") },
-        [CLI.aks(sub(SUB))]: "[]",
-        [CLI.groups(sub(SUB))]: "[]"
+        [CLI.aks(SUB)]: "[]",
+        [CLI.groups(SUB)]: "[]"
       });
       const recording = await discover(
         JSON.stringify({ provider: "azure", subscriptionId: SUB }),
@@ -712,13 +720,14 @@ describe("azure-discovery routes (SU-08)", () => {
         vpcs: [],
         subnets: []
       });
-      // The per-call timeouts are part of the contract with the runner.
+      // The per-call timeouts are part of the contract with the runner. Every
+      // `az` query shares one Windows-sized budget; kubectl is a native binary.
       expect(cli.calls).toEqual([
-        { line: CLI.aks(), timeout: 30000 },
-        { line: CLI.groups(), timeout: 30000 },
+        { line: CLI.aks(), timeout: 45000 },
+        { line: CLI.groups(), timeout: 45000 },
         {
           line: CLI.credentials("aks-selected", "rg-selected"),
-          timeout: 20000
+          timeout: 45000
         },
         { line: CLI.namespaces, timeout: 10000 }
       ]);
@@ -797,9 +806,15 @@ describe("azure-discovery routes (SU-08)", () => {
     });
 
     it("reports namespace discovery failures without a static fallback", async () => {
-      for (const failing of [
-        CLI.credentials("aks-1", "rg-1"),
-        CLI.namespaces
+      for (const { failing, label } of [
+        {
+          failing: CLI.credentials("aks-1", "rg-1"),
+          label: "az aks get-credentials failed: kube down"
+        },
+        {
+          failing: CLI.namespaces,
+          label: "kubectl get namespaces failed: kube down"
+        }
       ]) {
         const cli = cliFake({
           [CLI.aks()]: JSON.stringify([
@@ -827,7 +842,9 @@ describe("azure-discovery routes (SU-08)", () => {
           errors?: Record<string, string>;
         };
         expect(parsed.namespaces, failing).toEqual([]);
-        expect(parsed.errors?.namespaces, failing).toBe("kube down");
+        // The step label and its limit are what tell a user whose call was
+        // killed with no output which stage ran out of budget.
+        expect(parsed.errors?.namespaces, failing).toBe(label);
       }
     });
 

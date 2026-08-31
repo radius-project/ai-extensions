@@ -6,7 +6,8 @@ import { createRequestContext } from "../request-context.js";
 import { ENTRA_APP_RETENTION_NOTICE } from "./azure-auto-setup-application.js";
 import {
   createAzureAutoSetupRoutes,
-  handleAzureAutoSetup
+  handleAzureAutoSetup,
+  parseAzureAccountIdentity
 } from "./azure-auto-setup.js";
 import type {
   AzureAutoSetupCommandResult,
@@ -20,6 +21,25 @@ const SUBSCRIPTION = "22222222-2222-2222-2222-222222222222";
 const TENANT = "11111111-1111-1111-1111-111111111111";
 const APP_ID = "33333333-3333-3333-3333-333333333333";
 const USER_ID = "44444444-4444-4444-4444-444444444444";
+
+describe("Azure account identity parsing", () => {
+  it("accepts the subscription and tenant GUIDs Azure reports", () => {
+    expect(
+      parseAzureAccountIdentity(
+        JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT })
+      )
+    ).toEqual({ subscriptionId: SUBSCRIPTION, tenantId: TENANT });
+  });
+
+  it.each([
+    ["invalid JSON", "{"],
+    ["a non-object", "[]"],
+    ["a non-string tenant", JSON.stringify({ id: SUBSCRIPTION, tenantId: 42 })],
+    ["a non-string subscription", JSON.stringify({ id: 42, tenantId: TENANT })]
+  ])("rejects %s", (_label, stdout) => {
+    expect(parseAzureAccountIdentity(stdout)).toBeNull();
+  });
+});
 
 const servers = new Set<ReturnType<typeof createServer>>();
 
@@ -126,6 +146,7 @@ function orchestrationHarness(
   };
   const events: string[] = [];
   const failures: AzureAutoSetupFailureInput[] = [];
+  const writtenCredentialFiles: string[] = [];
   const runAz =
     options.runAz ??
     (async (args: string[]): Promise<AzureAutoSetupCommandResult> => {
@@ -155,8 +176,18 @@ function orchestrationHarness(
           code: 0,
           stdout: JSON.stringify([
             {
+              id: "fic-dev",
               name: "dev",
-              subject: "repo:octo/app:environment:dev"
+              subject: "repo:octo/app:environment:dev",
+              issuer: "https://token.actions.githubusercontent.com",
+              audiences: ["api://AzureADTokenExchange"]
+            },
+            {
+              id: "fic-dev-immutable",
+              name: "dev-immutable",
+              subject: "repo:octo@7/app@5:environment:dev",
+              issuer: "https://token.actions.githubusercontent.com",
+              audiences: ["api://AzureADTokenExchange"]
             }
           ]),
           stderr: ""
@@ -164,6 +195,17 @@ function orchestrationHarness(
       }
       if (line.includes("federated-credential create")) {
         return { code: 0, stdout: "", stderr: "" };
+      }
+      // Our credential setup re-reads the just-created federated credential to
+      // verify and record its provenance. Echo the written credential document
+      // so the live identity matches the required subject/issuer/audiences.
+      if (line.includes("federated-credential show")) {
+        const contents = JSON.parse(writtenCredentialFiles.at(-1) || "{}");
+        return {
+          code: 0,
+          stdout: JSON.stringify({ id: "fic-created", ...contents }),
+          stderr: ""
+        };
       }
       if (line.startsWith("role assignment create ")) {
         return { code: 1, stdout: "", stderr: "already exists" };
@@ -230,7 +272,9 @@ function orchestrationHarness(
     },
     tempFile: {
       createPath: () => "C:\\temp\\fic.json",
-      write: () => {},
+      write: (_path: string, contents: string) => {
+        writtenCredentialFiles.push(contents);
+      },
       remove: () => {}
     },
     ensureServicePrincipal:
@@ -683,7 +727,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         show: { code: 0, stdout: "null", stderr: "" }
       },
       {},
-      "az-account-incomplete"
+      "az-account-parse"
     ]
   ])(
     "reports %s before OIDC resolution",
@@ -1215,6 +1259,17 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       }
       if (command.includes("federated-credential create")) {
         return { code: 0, stdout: "", stderr: "" };
+      }
+      if (command.includes("federated-credential show")) {
+        const contents = JSON.parse(written.at(-1) || "{}");
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            id: "fic-dev",
+            ...contents
+          }),
+          stderr: ""
+        };
       }
       if (command.startsWith("role assignment create ")) {
         return { code: 0, stdout: "", stderr: "" };

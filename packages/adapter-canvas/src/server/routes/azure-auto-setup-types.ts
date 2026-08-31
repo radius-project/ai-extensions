@@ -95,6 +95,7 @@ export interface AzureAutoSetupOperationProgressPort {
 }
 
 export interface AzureAutoSetupOperationArtifactPort {
+  withCredentialProvenanceLock<T>(work: () => Promise<T>): Promise<T>;
   recordAzureApp(
     operation: AzureAutoSetupOperation,
     patch: Record<string, unknown>
@@ -107,6 +108,24 @@ export interface AzureAutoSetupOperationArtifactPort {
     operation: AzureAutoSetupOperation,
     entry: { name: string; subject: string; providerId?: string | null }
   ): void;
+  recordFederatedCredentialProvenance(
+    operation: AzureAutoSetupOperation,
+    entry: {
+      repo: string;
+      repoId: number;
+      environment: string;
+      tenantId: string;
+      clientId: string;
+      applicationObjectId: string;
+      credentialId: string;
+      name: string;
+      subject: string;
+      issuer: string;
+      audiences: string[];
+      subjectConfig: ResolveOidcSubjectResult["subjectConfig"];
+      origin: "created" | "reused";
+    }
+  ): Promise<void>;
   recordCreatedRoleAssignment(
     operation: AzureAutoSetupOperation,
     entry: {
@@ -250,6 +269,8 @@ export interface AzureAutoSetupCredentialInput {
         AzureAutoSetupOperationLifecyclePort,
       | "recordServicePrincipal"
       | "recordCreatedFederatedCredential"
+      | "recordFederatedCredentialProvenance"
+      | "withCredentialProvenanceLock"
       | "recordCreatedRoleAssignment"
       | "persist"
     >;
@@ -257,6 +278,7 @@ export interface AzureAutoSetupCredentialInput {
   oidc: ResolveOidcSubjectResult;
   oidcSuffix: string;
   clientId: string;
+  tenantId: string;
   appName: string;
   subscriptionId: string;
   resourceGroup: string;

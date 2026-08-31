@@ -61,6 +61,31 @@ function branchPhrase(branches: ReadonlyArray<string | undefined>): string {
     : `branches ${quoted.join(", ")}`;
 }
 
+// A handoff occupies the user lane, and the host cannot start a user turn while
+// one is already running, so a handoff raised by a render that happened inside
+// an agent turn is queued and delivered after that turn ends. By then the model
+// may already exist — most often because the same agent turn generated it — and
+// the classification the prompt was written from is stale. Restate the missing
+// model as evidence rather than fact and make the work conditional on a
+// re-check, so a queued handoff cannot redo generation and overwrite a model
+// that was just written.
+function staleHandoffGuard(
+  page: string,
+  branches: ReadonlyArray<string | undefined>,
+  canvasInstanceId: string,
+  rendersInPlace: boolean
+): string {
+  const phrase = branchPhrase(branches);
+  const onPhrase = phrase ? ` on ${phrase}` : " on the selected branch";
+  return [
+    `This handoff may have queued behind another turn. Recheck .radius/app.bicep${onPhrase} before acting.`,
+    rendersInPlace ?
+      `If it exists, do not regenerate it; the view at instanceId \`${canvasInstanceId}\` picks it up automatically.`
+    : `If it exists, do not regenerate it; reopen the ${page} view so it loads.`,
+    "Generate only while the model is still missing."
+  ].join(" ");
+}
+
 // Branch-aware guidance on where the app.bicep must live for the graph to
 // render. Explains the two cases: the selected branch is the current
 // workspace branch (write to the working tree, no push needed) vs. a
@@ -131,8 +156,10 @@ export function appBicepHandoffPrompt(
   const rendersInPlace = page === "graph";
   return [
     rendersInPlace ?
-      `The Radius ${page} view${where}${onPhrase} can't render yet because its application model hasn't been generated. Generate it now and keep the current view open.`
-    : `The Radius ${page} view${where}${onPhrase} can't render yet because its application model hasn't been generated. Generate it now, then open the ${page} view again.`,
+      `The Radius ${page} view${where}${onPhrase} could not render because its application model had not been generated when the view loaded. Generate it if it is still missing, and keep the current view open.`
+    : `The Radius ${page} view${where}${onPhrase} could not render because its application model had not been generated when the view loaded. Generate it if it is still missing, then open the ${page} view again.`,
+    "",
+    staleHandoffGuard(page, branches, canvasInstanceId, rendersInPlace),
     "",
     SKILL_HANDOFF,
     graphSourceNote(page, repo, branches, canvasInstanceId, !rendersInPlace),

@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import type { ProviderMutationRecord } from "../../operations.js";
 
 // Type surface for the `POST /api/create-environment` slice. Declarations only —
 // erased at compile time — so the four behavioral seams (refusal ladder, gh
@@ -100,6 +101,12 @@ export interface CreateEnvironmentOperation {
   // from being narrower than what `operations.ts` actually writes.
   inputRequired?: unknown;
   verification?: unknown;
+  recoveryState?: string | null;
+  providerRecovery?: {
+    state?: string;
+    guidance?: string | null;
+    mutations?: ProviderMutationRecord[];
+  };
   context?: Record<string, unknown>;
   request?: unknown;
   resumeRequest?: unknown;

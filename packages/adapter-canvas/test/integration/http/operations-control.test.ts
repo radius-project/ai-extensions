@@ -16,21 +16,27 @@ import {
 } from "../../support/server/operation-fixtures.js";
 import {
   acceptCommand,
+  buildDeleteStages,
   buildStages,
+  canDismissOperation,
   createOperation,
   createRegistry,
   enterStage,
   finish,
   isTerminalState,
+  dismissOperation,
   recordAzureApp,
   recordCommitState,
   recordCommittedWorkflowFile,
   recordGitHubEnvironment,
   recordServicePrincipal,
   setCommandState,
+  setStageState,
+  setVerificationWorkflowState,
   stopAtBoundary,
   toClientView,
   INPUT_REQUIRED_STATE,
+  OPERATION_KIND_DELETE,
   STAGE_VERIFY
 } from "../../../src/operations.js";
 import {
@@ -104,6 +110,8 @@ function start(): Harness {
       // Merge-proof eligibility is the route unit suite's to decide; no journey
       // here may reach GitHub for it, so the port refuses rather than answers.
       checkPullRequestMerge: () => pullRequestMergeCheck(),
+      inspectVerificationWorkflow: () => Promise.resolve("inactive"),
+      cancelVerificationWorkflow: () => Promise.resolve("inactive"),
       schedule: ({ kind, instanceId, commandId }) => {
         scheduled.push({ kind, instanceId, commandId });
         return true;
@@ -119,7 +127,9 @@ function start(): Harness {
         latest: () => null,
         latestAny: () => null,
         get: (operationId) => records.get(operationId) ?? null,
-        toClientView
+        toClientView,
+        productVersion: () => "0.0.0",
+        now: () => 0
       },
       {
         isValidRepoSlug: (value) =>
@@ -167,6 +177,8 @@ function start(): Harness {
         requireInput: () => {},
         finish,
         isTerminalState,
+        canDismissOperation,
+        dismissOperation,
         persistOperations,
         toClientView,
         scheduleEnvironmentOperation: () => true,
@@ -387,6 +399,51 @@ describe("operation controls real-loopback HIT", () => {
     expect(polled.nextTransition.code).toBe("stopping");
   });
 
+  it("offers and schedules only Retry deletion for an incomplete delete", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = createOperation({
+      provider: "azure",
+      repo: "contoso/store",
+      environment: "dev",
+      kind: OPERATION_KIND_DELETE,
+      stages: buildDeleteStages()
+    }) as OperationFixture;
+    op.stages[0].state = "succeeded";
+    setStageState(op, op.stages[1].id, "failed");
+    finish(op, "failed_partial", {
+      failure: { code: "credential-delete-failed" }
+    });
+    seed(harness, op);
+
+    const before = await poll(
+      entry.baseUrl,
+      `/api/operations/${encodeURIComponent(op.operationId)}`
+    );
+    expect(before.actions.map((entry) => entry.id)).toEqual(["retry-deletion"]);
+    expect(before.actions.map((entry) => entry.label)).not.toContain(
+      "Stop Setup"
+    );
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/retry/deletion`
+    );
+    expect(response.status).toBe(202);
+    const accepted = await body(response);
+    expect(accepted.operation.state).toBe("running");
+    expect(accepted.operation.nextTransition).toMatchObject({
+      code: "retrying-deletion"
+    });
+    expect(harness.scheduled).toEqual([
+      {
+        kind: "deletion_retry",
+        instanceId: "panel-a",
+        commandId: accepted.commandId
+      }
+    ]);
+  });
+
   it.each(["rollback", "retry_cleanup", "exit_setup"] as const)(
     "rejects Stop over HTTP while %s cleanup is running",
     async (kind) => {
@@ -579,6 +636,80 @@ describe("stop, then continue or roll back, over the socket", () => {
         commandId: accepted.commandId
       }
     ]);
+  });
+
+  describe("interrupted verification recovery over the socket", () => {
+    it("cancels the exact persisted workflow before cleanup becomes available", async () => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-recovery");
+      const op = seed(harness, stoppedSetup({ includeEnvironment: true }));
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+
+      const response = await post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/cancel-workflow`
+      );
+
+      expect(response.status).toBe(200);
+      expect(await body(response)).toMatchObject({
+        code: "workflow-cancelled"
+      });
+      const view = await poll(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}`
+      );
+      expect(view.actions.map((action) => action.id)).toContain("rollback");
+      expect(view.actions.map((action) => action.id)).not.toContain(
+        "cancel-workflow"
+      );
+    });
+
+    it("abandons the stopped setup and releases admission while its workflow is active", async () => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-abandon");
+      const op = seed(harness, stoppedSetup({ includeEnvironment: true }));
+      op.verification = { runId: "42" };
+      setVerificationWorkflowState(op, "active");
+
+      const response = await post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/exit?mode=abandon`
+      );
+
+      expect(response.status).toBe(200);
+      expect(await body(response)).toMatchObject({
+        code: "setup-exited",
+        removed: false,
+        operation: {
+          headline: { title: "Environment setup abandoned" },
+          actions: []
+        }
+      });
+      expect(harness.scheduled).toEqual([]);
+      expect(harness.registry.cleanupRequired("contoso/store")).toBeNull();
+    });
+
+    it("rejects a stale abandon URL after cleanup becomes safe", async () => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-abandon-stale");
+      const op = seed(harness, stoppedSetup({ includeEnvironment: true }));
+      setVerificationWorkflowState(op, "inactive");
+
+      const response = await post(
+        entry.baseUrl,
+        `/api/operations/${op.operationId}/exit?mode=abandon`
+      );
+
+      expect(response.status).toBe(409);
+      expect(await body(response)).toMatchObject({
+        code: "operation-abandon-not-available"
+      });
+      expect(harness.scheduled).toEqual([]);
+      expect(
+        harness.registry.cleanupRequired("contoso/store")?.operationId
+      ).toBe(op.operationId);
+    });
   });
 
   it("stops a running operation and then rolls it back through the same record", async () => {

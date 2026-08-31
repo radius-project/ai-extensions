@@ -90,6 +90,7 @@ const CREATE_BODY = {
 
 async function successfulSetup(createApp: boolean) {
   const unmatchedCalls: string[] = [];
+  let credentialContents = "";
   const operation = {
     operationId: createApp ? "op-http-create" : "op-http-reuse",
     repo: "octo/app",
@@ -116,7 +117,7 @@ async function successfulSetup(createApp: boolean) {
         stderr: ""
       };
     }
-    if (!createApp && line.startsWith(`ad app show --id ${APP_ID} `)) {
+    if (line.startsWith(`ad app show --id ${APP_ID} --query id`)) {
       return { code: 0, stdout: "app-object", stderr: "" };
     }
     if (createApp && line.startsWith("ad app list ")) {
@@ -147,11 +148,28 @@ async function successfulSetup(createApp: boolean) {
         stderr: ""
       };
     }
+    if (line.startsWith(`ad app show --id ${APP_ID} --query tags`)) {
+      // Reuse-origin classification reads the existing app's Radius provenance
+      // tags. A plainly reused app carries none, so it classifies as
+      // pre-existing and the success contract is unchanged.
+      return { code: 0, stdout: "[]", stderr: "" };
+    }
     if (line.includes("federated-credential list")) {
       return { code: 0, stdout: "[]", stderr: "" };
     }
     if (line.includes("federated-credential create")) {
       return { code: 0, stdout: "", stderr: "" };
+    }
+    if (line.includes("federated-credential show")) {
+      // The credential setup re-reads the just-created FIC to prove provenance.
+      // Echo the contents that were written to the temp file so the live
+      // identity (subject/issuer/audiences) matches what setup requires.
+      const contents = JSON.parse(credentialContents);
+      return {
+        code: 0,
+        stdout: JSON.stringify({ id: "fic-dev", ...contents }),
+        stderr: ""
+      };
     }
     if (line.startsWith("role assignment create ")) {
       return { code: 0, stdout: "", stderr: "" };
@@ -196,7 +214,9 @@ async function successfulSetup(createApp: boolean) {
     },
     tempFile: {
       createPath: () => "C:\\temp\\fic.json",
-      write: () => {},
+      write: (_path, contents) => {
+        credentialContents = contents;
+      },
       remove: () => {}
     },
     ensureServicePrincipal: async () => ({

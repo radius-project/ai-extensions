@@ -1,6 +1,10 @@
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { queryValue } from "../query.js";
 import { readString } from "../json.js";
+import {
+  parseGhCommandPresentation,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
 import { readPageState } from "../pages/state.js";
 import { ENVIRONMENT_PAGE_STATE_ID } from "../../pages/browser-state-ids.js";
 import {
@@ -16,6 +20,7 @@ import {
 } from "./environments.js";
 import {
   initializeEnvironmentOperations,
+  type EnvironmentOperationsController,
   type OperationRecord
 } from "./operations.js";
 import {
@@ -35,6 +40,7 @@ interface EnvironmentPageState {
   readonly branch: string;
   readonly activeSubtab: "credentials" | "environments";
   readonly mutationNonce: string;
+  readonly ghCommandPresentation: GhCommandPresentation;
 }
 
 function parsePageState(context: BrowserContext): EnvironmentPageState {
@@ -43,6 +49,9 @@ function parsePageState(context: BrowserContext): EnvironmentPageState {
     repo: readString(state, "repo"),
     branch: readString(state, "branch"),
     mutationNonce: readString(state, "mutationNonce"),
+    ghCommandPresentation: parseGhCommandPresentation(
+      state.ghCommandPresentation
+    ),
     activeSubtab:
       readString(state, "activeSubtab") === "credentials" ? "credentials" : (
         "environments"
@@ -55,17 +64,20 @@ function input(context: BrowserContext, id: string): DomInputElement | null {
 }
 
 function optimisticOperation(
+  kind: string,
   environment: string,
   provider: string,
-  now: number
+  now: number,
+  summary: string
 ): OperationRecord {
   return {
     operationId: "pending",
+    kind,
     environment,
     provider,
     state: "running",
     terminalState: null,
-    summary: `Creating ${environment}…`,
+    summary,
     currentStage: "",
     stages: [],
     steps: [],
@@ -153,6 +165,7 @@ export function initializeEnvironmentPage(
   const profiles = initializeCredentialProfilesPanel(context, {
     repo: state.repo,
     mutationNonce: state.mutationNonce,
+    ghCommandPresentation: state.ghCommandPresentation,
     environmentName: () => environmentInput.value,
     onReadinessChange(readiness) {
       githubReadiness = readiness;
@@ -196,11 +209,54 @@ export function initializeEnvironmentPage(
   // assigned immediately afterward. This makes the construction ordering
   // explicit without installing a silent nullable fallback.
   let environments: EnvironmentPaneController;
+  let operations: EnvironmentOperationsController;
+
+  // Terminal behavior for a delete operation, shared by the start path
+  // (startDeleteProgress) and the rejoin path (resumeProgress), so the user
+  // sees the same acknowledgement whether they stay on the panel or return to
+  // it while the delete is still running.
+  const handleDeleteTerminal = (op: OperationRecord): void => {
+    environments.loadEnvironmentTable();
+    const succeeded =
+      op.terminalState === "succeeded" ||
+      op.terminalState === "succeeded_with_warnings";
+    // Azure environments own a Microsoft Entra app registration that Radius
+    // never deletes automatically (it may be shared). Tell the user it was left
+    // behind so they can remove it in Azure if they want to.
+    if (!succeeded || op.provider !== "azure" || !confirmDialog) return;
+    const withWarnings = op.terminalState === "succeeded_with_warnings";
+    const outcome =
+      withWarnings ?
+        `The environment "${op.environment}" was deleted, but some cleanup steps reported warnings — check the progress panel for details.`
+      : `The environment "${op.environment}" was deleted.`;
+    confirmDialog.show({
+      title:
+        withWarnings ?
+          "Environment deleted with warnings"
+        : "Environment deleted",
+      message: `${outcome}\n\nIts Microsoft Entra app registration was not deleted — Radius never removes app registrations automatically because they can be shared by other environments or services. If you no longer need it, delete it in the `,
+      messageLink: {
+        label: "Azure portal",
+        href: "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+        suffix: "."
+      },
+      confirmLabel: "Done",
+      confirmVariant: "primary",
+      hideCancel: true
+      // "Done" only acknowledges this notice. It must NOT dismiss the progress
+      // panel — the panel carries its own dismiss button ("OK" for a clean
+      // delete, "Exit" for a warning outcome), and that button is the single
+      // action that persists the dismissal server-side. Dismissing from here as
+      // well would tear the panel down behind the user's back the moment they
+      // acknowledge the Entra-app notice.
+    });
+  };
   const credentials = initializeCredentialsPane(
     context,
     {
       repo: state.repo,
       mutationNonce: state.mutationNonce,
+      ghCommandPresentation: state.ghCommandPresentation,
       decisions: context.dialogs,
       ...(confirmDialog ? { confirmDialog } : {})
     },
@@ -259,6 +315,21 @@ export function initializeEnvironmentPage(
           selectedProfile !== null &&
           githubReadiness?.ready === true
         );
+      },
+      startDeleteProgress(environment, provider) {
+        environments.hideTerminalBanners();
+        operations.stopProgress();
+        operations.renderProgress(
+          optimisticOperation(
+            "delete",
+            environment,
+            provider,
+            context.clock.now(),
+            `Deleting ${environment}…`
+          )
+        );
+        operations.focusPanel();
+        operations.trackProgress(environment, provider, handleDeleteTerminal);
       }
     }
   );
@@ -278,9 +349,10 @@ export function initializeEnvironmentPage(
     environments.resetSubmitButton();
   };
 
-  const operations = initializeEnvironmentOperations(context, {
+  const initializedOperations = initializeEnvironmentOperations(context, {
     repo: state.repo,
     mutationNonce: state.mutationNonce,
+    ghCommandPresentation: state.ghCommandPresentation,
     deps: {
       showSuccessBanner: environments.showSuccess,
       showActionRequired: environments.showActionRequired,
@@ -291,13 +363,14 @@ export function initializeEnvironmentPage(
       // reached after Stop, Retry, Rollback, or Exit, must release it before the
       // user can start another setup without reloading the page.
       resetSubmitButton: restoreCreateButton,
+      onDeleteTerminal: handleDeleteTerminal,
       promptServiceManagementReference:
         discovery.promptServiceManagementReference,
       promptAppSelection: discovery.promptAppSelection
     }
   });
 
-  if (!operations) {
+  if (!initializedOperations) {
     confirmDialog?.teardown();
     credentials.teardown();
     environments.teardown();
@@ -306,6 +379,7 @@ export function initializeEnvironmentPage(
     scope.teardown();
     return NOOP_TEARDOWN;
   }
+  operations = initializedOperations;
 
   const showFormError = (message: string): void => {
     formStatus.className = "status error";
@@ -422,10 +496,15 @@ export function initializeEnvironmentPage(
     environments.showEnvironmentLanding();
     environments.hideTerminalBanners();
     operations.stopProgress();
-    operations.renderProgress({
-      ...optimisticOperation(environment, provider, context.clock.now()),
-      summary: `${environmentInput.disabled ? "Updating" : "Creating"} ${environment}…`
-    });
+    operations.renderProgress(
+      optimisticOperation(
+        "create",
+        environment,
+        provider,
+        context.clock.now(),
+        `${environmentInput.disabled ? "Updating" : "Creating"} ${environment}…`
+      )
+    );
     operations.focusPanel();
 
     createAbort = context.net.createAbort();

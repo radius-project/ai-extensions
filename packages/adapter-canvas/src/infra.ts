@@ -18,12 +18,17 @@ import {
   generateDeleteWorkflow as coreGenerateDeleteWorkflow,
   DELETE_RADIUS_REF,
   DELETE_APP_DISPATCHER_FILE,
+  DELETE_ENV_DISPATCHER_FILE,
+  DELETE_ENV_AZURE_FILE,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE
 } from "@radius-project/core";
 import { VERIFY_OPERATION_INPUT } from "./verification-run-identity.js";
 import type { DeployWorkflowOptions } from "@radius-project/core";
 import { parse as parseYaml } from "yaml";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import {
   fetchFileFromRepoResult,
   fetchFileFromRepo,
@@ -86,19 +91,191 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function assertValidWorkflowYaml(workflow: string, context: string): void {
+type GeneratedWorkflowArtifact = "verify" | "dispatcher" | "provider";
+
+const UNSAFE_AUTOMATIC_TRIGGERS = new Set([
+  "push",
+  "pull_request",
+  "pull_request_target",
+  "workflow_run",
+  "schedule"
+]);
+
+function isMapping(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function own(mapping: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(mapping, key);
+}
+
+function containsAwsWorkflowReference(value: unknown): boolean {
+  return [DEPLOY_AWS_FILE, DELETE_AWS_FILE].some((fileName) =>
+    containsWorkflowReference(value, fileName)
+  );
+}
+
+function containsWorkflowReference(value: unknown, fileName: string): boolean {
+  if (Array.isArray(value)) {
+    return value.some((child) => containsWorkflowReference(child, fileName));
+  }
+  if (!isMapping(value)) return false;
+  return Object.entries(value).some(
+    ([key, child]) =>
+      (key === "uses" && child === `./.github/workflows/${fileName}`) ||
+      containsWorkflowReference(child, fileName)
+  );
+}
+
+function assertTrustedGeneratedWorkflow(
+  workflow: string,
+  artifact: GeneratedWorkflowArtifact,
+  context: string,
+  expectedProviderWorkflow?: string
+): void {
+  let parsed: unknown;
   try {
-    parseYaml(workflow);
+    parsed = parseYaml(workflow);
   } catch (error) {
     throw new Error(
       `Generated ${context} is invalid YAML: ${errorMessage(error)}`,
       { cause: error }
     );
   }
+
+  const fail = (reason: string): never => {
+    throw new Error(`Generated ${context} failed trust validation: ${reason}`);
+  };
+  const requireMapping = (
+    value: unknown,
+    reason: string
+  ): Record<string, unknown> => (isMapping(value) ? value : fail(reason));
+  const document = requireMapping(
+    parsed,
+    "the document root must be a mapping."
+  );
+  if (/(?<!\$)\{\{[^{}]+\}\}/u.test(workflow)) {
+    fail("an unresolved {{...}} template placeholder remains.");
+  }
+
+  const triggers = requireMapping(
+    document.on,
+    "`on` must be a trigger mapping."
+  );
+  const triggerNames = Object.keys(triggers);
+  const unsafeTrigger = triggerNames.find((trigger) =>
+    UNSAFE_AUTOMATIC_TRIGGERS.has(trigger)
+  );
+  if (unsafeTrigger) {
+    fail(`unsafe automatic trigger \`${unsafeTrigger}\` is not allowed.`);
+  }
+
+  const jobs = requireMapping(document.jobs, "`jobs` must be a mapping.");
+  if (Object.keys(jobs).length === 0) {
+    fail("`jobs` must be a non-empty mapping.");
+  }
+
+  if (artifact === "provider") {
+    if (triggerNames.length !== 1 || triggerNames[0] !== "workflow_call") {
+      fail("the reusable `workflow_call` trigger must be the only trigger.");
+    }
+    const workflowCall = requireMapping(
+      triggers.workflow_call,
+      "`on.workflow_call` must be a mapping."
+    );
+    const inputs = requireMapping(
+      workflowCall.inputs,
+      "`on.workflow_call.inputs` must be a mapping."
+    );
+    if (!own(inputs, "environment") || !isMapping(inputs.environment)) {
+      fail("workflow call input `environment` is required.");
+    }
+    return;
+  }
+
+  if (triggerNames.length !== 1 || triggerNames[0] !== "workflow_dispatch") {
+    fail("the workflow must be triggered only by `workflow_dispatch`.");
+  }
+
+  if (artifact === "dispatcher") {
+    const dispatch = requireMapping(
+      triggers.workflow_dispatch,
+      "`on.workflow_dispatch` must be a mapping."
+    );
+    const inputs = requireMapping(
+      dispatch.inputs,
+      "`on.workflow_dispatch.inputs` must be a mapping."
+    );
+    if (!own(inputs, "environment") || !isMapping(inputs.environment)) {
+      fail("workflow dispatch input `environment` is required.");
+    }
+    if (
+      Object.keys(jobs).some((job) => job.toLowerCase() === "aws") ||
+      containsAwsWorkflowReference(jobs)
+    ) {
+      fail("the dispatcher must not contain an AWS job or workflow reference.");
+    }
+    if (
+      !expectedProviderWorkflow ||
+      !containsWorkflowReference(jobs, expectedProviderWorkflow)
+    ) {
+      fail(
+        `the dispatcher must invoke \`./.github/workflows/${expectedProviderWorkflow || "<provider>"}\`.`
+      );
+    }
+    return;
+  }
+
+  const dispatch = requireMapping(
+    triggers.workflow_dispatch,
+    "`on.workflow_dispatch` must be a mapping."
+  );
+  const inputs = requireMapping(
+    dispatch.inputs,
+    "`on.workflow_dispatch.inputs` must be a mapping."
+  );
+  for (const input of ["environment", VERIFY_OPERATION_INPUT]) {
+    if (!own(inputs, input) || !isMapping(inputs[input])) {
+      fail(`workflow dispatch input \`${input}\` is required.`);
+    }
+  }
+  const runName = document["run-name"];
+  if (
+    typeof runName !== "string" ||
+    !runName.includes("${{ inputs.environment }}") ||
+    !runName.includes(`\${{ inputs.${VERIFY_OPERATION_INPUT} }}`)
+  ) {
+    fail(
+      "the marker-bearing `run-name` must include the environment and Radius operation inputs."
+    );
+  }
+  const hasTrustedGhcrProbe = Object.values(jobs).some(
+    (job) =>
+      isMapping(job) &&
+      Array.isArray(job.steps) &&
+      job.steps.some(
+        (step) =>
+          isMapping(step) &&
+          step.name === "Verify GHCR package push permission" &&
+          isMapping(step.env) &&
+          step.env.GHCR_TOKEN === "${{ secrets.GITHUB_TOKEN }}" &&
+          typeof step.run === "string" &&
+          step.run.includes("/blobs/uploads/")
+      )
+  );
+  if (!hasTrustedGhcrProbe) {
+    fail("the trusted non-mutating GHCR push-permission probe is required.");
+  }
 }
 
 export { DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE };
-export { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE };
+export {
+  DELETE_APP_DISPATCHER_FILE,
+  DELETE_ENV_DISPATCHER_FILE,
+  DELETE_ENV_AZURE_FILE,
+  DELETE_AZURE_FILE,
+  DELETE_AWS_FILE
+};
 
 /**
  * Fetch a workflow template from radius-project/radius `.github/extension/` at
@@ -138,6 +315,72 @@ async function fetchRadiusTemplate(
   return content;
 }
 
+// Candidate directories to read a bundled static workflow template from, in
+// priority order. `import.meta.url` resolves to the compiled bundle
+// (plugins/radius/dist/extension.mjs or the installed copy) at runtime, whose
+// sibling `workflows/` directory is populated by build.mjs. When running from a
+// built bundle that sibling is the ONLY source of truth: the walk up to a
+// `.github/extension/` directory is deliberately skipped so a production install
+// can never read a `delete-environment.yml` that happens to sit in the user's
+// own repository checkout. In tests and source runs `import.meta.url` resolves
+// to this file under `src/`, so the walk locates the repository's own
+// `.github/extension/`.
+function bundledWorkflowDirs(): string[] {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return computeBundledWorkflowDirs(here, existsSync(join(here, "workflows")));
+}
+
+// Pure, testable core of bundledWorkflowDirs: given the directory this module
+// runs from and whether its sibling `workflows/` directory exists, return the
+// candidate template directories in priority order.
+export function computeBundledWorkflowDirs(
+  here: string,
+  bundleWorkflowsPresent: boolean
+): string[] {
+  const dirs = [join(here, "workflows")];
+  // The presence of the sibling `workflows/` directory (populated by build.mjs
+  // beside the installed extension.mjs) is what tells us we are running from a
+  // built bundle — every install layout has it, but no path-segment name is
+  // reliable across them (`~/.copilot/extensions/radius/`,
+  // `~/.copilot/installed-plugins/.../radius-edge/`, and in-repo
+  // `plugins/radius/dist/` all differ). When it is present that sibling is the
+  // only source of truth, so skip the walk up to the in-repo `.github/extension/`
+  // templates. Source/test runs have no sibling `workflows/`, so they walk up.
+  if (!bundleWorkflowsPresent) {
+    let cursor = here;
+    for (let depth = 0; depth < 8; depth++) {
+      dirs.push(join(cursor, ".github", "extension"));
+      const parent = dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+    }
+  }
+  return dirs;
+}
+
+/**
+ * Read a static, ai-extensions-owned workflow template shipped inside the
+ * plugin. Unlike fetchRadiusTemplate this never touches the network: the
+ * environment-delete workflows (issue #303) are committed in this repo and
+ * bundled beside the extension. A missing file is a hard error — there is no
+ * fallback — so a packaging regression surfaces immediately.
+ */
+export function readBundledWorkflowTemplate(fileName: string): string {
+  for (const dir of bundledWorkflowDirs()) {
+    const candidate = join(dir, fileName);
+    if (existsSync(candidate)) {
+      const body = readFileSync(candidate, "utf8");
+      if (!body || !body.trim()) {
+        throw new Error(`Bundled workflow template ${candidate} is empty.`);
+      }
+      return body;
+    }
+  }
+  throw new Error(
+    `Bundled workflow template "${fileName}" was not found beside the extension or in .github/extension.`
+  );
+}
+
 export async function generateVerifyWorkflow(
   env: string,
   provider: string
@@ -157,7 +400,11 @@ export async function generateVerifyWorkflow(
       coreGenerateVerifyWorkflow(env, platform, upstream)
     )
   );
-  assertValidWorkflowYaml(workflow, `verify workflow "${fileName}"`);
+  assertTrustedGeneratedWorkflow(
+    workflow,
+    "verify",
+    `verify workflow "${fileName}"`
+  );
   return workflow;
 }
 
@@ -215,7 +462,11 @@ export function configureVerifyGhcrProbe(workflow: string): string {
   const index = lines.findIndex((line) =>
     /^\s*-\s+name:\s*Verify GHCR package push permission\s*$/.test(line)
   );
-  if (index < 0) return workflow;
+  if (index < 0) {
+    throw new Error(
+      'The upstream verify workflow template no longer contains the "Verify GHCR package push permission" step, so Radius cannot replace it with the trusted non-mutating probe.'
+    );
+  }
   const indent = lines[index].match(/^\s*/)?.[0] ?? "";
   let end = index + 1;
   while (end < lines.length && !lines[end].startsWith(`${indent}- name:`)) {
@@ -229,6 +480,7 @@ ${indent}    GHCR_TOKEN: \${{ secrets.GITHUB_TOKEN }}
 ${indent}    STATE_REGISTRY: \${{ vars.RADIUS_STATE_REGISTRY }}
 ${indent}  run: |
 ${indent}    set -euo pipefail
+${indent}    curl() { command curl --connect-timeout 10 --max-time 30 "$@"; }
 ${indent}    repo_path="\${STATE_REGISTRY#ghcr.io/}"
 ${indent}    bearer="$(curl -fsS -u "\${GH_ACTOR}:\${GHCR_TOKEN}" "https://ghcr.io/token?service=ghcr.io&scope=repository:\${repo_path}:pull,push" | node -e 'let input=""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input).token || ""));')"
 ${indent}    if [[ -z "\${bearer}" ]]; then
@@ -296,43 +548,84 @@ export async function generateDeployWorkflow(
     );
   }
   for (const [file, workflow] of Object.entries(generated)) {
-    assertValidWorkflowYaml(workflow, `deploy workflow "${file}"`);
+    assertTrustedGeneratedWorkflow(
+      workflow,
+      file === DEPLOY_DISPATCHER_FILE ? "dispatcher" : "provider",
+      `deploy workflow "${file}"`,
+      file === DEPLOY_DISPATCHER_FILE ? DEPLOY_AZURE_FILE : undefined
+    );
   }
   return generated;
 }
 
 /**
- * Generate the application-delete workflow files (dispatcher + Azure provider
- * workflow). Returns an object mapping bare workflow filename -> YAML content;
- * the caller commits each under `.github/workflows/`. As with deploy, the AWS
- * provider workflow is never fetched or committed and the dispatcher's `aws:`
- * job is stripped.
+ * Generate the delete workflow files. Returns an object mapping bare workflow
+ * filename -> YAML content; the caller commits each under `.github/workflows/`.
+ * As with deploy, the AWS provider workflow is never committed and the
+ * application dispatcher's `aws:` job is stripped.
  *
- * The templates + the `delete-resource` composite action they reference live in
- * radius-project/radius `.github/extension`, so both the fetch and the
- * `{{RADIUS_REF}}` pinned into the provider workflows use DELETE_RADIUS_REF.
+ * Two paths share this generator with different provenance:
+ *
+ *   - Application delete (`delete-application.yml` + the reusable
+ *     `delete-azure.yml`) is fetched from radius-project/radius, which stays the
+ *     single source of truth for that reviewed upstream workflow.
+ *   - Environment delete (`delete-environment.yml` + its own reusable provider
+ *     `delete-environment-azure.yml`) is authored as static YAML in this repo's
+ *     `.github/extension/` and shipped inside the plugin (issue #303), so the
+ *     ai-extensions-owned "no deployed applications" guard can be reviewed here.
+ *     Those two files are read from the bundled plugin rather than fetched.
+ *
+ * The `{{RADIUS_REF}}` pinned into every provider workflow's composite actions
+ * uses DELETE_RADIUS_REF regardless of where the template body came from.
  */
 export async function generateDeleteWorkflow(
   env: string
 ): Promise<Record<string, string>> {
-  const files = [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE];
-  const bodies = await Promise.all(
-    files.map((f) => fetchRadiusTemplate(f, DELETE_RADIUS_REF))
+  // Application-delete templates come from upstream; environment-delete
+  // templates are static local assets read from the bundled plugin.
+  const fetched = [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE];
+  const fetchedBodies = await Promise.all(
+    fetched.map((f) => fetchRadiusTemplate(f, DELETE_RADIUS_REF))
   );
   const templates: Record<string, string> = {};
-  files.forEach((f, i) => {
-    templates[f] = bodies[i];
+  fetched.forEach((f, i) => {
+    templates[f] = fetchedBodies[i];
   });
+  templates[DELETE_ENV_DISPATCHER_FILE] = readBundledWorkflowTemplate(
+    DELETE_ENV_DISPATCHER_FILE
+  );
+  templates[DELETE_ENV_AZURE_FILE] = readBundledWorkflowTemplate(
+    DELETE_ENV_AZURE_FILE
+  );
   templates[DELETE_AWS_FILE] = templates[DELETE_AZURE_FILE];
   const generated = coreGenerateDeleteWorkflow(env, templates);
   delete generated[DELETE_AWS_FILE];
-  if (generated && typeof generated[DELETE_APP_DISPATCHER_FILE] === "string") {
-    generated[DELETE_APP_DISPATCHER_FILE] = stripAwsDispatcherJob(
-      generated[DELETE_APP_DISPATCHER_FILE]
-    );
+  // The application dispatcher references the never-committed AWS provider file
+  // via its `aws:` job; strip it so GitHub can parse the committed workflow. The
+  // static environment dispatcher is authored Azure-only, so this is a no-op for
+  // it, but running it keeps both dispatchers guarded the same way.
+  for (const dispatcher of [
+    DELETE_APP_DISPATCHER_FILE,
+    DELETE_ENV_DISPATCHER_FILE
+  ]) {
+    if (typeof generated[dispatcher] === "string") {
+      generated[dispatcher] = stripAwsDispatcherJob(generated[dispatcher]);
+    }
   }
   for (const [file, workflow] of Object.entries(generated)) {
-    assertValidWorkflowYaml(workflow, `delete workflow "${file}"`);
+    const isDispatcher =
+      file === DELETE_APP_DISPATCHER_FILE ||
+      file === DELETE_ENV_DISPATCHER_FILE;
+    const providerWorkflow =
+      file === DELETE_APP_DISPATCHER_FILE ? DELETE_AZURE_FILE
+      : file === DELETE_ENV_DISPATCHER_FILE ? DELETE_ENV_AZURE_FILE
+      : undefined;
+    assertTrustedGeneratedWorkflow(
+      workflow,
+      isDispatcher ? "dispatcher" : "provider",
+      `delete workflow "${file}"`,
+      providerWorkflow
+    );
   }
   return generated;
 }
@@ -550,7 +843,17 @@ export async function syncRepoWorkflows(
   };
 
   for (const branch of branches) {
+    // The env-delete dispatcher (`delete-environment.yml`) hard-references its
+    // reusable provider via `uses: ./.github/workflows/delete-environment-azure.yml`,
+    // so the two static files must always be committed together. byPath is built
+    // with the dispatcher inserted before the provider, so this flag is set while
+    // the dispatcher is processed and read when the provider is reached: whenever
+    // the dispatcher is present on a branch, author the provider too even in the
+    // background pass (no `opts.create`), so a drift rewrite of the dispatcher can
+    // never leave a dangling `uses:` reference behind.
+    let envDeleteDispatcherPresent = false;
     for (const [path, candidates] of byPath.entries()) {
+      const fileName = path.split("/").pop();
       const committed = await fetchFileFromRepo(repo, path, branch);
       const missing = committed == null || committed === "";
       if (missing) {
@@ -558,14 +861,20 @@ export async function syncRepoWorkflows(
         // that), and an unpushed working branch simply reads as "missing" and is
         // skipped. When `opts.create` is set, author the file so the workflow is
         // present on the branch it will run from — but only if the branch exists
-        // on the remote, so we never author onto an unpushed working branch.
-        if (!opts.create) continue;
+        // on the remote, so we never author onto an unpushed working branch. The
+        // env-delete provider is additionally force-authored when its dispatcher
+        // is present (see envDeleteDispatcherPresent), since a committed
+        // dispatcher without its provider is always a broken workflow; a
+        // `workflow_call`-only provider never triggers a run on push, so
+        // authoring it early is safe.
+        const forceAuthorEnvDeleteProvider =
+          fileName === DELETE_ENV_AZURE_FILE && envDeleteDispatcherPresent;
+        if (!opts.create && !forceAuthorEnvDeleteProvider) continue;
         if (!(await remoteHasBranch(branch))) {
           log(`skipped creating ${path} on "${branch}" (branch not on remote)`);
           continue;
         }
         const choice = candidates[0];
-        const fileName = path.split("/").pop();
         try {
           await commitFileToRepo(
             repo,
@@ -582,6 +891,10 @@ export async function syncRepoWorkflows(
         }
         continue;
       }
+      // The env-delete dispatcher is present on this branch, so its reusable
+      // provider must be committed alongside it (see envDeleteDispatcherPresent).
+      if (fileName === DELETE_ENV_DISPATCHER_FILE)
+        envDeleteDispatcherPresent = true;
       // In sync if the committed copy matches any environment's generated
       // content — the only per-env difference is the cosmetic dispatch default.
       if (candidates.some((c) => c.content === committed)) continue;
@@ -598,7 +911,6 @@ export async function syncRepoWorkflows(
         (committedProvider &&
           candidates.find((c) => c.provider === committedProvider)) ||
         candidates[0];
-      const fileName = path.split("/").pop();
       try {
         await commitFileToRepo(
           repo,
