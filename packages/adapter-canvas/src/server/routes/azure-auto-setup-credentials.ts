@@ -1,7 +1,13 @@
 import {
   findLegacyMutableCredentialName,
+  parseFederatedCredentials,
   selectMissingFederatedCredentials
 } from "../../azure-oidc.js";
+import type { AzureFederatedCredential } from "../../azure-oidc.js";
+import {
+  AZURE_AD_TOKEN_EXCHANGE_AUDIENCE,
+  GITHUB_ACTIONS_OIDC_ISSUER
+} from "../../credential-provenance.js";
 import {
   providerMutationRecord,
   unresolvedProviderMutations
@@ -27,6 +33,17 @@ interface RoleAssignmentInput {
 interface FederatedCredential {
   name: string;
   subject: string;
+}
+
+function parseFederatedCredentialObject(
+  stdout: string
+): AzureFederatedCredential | null {
+  try {
+    const parsed = JSON.parse(stdout);
+    return parseFederatedCredentials([parsed])[0] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 const AZURE_PROPAGATION_ATTEMPTS = 6;
@@ -110,6 +127,18 @@ function parseFederatedCredentialInventory(stdout: string): {
   } catch {
     return null;
   }
+}
+
+function hasCompleteFederatedCredentialIdentity(
+  credential: AzureFederatedCredential | null
+): boolean {
+  return Boolean(
+    credential?.id &&
+    credential.name &&
+    credential.subject &&
+    credential.issuer &&
+    credential.audiences.length > 0
+  );
 }
 
 function isRollbackPending(operation: { providerRecovery?: unknown }): boolean {
@@ -257,12 +286,40 @@ async function createFederatedCredentials({
   oidc,
   oidcSuffix,
   clientId,
+  tenantId,
   appName
 }: Pick<
   AzureAutoSetupCredentialInput,
-  "workflow" | "dependencies" | "oidc" | "oidcSuffix" | "clientId" | "appName"
+  | "workflow"
+  | "dependencies"
+  | "oidc"
+  | "oidcSuffix"
+  | "clientId"
+  | "tenantId"
+  | "appName"
 >): Promise<boolean> {
   const { steps, runAz, fail, stopBoundary, checkpoint } = workflow;
+  const appResult = await runAz([
+    "ad",
+    "app",
+    "show",
+    "--id",
+    clientId,
+    "--query",
+    "id",
+    "-o",
+    "tsv"
+  ]);
+  const applicationObjectId = appResult.stdout.trim();
+  if (appResult.code !== 0 || !applicationObjectId) {
+    await fail(
+      400,
+      `Could not resolve the Entra object id for App Registration ${clientId}.`,
+      "app-object-id-failed",
+      { steps, clientId, appName, azError: appResult.stderr }
+    );
+    return false;
+  }
   const listArgs = [
     "ad",
     "app",
@@ -271,7 +328,7 @@ async function createFederatedCredentials({
     "--id",
     clientId,
     "--query",
-    "[].{name:name,subject:subject,claimsMatchingExpression:claimsMatchingExpression}",
+    "[].{id:id,name:name,subject:subject,issuer:issuer,audiences:audiences,claimsMatchingExpression:claimsMatchingExpression}",
     "-o",
     "json"
   ];
@@ -314,6 +371,16 @@ async function createFederatedCredentials({
   }
   const existingSubjects = inventory.subjects;
   const existingNameToSubject = inventory.nameToSubject;
+  let existingCredentials: AzureFederatedCredential[] = [];
+  try {
+    const parsed = JSON.parse(listResult.stdout || "[]");
+    if (Array.isArray(parsed)) {
+      existingCredentials = parseFederatedCredentials(parsed);
+    }
+  } catch {
+    // The inventory parse above already validated the payload shape; leave the
+    // full-identity list empty and fall back to per-credential verification.
+  }
 
   const mutableCredentialName = findLegacyMutableCredentialName(
     oidc,
@@ -372,6 +439,59 @@ async function createFederatedCredentials({
     return false;
   }
 
+  const recordProvenance = async (
+    credential: AzureFederatedCredential,
+    origin: "created" | "reused"
+  ): Promise<boolean> => {
+    if (!hasCompleteFederatedCredentialIdentity(credential)) {
+      await fail(
+        400,
+        `Could not verify the complete Entra identity for federated credential "${credential.name}".`,
+        "federated-credential-identity-incomplete",
+        { steps, clientId, appName }
+      );
+      return false;
+    }
+    try {
+      await dependencies.operations.recordFederatedCredentialProvenance(
+        workflow.operation,
+        {
+          repo: oidc.fullName,
+          repoId: oidc.repoId,
+          environment: String(workflow.operation.environment || ""),
+          tenantId,
+          clientId,
+          applicationObjectId,
+          credentialId: credential.id,
+          name: credential.name,
+          subject: credential.subject,
+          issuer: credential.issuer,
+          audiences: credential.audiences,
+          subjectConfig: oidc.subjectConfig,
+          origin
+        }
+      );
+    } catch (error) {
+      await fail(
+        500,
+        `Federated credential "${credential.name}" was ${origin === "created" ? "created" : "found"}, but Radius could not save the ownership record needed for safe cleanup.`,
+        "credential-provenance-write-failed",
+        { steps, clientId, appName, error: String(error) }
+      );
+      return false;
+    }
+    return checkpoint(
+      `after-record-credential-provenance:${origin}:${credential.name}`
+    );
+  };
+
+  for (const desired of oidc.federatedCredentials) {
+    const existing = existingCredentials.find(
+      (credential) => credential.subject === desired.subject
+    );
+    if (existing && !(await recordProvenance(existing, "reused"))) return false;
+  }
+
   for (const credential of credentials) {
     steps.push(`Creating federated credential "${credential.name}"...`);
     const credentialTarget = `${clientId}:${credential.name}`;
@@ -390,9 +510,9 @@ async function createFederatedCredentials({
       return false;
     const contents = JSON.stringify({
       name: credential.name,
-      issuer: "https://token.actions.githubusercontent.com",
+      issuer: GITHUB_ACTIONS_OIDC_ISSUER,
       subject: credential.subject,
-      audiences: ["api://AzureADTokenExchange"],
+      audiences: [AZURE_AD_TOKEN_EXCHANGE_AUDIENCE],
       description: `Created by Radius operation ${workflow.operation.operationId}`
     });
     const path = dependencies.tempFile.createPath();
@@ -418,7 +538,11 @@ async function createFederatedCredentials({
               "--id",
               clientId,
               "--parameters",
-              "@" + path
+              "@" + path,
+              "--query",
+              "{id:id,name:name,subject:subject,issuer:issuer,audiences:audiences,description:description}",
+              "-o",
+              "json"
             ]),
           accept: (value) => value,
           providerIdOf: (result) => federatedCredentialIdFrom(result.stdout),
@@ -503,56 +627,9 @@ async function createFederatedCredentials({
       dependencies.tempFile.remove(path);
     }
     const created = result.code === 0;
-    if (result.code !== 0) {
-      if (
-        !(await checkpoint(
-          `after-federated-credential-create-attempt:${credential.name}`
-        ))
-      )
-        return false;
-      if (!result.stderr.includes("already exists")) {
-        await fail(
-          400,
-          `Failed to create federated credential "${credential.name}": ` +
-            result.stderr,
-          "federated-credential-failed",
-          { steps, clientId, appName, azError: result.stderr }
-        );
-        return false;
-      }
-      const showResult = await runAz([
-        "ad",
-        "app",
-        "federated-credential",
-        "show",
-        "--id",
-        clientId,
-        "--federated-credential-id",
-        credential.name,
-        "--query",
-        "subject",
-        "-o",
-        "tsv"
-      ]);
-      const actualSubject = (showResult.stdout || "").trim();
-      if (showResult.code !== 0 || actualSubject !== credential.subject) {
-        await fail(
-          400,
-          `Federated credential "${credential.name}" already exists but its subject ` +
-            `("${actualSubject}") does not match the required subject ("${credential.subject}"). Rename this ` +
-            `environment to avoid a credential-name collision.`,
-          "federated-credential-subject-mismatch",
-          { steps, clientId, appName }
-        );
-        return false;
-      }
-    }
-    steps.push(`✅ Federated credential "${credential.name}" created`);
     if (created) {
-      // The credential's own object id, taken from the write that created it
-      // and only read back when that write did not carry one. A name is the
-      // customer's to reuse, so this is what a later delete has to match
-      // before it removes anything, and one transient read must not lose it.
+      // Record rollback authority before live verification. If verification
+      // fails, the operation must still remember the object it just created.
       dependencies.operations.recordCreatedFederatedCredential(
         workflow.operation,
         {
@@ -574,6 +651,71 @@ async function createFederatedCredentials({
       )
         return false;
     }
+    if (result.code !== 0) {
+      if (
+        !(await checkpoint(
+          `after-federated-credential-create-attempt:${credential.name}`
+        ))
+      )
+        return false;
+      if (!result.stderr.includes("already exists")) {
+        await fail(
+          400,
+          `Failed to create federated credential "${credential.name}": ` +
+            result.stderr,
+          "federated-credential-failed",
+          { steps, clientId, appName, azError: result.stderr }
+        );
+        return false;
+      }
+    }
+    const showResult = await runAz([
+      "ad",
+      "app",
+      "federated-credential",
+      "show",
+      "--id",
+      clientId,
+      "--federated-credential-id",
+      credential.name,
+      "--query",
+      "{id:id,name:name,subject:subject,issuer:issuer,audiences:audiences}",
+      "-o",
+      "json"
+    ]);
+    const liveCredential = parseFederatedCredentialObject(showResult.stdout);
+    if (
+      showResult.code !== 0 ||
+      liveCredential?.subject !== credential.subject
+    ) {
+      await fail(
+        400,
+        `Federated credential "${credential.name}" ${created ? "could not be verified" : "already exists but its subject"} ` +
+          `("${liveCredential?.subject || ""}") does not match the required subject ("${credential.subject}").`,
+        "federated-credential-subject-mismatch",
+        { steps, clientId, appName }
+      );
+      return false;
+    }
+    if (
+      !liveCredential ||
+      !hasCompleteFederatedCredentialIdentity(liveCredential)
+    ) {
+      await fail(
+        400,
+        `Could not verify the complete Entra identity for federated credential "${credential.name}".`,
+        "federated-credential-identity-incomplete",
+        { steps, clientId, appName }
+      );
+      return false;
+    }
+    steps.push(
+      `✅ Federated credential "${credential.name}" ${created ? "created" : "reused"}`
+    );
+    if (
+      !(await recordProvenance(liveCredential, created ? "created" : "reused"))
+    )
+      return false;
   }
   const unresolvedCredentials = unresolvedProviderMutations(
     workflow.operation
@@ -826,6 +968,7 @@ export async function configureAzureAutoSetupCredentials({
   oidc,
   oidcSuffix,
   clientId,
+  tenantId,
   appName,
   subscriptionId,
   resourceGroup,
@@ -841,7 +984,7 @@ export async function configureAzureAutoSetupCredentials({
   if (isRollbackPending(operation)) {
     await fail(
       409,
-      "Radius reconciled an interrupted provider request and must roll back before creating a Service Principal.",
+      "Radius reconciled an interrupted provider request and must delete the setup resources before creating a Service Principal.",
       "provider-rollback-pending",
       { steps, clientId, appName }
     );
@@ -871,7 +1014,7 @@ export async function configureAzureAutoSetupCredentials({
   steps.push("✅ Service Principal ready");
   if (servicePrincipal.state === "created_candidate") {
     steps.push(
-      "ℹ️ The Service Principal was absent before this step and present after it, but the create command did not report success, so Radius cannot prove it created it and will not remove it during a rollback."
+      "ℹ️ The Service Principal was absent before this step and present after it, but the create command did not report success, so Radius cannot prove it created it and will not remove it during setup deletion."
     );
   }
   dependencies.operations.recordServicePrincipal(operation, {
@@ -887,28 +1030,31 @@ export async function configureAzureAutoSetupCredentials({
   if (isRollbackPending(operation)) {
     await fail(
       409,
-      "Radius reconciled the interrupted Service Principal request and must roll back before adding federated credentials.",
+      "Radius reconciled the interrupted Service Principal request and must delete the setup resources before adding federated credentials.",
       "provider-rollback-pending",
       { steps, clientId, appName }
     );
     return false;
   }
-  if (
-    !(await createFederatedCredentials({
-      workflow,
-      dependencies,
-      oidc,
-      oidcSuffix,
-      clientId,
-      appName
-    }))
-  ) {
+  const credentialsReady =
+    await dependencies.operations.withCredentialProvenanceLock(() =>
+      createFederatedCredentials({
+        workflow,
+        dependencies,
+        oidc,
+        oidcSuffix,
+        clientId,
+        tenantId,
+        appName
+      })
+    );
+  if (!credentialsReady) {
     return false;
   }
   if (isRollbackPending(operation)) {
     await fail(
       409,
-      "Radius reconciled an interrupted federated credential request and must roll back before assigning Azure roles.",
+      "Radius reconciled an interrupted federated credential request and must delete the setup resources before assigning Azure roles.",
       "provider-rollback-pending",
       { steps, clientId, appName }
     );
@@ -982,7 +1128,7 @@ export async function configureAzureAutoSetupCredentials({
   if (isRollbackPending(operation)) {
     await fail(
       409,
-      "Radius reconciled the interrupted Contributor assignment and must roll back before any further provider changes.",
+      "Radius reconciled the interrupted Contributor assignment and must delete the setup resources before any further provider changes.",
       "provider-rollback-pending",
       { steps, clientId, appName }
     );
@@ -1044,7 +1190,7 @@ export async function configureAzureAutoSetupCredentials({
   if (isRollbackPending(operation)) {
     await fail(
       409,
-      "Radius reconciled the interrupted AKS role assignment and must roll back before setup can complete.",
+      "Radius reconciled the interrupted AKS role assignment and must delete the setup resources before setup can complete.",
       "provider-rollback-pending",
       { steps, clientId, appName }
     );

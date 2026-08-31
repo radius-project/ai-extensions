@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { SETUP_EXITED_REASON } from "../../operation-terminal-reasons.js";
 import {
   CLEANUP_COMMANDS,
   cleanupRemovedGitHubEnvironment,
@@ -151,7 +152,9 @@ describe("cleanup command table", () => {
       (command) => command.terminalReason
     );
     expect(new Set(reasons).size).toBe(reasons.length);
-    expect(CLEANUP_COMMANDS.exit_setup.terminalReason).toBe("setup-exited");
+    expect(CLEANUP_COMMANDS.exit_setup.terminalReason).toBe(
+      SETUP_EXITED_REASON
+    );
     expect(CLEANUP_COMMANDS.exit_setup.cleanedMessage).toBe(
       "Radius closed this setup and removed the resources it created during this attempt."
     );

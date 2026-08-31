@@ -332,6 +332,7 @@ export function environmentOptionLabel(environment: EnvironmentInfo): string {
   const status = environment.status ?? "";
   if (environmentIsReady(status)) return environment.name;
   if (status === "failed") return `${environment.name} (creation failed)`;
+  if (status === "deleting") return `${environment.name} (being deleted…)`;
   if (environmentIsPending(status))
     return `${environment.name} (being created…)`;
   if (status === "unknown") return `${environment.name} (available)`;
@@ -360,6 +361,9 @@ export function environmentNotReadyReason(
   if (status === "failed") {
     return `Environment "${name}" was not created successfully, so it cannot be deployed to. Fix or recreate it first.`;
   }
+  if (status === "deleting") {
+    return `Environment "${name}" is being deleted, so it cannot be deployed to. Wait for the deletion to finish.`;
+  }
   if (environmentIsPending(status)) {
     return `Environment "${name}" is still being created. Wait for its credential verification to finish before deploying.`;
   }
@@ -368,6 +372,7 @@ export function environmentNotReadyReason(
 
 export function environmentNotReadyPhrase(status: string): string {
   if (status === "failed") return "was not created successfully";
+  if (status === "deleting") return "is being deleted";
   if (environmentIsPending(status)) return "is still being created";
   return "has an unknown status";
 }

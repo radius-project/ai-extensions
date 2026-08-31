@@ -7,11 +7,13 @@ import {
 import {
   acceptCommand,
   announceOperationTerminal,
+  applyDeletionRetry,
   applySetupResumePoint,
   applyStopRequest,
   beginRetryAttempt,
   canContinueSetup,
   canExitSetup,
+  canRetryDeletion,
   canRetryCleanup,
   canRetrySetup,
   canRetryVerification,
@@ -33,6 +35,7 @@ import {
   toClientView,
   EXIT_COMMAND_KIND,
   EXIT_COMMAND_OUTCOME,
+  OPERATION_KIND_DELETE,
   ABANDON_COMMAND_OUTCOME,
   STAGE_VERIFY,
   type OperationAttemptKind,
@@ -98,6 +101,7 @@ export type OperationScheduleKind =
   | "setup_continuation"
   | "verification_monitor"
   | "verification_retry"
+  | "deletion_retry"
   | "cleanup_retry"
   | "rollback"
   | "exit_setup";
@@ -268,24 +272,24 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   "verification-provenance-incomplete":
     "Radius did not save enough of the workflow, branch, and identity details to repeat verification safely.",
   "setup-retry-not-retryable":
-    "Only a stopped or partially failed setup can be continued.",
+    "Only a paused or partially failed setup can be continued.",
   "setup-retry-request-missing": FORWARD_REQUEST_MISSING,
   "setup-retry-ownership-ambiguous": FORWARD_OWNERSHIP_AMBIGUOUS,
   "setup-continue-not-available":
-    "This setup is not waiting at a stop that Radius can continue from.",
+    "This setup is not paused at a point Radius can continue from.",
   "setup-continue-request-missing": FORWARD_REQUEST_MISSING,
   "setup-continue-ownership-ambiguous": FORWARD_OWNERSHIP_AMBIGUOUS,
   "setup-continue-rolled-back":
-    "Radius rolled back what this attempt created, so there is nothing left to continue from. Start a new environment setup.",
+    "Radius deleted what this attempt created, so there is nothing left to continue from. Start a new environment setup.",
   "rollback-not-available":
-    "Only a stopped, partially failed, or unfinished setup can be rolled back.",
+    "Only a paused, partially failed, or unfinished setup can be deleted.",
   "rollback-environment-verified":
     "Credential verification succeeded for this environment, so it is finished setup. Remove it with Delete Environment instead.",
   "rollback-provenance-incomplete": PROVENANCE_INCOMPLETE,
   "rollback-nothing-owned":
     "Radius did not create any resources it can prove it owns in this attempt.",
   "rollback-already-attempted":
-    "Radius already ran a rollback for this attempt. Use the rollback retry for anything still present.",
+    "Radius already attempted deletion for this setup. Use Retry deletion for anything still present.",
   "cleanup-retry-not-retryable":
     "The last cleanup attempt did not leave anything Radius can safely retry.",
   "cleanup-retry-provenance-incomplete": PROVENANCE_INCOMPLETE,
@@ -349,7 +353,8 @@ function unknownOperation(context: CanvasRequestContext): void {
 async function resolveOperation(
   context: CanvasRequestContext,
   template: string,
-  dependencies: Pick<OperationsControlDependencies, "get">
+  dependencies: Pick<OperationsControlDependencies, "get">,
+  { allowDelete = false }: { allowDelete?: boolean } = {}
 ): Promise<{
   operationId: string;
   operation: OperationRecord;
@@ -361,6 +366,18 @@ async function resolveOperation(
   const operation = operationId ? dependencies.get(operationId) : null;
   if (!params || !operationId || !operation) {
     unknownOperation(context);
+    return null;
+  }
+  // Delete operations share this durable command route only for Retry deletion.
+  // Stop, setup retry/continue, rollback, and exit remain create-only controls.
+  if (operation.kind === OPERATION_KIND_DELETE && !allowDelete) {
+    sendJson(context, 409, {
+      error:
+        "This operation is a deletion and is not controlled through setup controls.",
+      code: "operation-not-setup-controllable",
+      operationId,
+      operation: clientView(operation)
+    });
     return null;
   }
   return { operationId, operation, params };
@@ -397,7 +414,7 @@ export async function handleStopOperation(
       rollbackRetryAttempt(operation, snapshot);
       sendJson(context, 500, {
         error:
-          "Radius could not save the stop request, so nothing was stopped. Try again.",
+          "Radius could not save the pause request, so nothing was paused. Try again.",
         code: "operation-stop-persist-failed",
         operationId,
         detail: errorMessage(error)
@@ -450,7 +467,7 @@ export async function handleStopOperation(
   ) {
     sendJson(context, 409, {
       error:
-        "Cleanup is already running and cannot be stopped. Wait for it to finish.",
+        "Setup cannot be paused while cleanup is running. Wait for cleanup to finish.",
       code: "operation-cleanup-not-stoppable",
       operationId,
       operation: clientView(operation)
@@ -465,7 +482,7 @@ export async function handleStopOperation(
   if (result.outcome === "terminal") {
     sendJson(context, 409, {
       error:
-        "This operation already finished, so there is nothing left to stop.",
+        "This operation already finished, so there is nothing left to pause.",
       code: "operation-already-terminal",
       operationId,
       operation: clientView(operation)
@@ -489,7 +506,7 @@ export async function handleStopOperation(
     rollbackRetryAttempt(operation, snapshot);
     sendJson(context, 500, {
       error:
-        "Radius could not save the stop request, so nothing was stopped. Try again.",
+        "Radius could not save the pause request, so nothing was paused. Try again.",
       code: "operation-stop-persist-failed",
       operationId,
       detail: errorMessage(error)
@@ -532,7 +549,7 @@ export async function handleCancelWorkflow(
   if (operation.state !== "cancelled" || !runId) {
     sendJson(context, 409, {
       error:
-        "Stop setup before cancelling its exact verification workflow run.",
+        "Pause setup before cancelling its exact verification workflow run.",
       code: "workflow-cancel-not-available",
       operationId,
       operation: clientView(operation)
@@ -746,6 +763,8 @@ function enterVerifyStage(operation: OperationRecord): void {
 
 const applyResumePoint: CommandSpec["prepare"] = (operation, eligibility) =>
   applySetupResumePoint(operation, eligibility.resumeFrom);
+const applyDeleteResumePoint: CommandSpec["prepare"] = (operation) =>
+  applyDeletionRetry(operation);
 
 const requireCleanupExit: EligibilityCheck = (operation) => {
   const eligibility = canExitSetup(operation);
@@ -883,7 +902,7 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     schedulerMiss: "restore-terminal",
     persistFailureCode: "operation-rollback-persist-failed",
     persistFailureMessage:
-      "Radius could not save the rollback request, so no cleanup began. Try again."
+      "Radius could not save the setup deletion request, so no cleanup began. Try again."
   },
   setup: {
     name: "setup",
@@ -911,6 +930,17 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     },
     precondition: requireMergedSetupPullRequest,
     scheduleKind: "verification_retry",
+    schedulerMiss: "close-operation",
+    ...RETRY_PERSIST_FAILURE
+  },
+  deletion: {
+    name: "deletion",
+    commandKind: "retry_deletion",
+    attemptKind: "deletion",
+    eligibility: canRetryDeletion,
+    activeKinds: ["retry_deletion"],
+    prepare: applyDeleteResumePoint,
+    scheduleKind: "deletion_retry",
     schedulerMiss: "close-operation",
     ...RETRY_PERSIST_FAILURE
   },
@@ -951,7 +981,12 @@ const ABANDON_EXIT_COMMAND: CommandSpec = {
 };
 
 function isRetryKind(value: string): value is OperationRetryKind {
-  return value === "setup" || value === "verification" || value === "cleanup";
+  return (
+    value === "setup" ||
+    value === "verification" ||
+    value === "cleanup" ||
+    value === "deletion"
+  );
 }
 
 /**
@@ -976,8 +1011,12 @@ async function runAcceptedCommand(
 ): Promise<void> {
   const lock = dependencies.acquireForRetry(operation);
   if (!lock.ok) {
+    const work =
+      operation.kind === OPERATION_KIND_DELETE ?
+        "environment operation"
+      : "setup";
     sendJson(context, 409, {
-      error: `Another setup is already running for ${String(operation.repo ?? "")}.`,
+      error: `Another ${work} is already running for ${String(operation.repo ?? "")}.`,
       code: "operation-in-progress",
       operationId: lock.conflict.operationId
     });
@@ -1106,9 +1145,15 @@ async function runCommandRoute(
   selectSpec: (
     params: Readonly<Record<string, string>>,
     operationId: string
-  ) => CommandSpec | null
+  ) => CommandSpec | null,
+  options: { allowDelete?: boolean } = {}
 ): Promise<void> {
-  const resolved = await resolveOperation(context, route, dependencies);
+  const resolved = await resolveOperation(
+    context,
+    route,
+    dependencies,
+    options
+  );
   if (!resolved) return;
   const { operationId, operation, params } = resolved;
   const spec = selectSpec(params, operationId);
@@ -1220,6 +1265,10 @@ export function handleRetryOperation(
   context: CanvasRequestContext,
   dependencies: OperationsControlDependencies
 ): Promise<void> {
+  const pathRetryKind = decodeSegment(
+    templatePathParameters(RETRY_OPERATION_ROUTE, context.pathname)
+      ?.retryKind ?? ""
+  );
   return runCommandRoute(
     context,
     dependencies,
@@ -1235,7 +1284,8 @@ export function handleRetryOperation(
         return null;
       }
       return COMMANDS[requestedKind];
-    }
+    },
+    { allowDelete: pathRetryKind === "deletion" }
   );
 }
 

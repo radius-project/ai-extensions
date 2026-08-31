@@ -120,6 +120,7 @@ function prepareBuildWorkspace(
       "junction"
     );
   }
+  copyFileSync(join(REPO_ROOT, "LICENSE"), join(workspaceRoot, "LICENSE"));
 
   const sourcePlugin = join(REPO_ROOT, "plugins", "radius");
   const workspacePlugin = join(workspaceRoot, "plugins", "radius");
@@ -133,6 +134,23 @@ function prepareBuildWorkspace(
   rmSync(join(workspacePlugin, "skills", ...missingAsset), {
     recursive: true
   });
+
+  // The build bundles the static environment-delete workflows from
+  // .github/extension/ (see copyStaticWorkflows in build.mjs). Stage them so the
+  // build reaches the install-copy step this test exercises instead of failing
+  // earlier on a missing static workflow asset.
+  const sourceExtension = join(REPO_ROOT, ".github", "extension");
+  const workspaceExtension = join(workspaceRoot, ".github", "extension");
+  mkdirSync(workspaceExtension, { recursive: true });
+  for (const workflowFile of [
+    "delete-environment.yml",
+    "delete-environment-azure.yml"
+  ]) {
+    copyFileSync(
+      join(sourceExtension, workflowFile),
+      join(workspaceExtension, workflowFile)
+    );
+  }
 
   return workspaceAdapter;
 }
@@ -275,10 +293,12 @@ describe("P0-C built Radius extension artifact", () => {
       "package.json",
       "plugin.json",
       "README.md",
+      "LICENSE",
       "THIRD-PARTY-NOTICES.txt",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-bicep/scripts/show-radius-type.mjs",
+      "skills/radius-app-bicep/scripts/validate-bicep.mjs",
       "skills/radius-app-graph/references/source-code-references.md"
     ];
     if (existsSync(SOURCE_CHANGELOG)) packagedPaths.push("CHANGELOG.md");
@@ -315,6 +335,24 @@ describe("P0-C built Radius extension artifact", () => {
       expect(existsSync(join(DIST, "CHANGELOG.md"))).toBe(false);
     }
 
+    // The environment-delete workflow (issue #303) is authored statically in
+    // this repo and must ship inside the plugin so an installed extension can
+    // commit it into the target repo. Assert both the dispatcher and its Azure
+    // provider are bundled under dist/workflows/ and match the source of truth.
+    for (const workflowFile of [
+      "delete-environment.yml",
+      "delete-environment-azure.yml"
+    ]) {
+      const bundled = join(DIST, "workflows", workflowFile);
+      expect(existsSync(bundled)).toBe(true);
+      expect(readFileSync(bundled, "utf8")).toBe(
+        readFileSync(
+          join(REPO_ROOT, ".github", "extension", workflowFile),
+          "utf8"
+        )
+      );
+    }
+
     const sourcePackage = JSON.parse(
       readFileSync(join(REPO_ROOT, "plugins", "radius", "package.json"), "utf8")
     ) as Record<string, unknown>;
@@ -336,6 +374,9 @@ describe("P0-C built Radius extension artifact", () => {
     );
     const expectedPackage = structuredClone(sourcePackage);
     expectedPackage.version = builtPackage.version;
+    // Repository-only scripts do not ship: the installed plugin cannot run them.
+    delete expectedPackage.scripts;
+    delete expectedPackage.devDependencies;
     for (const section of [
       "dependencies",
       "devDependencies",
@@ -370,6 +411,9 @@ describe("P0-C built Radius extension artifact", () => {
     expect(readFileSync(join(DIST, "README.md"), "utf8")).toBe(
       readFileSync(join(REPO_ROOT, "plugins", "radius", "README.md"), "utf8")
     );
+    expect(readFileSync(join(DIST, "LICENSE"), "utf8")).toBe(
+      readFileSync(join(REPO_ROOT, "LICENSE"), "utf8")
+    );
     for (const sourceSkill of filesUnder(
       join(REPO_ROOT, "plugins", "radius", "skills")
     )) {
@@ -398,7 +442,8 @@ describe("P0-C built Radius extension artifact", () => {
       "===== dagre@0.8.5 =====",
       "===== @reactflow/core@11.11.4 =====",
       "===== graphlib@2.1.8 =====",
-      "===== lodash@4.18.1 ====="
+      "===== lodash@4.18.1 =====",
+      "===== yaml@2.9.0 ====="
     ]) {
       expect(notices).toContain(marker);
     }
@@ -475,6 +520,7 @@ describe("P0-C built Radius extension artifact", () => {
       "heartbeat",
       "operation-chip",
       "graph-chip",
+      "deploy-chip",
       "deploy-result-page",
       "environment-page",
       "deploying-page",

@@ -349,7 +349,7 @@ export async function rollbackGitHubEnvironmentVariables(input: {
           if (environment.state === "replacement") {
             return {
               state: "manual_required" as const,
-              guidance: `${environment.detail} Radius will not repeat the variable rollback.`
+              guidance: `${environment.detail} Radius will not repeat the variable deletion.`
             };
           }
           if (environment.state !== "matched") {
@@ -374,8 +374,12 @@ export async function rollbackGitHubEnvironmentVariables(input: {
                 current.state === "present" &&
                 current.valueSha256 === variable.valueSha256
               ) ?
-                `${variable.target} is still present after Radius's single rollback request. Radius will not repeat the mutation. Restore it manually.`
-              : `${variable.target} changed during rollback. Radius will not overwrite the current value.`
+                `${variable.target} is still present after Radius's single deletion request. Radius will not repeat the mutation. ${
+                  variable.previousValue === null ?
+                    "Delete it manually."
+                  : "Restore its previous value manually."
+                }`
+              : `${variable.target} changed during deletion. Radius will not overwrite the current value.`
           };
         }
       });
@@ -384,7 +388,7 @@ export async function rollbackGitHubEnvironmentVariables(input: {
           variable,
           "warning",
           (mutation.result?.stderr || mutation.result?.stdout || "").trim() ||
-            `GitHub rejected the rollback of ${variable.target}.`
+            `GitHub rejected deletion of ${variable.target}.`
         );
         continue;
       }

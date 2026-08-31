@@ -36,7 +36,7 @@ env:
 jobs:
   deploy:
     steps:
-      - uses: radius-project/radius/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
+      - uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
 `,
   [DEPLOY_AWS_FILE]: `name: deploy-aws
 env:
@@ -44,7 +44,7 @@ env:
 jobs:
   deploy:
     steps:
-      - uses: radius-project/radius/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
+      - uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
 `
 };
 
@@ -73,7 +73,7 @@ env:
 jobs:
   deploy:
     steps:
-      - uses: radius-project/radius/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
+      - uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
 `
 };
 
@@ -88,7 +88,7 @@ describe("generateDeployWorkflow", () => {
     expect(files[DEPLOY_DISPATCHER_FILE]).toContain('default: "prod"');
     expect(files[DEPLOY_AZURE_FILE]).toContain('APP_FILE: ".radius/app.bicep"');
     expect(files[DEPLOY_AWS_FILE]).toContain(
-      `radius-project/radius/.github/extension/actions/run-rad-commands@${RADIUS_REF}`
+      `radius-project/ai-extensions/.github/extension/actions/run-rad-commands@${RADIUS_REF}`
     );
   });
 
@@ -132,12 +132,20 @@ describe("generateDeployWorkflow", () => {
       [DEPLOY_TEMPLATE_VAR_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS]:
         platformsExpr
     });
+    // The default architecture vars are GitHub Actions expressions whose fallback
+    // is itself a single-quoted string literal. The upstream template wraps the
+    // placeholder in DOUBLE quotes, so the injected expression stays inside a
+    // double-quoted YAML scalar — valid YAML, since the fallback's inner single
+    // quotes do not nest against the surrounding double quotes.
     expect(files[DEPLOY_DISPATCHER_FILE]).toContain(
       `TARGET_CLUSTER_ARCH_MODE: "${modeExpr}"`
     );
     expect(files[DEPLOY_AZURE_FILE]).toContain(
       `TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS: "${platformsExpr}"`
     );
+    // Regression guard: no nested single quotes (`'${{ ... 'detect' ... }}'`).
+    expect(files[DEPLOY_DISPATCHER_FILE]).not.toContain(`'${modeExpr}'`);
+    expect(files[DEPLOY_AZURE_FILE]).not.toContain(`'${platformsExpr}'`);
   });
 
   it("does not let caller supplied vars override reserved placeholders", () => {
@@ -160,7 +168,7 @@ describe("generateDeployWorkflow", () => {
     expect(files[DEPLOY_DISPATCHER_FILE]).toContain('default: "prod"');
     expect(files[DEPLOY_AZURE_FILE]).toContain('APP_FILE: ".radius/app.bicep"');
     expect(files[DEPLOY_AZURE_FILE]).toContain(
-      `radius-project/radius/.github/extension/actions/run-rad-commands@${RADIUS_REF}`
+      `radius-project/ai-extensions/.github/extension/actions/run-rad-commands@${RADIUS_REF}`
     );
     expect(files[DEPLOY_DISPATCHER_FILE]).toContain(
       'TARGET_CLUSTER_ARCH_MODE: "single_arch_only"'
@@ -326,26 +334,5 @@ describe("generateDeployWorkflow YAML validity", () => {
     );
     // The plain single-quoted scalars stay intact too.
     expect(azure.env.APP_FILE).toBe(".radius/app.bicep");
-  });
-
-  // Negative regression guard: this is exactly the #407 bug. When the arch
-  // scalar is SINGLE-quoted (as the radius templates were before #12721), the
-  // single-quoted default inside the injected GHA expression nests and YAML
-  // terminates the scalar early, so the rendered file is invalid YAML. This test
-  // locks in WHY the scalar must be double-quoted: if someone reintroduces the
-  // single-quoted scalar (or an injected value that nests quotes), it fails.
-  it("produces invalid YAML when an arch scalar is single-quoted (issue #407)", () => {
-    const broken = {
-      ...REALISTIC_TEMPLATES,
-      [DEPLOY_AZURE_FILE]: REALISTIC_TEMPLATES[DEPLOY_AZURE_FILE].replace(
-        'TARGET_CLUSTER_ARCH_MODE: "{{TARGET_CLUSTER_ARCH_MODE}}"',
-        "TARGET_CLUSTER_ARCH_MODE: '{{TARGET_CLUSTER_ARCH_MODE}}'"
-      )
-    };
-    // Substitution still succeeds (no unresolved placeholder), so generation
-    // does not throw — the breakage only surfaces when the YAML is parsed.
-    const files = generateDeployWorkflow("prod", ".radius/app.bicep", broken);
-
-    expect(() => parseYaml(files[DEPLOY_AZURE_FILE])).toThrow();
   });
 });

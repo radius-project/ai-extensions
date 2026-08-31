@@ -29,6 +29,73 @@ describe("normalizeCommandResult", () => {
     expect(normalizeCommandResult({ code: 3 }, "", "boom").code).toBe(3);
   });
 
+  it("surfaces a missing tool's spawn diagnostic when both streams are empty", () => {
+    const outcome = normalizeCommandResult(
+      { code: "ENOENT", message: "spawn az ENOENT" },
+      "",
+      ""
+    );
+
+    expect(outcome).toEqual({
+      code: 1,
+      stdout: "",
+      stderr: "spawn az ENOENT"
+    });
+    expect(() => expectSuccess(outcome, "az account show")).toThrow(
+      "az account show failed with exit code 1: spawn az ENOENT"
+    );
+  });
+
+  it("surfaces a timeout diagnostic when both streams are empty", () => {
+    expect(
+      normalizeCommandResult(
+        { code: "ETIMEDOUT", message: "Command timed out after 900000ms" },
+        "",
+        ""
+      )
+    ).toEqual({
+      code: 1,
+      stdout: "",
+      stderr: "Command timed out after 900000ms"
+    });
+  });
+
+  it("preserves real stderr instead of prepending the callback message", () => {
+    expect(
+      normalizeCommandResult(
+        { code: 1, message: "Command failed: gh api repository" },
+        "",
+        "gh: Not Found (HTTP 404)"
+      )
+    ).toEqual({
+      code: 1,
+      stdout: "",
+      stderr: "gh: Not Found (HTTP 404)"
+    });
+  });
+
+  it("does not inject the callback message when stdout carries the diagnostic", () => {
+    expect(
+      normalizeCommandResult(
+        { code: 1, message: "Command failed: az account show" },
+        "ERROR: run az login",
+        ""
+      )
+    ).toEqual({
+      code: 1,
+      stdout: "ERROR: run az login",
+      stderr: ""
+    });
+  });
+
+  it("keeps empty streams when an error has no message", () => {
+    expect(normalizeCommandResult({ code: "ENOENT" }, "", "")).toEqual({
+      code: 1,
+      stdout: "",
+      stderr: ""
+    });
+  });
+
   it.each([
     ["a signal or timeout code", { code: "ETIMEDOUT" }],
     ["a null code", { code: null }],
