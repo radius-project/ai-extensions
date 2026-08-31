@@ -877,7 +877,13 @@ describe("environment list behavior", () => {
     let mode: "empty" | "malformed" | "http" | "reject" = "empty";
     page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () => {
       if (mode === "reject") return Promise.reject(new Error("offline"));
-      if (mode === "http") return jsonResponse({}, false, 503);
+      if (mode === "http") {
+        return jsonResponse(
+          { error: "GitHub repository access was denied." },
+          false,
+          403
+        );
+      }
       if (mode === "malformed") return jsonResponse({ environments: "bad" });
       return jsonResponse({ environments: [] });
     });
@@ -899,7 +905,7 @@ describe("environment list behavior", () => {
     page.controller.loadEnvironmentTable();
     await flushPromises();
     expect(page.elements.tableBody.innerHTML).toContain(
-      "Could not load environments"
+      "GitHub repository access was denied."
     );
 
     mode = "reject";
@@ -908,6 +914,19 @@ describe("environment list behavior", () => {
     expect(page.elements.tableBody.innerHTML).toContain(
       "Could not load environments"
     );
+  });
+
+  it("escapes a server-provided list error before displaying it", async () => {
+    const page = renderPage();
+    page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({ error: '<img src=x onerror="alert(1)">' }, false, 500)
+    );
+
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+
+    expect(page.elements.tableBody.innerHTML).toContain("&lt;img");
+    expect(page.elements.tableBody.innerHTML).not.toContain("<img");
   });
 
   it("ignores a stale list response", async () => {
