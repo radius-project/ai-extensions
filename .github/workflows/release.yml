@@ -37,7 +37,7 @@ name: Release
 #   releases/<plugin>/latest        orphan artifact branch, force-moved to the
 #   + <plugin>@latest               newest stable release, with its tag
 #
-# Every one of them is signed by GitHub and publishes as Verified.
+# Every tag ref resolves to a commit GitHub signed and marked Verified.
 #
 # Release assets, one set per released plugin:
 #
@@ -55,13 +55,11 @@ name: Release
 # `releases/<plugin>/edge` and the `<plugin>@edge` tag on every push to main.
 #
 # The repository automation GitHub App creates the version PR so it triggers
-# normal pull_request CI, and it also writes every commit and tag this workflow
-# publishes. Both go through the GitHub API with no author, committer, tagger or
-# signature of our own, which is what lets GitHub sign for the app so each
-# object publishes as Verified. A runner cannot do this: it holds no signing
-# key, so anything it commits or tags itself is unsigned. The token is scoped to
-# this repository and requests only Contents and Pull requests write
-# permissions.
+# normal pull_request CI, and it also writes every release commit and tag ref.
+# GitHub signs the API-created commits for the app; lightweight tags are written
+# only after their target commit is Verified. A runner cannot sign either
+# object because it holds no signing key. The token is scoped to this repository
+# and requests only Contents and Pull requests write permissions.
 #
 # See docs/eng/RELEASING.md and docs/architecture/plugin-packaging-and-publishing.md.
 
@@ -183,6 +181,9 @@ jobs:
         with:
           client-id: ${{ secrets.RADIUS_RELEASE_MANAGER_BOT_CLIENT_ID }}
           private-key: ${{ secrets.RADIUS_RELEASE_MANAGER_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            ai-extensions
           permission-contents: write
           permission-pull-requests: write
 
@@ -193,6 +194,9 @@ jobs:
         with:
           client-id: ${{ secrets.RADIUS_RELEASE_MANAGER_BOT_CLIENT_ID }}
           private-key: ${{ secrets.RADIUS_RELEASE_MANAGER_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            ai-extensions
           permission-administration: read
 
       - name: Verify immutable releases are enabled
@@ -393,6 +397,9 @@ jobs:
         with:
           client-id: ${{ secrets.RADIUS_RELEASE_MANAGER_BOT_CLIENT_ID }}
           private-key: ${{ secrets.RADIUS_RELEASE_MANAGER_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            ai-extensions
           permission-contents: write
 
       - name: Create immutable-release check token
@@ -402,6 +409,9 @@ jobs:
         with:
           client-id: ${{ secrets.RADIUS_RELEASE_MANAGER_BOT_CLIENT_ID }}
           private-key: ${{ secrets.RADIUS_RELEASE_MANAGER_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            ai-extensions
           permission-administration: read
 
       - name: Recheck immutable releases
@@ -501,8 +511,8 @@ jobs:
 
       # `changeset git-tag` scans every eligible workspace package. That is
       # correct for an all-package release but unsafe in an independent matrix
-      # leg, where it could tag another plugin. Reproduce Changesets' annotated
-      # `<package>@<version>` tag format for this plugin only.
+      # leg, where it could tag another plugin. Reproduce Changesets'
+      # `<package>@<version>` tag name for this plugin only.
       - name: Tag the released source
         env:
           GH_TOKEN: ${{ github.token }}
@@ -519,7 +529,6 @@ jobs:
           else
             node scripts/verified-git.mjs tag \
               --name "$PLUGIN_SOURCE_TAG" \
-              --message "$PLUGIN_SOURCE_TAG" \
               --target "$SOURCE_SHA"
           fi
 
@@ -690,7 +699,6 @@ jobs:
               --sha "$latest_commit" --force
             node scripts/verified-git.mjs tag \
               --name "$PLUGIN_CHANNEL_TAG" \
-              --message "$PLUGIN_SOURCE_TAG" \
               --target "$latest_commit" --force
           fi
 
@@ -698,7 +706,6 @@ jobs:
           # pushed last. If anything above fails, a rerun reconciles the release.
           node scripts/verified-git.mjs tag \
             --name "$PLUGIN_ARTIFACT_TAG" \
-            --message "$PLUGIN_ARTIFACT_TAG" \
             --target "$pinned_commit"
           node scripts/verified-git.mjs verify-completion \
             --plugin "$PLUGIN_NAME" --version "$VERSION" --source "$SOURCE_SHA" \

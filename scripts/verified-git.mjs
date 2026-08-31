@@ -1,5 +1,5 @@
-// Creates every commit, tag and ref a release publishes through the GitHub API,
-// so GitHub signs each object and publishes it Verified.
+// Creates release commits and refs through the GitHub API. GitHub signs commits
+// for the App; tag refs are written only after their target commit is Verified.
 //
 // A runner holds no signing key, so `git commit` and `git tag` on the runner can
 // only ever produce unverified objects. GitHub signs on a bot's behalf instead,
@@ -15,14 +15,12 @@
 //         built from it shares no history with main. Moves no ref, and prints
 //         {"commit":"<sha>","tree":"<sha>"} so a caller can compare the tree
 //         against an already published branch before deciding to publish.
-//   node scripts/verified-git.mjs tag --name <tag> --message <message>
-//                                     --target <sha> [--force]
-//         Creates the annotated tag object and refs/tags/<tag>.
+//   node scripts/verified-git.mjs tag --name <tag> --target <sha> [--force]
+//         Creates a lightweight tag ref after GitHub verifies its target commit.
 //   node scripts/verified-git.mjs ref --name refs/heads/<branch> --sha <sha>
 //                                     [--force]
 //   node scripts/verified-git.mjs verify-tag --name <tag> [--target <sha>]
-//         Fails unless refs/tags/<tag> is an annotated tag object that GitHub
-//         verified, so a tag written by anything else is never reused.
+//         Fails unless the tag resolves to the expected GitHub-Verified commit.
 //   node scripts/verified-git.mjs verify-artifact --branch <branch>
 //         --plugin <name> --version <version> --source <sha>
 //   node scripts/verified-git.mjs inspect-artifact --branch <branch>
@@ -127,6 +125,10 @@ function requireVerified(object, label) {
     );
   }
   return object;
+}
+
+async function verifiedCommit(sha, label) {
+  return requireVerified(await api("GET", `/git/commits/${sha}`), label);
 }
 
 function collectFile(absolute, path, files) {
@@ -236,19 +238,10 @@ async function commit(args) {
 
 async function tag(args) {
   const name = required(option(args, "--name"), "--name");
-  const message = required(option(args, "--message"), "--message");
   const target = requireSha(option(args, "--target"), "--target");
-  const object = requireVerified(
-    await api("POST", "/git/tags", {
-      tag: name,
-      message,
-      object: target,
-      type: "commit"
-    }),
-    `tag ${name}`
-  );
-  await writeRef(`refs/tags/${name}`, object.sha, args.includes("--force"));
-  console.log(object.sha);
+  await verifiedCommit(target, `target commit for tag ${name}`);
+  await writeRef(`refs/tags/${name}`, target, args.includes("--force"));
+  console.log(target);
 }
 
 async function ref(args) {
@@ -260,21 +253,25 @@ async function ref(args) {
 async function verifyTagTarget(name, expected) {
   const existing = await readRef(`refs/tags/${name}`, true);
   if (!existing) fail(`refs/tags/${name} does not exist`);
-  // A lightweight tag has no object of its own, so it can carry no signature.
-  if (existing.object?.type !== "tag") {
-    fail(
-      `${name} must be an annotated tag, but its ref points straight at a ${existing.object?.type}`
+  let target;
+  if (existing.object?.type === "commit") {
+    target = requireSha(existing.object.sha, `${name} target`);
+  } else if (existing.object?.type === "tag") {
+    const object = requireVerified(
+      await api("GET", `/git/tags/${existing.object.sha}`),
+      `tag ${name}`
     );
+    if (object.object?.type !== "commit") {
+      fail(`${name} does not resolve directly to a commit`);
+    }
+    target = requireSha(object.object.sha, `${name} target`);
+  } else {
+    fail(`${name} does not point at a commit or annotated tag`);
   }
-
-  const object = requireVerified(
-    await api("GET", `/git/tags/${existing.object.sha}`),
-    `tag ${name}`
-  );
-  const target = object.object?.sha;
   if (expected !== undefined && target !== expected) {
     fail(`${name} points at ${target}, not ${expected}`);
   }
+  await verifiedCommit(target, `target commit for tag ${name}`);
   return target;
 }
 
@@ -309,10 +306,7 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
     fail(`${branch} does not point at a commit`);
   }
   const commitSha = requireSha(ref.object.sha, `${branch} target`);
-  const commit = requireVerified(
-    await api("GET", `/git/commits/${commitSha}`),
-    `commit ${commitSha}`
-  );
+  const commit = await verifiedCommit(commitSha, `commit ${commitSha}`);
   if (!Array.isArray(commit.parents) || commit.parents.length !== 0) {
     fail(`${branch} must point at a zero-parent commit`);
   }

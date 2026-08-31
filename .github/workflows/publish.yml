@@ -18,9 +18,10 @@ name: Publish
 # history — then moves the branch and `<plugin>@edge` tag onto it. A stale
 # manual rerun is skipped when a newer main commit is already published.
 #
-# That commit and tag are created through the GitHub API as the automation
-# GitHub App, so GitHub signs them and both publish as Verified. Nothing is
-# committed or tagged on the runner, which has no signing key.
+# That commit and tag ref are created through the GitHub API as the automation
+# GitHub App. GitHub signs the commit; the lightweight tag is created only after
+# the API confirms its target commit is Verified. Nothing is committed or
+# tagged on the runner, which has no signing key.
 #
 # Every published ref is namespaced by plugin name — `releases/<plugin>/<channel>`
 # and `<plugin>@<channel>` — so plugins never collide.
@@ -146,16 +147,17 @@ jobs:
         with:
           subject-path: ${{ env.PLUGIN_DIST }}/**/*
 
-      # Everything this workflow publishes is created through the GitHub API as
-      # the automation app, because that is the only way the objects come out
-      # Verified: a runner holds no signing key, so anything it commits or tags
-      # itself is unsigned. GitHub signs on the app's behalf instead.
+      # The app creates the signed commit and its lightweight tag ref through
+      # the GitHub API; the runner holds no signing key.
       - name: Create GitHub App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.RADIUS_RELEASE_MANAGER_BOT_CLIENT_ID }}
           private-key: ${{ secrets.RADIUS_RELEASE_MANAGER_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            ai-extensions
           permission-contents: write
 
       - name: Publish plugin dist to the edge branch and tag
@@ -257,5 +259,4 @@ jobs:
             --name "refs/heads/$PLUGIN_CHANNEL_BRANCH" --sha "$commit" --force
           node scripts/verified-git.mjs tag \
             --name "$PLUGIN_CHANNEL_TAG" \
-            --message "${PLUGIN_NAME}@${VERSION}" \
             --target "$commit" --force
