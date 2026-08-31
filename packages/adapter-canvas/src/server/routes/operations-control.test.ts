@@ -1848,7 +1848,7 @@ describe("contracts shared by every control route", () => {
       restoredAttempt: 0,
       persistFailureCode: "operation-rollback-persist-failed",
       persistFailureError:
-        "Radius could not save the delete request, so no cleanup began. Try again."
+        "Radius could not save the setup deletion request, so no cleanup began. Try again."
     },
     {
       name: "exit",

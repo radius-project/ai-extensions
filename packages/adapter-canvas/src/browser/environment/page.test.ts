@@ -133,6 +133,7 @@ const REQUIRED_ELEMENTS = [
   PROGRESS_IDS.panel,
   PROGRESS_IDS.commands,
   PROGRESS_IDS.commandButtons,
+  PROGRESS_IDS.commandDescriptions,
   PROGRESS_IDS.commandNote,
   PROGRESS_IDS.actions,
   PROGRESS_IDS.bottomButtons,
@@ -1200,8 +1201,8 @@ describe("initializeEnvironmentPage", () => {
           provider: "azure",
           state: "failed_partial",
           terminalState: "failed_partial",
-          summary: "Earlier setup needs rollback",
-          failure: { message: "Setup stopped before cleanup." },
+          summary: "Earlier setup needs deletion",
+          failure: { message: "Setup paused before deletion." },
           cleanup: {
             state: "not_started",
             created: [{ target: "radius-deploy (app-1)" }],
@@ -1213,7 +1214,7 @@ describe("initializeEnvironmentPage", () => {
               kind: "rollback",
               label: "Delete setup",
               description:
-                "Finish rollback before creating another environment.",
+                "Finish deletion before creating another environment.",
               path: "/api/operations/op-cleanup/rollback",
               pending: false,
               tone: "danger",
@@ -1236,6 +1237,9 @@ describe("initializeEnvironmentPage", () => {
     expect(page.elements[PROGRESS_IDS.commandButtons].children[0]?.id).toBe(
       "env-progress-command-rollback"
     );
+    expect(
+      page.elements[PROGRESS_IDS.commandDescriptions].children[0]?.textContent
+    ).toBe("Finish deletion before creating another environment.");
     expect(pageInput(page, "deploy-btn").disabled).toBe(false);
     expect(page.elements["deploy-btn"].textContent).toBe("Create Environment");
 

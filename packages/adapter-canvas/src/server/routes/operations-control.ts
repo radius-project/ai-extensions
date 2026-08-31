@@ -902,7 +902,7 @@ const COMMANDS: Readonly<Record<OperationCommandName, CommandSpec>> = {
     schedulerMiss: "restore-terminal",
     persistFailureCode: "operation-rollback-persist-failed",
     persistFailureMessage:
-      "Radius could not save the delete request, so no cleanup began. Try again."
+      "Radius could not save the setup deletion request, so no cleanup began. Try again."
   },
   setup: {
     name: "setup",

@@ -1524,6 +1524,15 @@ test.describe("Radius Canvas in Chromium", () => {
         )
       )
       .toBe(true);
+    await page.mouse.move(0, 0);
+    const verifyButton = page.getByRole("button", {
+      name: "Verify Credentials"
+    });
+    await expect(verifyButton).toHaveCSS("opacity", "1");
+    await expect(verifyButton).toHaveCSS(
+      "background-color",
+      "rgb(35, 135, 65)"
+    );
     await expectNoWcagViolations(page);
   });
 

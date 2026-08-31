@@ -374,7 +374,11 @@ export async function rollbackGitHubEnvironmentVariables(input: {
                 current.state === "present" &&
                 current.valueSha256 === variable.valueSha256
               ) ?
-                `${variable.target} is still present after Radius's single deletion request. Radius will not repeat the mutation. Restore it manually.`
+                `${variable.target} is still present after Radius's single deletion request. Radius will not repeat the mutation. ${
+                  variable.previousValue === null ?
+                    "Delete it manually."
+                  : "Restore its previous value manually."
+                }`
               : `${variable.target} changed during deletion. Radius will not overwrite the current value.`
           };
         }
