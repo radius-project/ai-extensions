@@ -18,7 +18,7 @@ Restart your Copilot session after installing so the skills and Radius Canvas be
 
 <!-- markdownlint-disable-next-line MD028 -->
 
-> **NOTE:** The canvas `extension.mjs` is a compiled build artifact that is not committed to `main`. CI rebuilds it on every merge, assembles the complete plugin into `plugins/radius/dist/`, and publishes that to a generated `releases/radius/edge` branch (also tagged `radius@edge`); the marketplace manifest pins the plugin `source` to that path and branch — so installing from the app delivers the skills and canvas without any manual build. See [`docs/design/2026-07-canvas-bundle-publishing.md`](../../docs/design/2026-07-canvas-bundle-publishing.md).
+> **NOTE:** The canvas `extension.mjs` is a compiled build artifact that is not committed to `main`. CI rebuilds it on every merge, assembles the complete plugin into `plugins/radius/dist/`, and publishes that to a generated `releases/radius/edge` branch (also tagged `radius@edge`); the marketplace manifest pins the plugin `source` to that path and branch — so installing from the app delivers the skills and canvas without any manual build. The artifact also includes the complete Repo Radius workflow/action tree under `workflows/`, with remote template fetches and first-party action references pinned to the exact source commit that produced the plugin. See [`docs/design/2026-07-canvas-bundle-publishing.md`](../../docs/design/2026-07-canvas-bundle-publishing.md).
 
 ## What's included
 
@@ -41,7 +41,7 @@ Restart your Copilot session after installing so the skills and Radius Canvas be
 
 Once installed, just ask Copilot naturally:
 
-```
+```text
 generate an app.bicep for this repo
 show me the application graph
 set up cloud credentials for Azure
