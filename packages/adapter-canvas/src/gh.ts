@@ -266,10 +266,10 @@ let _ghSnapshotPromise: Promise<GhSnapshot> | null = null;
 let _ghStrategy: GhTokenStrategy | null = null;
 
 // Single-flight resolution of the credential GHCR/GitHub Packages calls use.
-// Memoized alongside the snapshot (and cleared by the same reset) so the
-// identity endpoints can report the credential that will ACTUALLY be used —
-// including the injected-token fallback taken when the keyring lookup fails —
-// without spawning a second `gh auth token` per read.
+// Memoized alongside the snapshot (and cleared by the same reset) so identity
+// endpoints can report the credential that will ACTUALLY be used without
+// spawning a second `gh auth token` per read. Destructive retries explicitly
+// bypass this cache after the user may have refreshed package scopes.
 let _ghPackageCredentialPromise: Promise<GhPackageCredentialResolution> | null =
   null;
 const GH_KEYRING_TOKEN_TIMEOUT_MS = 8000;
@@ -1140,7 +1140,12 @@ export function switchGhKeyringAccount(
 // credential can be resolved. `username` is always the acting login so the
 // Basic-auth pair matches the token, and `source` names the credential that was
 // actually resolved so callers can give guidance that applies to it.
-export async function getGhPackageCredentials(): Promise<GhPackageCredentials> {
+export async function getGhPackageCredentials({
+  fresh = false
+}: {
+  fresh?: boolean;
+} = {}): Promise<GhPackageCredentials> {
+  if (fresh) _ghPackageCredentialPromise = null;
   const resolution = await ensurePackageCredential();
   if (!resolution.ok) throw new Error(resolution.error);
   return resolution.credentials;

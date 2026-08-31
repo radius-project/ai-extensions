@@ -1728,6 +1728,29 @@ describe.sequential("getGhPackageCredentials", () => {
     });
   });
 
+  it("reloads a refreshed keyring token for a destructive retry", async () => {
+    const userTokens = { pubuser: "stale-package-token" };
+    const { getGhPackageCredentials } = await loadGh("linux", {
+      token: "injected-pub",
+      withToken: STATUS.tokenPubActive,
+      keyring: STATUS.keyringPubAndEmu,
+      userTokens
+    });
+
+    expect(await getGhPackageCredentials()).toMatchObject({
+      token: "stale-package-token",
+      username: "pubuser"
+    });
+    userTokens.pubuser = "refreshed-package-token";
+    expect(await getGhPackageCredentials()).toMatchObject({
+      token: "stale-package-token"
+    });
+    expect(await getGhPackageCredentials({ fresh: true })).toMatchObject({
+      token: "refreshed-package-token",
+      username: "pubuser"
+    });
+  });
+
   it("falls back to the injected token when the acting login has no keyring entry", async () => {
     const { getGhPackageCredentials } = await loadGh("linux", {
       token: "injected-solo",

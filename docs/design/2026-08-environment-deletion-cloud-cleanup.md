@@ -169,7 +169,7 @@ rollback's opposite order:
 3. **GitHub environment.** Delete it via the idempotent
    `deleteGitHubEnvironmentIdempotent` primitive and invalidate the env-list
    cache so the UI no longer lists it. A 404 is treated as `not_found`.
-4. **GHCR state package.** Derive the dedicated package with `stateRegistryForEnvironment`, validate through the GitHub Packages API that it is private or internal and linked to the target repository, delete it, and confirm it is absent. The existing Delete Environment confirmation covers this environment-exclusive artifact; no second prompt is shown. Missing `delete:packages` access or any ambiguous result ends as a retryable partial failure after the earlier teardown remains complete. The user can grant the scope and retry or delete the package manually; confirmed absence is idempotent success.
+4. **GHCR state package.** Derive the dedicated package with `stateRegistryForEnvironment`, validate through the GitHub Packages API that it is private or internal and linked to the target repository, delete it, and confirm it is absent. The existing Delete Environment confirmation covers this environment-exclusive artifact; no second prompt is shown. Missing `delete:packages` access or any ambiguous result ends as a retryable partial failure after the earlier teardown remains complete. Each attempt reloads the active GitHub CLI package credential, so a retry uses the token updated by `gh auth refresh` instead of the credential cached by the failed attempt. The user can grant the scope and retry or delete the package manually; confirmed absence is idempotent success.
 5. **App-registration review.** Record an informational "left in place" step and notify the user; never delete it.
 
 #### App-registration policy

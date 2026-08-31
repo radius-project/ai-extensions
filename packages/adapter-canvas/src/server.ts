@@ -5788,7 +5788,7 @@ function createInstanceRequestCoordinator(
             input.repo,
             input.environment
           );
-          const credentials = await getGhPackageCredentials();
+          const credentials = await getGhPackageCredentials({ fresh: true });
           const outcome = await deleteGHCRStatePackage({
             targetRepository: input.repo,
             registry,
