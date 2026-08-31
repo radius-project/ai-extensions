@@ -23,7 +23,9 @@ import { routeKey } from "../route-table.js";
 import {
   acceptCommand,
   beginRetryAttempt,
+  buildDeleteStages,
   canRetryCleanup,
+  createOperation,
   enterStage,
   finish,
   isProviderRestartDecision,
@@ -38,12 +40,14 @@ import {
   requestStop,
   requireInput,
   setCommandState,
+  setStageState,
   setVerificationWorkflowState,
   verificationWorkflowState,
   stopAtBoundary,
   toClientView,
   ABANDON_COMMAND_OUTCOME,
   EXIT_COMMAND_KIND,
+  OPERATION_KIND_DELETE,
   STAGE_VERIFY
 } from "../../operations.js";
 import {
@@ -52,6 +56,7 @@ import {
   retryableSetup,
   reusedOnlyFailure,
   stoppedSetup,
+  FIXTURE_REPO,
   type OperationFixture
 } from "../../../test/support/server/operation-fixtures.js";
 import type { CanvasServerEntry } from "../types.js";
@@ -214,6 +219,22 @@ function dependencies(
     }
   };
   return Object.assign(base, overrides, { journal });
+}
+
+function retryableDeletion(): OperationFixture {
+  const op = createOperation({
+    provider: "azure",
+    repo: FIXTURE_REPO,
+    environment: "dev",
+    kind: OPERATION_KIND_DELETE,
+    stages: buildDeleteStages()
+  }) as OperationFixture;
+  op.stages[0].state = "succeeded";
+  setStageState(op, op.stages[1].id, "failed");
+  finish(op, "failed_partial", {
+    failure: { code: "credential-delete-failed" }
+  });
+  return op;
 }
 
 describe("the route registry", () => {
@@ -610,6 +631,34 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     expect(out.journal.persistCalls).toBe(1);
   });
 
+  it("retries only unfinished delete stages with the delete runner", async () => {
+    const op = retryableDeletion();
+    const out = await drive(handleRetryOperation, op, "retry/deletion");
+
+    expect(out.recording.status).toBe(202);
+    const payload = out.payload();
+    expect(payload.attempt).toBe(1);
+    expect(payload.commandId).toBe(
+      `${op.operationId}:retry_deletion:1:${op.stages[1].id}`
+    );
+    expect(op.state).toBe("running");
+    expect(op.stages.map((stage) => stage.state)).toEqual([
+      "succeeded",
+      "pending",
+      "pending",
+      "pending"
+    ]);
+    expect(op.currentStage).toBe(op.stages[1].id);
+    expect(out.journal.scheduled).toEqual([
+      {
+        kind: "deletion_retry",
+        instanceId: "panel-a",
+        commandId: payload.commandId
+      }
+    ]);
+    expect(out.journal.persistCalls).toBe(1);
+  });
+
   it("refuses a setup retry whose ownership the ledger cannot prove", async () => {
     const op = retryableSetup();
     recordGitHubEnvironment(op, {
@@ -991,6 +1040,23 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
     });
     // The duplicate never reopens the record a second time or schedules again.
     expect(op.state).toBe("failed_partial");
+    expect(deps.journal.scheduled).toHaveLength(1);
+  });
+
+  it("resolves a repeated deletion retry to the command already in flight", async () => {
+    const op = retryableDeletion();
+    const deps = dependencies({ get: () => op });
+    const path = controlPath(op, "retry/deletion");
+
+    const first = await call(handleRetryOperation, path, deps);
+    const second = await call(handleRetryOperation, path, deps);
+
+    expect(first.payload().duplicate).toBeUndefined();
+    expect(second.recording.status).toBe(202);
+    expect(second.payload()).toMatchObject({
+      duplicate: true,
+      commandId: first.payload().commandId
+    });
     expect(deps.journal.scheduled).toHaveLength(1);
   });
 
@@ -1725,6 +1791,34 @@ describe("contracts shared by every control route", () => {
     }
   );
 
+  it.each(routes)(
+    "refuses a delete operation on $name without mutating it",
+    async ({ path, handler }) => {
+      // A deletion is not a setup, so none of the setup controls apply. The
+      // route must refuse it outright — never record a stop, schedule a
+      // command, or persist — so the delete runner's fixed teardown is the only
+      // thing that ever acts on the record.
+      const deleteOp = createOperation({
+        provider: "azure",
+        repo: FIXTURE_REPO,
+        environment: "dev",
+        kind: OPERATION_KIND_DELETE,
+        stages: buildDeleteStages()
+      }) as OperationFixture;
+      const deps = dependencies({ get: () => deleteOp });
+      const out = await call(handler, path(deleteOp.operationId), deps);
+
+      expect(out.recording.status).toBe(409);
+      expect(out.payload()).toMatchObject({
+        code: "operation-not-setup-controllable"
+      });
+      expect(deps.journal.persistCalls).toBe(0);
+      expect(deps.journal.scheduled).toEqual([]);
+      expect(deleteOp.control.stop.requestedAt).toBeFalsy();
+      expect(deleteOp.state).not.toBe("cancelled");
+    }
+  );
+
   const commandRoutes = [
     {
       name: "continue",
@@ -1773,6 +1867,18 @@ describe("contracts shared by every control route", () => {
       persistFailureCode: "operation-retry-persist-failed",
       persistFailureError:
         "Radius could not save the retry request, so no work was started. Try again."
+    },
+    {
+      name: "retry/deletion",
+      path: (id: string) => `/api/operations/${id}/retry/deletion`,
+      handler: handleRetryOperation,
+      operation: retryableDeletion,
+      restoredState: "failed_partial",
+      attemptKind: "deletion",
+      restoredAttempt: 0,
+      persistFailureCode: "operation-retry-persist-failed",
+      persistFailureError:
+        "Radius could not save the retry request, so no work was started. Try again."
     }
   ] as const;
 
@@ -1816,7 +1922,10 @@ describe("contracts shared by every control route", () => {
 
       expect(out.recording.status).toBe(409);
       expect(out.payload()).toEqual({
-        error: "Another setup is already running for contoso/store.",
+        error:
+          route.name === "retry/deletion" ?
+            "Another environment operation is already running for contoso/store."
+          : "Another setup is already running for contoso/store.",
         code: "operation-in-progress",
         operationId: "op_live"
       });
@@ -1828,7 +1937,7 @@ describe("contracts shared by every control route", () => {
   // The two first-choice commands answer a repeated submission with the command
   // already in flight, so a double click never continues or deletes twice.
   const firstChoiceRoutes = commandRoutes.filter(
-    (route) => route.name !== "retry/setup"
+    (route) => route.name !== "retry/setup" && route.name !== "retry/deletion"
   );
 
   it.each(firstChoiceRoutes)(

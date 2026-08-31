@@ -103,6 +103,7 @@ const {
   generateDeployWorkflow,
   generateDeleteWorkflow,
   configureVerifyGhcrProbe,
+  computeBundledWorkflowDirs,
   configureVerifyOperationMarker
 } = await import("./infra.js");
 const { hasVerificationOperationMarker } =
@@ -424,6 +425,152 @@ ${BASE_UPSTREAM["verify-azure.yml"]}
   });
 });
 
+describe("generateDeleteWorkflow", () => {
+  it("emits both dispatchers plus the app and environment Azure providers, never AWS", async () => {
+    const files = await generateDeleteWorkflow("dev");
+    expect(Object.keys(files).sort()).toEqual([
+      "delete-application.yml",
+      "delete-azure.yml",
+      "delete-environment-azure.yml",
+      "delete-environment.yml"
+    ]);
+    expect(files["delete-aws.yml"]).toBeUndefined();
+  });
+
+  it("strips the aws job from the application dispatcher so GitHub can parse it", async () => {
+    const files = await generateDeleteWorkflow("dev");
+    expect(files["delete-application.yml"]).not.toContain("delete-aws.yml");
+    // The environment dispatcher is authored Azure-only and reuses the static,
+    // ai-extensions-owned environment provider rather than delete-azure.yml.
+    expect(files["delete-environment.yml"]).toContain(
+      "delete-environment-azure.yml"
+    );
+    expect(files["delete-environment.yml"]).not.toContain("delete-aws.yml");
+  });
+
+  it("keeps the guard step in the static environment provider", async () => {
+    const files = await generateDeleteWorkflow("dev");
+    expect(files["delete-environment-azure.yml"]).toContain(
+      "Guard - environment has no deployed applications"
+    );
+    expect(files["delete-environment-azure.yml"]).not.toContain(
+      "{{RADIUS_REF}}"
+    );
+  });
+
+  it("fails closed when the application listing cannot be read", async () => {
+    const files = await generateDeleteWorkflow("dev");
+    const provider = files["delete-environment-azure.yml"];
+    // A separate, unnamed-as-guard listing step performs the read so a listing
+    // failure is not misclassified as "applications still deployed".
+    expect(provider).toContain("- name: List applications in the environment");
+    // The fragile `|| echo '[]'` swallow-all must be gone: a listing failure
+    // exits non-zero instead of pretending the environment is empty.
+    expect(provider).not.toContain("|| echo '[]'");
+    expect(provider).toContain("rad application list --output json");
+    expect(provider).toContain("jq -e 'type == \"array\"'");
+  });
+
+  it("fills the {{ENV}} default into the environment dispatcher", async () => {
+    const files = await generateDeleteWorkflow("staging");
+    expect(files["delete-environment.yml"]).toContain("default: 'staging'");
+    expect(files["delete-environment.yml"]).not.toContain("{{ENV}}");
+  });
+
+  it("carries a correlation_id input echoed into run-name so the exact run can be matched", async () => {
+    const files = await generateDeleteWorkflow("dev");
+    const dispatcher = files["delete-environment.yml"];
+    expect(dispatcher).toContain("correlation_id:");
+    expect(dispatcher).toContain(
+      "run-name: Radius - Delete Environment ${{ inputs.environment }} ${{ inputs.correlation_id }}"
+    );
+  });
+
+  it("passes untrusted inputs to shell via env vars, not inline interpolation", async () => {
+    const provider = (await generateDeleteWorkflow("dev"))[
+      "delete-environment-azure.yml"
+    ];
+    // The hardened steps read RESOURCE_NAME/APP_* from `env:` rather than
+    // interpolating `${{ inputs.name }}` / step outputs into shell source.
+    expect(provider).toContain("RESOURCE_NAME: ${{ inputs.name }}");
+    expect(provider).toContain(
+      "APP_NAMES: ${{ steps.list_apps.outputs.app_names }}"
+    );
+    expect(provider).toContain(
+      "Found ${app_count} application(s) in environment '${RESOURCE_NAME}'."
+    );
+  });
+
+  it("routes environment-controlled vars.* through env: rather than shell interpolation", async () => {
+    const files = await generateDeleteWorkflow("dev");
+    const dispatcher = files["delete-environment.yml"];
+    const provider = files["delete-environment-azure.yml"];
+    // The provider-detect guard reads AZURE_CLIENT_ID from env, so a crafted
+    // value cannot execute in the id-token:write dispatcher job.
+    expect(dispatcher).toContain(
+      "AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}"
+    );
+    expect(dispatcher).toContain('if [ -n "$AZURE_CLIENT_ID" ]');
+    // The AKS connect step reads the resource group / cluster / subscription
+    // from env and references them with $VAR, never inline ${{ vars.* }}.
+    expect(provider).toContain(
+      "AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}"
+    );
+    expect(provider).toContain('--resource-group "$AZURE_RESOURCE_GROUP"');
+    expect(provider).not.toContain(
+      '--resource-group "${{ vars.AZURE_RESOURCE_GROUP }}"'
+    );
+    expect(provider).toContain('if [ -n "$AZURE_CLIENT_ID" ]');
+  });
+
+  it("caps the Azure delete job with a timeout aligned to the poll deadline", async () => {
+    const provider = (await generateDeleteWorkflow("dev"))[
+      "delete-environment-azure.yml"
+    ];
+    expect(provider).toContain("timeout-minutes: 30");
+  });
+
+  it("emits app_names through a delimited heredoc so a newline cannot corrupt the output", async () => {
+    const provider = (await generateDeleteWorkflow("dev"))[
+      "delete-environment-azure.yml"
+    ];
+    expect(provider).toContain("app_names<<${delimiter}");
+    expect(provider).not.toContain('echo "app_names=${app_names}"');
+  });
+});
+
+describe("computeBundledWorkflowDirs", () => {
+  it("walks up to .github/extension when running from source (no sibling workflows dir)", () => {
+    const dirs = computeBundledWorkflowDirs(
+      "/repo/packages/adapter-canvas/src",
+      false
+    );
+    expect(dirs[0]).toBe("/repo/packages/adapter-canvas/src/workflows");
+    expect(dirs.some((d) => d.endsWith("/.github/extension"))).toBe(true);
+  });
+
+  it("uses only the sibling workflows dir when running from a built bundle", () => {
+    const dirs = computeBundledWorkflowDirs(
+      "/install/plugins/radius/dist",
+      true
+    );
+    expect(dirs).toEqual(["/install/plugins/radius/dist/workflows"]);
+    expect(dirs.some((d) => d.includes(".github"))).toBe(false);
+  });
+
+  it("skips the walk for installed layouts with no dist segment", () => {
+    // Real installs have no `dist` path segment (e.g.
+    // ~/.copilot/extensions/radius/ or .../radius-edge/), so keying off the
+    // sibling workflows dir is what makes the guard hold for them.
+    const dirs = computeBundledWorkflowDirs(
+      "/Users/me/.copilot/extensions/radius",
+      true
+    );
+    expect(dirs).toEqual(["/Users/me/.copilot/extensions/radius/workflows"]);
+    expect(dirs.some((d) => d.includes(".github"))).toBe(false);
+  });
+});
+
 describe("GHCR verification probe", () => {
   it("checks push permission with a non-mutating upload session", () => {
     const workflow = configureVerifyGhcrProbe(
@@ -487,6 +634,44 @@ describe("syncRepoWorkflows", () => {
       { name: "dev", provider: "azure" }
     ]);
     expect(res.updated).toEqual([]);
+    expect(h.commits).toEqual([]);
+  });
+
+  it("authors the missing env-delete provider when its dispatcher is present so a drift-synced dispatcher never dangles", async () => {
+    // The background drift pass can rewrite delete-environment.yml (which
+    // `uses:` ./.github/workflows/delete-environment-azure.yml) while its
+    // companion provider is absent. Even without opts.create, the provider must
+    // be authored so the dispatched workflow can resolve its reusable file.
+    h.committed.main = await expectedFilesFor("dev", "azure");
+    delete h.committed.main[".github/workflows/delete-environment-azure.yml"];
+
+    const res = await syncRepoWorkflows("acme/app", [
+      { name: "dev", provider: "azure" }
+    ]);
+
+    expect(res.created).toEqual([
+      ".github/workflows/delete-environment-azure.yml"
+    ]);
+    const provider = h.commits.find(
+      (c) => c.path === ".github/workflows/delete-environment-azure.yml"
+    );
+    expect(provider).toBeDefined();
+    const expected = await generateDeleteWorkflow("dev");
+    expect(provider?.content).toBe(expected["delete-environment-azure.yml"]);
+  });
+
+  it("does not author the env-delete provider when its dispatcher is also missing (no orphan provider)", async () => {
+    // Neither env-delete file is committed: the provider must NOT be authored on
+    // its own, since a lone reusable provider (no dispatcher) is just noise.
+    h.committed.main = await expectedFilesFor("dev", "azure");
+    delete h.committed.main[".github/workflows/delete-environment.yml"];
+    delete h.committed.main[".github/workflows/delete-environment-azure.yml"];
+
+    const res = await syncRepoWorkflows("acme/app", [
+      { name: "dev", provider: "azure" }
+    ]);
+
+    expect(res.created).toEqual([]);
     expect(h.commits).toEqual([]);
   });
 

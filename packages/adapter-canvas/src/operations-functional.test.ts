@@ -871,7 +871,8 @@ describe("cooperative control functional coverage", () => {
     expect(recovered.control.attempts).toEqual({
       setup: 1,
       verification: 0,
-      cleanup: 0
+      cleanup: 0,
+      deletion: 0
     });
     expect(recovered.control.commands).toEqual([]);
     // The version 1 ledger had no workflow provenance, so the restored record

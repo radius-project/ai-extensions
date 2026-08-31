@@ -32,7 +32,7 @@ Before invoking this skill, all of these must exist:
    - Click **Deploy**
 3. The canvas immediately triggers the workflow (no intermediate form). Live status streams in until success / failure / timeout.
 
-> **Canvas not opening?** If `open_canvas` reports that the `radius` canvas is unavailable or failed to load, stop deployment and run `radius-fix-canvas-installation`. After repair, reload extensions or restart the app and retry. If the installed plugin files are missing or corrupt, respond: "The Radius plugin didn't load completely, so I can't show its view in the sidebar. Reinstalling usually fixes this: remove the Radius plugin from the Plugins settings page, add it again, then restart the Copilot app."
+> **Canvas not opening?** If the Radius panel does not appear even though this skill and the Radius plugin are installed, the canvas may not be registered due to a known GitHub Copilot app bug. Run the `radius-fix-canvas-installation` skill to repair it, then reload extensions (or restart the app) and try again.
 
 ## Deploy tools
 

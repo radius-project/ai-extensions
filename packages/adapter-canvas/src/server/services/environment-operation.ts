@@ -1,6 +1,10 @@
 import type { SelectedGhExecutor } from "../../gh.js";
 import { unresolvedProviderMutations } from "../../operations.js";
 import {
+  remediationReference,
+  type RemediationReference
+} from "../../remediation-reference.js";
+import {
   ensureGitHubEnvironment,
   GitHubEnvironmentEnsureCancelled,
   GitHubEnvironmentEnsureError,
@@ -104,32 +108,7 @@ export interface EnvironmentOperationWorkflowDependencies {
   now(): number;
 }
 
-/**
- * The id and params a remediation can be rebuilt from.
- *
- * Only the reference travels. Rebuilding from the registry at the point of use
- * keeps the rule that a command is never transported as a string, so a record
- * that survived persistence cannot smuggle one in.
- */
-export interface RemediationReference {
-  id: string;
-  params: Record<string, string>;
-}
-
-function remediationReference(value: unknown): RemediationReference | null {
-  if (!value || typeof value !== "object") return null;
-  const candidate = value as { id?: unknown; params?: unknown };
-  if (typeof candidate.id !== "string" || candidate.id === "") return null;
-  const params: Record<string, string> = {};
-  if (candidate.params && typeof candidate.params === "object") {
-    for (const [key, raw] of Object.entries(
-      candidate.params as Record<string, unknown>
-    )) {
-      if (typeof raw === "string") params[key] = raw;
-    }
-  }
-  return { id: candidate.id, params };
-}
+export type { RemediationReference } from "../../remediation-reference.js";
 
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
