@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   applicationGraphToResources,
-  findResourceDefinitionLines
+  findResourceDefinitionLines,
+  projectSafeApplicationGraph
 } from "./appgraph.js";
 import { buildResourceID } from "../../test/support/resource-id.js";
 
@@ -444,7 +445,7 @@ describe("applicationGraphToResources — icon resolution", () => {
       });
 
       expect(resources[0].icon).toBe("");
-      expect(resources[0].iconHash).toBe(extra.iconHash ?? "");
+      expect(resources[0].iconHash).toBe("");
     }
   );
 
@@ -455,6 +456,252 @@ describe("applicationGraphToResources — icon resolution", () => {
     );
 
     expect(resources[0].icon).toBe("");
+  });
+
+  describe("projectSafeApplicationGraph", () => {
+    it("keeps graph metadata while dropping resource, connection, and output property bags", () => {
+      const projected = projectSafeApplicationGraph({
+        resources: [
+          {
+            id: frontendId,
+            name: "frontend",
+            type: "Radius.Compute/containers",
+            displayType: "Container",
+            provisioningState: "NotSpecified",
+            diffHash: frontendHash,
+            diffStatus: "Modified",
+            deployStatus: "success",
+            deployMessage: "Deployment succeeded",
+            portalUrl: "https://portal.example.test/frontend",
+            codeReference: "legacy.ts#L1",
+            definitionLine: 12,
+            iconHash: frontendIconHash,
+            icon: frontendIcon,
+            properties: {
+              codeReference: "src/index.ts#L2",
+              configuration: "do-not-serialize"
+            },
+            connections: [
+              {
+                id: cacheId,
+                name: "cache",
+                direction: "Outbound",
+                kind: "Connection",
+                diffStatus: "Unchanged",
+                properties: { credential: "do-not-serialize" }
+              }
+            ],
+            outputResources: [
+              {
+                id: "provider/output",
+                name: "output",
+                type: "Provider/type",
+                displayType: "Provider output",
+                provider: "Provider",
+                apiVersion: "2025-01-01",
+                deployStatus: "success",
+                portalUrl: "https://portal.example.test/output",
+                iconHash: outputIconHash,
+                icon: outputIcon,
+                properties: { token: "do-not-serialize" }
+              }
+            ]
+          }
+        ],
+        icons: { [frontendIconHash]: frontendIcon, ignored: 7 },
+        unknown: "do-not-serialize"
+      });
+
+      expect(projected).toEqual({
+        resources: [
+          {
+            id: frontendId,
+            name: "frontend",
+            type: "Radius.Compute/containers",
+            displayType: "Container",
+            provisioningState: "NotSpecified",
+            diffHash: frontendHash,
+            diffStatus: "Modified",
+            deployStatus: "success",
+            deployMessage: "Deployment succeeded",
+            portalUrl: "https://portal.example.test/frontend",
+            codeReference: "legacy.ts#L1",
+            definitionLine: 12,
+            iconHash: frontendIconHash,
+            icon: frontendIcon,
+            properties: { codeReference: "src/index.ts#L2" },
+            connections: [
+              {
+                id: cacheId,
+                name: "cache",
+                direction: "Outbound",
+                kind: "Connection",
+                diffStatus: "Unchanged"
+              }
+            ],
+            outputResources: [
+              {
+                id: "provider/output",
+                name: "output",
+                type: "Provider/type",
+                displayType: "Provider output",
+                provider: "Provider",
+                apiVersion: "2025-01-01",
+                deployStatus: "success",
+                portalUrl: "https://portal.example.test/output",
+                iconHash: outputIconHash,
+                icon: outputIcon
+              }
+            ]
+          }
+        ],
+        icons: { [frontendIconHash]: frontendIcon }
+      });
+      expect(JSON.stringify(projected)).not.toContain("do-not-serialize");
+    });
+
+    it("accepts redacted Secret data and retains only its relationship metadata", () => {
+      const projected = projectSafeApplicationGraph({
+        resources: [
+          {
+            id: "secret-id",
+            name: "app-secret",
+            type: "Radius.Security/secrets@2025-08-01-preview",
+            diffHash: frontendHash,
+            properties: { data: { password: null, nested: [null] } },
+            connections: [
+              { id: frontendId, direction: "Inbound", kind: "Connection" }
+            ]
+          }
+        ]
+      });
+
+      expect(projected.resources[0]).toEqual({
+        id: "secret-id",
+        name: "app-secret",
+        type: "Radius.Security/secrets@2025-08-01-preview",
+        diffHash: frontendHash,
+        connections: [
+          { id: frontendId, direction: "Inbound", kind: "Connection" }
+        ],
+        outputResources: []
+      });
+    });
+
+    it("rejects non-redacted Secret data without repeating the value", () => {
+      const sentinel = "fixture-plaintext-value";
+
+      expect(() =>
+        projectSafeApplicationGraph({
+          resources: [
+            {
+              id: "secret-id",
+              name: "app-secret",
+              type: "Radius.Security/secrets",
+              properties: { data: { password: sentinel } }
+            }
+          ]
+        })
+      ).toThrowError(
+        expect.objectContaining({
+          message: expect.not.stringContaining(sentinel)
+        })
+      );
+    });
+
+    it("rejects non-redacted unnamed Secret data without inventing identity", () => {
+      expect(() =>
+        projectSafeApplicationGraph({
+          resources: [
+            {
+              type: "Radius.Security/secrets",
+              properties: { data: "fixture-plaintext-value" }
+            }
+          ]
+        })
+      ).toThrow(
+        "Canvas refused to save or render Secret resource because its graph data was not redacted."
+      );
+    });
+
+    it("rejects non-redacted Secret data in nested output resources", () => {
+      const sentinel = "fixture-plaintext-value";
+
+      expect(() =>
+        projectSafeApplicationGraph({
+          resources: [
+            {
+              id: frontendId,
+              name: "frontend",
+              type: "Radius.Compute/containers",
+              outputResources: [
+                {
+                  id: "secret-output",
+                  name: "app-secret",
+                  type: "Radius.Security/secrets",
+                  properties: { data: { password: sentinel } }
+                }
+              ]
+            }
+          ]
+        })
+      ).toThrowError(
+        expect.objectContaining({
+          message: expect.not.stringContaining(sentinel)
+        })
+      );
+    });
+
+    it("drops malformed connection and output entries", () => {
+      const projected = projectSafeApplicationGraph({
+        resources: [
+          {
+            id: frontendId,
+            name: "frontend",
+            type: "Radius.Compute/containers",
+            diffHash: frontendHash,
+            connections: [null, "cache"],
+            outputResources: [null, "deployment"]
+          }
+        ]
+      });
+
+      expect(projected.resources[0].connections).toEqual([]);
+      expect(projected.resources[0].outputResources).toEqual([]);
+    });
+
+    it("preserves connection kind through Canvas resource conversion", () => {
+      const resources = applicationGraphToResources([
+        {
+          id: frontendId,
+          name: "frontend",
+          type: "Radius.Compute/containers",
+          diffHash: frontendHash,
+          connections: [
+            { id: cacheId, direction: "Outbound", kind: "Connection" }
+          ]
+        },
+        {
+          id: cacheId,
+          name: "cache",
+          type: "Radius.Data/redisCaches",
+          diffHash: cacheHash
+        }
+      ]);
+
+      expect(resources[0].connections).toContainEqual({
+        id: cacheId,
+        direction: "Outbound",
+        kind: "Connection"
+      });
+    });
+
+    it("returns an empty artifact for malformed input", () => {
+      expect(projectSafeApplicationGraph(null)).toEqual({ resources: [] });
+      expect(projectSafeApplicationGraph({ resources: "invalid" })).toEqual({
+        resources: []
+      });
+    });
   });
 
   it("resolves output-resource icons through the same map", () => {
