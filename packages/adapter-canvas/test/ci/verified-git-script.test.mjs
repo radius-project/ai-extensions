@@ -88,6 +88,12 @@ async function api({
           verification: { verified, reason: verified ? "valid" : "unsigned" }
         });
       }
+      if (request.method === "GET" && path.startsWith("/git/commits/")) {
+        return send(200, {
+          sha: path.slice("/git/commits/".length),
+          verification: { verified, reason: verified ? "valid" : "unsigned" }
+        });
+      }
       if (route === "POST /git/tags") {
         return send(201, {
           sha: TAG,
@@ -99,7 +105,14 @@ async function api({
         if (!existing.has(name)) return send(404, { message: "Not Found" });
         return send(200, {
           ref: name,
-          ...(tagObject ? { object: { type: tagObject.type, sha: TAG } } : {})
+          ...(tagObject ?
+            {
+              object: {
+                type: tagObject.type,
+                sha: tagObject.type === "commit" ? tagObject.target : TAG
+              }
+            }
+          : {})
         });
       }
       if (request.method === "GET" && path.startsWith("/git/tags/")) {
@@ -166,8 +179,14 @@ async function completionApi({
           type: "commit",
           sha: COMMIT
         },
-        "/git/ref/tags/radius/v1.2.0": { type: "tag", sha: TAG },
-        "/git/ref/tags/radius@1.2.0": { type: "tag", sha: SOURCE_TAG }
+        "/git/ref/tags/radius/v1.2.0": {
+          type: "commit",
+          sha: artifactTarget
+        },
+        "/git/ref/tags/radius@1.2.0": {
+          type: "commit",
+          sha: sourceTarget
+        }
       };
       if (request.method === "GET" && refs[path]) {
         return send(200, {
@@ -196,6 +215,12 @@ async function completionApi({
             verified: commitVerified,
             reason: commitVerified ? "valid" : "unsigned"
           }
+        });
+      }
+      if (route === `GET /git/commits/${SOURCE}`) {
+        return send(200, {
+          sha: SOURCE,
+          verification: { verified: true, reason: "valid" }
         });
       }
       if (route === `GET /git/trees/${TREE}?recursive=1`) {
@@ -317,16 +342,7 @@ function commitArgs(paths = ["dist", "catalog.json"]) {
 }
 
 function tagArgs(name, ...rest) {
-  return [
-    "tag",
-    "--name",
-    name,
-    "--message",
-    name,
-    "--target",
-    TARGET,
-    ...rest
-  ];
+  return ["tag", "--name", name, "--target", TARGET, ...rest];
 }
 
 describe("scripts/verified-git.mjs", () => {
@@ -503,7 +519,7 @@ describe("scripts/verified-git.mjs", () => {
     expect(result.stderr).toContain("at least one --path is required");
   });
 
-  it("creates a signed annotated tag and its ref", async () => {
+  it("creates a lightweight tag ref to a verified commit", async () => {
     const root = repository();
     const { url, calls } = await api();
 
@@ -511,29 +527,28 @@ describe("scripts/verified-git.mjs", () => {
 
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
-    expect(result.stdout).toBe(TAG);
-
-    // A tagger would suppress the signature the same way an author does.
-    expect(calls.find((call) => call.route === "POST /git/tags").body).toEqual({
-      tag: "radius@1.2.0",
-      message: "radius@1.2.0",
-      object: TARGET,
-      type: "commit"
+    expect(result.stdout).toBe(TARGET);
+    expect(calls.map((call) => call.route)).not.toContain("POST /git/tags");
+    expect(calls[0]).toMatchObject({
+      route: `GET /git/commits/${TARGET}`,
+      authorization: "Bearer app-installation-token"
     });
     expect(calls.at(-1)).toMatchObject({
       route: "POST /git/refs",
-      body: { ref: "refs/tags/radius@1.2.0", sha: TAG }
+      body: { ref: "refs/tags/radius@1.2.0", sha: TARGET }
     });
   });
 
-  it("refuses to publish a tag GitHub did not sign", async () => {
+  it("refuses to publish a tag whose target commit GitHub did not sign", async () => {
     const root = repository();
     const { url, calls } = await api({ verified: false });
 
     const result = await run(root, url, tagArgs("radius@1.2.0"));
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("GitHub did not sign the tag radius@1.2.0");
+    expect(result.stderr).toContain(
+      "GitHub did not sign the target commit for tag radius@1.2.0"
+    );
     expect(calls.map((call) => call.route)).not.toContain("POST /git/refs");
   });
 
@@ -560,7 +575,7 @@ describe("scripts/verified-git.mjs", () => {
     expect(calls.at(-1)).toEqual({
       route: "PATCH /git/refs/tags/radius@latest",
       authorization: "Bearer app-installation-token",
-      body: { sha: TAG, force: true }
+      body: { sha: TARGET, force: true }
     });
   });
 
@@ -693,11 +708,11 @@ describe("scripts/verified-git.mjs", () => {
   });
 
   describe("verify-tag", () => {
-    it("accepts an annotated tag GitHub signed at the expected target", async () => {
+    it("accepts a lightweight tag whose target commit GitHub signed", async () => {
       const root = repository();
       const { url } = await api({
         refs: ["refs/tags/radius@1.2.0"],
-        tagObject: { type: "tag", target: TARGET }
+        tagObject: { type: "commit", target: TARGET }
       });
 
       const result = await run(root, url, [
@@ -713,10 +728,10 @@ describe("scripts/verified-git.mjs", () => {
       expect(result.stdout).toBe(TARGET);
     });
 
-    // A lightweight tag has no object of its own, so it carries no signature.
-    it("rejects a lightweight tag", async () => {
+    it("rejects a lightweight tag whose target commit is unverified", async () => {
       const root = repository();
       const { url } = await api({
+        verified: false,
         refs: ["refs/tags/radius@1.2.0"],
         tagObject: { type: "commit", target: TARGET }
       });
@@ -728,7 +743,26 @@ describe("scripts/verified-git.mjs", () => {
       ]);
 
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain("must be an annotated tag");
+      expect(result.stderr).toContain(
+        "GitHub did not sign the target commit for tag radius@1.2.0"
+      );
+    });
+
+    it("accepts a signed annotated tag whose target commit is also verified", async () => {
+      const root = repository();
+      const { url } = await api({
+        refs: ["refs/tags/radius@1.2.0"],
+        tagObject: { type: "tag", target: TARGET }
+      });
+
+      const result = await run(root, url, [
+        "verify-tag",
+        "--name",
+        "radius@1.2.0"
+      ]);
+
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe(TARGET);
     });
 
     it("rejects an annotated tag GitHub did not sign", async () => {

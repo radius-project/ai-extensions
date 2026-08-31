@@ -21,7 +21,7 @@ Edge needs nothing from you. The rest of this page is the stable release.
 - At least one changeset must be pending, or the workflow stops with nothing to release.
 - The previous release must have finished. If its run failed partway, re-run that run first - see [If something fails](#if-something-fails).
 - Immutable releases are optional. To enforce them later, enable the GitHub setting and set repository variable `REQUIRE_IMMUTABLE_RELEASES=true`.
-- The release GitHub App needs Contents and Pull requests write permissions. It writes every commit and tag the release publishes, which is what makes them show as **Verified**. It additionally needs Administration read only when immutable enforcement is enabled.
+- The release GitHub App needs Contents and Pull requests write permissions. It writes every release commit and tag ref; GitHub signs the commits, and each tag must resolve to a **Verified** commit. It additionally needs Administration read only when immutable enforcement is enabled.
 - You need write access to the repository to start the workflow.
 - For a release candidate that includes Azure environment creation, complete [Environment creation readiness](./ENVIRONMENT_CREATION_READINESS.md). A record with `BLOCKED` or `NOT RUN` production gates is not release approval.
 
@@ -48,7 +48,7 @@ git ls-remote origin "refs/tags/radius@latest" "refs/tags/radius/v<version>"
 
 Each released plugin gets its own release carrying three static asset names: `<plugin>-plugin.tar.gz`, `<plugin>-plugin.spdx.json`, and `<plugin>-awesome-copilot.zip`. CI downloads and checks all three before writing the completion tag. Every install branch is also checked to be a zero-parent orphan commit that GitHub signed. Then install or update the plugin from the marketplace and confirm it reports the new version.
 
-Every commit and tag the release wrote should show a **Verified** badge, attributed to the release GitHub App. Confirm it from the command line with:
+Every commit targeted by a release tag should report `verified: true`, attributed to the release GitHub App. The generated tags are lightweight refs, so verification belongs to their target commit. Confirm it from the command line with:
 
 ```bash
 gh api "repos/{owner}/{repo}/commits/$(git rev-parse refs/tags/radius/v<version>)" \
