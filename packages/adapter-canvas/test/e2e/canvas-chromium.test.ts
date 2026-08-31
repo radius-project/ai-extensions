@@ -20,6 +20,7 @@ import {
 } from "./support/canvas-harness.js";
 import type { Locator, Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
+import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environment/profiles.js";
 // Bound to the production constants so the retry cadence is exercised at the
 // value the compiled browser bundle actually schedules, not a copy of it.
 import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
@@ -1310,6 +1311,45 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(note).toContainText("Ready to configure deployments");
     await expect(recheck).toBeVisible();
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
+    await expectNoWcagViolations(page);
+  });
+
+  test("re-checks GitHub access after the final environment name settles", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    await gotoCanvas(page, canvas, "environment");
+    await openEnvironmentWizard(page);
+    const readiness = page.locator("#env-gh-identity-note");
+    await expect(readiness).toContainText("Ready to configure deployments");
+    const accountRequests = () =>
+      canvas.requests.filter(
+        (request) =>
+          request.method === "POST" && request.path === "/api/github-account"
+      );
+    const checksBeforeEdit = accountRequests().length;
+    const environment = page.getByLabel("Environment name");
+
+    await environment.fill("staging");
+    await environment.fill("production");
+    await expect(
+      page.getByRole("button", { name: "Create Environment" })
+    ).toBeDisabled();
+
+    await page.clock.fastForward(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS - 1);
+    expect(accountRequests()).toHaveLength(checksBeforeEdit);
+
+    await page.clock.fastForward(1);
+    await expect
+      .poll(() => accountRequests().length)
+      .toBe(checksBeforeEdit + 1);
+
+    expect(accountRequests().at(-1)?.body).toMatchObject({
+      environment: "production"
+    });
+    await expect(readiness).toContainText("Ready to configure deployments");
+    await expect(page.getByRole("button", { name: "Re-check" })).toBeEnabled();
     await expectNoWcagViolations(page);
   });
 
