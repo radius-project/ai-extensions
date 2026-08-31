@@ -21,7 +21,7 @@ No production code changes. The work is a mode switch in the test harness, a fix
 | Federated credential (FIC) | A trust rule letting a specific GitHub Actions job exchange its OIDC token for an Azure token, with no stored secret.                                                                        |
 | Bootstrap identity         | The identity the test runner signs in as. It stands in for the signed-in developer the extension expects — not for anything the product creates.                                             |
 | Fixture repository         | A dedicated GitHub repository playing the role of the user's application repository during a run.                                                                                            |
-| Hermetic                   | A test that touches no network, credential, or mutable external resource. Every layer today is hermetic.                                                                                     |
+| Offline                    | A test that touches no network, credential, or mutable external resource. Every layer today is offline.                                                                                      |
 | Provenance                 | The extension's record of whether it created a credential or found one already there. It decides whether deletion removes or keeps that credential.                                          |
 | `wellknown`                | [`radius-project/wellknown`](https://github.com/radius-project/wellknown), the Terraform repository owning Radius test identities and publishing them into repository secrets and variables. |
 
@@ -41,11 +41,11 @@ Success means one thing: a nightly run that fails when the product breaks the cl
 
 ### Non-goals
 
-- **Testing the agentic modeling flow.** Generating `app.bicep` involves model interaction that is neither deterministic nor cheap. The fixture repository carries a pre-modeled application so the lifecycle stages can be tested in isolation. Modeling keeps its existing hermetic coverage.
+- **Testing the agentic modeling flow.** Generating `app.bicep` involves model interaction that is neither deterministic nor cheap. The fixture repository carries a pre-modeled application so the lifecycle stages can be tested in isolation. Modeling keeps its existing offline coverage.
 - **Making this a required check.** It is slow, costs money, and depends on Azure and GitHub being up. `live-tests.yml` already sets the opt-in, scheduled, non-blocking precedent.
 - **Testing AWS.** Azure is where credential provisioning is most involved. AWS follows once the shape is proven.
-- **Replacing hermetic tests.** This layer covers only facts that require a real cloud.
-- **Deploy and deletion stages.** They ship as follow-up pull requests. Only the environment-deletion stage depends on work that is not yet merged; the deploy and delete-deployment stages do not, for the reasons set out in the development plan.
+- **Replacing offline tests.** This layer covers only facts that require a real cloud.
+- **Deploy and deletion stages.** They ship as follow-up pull requests. The deploy and deletion workflows they exercise are already merged, so these stages are sequenced after the create-environment journey for review size, not because they wait on anything.
 
 ### User scenarios
 
@@ -85,7 +85,7 @@ Without the flag the suite skips rather than fails, so an ordinary `pnpm test` i
 
 [`CanvasHarness`](../../packages/adapter-canvas/test/e2e/support/canvas-harness.ts) already owns server lifecycle, temporary directories, credential isolation, `PATH` construction, and `fetch` interception. Going live is therefore not a new harness — it is a switch on the four seams that fake the outside world:
 
-| Seam               | Hermetic mode (today)                                             | Cloud mode (new)                          |
+| Seam               | Fake mode (today)                                                 | Cloud mode (new)                          |
 |--------------------|-------------------------------------------------------------------|-------------------------------------------|
 | `PATH`             | Prepend a generated fake-CLI directory (`writeFakeCli`, line 222) | Use the real `gh`, `az`, `rad`, `kubectl` |
 | `GH_TOKEN`         | A placeholder string (line 1048)                                  | A GitHub App installation token           |
@@ -369,14 +369,14 @@ Three prerequisites surfaced while grounding those changes. Each blocks the appl
 
 This design is itself a test plan, so this section covers how the new test code is validated.
 
-- **Harness cloud mode** is unit-tested hermetically: `mode` defaults to `"fake"`, fake mode is unchanged, cloud mode skips fake-CLI generation and `PATH` injection, cloud mode leaves `fetch` alone, `GH_TOKEN` comes from the environment, and credential isolation holds in both modes.
+- **Harness cloud mode** is unit-tested offline: `mode` defaults to `"fake"`, fake mode is unchanged, cloud mode skips fake-CLI generation and `PATH` injection, cloud mode leaves `fetch` alone, `GH_TOKEN` comes from the environment, and credential isolation holds in both modes.
 - **The conformance check** asserts the pinned baseline contains the required files and compiles.
 - **The fixture's assertions** are thin wrappers over `az` and `gh`, so there is little logic to unit test. Their real risk is a false negative, which `assertCleanSlate()` mitigates by proving each assertion can tell present from absent within a single run.
 - **The journey spec** is the deliverable, run nightly and on demand.
 
 New challenges this introduces: live credentials in a browser test, a shared subscription whose quota we consume, eventual consistency in Entra, and a mutable fixture repository. Each is addressed above.
 
-This tier deliberately breaks a rule stated for every change in [the test plan](./2026-08-radius-canvas-test-plan.md): *"Keep tests local and repeatable. Do not use personal credentials, live cloud resources, mutable repositories, or public network assets."* That rule is right for the eleven hermetic layers and is not weakened there. It is scoped to those layers with an explicit carve-out here, so the exception is recorded rather than implied.
+This tier deliberately breaks a rule stated for every change in [the test plan](./2026-08-radius-canvas-test-plan.md): *"Keep tests local and repeatable. Do not use personal credentials, live cloud resources, mutable repositories, or public network assets."* That rule is right for the eleven offline layers and is not weakened there. It is scoped to those layers with an explicit carve-out here, so the exception is recorded rather than implied.
 
 ## Security
 
@@ -411,17 +411,17 @@ One compatibility risk is worth naming: if the Radius purge job's prefix list ch
 A stack of pull requests, each independently mergeable and leaving the repository green.
 
 1. **Foundation.** This doc, the test-plan amendment, and the twelfth layer in the architecture doc. No code.
-1. **Harness cloud mode.** `mode` and `workspacePath`, fully unit-tested. Hermetic; no cloud needed to review.
+1. **Harness cloud mode.** `mode` and `workspacePath`, fully unit-tested. Offline; no cloud needed to review.
 1. **Cloud fixture.** `cloud-fixture.ts`, `assertCleanSlate()`, the pinned baseline, and the conformance check.
-1. **Service-principal identity support.** Teach the setup route to resolve a caller that is a service principal as well as one that is a user, with hermetic tests for both. The only production change in the stack, and a prerequisite for any journey run by a CI runner.
+1. **Service-principal identity support.** Teach the setup route to resolve a caller that is a service principal as well as one that is a user, with offline tests for both. The only production change in the stack, and a prerequisite for any journey run by a CI runner.
 1. **Create-environment journey.** Stage one end to end, plus the Playwright config and script.
 1. **CI.** The scheduled workflow, the cleanup workflow, and the runbook.
 1. **Deploy and delete-deployment journeys.** Stages two and three.
-1. **Delete-environment journey.** Stage four. Deferred until environment-deletion work is merged.
+1. **Delete-environment journey.** Stage four.
 
 Upstream `wellknown` changes gate step 6 only. Steps 2 through 5 can be developed against a personal subscription, and steps 2 through 4 need no cloud access at all.
 
-Splitting the last step is deliberate, because treating deletion as one unit would defer more than the dependency justifies. Deleting a deployment and deleting an environment are separate route families with separate owners: [`deployments.ts:784`](../../packages/adapter-canvas/src/server/routes/deployments.ts) registers `POST /api/delete-deployment`, and [`environments.ts:864`](../../packages/adapter-canvas/src/server/routes/environments.ts) registers `POST /api/delete-environment`. The pending environment-deletion work changes the environments family and adds two services beneath it, but touches no file in the deployments family. Its only contact with the deploy path is an optional `correlationId` argument added to `findWorkflowRun`, which is inert when omitted. Stages two and three are therefore unblocked; only stage four genuinely waits, because the cloud cleanup it asserts is precisely what that work introduces.
+Splitting the last step is deliberate, because deleting a deployment and deleting an environment are separate route families with separate owners: [`deployments.ts:784`](../../packages/adapter-canvas/src/server/routes/deployments.ts) registers `POST /api/delete-deployment`, and [`environments.ts:864`](../../packages/adapter-canvas/src/server/routes/environments.ts) registers `POST /api/delete-environment`. Keeping them in separate stages keeps each review to one route family rather than merging two unrelated journeys into one change. No stage in this list waits on unmerged work: the deploy and deletion workflows these stages exercise are already merged.
 
 One deliverable of step 3 is deliberately left unwired. `baseline-conformance.ts` is written and unit-tested but no journey calls it, because `compileBaselineWorkspace()` reaches `buildGraphViaRad` and therefore needs a real `rad` binary on the runner — which step 6 concluded was unnecessary and did not install. Recording this as a deferral rather than leaving it to read as an oversight: activating the conformance check is a step 6 change to the runner image before it is a journey change, and any later stage that renders a planned graph inherits the same requirement.
 
@@ -434,7 +434,7 @@ One deliverable of step 3 is deliberately left unwired. `baseline-conformance.ts
 
 ## Alternatives considered
 
-- **Record and replay live traffic.** Capture real responses once, replay hermetically. Rejected: it proves the extension parses recorded responses, not that the cloud accepts current requests, and recordings rot silently as APIs change. It is a better fake, not an end-to-end test.
+- **Record and replay live traffic.** Capture real responses once, replay offline. Rejected: it proves the extension parses recorded responses, not that the cloud accepts current requests, and recordings rot silently as APIs change. It is a better fake, not an end-to-end test.
 - **Test against KinD instead of AKS.** Rejected above: invisible to `az aks list`, so it requires stubbing the code under test.
 - **Reuse the long-running cluster.** Rejected: shared state weakens deletion assertions and it is contended by a long daily job.
 - **Ephemeral fixture repository per run.** Cleanest isolation, rejected on privilege: it needs standing organization-wide repository administration.

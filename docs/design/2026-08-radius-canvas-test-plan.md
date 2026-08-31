@@ -30,7 +30,7 @@ Start with the status table. Use the phase sections for the work still to come. 
 
 - Add focused tests with the production change. Manual checks do not replace automated tests.
 - Use the simplest test that can reproduce the failure, then add a wider test only when the failure crosses a real boundary.
-- Keep tests local and repeatable. Do not use personal credentials, live cloud resources, mutable repositories, or public network assets. Every pull request gate layer remains hermetic. The [Cloud E2E layer](./2026-08-cloud-e2e-environment-lifecycle.md) is the single, explicit exception: it exists to prove the facts a fake cloud cannot, runs only on a schedule or on demand, never gates a pull request, and uses dedicated test credentials and a dedicated fixture repository rather than personal ones.
+- Keep tests local and repeatable. Do not use personal credentials, live cloud resources, mutable repositories, or public network assets. Every pull request gate layer remains offline. The [Cloud E2E layer](./2026-08-cloud-e2e-environment-lifecycle.md) is the single, explicit exception: it exists to prove the facts a fake cloud cannot, runs only on a schedule or on demand, never gates a pull request, and uses dedicated test credentials and a dedicated fixture repository rather than personal ones.
 - Show external failures as failures. If identity or state cannot be confirmed, deployment and deletion must stop.
 - For the session repository, graph and plan views use the current worktree branch, not an assumed `main`.
 - Close servers, streams, processes, timers, browser sessions, and temporary workspaces after success or failure.
