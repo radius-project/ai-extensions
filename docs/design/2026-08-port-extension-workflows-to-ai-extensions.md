@@ -134,7 +134,7 @@ Change `load-contrib-catalog` to `curl` the single catalog file from `radius-pro
 ##### Disadvantages
 
 - Adds a runtime network dependency on `raw.githubusercontent.com/radius-project/radius`. Mitigated by `curl --retry` and a pinnable `catalog-ref`.
-- The catalog ref and the action ref are conceptually distinct (radius ref vs. `ai-extensions` ref); defaulting `catalog-ref` to `main` preserves prior behavior but is a floating ref unless pinned.
+- The catalog ref and the action ref are conceptually distinct (radius ref vs. `ai-extensions` ref); `catalog-ref` is pinned to the Radius parity commit so the validated catalog cannot move independently.
 
 #### Proposed option
 
@@ -145,7 +145,7 @@ Change `load-contrib-catalog` to `curl` the single catalog file from `radius-pro
 The `load-contrib-catalog` composite action gains three optional inputs (`.github/extension/actions/load-contrib-catalog/action.yml`):
 
 - `catalog-repo` — default `radius-project/radius`. Repository hosting `deploy/manifest/defaults.yaml`.
-- `catalog-ref` — default `main`. Git ref of `catalog-repo` to fetch the catalog from.
+- `catalog-ref` — default `745ce9cc0fa6391a7de73cf9eb894521b1cb3053`. Immutable Radius commit containing the catalog validated with this extension tree.
 - `yq-version` — default `v4.53.3`. Pinned `yq` installed to read the catalog (matches the version pinned in radius's `build/tools.yaml`).
 
 The action's exported environment contract is unchanged: it still writes `RADIUS_DEFAULTS_YAML` and `RADIUS_CONTRIB_CATALOG_HELPER` to `GITHUB_ENV` for later steps and `scripts/contrib-catalog.sh` to consume.
@@ -170,7 +170,7 @@ Skill docs (`radius-deploy`, `radius-environment`, `radius-delete` `SKILL.md`) u
 
 #### Build & packaging (if applicable)
 
-- `.github/extension/` — the full tree ported from radius and re-synced to the pinned parity commit (`radius/main@921e55c6`; see the parity step in the Development plan), with `uses:` refs rewritten to `radius-project/ai-extensions` and executable bits preserved on the shell scripts.
+- `.github/extension/` — the full tree ported from radius and re-synced to the pinned parity commit (`radius/main@745ce9cc`; see the parity step in the Development plan), with `uses:` refs rewritten to `radius-project/ai-extensions` and executable bits preserved on the shell scripts.
 - New `.github/extension/actions/load-contrib-catalog/install-yq.sh` — byte-for-byte the generic installer from radius `build/scripts/install-yq.sh` (verified by SHA-256).
 - `load-contrib-catalog/action.yml` — rewritten to fetch the catalog by ref and install `yq` from the co-located script (no repo-root walk-up).
 - A Changeset (`.changeset/port-extension-workflows-to-ai-extensions.md`, `"radius": minor`) records the move; `core`/`adapter` packages are ignored by the changeset config. It is a `minor` rather than a `patch` because the next drift sync rewrites the workflow files already committed into user repositories to point at the new source — a behavioral change to previously generated output, not just new output.
@@ -194,7 +194,7 @@ Skill docs (`radius-deploy`, `radius-environment`, `radius-delete` `SKILL.md`) u
 ## Security
 
 - **Supply chain** — the catalog is fetched over `https` with TLS 1.2 enforced from a Radius-owned repository; `install-yq.sh` verifies `yq`'s SHA-256 before use. `curl` drops the `Authorization` header on cross-host redirects, so no token leaks to a download CDN.
-- **Ref pinning** — `catalog-ref` and the composite-action ref default to `main` (floating). Pinning both to immutable commits is available via the action input and the `{{RADIUS_REF}}` mechanism and is recommended for reproducible, tamper-resistant deploys (see Open questions).
+- **Ref pinning** — `catalog-ref` defaults to the immutable Radius parity commit. The generated composite-action ref still uses the `{{RADIUS_REF}}` mechanism so each consumer can pin the matching `ai-extensions` revision.
 - No new secrets are introduced; the catalog file is public data.
 
 ## Compatibility (optional)
@@ -213,7 +213,7 @@ The steps are ordered so that `radius-project/ai-extensions` is complete and pro
 1. Port `.github/extension/` from radius and rewrite `uses:` refs — checked in.
 1. Rewire `packages/core` and `packages/adapter-canvas` constants/comments and update tests — checked in.
 1. Make `load-contrib-catalog` self-contained (co-locate `install-yq.sh`, fetch catalog by ref), update README/Changeset — checked in (commit `2b538a2a`, PR [#424](https://github.com/radius-project/ai-extensions/pull/424)).
-1. **Reach parity with `radius/main`.** Done: the full `.github/extension/` tree was re-synced from `radius/main` (pinned commit `921e55c6`), restoring every asset the earlier port missed (live deploy-progress action + prebuilt `artifact-uploader` bundle, `refresh-azure-oidc-token` script/test, `apply-custom-recipe-packs` authored-pack-discovery fix, Azure subscription-propagation retry, resolved output-resource IDs, `action-shell-syntax`/`verify-azure` tests). Parity is now enforced mechanically by `extension-parity.live.test.ts`, so future drift fails a check rather than reaching users.
+1. **Reach parity with `radius/main`.** Done: the full `.github/extension/` tree was re-synced from `radius/main` and advanced to pinned commit `745ce9cc`, including the interrupted command outcome and fail-closed restore/teardown behavior plus their missed shell tests. Parity is enforced mechanically by `extension-parity.live.test.ts`, so future drift fails a check rather than reaching users.
 1. **Prove it works.** CI on #424 is green (build, Vitest, lint, live YAML validity, parity check, extension self-tests) **and** a real Azure and AWS deploy from a target user repo succeeds end to end against the ai-extensions copy — exercising the remote composite-action resolution and `load-contrib-catalog` that the in-repo live tests cannot cover. This runtime evidence is the final gate.
 1. **Resolve the cross-repo access gates.** Because ai-extensions is an internal repository, two org-level decisions must land before external user repos can consume these assets, and both are prerequisites of the "prove it works" gate above (see Open questions): (a) the runtime fetch of `.github/extension/` templates runs under the **end user's** token, so ai-extensions must be readable by those users (make it public, or otherwise grant read); and (b) the generated provider workflows reference the composite actions with `uses: radius-project/ai-extensions/...`, which GitHub only resolves when Actions **access sharing** is enabled for ai-extensions toward consumer repos. Neither is changeable from this PR.
 1. **Only then remove from radius.** Merge the radius removal (PR [radius#12719](https://github.com/radius-project/radius/pull/12719)) that deletes the duplicated `.github/extension/` and its consumer-side wiring, keeping `deploy/manifest/defaults.yaml` in radius (fetched by ref at runtime). This PR stays in draft until the runtime evidence above is recorded.
@@ -222,9 +222,9 @@ The steps are ordered so that `radius-project/ai-extensions` is complete and pro
 
 1. **Repository visibility for the runtime template fetch.** The extension fetches `.github/extension/` templates at commit time under the **end user's** GitHub token (`infra.ts`). ai-extensions is currently internal, so an external user's token cannot read it and generation fails. Does ai-extensions become public before Radius removal, or is another read-grant mechanism (e.g. a scoped token) used? This is a hard blocker for external consumers and must be decided by an org admin.
 1. **Actions access sharing for the composite-action `uses:` refs.** The generated provider workflows call the shared composite actions via `uses: radius-project/ai-extensions/.github/extension/actions/...`. GitHub only resolves a `uses:` ref into another repo when that repo has enabled **Actions access** toward the consumer (today `GET /repos/radius-project/ai-extensions/actions/permissions/access` returns `none`). Enabling this is an org-admin action and is a prerequisite for any external repo's deploy to run. Should it be enabled repo-wide, or scoped to the org?
-1. **Should `catalog-ref` be pinned rather than `main`?** Floating `main` preserves prior behavior but is not reproducible. Pinning to the commit the `ai-extensions` templates were validated against is safer — do we thread a pinned radius catalog ref through the generator alongside `{{RADIUS_REF}}`?
+1. **Catalog pinning.** Resolved: `catalog-ref` is pinned to the Radius parity commit, and CI validates contrib consumers against the fetched catalog at that immutable ref.
 1. **Long-term catalog ownership.** Is fetching `defaults.yaml` from radius the permanent boundary, or should the catalog (and its verification) eventually move to `ai-extensions` or a dedicated repo?
-1. **Radius duplicate removal timing.** The removal PR ([radius#12719](https://github.com/radius-project/radius/pull/12719)) is ready and parity is now complete and mechanically enforced (`extension-parity.live.test.ts`, pinned to `radius/main@921e55c6`). The remaining gates are the two access decisions above and recording a successful end-to-end Azure and AWS deploy from a target repo against the ai-extensions copy; the removal stays in draft until that evidence exists.
+1. **Radius duplicate removal timing.** The removal PR ([radius#12719](https://github.com/radius-project/radius/pull/12719)) is ready and parity is complete and mechanically enforced (`extension-parity.live.test.ts`, pinned to `radius/main@745ce9cc`). The two missed shell tests and the contrib-consumer verifier now run from ai-extensions before the duplicate tree is removed.
 
 ## Alternatives considered
 

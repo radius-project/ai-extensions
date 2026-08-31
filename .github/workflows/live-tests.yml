@@ -47,6 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: read
     env:
       # Enables the `describe.skipIf(!LIVE)` blocks in the workflow live tests
       # (workflow-yaml.live.test.ts, oidc-environment-contract.live.test.ts,
@@ -98,6 +99,14 @@ jobs:
           # anonymous raw.githubusercontent.com.
           GITHUB_TOKEN: ${{ github.token }}
         run: pnpm test -- src/workflows/workflow-yaml.live.test.ts src/workflows/oidc-environment-contract.live.test.ts src/workflows/extension-parity.live.test.ts
+
+      - name: Verify live contrib workflow consumers
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+          bash build/scripts/verify-contrib-consumers.sh
 
       - name: Run live verify marker round trip
         working-directory: packages/adapter-canvas
