@@ -34,7 +34,8 @@ import path from "node:path";
 import type { IncomingMessage } from "node:http";
 import {
   applicationGraphToResources,
-  filterGraphVisualizationResources
+  filterGraphVisualizationResources,
+  projectSafeApplicationGraph
 } from "@radius-project/core";
 import {
   killChildTree,
@@ -1149,14 +1150,12 @@ export async function resolveRadForGraph({
  * return the parsed app-graph.json it writes there. The modeled command must not
  * use `--preview`, which switches rad to the deployed-application API path.
  *
- * When `saveGraphJsonTo` is an absolute path, the raw app-graph.json produced by
- * the rad CLI is also copied there (parent directories created as needed) so the
- * generated graph is persisted alongside the app.bicep it was built from. A
- * failure to save is logged but never fails the graph build.
+ * When `saveGraphJsonTo` is an absolute path, a safety-projected app-graph.json
+ * is copied there (parent directories created as needed) so unknown property
+ * bags and graph-visible Secret data never reach the workspace artifact.
  *
- * The returned value is the raw, untyped app-graph.json payload: this module
- * only shuttles it to `applicationGraphToResources` (@radius-project/core), which owns
- * its shape.
+ * The returned value is the same safety-projected payload. The original CLI
+ * artifact exists only inside the throwaway working directory.
  */
 export async function runRadAppGraph(
   bicepFilePath: string,
@@ -1313,15 +1312,23 @@ export async function runRadAppGraph(
       });
     });
     const raw = fs.readFileSync(outFile, "utf8");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new Error("rad app graph produced invalid graph JSON.");
+    }
+    const appGraph = projectSafeApplicationGraph(parsed);
+    const safeJson = JSON.stringify(appGraph, null, 2);
     if (saveGraphJsonTo) {
       if (path.isAbsolute(saveGraphJsonTo))
-        saveGraphJson(saveGraphJsonTo, raw, log);
+        saveGraphJson(saveGraphJsonTo, safeJson, log);
       else
         log(
           `Warning: saveGraphJsonTo must be an absolute path; ignoring: ${saveGraphJsonTo}`
         );
     }
-    return JSON.parse(raw);
+    return appGraph;
   } catch (err) {
     throw new Error(`rad app graph failed: ${radErrorDetail(err)}`, {
       cause: err
@@ -1336,8 +1343,8 @@ export async function runRadAppGraph(
 }
 
 /**
- * saveGraphJson - persist the raw app-graph.json emitted by `rad app graph` to
- * `destPath`, creating parent directories as needed. Saving is best-effort: a
+ * saveGraphJson - persist a caller-projected app-graph.json to `destPath`,
+ * creating parent directories as needed. Saving is best-effort: a
  * failure is logged via the injected `log` and swallowed so it can never fail an
  * otherwise-successful graph build.
  */
@@ -1562,11 +1569,11 @@ export function writeBicepCompileConfig(
  * result into the canvas resource array. Throws (surfaced to the UI) on failure
  * — there is no JS fallback.
  *
- * The returned array is passed through `filterGraphVisualizationResources`, the
+ * The CLI artifact is safety-projected before it reaches this function. The
+ * returned array is then passed through `filterGraphVisualizationResources`, the
  * shared visualization filter, so implementation-detail resources
  * (containerImages and their ghcr-registry-creds secret) are never rendered in
- * any graph state — modeled, planned, deployed, or diff. This is applied only
- * to the returned array; the raw app-graph.json saved above is left complete.
+ * any graph state — modeled, planned, deployed, or diff.
  */
 export async function buildGraphViaRad(
   content: string,
