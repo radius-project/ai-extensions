@@ -128,7 +128,37 @@ export interface FakeCliScenario {
   commands: FakeCliCommand[];
 }
 
+export type FakeCliCommandOverride = (
+  command: FakeCliCommand
+) => FakeCliCommand;
+
 export const FAKE_CLI_TOOLS = ["gh", "rad", "az", "aws", "kubectl"] as const;
+
+// The failure payload a partial deletion records, matching the shape the
+// production delete runner writes (src/server/services/environment-deletion.ts).
+// The stage is supplied by the harness because only the runner knows the real
+// stage id of the operation the delete route created.
+export interface EnvironmentDeletionFailure {
+  code: string;
+  stepSeq: number | null;
+  message: string;
+  classification: string;
+  evidence: string | null;
+}
+
+// The terminal a driven deletion should reach: a clean success that walks every
+// stage to succeeded, or a partial failure that fails the first stage.
+export type EnvironmentDeletionOutcome =
+  | { state: "succeeded" }
+  | { state: "failed_partial"; failure: EnvironmentDeletionFailure };
+
+// Hands the test a release it can await: it resolves only once the runner has
+// entered the first stage and parked on its release promise, so a caller can
+// never drop the signal by firing it before the server-owned runner installed
+// the resolver.
+export interface DrivenEnvironmentDeletion {
+  release(): Promise<void>;
+}
 
 /**
  * Which outside world the harness runs against.
@@ -1453,6 +1483,20 @@ export class CanvasHarness {
     assertFakeModeAvailable(this.mode, operation);
   }
 
+  async setScenarioOverrides(
+    scenario: FakeCliScenario,
+    overrides: readonly FakeCliCommandOverride[],
+    appendedCommands: readonly FakeCliCommand[] = []
+  ): Promise<void> {
+    const commands = scenario.commands.map((command) =>
+      overrides.reduce((overridden, override) => override(overridden), command)
+    );
+    await this.setScenario({
+      ...scenario,
+      commands: [...commands, ...appendedCommands]
+    });
+  }
+
   async seedRestartedVerificationFailure(): Promise<string> {
     return this.seedRestartedVerification("failed");
   }
@@ -1542,18 +1586,19 @@ export class CanvasHarness {
     const text = typeof graph === "string" ? graph : JSON.stringify(graph);
     const raw = await fs.readFile(this.scenarioPath, "utf8");
     const scenario = JSON.parse(raw) as FakeCliScenario;
-    const commands = scenario.commands.map((command) => {
-      const isAppGraph =
-        command.tool === "rad" &&
-        command.argsPrefix?.[0] === "app" &&
-        command.argsPrefix?.[1] === "graph";
-      if (!isAppGraph) return command;
-      return {
-        ...command,
-        writeFiles: [{ path: "app-graph.json", content: text }]
-      };
-    });
-    await this.setScenario({ ...scenario, commands });
+    await this.setScenarioOverrides(scenario, [
+      (command) => {
+        const isAppGraph =
+          command.tool === "rad" &&
+          command.argsPrefix?.[0] === "app" &&
+          command.argsPrefix?.[1] === "graph";
+        if (!isAppGraph) return command;
+        return {
+          ...command,
+          writeFiles: [{ path: "app-graph.json", content: text }]
+        };
+      }
+    ]);
   }
 
   // The scenario distinguishes a token-authenticated single account from the
@@ -1585,25 +1630,26 @@ export class CanvasHarness {
     this.assertFakeMode("setGitHubKeyringScopes");
     const raw = await fs.readFile(this.scenarioPath, "utf8");
     const scenario = JSON.parse(raw) as FakeCliScenario;
-    const commands = scenario.commands.map((command) => {
-      const isKeyringStatus =
-        command.tool === "gh" &&
-        JSON.stringify(command.args) ===
-          JSON.stringify(["auth", "status", "--hostname", "github.com"]) &&
-        command.env?.GH_TOKEN === "absent";
-      if (!isKeyringStatus) return command;
-      return {
-        ...command,
-        stdout: [
-          authStatus("repo-user", "keyring", [...scopes]),
-          authStatus("acting-user", "keyring", [...scopes]).replace(
-            "Active account: true",
-            "Active account: false"
-          )
-        ].join("\n")
-      };
-    });
-    await this.setScenario({ ...scenario, commands });
+    await this.setScenarioOverrides(scenario, [
+      (command) => {
+        const isKeyringStatus =
+          command.tool === "gh" &&
+          JSON.stringify(command.args) ===
+            JSON.stringify(["auth", "status", "--hostname", "github.com"]) &&
+          command.env?.GH_TOKEN === "absent";
+        if (!isKeyringStatus) return command;
+        return {
+          ...command,
+          stdout: [
+            authStatus("repo-user", "keyring", [...scopes]),
+            authStatus("acting-user", "keyring", [...scopes]).replace(
+              "Active account: true",
+              "Active account: false"
+            )
+          ].join("\n")
+        };
+      }
+    ]);
   }
 
   async cliCalls(): Promise<Array<{ tool: string; args: string[] }>> {
@@ -1634,6 +1680,56 @@ export class CanvasHarness {
     runner: ((operationId: string) => Promise<void>) | null
   ): void {
     this.serverModule.setEnvironmentOperationTestRunner(runner);
+  }
+
+  // Drives the real delete OperationRecord the route creates to a terminal,
+  // exactly as the production runner does (environment-deletion.ts): enter every
+  // stage and finish. The completion is gated on the returned `release` so the
+  // progress poller first observes the operation running -- it ignores an
+  // operation already terminal on its first observation, treating it as a stale
+  // prior record. The created id is tracked for cleanup so a settled panel that
+  // was never dismissed cannot bleed into the next test.
+  driveEnvironmentDeletion(
+    outcome: EnvironmentDeletionOutcome
+  ): DrivenEnvironmentDeletion {
+    let releaseRunner: (() => void) | null = null;
+    let signalArrived: (() => void) | null = null;
+    const arrived = new Promise<void>((resolve) => {
+      signalArrived = resolve;
+    });
+    this.setEnvironmentOperationRunner(async (operationId: string) => {
+      const ops: OperationsModule = await import("../../../src/operations.js");
+      const op = ops.operations.get(operationId);
+      if (!op) throw new Error(`operation ${operationId} was never created`);
+      const [firstStage] = op.stages;
+      if (!firstStage)
+        throw new Error(`operation ${operationId} has no stages`);
+      this.seededOperationIds.add(operationId);
+      ops.enterStage(op, firstStage.id);
+      await new Promise<void>((resolve) => {
+        releaseRunner = resolve;
+        signalArrived?.();
+      });
+      if (outcome.state === "succeeded") {
+        for (const stage of op.stages) {
+          ops.enterStage(op, stage.id);
+          ops.setStageState(op, stage.id, "succeeded");
+        }
+        ops.finishSucceeded(op, "succeeded");
+      } else {
+        ops.setStageState(op, firstStage.id, "failed");
+        ops.finish(op, "failed_partial", {
+          failure: { ...outcome.failure, stage: firstStage.id }
+        });
+      }
+      await ops.operations.persist();
+    });
+    return {
+      release: async () => {
+        await arrived;
+        releaseRunner?.();
+      }
+    };
   }
 
   async cleanup(): Promise<void> {
