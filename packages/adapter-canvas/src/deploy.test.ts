@@ -14,6 +14,7 @@ import {
   selectedCommandAuthorizationError,
   selectWorkflowRunId
 } from "./deploy.js";
+import { FORK_REPOSITORY_SETUP_GUIDANCE } from "./repository-access-guidance.js";
 import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
 
 describe("selected-account workflow reads", () => {
@@ -607,6 +608,7 @@ describe("explainRepoAccessForEnvSetup", () => {
     expect(out).toContain("ryanwaite");
     expect(out).toContain("azure-cto/app");
     expect(out).toContain("gh auth switch");
+    expect(out).toContain(FORK_REPOSITORY_SETUP_GUIDANCE);
   });
 
   it("uses the bundled GitHub CLI path in switch-account guidance", () => {
@@ -663,6 +665,7 @@ describe("explainRepoAccessForEnvSetup", () => {
     expect(out).toContain("Maintain");
     expect(out).toContain("grant");
     expect(out).not.toContain("gh auth switch");
+    expect(out).toContain(FORK_REPOSITORY_SETUP_GUIDANCE);
   });
 
   it("push-only → role label Write", () => {

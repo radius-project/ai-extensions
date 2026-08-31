@@ -3,6 +3,11 @@ import {
   unresolvedCleanupTargets,
   EXIT_COMMAND_OUTCOME
 } from "../../operations.js";
+import {
+  CLEANUP_COMPLETE_REASON,
+  ROLLBACK_COMPLETE_REASON,
+  SETUP_EXITED_REASON
+} from "../../operation-terminal-reasons.js";
 
 // What the one deletion pass does differently for each command that reaches it.
 //
@@ -36,7 +41,7 @@ export const CLEANUP_COMMANDS: Readonly<Record<string, CleanupCommandSpec>> = {
   rollback: {
     selectTargets: provenOwnedCleanupTargets,
     cleanedOutcome: "rolled-back",
-    terminalReason: "rollback-complete",
+    terminalReason: ROLLBACK_COMPLETE_REASON,
     cleanedMessage:
       "Radius removed the resources it created during this attempt.",
     incompleteMessage:
@@ -45,7 +50,7 @@ export const CLEANUP_COMMANDS: Readonly<Record<string, CleanupCommandSpec>> = {
   cleanup_retry: {
     selectTargets: unresolvedCleanupTargets,
     cleanedOutcome: "cleaned",
-    terminalReason: "cleanup-complete",
+    terminalReason: CLEANUP_COMPLETE_REASON,
     cleanedMessage:
       "Radius removed the resources it created during this attempt.",
     incompleteMessage:
@@ -60,7 +65,7 @@ export const CLEANUP_COMMANDS: Readonly<Record<string, CleanupCommandSpec>> = {
   exit_setup: {
     selectTargets: provenOwnedCleanupTargets,
     cleanedOutcome: EXIT_COMMAND_OUTCOME,
-    terminalReason: "setup-exited",
+    terminalReason: SETUP_EXITED_REASON,
     cleanedMessage:
       "Radius closed this setup and removed the resources it created during this attempt.",
     incompleteMessage:

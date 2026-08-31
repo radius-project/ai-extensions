@@ -189,8 +189,8 @@ const EXIT_ACTION_WITH_DELETIONS = {
 const STOP_ACTION = {
   id: "stop",
   kind: "stop",
-  label: "Stop Setup",
-  description: "Radius finishes the current step and stops.",
+  label: "Pause setup",
+  description: "Radius finishes the current step and pauses.",
   path: "/api/operations/op-1/stop",
   pending: false
 };
@@ -198,7 +198,7 @@ const STOP_ACTION = {
 const RETRY_CLEANUP_ACTION = {
   id: "retry-cleanup",
   kind: "retry_cleanup",
-  label: "Retry rollback",
+  label: "Retry deletion",
   description: "Radius tries again to remove what is still present.",
   path: "/api/operations/op-1/rollback/retry",
   pending: false,
@@ -207,14 +207,14 @@ const RETRY_CLEANUP_ACTION = {
 
 const ROLLING_BACK_HEADLINE = {
   code: "rolling-back",
-  title: "Rolling back created resources…",
+  title: "Deleting setup resources…",
   message:
     "Radius is removing the resources it proved it created during this attempt."
 };
 
 const ROLLBACK_COMPLETE_HEADLINE = {
   code: "rollback-complete",
-  title: "Rollback complete",
+  title: "Setup deleted",
   message:
     "Radius removed the resources it created during this attempt. Anything it reused was left alone."
 };
@@ -594,7 +594,7 @@ describe("parseOperationResponse", () => {
           {
             id: "rollback",
             kind: "rollback",
-            label: "Roll back created resources",
+            label: "Delete setup",
             description: "This cannot be undone.",
             path: "/api/operations/op-1/rollback",
             pending: false,
@@ -637,7 +637,7 @@ describe("parseOperationResponse", () => {
       {
         id: "rollback",
         kind: "rollback",
-        label: "Roll back created resources",
+        label: "Delete setup",
         description: "This cannot be undone.",
         path: "/api/operations/op-1/rollback",
         pending: false,
@@ -1996,7 +1996,7 @@ describe("failure card rendering", () => {
     [
       "anything",
       false,
-      "Cleanup stopped at the commit point, so reusable artifacts were left in place."
+      "Deletion stopped at the commit point, so reusable artifacts were left in place."
     ],
     ["succeeded_with_warnings", undefined, "Cleanup finished with warnings."],
     ["succeeded", undefined, "Cleanup finished."],
@@ -2400,7 +2400,7 @@ describe("operation commands", () => {
     const rendered = buttons(browser);
     expect(rendered).toHaveLength(2);
     expect(rendered[0].id).toBe("env-progress-command-stop");
-    expect(rendered[0].textContent).toBe("Stop Setup");
+    expect(rendered[0].textContent).toBe("Pause setup");
     expect(rendered[0].getAttribute("type")).toBe("button");
     expect(rendered[0].className).toBe("rad-btn rad-btn--secondary");
     expect(rendered[0].getAttribute("title")).toBe(STOP_ACTION.description);
@@ -2597,7 +2597,7 @@ describe("operation commands", () => {
     renderActions(browser, [{ ...STOP_ACTION, pending: true }]);
 
     expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
-      "Stopping after the current step…"
+      "Pausing after the current step…"
     );
   });
 
@@ -2840,7 +2840,7 @@ describe("operation commands", () => {
     );
     expect(Reflect.get(buttons(browser)[0], "disabled")).toBe(true);
     expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
-      "Stopping after the current step…"
+      "Pausing after the current step…"
     );
 
     buttons(browser)[0].dispatch("click");
@@ -3090,15 +3090,15 @@ describe("rollback confirmation", () => {
   const rollbackAction = {
     id: "rollback",
     kind: "rollback",
-    label: "Roll back created resources",
+    label: "Delete setup",
     description: "This cannot be undone.",
     path: "/api/operations/op-1/rollback",
     pending: false,
     tone: "danger",
     requiresConfirmation: true,
-    confirmTitle: "Roll back resources created by this setup?",
-    confirmLabel: "Roll back resources",
-    cancelLabel: "Keep resources",
+    confirmTitle: "Delete this setup and its created resources?",
+    confirmLabel: "Delete setup",
+    cancelLabel: "Keep setup",
     preview: {
       type: "rollback",
       removes: [{ kind: "azure_app", target: "radius-dev" }],
@@ -3155,7 +3155,7 @@ describe("rollback confirmation", () => {
     expect(browser.els[ROLLBACK_IDS.modal].style.display).toBe("flex");
     expect(browser.net.calls).toHaveLength(0);
     expect(browser.els[ROLLBACK_IDS.title].textContent).toBe(
-      "Roll back resources created by this setup?"
+      "Delete this setup and its created resources?"
     );
     expect(browser.els[ROLLBACK_IDS.intro].textContent).toBe(
       "This cannot be undone."
@@ -3170,10 +3170,8 @@ describe("rollback confirmation", () => {
     expect(textOf(browser, ROLLBACK_IDS.manualList)).toEqual([
       "Role assignment: Contributor — Remove it"
     ]);
-    expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe(
-      "Roll back resources"
-    );
-    expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe("Keep resources");
+    expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe("Delete setup");
+    expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe("Keep setup");
     expect(trigger(browser).getAttribute("aria-haspopup")).toBe("dialog");
   });
 
@@ -3184,9 +3182,9 @@ describe("rollback confirmation", () => {
     // rebuild of either.
     const browser = setup();
     open(browser, {
-      label: "Roll back environment setup",
-      confirmTitle: "Roll back this environment setup?",
-      confirmLabel: "Roll back setup",
+      label: "Delete setup",
+      confirmTitle: "Delete this setup and its created resources?",
+      confirmLabel: "Delete setup",
       description:
         "Radius reverts the workflow files it committed with a new commit.",
       preview: {
@@ -3204,13 +3202,11 @@ describe("rollback confirmation", () => {
       }
     });
 
-    expect(trigger(browser).textContent).toBe("Roll back environment setup");
+    expect(trigger(browser).textContent).toBe("Delete setup");
     expect(browser.els[ROLLBACK_IDS.title].textContent).toBe(
-      "Roll back this environment setup?"
+      "Delete this setup and its created resources?"
     );
-    expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe(
-      "Roll back setup"
-    );
+    expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe("Delete setup");
     // The workflow files are listed first, in the order the server will act.
     expect(textOf(browser, ROLLBACK_IDS.removeList)).toEqual([
       "Workflow file: .github/workflows/radius-verify-credentials.yml on main",
@@ -3231,12 +3227,10 @@ describe("rollback confirmation", () => {
     });
 
     expect(browser.els[ROLLBACK_IDS.title].textContent).toBe(
-      "Roll back resources created by this setup?"
+      "Delete this setup and its created resources?"
     );
-    expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe(
-      "Roll back resources"
-    );
-    expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe("Keep resources");
+    expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe("Delete setup");
+    expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe("Keep setup");
     expect(browser.els[ROLLBACK_IDS.removeBlock].style.display).toBe("none");
   });
 
@@ -3329,7 +3323,7 @@ describe("rollback confirmation", () => {
     open(browser);
 
     expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
-      "Radius could not open the rollback confirmation."
+      "Radius could not open the delete confirmation."
     );
     expect(browser.net.calls).toHaveLength(0);
   });
@@ -3480,7 +3474,7 @@ describe("rollback confirmation", () => {
           {
             id: "stop",
             kind: "stop",
-            label: "Stop Setup",
+            label: "Pause setup",
             description: "",
             path: "/api/operations/op-1/stop",
             pending: false
@@ -3510,14 +3504,14 @@ describe("headline and rollback outcomes", () => {
       summary: "Creating dev…",
       headline: {
         code: "rolling-back",
-        title: "Rolling back created resources…",
+        title: "Deleting setup resources…",
         message: "Radius is removing what it created."
       },
       activeCommandKind: "rollback"
     });
 
     expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
-      "Rolling back created resources…"
+      "Deleting setup resources…"
     );
     expect(browser.els[PROGRESS_IDS.headlineNote].textContent).toBe(
       "Radius is removing what it created."
@@ -3610,7 +3604,7 @@ describe("headline and rollback outcomes", () => {
         terminalState: "cancelled",
         headline: {
           code: "rollback-complete",
-          title: "Rollback complete",
+          title: "Setup deleted",
           message: "Radius removed the resources it created."
         }
       })
@@ -3700,7 +3694,7 @@ describe("headline and rollback outcomes", () => {
 describe("rollback lifecycle presentation", () => {
   const ROLLBACK_INCOMPLETE_HEADLINE = {
     code: "rollback-incomplete",
-    title: "Rollback finished with items still present",
+    title: "Deletion finished with items still present",
     message: "The resources below are still present."
   };
   // A rollback that is still deleting: the server closes the command list
@@ -3760,8 +3754,8 @@ describe("rollback lifecycle presentation", () => {
         terminalState: "cancelled",
         headline: {
           code: "stopped",
-          title: "Environment setup stopped",
-          message: "Radius stopped before the next setup step."
+          title: "Environment setup paused",
+          message: "Radius paused before the next setup step."
         },
         cleanup: { created: [{ target: "app radius-dev" }] }
       })
@@ -3772,7 +3766,7 @@ describe("rollback lifecycle presentation", () => {
 
     expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
-      "Rolling back created resources…"
+      "Deleting setup resources…"
     );
   });
 
@@ -3822,7 +3816,7 @@ describe("rollback lifecycle presentation", () => {
     controllerFor(browser)?.renderProgress(rollbackIncomplete());
 
     expect(textOf(browser, PROGRESS_IDS.commandButtons)).toEqual([
-      "Retry rollback"
+      "Retry deletion"
     ]);
     expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
@@ -3840,8 +3834,8 @@ describe("rollback lifecycle presentation", () => {
       actions: [EXIT_ACTION],
       headline: {
         code: "stopped",
-        title: "Environment setup stopped",
-        message: "Radius stopped before the next setup step."
+        title: "Environment setup paused",
+        message: "Radius paused before the next setup step."
       },
       cleanup: { created: [{ target: "app radius-dev" }] }
     });
@@ -3960,7 +3954,7 @@ describe("rollback and the stale setup-failure banner", () => {
   const ROLLBACK_ACTION = {
     id: "rollback",
     kind: "rollback",
-    label: "Roll back created resources",
+    label: "Delete setup",
     description: "This cannot be undone.",
     path: "/api/operations/op-1/rollback",
     pending: false,
@@ -4009,7 +4003,7 @@ describe("rollback and the stale setup-failure banner", () => {
 
     expect(browser.els[ERROR_BANNER_ID].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
-      "Rollback started. Removing the resources Radius created…"
+      "Setup deletion started. Removing the resources Radius created…"
     );
     // The rows behind that failure are already being removed, so the picker is
     // asked for the current listing rather than left on the failed one.
@@ -4079,7 +4073,7 @@ describe("rollback and the stale setup-failure banner", () => {
         terminalState: "cancelled",
         headline: {
           code: "rollback-complete",
-          title: "Rollback complete",
+          title: "Setup deleted",
           message: "Radius removed the resources it created."
         }
       })
@@ -5287,7 +5281,7 @@ describe("resumeProgress", () => {
     serveOperation(browser, {
       terminalState: "failed_partial",
       state: "failed_partial",
-      summary: "dev setup stopped",
+      summary: "dev setup paused",
       failure: { message: "role assignment failed" },
       cleanup: { created: [{ target: "app radius-dev" }] },
       actions: [
@@ -5828,7 +5822,7 @@ describe("teardown", () => {
           environment: "dev",
           state: "cancelled",
           terminalState: "cancelled",
-          summary: "Old setup stopped"
+          summary: "Old setup paused"
         })
       )
     );
@@ -6134,8 +6128,8 @@ describe("exiting a setup", () => {
 describe("acknowledging a finished deletion pass", () => {
   const STOPPED_HEADLINE = {
     code: "stopped",
-    title: "Environment setup stopped",
-    message: "Radius stopped before the next setup step."
+    title: "Environment setup paused",
+    message: "Radius paused before the next setup step."
   };
 
   function completedRollback(): OperationRecord {
@@ -6319,9 +6313,7 @@ describe("acknowledging a finished deletion pass", () => {
     controller?.resumeProgress();
     await flushPromises();
 
-    expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
-      "Rollback complete"
-    );
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe("Setup deleted");
     expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("OK");
     // A record that is already terminal is redisplayed, not re-applied: the
     // page load owns the listing, and nothing here polls it again.

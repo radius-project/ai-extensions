@@ -97,7 +97,7 @@ export async function planRecoveredCleanup(input: {
       state: "blocked",
       detail:
         `Radius has not confirmed the outcome of the ${unsettledDeletion.kind.replace(".cleanup_delete", "")} deletion it issued for ${unsettledDeletion.target}. ` +
-        "It will not repeat that delete or continue the rollback until that resource's exact identity can be read."
+        "It will not repeat that delete or continue setup deletion until that resource's exact identity can be read."
     };
   }
   const active = activeCleanupCommand(input.operation);
