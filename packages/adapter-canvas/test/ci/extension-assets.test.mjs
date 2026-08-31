@@ -13,6 +13,7 @@ const FULL_SHA_REFERENCE = /^[^@\s]+@[0-9a-f]{40}$/;
 
 function filesUnder(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    if (entry.name === "node_modules") return [];
     const path = join(directory, entry.name);
     return entry.isDirectory() ? filesUnder(path) : [path];
   });

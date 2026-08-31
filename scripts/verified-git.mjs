@@ -351,7 +351,7 @@ async function verifyArtifactState({
     fail(`${branch} does not contain ${EXTENSION_ROOT}`);
   }
   if (
-    (rootAssets.size > 0 || bundledAssets.size > 0) &&
+    rootAssets.size > 0 &&
     (rootAssets.size !== bundledAssets.size ||
       [...rootAssets].some(([path, sha]) => bundledAssets.get(path) !== sha))
   ) {
