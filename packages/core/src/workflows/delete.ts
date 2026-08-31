@@ -1,13 +1,8 @@
 import { assertNoUnresolvedPlaceholders, fillTemplate } from "./template.js";
 import { RADIUS_REF } from "./deploy.js";
 
-// The ref of radius-project/ai-extensions that hosts the delete workflow
-// templates and the `delete-resource` composite action. These live on `main`,
-// so both the template fetch and the `{{RADIUS_REF}}` the provider workflows
-// pin their composite actions to default to RADIUS_REF ("main"). It can be
-// overridden via the RADIUS_DELETE_REF env var (e.g. pin to a commit SHA or a
-// PR branch) so the delete templates can be re-pinned without releasing a new
-// core package.
+// Release builds replace this environment read with their exact source commit.
+// Source and live-test runs may override it to validate another revision.
 export const DELETE_RADIUS_REF = process.env.RADIUS_DELETE_REF || RADIUS_REF;
 
 // Committed delete-workflow file names. The application-delete dispatcher plus

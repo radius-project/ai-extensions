@@ -39,6 +39,7 @@ import { pluginRefs, repoRoot, requirePlugin } from "./plugins.mjs";
 const SHA = /^[0-9a-f]{40}$/;
 const REF = /^refs\/(?:heads|tags)\/[^\s~^:?*[\\]+$/;
 const MARKETPLACE = ".github/plugin/marketplace.json";
+const EXTENSION_ROOT = ".github/extension";
 const REGULAR_MODES = new Set(["100644", "100755"]);
 
 // Unwind instead of exiting in place: calling process.exit() while a socket is
@@ -299,7 +300,13 @@ async function readJsonBlob(entry, label) {
   }
 }
 
-async function verifyArtifactState({ plugin, version, source, branch }) {
+async function verifyArtifactState({
+  plugin,
+  version,
+  source,
+  branch,
+  requireCurrentLayout = false
+}) {
   const ref = await readRef(`refs/heads/${branch}`, true);
   if (!ref) fail(`refs/heads/${branch} does not exist`);
   if (ref.object?.type !== "commit") {
@@ -320,11 +327,37 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
   const files = tree.tree.filter((entry) => entry.type !== "tree");
   for (const entry of files) {
     const allowed =
-      entry.path === MARKETPLACE || entry.path.startsWith(`${plugin.distDir}/`);
+      entry.path === MARKETPLACE ||
+      entry.path.startsWith(`${plugin.distDir}/`) ||
+      entry.path.startsWith(`${EXTENSION_ROOT}/`);
     if (!allowed) fail(`${branch} contains an unexpected path: ${entry.path}`);
     if (entry.type !== "blob" || !REGULAR_MODES.has(entry.mode)) {
       fail(`${branch} contains a non-regular file: ${entry.path}`);
     }
+  }
+
+  const rootAssets = new Map(
+    files
+      .filter((entry) => entry.path.startsWith(`${EXTENSION_ROOT}/`))
+      .map((entry) => [entry.path.slice(EXTENSION_ROOT.length + 1), entry.sha])
+  );
+  const bundledRoot = `${plugin.distDir}/workflows`;
+  const bundledAssets = new Map(
+    files
+      .filter((entry) => entry.path.startsWith(`${bundledRoot}/`))
+      .map((entry) => [entry.path.slice(bundledRoot.length + 1), entry.sha])
+  );
+  if (requireCurrentLayout && rootAssets.size === 0) {
+    fail(`${branch} does not contain ${EXTENSION_ROOT}`);
+  }
+  if (
+    (rootAssets.size > 0 || bundledAssets.size > 0) &&
+    (rootAssets.size !== bundledAssets.size ||
+      [...rootAssets].some(([path, sha]) => bundledAssets.get(path) !== sha))
+  ) {
+    fail(
+      `${branch} does not bundle an exact copy of ${EXTENSION_ROOT} in ${bundledRoot}`
+    );
   }
 
   const packagePath = `${plugin.distDir}/package.json`;
@@ -350,6 +383,14 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
       commit.message.slice(messagePrefix.length)
     : undefined;
   requireSha(actualSource, `${branch} recorded source`);
+  if (
+    (requireCurrentLayout || packageJson.radiusSourceRef !== undefined) &&
+    packageJson.radiusSourceRef !== actualSource
+  ) {
+    fail(
+      `${packagePath} pins ${String(packageJson.radiusSourceRef)}, not recorded source ${actualSource}`
+    );
+  }
   if (source !== undefined && actualSource !== source) {
     fail(
       `${branch} does not record ${plugin.name}@${actualVersion} from ${source}`
@@ -388,7 +429,13 @@ async function verifyArtifact(args) {
   const branch = required(option(args, "--branch"), "--branch");
   console.log(
     JSON.stringify(
-      await verifyArtifactState({ plugin, version, source, branch })
+      await verifyArtifactState({
+        plugin,
+        version,
+        source,
+        branch,
+        requireCurrentLayout: true
+      })
     )
   );
 }
@@ -408,7 +455,8 @@ async function verifyCompletion(args) {
     plugin,
     version,
     source,
-    branch: refs.PLUGIN_PINNED_BRANCH
+    branch: refs.PLUGIN_PINNED_BRANCH,
+    requireCurrentLayout: true
   });
 
   await verifyTagTarget(refs.PLUGIN_ARTIFACT_TAG, artifact.commit);

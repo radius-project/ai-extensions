@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse as parseYaml } from "yaml";
 import {
   DEFAULT_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS,
@@ -76,6 +76,31 @@ jobs:
       - uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
 `
 };
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.resetModules();
+});
+
+describe("RADIUS_REF source pin", () => {
+  it("pins generated actions to the supplied build source commit", async () => {
+    const source = "a".repeat(40);
+    vi.stubEnv("RADIUS_SOURCE_REF", source);
+    vi.resetModules();
+
+    const reloaded = await import("./deploy.js");
+    const files = reloaded.generateDeployWorkflow(
+      "prod",
+      ".radius/app.bicep",
+      BASE_TEMPLATES
+    );
+
+    expect(reloaded.RADIUS_REF).toBe(source);
+    expect(files[DEPLOY_AZURE_FILE]).toContain(
+      `radius-project/ai-extensions/.github/extension/actions/run-rad-commands@${source}`
+    );
+  });
+});
 
 describe("generateDeployWorkflow", () => {
   it("fills the reserved placeholders in every workflow", () => {

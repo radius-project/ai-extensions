@@ -13,9 +13,10 @@ name: Publish
 #
 # The build itself is not repeated: this reuses build.yml (same checks, same
 # artifact) and downloads its `plugin-dist-<plugin>` output. On every push to
-# main it force-recreates the channel branch as an ORPHAN holding only that
-# plugin's dist plus the marketplace catalog — one root commit, no source, no
-# history — then moves the branch and `<plugin>@edge` tag onto it. A stale
+# main it force-recreates the channel branch as an ORPHAN holding that plugin's
+# dist, the complete `.github/extension/` asset tree, and the marketplace
+# catalog — one root commit, no monorepo source or history — then moves the
+# branch and `<plugin>@edge` tag onto it. A stale
 # manual rerun is skipped when a newer main commit is already published.
 #
 # Before the first push the bundle gets signed build provenance and an SBOM
@@ -150,7 +151,8 @@ jobs:
           set -euo pipefail
           version="$(jq -er .version "$PLUGIN_DIST/package.json")"
           node scripts/validate-plugin-dist.mjs \
-            --plugin "$PLUGIN_NAME" --version "$version"
+            --plugin "$PLUGIN_NAME" --version "$version" \
+            --source "$GITHUB_SHA"
           echo "VERSION=$version" >>"$GITHUB_ENV"
 
       # build.yml ran in this same workflow run, so the provenance this records
@@ -266,15 +268,14 @@ jobs:
           node scripts/version.mjs \
             --set "$VERSION" --plugin "$PLUGIN_NAME" --channel edge
 
-          # The channel branch is an ORPHAN carrying only the built plugin and
-          # its catalog: no source, no history, one root commit per publish.
-          # Naming the two paths explicitly is what keeps anything else out of
-          # the published tree, and the API refuses to move on unless GitHub
-          # signed the commit and wrote it without parents. The source commit it
-          # was built from is recorded in the commit message.
+          # The channel branch is an ORPHAN carrying the built plugin, its
+          # catalog and a canonical-path copy of the workflow assets: no source,
+          # no history, one root commit per publish. Generated external `uses:`
+          # refs pin the source commit recorded in the commit message.
           commit="$(node scripts/verified-git.mjs commit \
             --message "chore(release): publish ${PLUGIN_NAME}@${VERSION} for ${GITHUB_SHA}" \
-            --path "$PLUGIN_DIST" --path "$MANIFEST" | jq -r .commit)"
+            --path "$PLUGIN_DIST" --path "$MANIFEST" \
+            --path ".github/extension" | jq -r .commit)"
 
           # Both names resolve to that one verified commit. They can no longer
           # move in a single atomic push, so the branch every install reads
