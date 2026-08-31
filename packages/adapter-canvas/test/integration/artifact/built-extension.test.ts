@@ -59,6 +59,10 @@ const DIST_CODE_REFERENCE = join(
   "references",
   "source-code-references.md"
 );
+const SOURCE_REF = execFileSync("git", ["rev-parse", "HEAD"], {
+  cwd: REPO_ROOT,
+  encoding: "utf8"
+}).trim();
 // Independent reviewed oracle: unlike importing the live declaration builders,
 // this fixture changes only when a contract update is deliberately accepted.
 const EXPECTED_REGISTRATION = JSON.parse(
@@ -71,6 +75,8 @@ const EXPECTED_REGISTRATION = JSON.parse(
 function filesUnder(path: string): string[] {
   if (!existsSync(path)) return [];
   return readdirSync(path, { withFileTypes: true }).flatMap((entry: Dirent) => {
+    // A locally installed nested action package is never part of the artifact.
+    if (entry.name === "node_modules") return [];
     const child = join(path, entry.name);
     return entry.isDirectory() ? filesUnder(child) : [child];
   });
@@ -83,12 +89,14 @@ function relativeFilesUnder(root: string): string[] {
 }
 
 function expectMatchingFile(source: string, destination: string): void {
-  expect(readFileSync(destination)).toEqual(readFileSync(source));
+  const expected = readFileSync(source);
+  const actual = readFileSync(destination);
+  expect(actual.equals(expected), destination).toBe(true);
 }
 
 function prepareBuildWorkspace(
   workspaceRoot: string,
-  missingAsset: readonly string[]
+  missingAsset: readonly string[] = []
 ): string {
   for (const entry of [".node-version", "pnpm-workspace.yaml"]) {
     copyFileSync(join(REPO_ROOT, entry), join(workspaceRoot, entry));
@@ -131,26 +139,16 @@ function prepareBuildWorkspace(
   cpSync(join(sourcePlugin, "skills"), join(workspacePlugin, "skills"), {
     recursive: true
   });
-  rmSync(join(workspacePlugin, "skills", ...missingAsset), {
-    recursive: true
-  });
+  if (missingAsset.length > 0) {
+    rmSync(join(workspacePlugin, "skills", ...missingAsset), {
+      recursive: true
+    });
+  }
 
-  // The build bundles the static environment-delete workflows from
-  // .github/extension/ (see copyStaticWorkflows in build.mjs). Stage them so the
-  // build reaches the install-copy step this test exercises instead of failing
-  // earlier on a missing static workflow asset.
+  // The complete workflow contract is a required plugin artifact input.
   const sourceExtension = join(REPO_ROOT, ".github", "extension");
   const workspaceExtension = join(workspaceRoot, ".github", "extension");
-  mkdirSync(workspaceExtension, { recursive: true });
-  for (const workflowFile of [
-    "delete-environment.yml",
-    "delete-environment-azure.yml"
-  ]) {
-    copyFileSync(
-      join(sourceExtension, workflowFile),
-      join(workspaceExtension, workflowFile)
-    );
-  }
+  cpSync(sourceExtension, workspaceExtension, { recursive: true });
 
   return workspaceAdapter;
 }
@@ -183,7 +181,8 @@ function assertCurrentArtifact(): void {
     join(REPO_ROOT, "plugins", "radius", "plugin.json"),
     join(REPO_ROOT, "plugins", "radius", "README.md"),
     ...(existsSync(SOURCE_CHANGELOG) ? [SOURCE_CHANGELOG] : []),
-    ...filesUnder(join(REPO_ROOT, "plugins", "radius", "skills"))
+    ...filesUnder(join(REPO_ROOT, "plugins", "radius", "skills")),
+    ...filesUnder(join(REPO_ROOT, ".github", "extension"))
   ];
   const newestInput = Math.max(
     ...productionInputs.map((path) => statSync(path).mtimeMs)
@@ -278,6 +277,8 @@ describe("P0-C built Radius extension artifact", () => {
     expect(bundle).not.toContain("vendorCache");
     expect(bundle).not.toContain("readVendorAssets");
     expect(bundle).not.toContain("react/umd/react.production.min.js");
+    expect(bundle).toContain(SOURCE_REF);
+    expect(bundle).not.toContain("RADIUS_SOURCE_REF");
     expect(normalizedSources).not.toEqual(
       expect.arrayContaining([
         expect.stringMatching(/packages\/adapter-canvas\/src\/client\.ts$/)
@@ -335,21 +336,15 @@ describe("P0-C built Radius extension artifact", () => {
       expect(existsSync(join(DIST, "CHANGELOG.md"))).toBe(false);
     }
 
-    // The environment-delete workflow (issue #303) is authored statically in
-    // this repo and must ship inside the plugin so an installed extension can
-    // commit it into the target repo. Assert both the dispatcher and its Azure
-    // provider are bundled under dist/workflows/ and match the source of truth.
-    for (const workflowFile of [
-      "delete-environment.yml",
-      "delete-environment-azure.yml"
-    ]) {
-      const bundled = join(DIST, "workflows", workflowFile);
-      expect(existsSync(bundled)).toBe(true);
-      expect(readFileSync(bundled, "utf8")).toBe(
-        readFileSync(
-          join(REPO_ROOT, ".github", "extension", workflowFile),
-          "utf8"
-        )
+    const sourceExtension = join(REPO_ROOT, ".github", "extension");
+    const bundledExtension = join(DIST, "workflows");
+    expect(relativeFilesUnder(bundledExtension)).toEqual(
+      relativeFilesUnder(sourceExtension)
+    );
+    for (const asset of relativeFilesUnder(sourceExtension)) {
+      expectMatchingFile(
+        join(sourceExtension, asset),
+        join(bundledExtension, asset)
       );
     }
 
@@ -374,6 +369,7 @@ describe("P0-C built Radius extension artifact", () => {
     );
     const expectedPackage = structuredClone(sourcePackage);
     expectedPackage.version = builtPackage.version;
+    expectedPackage.radiusSourceRef = SOURCE_REF;
     // Repository-only scripts do not ship: the installed plugin cannot run them.
     delete expectedPackage.scripts;
     delete expectedPackage.devDependencies;
@@ -600,8 +596,19 @@ describe("P0-C built Radius extension artifact", () => {
     const installDir = mkdtempSync(join(tmpdir(), "radius-canvas-install-"));
     const installPath = join(installDir, "extension.mjs");
     const unrelatedRootFile = join(installDir, "unrelated-root.txt");
+    const staleWorkflow = join(installDir, "workflows", "removed.yml");
+    const staleSkill = join(
+      installDir,
+      "skills",
+      "radius-app-graph",
+      "REMOVED.md"
+    );
     try {
       writeFileSync(unrelatedRootFile, "keep root\n");
+      mkdirSync(dirname(staleWorkflow), { recursive: true });
+      writeFileSync(staleWorkflow, "stale\n");
+      mkdirSync(dirname(staleSkill), { recursive: true });
+      writeFileSync(staleSkill, "stale\n");
 
       execFileSync(process.execPath, ["build.mjs", "--install"], {
         cwd: join(REPO_ROOT, "packages", "adapter-canvas"),
@@ -617,10 +624,12 @@ describe("P0-C built Radius extension artifact", () => {
         "extension.mjs.map",
         "THIRD-PARTY-NOTICES.txt",
         "package.json",
-        ...relativeFilesUnder(DIST_SKILL).map(
-          (filePath) => `skills/radius-app-bicep/${filePath}`
+        ...relativeFilesUnder(join(DIST, "workflows")).map(
+          (filePath) => `workflows/${filePath}`
         ),
-        "skills/radius-app-graph/references/source-code-references.md"
+        ...relativeFilesUnder(join(DIST, "skills")).map(
+          (filePath) => `skills/${filePath}`
+        )
       ];
       for (const managedFile of managedFiles) {
         expectMatchingFile(
@@ -629,42 +638,8 @@ describe("P0-C built Radius extension artifact", () => {
         );
       }
       expect(readFileSync(unrelatedRootFile, "utf8")).toBe("keep root\n");
-    } finally {
-      rmSync(installDir, { recursive: true, force: true });
-    }
-  });
-
-  it("installs every skill file, not just the scripts", () => {
-    const installDir = mkdtempSync(join(tmpdir(), "radius-canvas-install-"));
-    const installPath = join(installDir, "extension.mjs");
-    try {
-      // Seed a file that no longer exists upstream. A merging copy would leave
-      // it behind for the agent to read.
-      const staleDir = join(installDir, "skills", "radius-app-graph");
-      mkdirSync(staleDir, { recursive: true });
-      writeFileSync(join(staleDir, "REMOVED.md"), "stale", "utf8");
-
-      execFileSync(process.execPath, ["build.mjs", "--install"], {
-        cwd: join(REPO_ROOT, "packages", "adapter-canvas"),
-        env: { ...process.env, RADIUS_CANVAS_INSTALL_PATH: installPath },
-        stdio: "pipe"
-      });
-
-      // SKILL.md and its references are the instructions the agent follows, so
-      // an install that refreshes only the bundle runs stale guidance against a
-      // fresh extension.
-      const skillsRoot = join(DIST, "skills");
-      const skillFiles = filesUnder(skillsRoot);
-      expect(skillFiles.some((path) => path.endsWith("SKILL.md"))).toBe(true);
-      for (const source of skillFiles) {
-        const relative = source.slice(skillsRoot.length + 1);
-        const installed = join(installDir, "skills", relative);
-        expect(existsSync(installed)).toBe(true);
-        expect(readFileSync(installed, "utf8")).toBe(
-          readFileSync(source, "utf8")
-        );
-      }
-      expect(existsSync(join(staleDir, "REMOVED.md"))).toBe(false);
+      expect(existsSync(staleWorkflow)).toBe(false);
+      expect(existsSync(staleSkill)).toBe(false);
     } finally {
       rmSync(installDir, { recursive: true, force: true });
     }
@@ -706,6 +681,7 @@ describe("P0-C built Radius extension artifact", () => {
           encoding: "utf8",
           env: {
             ...process.env,
+            RADIUS_SOURCE_REF: SOURCE_REF,
             RADIUS_CANVAS_INSTALL_PATH: installPath
           }
         });
@@ -722,4 +698,25 @@ describe("P0-C built Radius extension artifact", () => {
       }
     }
   );
+
+  it("rejects a mutable source ref before building", () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "radius-canvas-mutable-source-")
+    );
+    try {
+      const buildDirectory = prepareBuildWorkspace(workspaceRoot);
+      const result = spawnSync(process.execPath, ["build.mjs"], {
+        cwd: buildDirectory,
+        encoding: "utf8",
+        env: { ...process.env, RADIUS_SOURCE_REF: "main" }
+      });
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(
+        "RADIUS_SOURCE_REF must be the full source commit SHA"
+      );
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
 });
