@@ -40,6 +40,12 @@ jobs:
         with:
           node-version-file: .node-version
 
+      - name: Install yq
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          YQ_VERSION: v4.53.3
+        run: bash .github/extension/actions/load-contrib-catalog/install-yq.sh
+
       - name: Shellcheck extension scripts
         shell: bash
         run: |

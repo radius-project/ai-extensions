@@ -92,6 +92,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install yq
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          YQ_VERSION: v4.53.3
+        run: bash .github/extension/actions/load-contrib-catalog/install-yq.sh
+
       - name: Run live upstream workflow tests
         env:
           # The templates live in this internal repo, so the live suites read
