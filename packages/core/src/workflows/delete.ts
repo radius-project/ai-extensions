@@ -1,12 +1,13 @@
 import { assertNoUnresolvedPlaceholders, fillTemplate } from "./template.js";
 import { RADIUS_REF } from "./deploy.js";
 
-// The ref of radius-project/radius that hosts the delete workflow templates and
-// the `delete-resource` composite action. These now live on `main`, so both the
-// template fetch and the `{{RADIUS_REF}}` the provider workflows pin their
-// composite actions to default to RADIUS_REF ("main"). It can be overridden via
-// the RADIUS_DELETE_REF env var (e.g. pin to a commit SHA or a PR branch) so the
-// delete templates can be re-pinned without releasing a new core package.
+// The ref of radius-project/ai-extensions that hosts the delete workflow
+// templates and the `delete-resource` composite action. These live on `main`,
+// so both the template fetch and the `{{RADIUS_REF}}` the provider workflows
+// pin their composite actions to default to RADIUS_REF ("main"). It can be
+// overridden via the RADIUS_DELETE_REF env var (e.g. pin to a commit SHA or a
+// PR branch) so the delete templates can be re-pinned without releasing a new
+// core package.
 export const DELETE_RADIUS_REF = process.env.RADIUS_DELETE_REF || RADIUS_REF;
 
 // Committed delete-workflow file names. The application-delete dispatcher plus
@@ -39,7 +40,7 @@ export type DeleteWorkflowFiles = Record<string, string>;
 
 /**
  * Build the delete GitHub Actions workflows, mirroring the composite-action
- * structure of radius-project/radius.
+ * structure of radius-project/ai-extensions.
  *
  * Returns the files committed to the target repo's `.github/workflows/`: the
  * `delete-application.yml` and `delete-environment.yml` dispatchers plus the
@@ -49,13 +50,9 @@ export type DeleteWorkflowFiles = Record<string, string>;
  * default); the provider workflows also pin their composite actions to
  * `{{RADIUS_REF}}`.
  *
- * `templates` maps the committed file name to the raw template body. The
- * application-delete templates are fetched from `radius-project/radius`; the
- * environment-delete templates (`delete-environment.yml` and
- * `delete-environment-azure.yml`) are static assets owned by
- * radius-project/ai-extensions and read from the bundled plugin. Either way the
- * caller must supply every file; there is no fallback, so a missing file is a
- * hard error.
+ * `templates` maps the committed file name to the raw template body fetched
+ * from `radius-project/ai-extensions`. The caller must supply every file;
+ * there is no fallback, so a missing file is a hard error.
  */
 export function generateDeleteWorkflow(
   env: string,
@@ -65,7 +62,7 @@ export function generateDeleteWorkflow(
     const body = templates[file];
     if (!body) {
       throw new Error(
-        `Missing delete template "${file}". Templates must be fetched from radius-project/radius/.github/extension at "${DELETE_RADIUS_REF}".`
+        `Missing delete template "${file}". Templates must be fetched from radius-project/ai-extensions/.github/extension at "${DELETE_RADIUS_REF}".`
       );
     }
     return body;

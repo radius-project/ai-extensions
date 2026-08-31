@@ -1,6 +1,6 @@
 # Static delete-environment dispatcher, owned by radius-project/ai-extensions
 # (issue #303). Unlike the deploy/verify/delete-application workflows — which are
-# fetched from radius-project/radius at commit time — this file and its Azure
+# fetched from radius-project/ai-extensions at commit time — this file and its Azure
 # provider (delete-environment-azure.yml) live here so the environment-delete
 # safety guard (refuse to delete an environment that still has deployed apps)
 # can be owned and reviewed in this repo. The extension commits both files
