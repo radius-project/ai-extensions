@@ -12,7 +12,7 @@ name: Cloud E2E
 # infrastructure failure, or leaked state from an earlier run - and treating
 # them as one destroys the signal this tier exists to provide.
 #
-# THIS WORKFLOW HAS NEVER EXECUTED. Four prerequisites are outstanding, none of
+# THIS WORKFLOW HAS NEVER EXECUTED. Five prerequisites are outstanding, none of
 # them in this repository:
 #
 #   1. radius-project/wellknown#134 (the Terraform that publishes the identity
@@ -21,13 +21,16 @@ name: Cloud E2E
 #      or that Terraform apply fails `Authorization_RequestDenied`.
 #   3. The publishing GitHub App must be installed on this repository. Terraform
 #      cannot install an App, so that half is manual.
-#   4. The fixture repository does not exist. `FIXTURE_BASELINE_SHA` in
+#   4. The dedicated Cloud E2E GitHub App must be created, installed only on the
+#      fixture repository, and its client id and private key stored here as
+#      `CLOUD_E2E_BOT_CLIENT_ID` and `CLOUD_E2E_BOT_PRIVATE_KEY`.
+#   5. The fixture repository does not exist. `FIXTURE_BASELINE_SHA` in
 #      packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts is
 #      still forty zeros, which makes the suite skip rather than pass hollowly.
 #
-# Until then the run reaches `pnpm test:cloud` and skips with a specific reason.
-# That is the designed behaviour, not a silent pass: the gate in
-# `support/create-environment-journey.ts` names exactly what is missing.
+# While the fixture variable is unpublished, the run stops after checkout with a
+# specific notice. If the variable lands before the source pin, the suite's own
+# gate skips at `pnpm test:cloud` and names the placeholder fields.
 
 on:
   # Deliberately NOT `pull_request_target`, and deliberately NOT `merge_group`.
@@ -85,14 +88,13 @@ jobs:
     # not `az`, `gh`, or `kubectl`, and cloud mode runs the real ones - the
     # whole point of the tier. Browsers are installed explicitly below instead.
     runs-on: ubuntu-24.04
-    # Strictly greater than the Playwright timeout, which is 45 minutes in
-    # packages/adapter-canvas/playwright.cloud.config.ts. The ordering is the
-    # requirement: Playwright must be the thing that gives up first, because it
-    # writes the trace on the way out. If GitHub cancelled the job first, the
-    # single most useful diagnostic for a run nobody can reproduce locally is
-    # exactly what would be lost. The remaining headroom covers dependency
-    # install, browser download, AKS provisioning in `beforeAll`, teardown, and
-    # artifact upload - none of which are inside the per-test budget.
+    # Strictly greater than Playwright's 45-minute per-test timeout and 75-minute
+    # global timeout in packages/adapter-canvas/playwright.cloud.config.ts. The
+    # ordering is the requirement: Playwright must be the thing that gives up
+    # first, because it writes the trace on the way out. If GitHub cancelled the
+    # job first, the single most useful diagnostic for a run nobody can reproduce
+    # locally is exactly what would be lost. The remaining headroom covers
+    # dependency install, browser download, teardown, and artifact upload.
     timeout-minutes: 90
     permissions:
       contents: read # actions/checkout
@@ -155,6 +157,28 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
 
+      # The variable scopes the installation token, while the suite clones the
+      # source-pinned repository. Refuse a mismatch before authenticating so the
+      # two trust boundaries cannot quietly point at different repositories.
+      - name: Verify the published fixture repository matches the pin
+        if: steps.fixture.outputs.configured == 'true'
+        env:
+          PUBLISHED: ${{ steps.fixture.outputs.full-name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            const pin = await import(
+              "./packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts"
+            );
+            if (process.env.PUBLISHED !== pin.FIXTURE_REPOSITORY) {
+              console.error(
+                `::error::AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY is "${process.env.PUBLISHED}" but the suite is pinned to "${pin.FIXTURE_REPOSITORY}". Refusing to run against an ambiguous scope.`
+              );
+              process.exit(1);
+            }
+          '
+
       - name: Install dependencies
         if: steps.fixture.outputs.configured == 'true'
         run: pnpm install --frozen-lockfile
@@ -192,6 +216,7 @@ jobs:
           private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
           owner: ${{ steps.fixture.outputs.owner }}
           repositories: ${{ steps.fixture.outputs.name }}
+          permission-actions: read
           permission-administration: read
           permission-contents: write
           permission-environments: write
@@ -229,7 +254,7 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          out="$RUNNER_TEMP/cloud-e2e-diagnostics"
+          out="$RUNNER_TEMP/cloud-e2e-artifact"
           mkdir -p "$out"
 
           az version >"$out/az-version.json" 2>&1 || true
@@ -263,15 +288,26 @@ jobs:
               >"$out/gh-fixture-repository.txt"
           fi
 
+      - name: Stage Playwright traces and report
+        if: always() && steps.fixture.outputs.configured == 'true'
+        shell: bash
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/cloud-e2e-artifact"
+          mkdir -p "$out/test-results"
+          if [[ -d packages/adapter-canvas/test-results/cloud ]]; then
+            cp -R packages/adapter-canvas/test-results/cloud "$out/test-results/cloud"
+          fi
+          if [[ -d packages/adapter-canvas/playwright-report-cloud ]]; then
+            cp -R packages/adapter-canvas/playwright-report-cloud "$out/playwright-report-cloud"
+          fi
+
       - name: Upload traces, reports, and cloud diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cloud-e2e-diagnostics
-          path: |
-            packages/adapter-canvas/test-results/cloud
-            packages/adapter-canvas/playwright-report-cloud
-            ${{ runner.temp }}/cloud-e2e-diagnostics
+          path: ${{ runner.temp }}/cloud-e2e-artifact
           if-no-files-found: warn
           retention-days: 14
 

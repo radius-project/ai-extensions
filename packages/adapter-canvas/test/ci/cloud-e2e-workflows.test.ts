@@ -188,17 +188,20 @@ describe("cloud-e2e.yml", () => {
     expect(workflow.jobs?.["cloud-e2e"]?.if).toBe(GUARD);
   });
 
-  it("gives the job a longer budget than Playwright's own test timeout", async () => {
+  it("gives the job a longer budget than Playwright's test and suite timeouts", async () => {
     // The ordering is the requirement, not the numbers: Playwright has to be
     // the thing that gives up first, because it writes the trace on the way
-    // out. Both values are derived, so changing either keeps the invariant
+    // out. All values are derived, so changing any of them keeps the invariant
     // honest instead of silently invalidating a hardcoded pair.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const jobMinutes = workflow.jobs?.["cloud-e2e"]?.["timeout-minutes"];
     const playwrightMinutes = (cloudConfig.timeout ?? 0) / 60_000;
+    const playwrightGlobalMinutes = (cloudConfig.globalTimeout ?? 0) / 60_000;
 
     expect(playwrightMinutes).toBeGreaterThan(0);
+    expect(playwrightGlobalMinutes).toBeGreaterThan(playwrightMinutes);
     expect(jobMinutes).toBeGreaterThan(playwrightMinutes);
+    expect(jobMinutes).toBeGreaterThan(playwrightGlobalMinutes);
   });
 
   it("switches the suite on and runs it", async () => {
@@ -232,20 +235,34 @@ describe("cloud-e2e.yml", () => {
     const token = steps(workflow.jobs?.["cloud-e2e"]).find((step) =>
       step.uses?.startsWith("actions/create-github-app-token@")
     );
+    expect(token?.with?.["permission-actions"]).toBe("read");
     expect(token?.with?.["permission-workflows"]).toBe("write");
     expect(token?.with?.["permission-environments"]).toBe("write");
   });
 
-  it("uploads diagnostics whether or not the run failed", async () => {
+  it("stages and uploads one predictable diagnostics tree whether or not the run failed", async () => {
     // `always()`, because a run that fails during teardown still produced the
     // trace that explains it, and a passing run's artifact is the baseline a
     // later failure is read against.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
-    const upload = steps(workflow.jobs?.["cloud-e2e"]).find((step) =>
+    const jobSteps = steps(workflow.jobs?.["cloud-e2e"]);
+    const collect = jobSteps.find(
+      (step) => step.name === "Collect az and gh diagnostics"
+    );
+    const stage = jobSteps.find(
+      (step) => step.name === "Stage Playwright traces and report"
+    );
+    const upload = jobSteps.find((step) =>
       step.uses?.startsWith("actions/upload-artifact@")
     );
+    expect(collect?.run).toContain('out="$RUNNER_TEMP/cloud-e2e-artifact"');
+    expect(stage?.if).toContain("always()");
+    expect(stage?.run).toContain("packages/adapter-canvas/test-results/cloud");
+    expect(stage?.run).toContain(
+      "packages/adapter-canvas/playwright-report-cloud"
+    );
     expect(upload?.if).toBe("always()");
-    expect(String(upload?.with?.path)).toContain("test-results/cloud");
+    expect(upload?.with?.path).toBe("${{ runner.temp }}/cloud-e2e-artifact");
   });
 
   it("collects the fixture repository's own failing workflow logs", async () => {
@@ -291,6 +308,20 @@ describe("cloud-e2e.yml", () => {
     expect(names.indexOf("Resolve the fixture repository")).toBeLessThan(
       names.indexOf("Install dependencies")
     );
+  });
+
+  it("refuses to run when the published fixture and source pin disagree", async () => {
+    const workflow = await parseWorkflow(RUN_WORKFLOW);
+    const verify = steps(workflow.jobs?.["cloud-e2e"]).find(
+      (step) =>
+        step.name === "Verify the published fixture repository matches the pin"
+    );
+
+    expect(verify?.if).toContain("steps.fixture.outputs.configured == 'true'");
+    expect(verify?.run).toContain(
+      "test/e2e-cloud/support/fixture-repository.ts"
+    );
+    expect(verify?.run).toContain("Refusing to run against an ambiguous scope");
   });
 });
 
