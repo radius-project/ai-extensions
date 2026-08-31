@@ -65,7 +65,7 @@ Rules:
 - `containerPort` exposes the process port; it does not configure the process listener
 - `command` replaces the image `ENTRYPOINT`, and `args` replaces `CMD`; override only after inspecting the image contract and required binaries
 - Never **set** a read-only property. Reference a nonsecret read-only output only when the exact schema declares it and the exact target Recipe explicitly maps it
-- A connection to an authored secret uses `<secret>.id`; a connection for Recipe-generated secret outputs uses only `<producer>.id`. Generated secret-backed variable suffixes follow the authored data key or Recipe output key
+- A connection to an authored or reused Secret uses `<secret>.id`; a connection for Recipe-generated `result.secrets` entries uses only `<producer>.id`. Generated secret-backed variable suffixes are the uppercased authored data key or Recipe result key; case-normalized Secret-key collisions fail validation
 - An explicit `env` entry with the same name takes precedence over a generated connection variable. `disableDefaultEnvVars: true` suppresses all generated variables for that connection
 - A direct resource output, image, or secret reference creates dependency ordering; `connections` is not mandatory for ordering except when connection projection is consumed
 - Include every co-scheduled role required by the selected profile in the `containers` map. A producer, consumer, proxy, worker, or sidecar must have its own complete image/process/configuration entry
@@ -303,7 +303,7 @@ Rules:
 - Developer-facing props (`database`, `version`, `size`, `topic`, `queue`, `container`) are derived from source — do NOT hardcode; only set properties the schema defines
 - Do NOT set readOnly properties (`host`, `port`, `connectionString`) — these are recipe outputs
 - A nonsecret read-only output such as `host`, `port`, or `endpoint` may be referenced for app-native wiring only when the exact schema declares it and the selected Recipe explicitly maps it. Schema presence alone is insufficient; use a provider-fixed literal only with proof from the concrete provider contract
-- Resolve sensitive outputs from the exact schema and recipe. If that version exposes managed-secret metadata, bind its declared name/key directly through `valueFrom.secretKeyRef`; never copy the value into an authored secret or guess a sibling convenience property. Do not assume one universal `properties.secrets` shape. See [secrets-handling.md](secrets-handling.md)
+- Resolve sensitive results from the exact schema and Recipe `result.secrets` contract. On a verified compatible Kubernetes Container Recipe, connect to the producer for standard `CONNECTION_*` projection; for an explicit custom Kubernetes environment name, bind its declared name/key through `valueFrom.secretKeyRef`. Never copy the value into an authored Secret or guess a sibling convenience property. See [secrets-handling.md](secrets-handling.md)
 - A selected resource is incomplete until a workload's primary feature consumes its exact subresource, endpoint, protocol/TLS/auth settings, and secret contract
 
 ## Radius.Security/secrets structure
@@ -340,7 +340,7 @@ Rules:
 - Keys in `data` must match their exact consumer or schema contract; do not impose universal casing
 - `USERNAME` is the database administrator you author (e.g. `myadmin`) — it is not derived from the source
 - A developer-supplied credential consumed through connection projection belongs in an authored `Radius.Security/secrets`; connect the workload to `<secret>.id` so Radius injects a secret-backed `CONNECTION_<CONNECTION>_<SECRETKEY>` variable
-- For Recipe-generated credentials, connect only to `<producer>.id`. Use `valueFrom.secretKeyRef` with `<producer>.properties.secrets.name` and the declared Recipe output key only when an explicit custom Kubernetes environment variable name is required
+- For Recipe-generated credentials, connect only to `<producer>.id`. Use `valueFrom.secretKeyRef` with `<producer>.properties.secrets.name` and the declared Recipe `result.secrets` key only when an explicit custom Kubernetes environment variable name is required
 - Never use `<producer>.properties.secrets.name` as a connection source or author a secret to wrap a Recipe output
 - Never use authored secret `data.value` interpolation to manufacture a credential-bearing URL or configuration value
 

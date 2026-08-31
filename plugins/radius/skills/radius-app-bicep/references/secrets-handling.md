@@ -11,7 +11,7 @@ For every secret, inspect:
 3. the exact `Radius.Security/secrets` and `Radius.Compute/containers` schemas for authored-secret connections, producer connections, and `secretKeyRef` support; and
 4. the application source for the final native variable/configuration name and required format.
 
-Preserve the application's exact environment contract. Connection projection uses `CONNECTION_<CONNECTION>_<SECRETKEY>`; the suffix follows the authored secret data key or Recipe secret output key. When the application requires a different Kubernetes environment name, bind that name explicitly through `secretKeyRef`.
+Preserve the application's exact environment contract. Connection projection uses `CONNECTION_<CONNECTION>_<SECRETKEY>`; the suffix is the uppercased authored Secret data key or Recipe `result.secrets` key. When the application requires a different Kubernetes environment name, bind that name explicitly through `secretKeyRef`.
 
 Never hardcode passwords, tokens, keys, or credential-bearing URLs. Use a `@secure()` parameter for developer-supplied Bicep inputs, including values placed in an authored `Radius.Security/secrets` resource. When an existing application also requires a different native environment name, an explicit `env.value` from that same secure parameter may coexist with the authored-secret connection to preserve behavior.
 
@@ -23,7 +23,7 @@ Follow the exact resource schema:
 - If it defines a secret reference such as `secretName`, author the supported secret resource and reference it exactly as the schema requires.
 - If it defines no credential input, do not invent one.
 
-When the workload consumes a developer-supplied credential through connection projection, author a `Radius.Security/secrets` resource and connect the workload to its resource ID. A sensitive backing-resource input is not readable back from that resource, so do not connect to the backing resource and expect Radius to project the supplied value:
+When the workload consumes a developer-supplied credential through connection projection, author or reuse a `Radius.Security/secrets` resource and connect the workload to its resource ID. A sensitive backing-resource input is not readable back from that resource, so do not connect to the backing resource and expect Radius to project the supplied value. Developer-owned inputs remain inputs and must not be returned through Recipe `result.secrets`, as reflected by the PostgreSQL and MySQL ownership corrections in [resource-types-contrib#298](https://github.com/radius-project/resource-types-contrib/pull/298) and [resource-types-contrib#315](https://github.com/radius-project/resource-types-contrib/pull/315):
 
 ```bicep
 @secure()
@@ -40,7 +40,7 @@ resource mysql 'Radius.Data/mySqlDatabases@2025-08-01-preview' = {
 }
 
 resource mysqlCredentials 'Radius.Security/secrets@2025-08-01-preview' = {
-  name: 'mysql-credentials'
+  name: 'mysql-client-credentials'
   properties: {
     environment: environment
     application: app.id
@@ -71,13 +71,13 @@ resource apiContainer 'Radius.Compute/containers@2025-08-01-preview' = {
 }
 ```
 
-The connection above injects secret-backed `CONNECTION_DATABASE_PASSWORD`; `PASSWORD` follows the authored `password` data key. The names are illustrative. Confirm the resource properties, connection key, secret data key, generated environment name, and required value format against the target version and source. If the application requires a different native name, model an explicit supported binding rather than assuming the connection renames it.
+The connection above injects secret-backed `CONNECTION_DATABASE_PASSWORD`; `PASSWORD` is the uppercased authored `password` data key. The names are illustrative. Confirm the resource properties, connection key, Secret data key, generated environment name, and required value format against the target version and source. Keep the authored Secret name distinct from Recipe-owned Kubernetes Secret names. If the application requires a different native name, model an explicit supported binding rather than assuming the connection renames it.
 
-## Recipe-generated secret outputs
+## Recipe-generated secret results
 
-Some Recipes generate sensitive values such as access keys, URLs, or connection strings. Their contract varies:
+Some Recipes generate sensitive values such as access keys, URLs, or connection strings through `result.secrets`. Their contract varies:
 
-- a schema version may expose a public managed-secret name and declared secret output keys;
+- a schema version may expose a public managed-secret name and declared `result.secrets` keys;
 - another version may use a different output shape or key names; or
 - the configured recipe may not expose the value in a form containers can bind.
 
@@ -91,9 +91,9 @@ connections: {
 }
 ```
 
-If the Recipe declares an `apiKey` secret output, Radius injects it as secret-backed `CONNECTION_SERVICE_APIKEY`. The `APIKEY` suffix follows the exact Recipe output key; it does not come from a guessed resource property. Connect only to `service.id`, not `service.properties.secrets.name`.
+If the Recipe declares `apiKey` in `result.secrets`, Radius injects it as secret-backed `CONNECTION_SERVICE_APIKEY`. The `APIKEY` suffix is the uppercased exact result key; it does not come from a guessed resource property. Connect only to `service.id`, not `service.properties.secrets.name`.
 
-Radius materializes Recipe secret outputs into a managed Kubernetes Secret and keeps `<producer>.properties.secrets.name` public as that Kubernetes Secret name. Use it only when the application requires an explicit custom environment name:
+Radius materializes Recipe `result.secrets` entries into a managed Kubernetes Secret and keeps `<producer>.properties.secrets.name` public as that Kubernetes Secret name. Use it only when the application requires an explicit custom environment name:
 
 ```bicep
 APP_API_KEY: {
@@ -106,7 +106,7 @@ APP_API_KEY: {
 }
 ```
 
-The key must be declared by the exact Recipe output contract. Never create an authored `Radius.Security/secrets` wrapper whose `data` copies a Recipe-generated value from a resource property. An authored secret is not an adapter for a missing or different output shape.
+The key must be declared by the exact Recipe `result.secrets` contract. Never create an authored `Radius.Security/secrets` wrapper whose `data` copies a Recipe-generated value from a resource property. An authored secret is not an adapter for a missing or different output shape.
 
 The public Recipe-managed property is `properties.secrets.name`; do not invent an alternate nested identifier or guess a key. If the exact schema/Recipe does not expose the required managed-secret name and key, report the gap. If a mutable compiled extension disagrees with that exact contract, report version drift rather than inventing a convenience property or wrapper.
 
@@ -146,7 +146,7 @@ Kubernetes expands `$(VAR_NAME)` only from variables earlier in the container's 
 
 What the Kubernetes recipe does guarantee is that `secretKeyRef` variables are emitted before plain `value` variables. So a composed value can always read a secret-backed helper, whatever the two keys are called, and that is the form to prefer.
 
-Two plain values are sorted against each other by name, which only matters for a developer-supplied credential: a `@secure()` parameter reaches the container through `env.value` and must not be routed through `secretKeyRef` or an authored secret, so `secretKeyRef` is not available to it and the helper is a plain value like its consumer. If the application dictates both names and the helper's does not sort first, this composition cannot be expressed — report that rather than renaming a key the application reads. `validate-bicep.mjs` fails the model when a plain value reads a plain helper that cannot reach it.
+Two plain values are sorted against each other by name. This still matters when preserving an existing developer-supplied `@secure()` `env.value` fallback: if the application dictates both names and the helper's does not sort first, that composition cannot be expressed — report it rather than renaming a key the application reads. On a verified compatible Kubernetes Container Recipe, an explicitly requested migration may instead use an authored or reused Secret connection, whose generated value is secret-backed and emitted before plain values. `validate-bicep.mjs` fails the model when a plain value reads a plain helper that cannot reach it.
 
 Verify this against the exact target recipe rather than carrying it over: the Azure ACI recipe emits every variable in one name-sorted list with no such separation, and `$(VAR_NAME)` expansion is a Kubernetes container behavior to begin with, so this composition pattern does not hold on every platform.
 
@@ -218,12 +218,13 @@ Do not return the definition as deployable with the dependency unwired, silently
 - The input property, authored secret, producer connection, managed-secret name, and key all exist in the exact configured schemas and Recipe.
 - Every container variable uses the exact native name and format read by source.
 - Every developer-supplied credential consumed through connection projection is in an authored `Radius.Security/secrets` connected through `<secret>.id`.
-- Every Recipe-generated credential consumed through standard connection projection comes from a connection to `<producer>.id`, and its `CONNECTION_<CONNECTION>_<SECRETKEY>` suffix follows the declared Recipe output key.
+- Every Recipe-generated credential consumed through standard connection projection comes from a connection to `<producer>.id`, and its `CONNECTION_<CONNECTION>_<SECRETKEY>` suffix is the uppercased declared Recipe `result.secrets` key.
 - Every custom Kubernetes environment name for a Recipe-generated credential uses `valueFrom.secretKeyRef` with `<producer>.properties.secrets.name` and the exact declared key.
 - No authored secret `data.value` references a recipe resource output or guessed convenience property.
 - No authored secret `data.value` interpolates an aggregate credential-bearing URL/config.
 - No secret is hardcoded, assumed URL-safe, or assumed to appear in generic connection variables.
 - An explicit `env` entry takes precedence over a generated connection variable of the same name. `disableDefaultEnvVars: true` suppresses all generated variables for that connection, so it is absent whenever the workload relies on a generated secret-backed value.
+- A managed `result.secrets` reference wins over an ordinary generated connection value with the same normalized name; Secret-derived keys that normalize to the same uppercase variable name fail validation.
 - `properties.secrets.name` remains the public Kubernetes Secret name for Recipe outputs; connections use the producer resource ID instead.
 - Runtime composition preserves dependency order, escaping, encoding, and image entrypoint behavior.
 - The credential shape the exact contract exposes matches the shape the pinned client parses, or the mismatch is reported. Address outputs stand alone only where the exact target Recipe is proven to provision no credential and the reply says so. No undeclared discrete property or secret key is invented, and no runtime split is assumed for an image with no shell.

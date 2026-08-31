@@ -2,4 +2,4 @@
 "radius": patch
 ---
 
-Clarify Kubernetes secret-backed connection compatibility and preserve supported fallback wiring on older or mixed Radius installations.
+Teach Radius app modeling to use Kubernetes secret-backed connections only with compatible Radius and Container Recipes, while preserving existing explicit secret wiring and ACI behavior.
