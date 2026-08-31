@@ -5,7 +5,8 @@ import {
   describeVerificationDispatch,
   hasWorkflowRunTrigger,
   parseVerifyWorkflowRunUrl,
-  planCredentialVerification
+  planCredentialVerification,
+  type PullRequestNextStep
 } from "./verification-plan.js";
 
 const dispatcher = (env: string, chain = true) => `name: Radius
@@ -192,6 +193,15 @@ describe("dispatch narration", () => {
 });
 
 describe("pull request next step", () => {
+  // Listed once so a new outcome cannot be added without the invariants below
+  // covering it.
+  const ALL_OUTCOMES = [
+    "verification-running",
+    "awaiting-merge",
+    "awaiting-credentials",
+    "awaiting-merge-and-credentials"
+  ] as const satisfies readonly PullRequestNextStep[];
+
   it("reports verification as running when the dispatch already went out", () => {
     expect(
       describePullRequestNextStep({
@@ -233,15 +243,26 @@ describe("pull request next step", () => {
     expect(message).not.toContain("to finish setup");
   });
 
-  // Only one of the three outcomes may promise that merging starts
+  // Merging is necessary here but not sufficient, so the guidance must name
+  // both blockers rather than implying the merge is the last step.
+  it("names both blockers when the merge and the credentials are outstanding", () => {
+    const message = describePullRequestNextStep({
+      outcome: "awaiting-merge-and-credentials",
+      baseBranch: "main",
+      ref: "radius/setup-dev-workflows-abc"
+    });
+    expect(message).toBe(
+      'Merge the pull request above to put the workflows on "main", and finish the cloud ' +
+        "credentials above. Credential verification is waiting on both, so merging alone " +
+        "will not start it."
+    );
+    expect(message).not.toContain("run once it lands");
+  });
+
+  // Only one of the four outcomes may promise that merging starts
   // verification, because it is the only one where that is true.
   it("promises verification follows the merge in exactly one outcome", () => {
-    const outcomes = [
-      "verification-running",
-      "awaiting-merge",
-      "awaiting-credentials"
-    ] as const;
-    const promising = outcomes.filter((outcome) =>
+    const promising = ALL_OUTCOMES.filter((outcome) =>
       /run once it lands/.test(
         describePullRequestNextStep({ outcome, baseBranch: "main", ref: "x" })
       )
@@ -252,11 +273,7 @@ describe("pull request next step", () => {
   // The two claims are opposites, so no single message may make both.
   it("never says verification waits for the merge while it is already running", () => {
     for (const baseBranch of ["main", "trunk"]) {
-      for (const outcome of [
-        "verification-running",
-        "awaiting-merge",
-        "awaiting-credentials"
-      ] as const) {
+      for (const outcome of ALL_OUTCOMES) {
         const message = describePullRequestNextStep({
           outcome,
           baseBranch,
@@ -271,7 +288,9 @@ describe("pull request next step", () => {
   });
 
   it("names the branch verification runs against only when it is running", () => {
-    for (const outcome of ["awaiting-merge", "awaiting-credentials"] as const) {
+    for (const outcome of ALL_OUTCOMES.filter(
+      (candidate) => candidate !== "verification-running"
+    )) {
       expect(
         describePullRequestNextStep({
           outcome,

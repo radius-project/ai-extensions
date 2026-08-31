@@ -154,18 +154,23 @@ export function describeVerificationDispatch({
 }
 
 // What the customer's pull request is actually waiting on, once the plan, the
-// cloud credentials, and the dispatch have all had their say. The three cases
-// are distinct next actions, so a boolean would fold the credential blocker
-// into the merge prompt and tell the customer to merge when merging is not
-// what unblocks them.
+// cloud credentials, and the dispatch have all had their say. Verification has
+// two independent blockers, the workflows not being on the default branch and
+// the cloud credentials being incomplete, and either, both, or neither can
+// hold. Collapsing them loses the case where merging is necessary but not
+// sufficient, and tells that customer the merge alone will start verification.
 export type PullRequestNextStep =
-  "verification-running" | "awaiting-merge" | "awaiting-credentials";
+  | "verification-running"
+  | "awaiting-merge"
+  | "awaiting-credentials"
+  | "awaiting-merge-and-credentials";
 
 // The pull-request guidance and the verification outcome are the same answer
 // told twice, so they are derived from one decision rather than predicted
 // before `planCredentialVerification`, the credential check, and the dispatch
 // have made it. Only `awaiting-merge` may promise that merging starts
-// verification, because it is the only case where that is true.
+// verification, because it is the only case where the merge is the last thing
+// standing in the way.
 export function describePullRequestNextStep({
   outcome,
   baseBranch,
@@ -179,6 +184,8 @@ export function describePullRequestNextStep({
     return `Credential verification is running against branch "${ref}", so it is not waiting for the merge. Merging the pull request above puts the workflows on "${baseBranch}".`;
   if (outcome === "awaiting-credentials")
     return `Merging the pull request above puts the workflows on "${baseBranch}", but credential verification is waiting on the cloud credentials above, not on the merge.`;
+  if (outcome === "awaiting-merge-and-credentials")
+    return `Merge the pull request above to put the workflows on "${baseBranch}", and finish the cloud credentials above. Credential verification is waiting on both, so merging alone will not start it.`;
   return `Merge the pull request above to finish setup; credential verification and deploys run once it lands on "${baseBranch}".`;
 }
 

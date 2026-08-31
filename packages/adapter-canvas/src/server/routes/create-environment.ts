@@ -1289,13 +1289,18 @@ export async function handleCreateEnvironment(
     // The guidance waited for the whole decision, not just the plan. Every
     // path that skipped or failed the dispatch has already returned by here,
     // so this is the one place that knows what the pull request is actually
-    // waiting on rather than predicting it. The marker follows the same
-    // decision: an observation when verification is already running, a prompt
-    // only when the customer genuinely owes an action.
+    // waiting on rather than predicting it. The two blockers are independent,
+    // so they are read separately: merging is only the last step when the
+    // credentials are already complete. The marker follows the same decision,
+    // an observation when verification is already running and a prompt only
+    // when the customer genuinely owes an action.
     if (prState && pullRequestOpened) {
+      const awaitingMerge = !verifyPlan.shouldDispatch;
+      const awaitingCredentials = !credentialsComplete;
       const outcome: PullRequestNextStep =
-        !verifyPlan.shouldDispatch ? "awaiting-merge"
-        : !credentialsComplete ? "awaiting-credentials"
+        awaitingMerge && awaitingCredentials ? "awaiting-merge-and-credentials"
+        : awaitingMerge ? "awaiting-merge"
+        : awaitingCredentials ? "awaiting-credentials"
         : "verification-running";
       const nextStep = describePullRequestNextStep({
         outcome,

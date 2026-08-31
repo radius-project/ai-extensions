@@ -2667,6 +2667,32 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     ).toBe(true);
   });
 
+  // A first-time setup on a protected branch: the verify workflow is not on
+  // the default branch yet AND the cloud credentials are incomplete. Merging
+  // is necessary but not sufficient, so promising verification runs once it
+  // lands would be the same false promise in a case where two things block it.
+  it("names both blockers when the merge and the credentials are outstanding", async () => {
+    const harness = start({
+      ...protectedScript,
+      azureCredential: () => ({ clientId: "c", tenantId: "t" })
+    });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(await response.json()).toMatchObject({ actionRequired: true });
+    expect(harness.steps.filter((step) => step.startsWith("👉"))).toEqual([
+      '👉 Merge the pull request above to put the workflows on "main", and finish the ' +
+        "cloud credentials above. Credential verification is waiting on both, so merging " +
+        "alone will not start it."
+    ]);
+    expect(
+      harness.steps.some((step) => step.includes("run once it lands"))
+    ).toBe(false);
+    expect(
+      harness.ghCalls.some((call) => call.startsWith("workflow run "))
+    ).toBe(false);
+  });
+
   it("gives no merge guidance when the pull request was never opened", async () => {
     const harness = start({
       ...protectedScript,
