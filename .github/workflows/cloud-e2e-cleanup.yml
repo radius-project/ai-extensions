@@ -1,0 +1,301 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+---
+name: Cloud E2E Cleanup
+
+# Reclaims what a crashed Cloud E2E run leaks. `dispose()` runs from an
+# `always()` teardown, so this workflow exists for the case where the runner
+# dies outright and no teardown ever runs at all.
+#
+# SCOPE, and the boundary matters:
+#
+#   In scope   Leaked Entra applications older than six hours, stale GitHub
+#              Environments older than six hours, and resetting the fixture
+#              repository's default branch to the pinned baseline.
+#
+#   NOT in     Resource groups. This is deliberate and is a cross-repository
+#   scope      dependency, recorded here so a future reader does not "fix" the
+#              apparent gap. The Radius purge job already deletes resource
+#              groups matching `^radtest-` older than six hours, twice daily,
+#              in this same subscription. The per-run group is named
+#              `radtest-canvas-<uid>` - see `RESOURCE_GROUP_PREFIX` in
+#              packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts
+#              - precisely so that job is our safety net for free. Sweeping
+#              them here would duplicate a job we do not own and would put a
+#              second deleter on a shared subscription.
+#
+#   NOT in     `radius/setup-*` workflow fallback branches. They are selected
+#   scope      per run by environment name, so a stale one cannot be mistaken
+#              for a later run's, and deleting branches needs a broader grant
+#              than this workflow otherwise holds.
+#
+# Everything destructive here is named exactly, never matched by wildcard, and
+# never applied to something younger than the age threshold - so a purge can
+# never race a run that is still using its own state. The shared concurrency
+# group with cloud-e2e.yml is the other half of that guarantee.
+#
+# See docs/eng/CLOUD_E2E_RUNBOOK.md. Like cloud-e2e.yml, this has never
+# executed: the fixture repository does not exist yet, and the pin below is
+# still a placeholder, so every run so far would no-op by design.
+
+on:
+  # Never `pull_request_target`, and never any pull-request trigger at all.
+  # This workflow deletes things; nothing a contributor can trigger should
+  # reach it.
+  schedule:
+    # 02:07 and 14:07 UTC. Twice daily, matching the six-hour age threshold's
+    # cadence, and offset from the 04:23 Cloud E2E run.
+    - cron: "7 2,14 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+# Shared with cloud-e2e.yml on purpose: a purge must never run while a journey
+# is in flight, or it would delete the Entra application, Environment, or branch
+# state that run is actively asserting on. `cancel-in-progress: false` so a
+# queued purge waits for the run rather than displacing it.
+concurrency:
+  group: cloud-e2e-shared-cloud-estate
+  cancel-in-progress: false
+
+jobs:
+  purge:
+    name: Reclaim leaked cloud and GitHub state
+    # A fork that enables scheduled workflows would otherwise point a deletion
+    # job at our subscription and our fixture repository.
+    if: github.repository == 'radius-project/ai-extensions'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read # actions/checkout
+      id-token: write # OIDC token exchanged for an Azure token by azure/login
+    env:
+      # Matches the Radius purge job's own threshold, and is comfortably longer
+      # than the 90-minute ceiling a Cloud E2E run can occupy.
+      MAX_AGE_HOURS: "6"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      # The pin is read from the suite's own source rather than restated here.
+      # `FIXTURE_BASELINE_SHA` is `"0".repeat(40)` today, so a copy in YAML
+      # could not even express it, and a second copy of a reset target is
+      # exactly the kind of drift that turns a cleanup job into a destructive
+      # operation against the wrong scope. Node 24 strips the types natively,
+      # so this needs no build and no dependency install.
+      - name: Resolve the pinned fixture repository
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            const pin = await import(
+              "./packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts"
+            );
+            const provisioned = pin.isFixtureRepositoryProvisioned();
+            const lines = [
+              `provisioned=${provisioned}`,
+              `repository=${pin.FIXTURE_REPOSITORY}`,
+              `owner=${pin.FIXTURE_REPO_OWNER}`,
+              `name=${pin.FIXTURE_REPO_NAME}`,
+              `default-branch=${pin.FIXTURE_REPO_DEFAULT_BRANCH}`,
+              `baseline-sha=${pin.FIXTURE_BASELINE_SHA}`,
+              `application-name=${pin.appRegistrationName()}`,
+              `environment-prefix=${pin.ENVIRONMENT_NAME_PREFIX}`,
+              `reason=${pin.describeUnprovisionedFixtureRepository()}`
+            ];
+            await import("node:fs").then(({ appendFileSync }) =>
+              appendFileSync(process.env.GITHUB_OUTPUT, `${lines.join("\n")}\n`)
+            );
+          '
+
+      # A published variable that disagrees with the pinned constant means the
+      # runs and this purge are looking at two different repositories. Deleting
+      # against the wrong scope is the failure this check exists to prevent, so
+      # it fails the job rather than guessing which one is right.
+      - name: Verify the published variable matches the pin
+        if: vars.AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY != ''
+        env:
+          PUBLISHED: ${{ vars.AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY }}
+          PINNED: ${{ steps.pin.outputs.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$PUBLISHED" != "$PINNED" ]]; then
+            echo "::error::AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY is \"$PUBLISHED\" but the suite is pinned to \"$PINNED\". Refusing to purge against an ambiguous scope."
+            exit 1
+          fi
+
+      - name: Report that there is nothing to reclaim
+        if: steps.pin.outputs.provisioned != 'true'
+        env:
+          REASON: ${{ steps.pin.outputs.reason }}
+        shell: bash
+        run: |
+          echo "::notice::$REASON Nothing to purge."
+          echo "$REASON" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Sign in to Azure
+        if: steps.pin.outputs.provisioned == 'true'
+        uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Create a GitHub App token for the fixture repository
+        id: app-token
+        if: steps.pin.outputs.provisioned == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
+          owner: ${{ steps.pin.outputs.owner }}
+          repositories: ${{ steps.pin.outputs.name }}
+          permission-contents: write
+          permission-environments: write
+
+      # Matched by exact display name - the one the product derives from the
+      # fixture repository - and never by prefix. An application younger than
+      # the threshold, or one whose creation time Graph did not return, is left
+      # alone: without a provable age this cannot distinguish leaked state from
+      # a run in progress, and the safe answer is to do nothing.
+      - name: Purge leaked Entra applications
+        if: steps.pin.outputs.provisioned == 'true'
+        env:
+          APPLICATION_NAME: ${{ steps.pin.outputs.application-name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
+          applications="$RUNNER_TEMP/applications.json"
+          az ad app list \
+            --filter "displayName eq '$APPLICATION_NAME'" \
+            --query '[].{id:id,appId:appId,displayName:displayName,createdDateTime:createdDateTime}' \
+            -o json >"$applications"
+
+          skipped="$(jq -r --arg cutoff "$cutoff" \
+            '[.[] | select(.createdDateTime == null or .createdDateTime >= $cutoff)] | length' \
+            "$applications")"
+          if [[ "$skipped" != "0" ]]; then
+            echo "::notice::Left $skipped application(s) named $APPLICATION_NAME alone: newer than $cutoff, or Graph reported no creation time."
+          fi
+
+          purged=0
+          while read -r id; do
+            [[ -n "$id" ]] || continue
+            echo "Deleting leaked application $APPLICATION_NAME ($id), created before $cutoff."
+            az ad app delete --id "$id"
+            purged=$((purged + 1))
+          done < <(jq -r --arg cutoff "$cutoff" \
+            '.[] | select(.createdDateTime != null and .createdDateTime < $cutoff) | .id' \
+            "$applications")
+
+          echo "- Entra applications purged: $purged" >>"$GITHUB_STEP_SUMMARY"
+
+      # Environments are per-run (`radtest-<uid>`), so unlike the application
+      # there is more than one candidate. Still matched by the suite's own
+      # prefix and still age-gated, so a live run's environment is never a
+      # candidate.
+      - name: Purge stale GitHub Environments
+        if: steps.pin.outputs.provisioned == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
+          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
+          environments="$RUNNER_TEMP/environments.json"
+          gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments" >"$environments"
+
+          purged=0
+          while read -r name; do
+            [[ -n "$name" ]] || continue
+            echo "Deleting stale environment $name, created before $cutoff."
+            gh api -X DELETE "repos/$FIXTURE_REPOSITORY/environments/$name"
+            purged=$((purged + 1))
+          done < <(jq -r --arg cutoff "$cutoff" --arg prefix "$ENVIRONMENT_PREFIX" \
+            '.[]?.environments[]? | select(.name | startswith($prefix)) | select(.created_at < $cutoff) | .name' \
+            "$environments")
+
+          echo "- GitHub Environments purged: $purged" >>"$GITHUB_STEP_SUMMARY"
+
+      # The fixture repository is deliberately mutable: a run commits the
+      # product's workflows to it. Resetting to the pinned baseline is what
+      # makes the next run's `assertCleanSlate()` mean something, and what stops
+      # a half-finished run from being mistaken for a product regression the
+      # following night.
+      - name: Reset the fixture default branch to the pinned baseline
+        if: steps.pin.outputs.provisioned == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
+          DEFAULT_BRANCH: ${{ steps.pin.outputs.default-branch }}
+          BASELINE_SHA: ${{ steps.pin.outputs.baseline-sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="repos/$FIXTURE_REPOSITORY/git/ref/heads/$DEFAULT_BRANCH"
+          current="$(gh api "$ref" --jq .object.sha)"
+
+          if [[ "$current" == "$BASELINE_SHA" ]]; then
+            echo "- Fixture \`$DEFAULT_BRANCH\` already at the pinned baseline" >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Force is required and is the point: a run leaves real commits on the
+          # branch, and the baseline is the only state the suite is allowed to
+          # start from.
+          gh api -X PATCH "repos/$FIXTURE_REPOSITORY/git/refs/heads/$DEFAULT_BRANCH" \
+            -f "sha=$BASELINE_SHA" -F force=true >/dev/null
+          echo "- Fixture \`$DEFAULT_BRANCH\` reset from \`$current\` to the pinned baseline" >>"$GITHUB_STEP_SUMMARY"
+
+  notify-scheduled-result:
+    name: Scheduled cleanup alert
+    # A purge that fails quietly is worse than one that never ran: leaked state
+    # accumulates, and every subsequent Cloud E2E run then fails its clean-slate
+    # probe, which reads as a product regression until someone checks here.
+    if: ${{ always() && github.event_name == 'schedule' && github.repository == 'radius-project/ai-extensions' }}
+    needs:
+      - purge
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Report or clear scheduled failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: purge=${{ needs.purge.result }}
+          SCHEDULE_FAILED: ${{ needs.purge.result != 'success' }}
+        shell: bash
+        run: |
+          title="Cloud E2E Cleanup scheduled failure"
+          issue_number="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search "\"$title\" in:title" \
+            --json number \
+            --jq '.[0].number // empty')"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+          if [[ "$SCHEDULE_FAILED" == "true" ]]; then
+            body="The scheduled Cloud E2E cleanup workflow failed: $RESULT. Run: $run_url. Leaked state is not being reclaimed, so expect the next Cloud E2E run to fail its clean-slate probe. See the leaked-state section of docs/eng/CLOUD_E2E_RUNBOOK.md."
+            if [[ -n "$issue_number" ]]; then
+              gh issue comment "$issue_number" --repo "$GITHUB_REPOSITORY" --body "$body"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+            fi
+          elif [[ -n "$issue_number" ]]; then
+            gh issue close "$issue_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --comment "The scheduled Cloud E2E cleanup workflow recovered. Run: $run_url"
+          fi
