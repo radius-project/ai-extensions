@@ -25,9 +25,3 @@ recipe-pack catalog (`deploy/manifest/defaults.yaml`) from `radius-project/radiu
 by ref at runtime and installs `yq` from a co-located script, so the composite
 actions are self-contained in this repository while the catalog data stays a
 Radius-owned artifact validated by Radius CI.
-
-The shared `load-contrib-catalog` action fetches the Radius resource-type and
-recipe-pack catalog (`deploy/manifest/defaults.yaml`) from `radius-project/radius`
-by ref at runtime and installs `yq` from a co-located script, so the composite
-actions are self-contained in this repository while the catalog data stays a
-Radius-owned artifact validated by Radius CI.
