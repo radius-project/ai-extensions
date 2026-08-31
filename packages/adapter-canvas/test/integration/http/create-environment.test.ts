@@ -2693,6 +2693,48 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     ).toBe(false);
   });
 
+  // A stop leaves the operation cancelled, so the guidance is deliberately not
+  // emitted: "merge to finish setup" would promise an outcome for an operation
+  // the customer just abandoned, which is the same false promise this guidance
+  // exists to remove. The committed pull request is still named by its own
+  // step and by the recorded commit state, so nothing about what exists is
+  // lost.
+  it("claims nothing about the merge when the operation is stopped", async () => {
+    const harness = start({
+      ...protectedScript,
+      files: {
+        ".github/workflows/radius-verify-credentials.yml":
+          "on: workflow_dispatch\njobs:\n"
+      }
+    });
+    harness.setJournalHook((entry) => {
+      if (entry === "stopBoundary:before-verification-dispatch")
+        harness.operation.stopRequested = true;
+    });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(await response.json()).toMatchObject({
+      cancelled: true,
+      boundary: "before-verification-dispatch"
+    });
+    expect(harness.steps.filter((step) => step.startsWith("👉"))).toEqual([]);
+    expect(
+      harness.steps.some((step) => step.includes("run once it lands"))
+    ).toBe(false);
+    expect(
+      harness.steps.some((step) => step.includes("is running against"))
+    ).toBe(false);
+    // What exists is still on the record, so the stop stays honest about it.
+    expect(harness.steps).toContain(
+      "✅ Opened pull request #7: https://github.com/octo/app/pull/7"
+    );
+    expect(harness.commitStates[0]).toMatchObject({
+      mode: "pull_request",
+      pullRequestUrl: "https://github.com/octo/app/pull/7"
+    });
+  });
+
   it("gives no merge guidance when the pull request was never opened", async () => {
     const harness = start({
       ...protectedScript,
