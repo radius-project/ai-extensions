@@ -349,9 +349,32 @@ jobs:
           --plugin "$PLUGIN_NAME"
           --version "${{ steps.version.outputs.version }}"
 
+      # pnpm owns dependency, license and checksum discovery, so the inventory
+      # is its native SPDX document rather than anything assembled here.
+      #
+      # It has to be generated in THIS workspace: the edge version only exists
+      # here, stamped into package.json by Resolve version above, and pnpm
+      # records it as the SBOM's root package. A publishing job working from a
+      # clean checkout would inventory the unstamped version instead and ship a
+      # document that does not describe the artifact it accompanies.
+      - name: Generate the SBOM
+        run: >-
+          pnpm sbom --sbom-format spdx --sbom-type application
+          --filter "$PLUGIN_NAME" --out "$RUNNER_TEMP/$PLUGIN_SBOM"
+
       - name: Upload plugin dist artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ env.PLUGIN_ARTIFACT }}
           path: ${{ env.PLUGIN_DIST }}
+          if-no-files-found: error
+
+      # Kept out of the dist artifact: that tree is published verbatim as the
+      # install branch, and the SBOM describes the release rather than being
+      # part of what gets installed.
+      - name: Upload plugin SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ env.PLUGIN_SBOM_ARTIFACT }}
+          path: ${{ runner.temp }}/${{ env.PLUGIN_SBOM }}
           if-no-files-found: error

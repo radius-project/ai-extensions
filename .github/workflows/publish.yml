@@ -18,6 +18,12 @@ name: Publish
 # history — then moves the branch and `<plugin>@edge` tag onto it. A stale
 # manual rerun is skipped when a newer main commit is already published.
 #
+# Before the first push the bundle gets signed build provenance and an SBOM
+# attestation. build.yml produced both the dist and its native `pnpm sbom`
+# document from one workspace, so the inventory names the stamped edge version
+# actually being published. Edge publishes a branch rather than a release and
+# so has nowhere to attach the document; the attestation is where it lives.
+#
 # That commit and tag ref are created through the GitHub API as the automation
 # GitHub App. GitHub signs the commit; the lightweight tag is created only after
 # the API confirms its target commit is Verified. Nothing is committed or
@@ -128,6 +134,14 @@ jobs:
           name: ${{ env.PLUGIN_ARTIFACT }}
           path: ${{ env.PLUGIN_DIST }}
 
+      # Built alongside the dist by the same build job, so it inventories the
+      # exact bundle published below, stamped edge version included.
+      - name: Download plugin SBOM
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.PLUGIN_SBOM_ARTIFACT }}
+          path: ${{ runner.temp }}/sbom
+
       # The version is read back out of the artifact: a matrixed build job has
       # no per-leg outputs addressable from here, and the artifact is the thing
       # actually being published.
@@ -146,6 +160,16 @@ jobs:
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ env.PLUGIN_DIST }}/**/*
+
+      # Edge publishes a branch rather than a release, so it has nowhere to
+      # attach an SBOM file. Recording it against the same subjects as the
+      # provenance is what makes the inventory retrievable: `gh attestation
+      # verify` on any published file returns the bundle it came from.
+      - name: Attest the plugin SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ env.PLUGIN_DIST }}/**/*
+          sbom-path: ${{ runner.temp }}/sbom/${{ env.PLUGIN_SBOM }}
 
       # The app creates the signed commit and its lightweight tag ref through
       # the GitHub API; the runner holds no signing key.
