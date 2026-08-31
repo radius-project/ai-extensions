@@ -46,9 +46,7 @@ Radius has a second, sibling flow — **Create-Environment rollback** — that t
 
 ### Goals
 
-- When an established environment is deleted, remove the cloud/GitHub artifacts
-  it owns so nothing leaks: the Radius environment, the federated credential,
-  and the GitHub environment.
+- When an established environment is deleted, remove the cloud/GitHub artifacts it owns so nothing leaks: the Radius environment, the federated credential, the GitHub environment, and the private per-environment GHCR state package.
 - Run the teardown in an order that keeps deletion **fail-closed** — never
   remove a credential a not-yet-confirmed step still needs.
 - Make every teardown step **idempotent**, so a re-run after a partial failure
@@ -74,7 +72,7 @@ Radius has a second, sibling flow — **Create-Environment rollback** — that t
 
 #### User story 1
 
-A developer has a working `dev` environment and clicks **Delete Env**. Deletion dispatches the delete-environment workflow (which needs the federated credential to authenticate to the cluster), then removes the credential and the GitHub environment. The Entra app registration is **left in place**, and the completion acknowledgement links to the Azure Portal so the developer can remove it if it is no longer needed.
+A developer has a working `dev` environment and clicks **Delete Env**. Deletion dispatches the delete-environment workflow (which needs the federated credential to authenticate to the cluster), then removes the credential, the GitHub environment, and the private GHCR state package dedicated to that environment. The Entra app registration is **left in place**, and the completion acknowledgement links to the Azure Portal so the developer can remove it if it is no longer needed.
 
 #### User story 2
 
@@ -82,7 +80,7 @@ A delete run fails partway — say the federated-credential delete errors. The p
 
 ## User experience (if applicable)
 
-Delete Environment runs as a tracked operation with a progress panel. The panel shows each stage (Radius environment delete, federated-credential delete, GitHub environment delete, app-registration review), streams human-readable steps, and on conclusion surfaces a summary of what was removed, what was left in place (the app registration), and any warnings. A hard fail-closed outcome shows the completed stages and offers **Retry deletion** when unfinished stages remain. Delete operations are not pausable and never show the create flow's **Stop setup**, **Continue setup**, rollback, or exit controls. No new prompts are introduced beyond the existing delete confirmation.
+Delete Environment runs as a tracked operation with a progress panel. The panel shows each stage (Radius environment delete, federated-credential delete, GitHub environment delete, GHCR state-package delete, app-registration review), streams human-readable steps, and on conclusion surfaces a summary of what was removed, what was left in place (the app registration), and any warnings. A hard fail-closed outcome shows the completed stages and offers **Retry deletion** when unfinished stages remain. Delete operations are not pausable and never show the create flow's **Stop setup**, **Continue setup**, rollback, or exit controls. No new prompts are introduced beyond the existing delete confirmation.
 
 ## Design
 
@@ -96,13 +94,7 @@ The delete flow has two layers:
 
 The decision layer is specific to deletion (established environment + live discovery + explicit confirmation). Deletion and rollback share pure command construction, Azure not-found classification, and the GitHub environment-list cache contract. They do not share whole mutation executors because rollback requires exact-identity proof and durable outcome-unknown reconciliation while deletion uses immutable credential-consumer provenance and immediate live revalidation.
 
-The deletion **order** is the load-bearing design decision. The
-delete-environment workflow authenticates to the cluster using the federated
-credential, so it must run **first, while the credential still exists**. Only
-after the Radius environment is confirmed gone do we remove the federated
-credential, then the GitHub environment. If any earlier step cannot be
-confirmed, the flow stops before removing the credential and GitHub environment
-that a retry would need — this is what "fail-closed" means here.
+The deletion **order** is the load-bearing design decision. The delete-environment workflow authenticates to the cluster using the federated credential, so it must run **first, while the credential still exists**. Only after the Radius environment is confirmed gone do we remove the federated credential, then the GitHub environment and its dedicated state package. If any earlier step cannot be confirmed, the flow stops before removing the credential and GitHub environment that a retry would need — this is what "fail-closed" means here.
 
 ```mermaid
 graph TD
@@ -111,7 +103,8 @@ graph TD
     S1["1. Dispatch Radius delete-environment workflow<br/>(uses the FIC to authenticate)"]
     S2["2. Delete federated credential"]
     S3["3. Delete GitHub environment<br/>(+ invalidate env-list cache)"]
-    S4["4. Review app registration<br/>(leave in place + notify)"]
+    S4["4. Delete per-environment GHCR state package"]
+    S5["5. Review app registration<br/>(leave in place + notify)"]
   end
   subgraph Shared["Lowest safe seams shared with rollback"]
     GHArgs["buildGitHubEnvironmentDeleteArgs"]
@@ -119,7 +112,7 @@ graph TD
     AzNotFound["isAzResourceNotFound"]
     Cache["environment-list cache invalidation contract"]
   end
-  Confirm --> S1 --> S2 --> S3 --> S4
+  Confirm --> S1 --> S2 --> S3 --> S4 --> S5
   S2 --> AzArgs
   S2 --> AzNotFound
   S3 --> GHArgs
@@ -151,6 +144,8 @@ sequenceDiagram
   Flow->>Ext: gh api DELETE .../environments/{env}
   Ext-->>Flow: deleted / 404 / failed
   Flow->>Flow: deletion result + env-list cache invalidation
+  Flow->>Ext: DELETE private per-environment GHCR package
+  Ext-->>Flow: deleted / confirmed absent / retryable partial failure
   Flow->>UI: review app registration (leave + notify) → summary
 ```
 
@@ -174,8 +169,8 @@ rollback's opposite order:
 3. **GitHub environment.** Delete it via the idempotent
    `deleteGitHubEnvironmentIdempotent` primitive and invalidate the env-list
    cache so the UI no longer lists it. A 404 is treated as `not_found`.
-4. **App-registration review.** Record an informational "left in place" step and
-   notify the user; never delete it.
+4. **GHCR state package.** Derive the dedicated package with `stateRegistryForEnvironment`, validate through the GitHub Packages API that it is private or internal and linked to the target repository, delete it, and confirm it is absent. The existing Delete Environment confirmation covers this environment-exclusive artifact; no second prompt is shown. Missing `delete:packages` access or any ambiguous result ends as a retryable partial failure after the earlier teardown remains complete. The user can grant the scope and retry or delete the package manually; confirmed absence is idempotent success.
+5. **App-registration review.** Record an informational "left in place" step and notify the user; never delete it.
 
 #### App-registration policy
 

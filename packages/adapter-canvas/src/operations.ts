@@ -1037,10 +1037,12 @@ export const STAGE_VERIFY = "verify";
 // it owns its own stage inventory rather than reusing the create stages: it
 // deletes the Radius environment on the cluster (via a dispatched workflow),
 // removes the per-environment federated credential, deletes the GitHub
-// environment, and finally reviews whether the app registration is now unused.
+// environment and GHCR state package, and finally records that the shared app
+// registration was retained.
 export const STAGE_DELETE_RADIUS_ENV = "delete_radius_environment";
 export const STAGE_DELETE_CREDENTIAL = "delete_federated_credential";
 export const STAGE_DELETE_GITHUB_ENV = "delete_github_environment";
+export const STAGE_DELETE_STATE_PACKAGE = "delete_state_package";
 export const STAGE_REVIEW_APP_REGISTRATION = "review_app_registration";
 
 const STAGE_LABELS = {
@@ -1050,6 +1052,7 @@ const STAGE_LABELS = {
   [STAGE_DELETE_RADIUS_ENV]: "Delete Radius environment",
   [STAGE_DELETE_CREDENTIAL]: "Remove federated credential",
   [STAGE_DELETE_GITHUB_ENV]: "Delete GitHub environment",
+  [STAGE_DELETE_STATE_PACKAGE]: "Delete state package",
   [STAGE_REVIEW_APP_REGISTRATION]: "Review app registration"
 };
 
@@ -1124,7 +1127,7 @@ export function buildDeleteStages({
 }: any = {}): any[] {
   const ids = [STAGE_DELETE_RADIUS_ENV];
   if (includeAzureCleanup) ids.push(STAGE_DELETE_CREDENTIAL);
-  ids.push(STAGE_DELETE_GITHUB_ENV);
+  ids.push(STAGE_DELETE_GITHUB_ENV, STAGE_DELETE_STATE_PACKAGE);
   if (includeAzureCleanup) ids.push(STAGE_REVIEW_APP_REGISTRATION);
   return ids.map((id) => ({ id, label: STAGE_LABELS[id], state: "pending" }));
 }

@@ -97,7 +97,7 @@ import {
   GITHUB_API_VERSION
 } from "./azure-oidc.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
-import { bootstrapGHCRStatePackage } from "./ghcr.js";
+import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
 import {
   classifyProvider,
@@ -5783,6 +5783,20 @@ function createInstanceRequestCoordinator(
         },
         deleteGitHubEnvironment: (input) =>
           deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
+        deleteStatePackage: async (input) => {
+          const registry = stateRegistryForEnvironment(
+            input.repo,
+            input.environment
+          );
+          const credentials = await getGhPackageCredentials();
+          const outcome = await deleteGHCRStatePackage({
+            targetRepository: input.repo,
+            registry,
+            credentials,
+            ghCommandPresentation: GH_COMMAND_PRESENTATION
+          });
+          return outcome.outcome;
+        },
         withCredentialProvenanceLock,
         readCredentialProvenance: (clientId) =>
           listCredentialProvenanceForClient(clientId),

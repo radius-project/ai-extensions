@@ -2,10 +2,13 @@ import { describe, it, expect, vi } from "vitest";
 import {
   createOperation,
   buildDeleteStages,
+  beginRetryAttempt,
+  applyDeletionRetry,
   OPERATION_KIND_DELETE,
   STAGE_DELETE_RADIUS_ENV,
   STAGE_DELETE_CREDENTIAL,
   STAGE_DELETE_GITHUB_ENV,
+  STAGE_DELETE_STATE_PACKAGE,
   STAGE_REVIEW_APP_REGISTRATION
 } from "../../operations.js";
 import {
@@ -132,6 +135,7 @@ function makePorts(
     deleteGitHubEnvironment: vi.fn(async () => ({
       outcome: "deleted" as const
     })),
+    deleteStatePackage: vi.fn(async () => "deleted" as const),
     readCredentialProvenance: vi.fn(() => []),
     removeCredentialProvenance: vi.fn(async () => {}),
     clearEnvironmentCredentialProvenance: vi.fn(async () => {}),
@@ -185,7 +189,7 @@ describe("runEnvironmentDeletion — azure happy path", () => {
     expect(lockHeld).toBe(false);
   });
 
-  it("deletes env, credential, github env, and leaves the app registration in place", async () => {
+  it("deletes env, credential, github env, state package, and leaves the app registration in place", async () => {
     const op = makeOp();
     // list returns the env's credential first, then the delete succeeds. Stage 4
     // performs no Azure calls — it only records that the app was left in place.
@@ -209,6 +213,7 @@ describe("runEnvironmentDeletion — azure happy path", () => {
     expect(stage(op, STAGE_DELETE_RADIUS_ENV)).toBe("succeeded");
     expect(stage(op, STAGE_DELETE_CREDENTIAL)).toBe("succeeded");
     expect(stage(op, STAGE_DELETE_GITHUB_ENV)).toBe("succeeded");
+    expect(stage(op, STAGE_DELETE_STATE_PACKAGE)).toBe("succeeded");
     // The app registration is never touched — no prompt, no delete, no probe.
     expect(stage(op, STAGE_REVIEW_APP_REGISTRATION)).toBe("succeeded");
     expect(op.state).toBe("succeeded");
@@ -220,6 +225,78 @@ describe("runEnvironmentDeletion — azure happy path", () => {
         /Left the app registration \(app-1\) in place/.test(s.label)
       )
     ).toBe(true);
+  });
+});
+
+describe("runEnvironmentDeletion — GHCR state package", () => {
+  it("treats a manually deleted package as converged", async () => {
+    const op = makeOp();
+    const ports = makePorts({
+      deleteStatePackage: vi.fn(async () => "not_found" as const)
+    });
+
+    await runEnvironmentDeletion(op, ports);
+
+    expect(stage(op, STAGE_DELETE_STATE_PACKAGE)).toBe("succeeded");
+    expect(op.state).toBe("succeeded");
+    expect(
+      op.steps.some(
+        (step: { label: string }) =>
+          step.label === "No GHCR state package to delete"
+      )
+    ).toBe(true);
+  });
+
+  it("keeps prior teardown complete and makes package failure retryable", async () => {
+    const op = makeOp();
+    const deleteStatePackage = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error(
+          "GitHub Packages API rejected package deletion. Run gh auth refresh --hostname github.com --scopes delete:packages."
+        )
+      )
+      .mockResolvedValueOnce("deleted");
+    const ports = makePorts({ deleteStatePackage });
+
+    await runEnvironmentDeletion(op, ports);
+
+    expect(op.state).toBe("failed_partial");
+    expect(op.failure.code).toBe("state-package-delete-failed");
+    expect(op.failure.message).toContain("delete:packages");
+    expect(op.failure.message).toContain(
+      'delete "ghcr.io/octo/app-radius-state-dev-'
+    );
+    expect(op.failure.message).toContain("manually in GitHub Packages");
+    expect(stage(op, STAGE_DELETE_RADIUS_ENV)).toBe("succeeded");
+    expect(stage(op, STAGE_DELETE_CREDENTIAL)).toBe("succeeded");
+    expect(stage(op, STAGE_DELETE_GITHUB_ENV)).toBe("succeeded");
+    expect(stage(op, STAGE_DELETE_STATE_PACKAGE)).toBe("failed");
+    expect(stage(op, STAGE_REVIEW_APP_REGISTRATION)).toBe("skipped");
+
+    beginRetryAttempt(op, "deletion");
+    applyDeletionRetry(op);
+    await runEnvironmentDeletion(op, ports);
+
+    expect(deleteStatePackage).toHaveBeenCalledTimes(2);
+    expect(op.state).toBe("succeeded");
+    expect(stage(op, STAGE_REVIEW_APP_REGISTRATION)).toBe("succeeded");
+  });
+
+  it("does not attempt package deletion when an earlier stage fails closed", async () => {
+    const op = makeOp();
+    const deleteStatePackage = vi.fn(async () => "deleted" as const);
+    const ports = makePorts({
+      deleteRadiusEnvironment: vi.fn(async () => ({
+        outcome: "failed" as const
+      })),
+      deleteStatePackage
+    });
+
+    await runEnvironmentDeletion(op, ports);
+
+    expect(deleteStatePackage).not.toHaveBeenCalled();
+    expect(stage(op, STAGE_DELETE_STATE_PACKAGE)).toBe("skipped");
   });
 });
 
@@ -291,7 +368,8 @@ describe("runEnvironmentDeletion — no Azure-cleanup path (e.g. non-Azure)", ()
     expect(ports.runAz).not.toHaveBeenCalled();
     expect(op.stages.map((s: { id: string }) => s.id)).toEqual([
       STAGE_DELETE_RADIUS_ENV,
-      STAGE_DELETE_GITHUB_ENV
+      STAGE_DELETE_GITHUB_ENV,
+      STAGE_DELETE_STATE_PACKAGE
     ]);
     expect(op.state).toBe("succeeded");
   });
@@ -940,6 +1018,7 @@ describe("runEnvironmentDeletion — fallbacks and optional ports", () => {
       deleteGitHubEnvironment: vi.fn(async () => ({
         outcome: "deleted" as const
       })),
+      deleteStatePackage: vi.fn(async () => "deleted" as const),
       // Provenance proves Radius created this credential, so it is eligible for
       // deletion (and the delete-failure warning path is exercised).
       readCredentialProvenance: () => createdProvenance(),

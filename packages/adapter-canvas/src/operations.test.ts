@@ -126,6 +126,7 @@ import {
   STAGE_DELETE_RADIUS_ENV,
   STAGE_DELETE_CREDENTIAL,
   STAGE_DELETE_GITHUB_ENV,
+  STAGE_DELETE_STATE_PACKAGE,
   STAGE_REVIEW_APP_REGISTRATION
 } from "./operations.js";
 
@@ -1486,6 +1487,7 @@ describe("delete stage inventory", () => {
       STAGE_DELETE_RADIUS_ENV,
       STAGE_DELETE_CREDENTIAL,
       STAGE_DELETE_GITHUB_ENV,
+      STAGE_DELETE_STATE_PACKAGE,
       STAGE_REVIEW_APP_REGISTRATION
     ]);
     expect(
@@ -1498,7 +1500,8 @@ describe("delete stage inventory", () => {
     const stages = buildDeleteStages({ includeAzureCleanup: false });
     expect(stages.map((s) => s.id)).toEqual([
       STAGE_DELETE_RADIUS_ENV,
-      STAGE_DELETE_GITHUB_ENV
+      STAGE_DELETE_GITHUB_ENV,
+      STAGE_DELETE_STATE_PACKAGE
     ]);
   });
 });
@@ -5354,7 +5357,8 @@ describe("action projection", () => {
     op.stages[0].state = "succeeded";
     op.stages[1].state = "failed";
     op.stages[2].state = "skipped";
-    op.stages[3].state = "succeeded";
+    op.stages[3].state = "failed";
+    op.stages[4].state = "succeeded";
     addStep(op, {
       stage: op.stages[0].id,
       kind: "mutation",
@@ -5380,6 +5384,7 @@ describe("action projection", () => {
 
     expect(op.stages.map((stage) => stage.state)).toEqual([
       "succeeded",
+      "pending",
       "pending",
       "pending",
       "succeeded"

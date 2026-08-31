@@ -208,8 +208,9 @@ export async function handleDeleteEnvironment(
     }
     // Deleting an environment is now an async operation (issue #303): it tears
     // down the Radius environment on the cluster, removes the per-environment
-    // federated credential, deletes the GitHub environment, and — when the app
-    // registration is left unused — prompts before deleting it. The work runs
+    // federated credential, deletes the GitHub environment and its dedicated
+    // GHCR state package, and records that the shared app registration remains.
+    // The work runs
     // in the background under the same OperationRecord + progress-panel model as
     // environment creation, so the route only starts it and returns 202.
     let target: {

@@ -646,6 +646,7 @@ describe("POST /api/operations/{id}/retry/{kind}", () => {
       "succeeded",
       "pending",
       "pending",
+      "pending",
       "pending"
     ]);
     expect(op.currentStage).toBe(op.stages[1].id);
