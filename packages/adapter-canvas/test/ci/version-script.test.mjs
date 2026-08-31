@@ -64,6 +64,10 @@ function writePlugin(root, name, version = RELEASED) {
   writeFileSync(join(root, "plugins", name, "README.md"), `${name}\n`);
 }
 
+function writeChangelog(root, name, contents) {
+  writeFileSync(join(root, "plugins", name, "CHANGELOG.md"), contents);
+}
+
 function writeRepository(
   plugins,
   { metadataVersion = RELEASED, pluginDirs } = {}
@@ -138,6 +142,64 @@ describe("scripts/version.mjs across several plugins", () => {
 
     expect(runVersion(root, "--plugin", "radius").stdout).toBe("0.4.0");
     expect(runVersion(root, "--plugin", "radius-aws").stdout).toBe("1.2.0");
+  });
+
+  it("prints release notes from only the selected plugin's current version", () => {
+    const root = twoPlugins();
+    writeChangelog(root, "radius", "## 0.4.0\n\nRadius notes.\n");
+    writeChangelog(
+      root,
+      "radius-aws",
+      "## 1.2.0\n\nAWS notes.\n\nSecond paragraph.\n\n## 1.1.0\n\nOld notes.\n"
+    );
+
+    const result = runVersion(
+      root,
+      "--release-notes",
+      "--plugin",
+      "radius-aws"
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("AWS notes.\n\nSecond paragraph.");
+  });
+
+  it.each([
+    ["missing", undefined, "does not exist"],
+    ["empty", "## 1.2.0\n\n## 1.1.0\n\nOld notes.\n", "empty entry"]
+  ])(
+    "rejects %s release notes for the selected plugin",
+    (_label, changelog, message) => {
+      const root = twoPlugins();
+      if (changelog !== undefined) {
+        writeChangelog(root, "radius-aws", changelog);
+      }
+
+      const result = runVersion(
+        root,
+        "--release-notes",
+        "--plugin",
+        "radius-aws"
+      );
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("plugins/radius-aws/CHANGELOG.md");
+      expect(result.stderr).toContain(message);
+    }
+  );
+
+  it("compares the selected plugin's version", () => {
+    const root = twoPlugins();
+
+    expect(
+      runVersion(root, "--compare", "1.0.0", "--plugin", "radius").stdout
+    ).toBe("-1");
+    expect(
+      runVersion(root, "--compare", "1.0.0", "--plugin", "radius-aws").stdout
+    ).toBe("1");
+    expect(
+      runVersion(root, "--compare", "1.2.0", "--plugin", "radius-aws").stdout
+    ).toBe("0");
   });
 
   it("releases one plugin without touching the other", () => {

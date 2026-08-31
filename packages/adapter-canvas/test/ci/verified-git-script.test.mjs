@@ -22,6 +22,10 @@ const TARGET = "a".repeat(40);
 const COMMIT = "b".repeat(40);
 const TREE = "c".repeat(40);
 const TAG = "d".repeat(40);
+const SOURCE_TAG = "e".repeat(40);
+const SOURCE = "f".repeat(40);
+const PACKAGE_BLOB = "1".repeat(40);
+const MARKETPLACE_BLOB = "2".repeat(40);
 // File modes and symlinks are not reproducible on Windows.
 const WINDOWS = process.platform === "win32";
 
@@ -118,6 +122,134 @@ async function api({
   return { url: `http://127.0.0.1:${server.address().port}`, calls };
 }
 
+async function completionApi({
+  artifactTarget = COMMIT,
+  sourceTarget = SOURCE,
+  commitVerified = true,
+  parents = [],
+  commitSource = SOURCE,
+  packageVersion = "1.2.0",
+  catalogVersion = "1.2.0",
+  catalogRef = "releases/radius/v1.2.0",
+  releaseDraft = false,
+  releaseAssets = [
+    "radius-plugin-1.2.0.tar.gz",
+    "radius-plugin-1.2.0.spdx.json",
+    "radius-awesome-copilot-1.2.0.zip"
+  ]
+} = {}) {
+  const calls = [];
+  const jsonBlob = (value) => ({
+    encoding: "base64",
+    content: Buffer.from(`${JSON.stringify(value)}\n`).toString("base64")
+  });
+  const server = createServer((request, response) => {
+    request.resume();
+    request.on("end", () => {
+      const path = decodeURIComponent(
+        request.url.replace("/repos/owner/repo", "")
+      );
+      const route = `${request.method} ${path}`;
+      calls.push(route);
+      const send = (status, body) => {
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(JSON.stringify(body));
+      };
+
+      const refs = {
+        "/git/ref/heads/releases/radius/v1.2.0": {
+          type: "commit",
+          sha: COMMIT
+        },
+        "/git/ref/tags/radius/v1.2.0": { type: "tag", sha: TAG },
+        "/git/ref/tags/radius@1.2.0": { type: "tag", sha: SOURCE_TAG }
+      };
+      if (request.method === "GET" && refs[path]) {
+        return send(200, {
+          ref: path.slice("/git/ref/".length),
+          object: refs[path]
+        });
+      }
+      if (route === `GET /git/tags/${TAG}`) {
+        return send(200, {
+          object: { type: "commit", sha: artifactTarget },
+          verification: { verified: true, reason: "valid" }
+        });
+      }
+      if (route === `GET /git/tags/${SOURCE_TAG}`) {
+        return send(200, {
+          object: { type: "commit", sha: sourceTarget },
+          verification: { verified: true, reason: "valid" }
+        });
+      }
+      if (route === `GET /git/commits/${COMMIT}`) {
+        return send(200, {
+          message: `chore(release): radius@1.2.0 for ${commitSource}`,
+          tree: { sha: TREE },
+          parents,
+          verification: {
+            verified: commitVerified,
+            reason: commitVerified ? "valid" : "unsigned"
+          }
+        });
+      }
+      if (route === `GET /git/trees/${TREE}?recursive=1`) {
+        return send(200, {
+          truncated: false,
+          tree: [
+            {
+              path: ".github/plugin/marketplace.json",
+              mode: "100644",
+              type: "blob",
+              sha: MARKETPLACE_BLOB
+            },
+            {
+              path: "plugins/radius/dist/package.json",
+              mode: "100644",
+              type: "blob",
+              sha: PACKAGE_BLOB
+            },
+            {
+              path: "plugins/radius/dist/extension.mjs",
+              mode: "100644",
+              type: "blob",
+              sha: "3".repeat(40)
+            }
+          ]
+        });
+      }
+      if (route === `GET /git/blobs/${PACKAGE_BLOB}`) {
+        return send(200, jsonBlob({ name: "radius", version: packageVersion }));
+      }
+      if (route === `GET /git/blobs/${MARKETPLACE_BLOB}`) {
+        return send(
+          200,
+          jsonBlob({
+            plugins: [
+              {
+                name: "radius",
+                version: catalogVersion,
+                source: { ref: catalogRef }
+              }
+            ]
+          })
+        );
+      }
+      if (route === "GET /releases/tags/radius@1.2.0") {
+        return send(200, {
+          draft: releaseDraft,
+          assets: releaseAssets.map((name) => ({ name }))
+        });
+      }
+      return send(500, { message: `unexpected ${route}` });
+    });
+  });
+
+  servers.push(server);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { url: `http://127.0.0.1:${server.address().port}`, calls };
+}
+
 function repository() {
   const root = mkdtempSync(join(tmpdir(), "radius-verified-git-"));
   roots.push(root);
@@ -129,6 +261,16 @@ function repository() {
   writeFileSync(join(root, "dist", "extension.mjs"), "export {};\n");
   writeFileSync(join(root, "dist", "skills", "SKILL.md"), "# Skill\n");
   writeFileSync(join(root, "catalog.json"), '{"plugins":[]}\n');
+  mkdirSync(join(root, "plugins", "radius"), { recursive: true });
+  writeFileSync(
+    join(root, "plugins", "radius", "package.json"),
+    '{"name":"radius","version":"1.2.0"}\n'
+  );
+  writeFileSync(
+    join(root, "plugins", "radius", "plugin.json"),
+    '{"name":"radius","version":"1.2.0"}\n'
+  );
+  writeFileSync(join(root, "plugins", "radius", "README.md"), "Radius\n");
   return root;
 }
 
@@ -615,6 +757,101 @@ describe("scripts/verified-git.mjs", () => {
 
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("does not exist");
+    });
+  });
+
+  describe("verify-completion", () => {
+    const args = [
+      "verify-completion",
+      "--plugin",
+      "radius",
+      "--version",
+      "1.2.0",
+      "--source",
+      SOURCE
+    ];
+
+    it("accepts a complete release whose marker targets its pinned artifact", async () => {
+      const root = repository();
+      const { url } = await completionApi();
+
+      const result = await run(root, url, args);
+
+      expect(result).toEqual({
+        status: 0,
+        stdout: JSON.stringify({ commit: COMMIT, tree: TREE }),
+        stderr: ""
+      });
+    });
+
+    it("rejects a verified completion tag targeting the wrong commit", async () => {
+      const root = repository();
+      const wrong = "9".repeat(40);
+      const { url } = await completionApi({ artifactTarget: wrong });
+
+      const result = await run(root, url, args);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`points at ${wrong}, not ${COMMIT}`);
+    });
+
+    it.each([
+      ["an unverified artifact", { commitVerified: false }, "did not sign"],
+      ["a parented artifact", { parents: [{ sha: SOURCE }] }, "zero-parent"],
+      ["the wrong version", { packageVersion: "1.1.0" }, "radius@1.2.0"],
+      ["the wrong source", { commitSource: TARGET }, `from ${SOURCE}`],
+      [
+        "a source tag on the wrong commit",
+        { sourceTarget: TARGET },
+        `points at ${TARGET}, not ${SOURCE}`
+      ],
+      [
+        "the wrong catalog ref",
+        { catalogRef: "radius@latest" },
+        "does not publish"
+      ],
+      ["a draft release", { releaseDraft: true }, "published GitHub release"],
+      ["missing release assets", { releaseAssets: [] }, "expected assets"],
+      [
+        "an extra release asset",
+        {
+          releaseAssets: [
+            "radius-plugin-1.2.0.tar.gz",
+            "radius-plugin-1.2.0.spdx.json",
+            "radius-awesome-copilot-1.2.0.zip",
+            "unexpected.txt"
+          ]
+        },
+        "expected assets"
+      ]
+    ])("rejects completion with %s", async (_label, options, message) => {
+      const root = repository();
+      const { url } = await completionApi(options);
+
+      const result = await run(root, url, args);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(message);
+    });
+
+    it("exposes artifact verification as a reusable command", async () => {
+      const root = repository();
+      const { url } = await completionApi();
+
+      const result = await run(root, url, [
+        "verify-artifact",
+        "--branch",
+        "releases/radius/v1.2.0",
+        "--plugin",
+        "radius",
+        "--version",
+        "1.2.0",
+        "--source",
+        SOURCE
+      ]);
+
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({ commit: COMMIT, tree: TREE });
     });
   });
 });

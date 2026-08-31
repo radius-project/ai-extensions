@@ -289,9 +289,11 @@ jobs:
             artifact_tag="${plugin}/v${version}"
 
             if git show-ref --verify --quiet "refs/tags/$artifact_tag"; then
-              # The completion marker is what makes this workflow skip the
-              # plugin, so it only counts when this app actually signed it.
-              node scripts/verified-git.mjs verify-tag --name "$artifact_tag" >/dev/null
+              # A marker only counts when it still proves the complete pinned
+              # artifact, source tag, release, and asset set.
+              node scripts/verified-git.mjs verify-completion \
+                --plugin "$plugin" --version "$version" --source "$source_sha" \
+                >/dev/null
               echo "Artifact tag $artifact_tag already exists; nothing to publish for $plugin." >>"$GITHUB_STEP_SUMMARY"
               continue
             fi
@@ -537,37 +539,6 @@ jobs:
 
           gh auth setup-git
 
-          # An install branch that already exists is only reusable when it is
-          # the very artifact this run rebuilt, and when GitHub signed it: a
-          # branch left behind by older automation would otherwise keep
-          # publishing an unverified commit forever.
-          verify_artifact_commit() {
-            commit="$1"
-            branch="$2"
-            if [ "$(git rev-list --parents -n 1 "$commit" | awk '{ print NF }')" -ne 1 ]; then
-              echo "::error::$branch must point to an orphan root commit, but $commit has history."
-              exit 1
-            fi
-            if [ "$(gh api "repos/$GITHUB_REPOSITORY/commits/$commit" --jq '.commit.verification.verified')" != "true" ]; then
-              echo "::error::$branch points at $commit, which GitHub has not verified."
-              exit 1
-            fi
-            published_version="$(git show "$commit:$PLUGIN_DIST/package.json" | jq -r .version)"
-            published_message="$(git log -1 --format=%s "$commit")"
-            if [ "$published_version" != "$VERSION" ] || \
-               [ "$published_message" != "chore(release): ${PLUGIN_SOURCE_TAG} for ${SOURCE_SHA}" ]; then
-              echo "::error::$branch already exists but is not the $PLUGIN_SOURCE_TAG artifact from $SOURCE_SHA."
-              exit 1
-            fi
-
-            unexpected="$(git ls-tree -r --name-only "$commit" | grep -v "^$PLUGIN_DIST/" | grep -vFx "$MANIFEST" || true)"
-            if [ -n "$unexpected" ]; then
-              echo "::error::$branch must contain only $PLUGIN_DIST and $MANIFEST; found:"
-              echo "$unexpected"
-              exit 1
-            fi
-          }
-
           # Each install branch is an ORPHAN carrying only the built plugin and a
           # catalog that points at that same branch, so
           # `marketplace add OWNER/REPO#<branch>` installs exactly what is
@@ -593,19 +564,18 @@ jobs:
           expected_pinned_commit="$(jq -r .commit <<<"$built")"
           expected_pinned_tree="$(jq -r .tree <<<"$built")"
 
-          if git ls-remote --exit-code --heads origin "refs/heads/$pinned" >/dev/null 2>&1; then
-            git fetch origin "refs/heads/$pinned:refs/remotes/origin/$pinned"
-            pinned_commit="$(git rev-parse "refs/remotes/origin/$pinned")"
-            verify_artifact_commit "$pinned_commit" "$pinned"
-            published_tree="$(git rev-parse "$pinned_commit^{tree}")"
-            if [ "$published_tree" != "$expected_pinned_tree" ]; then
-              echo "::error::$pinned contains tree $published_tree, but this run rebuilt $expected_pinned_tree."
-              exit 1
-            fi
-          else
+          if ! git ls-remote --exit-code --heads origin "refs/heads/$pinned" >/dev/null 2>&1; then
             node scripts/verified-git.mjs ref \
               --name "refs/heads/$pinned" --sha "$expected_pinned_commit"
-            pinned_commit="$expected_pinned_commit"
+          fi
+          published="$(node scripts/verified-git.mjs verify-artifact \
+            --branch "$pinned" --plugin "$PLUGIN_NAME" \
+            --version "$VERSION" --source "$SOURCE_SHA")"
+          pinned_commit="$(jq -r .commit <<<"$published")"
+          published_tree="$(jq -r .tree <<<"$published")"
+          if [ "$published_tree" != "$expected_pinned_tree" ]; then
+            echo "::error::$pinned contains tree $published_tree, but this run rebuilt $expected_pinned_tree."
+            exit 1
           fi
 
           # github/awesome-copilot lists this plugin from its own repository and
@@ -729,6 +699,9 @@ jobs:
             --name "$PLUGIN_ARTIFACT_TAG" \
             --message "$PLUGIN_ARTIFACT_TAG" \
             --target "$pinned_commit"
+          node scripts/verified-git.mjs verify-completion \
+            --plugin "$PLUGIN_NAME" --version "$VERSION" --source "$SOURCE_SHA" \
+            >/dev/null
 
           {
             echo "### ${PLUGIN_SOURCE_TAG}"

@@ -23,16 +23,23 @@
 //   node scripts/verified-git.mjs verify-tag --name <tag> [--target <sha>]
 //         Fails unless refs/tags/<tag> is an annotated tag object that GitHub
 //         verified, so a tag written by anything else is never reused.
+//   node scripts/verified-git.mjs verify-artifact --branch <branch>
+//         --plugin <name> --version <version> --source <sha>
+//   node scripts/verified-git.mjs verify-completion --plugin <name>
+//         --version <version> --source <sha>
 //
-// GITHUB_TOKEN must be a GitHub App installation token with contents write.
+// Writes require a GitHub App installation token with contents write; verifies
+// require a token with contents read.
 // GITHUB_REPOSITORY and GITHUB_API_URL come from the workflow environment.
 
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { repoRoot } from "./plugins.mjs";
+import { pluginRefs, repoRoot, requirePlugin } from "./plugins.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const REF = /^refs\/(?:heads|tags)\/[^\s~^:?*[\\]+$/;
+const MARKETPLACE = ".github/plugin/marketplace.json";
+const REGULAR_MODES = new Set(["100644", "100755"]);
 
 // Unwind instead of exiting in place: calling process.exit() while a socket is
 // still open aborts Node on Windows before stderr is flushed.
@@ -157,16 +164,20 @@ function collect(paths) {
   return files.sort((a, b) => (a.path < b.path ? -1 : 1));
 }
 
-async function writeRef(name, sha, force) {
+async function readRef(name, absentOn404 = false) {
   if (!REF.test(name)) {
     fail(`--name must be a refs/heads or refs/tags ref: ${name}`);
   }
-  const existing = await api(
+  return api(
     "GET",
     `/git/ref/${name.replace(/^refs\//, "")}`,
     undefined,
-    true
+    absentOn404
   );
+}
+
+async function writeRef(name, sha, force) {
+  const existing = await readRef(name, true);
   if (existing) {
     if (!force) fail(`${name} already exists; pass --force to move it`);
     await api("PATCH", `/git/${name}`, { sha, force: true });
@@ -233,12 +244,8 @@ async function ref(args) {
   console.log(await writeRef(name, sha, args.includes("--force")));
 }
 
-async function verifyTag(args) {
-  const name = required(option(args, "--name"), "--name");
-  const expected = option(args, "--target");
-  if (expected !== undefined) requireSha(expected, "--target");
-
-  const existing = await api("GET", `/git/ref/tags/${name}`, undefined, true);
+async function verifyTagTarget(name, expected) {
+  const existing = await readRef(`refs/tags/${name}`, true);
   if (!existing) fail(`refs/tags/${name} does not exist`);
   // A lightweight tag has no object of its own, so it can carry no signature.
   if (existing.object?.type !== "tag") {
@@ -255,7 +262,144 @@ async function verifyTag(args) {
   if (expected !== undefined && target !== expected) {
     fail(`${name} points at ${target}, not ${expected}`);
   }
-  console.log(target);
+  return target;
+}
+
+async function verifyTag(args) {
+  const name = required(option(args, "--name"), "--name");
+  const expected = option(args, "--target");
+  if (expected !== undefined) requireSha(expected, "--target");
+  console.log(await verifyTagTarget(name, expected));
+}
+
+async function readJsonBlob(entry, label) {
+  if (!entry || entry.type !== "blob" || !SHA.test(String(entry.sha))) {
+    fail(`${label} is missing from the artifact tree`);
+  }
+  const blob = await api("GET", `/git/blobs/${entry.sha}`);
+  if (blob.encoding !== "base64" || typeof blob.content !== "string") {
+    fail(`${label} is not a base64 Git blob`);
+  }
+  try {
+    return JSON.parse(
+      Buffer.from(blob.content.replace(/\s/g, ""), "base64").toString("utf8")
+    );
+  } catch (error) {
+    fail(`${label} is not valid JSON: ${error.message}`);
+  }
+}
+
+async function verifyArtifactState({ plugin, version, source, branch }) {
+  const ref = await readRef(`refs/heads/${branch}`, true);
+  if (!ref) fail(`refs/heads/${branch} does not exist`);
+  if (ref.object?.type !== "commit") {
+    fail(`${branch} does not point at a commit`);
+  }
+  const commitSha = requireSha(ref.object.sha, `${branch} target`);
+  const commit = requireVerified(
+    await api("GET", `/git/commits/${commitSha}`),
+    `commit ${commitSha}`
+  );
+  if (!Array.isArray(commit.parents) || commit.parents.length !== 0) {
+    fail(`${branch} must point at a zero-parent commit`);
+  }
+
+  const expectedMessage = `chore(release): ${plugin.name}@${version} for ${source}`;
+  if (commit.message !== expectedMessage) {
+    fail(`${branch} does not record ${plugin.name}@${version} from ${source}`);
+  }
+
+  const treeSha = requireSha(commit.tree?.sha, `${branch} tree`);
+  const tree = await api("GET", `/git/trees/${treeSha}?recursive=1`);
+  if (tree.truncated === true || !Array.isArray(tree.tree)) {
+    fail(`${branch} did not return a complete recursive tree`);
+  }
+
+  const files = tree.tree.filter((entry) => entry.type !== "tree");
+  for (const entry of files) {
+    const allowed =
+      entry.path === MARKETPLACE || entry.path.startsWith(`${plugin.distDir}/`);
+    if (!allowed) fail(`${branch} contains an unexpected path: ${entry.path}`);
+    if (entry.type !== "blob" || !REGULAR_MODES.has(entry.mode)) {
+      fail(`${branch} contains a non-regular file: ${entry.path}`);
+    }
+  }
+
+  const packagePath = `${plugin.distDir}/package.json`;
+  const packageJson = await readJsonBlob(
+    files.find((entry) => entry.path === packagePath),
+    packagePath
+  );
+  if (packageJson.name !== plugin.name || packageJson.version !== version) {
+    fail(`${packagePath} does not identify ${plugin.name}@${version}`);
+  }
+
+  const marketplace = await readJsonBlob(
+    files.find((entry) => entry.path === MARKETPLACE),
+    MARKETPLACE
+  );
+  const catalogEntry = marketplace.plugins?.find(
+    (entry) => entry.name === plugin.name
+  );
+  if (
+    catalogEntry?.version !== version ||
+    catalogEntry?.source?.ref !== branch
+  ) {
+    fail(
+      `${MARKETPLACE} does not publish ${plugin.name}@${version} from ${branch}`
+    );
+  }
+
+  return { commit: commitSha, tree: treeSha };
+}
+
+async function verifyArtifact(args) {
+  const plugin = requirePlugin(option(args, "--plugin"));
+  const version = required(option(args, "--version"), "--version");
+  const source = requireSha(option(args, "--source"), "--source");
+  const branch = required(option(args, "--branch"), "--branch");
+  console.log(
+    JSON.stringify(
+      await verifyArtifactState({ plugin, version, source, branch })
+    )
+  );
+}
+
+async function verifyCompletion(args) {
+  const plugin = requirePlugin(option(args, "--plugin"));
+  const version = required(option(args, "--version"), "--version");
+  const source = requireSha(option(args, "--source"), "--source");
+  const refs = pluginRefs(plugin, { version });
+  const artifact = await verifyArtifactState({
+    plugin,
+    version,
+    source,
+    branch: refs.PLUGIN_PINNED_BRANCH
+  });
+
+  await verifyTagTarget(refs.PLUGIN_ARTIFACT_TAG, artifact.commit);
+  await verifyTagTarget(refs.PLUGIN_SOURCE_TAG, source);
+
+  const release = await api(
+    "GET",
+    `/releases/tags/${encodeURIComponent(refs.PLUGIN_SOURCE_TAG)}`,
+    undefined,
+    true
+  );
+  if (!release || release.draft !== false) {
+    fail(`${refs.PLUGIN_SOURCE_TAG} does not have a published GitHub release`);
+  }
+  const expectedAssets = [
+    `${plugin.name}-plugin-${version}.tar.gz`,
+    `${plugin.name}-plugin-${version}.spdx.json`,
+    `${plugin.name}-awesome-copilot-${version}.zip`
+  ].sort();
+  const actualAssets = (release.assets ?? []).map((asset) => asset.name).sort();
+  if (JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {
+    fail(`${refs.PLUGIN_SOURCE_TAG} does not have exactly the expected assets`);
+  }
+
+  console.log(JSON.stringify(artifact));
 }
 
 const [command, ...args] = process.argv.slice(2);
@@ -273,6 +417,12 @@ try {
       break;
     case "verify-tag":
       await verifyTag(args);
+      break;
+    case "verify-artifact":
+      await verifyArtifact(args);
+      break;
+    case "verify-completion":
+      await verifyCompletion(args);
       break;
     default:
       fail(`unknown command: ${command ?? "(none)"}`);
