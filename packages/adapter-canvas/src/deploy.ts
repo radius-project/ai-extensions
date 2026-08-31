@@ -12,6 +12,7 @@ import {
   displayGhCommand,
   type GhCommandPresentation
 } from "./gh-command-display.js";
+import { FORK_REPOSITORY_SETUP_GUIDANCE } from "./repository-access-guidance.js";
 
 type DeployStatus = "pending" | "in_progress" | "success" | "failed";
 
@@ -785,7 +786,8 @@ export function explainRepoAccessForEnvSetup(
       (switchCommand ?
         `Switch accounts with: ${switchCommand} (or sign in the account that has access), then retry. ${ghCommandPresentation.installationNote} `
       : `${ghCommandPresentation.installationNote} `) +
-      "Note: gh auth switch changes your machine\u2019s active GitHub account for every tool in this terminal until you switch back."
+      "Note: gh auth switch changes your machine\u2019s active GitHub account for every tool in this terminal until you switch back. " +
+      FORK_REPOSITORY_SETUP_GUIDANCE
     );
   }
   if (permissions && permissions.admin === true) return "";
@@ -813,7 +815,8 @@ export function explainRepoAccessForEnvSetup(
     '", but ' +
     haveClause +
     ". " +
-    "Ask a repository or organization admin to grant you Admin (repo Settings \u2192 Collaborators and teams), then retry."
+    "Ask a repository or organization admin to grant you Admin (repo Settings \u2192 Collaborators and teams), then retry. " +
+    FORK_REPOSITORY_SETUP_GUIDANCE
   );
 }
 
