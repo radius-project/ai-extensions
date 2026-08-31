@@ -3,7 +3,7 @@ import coverageBaseline from "./coverage-baseline.json" with { type: "json" };
 
 export default defineConfig({
   test: {
-    projects: ["packages/*/vitest.config.ts"],
+    projects: ["packages/*/vitest.config.ts", "plugins/*/vitest.config.ts"],
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary", "lcov"],
@@ -11,6 +11,7 @@ export default defineConfig({
         "packages/*/src/**/*.ts",
         "packages/*/src/**/*.mjs",
         "plugins/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs",
+        "plugins/radius/skills/radius-app-bicep/scripts/radius-recipe-pack.mjs",
         "plugins/radius/skills/radius-app-bicep/scripts/radius-type-schema.mjs"
       ],
       exclude: ["packages/*/src/**/*.test.ts"],
@@ -22,6 +23,13 @@ export default defineConfig({
           functions: 100,
           lines: 100
         },
+        "plugins/radius/skills/radius-app-bicep/scripts/radius-recipe-pack.mjs":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
         "plugins/radius/skills/radius-app-bicep/scripts/radius-type-schema.mjs":
           {
             statements: 100,

@@ -3,7 +3,8 @@
 // Resolves predefined Radius resource types for an application-modeling run.
 // It asks the extension-managed `rad` binary for the exact Radius commit,
 // downloads that release's generated Bicep definitions from a pinned source,
-// converts them into compact model-facing schemas, and wires the matching
+// converts them into compact model-facing schemas, includes exact matching
+// definitions from the release-pinned Azure Recipe pack, and wires the matching
 // Radius extension into the staged bicepconfig.json.
 //
 // This is executable code rather than prompt guidance so release selection,
@@ -36,11 +37,24 @@ export {
   parseIndexReference,
   selectResource
 } from "./radius-type-schema.mjs";
+import {
+  extractRecipeDefinition,
+  parseAzureRecipePackPin,
+  validateAzureRecipePack
+} from "./radius-recipe-pack.mjs";
+
+export {
+  extractRecipeDefinition,
+  parseAzureRecipePackPin
+} from "./radius-recipe-pack.mjs";
 
 const CONTRACT_VERSION = 1;
 const GENERATED_ROOT =
   "https://raw.githubusercontent.com/radius-project/radius";
 const GENERATED_PATH = "hack/bicep-types-radius/generated";
+const RADIUS_DEFAULTS_PATH = "deploy/manifest/defaults.yaml";
+const AZURE_RECIPE_PACK_PATH = "recipe-packs/azure/aks-recipepack.bicep";
+const MANAGED_RECIPES_CACHE_PATH = "managed-recipes";
 // This exact SHA pattern is the safety boundary around the only recursive
 // removal below ~/.radius. Never broaden it to accept arbitrary directory names.
 const COMMIT_DIRECTORY = /^[0-9a-f]{40}$/iu;
@@ -361,13 +375,14 @@ async function readBoundedText(response, maxBytes) {
   return Buffer.concat(chunks, total).toString("utf8");
 }
 
-export async function fetchJson(
+async function fetchText(
   url,
   {
     fetchImpl = globalThis.fetch,
     timeoutMs = 15_000,
     maxBytes = 5 * 1024 * 1024,
-    sleep = defaultSleep
+    sleep = defaultSleep,
+    accept = "text/plain"
   } = {}
 ) {
   const source = new URL(url);
@@ -384,7 +399,7 @@ export async function fetchJson(
     let delay;
     try {
       const response = await fetchImpl(url, {
-        headers: { accept: "application/json" },
+        headers: { accept },
         redirect: "error",
         signal: controller.signal
       });
@@ -403,12 +418,7 @@ export async function fetchJson(
         if (!error.noRetry) error.retryDelayMs = retryDelay(response.headers);
         throw error;
       }
-      const text = await readBoundedText(response, maxBytes);
-      try {
-        return { value: JSON.parse(text), text };
-      } catch {
-        throw noRetry("Source returned invalid JSON.");
-      }
+      return await readBoundedText(response, maxBytes);
     } catch (error) {
       const timedOut = error?.name === "AbortError";
       if (timedOut) {
@@ -424,6 +434,18 @@ export async function fetchJson(
     await sleep(delay);
   }
   throw new Error("Source request failed.");
+}
+
+export async function fetchJson(url, options = {}) {
+  const text = await fetchText(url, {
+    ...options,
+    accept: "application/json"
+  });
+  try {
+    return { value: JSON.parse(text), text };
+  } catch {
+    throw noRetry("Source returned invalid JSON.");
+  }
 }
 
 function defaultCacheRoot(home = os.homedir()) {
@@ -581,6 +603,71 @@ async function loadGeneratedJson(
   return { value: fetched.value, cached: false, cacheReady, file };
 }
 
+async function loadCachedText(
+  relativePath,
+  commit,
+  url,
+  validate,
+  {
+    cacheRoot = defaultCacheRoot(),
+    fetchImpl = globalThis.fetch,
+    fetchTimeoutMs = 15_000,
+    maxResponseBytes = 5 * 1024 * 1024,
+    sleep = defaultSleep,
+    warn = (text) => console.error(text)
+  } = {}
+) {
+  const file = cacheFile(cacheRoot, commit, relativePath);
+  const validateText = (value) => {
+    if (typeof value !== "string") {
+      throw new Error("Cached managed Recipe source must be text.");
+    }
+    validate(value);
+  };
+  const cached = await readCache(file, validateText);
+  if (cached !== undefined) return cached;
+
+  const text = await fetchText(url, {
+    fetchImpl,
+    timeoutMs: fetchTimeoutMs,
+    maxBytes: maxResponseBytes,
+    sleep
+  });
+  validate(text);
+  try {
+    await writeCache(file, JSON.stringify(text));
+  } catch (error) {
+    warn(
+      `Warning: could not cache managed Radius Recipe source: ${message(error)}`
+    );
+  }
+  return text;
+}
+
+async function loadManagedAzureRecipePack(releaseCommit, options) {
+  const defaults = await loadCachedText(
+    `${MANAGED_RECIPES_CACHE_PATH}/defaults.json`,
+    releaseCommit,
+    `${GENERATED_ROOT}/${releaseCommit}/${RADIUS_DEFAULTS_PATH}`,
+    parseAzureRecipePackPin,
+    options
+  );
+  const pin = parseAzureRecipePackPin(defaults);
+  const source = await loadCachedText(
+    `${MANAGED_RECIPES_CACHE_PATH}/azure/${pin.commit}/aks-recipepack.json`,
+    releaseCommit,
+    `https://raw.githubusercontent.com/${pin.repository}/${pin.commit}/${AZURE_RECIPE_PACK_PATH}`,
+    validateAzureRecipePack,
+    options
+  );
+  return {
+    repository: pin.repository,
+    commit: pin.commit,
+    path: AZURE_RECIPE_PACK_PATH,
+    source
+  };
+}
+
 export async function resolveRadiusTypes(selectors, options = {}) {
   const parsed = selectors.map((selector) =>
     typeof selector === "string" ? parseResourceSelector(selector) : selector
@@ -668,6 +755,68 @@ export async function resolveRadiusTypes(selectors, options = {}) {
       });
     }
 
+    if (resources.length > 0) {
+      try {
+        const pack = await loadManagedAzureRecipePack(identity.commit, options);
+        for (const resource of resources) {
+          try {
+            const definition = extractRecipeDefinition(
+              pack.source,
+              resource.type
+            );
+            resource.recipe =
+              definition === undefined ?
+                {
+                  status: "notFound",
+                  provenance: "managed-release-default",
+                  recipePack: "azure",
+                  repository: pack.repository,
+                  commit: pack.commit,
+                  path: pack.path,
+                  message: `The managed Azure Recipe pack does not contain a Recipe definition for "${resource.type}".`
+                }
+              : {
+                  status: "available",
+                  provenance: "managed-release-default",
+                  recipePack: "azure",
+                  repository: pack.repository,
+                  commit: pack.commit,
+                  path: pack.path,
+                  definition
+                };
+          } catch (error) {
+            const detail = message(error);
+            resource.recipe = {
+              status: "unavailable",
+              provenance: "managed-release-default",
+              recipePack: "azure",
+              repository: pack.repository,
+              commit: pack.commit,
+              path: pack.path,
+              message: detail
+            };
+            const warn = options.warn ?? ((text) => console.error(text));
+            warn(
+              `Warning: could not resolve the managed Azure Recipe for ${resource.type}: ${detail}`
+            );
+          }
+        }
+      } catch (error) {
+        const detail = message(error);
+        const recipe = {
+          status: "unavailable",
+          provenance: "managed-release-default",
+          recipePack: "azure",
+          message: detail
+        };
+        for (const resource of resources) resource.recipe = recipe;
+        const warn = options.warn ?? ((text) => console.error(text));
+        warn(
+          `Warning: could not resolve the managed Azure Recipe pack: ${detail}`
+        );
+      }
+    }
+
     return {
       contractVersion: CONTRACT_VERSION,
       extension: identity.extension,
@@ -698,7 +847,9 @@ export async function main(
       return 0;
     }
     const stagingDir = validateStagingDirectory(parsed.stagingDir);
-    const contract = await resolve(parsed.selectors);
+    const contract = await resolve(parsed.selectors, {
+      warn: (text) => stderr.write(`${text}\n`)
+    });
     const output = `${JSON.stringify({
       contractVersion: contract.contractVersion,
       resources: contract.resources,

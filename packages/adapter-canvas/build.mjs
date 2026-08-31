@@ -139,7 +139,10 @@ async function assembleDist() {
     if (!existsSync(from)) {
       throw new Error(`Missing required plugin source: ${from}`);
     }
-    cpSync(from, join(distDir, entry), { recursive: true });
+    cpSync(from, join(distDir, entry), {
+      recursive: true,
+      filter: (source) => !source.endsWith(".test.ts")
+    });
   }
   for (const entry of optionalPluginSources) {
     const from = join(pluginDir, entry);

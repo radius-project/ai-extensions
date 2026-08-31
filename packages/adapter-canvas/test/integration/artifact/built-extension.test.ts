@@ -182,7 +182,9 @@ function assertCurrentArtifact(): void {
     join(REPO_ROOT, "plugins", "radius", "plugin.json"),
     join(REPO_ROOT, "plugins", "radius", "README.md"),
     ...(existsSync(SOURCE_CHANGELOG) ? [SOURCE_CHANGELOG] : []),
-    ...filesUnder(join(REPO_ROOT, "plugins", "radius", "skills"))
+    ...filesUnder(join(REPO_ROOT, "plugins", "radius", "skills")).filter(
+      (path) => !path.endsWith(".test.ts")
+    )
   ];
   const newestInput = Math.max(
     ...productionInputs.map((path) => statSync(path).mtimeMs)
@@ -412,8 +414,9 @@ describe("P0-C built Radius extension artifact", () => {
         join(REPO_ROOT, "plugins", "radius").length + 1
       );
       if (
+        relative.endsWith(".test.ts") ||
         relative.replaceAll("\\", "/") ===
-        "skills/radius-app-bicep/scripts/show-radius-type.mjs"
+          "skills/radius-app-bicep/scripts/show-radius-type.mjs"
       ) {
         continue;
       }
@@ -422,7 +425,9 @@ describe("P0-C built Radius extension artifact", () => {
       );
     }
     expect(relativeFilesUnder(DIST_SKILL)).toEqual(
-      relativeFilesUnder(SOURCE_SKILL)
+      relativeFilesUnder(SOURCE_SKILL).filter(
+        (path) => !path.endsWith(".test.ts")
+      )
     );
     expectMatchingFile(SOURCE_CODE_REFERENCE, DIST_CODE_REFERENCE);
     const notices = readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8");

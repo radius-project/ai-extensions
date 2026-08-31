@@ -1,10 +1,13 @@
 {
   "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false
+  },
   "include": [
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "plugins/*/vitest.config.ts",
+    "plugins/radius/skills/**/*.test.ts"
   ],
-  "exclude": [
-    "node_modules",
-    "packages"
-  ]
+  "exclude": ["node_modules", "packages"]
 }
