@@ -2111,6 +2111,86 @@ describe("client projection", () => {
     expect(JSON.stringify(view)).not.toContain("ignore previous instructions");
   });
 
+  it("persists and projects only a structured failure remediation", () => {
+    const op = newOp();
+    finish(op, "failed", {
+      failure: {
+        code: "github-scopes-missing",
+        message: "GitHub access is missing.",
+        classification: "user-fixable",
+        remediation: {
+          id: "github-account-scopes",
+          params: { login: "octocat", packages: "true", unsafe: 1 }
+        }
+      }
+    });
+
+    const restored = fromPersistedOperation(toPersistedOperation(op));
+
+    expect(restored.failure.remediation).toEqual({
+      id: "github-account-scopes",
+      params: { login: "octocat", packages: "true" }
+    });
+    expect(toClientView(restored).failure.remediation).toEqual({
+      id: "github-account-scopes",
+      params: { login: "octocat", packages: "true" }
+    });
+  });
+
+  it.each(["repo", ["repo"], 7])(
+    "treats non-record remediation params as empty when params=%j",
+    (params) => {
+      const op = newOp();
+      finish(op, "failed", {
+        failure: {
+          code: "github-scopes-missing",
+          message: "GitHub access is missing.",
+          classification: "user-fixable",
+          remediation: {
+            id: "github-account-scopes",
+            params
+          }
+        }
+      });
+
+      const restored = fromPersistedOperation(toPersistedOperation(op));
+
+      expect(restored.failure.remediation).toEqual({
+        id: "github-account-scopes",
+        params: {}
+      });
+      expect(toClientView(restored).failure.remediation).toEqual({
+        id: "github-account-scopes",
+        params: {}
+      });
+    }
+  );
+
+  it.each([
+    ["absent", undefined, null],
+    ["null", null, null],
+    ["non-numeric", "later", null],
+    ["numeric", 4, 4]
+  ])(
+    "projects a %s failure stepSeq without inventing step zero",
+    (_name, stepSeq, expected) => {
+      const op = newOp();
+      finish(op, "failed", {
+        failure: {
+          code: "github-scopes-missing",
+          message: "GitHub access is missing.",
+          classification: "user-fixable",
+          stepSeq
+        }
+      });
+
+      expect(toClientView(op).failure.stepSeq).toBe(expected);
+      expect(
+        fromPersistedOperation(toPersistedOperation(op)).failure.stepSeq
+      ).toBe(expected);
+    }
+  );
+
   it("names created resources with safe labels rather than the private ledger", () => {
     const op = newOp();
     recordAzureApp(op, {

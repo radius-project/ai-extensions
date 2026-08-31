@@ -326,6 +326,7 @@ const productionHandlers = {
   }),
   ...createEnvironmentsRoutes({
     errorMessage: (error) => String(error),
+    redactDiagnostic: (value) => value,
     repoMatchesWorkspace: () => false,
     readInstanceEntry: () => undefined,
     runCommand: () => Promise.resolve(""),

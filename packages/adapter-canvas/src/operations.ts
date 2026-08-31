@@ -31,6 +31,7 @@ import {
   type OperationStore
 } from "./operation-store.js";
 import { redactGhCredentials } from "./gh.js";
+import { remediationReference } from "./remediation-reference.js";
 
 // Version 2 adds the cooperative control record (stop, attempts, commands,
 // outcome history). Version 3 adds workflow provenance to the artifact ledger
@@ -5569,13 +5570,17 @@ function persistedDeleteRecovery(request: any): PersistedDeleteRecovery | null {
 
 function persistedFailure(failure: any): any {
   if (!failure) return null;
+  const remediation = remediationReference(failure.remediation);
   return {
     code: String(failure.code || ""),
     stage: failure.stage == null ? null : String(failure.stage),
     stepSeq:
-      Number.isFinite(Number(failure.stepSeq)) ? Number(failure.stepSeq) : null,
+      failure.stepSeq == null || !Number.isFinite(Number(failure.stepSeq)) ?
+        null
+      : Number(failure.stepSeq),
     message: String(failure.message || ""),
-    classification: String(failure.classification || "")
+    classification: String(failure.classification || ""),
+    ...(remediation ? { remediation } : {})
   };
 }
 
@@ -6324,15 +6329,6 @@ export function toClientView(op: any): any {
     headline: projectOperationHeadline(op),
     activeCommandKind: activeCommandKind(op),
     nextTransition: projectNextTransition(op),
-    failure:
-      op.failure ?
-        {
-          code: op.failure.code,
-          stage: op.failure.stage,
-          stepSeq: op.failure.stepSeq,
-          message: op.failure.message,
-          classification: op.failure.classification
-        }
-      : null
+    failure: persistedFailure(op.failure)
   };
 }
