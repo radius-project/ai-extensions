@@ -73,7 +73,13 @@ function applyPortTransform(text: string): string {
 // not byte-compared.
 const CONTENT_EXCEPTIONS = new Set<string>([
   "README.md",
-  "actions/load-contrib-catalog/action.yml"
+  "actions/load-contrib-catalog/action.yml",
+  // The environment-delete dispatcher exists in Radius too, but the version
+  // hosted here is the ai-extensions-owned rewrite (issue #303): Azure-only,
+  // with the "refuse to delete an environment that still has deployed apps"
+  // safety guard and a correlation_id input. It must exist, but its content
+  // intentionally diverges from Radius' generic Azure/AWS dispatcher.
+  "delete-environment.yml"
 ]);
 
 // Paths that exist only in ai-extensions and have no Radius counterpart.
