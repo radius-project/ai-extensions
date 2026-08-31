@@ -35,7 +35,7 @@ No production code changes. The work is a mode switch in the test harness, a fix
 - Establish a harness and fixture that the later deploy and deletion stages plug into without redesign.
 - Assert cloud state by querying Azure and GitHub directly, never by reading the extension's own status display.
 - Reuse Radius's existing test subscription, identity automation, cleanup jobs, and registry instead of building a parallel estate.
-- Keep the tier off the pull request path, so third-party outages never block a merge.
+- Never run these tests on pull requests, so an Azure or GitHub outage cannot stop anyone from merging.
 
 Success means one thing: a nightly run that fails when the product breaks the cloud contract, and only then.
 
