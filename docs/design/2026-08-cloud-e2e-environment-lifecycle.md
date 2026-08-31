@@ -77,7 +77,10 @@ identity, whose credentials are not extractable from CI anyway. That is not a we
 configuration: the product is written for a signed-in human, so a local run exercises its
 primary path, and CI is the one that needs the service-principal accommodation in step 4.
 The consequence to plan for is that a local run and CI are not identical environments, so
-an identity-sensitive failure can reproduce in one and not the other.
+an identity-sensitive failure can reproduce in one and not the other. The fork is selected
+through the two `RADIUS_CLOUD_E2E_FIXTURE_*` variables described under
+[Two product behaviours the fixture must respect](#two-product-behaviours-the-fixture-must-respect);
+they are refused when `CI` is set, so they cannot affect the nightly run.
 
 **Sample output:**
 
@@ -190,15 +193,17 @@ The fixture creates only what the product never creates: a resource group, a clu
 
 The resulting boundary:
 
-| The fixture creates                               | The product creates — the fixture must not     |
+| The fixture creates, per run                      | The product creates — the fixture must not     |
 |---------------------------------------------------|------------------------------------------------|
 | Per-run resource group `radtest-canvas-<uid>`     | App registration and its service principal     |
 | Per-run AKS cluster, purely as a discovery target | Federated credential                           |
 | Fixture repository clone at a pinned commit       | Role assignment                                |
-| Bootstrap identity                                | The GitHub Environment and its variables       |
-| `GH_TOKEN` for the runner                         | Generated workflow files on the default branch |
+| —                                                 | The GitHub Environment and its variables       |
+| —                                                 | Generated workflow files on the default branch |
 
-Two mechanisms enforce it.
+A third category sits outside that table because neither side creates it. The **bootstrap identity** and the runner's **`GH_TOKEN`** are provisioned ahead of any run by `wellknown` Terraform and the App installation, as described under [Upstream `wellknown` changes](#upstream-wellknown-changes). They are standing inputs to the tier, not artifacts of a run: nothing creates them per run, `assertCleanSlate()` must not expect them absent, and cleanup must never delete them. Listing the identity as fixture-created would have implied all three of the opposite.
+
+Two mechanisms enforce the boundary.
 
 **`assertCleanSlate()` runs before the journey starts.** It asserts every right-hand item is absent. This turns later assertions from observations into proofs, and catches a previous run's leaked state before that state silently turns a red test green.
 
@@ -266,6 +271,8 @@ These are **not** stored in `ai-extensions` and copied in at run time. They are 
 
 The cost is cross-repository atomicity: a product change needing an `app.bicep` change cannot land in one pull request. Mitigated by pinning the baseline commit SHA in a single `ai-extensions` constant, so updating the application is a deliberate, reviewable SHA bump — and that SHA doubles as the cleanup reset target. A conformance check asserts the pinned baseline still has the three files and still compiles, so an upstream Radius change cannot silently rot the fixture into an unexplained overnight failure.
 
+Compiling the baseline needs `rad`, and **the runner does not install it**. The check compiles through the product's own [`buildGraphViaRad()`](../../packages/adapter-shared/src/rad.ts), which resolves the extension-managed binary — downloading it when absent via [`ensureRadBinary()`](../../packages/adapter-shared/src/rad.ts) — rather than shelling out to a `rad` the workflow put on `PATH`. So no setup step is required, and more importantly the baseline is proved to compile against **the same `rad` and the same Radius Bicep extension the product would use**, not a separately pinned copy that could drift from it. A workflow-installed `rad` would let the check pass against a version no user runs.
+
 ##### What the baseline commit contains
 
 | Path                       | Purpose                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -315,7 +322,20 @@ Both were found by reading the production code, and both would otherwise cause a
 
 **The application name is repository-scoped, so runs must serialize.** [`resolveAzureAutoSetupApplication()`](../../packages/adapter-canvas/src/server/routes/azure-auto-setup-application.ts) derives the Entra application name as `radius-deploy-<owner>-<repo>`, with no environment and no unique id. Two runs against one fixture repository therefore contend for a single application. The fixture must not work around this by making the name unique per run — the product owns that derivation, and overriding it in test would exercise something no user ever runs. Runs serialize through a `concurrency` group instead, and cleanup must never delete an application a concurrent run is still using.
 
-A `concurrency` group only serializes runs *within the CI repository*, so it does nothing about a developer running `pnpm test:cloud` while the nightly is mid-flight. Two runs sharing a subscription and a fixture repository would contend for that one application name, and the likely symptom is not a clean failure — it is one run's cleanup deleting the application the other is still using, surfacing as an unrelated Entra error. This is the second reason a local run uses the developer's own subscription and their own fork of the fixture repository, alongside the credential reason above: **different repository, different derived application name, no shared state, no possible contention.** Pointing a local run at the shared fixture repository is therefore unsupported, and the runbook says so rather than leaving it to be discovered.
+A `concurrency` group only serializes runs *within the CI repository*, so it does nothing about a developer running `pnpm test:cloud` while the nightly is mid-flight. Two runs sharing a subscription and a fixture repository would contend for that one application name, and the likely symptom is not a clean failure — it is one run's cleanup deleting the application the other is still using, surfacing as an unrelated Entra error. This is the second reason a local run uses the developer's own subscription and their own fork of the fixture repository, alongside the credential reason above: **different repository, different derived application name, no shared state, no possible contention.**
+
+**How a developer selects their fork.** Two environment variables, which must be set together:
+
+| Variable                                | Value                                |
+|-----------------------------------------|--------------------------------------|
+| `RADIUS_CLOUD_E2E_FIXTURE_REPOSITORY`   | `owner/name` of the developer's fork |
+| `RADIUS_CLOUD_E2E_FIXTURE_BASELINE_SHA` | The baseline commit **in that fork** |
+
+Setting one without the other is a hard failure rather than a partial override. A fork's commits are not the upstream commits, so a run pointed at a fork while still carrying the upstream pin would try to reset the fork to a SHA it does not contain — and because that pinned SHA is also the cleanup reset target, the failure would surface during cleanup, after the run had already created cloud resources. Failing at startup instead costs nothing and is unambiguous.
+
+**The suite refuses these variables when `CI` is set**, and fails rather than ignoring them. Ignoring would be worse than either alternative: in CI a stray value could repoint the nightly run at somebody's fork, and locally a silently-ignored override would leave a developer believing they were testing their fork while actually operating on the shared repository — which is precisely the contention this paragraph exists to prevent.
+
+Pointing a local run at the *shared* fixture repository is therefore unsupported. The runbook must state that and name these two variables; it lands with the CI layer rather than this note, so treat it as a requirement on that layer, not something already written down here.
 
 **Workflow publication has two paths, and only one touches the default branch.** When the token lacks `workflow` scope the product does not commit to the default branch at all; it creates a `radius/setup-<env>-workflows-<suffix>` branch and opens a pull request ([`beginPrFallback()`](../../packages/adapter-canvas/src/server/routes/create-environment-workflow-committer.ts)). So a clean-slate or leak check that compares only the default-branch head to the pinned baseline reports clean while a branch and an open pull request leak; those checks must cover both. It also means the end-to-end GitHub App must hold `workflows: write`. Without it the journey quietly takes the pull-request path and passes without ever testing the committed-workflow path it claims to cover — a green run proving the wrong thing.
 
@@ -392,6 +412,8 @@ The two published Actions variables are consumed differently, and the difference
 
 - `AIEXT_CLOUD_E2E_AZURE_LOCATION` is a real input. The suite reads it through `resolveFixtureLocation()` and falls back to a compiled default when it is unset. The region is validated for shape only — never against an allow-list, because Azure adds regions and a strict rule would fail the nightly run for a reason unrelated to the product.
 - `AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY` is **not** an input to the suite. The fixture repository is pinned in source so a mutable Actions variable cannot silently repoint the tests at a different repository; the variable exists as a consistency check against that pin and as the cleanup workflow's signal that there is anything to purge. Changing the suite to read it directly would defeat the pinning, so treat that as a regression rather than a cleanup.
+
+  This is a narrower rule than "the fixture repository can never be overridden", and the distinction is what makes the local-fork workflow above legitimate rather than a contradiction of it. What must never become an input is a **remotely mutable value that CI reads**: an Actions variable can be edited by anyone with repository settings access, and the nightly run would silently begin testing somewhere else with nothing in the diff to show it. The local override is the opposite on every count — it is set explicitly by the person running the suite, it never reaches CI because the suite refuses it when `CI` is set, and it cannot change what the nightly tests. The pin protects CI's inputs from remote mutation; it is not a prohibition on a developer testing their own fork.
 
 #### Upstream `wellknown` changes
 
