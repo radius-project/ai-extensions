@@ -27,8 +27,7 @@ import { FORK_REPOSITORY_SETUP_GUIDANCE } from "../../repository-access-guidance
 // this code was inline: after each committed file. The use case still owns what
 // a gate means and when cancellation is observed; this module only calls it.
 
-export const WRITE_ACCESS_HINT =
-  ` Check that you have write access to the repository and that GitHub Actions is enabled. ${FORK_REPOSITORY_SETUP_GUIDANCE}`;
+export const WRITE_ACCESS_HINT = ` Check that you have write access to the repository and that GitHub Actions is enabled. ${FORK_REPOSITORY_SETUP_GUIDANCE}`;
 
 function workflowScopeHint(
   ghCommandPresentation: GhCommandPresentation
