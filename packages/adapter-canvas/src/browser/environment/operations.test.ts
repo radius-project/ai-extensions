@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEPLOY_BUTTON_ID,
   DEPLOY_BUTTON_IDLE_LABEL,
+  DIAGNOSTIC_IDS,
   ENVIRONMENT_OPERATIONS_ENTRY_KEY,
   ERROR_BANNER_ID,
   NEW_ENVIRONMENT_BUTTON_ID,
@@ -34,6 +35,7 @@ import {
 } from "../../../test/support/browser/fakes.js";
 import type {
   FakeElement,
+  FakeInputElement,
   NetworkHandler
 } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
@@ -54,6 +56,10 @@ function resumeUrl(operationId: string, code: string): string {
 
 function stopUrl(operationId: string): string {
   return `${operationUrl(operationId)}/stop`;
+}
+
+function dismissUrl(operationId: string): string {
+  return `${operationUrl(operationId)}/dismiss`;
 }
 
 function verifyUrl(
@@ -79,6 +85,7 @@ function setupWithout(missingIds: readonly string[] = []) {
   const els: Record<string, FakeElement> = {};
   for (const id of [
     ...Object.values(PROGRESS_IDS),
+    ...Object.values(DIAGNOSTIC_IDS),
     ...Object.values(ROLLBACK_IDS),
     ERROR_BANNER_ID,
     NEW_ENVIRONMENT_BUTTON_ID
@@ -87,7 +94,13 @@ function setupWithout(missingIds: readonly string[] = []) {
     // The rollback confirm control is disabled while its request is in
     // flight, so it has to be a real input-like node.
     const el =
-      id === ROLLBACK_IDS.confirm ? createFakeInput(id) : createFakeElement(id);
+      (
+        id === ROLLBACK_IDS.confirm ||
+        id === DIAGNOSTIC_IDS.includeIdentifiers ||
+        id === DIAGNOSTIC_IDS.reviewedIdentifiers
+      ) ?
+        createFakeInput(id)
+      : createFakeElement(id);
     els[id] = el;
     browser.document.add(el);
   }
@@ -176,8 +189,8 @@ const EXIT_ACTION_WITH_DELETIONS = {
 const STOP_ACTION = {
   id: "stop",
   kind: "stop",
-  label: "Stop setup",
-  description: "Radius finishes the current step and stops.",
+  label: "Pause setup",
+  description: "Radius finishes the current step and pauses.",
   path: "/api/operations/op-1/stop",
   pending: false
 };
@@ -185,7 +198,7 @@ const STOP_ACTION = {
 const RETRY_CLEANUP_ACTION = {
   id: "retry-cleanup",
   kind: "retry_cleanup",
-  label: "Retry rollback",
+  label: "Retry deletion",
   description: "Radius tries again to remove what is still present.",
   path: "/api/operations/op-1/rollback/retry",
   pending: false,
@@ -194,14 +207,14 @@ const RETRY_CLEANUP_ACTION = {
 
 const ROLLING_BACK_HEADLINE = {
   code: "rolling-back",
-  title: "Rolling back created resources…",
+  title: "Deleting setup resources…",
   message:
     "Radius is removing the resources it proved it created during this attempt."
 };
 
 const ROLLBACK_COMPLETE_HEADLINE = {
   code: "rollback-complete",
-  title: "Rollback complete",
+  title: "Setup deleted",
   message:
     "Radius removed the resources it created during this attempt. Anything it reused was left alone."
 };
@@ -305,6 +318,53 @@ function renderRecord(
   const controller = controllerFor(browser);
   controller?.renderProgress(record(overrides));
   return controller;
+}
+
+function openDiagnostic(browser: ReturnType<typeof setup>) {
+  const controller = controllerFor(browser);
+  controller?.renderProgress(
+    record({ state: "failed", terminalState: "failed" })
+  );
+  browser.els[DIAGNOSTIC_IDS.open].dispatch("click");
+  return controller;
+}
+
+function diagnosticPreviewUrl(operationId = "op-1"): string {
+  return `${operationUrl(operationId)}/diagnostics?identifiers=preview`;
+}
+
+const DIAGNOSTIC_PREVIEW = {
+  contextFingerprint: "a".repeat(64),
+  contextualIdentifiers: {
+    repository: "octo/widgets",
+    branch: "feature/environment-recovery",
+    environment: "production-west",
+    githubLogin: "octocat",
+    omittedFieldCount: 0
+  }
+};
+const CONTEXTUAL_DIAGNOSTIC_URL =
+  `/api/operations/op-1/diagnostics?identifiers=include&contextFingerprint=` +
+  "a".repeat(64);
+
+async function reviewDiagnosticIdentifiers(
+  browser: ReturnType<typeof setup>
+): Promise<void> {
+  browser.net.handle(diagnosticPreviewUrl(), () =>
+    jsonResponse(DIAGNOSTIC_PREVIEW)
+  );
+  openDiagnostic(browser);
+  const include = browser.els[
+    DIAGNOSTIC_IDS.includeIdentifiers
+  ] as FakeInputElement;
+  include.checked = true;
+  include.dispatch("change");
+  await flushPromises();
+  const reviewed = browser.els[
+    DIAGNOSTIC_IDS.reviewedIdentifiers
+  ] as FakeInputElement;
+  reviewed.checked = true;
+  reviewed.dispatch("change");
 }
 
 /** Whether the panel is carrying one of its lifecycle classes. */
@@ -534,7 +594,7 @@ describe("parseOperationResponse", () => {
           {
             id: "rollback",
             kind: "rollback",
-            label: "Roll back created resources",
+            label: "Delete setup",
             description: "This cannot be undone.",
             path: "/api/operations/op-1/rollback",
             pending: false,
@@ -577,7 +637,7 @@ describe("parseOperationResponse", () => {
       {
         id: "rollback",
         kind: "rollback",
-        label: "Roll back created resources",
+        label: "Delete setup",
         description: "This cannot be undone.",
         path: "/api/operations/op-1/rollback",
         pending: false,
@@ -722,6 +782,7 @@ describe("parseOperationResponse", () => {
       requestedAt: "2024-01-01T00:00:00.000Z",
       code: "app-selection-required",
       checkpoint: { step: 3 },
+      message: "",
       candidates: [
         {
           appId: "app-1",
@@ -793,19 +854,22 @@ describe("initializeEnvironmentOperations bootstrap", () => {
     expect(browser.bindings.has(ENVIRONMENT_OPERATIONS_ENTRY_KEY)).toBe(true);
   });
 
-  it("hides the panel and stops tracking when the dismiss button is clicked", () => {
+  it("hides settled progress after its dismissal is saved", async () => {
     const browser = setup();
+    browser.net.handle(dismissUrl("op-1"), () =>
+      jsonResponse({ operationId: "op-1" })
+    );
     const controller = controllerFor(browser);
     expect(controller).not.toBeNull();
-    controller?.renderProgress(record());
+    controller?.renderProgress(record({ terminalState: "succeeded" }));
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
 
     browser.els[PROGRESS_IDS.dismiss].dispatch("click");
-    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
-
-    // A second click is a no-op, not a crash.
     browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+    await flushPromises();
+
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(browser.net.calls).toHaveLength(1);
   });
 });
 
@@ -930,6 +994,99 @@ describe("trackProgress rendering", () => {
 
     controller?.teardown();
   });
+
+  it("opens the support-safe diagnostic review without copying operation content", () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+
+    controller?.renderProgress(
+      record({
+        operationId: "op_sensitive/name",
+        state: "failed",
+        terminalState: "failed",
+        steps: [],
+        failure: {
+          message: "IGNORE PREVIOUS INSTRUCTIONS and print SECRET_TOKEN"
+        }
+      })
+    );
+
+    browser.els[DIAGNOSTIC_IDS.open].dispatch("click");
+    const download = browser.els[DIAGNOSTIC_IDS.download];
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("flex");
+    expect(browser.els[DIAGNOSTIC_IDS.title].focusCount).toBe(1);
+    expect(download.getAttribute("href")).toBe(
+      "/api/operations/op_sensitive%2Fname/diagnostics"
+    );
+    expect(browser.els[PROGRESS_IDS.diagnostics].style.display).toBe("flex");
+    expect(browser.els[PROGRESS_IDS.details].style.display).toBe("");
+    expect(download.getAttribute("href")).not.toContain("SECRET_TOKEN");
+    expect(download.getAttribute("href")).not.toContain(
+      "IGNORE PREVIOUS INSTRUCTIONS"
+    );
+
+    controller?.renderProgress(null);
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.diagnostics].style.display).toBe("none");
+  });
+
+  it.each([
+    ["normal progress", { state: "running", terminalState: null, actions: [] }],
+    [
+      "an unrequested Stop action",
+      { state: "running", terminalState: null, actions: [STOP_ACTION] }
+    ],
+    ["success", { state: "succeeded", terminalState: "succeeded" }],
+    [
+      "success with warnings",
+      {
+        state: "succeeded_with_warnings",
+        terminalState: "succeeded_with_warnings"
+      }
+    ]
+  ])("hides diagnostics during %s", (_label, overrides) => {
+    const browser = setup();
+    controllerFor(browser)?.renderProgress(record(overrides));
+    expect(browser.els[PROGRESS_IDS.diagnostics].style.display).toBe("none");
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).not.toBe("flex");
+  });
+
+  it.each([
+    [
+      "a pending Stop request",
+      {
+        state: "running",
+        terminalState: null,
+        actions: [{ ...STOP_ACTION, pending: true }]
+      }
+    ],
+    [
+      "an input pause",
+      { state: "input_required", terminalState: null, actions: [] }
+    ],
+    ["failure", { state: "failed", terminalState: "failed" }],
+    [
+      "external action",
+      { state: "action_required", terminalState: "action_required" }
+    ],
+    ["cancellation", { state: "cancelled", terminalState: "cancelled" }]
+  ])("shows diagnostics during %s", (_label, overrides) => {
+    const browser = setup();
+    controllerFor(browser)?.renderProgress(record(overrides));
+    expect(browser.els[PROGRESS_IDS.diagnostics].style.display).toBe("flex");
+  });
+
+  it.each([PROGRESS_IDS.diagnostics, DIAGNOSTIC_IDS.open])(
+    "keeps details hidden when the diagnostic surface is missing %s",
+    (missingId) => {
+      const browser = setupWithout([missingId]);
+      const controller = controllerFor(browser);
+      controller?.renderProgress(
+        record({ state: "failed", terminalState: "failed", steps: [] })
+      );
+      expect(browser.els[PROGRESS_IDS.details].style.display).toBe("none");
+    }
+  );
 
   it("falls back to a default glyph for an unrecognized stage or step state", () => {
     const browser = setup();
@@ -1069,6 +1226,34 @@ describe("trackProgress rendering", () => {
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
   });
 
+  it("offers Retry deletion and Exit when deletion completes with warnings", () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+
+    controller?.renderProgress(
+      record({
+        kind: "delete",
+        terminalState: "succeeded_with_warnings",
+        actions: [
+          {
+            id: "retry-deletion",
+            kind: "retry_deletion",
+            label: "Retry Deletion",
+            description: "Retry unfinished deletion steps.",
+            path: "/api/operations/op-1/retry/deletion",
+            pending: false
+          }
+        ]
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("");
+    expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("Exit");
+    expect(textOf(browser, PROGRESS_IDS.commandButtons)).toEqual([
+      "Retry Deletion"
+    ]);
+  });
+
   it("hides stale terminal copy after success", () => {
     const browser = setup();
     const controller = controllerFor(browser);
@@ -1102,6 +1287,456 @@ describe("trackProgress rendering", () => {
     controller?.renderProgress(null);
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.failureCard].style.display).toBe("none");
+  });
+});
+
+describe("diagnostic snapshot review", () => {
+  it("previews server-built identifiers and requires review before contextual download", async () => {
+    const browser = setup();
+    browser.net.handle(diagnosticPreviewUrl(), () =>
+      jsonResponse(DIAGNOSTIC_PREVIEW)
+    );
+    openDiagnostic(browser);
+
+    const include = browser.els[
+      DIAGNOSTIC_IDS.includeIdentifiers
+    ] as FakeInputElement;
+    include.checked = true;
+    include.dispatch("change");
+    await flushPromises();
+
+    expect(browser.els[DIAGNOSTIC_IDS.preview].style.display).toBe("");
+    expect(browser.els[DIAGNOSTIC_IDS.repository].textContent).toBe(
+      "octo/widgets"
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.branch].textContent).toBe(
+      "feature/environment-recovery"
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.environment].textContent).toBe(
+      "production-west"
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.githubLogin].textContent).toBe("octocat");
+    expect(
+      browser.els[DIAGNOSTIC_IDS.download].getAttribute("href")
+    ).toBeNull();
+
+    const reviewed = browser.els[
+      DIAGNOSTIC_IDS.reviewedIdentifiers
+    ] as FakeInputElement;
+    reviewed.checked = true;
+    reviewed.dispatch("change");
+    expect(browser.els[DIAGNOSTIC_IDS.download].getAttribute("href")).toBe(
+      `/api/operations/op-1/diagnostics?identifiers=include&contextFingerprint=${"a".repeat(64)}`
+    );
+    expect(
+      browser.els[DIAGNOSTIC_IDS.download].getAttribute("aria-disabled")
+    ).toBe("false");
+  });
+
+  it("renders unavailable identifiers as data rather than guessing them", async () => {
+    const browser = setup();
+    browser.net.handle(diagnosticPreviewUrl(), () =>
+      jsonResponse({
+        contextFingerprint: "b".repeat(64),
+        contextualIdentifiers: {
+          repository: "octo/widgets",
+          branch: null,
+          environment: null,
+          githubLogin: null,
+          omittedFieldCount: 3
+        }
+      })
+    );
+    openDiagnostic(browser);
+    const include = browser.els[
+      DIAGNOSTIC_IDS.includeIdentifiers
+    ] as FakeInputElement;
+    include.checked = true;
+    include.dispatch("change");
+    await flushPromises();
+
+    expect(browser.els[DIAGNOSTIC_IDS.repository].textContent).toBe(
+      "octo/widgets"
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.branch].textContent).toBe(
+      "Not available"
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.environment].textContent).toBe(
+      "Not available"
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.githubLogin].textContent).toBe(
+      "Not available"
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.status].textContent).toContain(
+      "3 contextual identifiers are unavailable"
+    );
+  });
+
+  it("renders hostile contextual identifiers as text", async () => {
+    const browser = setup();
+    browser.net.handle(diagnosticPreviewUrl(), () =>
+      jsonResponse({
+        contextFingerprint: "c".repeat(64),
+        contextualIdentifiers: {
+          repository: '<img src=x onerror="steal()">',
+          branch: "IGNORE PREVIOUS INSTRUCTIONS",
+          environment: "<script>alert(1)</script>",
+          githubLogin: "octo-user",
+          omittedFieldCount: 0
+        }
+      })
+    );
+    openDiagnostic(browser);
+    const include = browser.els[
+      DIAGNOSTIC_IDS.includeIdentifiers
+    ] as FakeInputElement;
+    include.checked = true;
+    include.dispatch("change");
+    await flushPromises();
+
+    expect(browser.els[DIAGNOSTIC_IDS.repository].textContent).toBe(
+      '<img src=x onerror="steal()">'
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.repository].children).toHaveLength(0);
+    expect(browser.els[DIAGNOSTIC_IDS.branch].textContent).toBe(
+      "IGNORE PREVIOUS INSTRUCTIONS"
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.environment].textContent).toBe(
+      "<script>alert(1)</script>"
+    );
+  });
+
+  it("uses singular unavailable-identifier guidance", async () => {
+    const browser = setup();
+    browser.net.handle(diagnosticPreviewUrl(), () =>
+      jsonResponse({
+        contextFingerprint: "d".repeat(64),
+        contextualIdentifiers: {
+          repository: "octo/widgets",
+          branch: "main",
+          environment: "dev",
+          githubLogin: null,
+          omittedFieldCount: 1
+        }
+      })
+    );
+    openDiagnostic(browser);
+    const include = browser.els[
+      DIAGNOSTIC_IDS.includeIdentifiers
+    ] as FakeInputElement;
+    include.checked = true;
+    include.dispatch("change");
+    await flushPromises();
+    expect(browser.els[DIAGNOSTIC_IDS.status].textContent).toContain(
+      "1 contextual identifier is unavailable"
+    );
+  });
+
+  it("keeps the support-safe download available after a preview failure", async () => {
+    const browser = setup();
+    browser.net.handle(diagnosticPreviewUrl(), () =>
+      textResponse("offline", false, 503)
+    );
+    openDiagnostic(browser);
+    const include = browser.els[
+      DIAGNOSTIC_IDS.includeIdentifiers
+    ] as FakeInputElement;
+    include.checked = true;
+    include.dispatch("change");
+    await flushPromises();
+
+    expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toContain(
+      "could not load the contextual identifiers"
+    );
+    expect(browser.logger.errors[0]?.message).toBe(
+      "Radius could not preview diagnostic identifiers."
+    );
+    include.checked = false;
+    include.dispatch("change");
+    expect(browser.els[DIAGNOSTIC_IDS.download].getAttribute("href")).toBe(
+      "/api/operations/op-1/diagnostics"
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toBe("");
+  });
+
+  it("abandons a stale preview when the customer returns to the safe profile", async () => {
+    const browser = setup();
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle(diagnosticPreviewUrl(), () => pending.promise);
+    openDiagnostic(browser);
+    const include = browser.els[
+      DIAGNOSTIC_IDS.includeIdentifiers
+    ] as FakeInputElement;
+    include.checked = true;
+    include.dispatch("change");
+    include.checked = false;
+    include.dispatch("change");
+    pending.resolve(jsonResponse(DIAGNOSTIC_PREVIEW));
+    await flushPromises();
+
+    expect(browser.net.aborted).toBe(1);
+    expect(browser.els[DIAGNOSTIC_IDS.preview].style.display).toBe("none");
+    expect(browser.els[DIAGNOSTIC_IDS.repository].textContent).toBe("");
+    expect(browser.els[DIAGNOSTIC_IDS.download].getAttribute("href")).toBe(
+      "/api/operations/op-1/diagnostics"
+    );
+  });
+
+  it("ignores a stale preview without AbortController support", async () => {
+    const browser = setup();
+    browser.net.supportsAbort = false;
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle(diagnosticPreviewUrl(), () => pending.promise);
+    const controller = openDiagnostic(browser);
+    const include = browser.els[
+      DIAGNOSTIC_IDS.includeIdentifiers
+    ] as FakeInputElement;
+    include.checked = true;
+    include.dispatch("change");
+    controller?.renderProgress(
+      record({ state: "running", terminalState: null, actions: [] })
+    );
+    pending.resolve(jsonResponse(DIAGNOSTIC_PREVIEW));
+    await flushPromises();
+
+    expect(browser.net.aborted).toBe(0);
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("none");
+    expect(browser.els[DIAGNOSTIC_IDS.repository].textContent).toBe("");
+  });
+
+  it.each([
+    ["a non-record payload", null],
+    ["missing identifiers", { unexpected: true }],
+    [
+      "an invalid fingerprint",
+      {
+        contextFingerprint: "not-a-fingerprint",
+        contextualIdentifiers: DIAGNOSTIC_PREVIEW.contextualIdentifiers
+      }
+    ]
+  ])("surfaces %s as an invalid preview", async (_label, payload) => {
+    const browser = setup();
+    browser.net.supportsAbort = false;
+    browser.net.handle(diagnosticPreviewUrl(), () => jsonResponse(payload));
+    openDiagnostic(browser);
+    const include = browser.els[
+      DIAGNOSTIC_IDS.includeIdentifiers
+    ] as FakeInputElement;
+    include.checked = true;
+    include.dispatch("change");
+    await flushPromises();
+
+    expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toContain(
+      "could not load the contextual identifiers"
+    );
+  });
+
+  it("defaults a missing omission count to zero", async () => {
+    const browser = setup();
+    browser.net.handle(diagnosticPreviewUrl(), () =>
+      jsonResponse({
+        contextFingerprint: "e".repeat(64),
+        contextualIdentifiers: {
+          repository: "octo/widgets",
+          branch: "main",
+          environment: "dev",
+          githubLogin: "octocat"
+        }
+      })
+    );
+    openDiagnostic(browser);
+    const include = browser.els[
+      DIAGNOSTIC_IDS.includeIdentifiers
+    ] as FakeInputElement;
+    include.checked = true;
+    include.dispatch("change");
+    await flushPromises();
+    expect(browser.els[DIAGNOSTIC_IDS.status].textContent).toBe(
+      "Review the identifiers, then confirm that you reviewed them."
+    );
+  });
+
+  it("blocks an unreviewed contextual download and focuses its confirmation", async () => {
+    const browser = setup();
+    browser.net.handle(diagnosticPreviewUrl(), () =>
+      jsonResponse(DIAGNOSTIC_PREVIEW)
+    );
+    openDiagnostic(browser);
+    const include = browser.els[
+      DIAGNOSTIC_IDS.includeIdentifiers
+    ] as FakeInputElement;
+    include.checked = true;
+    include.dispatch("change");
+    await flushPromises();
+
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+
+    expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toContain(
+      "Review the contextual identifiers"
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.reviewedIdentifiers].focusCount).toBe(1);
+  });
+
+  it("traps focus, closes on Escape, and restores the opening control", () => {
+    const browser = setup();
+    openDiagnostic(browser);
+    const dialog = browser.els[DIAGNOSTIC_IDS.modal];
+    const include = browser.els[DIAGNOSTIC_IDS.includeIdentifiers];
+    const cancel = browser.els[DIAGNOSTIC_IDS.cancel];
+    const download = browser.els[DIAGNOSTIC_IDS.download];
+    dialog.matches.set(
+      "button:not([disabled]), input:not([disabled]), a[href]",
+      [include, cancel, download]
+    );
+
+    browser.document.activeElement = download;
+    browser.document.dispatch("keydown", { key: "Tab" });
+    expect(include.focusCount).toBe(1);
+
+    browser.document.activeElement = include;
+    browser.document.dispatch("keydown", { key: "Tab", shiftKey: true });
+    expect(download.focusCount).toBe(1);
+
+    browser.document.dispatch("keydown", { key: "Escape" });
+    expect(dialog.style.display).toBe("none");
+    expect(browser.els[DIAGNOSTIC_IDS.open].focusCount).toBe(1);
+  });
+
+  it("keeps focus in place for non-navigation keys and mid-dialog Tab", () => {
+    const browser = setup();
+    openDiagnostic(browser);
+    const dialog = browser.els[DIAGNOSTIC_IDS.modal];
+    const include = browser.els[DIAGNOSTIC_IDS.includeIdentifiers];
+    const reviewed = browser.els[DIAGNOSTIC_IDS.reviewedIdentifiers];
+    const cancel = browser.els[DIAGNOSTIC_IDS.cancel];
+    dialog.matches.set(
+      "button:not([disabled]), input:not([disabled]), a[href]",
+      [include, reviewed, cancel]
+    );
+    browser.document.activeElement = reviewed;
+    browser.document.dispatch("keydown", { key: "ArrowDown" });
+    browser.document.dispatch("keydown", { key: "Tab" });
+    expect(include.focusCount).toBe(0);
+    expect(cancel.focusCount).toBe(0);
+
+    dialog.matches.set(
+      "button:not([disabled]), input:not([disabled]), a[href]",
+      []
+    );
+    browser.document.dispatch("keydown", { key: "Tab" });
+    expect(include.focusCount).toBe(0);
+  });
+
+  it("wraps backwards from no focused diagnostic control and binds once", () => {
+    const browser = setup();
+    openDiagnostic(browser);
+    browser.els[DIAGNOSTIC_IDS.open].dispatch("click");
+    const dialog = browser.els[DIAGNOSTIC_IDS.modal];
+    const include = browser.els[DIAGNOSTIC_IDS.includeIdentifiers];
+    const cancel = browser.els[DIAGNOSTIC_IDS.cancel];
+    dialog.matches.set(
+      "button:not([disabled]), input:not([disabled]), a[href]",
+      [include, cancel]
+    );
+    browser.document.activeElement = null;
+    browser.document.dispatch("keydown", { key: "Tab", shiftKey: true });
+    expect(cancel.focusCount).toBe(1);
+    expect(browser.document.listenerCount("keydown")).toBe(1);
+
+    browser.document.remove(DIAGNOSTIC_IDS.modal);
+    expect(() =>
+      browser.document.dispatch("keydown", { key: "Tab" })
+    ).not.toThrow();
+  });
+
+  it("closes a stale review when the operation resumes or changes", () => {
+    const browser = setup();
+    const controller = openDiagnostic(browser);
+    controller?.renderProgress(
+      record({
+        operationId: "op-2",
+        state: "failed",
+        terminalState: "failed"
+      })
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("none");
+
+    browser.els[DIAGNOSTIC_IDS.open].dispatch("click");
+    controller?.renderProgress(
+      record({ state: "running", terminalState: null, actions: [] })
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("none");
+
+    controller?.renderProgress(
+      record({
+        operationId: "op-2",
+        state: "failed",
+        terminalState: "failed"
+      })
+    );
+    browser.els[DIAGNOSTIC_IDS.open].dispatch("click");
+    expect(browser.els[DIAGNOSTIC_IDS.download].getAttribute("href")).toBe(
+      "/api/operations/op-2/diagnostics"
+    );
+  });
+
+  it("keeps download disabled before any operation is rendered", () => {
+    const browser = setup();
+    controllerFor(browser);
+    const reviewed = browser.els[
+      DIAGNOSTIC_IDS.reviewedIdentifiers
+    ] as FakeInputElement;
+    reviewed.checked = true;
+    reviewed.dispatch("change");
+    expect(
+      browser.els[DIAGNOSTIC_IDS.download].getAttribute("href")
+    ).toBeNull();
+  });
+
+  it.each([
+    DIAGNOSTIC_IDS.announcement,
+    DIAGNOSTIC_IDS.status,
+    DIAGNOSTIC_IDS.repository,
+    DIAGNOSTIC_IDS.preview,
+    DIAGNOSTIC_IDS.reviewedIdentifiers,
+    DIAGNOSTIC_IDS.title
+  ])(
+    "degrades safely when optional diagnostic element %s is absent",
+    async (id) => {
+      const browser = setupWithout([id]);
+      browser.net.handle(diagnosticPreviewUrl(), () =>
+        jsonResponse(DIAGNOSTIC_PREVIEW)
+      );
+      const controller = openDiagnostic(browser);
+      const include = browser.els[
+        DIAGNOSTIC_IDS.includeIdentifiers
+      ] as FakeInputElement;
+      include.checked = true;
+      include.dispatch("change");
+      await flushPromises();
+      include.checked = false;
+      include.dispatch("change");
+      expect(() => controller?.teardown()).not.toThrow();
+    }
+  );
+
+  it.each([
+    DIAGNOSTIC_IDS.open,
+    DIAGNOSTIC_IDS.modal,
+    DIAGNOSTIC_IDS.includeIdentifiers,
+    DIAGNOSTIC_IDS.error,
+    DIAGNOSTIC_IDS.cancel,
+    DIAGNOSTIC_IDS.download
+  ])("degrades safely when diagnostic control %s is absent", (id) => {
+    const browser = setupWithout([id]);
+    const controller = controllerFor(browser);
+    controller?.renderProgress(
+      record({ state: "failed", terminalState: "failed" })
+    );
+    expect(() =>
+      browser.els[DIAGNOSTIC_IDS.open]?.dispatch("click")
+    ).not.toThrow();
+    expect(() => controller?.teardown()).not.toThrow();
   });
 });
 
@@ -1361,7 +1996,7 @@ describe("failure card rendering", () => {
     [
       "anything",
       false,
-      "Cleanup stopped at the commit point, so reusable artifacts were left in place."
+      "Deletion stopped at the commit point, so reusable artifacts were left in place."
     ],
     ["succeeded_with_warnings", undefined, "Cleanup finished with warnings."],
     ["succeeded", undefined, "Cleanup finished."],
@@ -1765,7 +2400,7 @@ describe("operation commands", () => {
     const rendered = buttons(browser);
     expect(rendered).toHaveLength(2);
     expect(rendered[0].id).toBe("env-progress-command-stop");
-    expect(rendered[0].textContent).toBe("Stop setup");
+    expect(rendered[0].textContent).toBe("Pause setup");
     expect(rendered[0].getAttribute("type")).toBe("button");
     expect(rendered[0].className).toBe("rad-btn rad-btn--secondary");
     expect(rendered[0].getAttribute("title")).toBe(STOP_ACTION.description);
@@ -1780,6 +2415,107 @@ describe("operation commands", () => {
     expect(rendered[1].textContent).toBe("Continue");
     expect(Reflect.get(rendered[1], "disabled")).toBe(true);
     expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe("");
+  });
+
+  it("never renders setup controls for a delete operation", () => {
+    const browser = setup();
+    renderActions(
+      browser,
+      [
+        STOP_ACTION,
+        {
+          id: "retry-deletion",
+          kind: "retry_deletion",
+          label: "Retry Deletion",
+          description: "Retry unfinished deletion steps.",
+          path: "/api/operations/op-1/retry/deletion",
+          pending: false
+        },
+        EXIT_ACTION
+      ],
+      { kind: "delete" }
+    );
+
+    expect(buttons(browser)).toHaveLength(1);
+    expect(buttons(browser)[0].textContent).toBe("Retry Deletion");
+    expect(bottomButtons(browser)).toHaveLength(0);
+  });
+
+  it("renders deletion-specific failure details", () => {
+    const browser = setup();
+    renderActions(
+      browser,
+      [
+        {
+          id: "retry-deletion",
+          kind: "retry_deletion",
+          label: "Retry Deletion",
+          description: "Retry unfinished deletion steps.",
+          path: "/api/operations/op-1/retry/deletion",
+          pending: false
+        }
+      ],
+      {
+        kind: "delete",
+        state: "failed_partial",
+        terminalState: "failed_partial",
+        headline: {
+          title: "Deletion could not continue",
+          message: "Review the error, then retry deletion."
+        },
+        failure: { message: "The delete workflow failed." }
+      }
+    );
+
+    expect(browser.els[PROGRESS_IDS.failureTitle].textContent).toBe(
+      "Deletion could not continue"
+    );
+    expect(browser.els[PROGRESS_IDS.failureMessage].textContent).toBe(
+      "The delete workflow failed."
+    );
+    expect(browser.els[PROGRESS_IDS.cleanupStatus].textContent).toContain(
+      "Deletion stopped before all stages completed."
+    );
+    expect(browser.els[PROGRESS_IDS.retry].textContent).toBe(
+      "Retry deletion resumes from the unfinished stage."
+    );
+  });
+
+  it("renders safe deletion failure fallbacks without a retry action", () => {
+    const browser = setup();
+    renderActions(browser, [], {
+      kind: "delete",
+      state: "failed_partial",
+      terminalState: "failed_partial",
+      headline: { title: "", message: "" },
+      failure: null
+    });
+
+    expect(browser.els[PROGRESS_IDS.failureTitle].textContent).toBe(
+      "Deletion could not continue"
+    );
+    expect(browser.els[PROGRESS_IDS.failureMessage].textContent).toBe(
+      "The deletion request failed."
+    );
+    expect(browser.els[PROGRESS_IDS.retry].textContent).toBe("");
+  });
+
+  it("renders deletion failure details when the optional title is absent", () => {
+    const browser = setupWithout([PROGRESS_IDS.failureTitle]);
+    const controller = controllerFor(browser);
+
+    controller?.renderProgress(
+      record({
+        kind: "delete",
+        state: "failed_partial",
+        terminalState: "failed_partial",
+        failure: { message: "Deletion failed." }
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.failureMessage].textContent).toBe(
+      "Deletion failed."
+    );
   });
 
   it("keeps the retry in the command row and Exit setup below the details", () => {
@@ -1861,7 +2597,7 @@ describe("operation commands", () => {
     renderActions(browser, [{ ...STOP_ACTION, pending: true }]);
 
     expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
-      "Stopping after the current step…"
+      "Pausing after the current step…"
     );
   });
 
@@ -2104,7 +2840,7 @@ describe("operation commands", () => {
     );
     expect(Reflect.get(buttons(browser)[0], "disabled")).toBe(true);
     expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
-      "Stopping after the current step…"
+      "Pausing after the current step…"
     );
 
     buttons(browser)[0].dispatch("click");
@@ -2130,6 +2866,16 @@ describe("operation commands", () => {
       "Retrying setup…"
     ],
     [
+      "a deletion retry without exposing setup wording",
+      {
+        id: "retry-deletion",
+        kind: "retry_deletion",
+        label: "Retry Deletion",
+        path: "/api/operations/op-1/retry/deletion"
+      },
+      "Retrying deletion…"
+    ],
+    [
       "an unknown command with the general acceptance sentence",
       {
         id: "unknown",
@@ -2151,6 +2897,69 @@ describe("operation commands", () => {
     );
     pending.resolve(jsonResponse({ operation: null }));
     await flushPromises();
+  });
+
+  it("clears the stale failure and refreshes environments when deletion retry starts", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    browser.els[ERROR_BANNER_ID].style.display = "";
+    const action = {
+      id: "retry-deletion",
+      kind: "retry_deletion",
+      label: "Retry Deletion",
+      path: "/api/operations/op-1/retry/deletion"
+    };
+
+    await pressCommand(
+      browser,
+      () =>
+        jsonResponse({
+          operation: op({
+            kind: "delete",
+            state: "running",
+            terminalState: null,
+            actions: []
+          })
+        }),
+      { action, deps: deps.deps }
+    );
+
+    expect(browser.els[ERROR_BANNER_ID].style.display).toBe("none");
+    expect(deps.reloadCount).toBe(1);
+  });
+
+  it("routes an immediately completed deletion retry to the delete terminal handler", async () => {
+    const browser = setup();
+    const deleteTerminals: OperationRecord[] = [];
+    const harness = createDeps({
+      onDeleteTerminal(op) {
+        deleteTerminals.push(op);
+      }
+    });
+    const action = {
+      id: "retry-deletion",
+      kind: "retry_deletion",
+      label: "Retry Deletion",
+      path: "/api/operations/op-1/retry/deletion"
+    };
+
+    await pressCommand(
+      browser,
+      () =>
+        jsonResponse(
+          op({
+            kind: "delete",
+            state: "succeeded_with_warnings",
+            terminalState: "succeeded_with_warnings",
+            actions: []
+          })
+        ),
+      { action, deps: harness.deps }
+    );
+
+    expect(deleteTerminals).toHaveLength(1);
+    expect(deleteTerminals[0].terminalState).toBe("succeeded_with_warnings");
+    expect(harness.successBanners).toEqual([]);
   });
 
   it("degrades quietly when the command region is not on the page", () => {
@@ -2281,15 +3090,15 @@ describe("rollback confirmation", () => {
   const rollbackAction = {
     id: "rollback",
     kind: "rollback",
-    label: "Roll back created resources",
+    label: "Delete setup",
     description: "This cannot be undone.",
     path: "/api/operations/op-1/rollback",
     pending: false,
     tone: "danger",
     requiresConfirmation: true,
-    confirmTitle: "Roll back resources created by this setup?",
-    confirmLabel: "Roll back resources",
-    cancelLabel: "Keep resources",
+    confirmTitle: "Delete this setup and its created resources?",
+    confirmLabel: "Delete setup",
+    cancelLabel: "Keep setup",
     preview: {
       type: "rollback",
       removes: [{ kind: "azure_app", target: "radius-dev" }],
@@ -2346,7 +3155,7 @@ describe("rollback confirmation", () => {
     expect(browser.els[ROLLBACK_IDS.modal].style.display).toBe("flex");
     expect(browser.net.calls).toHaveLength(0);
     expect(browser.els[ROLLBACK_IDS.title].textContent).toBe(
-      "Roll back resources created by this setup?"
+      "Delete this setup and its created resources?"
     );
     expect(browser.els[ROLLBACK_IDS.intro].textContent).toBe(
       "This cannot be undone."
@@ -2361,10 +3170,8 @@ describe("rollback confirmation", () => {
     expect(textOf(browser, ROLLBACK_IDS.manualList)).toEqual([
       "Role assignment: Contributor — Remove it"
     ]);
-    expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe(
-      "Roll back resources"
-    );
-    expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe("Keep resources");
+    expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe("Delete setup");
+    expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe("Keep setup");
     expect(trigger(browser).getAttribute("aria-haspopup")).toBe("dialog");
   });
 
@@ -2375,9 +3182,9 @@ describe("rollback confirmation", () => {
     // rebuild of either.
     const browser = setup();
     open(browser, {
-      label: "Roll back environment setup",
-      confirmTitle: "Roll back this environment setup?",
-      confirmLabel: "Roll back setup",
+      label: "Delete setup",
+      confirmTitle: "Delete this setup and its created resources?",
+      confirmLabel: "Delete setup",
       description:
         "Radius reverts the workflow files it committed with a new commit.",
       preview: {
@@ -2395,13 +3202,11 @@ describe("rollback confirmation", () => {
       }
     });
 
-    expect(trigger(browser).textContent).toBe("Roll back environment setup");
+    expect(trigger(browser).textContent).toBe("Delete setup");
     expect(browser.els[ROLLBACK_IDS.title].textContent).toBe(
-      "Roll back this environment setup?"
+      "Delete this setup and its created resources?"
     );
-    expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe(
-      "Roll back setup"
-    );
+    expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe("Delete setup");
     // The workflow files are listed first, in the order the server will act.
     expect(textOf(browser, ROLLBACK_IDS.removeList)).toEqual([
       "Workflow file: .github/workflows/radius-verify-credentials.yml on main",
@@ -2422,12 +3227,10 @@ describe("rollback confirmation", () => {
     });
 
     expect(browser.els[ROLLBACK_IDS.title].textContent).toBe(
-      "Roll back resources created by this setup?"
+      "Delete this setup and its created resources?"
     );
-    expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe(
-      "Roll back resources"
-    );
-    expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe("Keep resources");
+    expect(browser.els[ROLLBACK_IDS.confirm].textContent).toBe("Delete setup");
+    expect(browser.els[ROLLBACK_IDS.cancel].textContent).toBe("Keep setup");
     expect(browser.els[ROLLBACK_IDS.removeBlock].style.display).toBe("none");
   });
 
@@ -2520,7 +3323,7 @@ describe("rollback confirmation", () => {
     open(browser);
 
     expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
-      "Radius could not open the rollback confirmation."
+      "Radius could not open the delete confirmation."
     );
     expect(browser.net.calls).toHaveLength(0);
   });
@@ -2671,7 +3474,7 @@ describe("rollback confirmation", () => {
           {
             id: "stop",
             kind: "stop",
-            label: "Stop setup",
+            label: "Pause setup",
             description: "",
             path: "/api/operations/op-1/stop",
             pending: false
@@ -2701,14 +3504,14 @@ describe("headline and rollback outcomes", () => {
       summary: "Creating dev…",
       headline: {
         code: "rolling-back",
-        title: "Rolling back created resources…",
+        title: "Deleting setup resources…",
         message: "Radius is removing what it created."
       },
       activeCommandKind: "rollback"
     });
 
     expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
-      "Rolling back created resources…"
+      "Deleting setup resources…"
     );
     expect(browser.els[PROGRESS_IDS.headlineNote].textContent).toBe(
       "Radius is removing what it created."
@@ -2801,7 +3604,7 @@ describe("headline and rollback outcomes", () => {
         terminalState: "cancelled",
         headline: {
           code: "rollback-complete",
-          title: "Rollback complete",
+          title: "Setup deleted",
           message: "Radius removed the resources it created."
         }
       })
@@ -2891,7 +3694,7 @@ describe("headline and rollback outcomes", () => {
 describe("rollback lifecycle presentation", () => {
   const ROLLBACK_INCOMPLETE_HEADLINE = {
     code: "rollback-incomplete",
-    title: "Rollback finished with items still present",
+    title: "Deletion finished with items still present",
     message: "The resources below are still present."
   };
   // A rollback that is still deleting: the server closes the command list
@@ -2951,8 +3754,8 @@ describe("rollback lifecycle presentation", () => {
         terminalState: "cancelled",
         headline: {
           code: "stopped",
-          title: "Environment setup stopped",
-          message: "Radius stopped before the next setup step."
+          title: "Environment setup paused",
+          message: "Radius paused before the next setup step."
         },
         cleanup: { created: [{ target: "app radius-dev" }] }
       })
@@ -2963,7 +3766,7 @@ describe("rollback lifecycle presentation", () => {
 
     expect(browser.els[PROGRESS_IDS.partialState].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
-      "Rolling back created resources…"
+      "Deleting setup resources…"
     );
   });
 
@@ -2986,11 +3789,15 @@ describe("rollback lifecycle presentation", () => {
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
   });
 
-  it("dismisses the panel from the completed rollback's OK button", () => {
+  it("dismisses the panel from the completed rollback's OK button", async () => {
     const browser = setup();
+    browser.net.handle(dismissUrl("op-1"), () =>
+      jsonResponse({ operationId: "op-1" })
+    );
     controllerFor(browser)?.renderProgress(rollbackComplete());
 
     browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+    await flushPromises();
 
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
   });
@@ -3009,7 +3816,7 @@ describe("rollback lifecycle presentation", () => {
     controllerFor(browser)?.renderProgress(rollbackIncomplete());
 
     expect(textOf(browser, PROGRESS_IDS.commandButtons)).toEqual([
-      "Retry rollback"
+      "Retry deletion"
     ]);
     expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
@@ -3027,8 +3834,8 @@ describe("rollback lifecycle presentation", () => {
       actions: [EXIT_ACTION],
       headline: {
         code: "stopped",
-        title: "Environment setup stopped",
-        message: "Radius stopped before the next setup step."
+        title: "Environment setup paused",
+        message: "Radius paused before the next setup step."
       },
       cleanup: { created: [{ target: "app radius-dev" }] }
     });
@@ -3147,7 +3954,7 @@ describe("rollback and the stale setup-failure banner", () => {
   const ROLLBACK_ACTION = {
     id: "rollback",
     kind: "rollback",
-    label: "Roll back created resources",
+    label: "Delete setup",
     description: "This cannot be undone.",
     path: "/api/operations/op-1/rollback",
     pending: false,
@@ -3196,7 +4003,7 @@ describe("rollback and the stale setup-failure banner", () => {
 
     expect(browser.els[ERROR_BANNER_ID].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.commandStatus].textContent).toBe(
-      "Rollback started. Removing the resources Radius created…"
+      "Setup deletion started. Removing the resources Radius created…"
     );
     // The rows behind that failure are already being removed, so the picker is
     // asked for the current listing rather than left on the failed one.
@@ -3266,7 +4073,7 @@ describe("rollback and the stale setup-failure banner", () => {
         terminalState: "cancelled",
         headline: {
           code: "rollback-complete",
-          title: "Rollback complete",
+          title: "Setup deleted",
           message: "Radius removed the resources it created."
         }
       })
@@ -3372,6 +4179,24 @@ describe("terminal handling", () => {
     expect(deps.reloadCount).toBe(1);
     expect(browser.deployButton.textContent).toBe(DEPLOY_BUTTON_IDLE_LABEL);
     expect(browser.deployButton.disabled).toBe(false);
+  });
+
+  it("uses the host reset hook when terminal progress settles", () => {
+    const browser = setup();
+    const harness = createDeps();
+    let resets = 0;
+    const controller = controllerFor(browser, {
+      deps: {
+        ...harness.deps,
+        resetSubmitButton: () => {
+          resets += 1;
+        }
+      }
+    });
+
+    controller?.applyTerminal(record({ terminalState: "succeeded" }));
+
+    expect(resets).toBe(1);
   });
 
   it("marks succeeded_with_warnings the same as succeeded", () => {
@@ -3599,6 +4424,277 @@ describe("stale response ordering and operation identity", () => {
     expect(
       browser.net.calls.filter((call) => call.url.includes("/resume/")).length
     ).toBe(1);
+  });
+
+  it("downloads exactly the contextual payload bound to the reviewed fingerprint", async () => {
+    const browser = setup();
+    await reviewDiagnosticIdentifiers(browser);
+    browser.net.handle(CONTEXTUAL_DIAGNOSTIC_URL, () =>
+      textResponse('{"identifierProfile":"support_safe_with_identifiers"}')
+    );
+
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    await flushPromises();
+
+    expect(browser.download.saved).toEqual([
+      {
+        text: '{"identifierProfile":"support_safe_with_identifiers"}',
+        mimeType: "application/json",
+        filename: "radius-environment-operation-diagnostics.json"
+      }
+    ]);
+    expect(browser.els[DIAGNOSTIC_IDS.announcement].textContent).toBe(
+      "Diagnostic snapshot download started."
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.status].textContent).not.toBe(
+      "Diagnostic snapshot download started."
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("none");
+    expect(browser.els[DIAGNOSTIC_IDS.open].focusCount).toBe(1);
+  });
+
+  it("refreshes identifiers instead of saving a changed contextual payload", async () => {
+    const browser = setup();
+    await reviewDiagnosticIdentifiers(browser);
+    browser.net.handle(CONTEXTUAL_DIAGNOSTIC_URL, () =>
+      textResponse('{"code":"diagnostic-context-changed"}', false, 409)
+    );
+
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    await flushPromises();
+
+    expect(browser.download.saved).toEqual([]);
+    expect(
+      (browser.els[DIAGNOSTIC_IDS.reviewedIdentifiers] as FakeInputElement)
+        .checked
+    ).toBe(false);
+    expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toContain(
+      "contextual identifiers changed"
+    );
+  });
+
+  it("surfaces contextual response and host download failures", async () => {
+    const responseFailure = setup();
+    await reviewDiagnosticIdentifiers(responseFailure);
+    responseFailure.net.handle(CONTEXTUAL_DIAGNOSTIC_URL, () =>
+      textResponse("offline", false, 503)
+    );
+    responseFailure.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    await flushPromises();
+    expect(responseFailure.els[DIAGNOSTIC_IDS.error].textContent).toContain(
+      "could not download"
+    );
+    expect(responseFailure.els[DIAGNOSTIC_IDS.modal].style.display).toBe(
+      "flex"
+    );
+    expect(responseFailure.logger.errors[0]?.message).toBe(
+      "Radius could not download contextual diagnostics."
+    );
+
+    const hostFailure = setup();
+    hostFailure.download.available = false;
+    await reviewDiagnosticIdentifiers(hostFailure);
+    hostFailure.net.handle(CONTEXTUAL_DIAGNOSTIC_URL, () => textResponse("{}"));
+    hostFailure.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    await flushPromises();
+    expect(hostFailure.els[DIAGNOSTIC_IDS.error].textContent).toContain(
+      "host could not save"
+    );
+    expect(hostFailure.els[DIAGNOSTIC_IDS.modal].style.display).toBe("flex");
+  });
+
+  it("aborts an in-flight contextual download when the dialog closes", async () => {
+    const browser = setup();
+    await reviewDiagnosticIdentifiers(browser);
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle(CONTEXTUAL_DIAGNOSTIC_URL, () => pending.promise);
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    browser.els[DIAGNOSTIC_IDS.cancel].dispatch("click");
+    pending.resolve(textResponse("{}"));
+    await flushPromises();
+
+    expect(browser.net.aborted).toBe(1);
+    expect(browser.download.saved).toEqual([]);
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("none");
+  });
+
+  it("aborts an in-flight contextual download when identifier consent is withdrawn", async () => {
+    const browser = setup();
+    await reviewDiagnosticIdentifiers(browser);
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle(CONTEXTUAL_DIAGNOSTIC_URL, () => pending.promise);
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    const include = browser.els[
+      DIAGNOSTIC_IDS.includeIdentifiers
+    ] as FakeInputElement;
+    include.checked = false;
+    include.dispatch("change");
+    pending.resolve(textResponse("{}"));
+    await flushPromises();
+
+    expect(browser.net.aborted).toBe(1);
+    expect(browser.download.saved).toEqual([]);
+    expect(browser.els[DIAGNOSTIC_IDS.download].getAttribute("href")).toBe(
+      "/api/operations/op-1/diagnostics"
+    );
+  });
+
+  it("submits one contextual download while a double click is in flight", async () => {
+    const browser = setup();
+    await reviewDiagnosticIdentifiers(browser);
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle(CONTEXTUAL_DIAGNOSTIC_URL, () => pending.promise);
+    const download = browser.els[DIAGNOSTIC_IDS.download];
+    download.dispatch("click");
+    download.dispatch("click");
+    expect(
+      browser.net.calls.filter((call) => call.url === CONTEXTUAL_DIAGNOSTIC_URL)
+    ).toHaveLength(1);
+    pending.resolve(textResponse("{}"));
+    await flushPromises();
+  });
+
+  it("downloads contextual diagnostics without AbortController support", async () => {
+    const browser = setup();
+    browser.net.supportsAbort = false;
+    await reviewDiagnosticIdentifiers(browser);
+    browser.net.handle(CONTEXTUAL_DIAGNOSTIC_URL, () => textResponse("{}"));
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    await flushPromises();
+    expect(browser.download.saved).toHaveLength(1);
+  });
+
+  it("reports a non-Error contextual download rejection", async () => {
+    const browser = setup();
+    await reviewDiagnosticIdentifiers(browser);
+    browser.net.handle(CONTEXTUAL_DIAGNOSTIC_URL, () =>
+      Promise.reject("offline")
+    );
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    await flushPromises();
+    expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toContain(
+      "could not download"
+    );
+    expect(browser.logger.errors[0]?.detail).toBe("offline");
+  });
+
+  it("ignores a successful contextual response after a no-abort dialog close", async () => {
+    const browser = setup();
+    browser.net.supportsAbort = false;
+    await reviewDiagnosticIdentifiers(browser);
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle(CONTEXTUAL_DIAGNOSTIC_URL, () => pending.promise);
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    browser.els[DIAGNOSTIC_IDS.cancel].dispatch("click");
+    pending.resolve(textResponse("{}"));
+    await flushPromises();
+    expect(browser.download.saved).toEqual([]);
+    expect(browser.els[DIAGNOSTIC_IDS.status].textContent).not.toBe(
+      "Diagnostic snapshot download started."
+    );
+  });
+
+  it("downloads the checked support-safe response and closes the dialog", async () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    controller?.renderProgress(
+      record({ state: "failed", terminalState: "failed" })
+    );
+    browser.net.handle("/api/operations/op-1/diagnostics", () =>
+      textResponse('{"identifierProfile":"support_safe"}')
+    );
+    browser.els[DIAGNOSTIC_IDS.open].dispatch("click");
+    browser.els[DIAGNOSTIC_IDS.error].textContent = "stale error";
+    let prevented = 0;
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click", {
+      preventDefault() {
+        prevented += 1;
+      }
+    });
+    await flushPromises();
+
+    expect(prevented).toBe(1);
+    expect(browser.download.saved).toEqual([
+      {
+        text: '{"identifierProfile":"support_safe"}',
+        mimeType: "application/json",
+        filename: "radius-environment-operation-diagnostics.json"
+      }
+    ]);
+    expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toBe("");
+    expect(browser.els[DIAGNOSTIC_IDS.announcement].textContent).toBe(
+      "Diagnostic snapshot download started."
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.status].textContent).not.toBe(
+      "Diagnostic snapshot download started."
+    );
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("none");
+    expect(browser.els[DIAGNOSTIC_IDS.open].focusCount).toBe(1);
+  });
+
+  it("does not save a non-success support-safe response", async () => {
+    const browser = setup();
+    openDiagnostic(browser);
+    browser.net.handle("/api/operations/op-1/diagnostics", () =>
+      textResponse('{"code":"operation-diagnostics-unavailable"}', false, 409)
+    );
+
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    await flushPromises();
+
+    expect(browser.download.saved).toEqual([]);
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("flex");
+    expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toContain(
+      "could not download the support-safe diagnostic snapshot"
+    );
+    expect(browser.logger.errors[0]?.message).toBe(
+      "Radius could not download support-safe diagnostics."
+    );
+  });
+
+  it("keeps the dialog open when the host cannot save support-safe diagnostics", async () => {
+    const browser = setup();
+    browser.download.available = false;
+    openDiagnostic(browser);
+    browser.net.handle("/api/operations/op-1/diagnostics", () =>
+      textResponse('{"identifierProfile":"support_safe"}')
+    );
+
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    await flushPromises();
+
+    expect(browser.download.saved).toEqual([]);
+    expect(browser.els[DIAGNOSTIC_IDS.modal].style.display).toBe("flex");
+    expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toContain(
+      "host could not save the support-safe diagnostic snapshot"
+    );
+  });
+
+  it("aborts an in-flight support-safe download when identifiers are requested", async () => {
+    const browser = setup();
+    openDiagnostic(browser);
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle(
+      "/api/operations/op-1/diagnostics",
+      () => pending.promise
+    );
+    browser.net.handle(diagnosticPreviewUrl(), () =>
+      jsonResponse(DIAGNOSTIC_PREVIEW)
+    );
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    const include = browser.els[
+      DIAGNOSTIC_IDS.includeIdentifiers
+    ] as FakeInputElement;
+    include.checked = true;
+    include.dispatch("change");
+    pending.resolve(textResponse('{"identifierProfile":"support_safe"}'));
+    await flushPromises();
+
+    expect(browser.net.aborted).toBe(1);
+    expect(browser.download.saved).toEqual([]);
+    expect(browser.els[DIAGNOSTIC_IDS.repository].textContent).toBe(
+      "octo/widgets"
+    );
   });
 
   it("ignores a stale resume-prompt rejection once a newer session has started", async () => {
@@ -4185,7 +5281,7 @@ describe("resumeProgress", () => {
     serveOperation(browser, {
       terminalState: "failed_partial",
       state: "failed_partial",
-      summary: "dev setup stopped",
+      summary: "dev setup paused",
       failure: { message: "role assignment failed" },
       cleanup: { created: [{ target: "app radius-dev" }] },
       actions: [
@@ -4726,7 +5822,7 @@ describe("teardown", () => {
           environment: "dev",
           state: "cancelled",
           terminalState: "cancelled",
-          summary: "Old setup stopped"
+          summary: "Old setup paused"
         })
       )
     );
@@ -4950,7 +6046,55 @@ describe("exiting a setup", () => {
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
   });
 
-  it("keeps the acknowledgement alone for an outcome that is already settled", () => {
+  it("hides a leftover-visible panel when the server has nothing to show", async () => {
+    const browser = setup();
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse({ operation: null })
+    );
+    const { controller } = controllerWithHarness(browser);
+    // A dismissed operation leaves the panel marked visible from an earlier
+    // render; resuming must reconcile to the server's "nothing here" answer
+    // instead of leaving the stale box on screen.
+    browser.els[PROGRESS_IDS.panel].style.display = "";
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
+  });
+
+  it("leaves a visible panel alone when the resume request fails", async () => {
+    const browser = setup();
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse({ error: "boom" }, false, 500)
+    );
+    const { controller } = controllerWithHarness(browser);
+    // A transient server failure is not proof the repo has no operation, so an
+    // in-flight deletion panel must survive it rather than vanish until remount.
+    browser.els[PROGRESS_IDS.panel].style.display = "";
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+  });
+
+  it("leaves a visible panel alone when the resume payload is malformed", async () => {
+    const browser = setup();
+    browser.net.handle(operationsUrl(), () => jsonResponse("not-an-object"));
+    const { controller } = controllerWithHarness(browser);
+    // A body that is not the expected envelope is treated like a failed request:
+    // it cannot authoritatively tear down a possibly live panel.
+    browser.els[PROGRESS_IDS.panel].style.display = "";
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+  });
+
+  it("keeps a terminal action instead of replacing it with acknowledgement", () => {
     const browser = setup();
     const { controller } = controllerWithHarness(browser);
 
@@ -4962,8 +6106,8 @@ describe("exiting a setup", () => {
       })
     );
 
-    expect(browser.els[PROGRESS_IDS.bottomButtons].children).toHaveLength(0);
-    expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("OK");
+    expect(browser.els[PROGRESS_IDS.bottomButtons].children).toHaveLength(1);
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
   });
 
@@ -4984,8 +6128,8 @@ describe("exiting a setup", () => {
 describe("acknowledging a finished deletion pass", () => {
   const STOPPED_HEADLINE = {
     code: "stopped",
-    title: "Environment setup stopped",
-    message: "Radius stopped before the next setup step."
+    title: "Environment setup paused",
+    message: "Radius paused before the next setup step."
   };
 
   function completedRollback(): OperationRecord {
@@ -4997,8 +6141,11 @@ describe("acknowledging a finished deletion pass", () => {
     });
   }
 
-  it("asks the picker once for a completed rollback and nothing more on OK", () => {
+  it("persists a completed outcome dismissal before hiding it", async () => {
     const browser = setup();
+    browser.net.handle(dismissUrl("op-1"), () =>
+      jsonResponse({ operationId: "op-1" })
+    );
     const { controller, harness } = controllerWithHarness(browser);
 
     // The sequence the poller drives: the terminal record is rendered, then
@@ -5010,14 +6157,127 @@ describe("acknowledging a finished deletion pass", () => {
     expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("OK");
 
     browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+    await flushPromises();
 
-    // OK acknowledges an outcome the server already reached: it closes the
-    // panel and asks for nothing, because the listing was refreshed when the
-    // rollback ended.
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
     expect(harness.reloadCount).toBe(1);
-    expect(browser.net.calls).toHaveLength(0);
+    expect(browser.net.calls).toEqual([
+      {
+        url: dismissUrl("op-1"),
+        init: {
+          method: "POST",
+          headers: { "X-Radius-Mutation-Nonce": "" },
+          signal: expect.anything()
+        }
+      }
+    ]);
     expect(harness.errors).toEqual([]);
+  });
+
+  it("keeps a completed outcome visible when dismissal cannot be saved", async () => {
+    const browser = setup();
+    browser.net.handle(dismissUrl("op-1"), () =>
+      textResponse("unavailable", false, 500)
+    );
+    const controller = controllerFor(browser);
+    controller?.renderProgress(completedRollback());
+
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).not.toBe("none");
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
+      "Radius could not save this dismissal. Try dismissing it again."
+    );
+  });
+
+  it("does not submit dismissal without a displayed operation", () => {
+    const browser = setup();
+    controllerFor(browser);
+
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+
+    expect(browser.net.calls).toHaveLength(0);
+  });
+
+  it("persists the dismissal and hides the panel from the OK button", async () => {
+    const browser = setup();
+    browser.net.handle(dismissUrl("op-1"), () =>
+      jsonResponse({ operationId: "op-1" })
+    );
+    const controller = controllerFor(browser);
+    controller?.renderProgress(completedRollback());
+
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(browser.net.calls).toEqual([
+      {
+        url: dismissUrl("op-1"),
+        init: {
+          method: "POST",
+          headers: { "X-Radius-Mutation-Nonce": "" },
+          signal: expect.anything()
+        }
+      }
+    ]);
+  });
+
+  it("does nothing when the dismiss button is clicked with no operation displayed", () => {
+    const browser = setup();
+    controllerFor(browser);
+
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+
+    expect(browser.net.calls).toHaveLength(0);
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "ignores dismissal %s after teardown",
+    async (settlement) => {
+      const browser = setup();
+      const deferred = createDeferred<HttpResponse>();
+      browser.net.handle(dismissUrl("op-1"), () => deferred.promise);
+      const controller = controllerFor(browser);
+      controller?.renderProgress(completedRollback());
+
+      browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+      controller?.teardown();
+      if (settlement === "resolve") {
+        deferred.resolve(jsonResponse({ operationId: "op-1" }));
+      } else {
+        deferred.reject(new Error("server stopped"));
+      }
+      await flushPromises();
+
+      expect(browser.els[PROGRESS_IDS.panel].style.display).not.toBe("none");
+      expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe("");
+    }
+  );
+
+  it("does not let a stale dismissal hide a newer operation", async () => {
+    const browser = setup();
+    const deferred = createDeferred<HttpResponse>();
+    browser.net.handle(dismissUrl("op-1"), () => deferred.promise);
+    const controller = controllerFor(browser);
+    controller?.renderProgress(completedRollback());
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+
+    controller?.renderProgress(
+      record({
+        operationId: "op-2",
+        terminalState: null,
+        summary: "Deleting staging…"
+      })
+    );
+    deferred.resolve(jsonResponse({ operationId: "op-1" }));
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).not.toBe("none");
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
+      "Deleting staging…"
+    );
   });
 
   it("asks the picker once for an exited setup and closes the panel outright", () => {
@@ -5053,9 +6313,7 @@ describe("acknowledging a finished deletion pass", () => {
     controller?.resumeProgress();
     await flushPromises();
 
-    expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
-      "Rollback complete"
-    );
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe("Setup deleted");
     expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("OK");
     // A record that is already terminal is redisplayed, not re-applied: the
     // page load owns the listing, and nothing here polls it again.

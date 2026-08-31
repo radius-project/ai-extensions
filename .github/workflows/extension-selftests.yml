@@ -1,0 +1,117 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+---
+name: Extension self-tests
+
+# Hermetic checks for the ported `.github/extension/` tree that the Vitest suites
+# cannot cover: the Bash action helpers and the prebuilt `artifact-uploader`
+# bundle. These assets used to live in radius-project/radius and were validated
+# by Radius CI; now that ai-extensions owns them, this workflow reproduces that
+# coverage here so a regression in a shell helper or a stale committed bundle
+# fails a check instead of shipping into user repos.
+#
+# Both jobs pin the checkout to the PR head SHA (not the default merge commit) so
+# they validate exactly the tree the PR ships.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  shell:
+    name: Action shell helpers
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      # The `*_test.sh` suites that assert bundled JS behavior shell out to
+      # `node`; pin the runner's Node to the repo's supported major. `jq`,
+      # `python3`, and `shellcheck` are preinstalled on ubuntu-latest.
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      - name: Shellcheck extension scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t scripts < <(git ls-files '.github/extension/**/*.sh')
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "::error::no extension shell scripts found to lint"
+            exit 1
+          fi
+          printf 'shellcheck: %s\n' "${scripts[@]}"
+          shellcheck "${scripts[@]}"
+
+      - name: Run action shell tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t tests < <(git ls-files '.github/extension/**/*_test.sh')
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "::error::no extension shell tests found to run"
+            exit 1
+          fi
+          for test in "${tests[@]}"; do
+            echo "::group::${test}"
+            bash "${test}"
+            echo "::endgroup::"
+          done
+
+  uploader:
+    name: Deploy-progress artifact uploader
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: .github/extension/actions/deploy-progress/artifact-uploader
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      # The uploader is a standalone package with its own lockfile, deliberately
+      # outside the root pnpm workspace. `--ignore-workspace` keeps pnpm from
+      # walking up to the repo workspace and installing the whole monorepo.
+      - name: Install uploader dependencies
+        run: pnpm install --frozen-lockfile --ignore-workspace
+
+      - name: Test uploader
+        run: pnpm run test
+
+      - name: Rebuild uploader bundle
+        run: pnpm run build
+
+      # The `dist/` bundle is committed (force-added past .gitignore) so user
+      # repos can run the action without a build step. Fail if the rebuilt output
+      # drifts from what is checked in, i.e. someone edited `src/` without
+      # committing the regenerated bundle.
+      - name: Verify committed bundle is up to date
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git diff --exit-code -- dist; then
+            echo "::error::dist/ is stale; run 'pnpm run build' in the" \
+              "artifact-uploader package and commit the result."
+            exit 1
+          fi

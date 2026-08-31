@@ -2,50 +2,55 @@
 
 This is the reference: how the release works and why. If you just need to cut one, follow the [release runbook](./RELEASE_RUNBOOK.md) instead.
 
-This repo ships exactly one artifact: the **`radius` plugin** under [`plugins/radius/`](../../plugins/radius). Everything else - the three `@radius-project/*` packages - is implementation detail that gets bundled into the plugin's `extension.mjs` and is never published to a registry.
+This repo ships **plugins** - today exactly one, the `radius` plugin under [`plugins/radius/`](../../plugins/radius). Everything else - the three `@radius-project/*` packages - is implementation detail that gets bundled into a plugin's `extension.mjs` and is never published to a registry. The pipeline is written for the plural case throughout, so a second plugin needs no change to it.
 
 Three things follow from that, and they are the things to understand before releasing:
 
-1. **[Changesets v3](https://changesets.dev/) owns the release.** It decides the version, writes the changelog, opens the release pull request, and creates the canonical package tag and the GitHub release. Nothing in this repo picks a version, names a tag, or writes release notes. The flow is the standard [versioning and publishing](https://changesets.dev/guide/versioning-and-publishing) loop: the v3-compatible [Changesets GitHub Action v2](https://github.com/changesets/action) prepares the version PR, then performs [tag-only publishing](https://changesets.dev/guide/automating#publish-git-tags-only) because this repo ships a git branch rather than an npm package.
+1. **[Changesets v3](https://changesets.dev/) owns version selection and release notes.** It decides each plugin's version, writes its changelog, and supplies the canonical `<plugin>@<version>` tag name. The v3-compatible [Changesets GitHub Action v2](https://github.com/changesets/action) opens the version PR. After validation, the workflow creates that source tag for the released plugin only; `changeset git-tag` cannot be used in a matrix leg because it scans every eligible workspace package.
 2. **There are two channels.** Every merge to `main` refreshes the rolling **edge** channel automatically. A **stable** release is cut deliberately: a maintainer runs the Release workflow, and merging the pull request it opens publishes the release.
-3. **Every published bundle is attested.** Both channels record signed [build provenance](https://github.com/actions/attest), so a consumer can verify which workflow, repository and commit produced the canvas bundle.
+3. **Every published bundle is attested and inventoried, and every tag resolves to a Verified commit.** Both channels record signed [build provenance](https://github.com/actions/attest), and stable releases ship native SPDX output from [`pnpm sbom`](https://pnpm.io/cli/sbom). Every release commit and ref is created through the GitHub API as the repository automation GitHub App. GitHub signs the commits; lightweight tags are created only after their target commit is Verified. GitHub immutable releases are optional for now: draft-first assembly works in either mode, and setting repository variable `REQUIRE_IMMUTABLE_RELEASES=true` enables fail-closed enforcement later.
 
-| Channel    | Install ref                                             | Version                      | Refreshed                       |
-|------------|---------------------------------------------------------|------------------------------|---------------------------------|
-| **edge**   | `releases/edge` (tag `edge`)                            | `0.2.0-edge-<utc-timestamp>` | every push to `main`            |
-| **stable** | `releases/latest` (tag `latest`)                        | `0.2.0`                      | every release                   |
-| **pinned** | `releases/radius/v0.2.0` (artifact tag `radius/v0.2.0`) | `0.2.0`                      | never - created once, immutable |
-| **source** | source commit on `main` (Changesets tag `radius@0.2.0`) | `0.2.0`                      | never - created once, immutable |
+Every published ref is namespaced by plugin name - `releases/<plugin>/<channel>` for branches and `<plugin>@<channel>` for tags - and [`scripts/plugins.mjs`](../../scripts/plugins.mjs) is the only place those names are built. Plugins are **discovered**, not configured: a directory under `plugins/` with matching `package.json` and `plugin.json` names, a README, and a `test:artifact` script is a shippable plugin. Names are restricted to the ref-safe external-plugin form. Adding `plugins/radius-aws/` needs no workflow change; each plugin versions, releases, and publishes independently.
+
+| Channel    | Install ref                                                 | Version              | Refreshed                    |
+|------------|-------------------------------------------------------------|----------------------|------------------------------|
+| **edge**   | `releases/<plugin>/edge` (tag `<plugin>@edge`)              | `0.2.0-edge-0b33186` | every push to `main`         |
+| **stable** | `releases/<plugin>/latest` (tag `<plugin>@latest`)          | `0.2.0`              | every release of that plugin |
+| **pinned** | `releases/<plugin>/v0.2.0` (artifact tag `<plugin>/v0.2.0`) | `0.2.0`              | created once by automation   |
+| **source** | source commit on `main` (Changesets tag `<plugin>@0.2.0`)   | `0.2.0`              | created once by automation   |
 
 ## Packages
 
-| Package directory          | npm name                         | Role                                                |
-|----------------------------|----------------------------------|-----------------------------------------------------|
-| `plugins/radius/`          | `radius`                         | **The shipped artifact.** Manifest, skills, bundle. |
-| `packages/core/`           | `@radius-project/core`           | UI-agnostic product core.                           |
-| `packages/adapter-shared/` | `@radius-project/adapter-shared` | Shared adapter helpers.                             |
-| `packages/adapter-canvas/` | `@radius-project/adapter-canvas` | Copilot canvas adapter; builds the bundle.          |
+| Package directory          | npm name                         | Role                                                 |
+|----------------------------|----------------------------------|------------------------------------------------------|
+| `plugins/*/`               | the plugin name                  | **The shipped artifacts.** Manifest, skills, bundle. |
+| `packages/core/`           | `@radius-project/core`           | UI-agnostic product core.                            |
+| `packages/adapter-shared/` | `@radius-project/adapter-shared` | Shared adapter helpers.                              |
+| `packages/adapter-canvas/` | `@radius-project/adapter-canvas` | Copilot canvas adapter; builds the bundle.           |
 
-All four are `private: true` and none is published to a registry. The three `packages/*` entries are listed in `ignore` in [`.changeset/config.json`](../../.changeset/config.json), so their `version` fields are inert - nothing consumes them, and internal dependencies use `workspace:*`, which resolves by path rather than by range.
+Today `plugins/` holds one entry, `radius`. All packages are `private: true` and none is published to a registry. The three `packages/*` entries are listed in `ignore` in [`.changeset/config.json`](../../.changeset/config.json), so their `version` fields are inert - nothing consumes them, and internal dependencies use `workspace:*`, which resolves by path rather than by range.
 
-Because every package is private, [`privatePackages`](https://changesets.dev/guide/config#privatepackages) is set to `{ "version": true, "tag": true }` - the [Beyond npm](https://changesets.dev/guide/beyond-npm) setup that lets Changesets version and tag packages it will never publish to a registry. Changesets v3 versions no private package unless asked, so that opt-in plus the `ignore` list is what makes `radius` the only package that is versioned, changelogged and tagged.
+Because every package is private, [`privatePackages.version`](https://changesets.dev/guide/config#privatepackages) is enabled so Changesets versions plugins it will never publish to a registry. `privatePackages.tag` is deliberately disabled: the generic Changesets tag command scans every eligible package, while the release workflow must create only the selected plugin's source tag. The `ignore` list keeps the internal `packages/*` workspaces inert.
+
+Each plugin package owns a `build` script that assembles its own `plugins/<name>/dist/`. That is the contract CI relies on: `pnpm --filter <plugin> run build` is how any plugin is built, so a new one plugs in without touching a workflow.
 
 ## Where the version lives
 
-[`plugins/radius/package.json`](../../plugins/radius/package.json) is the **single source of truth**. Every other version string is derived from it by [`scripts/version.mjs`](../../scripts/version.mjs):
+[`plugins/<plugin>/package.json`](../../plugins/radius/package.json) is the **single source of truth** for that plugin. Every other version string is derived from it by [`scripts/version.mjs`](../../scripts/version.mjs):
 
-| File                              | How it gets its version                                                                                                        |
-|-----------------------------------|--------------------------------------------------------------------------------------------------------------------------------|
-| `plugins/radius/package.json`     | Bumped by `changeset version`. **Source of truth.**                                                                            |
-| `plugins/radius/plugin.json`      | Derived - `version`.                                                                                                           |
-| `.github/plugin/marketplace.json` | Derived - `metadata.version` and the `radius` plugin entry; an edge publish retargets and restamps its generated catalog copy. |
-| `packages/*/package.json`         | Not versioned - ignored by Changesets.                                                                                         |
+| File                                           | How it gets its version                                                     |
+|------------------------------------------------|-----------------------------------------------------------------------------|
+| `plugins/<plugin>/package.json`                | Bumped by `changeset version`. **Source of truth.**                         |
+| `plugins/<plugin>/plugin.json`                 | Derived - `version`.                                                        |
+| `.github/plugin/marketplace.json` plugin entry | Derived; an edge publish retargets and restamps its generated catalog copy. |
+| `.github/plugin/marketplace.json` `metadata`   | Independent marketplace version; plugin release commands preserve it.       |
+| `packages/*/package.json`                      | Not versioned - ignored by Changesets.                                      |
 
-`pnpm run version` is `changeset version` followed by that sync, and it is the command the release workflow runs. CI runs `pnpm run version:check` and fails the build if the derived files drift; `pnpm run version:sync` repairs them. Never hand-edit a derived version.
+`pnpm run version` remains the all-plugin local command. The release workflow uses `scripts/release-version.mjs`, which temporarily extends `.changeset/config.json`'s existing ignore list with every plugin outside the selected scope, invokes the Changesets CLI without `--ignore`, restores the original config bytes even when versioning fails, and then runs the same manifest synchronization. The temporary config is necessary because Changesets rejects CLI `--ignore` when the checked-in config already ignores internal packages. CI runs `pnpm run version:check`; `pnpm run version:sync` repairs drift across all plugins.
 
-The catalog on `main` is the manifest end users add, so its single `radius` entry carries the released version. During the preview period that entry's `source.ref` is `edge`. The edge publish retargets and restamps its generated catalog copy with the snapshot version in a workspace that never reaches `main`. After the first stable release, changing the `source.ref` on `main` to `latest` makes stable the default without renaming the plugin or retiring the explicit edge install target.
+Per-plugin commands take `--plugin <name>`. It may be omitted only while the repo ships exactly one plugin; the moment a second appears, every caller must say which one it means rather than silently acting on the wrong one.
 
-> The marketplace's `metadata.version` currently tracks the plugin version because there is exactly one plugin. If this marketplace ever lists a second plugin, decouple that field.
+The catalog on `main` is the manifest end users add, so each plugin entry carries its own released version. During the preview period an entry's `source.ref` is `<plugin>@edge`. The edge publish retargets and restamps its generated catalog copy in a workspace that never reaches `main`. After a plugin's first stable release, changing its `source.ref` to `<plugin>@latest` makes stable the default for that plugin alone.
 
 ## Day-to-day: add a changeset
 
@@ -71,81 +76,121 @@ graph LR
     Prep -->|a maintainer merges it| Merge["release PR closes<br/>merged into main"]
   Merge --> Q{"expected bot PR<br/>branch?"}
   Q -->|no| Skip["do nothing"]
-  Q -->|yes| Build["build exact merge commit<br/>checks + package + attest"]
-  Build --> Tag["Changesets tags radius@version<br/>+ GitHub release from changelog"]
-  Tag --> Art["publish immutable branch<br/>upload asset<br/>atomically move latest refs"]
-  Art --> Done["push radius/v&lt;version&gt;<br/>completion marker"]
+  Q -->|yes| Build["build exact merge commit<br/>checks + package + SBOM + attest"]
+  Build --> Tag["create selected plugin@version<br/>verified-commit tag ref"]
+  Tag --> Art["publish zero-history branch<br/>build release assets<br/>draft release, attach + verify, publish<br/>move latest refs"]
+    Art --> Done["push plugin/v&lt;version&gt;<br/>completion marker"]
 ```
 
 1. Land ordinary pull requests, each carrying a changeset. Nothing ships; every merge only refreshes the [edge channel](#what-the-edge-channel-does).
-2. When you want a stable release, run **Actions → Release → Run workflow** from `main`. `changeset version` applies the pending changesets, writes `plugins/radius/CHANGELOG.md`, syncs the derived manifests, and opens a pull request titled `chore(release): version packages` on the `changeset-release/main` branch. Its body lists everything that will ship.
+2. When you want a stable release, run **Actions → Release → Run workflow** from `main`. Leave **plugin** empty to release everything with a pending changeset, or name one to release just that plugin - the workflow then tells Changesets to ignore the others, so their pending changesets stay queued for their own release. `scripts/release-version.mjs` invokes Changesets with an argv array, writes each released plugin's `CHANGELOG.md`, syncs the derived manifests, and opens a scope-labelled pull request on `changeset-release/main`. A differently scoped dispatch cannot overwrite an open release PR; merge or close that PR first.
 3. Review it like any other pull request and merge it.
-4. The merged event for that bot-authored `changeset-release/main` pull request builds the exact merge commit and runs the complete check suite before publishing anything. The Changesets action then tags that commit `radius@<version>` and publishes its changelog entry as the GitHub release; the workflow publishes the immutable install branch, uploads the release asset, atomically activates `releases/latest` plus `latest`, and finally pushes `radius/v<version>` as the completion marker. Newer pending changesets do not hide the prepared release.
-
-Re-running the dispatch before step 3 updates the same pull request rather than opening a second one. To preview the changelog locally without touching `main`, run `pnpm run version` and inspect the result.
+4. The merged event for that bot-authored `changeset-release/main` pull request runs `scripts/release-plan.mjs`: a plugin is released only when its package version changed from the merge's first parent **and** the matching changelog heading was added in the same diff. Shared checks run once; plugin builds and publishes are independent matrix legs. Each leg creates only its own `<plugin>@<version>` source tag, publishes a verified zero-parent install branch, drafts the GitHub release, attaches and re-downloads every asset for comparison, activates `releases/<plugin>/latest` plus `<plugin>@latest`, and finally pushes `<plugin>/v<version>` as the completion marker.
 
 ### Prerequisites and constraints
 
-- The repository automation GitHub App identified by `DEPENDABOT_MANAGER_BOT_CLIENT_ID` and `DEPENDABOT_MANAGER_BOT_PRIVATE_KEY` must have Contents and Pull requests write permissions. Its short-lived token authors the release PR, so the normal `pull_request` build runs against the versioned branch.
-- The version-only action uses the GitHub API by default, so GitHub creates and signs the version commit through the API. The publish step is the exception: it sets `push-with-git-cli: true`, because the API path tags `github.sha`, which on a `pull_request` event is the ephemeral `refs/pull/<n>/merge` commit rather than the merge commit on `main`. Over the Git CLI it pushes the tag Changesets created at the checked-out source commit.
-- Only `workflow_dispatch` invokes the version action. Stable publication only accepts a merged, same-repository, bot-authored pull request from `changeset-release/main` whose commit still matches the version and changelog and carries no leftover changesets, so an ordinary version/changelog edit on `main` cannot cut a release.
+- Immutable releases are optional. With no repository variable, stable releases may remain mutable and retries reconcile their assets. To enforce immutability later, enable GitHub immutable releases and set `REQUIRE_IMMUTABLE_RELEASES=true`; preparation and publication then fail closed if protection is absent.
+- The repository automation GitHub App identified by `RADIUS_RELEASE_MANAGER_BOT_CLIENT_ID` and `RADIUS_RELEASE_MANAGER_BOT_PRIVATE_KEY` needs Contents and Pull requests write permissions. It opens the version pull request and writes every release commit and ref. Administration read is additionally required only when `REQUIRE_IMMUTABLE_RELEASES=true`.
+- **Every tag resolves to a Verified commit.** A runner holds no signing key. GitHub signs commits created through the GitHub API as the App, but the Git tag-object API does not add a server signature. [`scripts/verified-git.mjs`](../../scripts/verified-git.mjs) therefore creates lightweight tag refs only after GitHub reports their target commit as verified, and checks the target again when reusing a tag. Existing cryptographically verified annotated tags remain valid when their target commit is also verified. Reusing an install branch likewise re-checks its commit. The version commit is already API-created by the Changesets action for the same reason.
+- A branch and its channel tag can no longer move in a single atomic push. The branch every install reads lands first, then the tag; a failure in between leaves the tag on the previous published artifact and the next run reconciles it.
+- Only `workflow_dispatch` invokes the version action. Stable publication accepts only a merged, same-repository, one-commit bot PR from `changeset-release/main`. The one-commit invariant makes the first-parent diff exact under merge, squash, or rebase; the tested release-plan boundary then requires each released package version and matching changelog heading to be newly added in that diff.
 - Complete workflow runs are queued with `queue: max`; a later dispatch or release-PR merge cannot cancel an earlier run. The stable build receives the pull request's explicit merge SHA, so retries never bundle later unreleased changes.
 - The publish checkout does not persist its write credential. Dependency installation runs without Git authentication, and `gh auth setup-git` configures the short-lived job token only inside the final ref-publishing step.
-- Neither release job compiles anything - the bundle arrives as a build artifact and the only dependency they run is the Changesets CLI - so both install with `--ignore-scripts`. Dependency lifecycle scripts therefore never execute in a job holding the GitHub App token or the ability to move published refs. `build.yml` keeps them enabled because it does build the bundle.
-- `radius/v<version>` is pushed last. Until that completion tag exists, rerun the original failed workflow; it rebuilds the expected orphan tree and reuses an existing immutable branch only when every published byte matches, then restores the rolling refs and retries the asset upload. Changesets creates the tag and the GitHub release exactly once and skips both on a rerun, because the tag it would create already exists. The original run is required because signed provenance records its event SHA and cannot substitute a later push's SHA. A rerun never moves `releases/latest` or `latest` backwards: if a newer release already published them, the rerun finishes its own immutable refs and leaves the rolling ones alone.
-- The rolling stable refs only ever carry a stable version. A version with a semver prerelease part - `0.3.0-rc.0` - still gets its immutable `releases/radius/v<version>` branch, `radius/v<version>` tag and GitHub release, but never becomes `releases/latest` or `latest`.
+- Neither release job compiles anything - the bundle arrives as a build artifact and the only dependencies they run are the Changesets CLI and `pnpm sbom` - so both install with `--ignore-scripts`. Dependency lifecycle scripts therefore never execute in a job holding the GitHub App token or the ability to move published refs. `build.yml` keeps them enabled because it does build the bundle.
+- Shared static, Node, Windows, and Chromium checks upload one gate artifact. Plugin builds run in a separate matrix and upload disjoint artifacts. Publish legs require the shared gate plus their own artifact, so failed shared validation blocks all publishing while one failed plugin does not cancel or serialize its siblings.
+- `<plugin>/v<version>` is pushed last. Until it exists, rerun the original workflow; it rebuilds the expected orphan tree and verifies existing refs and assets. A mutable published release's assets are reconciled with `--clobber`; an actually immutable release reuses its published native SBOM and compares protected assets without modification.
+- Every generated install branch - edge, latest, and versioned - is an orphan root commit. Creation and reuse both check that the commit has zero parents and that GitHub verified it; any branch carrying source history, or any commit GitHub did not sign, fails publication.
+- The rolling stable refs only ever carry a stable version. A prerelease still gets `releases/<plugin>/v<version>`, `<plugin>/v<version>`, and a prerelease-marked GitHub release, but never becomes the latest channel.
+- [Immutable releases](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes) lock only the tag used by a published release. No release is created for `<plugin>@latest` or `<plugin>@edge`, so those channel tags remain movable in either mode.
+
+## Adding a plugin
+
+Nothing in the release pipeline is keyed to `radius`, so a second plugin is a directory, not a workflow change:
+
+1. Create `plugins/<name>/` with a `package.json`, `plugin.json`, and non-empty `README.md`. Both manifest names must equal the lowercase, ref-safe directory name; consecutive `.` or `-` separators are rejected.
+2. Give that `package.json` a `build` script that assembles `plugins/<name>/dist/` and a `test:artifact` script that smoke-tests the built output.
+3. Add its entry to `.github/plugin/marketplace.json` with `source.ref` of `<name>@edge`, then run `pnpm run version:sync`.
+
+`scripts/plugins.mjs` discovers it from there: `pnpm run version:check` covers it, the publish matrix builds and ships its own `releases/<name>/edge` and `<name>@edge`, and **Actions → Release** can cut it independently of every other plugin.
 
 ## If a package is ever published
 
-Publishing (say) `@radius-project/core` so third parties can build their own adapters would change the model: remove it from `ignore` in `.changeset/config.json`, flip `private` to `false`, and start naming it in changesets alongside `radius`. Nothing here has to be undone first - the `ignore` list is the only thing standing between this setup and full independent per-package versioning.
+Publishing (say) `@radius-project/core` so third parties can build their own adapters would change the model: remove it from `ignore` in `.changeset/config.json`, flip `private` to `false`, and start naming it in changesets alongside the plugins. Nothing here has to be undone first - the `ignore` list is the only thing standing between this setup and full independent per-package versioning.
 
 ## What the edge channel does
 
-[`.github/workflows/publish.yml`](../../.github/workflows/publish.yml) runs on every push to `main`. It typechecks, lints, tests, and builds the plugin into `plugins/radius/dist/`, attests the bundle's provenance, then:
+[`.github/workflows/publish.yml`](../../.github/workflows/publish.yml) runs on every push to `main`, once per plugin. It typechecks, lints, tests, and builds the plugin into `plugins/<plugin>/dist/`, attests the bundle's provenance, then:
 
-- **force-recreates `releases/edge` as an orphan branch** whose single root commit contains nothing but the otherwise git-ignored `plugins/radius/dist/` and the marketplace catalog, and
-- **force-moves the `edge` tag** onto that commit in the same atomic push.
+- **force-recreates `releases/<plugin>/edge` as an orphan branch** whose single root commit contains nothing but the otherwise git-ignored `plugins/<plugin>/dist/` and the marketplace catalog, and
+- **force-moves the `<plugin>@edge` tag** onto that same commit straight afterwards.
 
-Because Changesets owns the version, an edge build cannot claim to be a release: the build runs [`changeset version --snapshot edge`](https://changesets.dev/guide/snapshot-releases) to ask what the next release *will* be and stamps that with an `edge` prerelease tag plus the seven-character SHA of the commit being built, for example `0.1.0-edge-0b33186`. Before running it, CI adds an ephemeral `radius` patch changeset, so documentation-only pushes and pushes containing only an empty changeset still become a Changesets-calculated snapshot of the next patch; any pending minor or major changeset takes precedence. The rewrite and synthetic changeset exist only in the CI workspace and are never committed.
+Because Changesets owns the version, an edge build cannot claim to be a release: the build runs a **plugin-scoped** [`changeset version --snapshot edge`](https://changesets.dev/guide/snapshot-releases) to ask what that plugin's next release will be and stamps it with an `edge` prerelease plus the seven-character source SHA, for example `0.1.0-edge-0b33186`. CI adds an ephemeral patch changeset for that plugin so documentation-only pushes still get a next-patch snapshot; pending changesets for other plugins are ignored in this matrix leg.
 
-`plugins/radius/dist/` is a complete, self-contained plugin: `plugin.json`, `package.json`, `README.md`, all of `skills/`, and the compiled `extension.mjs` (plus its source map). The build assembles it, so nothing is copied separately in CI.
+`plugins/<plugin>/dist/` is a complete, self-contained plugin: `plugin.json`, `package.json`, `README.md`, all of `skills/`, and the compiled `extension.mjs` (plus its source map). The plugin's own `build` script assembles it, so nothing is copied separately in CI.
 
-Because the branch is an orphan, it carries **no source and no history** - a clone of `releases/edge` contains only the artifact. The commit message records the `main` SHA it was built from, which is the only link back to the source. A CI guard fails the publish if anything outside `plugins/radius/dist/` lands in the tree.
+Because the branch is an orphan, it carries **no source and no history** - a clone of `releases/<plugin>/edge` contains only the artifact. The commit message records the `main` SHA it was built from, which is the only link back to the source. Only the dist directory and the catalog are ever uploaded, so nothing else can reach the published tree.
 
-The plugin source in [`.github/plugin/marketplace.json`](../../.github/plugin/marketplace.json) pins `path: plugins/radius/dist`. The single `radius` entry follows the `edge` tag while the plugin is in preview; changing its ref to `latest` makes stable the default later. Generated edge and stable catalogs point their own copies at the corresponding artifact ref. Each install therefore resolves matching skills and canvas files from one generated artifact commit. This is why the build output can stay git-ignored on `main`.
+The plugin source in [`.github/plugin/marketplace.json`](../../.github/plugin/marketplace.json) pins `path: plugins/<plugin>/dist`. Each entry follows its `<plugin>@edge` tag while that plugin is in preview; changing its ref to `<plugin>@latest` makes stable the default later, for that plugin alone. Generated edge and stable catalogs point their own copies at the corresponding artifact ref. Each install therefore resolves matching skills and canvas files from one generated artifact commit. This is why the build output can stay git-ignored on `main`.
 
-Both `releases/edge` and `edge` are replaced wholesale on every push to `main`, so superseded bundles become unreferenced objects rather than permanent repository growth. See [docs/design/2026-07-canvas-bundle-publishing.md](../design/2026-07-canvas-bundle-publishing.md) for the full design.
+Both `releases/<plugin>/edge` and `<plugin>@edge` are replaced wholesale on every push to `main`, so superseded bundles become unreferenced objects rather than permanent repository growth. See [docs/design/2026-07-canvas-bundle-publishing.md](../design/2026-07-canvas-bundle-publishing.md) for the full design.
 
-Complete edge workflow runs are queued FIFO with `queue: max`, including the build. Each run passes its immutable push SHA to the reusable build, preserving every `main` push and preventing a slower original run from publishing out of order. A manually rerun workflow falls outside that original queue order, so the publisher compares its SHA with the source SHA recorded by the current edge commit: same-source retries and descendants may publish, stale ancestors are skipped, and divergent histories fail. The branch and tag move atomically after that check.
+Complete edge workflow runs are queued FIFO with `queue: max`, including the build. Each run passes its immutable push SHA to the reusable build, preserving every `main` push and preventing a slower original run from publishing out of order. A manually rerun workflow falls outside that original queue order, so the publisher compares its SHA with the source SHA recorded by the current edge commit: same-source retries and descendants may publish, stale ancestors are skipped, and divergent histories fail. The branch moves after that check, then the tag.
 
 ## What a versioned release produces
 
-| Artifact                               | Created by          | Mutable? | Purpose                                                                        |
-|----------------------------------------|---------------------|----------|--------------------------------------------------------------------------------|
-| `radius@<version>` tag                 | `changesets/action` | **no**   | Canonical Changesets tag pointing at the released source commit on `main`.     |
-| GitHub release                         | `changesets/action` | no       | Body is the Changesets `CHANGELOG.md` entry; carries the attested tarball.     |
-| `releases/radius/v<version>` branch    | `release.yml`       | **no**   | Pinned install target: the same orphan layout as `releases/edge`, one version. |
-| `radius/v<version>` tag                | `release.yml`       | **no**   | Points at the pinned artifact branch and marks publication complete.           |
-| `releases/latest` branch, `latest` tag | `release.yml`       | yes      | Stable install target: force-moved to the newest stable release.               |
+Each released plugin produces its own complete set:
 
-Everything local that can fail - checks, build, packaging and attestation - happens before the first push. Changesets then tags the source commit and publishes the release notes; the pinned branch is immutable and pushed without `--force`, and a retry constructs the expected artifact tree from its rebuilt files and reuses an existing branch only when its tree ID matches exactly. The GitHub release and its asset complete before `releases/latest` and `latest` move atomically, and the immutable `radius/v<version>` artifact tag is pushed last.
+| Artifact                                                 | Created by    | Mutable?                     | Purpose                                                                                 |
+|----------------------------------------------------------|---------------|------------------------------|-----------------------------------------------------------------------------------------|
+| `<plugin>@<version>` tag                                 | `release.yml` | no by workflow               | Changesets-format tag name pointing at the verified released source commit on `main`.   |
+| GitHub release                                           | `release.yml` | yes by default; configurable | Body is the Changesets `CHANGELOG.md` entry; carries the three assets below.            |
+| `releases/<plugin>/v<version>` branch                    | `release.yml` | no by workflow               | Pinned install target: the same orphan layout as `releases/<plugin>/edge`, one version. |
+| `<plugin>/v<version>` tag                                | `release.yml` | no by workflow               | Points at the pinned artifact branch and marks publication complete.                    |
+| `releases/<plugin>/latest` branch, `<plugin>@latest` tag | `release.yml` | yes                          | Stable install target: force-moved to the newest stable release of that plugin.         |
 
-The two branches carry an identical `plugins/radius/dist/`; they differ only in the catalog's `source.ref`, which each one points at itself. So `marketplace add radius-project/ai-extensions#releases/radius/v0.1.0` pins that exact release, and `#releases/latest` tracks stable - neither redirects to edge.
+| Release asset                  | Built by                      | Contents                                                           |
+|--------------------------------|-------------------------------|--------------------------------------------------------------------|
+| `<plugin>-plugin.tar.gz`       | `release.yml`                 | The installable `plugins/<plugin>/dist/` tree, attested.           |
+| `<plugin>-plugin.spdx.json`    | `pnpm sbom`                   | SPDX 2.3 SBOM of the workspace dependency graph, attested.         |
+| `<plugin>-awesome-copilot.zip` | `scripts/awesome-copilot.mjs` | The four files for a manual `github/awesome-copilot` pull request. |
 
-> The catalog exposes one plugin named `radius`. It follows `edge` during preview and switches to `latest` after the first stable release; add an explicit generated marketplace branch to pin edge, latest, or one exact version independently of that default.
+The SPDX document is written directly by [`pnpm sbom`](https://pnpm.io/cli/sbom) using `--filter <plugin>`, so pnpm supplies the selected plugin root plus its dependency, license, download, and checksum data without a repository normalization pass. The plugin declares its build adapter as a workspace `devDependency`, ensuring browser libraries inlined by esbuild appear in that native dependency graph.
+
+Everything local that can fail - checks, manifest-driven dist validation, build, deterministic tar/zip packaging, native SBOM generation, and attestation - happens before the first published ref. The pinned branch ref is created rather than force-moved, and all install branches are GitHub-signed root commits. The GitHub release is created as a draft and receives every asset before publication. In mutable mode, retries can replace assets; in enforced immutable mode, retries reuse the published native SBOM. The workflow downloads and compares the selected asset bytes before moving rolling refs and writing the completion tag.
+
+A plugin's two branches carry an identical `plugins/<plugin>/dist/`; they differ only in the catalog's `source.ref`, which each one points at itself. So `marketplace add radius-project/ai-extensions#releases/radius/v0.1.0` pins that exact release, and `#releases/radius/latest` tracks stable - neither redirects to edge.
+
+> Each catalog entry follows its own `<plugin>@edge` during preview and switches to `<plugin>@latest` after that plugin's first stable release; add an explicit generated marketplace branch to pin edge, latest, or one exact version independently of that default.
+
+### Listing a plugin on github/awesome-copilot
+
+[`github/awesome-copilot`](https://github.com/github/awesome-copilot) lists plugins hosted elsewhere in its own `plugins/external.json` and in the marketplace catalog it serves. Both files carry the *same* entry object, so every release builds them and ships them as `<plugin>-awesome-copilot.zip`:
+
+```text
+.github/plugin/marketplace.json   { "plugins": [ <entry> ] }
+plugins/external.json             [ <entry> ]
+plugins/<plugin>/plugin.json      the released manifest, for the reviewer
+plugins/<plugin>/README.md        the released README, for the reviewer
+```
+
+Every field is derived from `.github/plugin/marketplace.json` and the released `plugins/<plugin>/dist/plugin.json`, so a rename or keyword change cannot ship a stale listing. `source.ref` **and** `source.sha` are both the full 40-character SHA of the `releases/<plugin>/v<version>` artifact commit - never a tag or branch name, which could be repointed after awesome-copilot's review; their validation accepts a full commit SHA in either field and rejects an abbreviated one.
+
+The **first** listing must go through their [external plugin issue form](https://github.com/github/awesome-copilot/blob/main/CONTRIBUTING.md#adding-external-plugins), not a pull request. Once the plugin is listed, a version bump is a normal pull request that edits `plugins/external.json`: unzip the asset over a fork of `main` and splice each entry into the corresponding file.
 
 ### Why there are two version tags
 
-`radius@<version>` is Changesets' canonical format: [`changeset git-tag`](https://changesets.dev/guide/cli#git-tag) writes `<pkg-name>@<version>` for workspace repos and it is not configurable. It points to the source commit, keeping Changesets' already-tagged detection and a meaningful link into `main` history. `radius/v<version>` is this repository's artifact tag; it points to the matching orphan install commit on `releases/radius/v<version>` and doubles as the workflow's publication-complete marker.
+`<plugin>@<version>` is Changesets' canonical format: [`changeset git-tag`](https://changesets.dev/guide/cli#git-tag) writes `<pkg-name>@<version>` for workspace repos and it is not configurable. It points to the source commit, keeping Changesets' already-tagged detection and a meaningful link into `main` history. `<plugin>/v<version>` is this repository's artifact tag; it points to the matching orphan install commit on `releases/<plugin>/v<version>` and doubles as the workflow's publication-complete marker. The channel tags `<plugin>@edge` and `<plugin>@latest` follow the same `<plugin>@<ref>` shape as the Changesets tag, so every name a consumer types starts with the plugin it installs.
 
 ## Verifying a published bundle
 
-Every published `extension.mjs` - and every release tarball - carries signed provenance tying it to the workflow, repository and commit that built it:
+Every file in an edge plugin tree is a provenance subject. For stable releases, the deterministic plugin tarball carries build provenance and a second standard SBOM attestation binds that same tarball to the published SPDX predicate:
 
 ```bash
-gh release download 'radius@0.1.0' --pattern 'radius-plugin-*.tar.gz'
-gh attestation verify radius-plugin-0.1.0.tar.gz --repo radius-project/ai-extensions
+gh release download 'radius@0.1.0' --pattern 'radius-plugin-*'
+gh attestation verify radius-plugin.tar.gz --repo radius-project/ai-extensions
 ```
+
+The SPDX asset is pnpm's native selected-plugin document. It lists the workspace dependency closure with registry locations, licenses, integrity checksums, and pnpm's own document identity.
 
 The same works for a bundle taken straight off an install target, since provenance is matched by digest:
 

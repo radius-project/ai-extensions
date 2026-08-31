@@ -553,6 +553,23 @@ describe("createCloudFixture", () => {
       );
     });
 
+    it("refuses to read execFile's empty-stream failure message as absence", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh",
+          match: ["api", ENVIRONMENT_PATH],
+          respond: {
+            code: 1,
+            stderr: `Command failed: gh api ${ENVIRONMENT_PATH}\n`
+          }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        /Could not probe GitHub environment .* Command failed: gh api repos\//
+      );
+    });
+
     it("reports an environment probe failure that gh wrote to stdout", async () => {
       const { fixture } = await createHarness([
         {

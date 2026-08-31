@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CREDENTIAL_PROFILES_ENDPOINT,
   GITHUB_ACCOUNT_ENDPOINT,
+  GITHUB_ENVIRONMENT_RECHECK_DELAY_MS,
   GITHUB_IDENTITY_ENDPOINT,
   GITHUB_IDENTITY_IDS,
   PROFILE_MENU_IDS,
@@ -235,6 +236,21 @@ const AWS_PROFILE: CredentialProfile = {
 
 function profilesResponse(profiles: readonly CredentialProfile[]) {
   return jsonResponse({ profiles });
+}
+
+function identityResponse() {
+  return jsonResponse({
+    actingLogin: "alice",
+    displayLogin: "alice",
+    accounts: [
+      {
+        login: "alice",
+        hasWorkflow: true,
+        hasPackages: true,
+        switchable: true
+      }
+    ]
+  });
 }
 
 function readinessResponse(
@@ -1504,20 +1520,7 @@ describe("github identity loading and rendering", () => {
     async (ready, summary, color) => {
       const page = renderProfilesPage();
       const { deps } = makeDeps();
-      page.browser.net.handle(IDENTITY_URL(), () =>
-        jsonResponse({
-          actingLogin: "alice",
-          displayLogin: "alice",
-          accounts: [
-            {
-              login: "alice",
-              hasWorkflow: true,
-              hasPackages: true,
-              switchable: true
-            }
-          ]
-        })
-      );
+      page.browser.net.handle(IDENTITY_URL(), identityResponse);
       page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
         jsonResponse({
           readiness: {
@@ -1553,42 +1556,36 @@ describe("github identity loading and rendering", () => {
     expect(page.fieldEl.style.display).toBe("none");
   });
 
-  it("sends an empty nonce when an older page has no nonce state", async () => {
+  it("preserves older-page defaults for initial and manual checks", async () => {
     const page = renderProfilesPage();
     const { deps } = makeDeps({
       mutationNonce: undefined,
       environmentName: () => "   "
     });
-    page.browser.net.handle(IDENTITY_URL(), () =>
-      jsonResponse({
-        actingLogin: "alice",
-        displayLogin: "alice",
-        accounts: [
-          {
-            login: "alice",
-            hasWorkflow: true,
-            hasPackages: true,
-            switchable: true
-          }
-        ]
-      })
-    );
-    let nonce = "not-called";
-    let environment = "";
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
+    const requests: Array<{ nonce: string; environment: string }> = [];
     page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, (init) => {
-      nonce =
-        (init?.headers as Record<string, string> | undefined)?.[
-          "X-Radius-Mutation-Nonce"
-        ] ?? "missing";
-      environment = JSON.parse(String(init?.body)).environment;
+      requests.push({
+        nonce:
+          (init?.headers as Record<string, string> | undefined)?.[
+            "X-Radius-Mutation-Nonce"
+          ] ?? "missing",
+        environment: JSON.parse(String(init?.body)).environment
+      });
       return readinessResponse();
     });
     const handle = setupIdentity(page, deps);
 
     await handle?.loadGithubIdentity();
+    expect(requests).toEqual([{ nonce: "", environment: "dev" }]);
 
-    expect(nonce).toBe("");
-    expect(environment).toBe("dev");
+    page.recheckBtn.dispatch("click");
+    await flushPromises();
+
+    expect(requests).toEqual([
+      { nonce: "", environment: "dev" },
+      { nonce: "", environment: "dev" }
+    ]);
   });
 
   it("does not recheck before an account has been selected", () => {
@@ -1633,7 +1630,7 @@ describe("github identity loading and rendering", () => {
 
     expect(changes.at(-1)).toBeNull();
     expect(fakeText(page.noteEl)).toBe(
-      "Re-check GitHub access for this environment."
+      "GitHub access will be checked automatically."
     );
     expect(page.recheckBtn.disabled).toBe(false);
   });
@@ -1912,6 +1909,330 @@ describe("github identity loading and rendering", () => {
     expect(page.recheckBtn.textContent).toBe("Re-check");
     void handle;
   });
+
+  it("debounces an edit made while GitHub identity is still loading", async () => {
+    const page = renderProfilesPage();
+    let environment = "dev";
+    const { deps } = makeDeps({ environmentName: () => environment });
+    let resolveIdentity: (response: HttpResponse) => void = () => {};
+    page.browser.net.handle(
+      IDENTITY_URL(),
+      () =>
+        new Promise<HttpResponse>((resolve) => {
+          resolveIdentity = resolve;
+        })
+    );
+    const handle = setupIdentity(page, deps);
+    const identityLoad = handle?.loadGithubIdentity();
+    await flushPromises();
+    let checks = 0;
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () => {
+      checks += 1;
+      return readinessResponse();
+    });
+
+    environment = "production";
+    handle?.invalidateReadiness();
+    resolveIdentity(identityResponse());
+    await identityLoad;
+
+    expect(checks).toBe(0);
+    page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS - 1);
+    expect(checks).toBe(0);
+    page.browser.clock.tick(1);
+    await flushPromises();
+
+    expect(checks).toBe(1);
+    expect(fakeText(page.noteEl)).toBe("Ready to configure deployments");
+  });
+
+  it("does not check a blank name after an in-flight identity request finishes", async () => {
+    const page = renderProfilesPage();
+    let environment = "dev";
+    const { deps } = makeDeps({ environmentName: () => environment });
+    let resolveIdentity: (response: HttpResponse) => void = () => {};
+    page.browser.net.handle(
+      IDENTITY_URL(),
+      () =>
+        new Promise<HttpResponse>((resolve) => {
+          resolveIdentity = resolve;
+        })
+    );
+    const handle = setupIdentity(page, deps);
+    const identityLoad = handle?.loadGithubIdentity();
+    await flushPromises();
+    let checks = 0;
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () => {
+      checks += 1;
+      return readinessResponse();
+    });
+
+    environment = "   ";
+    handle?.invalidateReadiness();
+    page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS);
+    resolveIdentity(identityResponse());
+    await identityLoad;
+    await flushPromises();
+
+    expect(checks).toBe(0);
+    expect(page.browser.clock.timeouts).toBe(0);
+  });
+
+  it("checks the settled name when identity loads after the debounce expires", async () => {
+    const page = renderProfilesPage();
+    let environment = "dev";
+    const { deps } = makeDeps({ environmentName: () => environment });
+    let resolveIdentity: (response: HttpResponse) => void = () => {};
+    page.browser.net.handle(
+      IDENTITY_URL(),
+      () =>
+        new Promise<HttpResponse>((resolve) => {
+          resolveIdentity = resolve;
+        })
+    );
+    const handle = setupIdentity(page, deps);
+    const identityLoad = handle?.loadGithubIdentity();
+    await flushPromises();
+    const bodies: unknown[] = [];
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, (init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return readinessResponse();
+    });
+
+    environment = "production";
+    handle?.invalidateReadiness();
+    page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS);
+    expect(bodies).toEqual([]);
+    resolveIdentity(identityResponse());
+    await identityLoad;
+
+    expect(bodies).toEqual([
+      { login: "alice", repo: "octo/cat", environment: "production" }
+    ]);
+  });
+
+  it("checks only the final environment name after it remains unchanged for two seconds", async () => {
+    const page = renderProfilesPage();
+    let environment = "dev";
+    const { deps } = makeDeps({ environmentName: () => environment });
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
+    const handle = setupIdentity(page, deps);
+    await handle?.loadGithubIdentity();
+    const bodies: unknown[] = [];
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, (init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return readinessResponse();
+    });
+
+    environment = "prod";
+    handle?.invalidateReadiness();
+    page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS - 1);
+    expect(bodies).toEqual([]);
+
+    environment = "production";
+    handle?.invalidateReadiness();
+    expect(fakeText(page.noteEl)).toBe(
+      "GitHub access will be checked automatically."
+    );
+    expect(page.browser.clock.timeouts).toBe(1);
+    page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS - 1);
+    expect(bodies).toEqual([]);
+
+    page.browser.clock.tick(1);
+    await flushPromises();
+
+    expect(bodies).toEqual([
+      { login: "alice", repo: "octo/cat", environment: "production" }
+    ]);
+    expect(fakeText(page.noteEl)).toBe("Ready to configure deployments");
+    expect(page.recheckBtn.disabled).toBe(false);
+    expect(page.recheckBtn.textContent).toBe("Re-check");
+  });
+
+  it("does not schedule an automatic check for a blank environment name", async () => {
+    const page = renderProfilesPage();
+    const { deps } = makeDeps({ environmentName: () => "   " });
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
+    const handle = setupIdentity(page, deps);
+    await handle?.loadGithubIdentity();
+    let checks = 0;
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () => {
+      checks += 1;
+      return readinessResponse();
+    });
+
+    handle?.invalidateReadiness();
+    page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS);
+    await flushPromises();
+
+    expect(checks).toBe(0);
+    expect(page.browser.clock.timeouts).toBe(0);
+    expect(fakeText(page.noteEl)).toBe(
+      "Re-check GitHub access for this environment."
+    );
+  });
+
+  it("checks the current name after a programmatic input change", async () => {
+    const page = renderProfilesPage();
+    let environment = "staging";
+    const { deps } = makeDeps({ environmentName: () => environment });
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
+    const handle = setupIdentity(page, deps);
+    await handle?.loadGithubIdentity();
+    const bodies: unknown[] = [];
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, (init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return readinessResponse();
+    });
+
+    handle?.invalidateReadiness();
+    environment = "production";
+    page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS);
+    await flushPromises();
+
+    expect(bodies).toEqual([
+      { login: "alice", repo: "octo/cat", environment: "production" }
+    ]);
+  });
+
+  it("does not check a programmatically cleared name", async () => {
+    const page = renderProfilesPage();
+    let environment = "staging";
+    const { deps } = makeDeps({ environmentName: () => environment });
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
+    const handle = setupIdentity(page, deps);
+    await handle?.loadGithubIdentity();
+    let checks = 0;
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () => {
+      checks += 1;
+      return readinessResponse();
+    });
+
+    handle?.invalidateReadiness();
+    environment = "   ";
+    page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS);
+    await flushPromises();
+
+    expect(checks).toBe(0);
+  });
+
+  it("manual recheck cancels the pending timer and runs immediately", async () => {
+    const page = renderProfilesPage();
+    let environment = "dev";
+    const { deps } = makeDeps({ environmentName: () => environment });
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
+    const handle = setupIdentity(page, deps);
+    await handle?.loadGithubIdentity();
+    let checks = 0;
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () => {
+      checks += 1;
+      return readinessResponse();
+    });
+
+    environment = "production";
+    handle?.invalidateReadiness();
+    expect(page.browser.clock.timeouts).toBe(1);
+    page.recheckBtn.dispatch("click");
+    await flushPromises();
+
+    expect(checks).toBe(1);
+    expect(page.browser.clock.timeouts).toBe(0);
+    page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS);
+    await flushPromises();
+    expect(checks).toBe(1);
+  });
+
+  it("clears a pending environment check during teardown", async () => {
+    const page = renderProfilesPage();
+    let environment = "dev";
+    const { deps } = makeDeps({ environmentName: () => environment });
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
+    const handle = setupIdentity(page, deps);
+    await handle?.loadGithubIdentity();
+    let checks = 0;
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () => {
+      checks += 1;
+      return readinessResponse();
+    });
+
+    environment = "production";
+    handle?.invalidateReadiness();
+    expect(page.browser.clock.timeouts).toBe(1);
+    handle?.teardown();
+    expect(page.browser.clock.timeouts).toBe(0);
+
+    page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS);
+    await flushPromises();
+    expect(checks).toBe(0);
+  });
+
+  it("shows an automatic check failure and keeps manual retry available", async () => {
+    const page = renderProfilesPage();
+    let environment = "dev";
+    const { deps } = makeDeps({ environmentName: () => environment });
+    page.browser.net.handle(IDENTITY_URL(), identityResponse);
+    const handle = setupIdentity(page, deps);
+    await handle?.loadGithubIdentity();
+    page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
+      jsonResponse({ error: "GitHub access check timed out." }, false, 504)
+    );
+
+    environment = "production";
+    handle?.invalidateReadiness();
+    page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS);
+    expect(page.recheckBtn.disabled).toBe(true);
+    expect(page.recheckBtn.textContent).toBe("Checking…");
+    await flushPromises();
+
+    expect(fakeText(page.noteEl)).toBe("GitHub access check timed out.");
+    expect(page.noteEl.style.color).toBe("var(--rad-danger, #cf222e)");
+    expect(page.recheckBtn.disabled).toBe(false);
+    expect(page.recheckBtn.textContent).toBe("Re-check");
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "ignores an automatic response superseded by a newer environment before it %ss",
+    async (outcome) => {
+      const page = renderProfilesPage();
+      let environment = "dev";
+      const { deps } = makeDeps({ environmentName: () => environment });
+      page.browser.net.handle(IDENTITY_URL(), identityResponse);
+      const handle = setupIdentity(page, deps);
+      await handle?.loadGithubIdentity();
+      let settle:
+        ((value: HttpResponse) => void) | ((reason: Error) => void) = () => {};
+      const staleResponse = new Promise<HttpResponse>((resolve, reject) => {
+        settle = outcome === "resolve" ? resolve : reject;
+      });
+      let calls = 0;
+      page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () => {
+        calls += 1;
+        return calls === 1 ? staleResponse : (
+            readinessResponse({ summary: "Production access is ready." })
+          );
+      });
+
+      environment = "staging";
+      handle?.invalidateReadiness();
+      page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS);
+      environment = "production";
+      handle?.invalidateReadiness();
+      page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS);
+      await flushPromises();
+      expect(fakeText(page.noteEl)).toBe("Production access is ready.");
+
+      if (outcome === "resolve") {
+        (settle as (value: HttpResponse) => void)(
+          readinessResponse({ summary: "Stale staging access." })
+        );
+      } else {
+        (settle as (reason: Error) => void)(new Error("stale staging failure"));
+      }
+      await flushPromises();
+
+      expect(fakeText(page.noteEl)).toBe("Production access is ready.");
+    }
+  );
 });
 
 describe("switching a github account", () => {
