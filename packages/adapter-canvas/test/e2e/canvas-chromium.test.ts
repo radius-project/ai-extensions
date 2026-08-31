@@ -56,6 +56,81 @@ async function filesContainingText(
   return matches;
 }
 
+// The environment-deletion route refuses (409 app-deployed) while an
+// application is still deployed to the environment, and only deletes
+// Azure-backed environments (it reads AZURE_CLIENT_ID / AZURE_TENANT_ID to plan
+// the credential and app-registration cleanup). The default fixture has an
+// active deployment (dep-1) and no Azure identity variables, so the deletion
+// journeys start from a scenario where the environment has no active app and is
+// classified Azure: the two deployment-list lookups the active-app guard runs
+// return empty, the environment's variable listing carries the Azure identity,
+// and the repository-id lookup the target discovery makes resolves.
+async function setScenarioWithoutActiveDeployment(
+  canvas: CanvasHarness
+): Promise<void> {
+  const argsOf = (command: FakeCliCommand): string[] => command.args ?? [];
+  await canvas.setScenarioOverrides(
+    defaultFakeCliScenario(),
+    [
+      (command) => {
+        const listsEnvironmentDeployments =
+          command.tool === "gh" &&
+          argsOf(command).some(
+            (arg) =>
+              arg.includes("/deployments?") &&
+              arg.includes("environment=fixture-environment")
+          );
+        if (listsEnvironmentDeployments) return { ...command, stdout: "" };
+        return command;
+      },
+      (command) => {
+        const listsEnvironmentVariablesWithValues =
+          command.tool === "gh" &&
+          argsOf(command).some((arg) =>
+            arg.includes("/environments/fixture-environment/variables")
+          ) &&
+          argsOf(command).some((arg) => arg.includes(".value"));
+        if (!listsEnvironmentVariablesWithValues) return command;
+        return {
+          ...command,
+          stdout: [
+            command.stdout ?? "",
+            "AZURE_CLIENT_ID\tfixture-client-id",
+            "AZURE_TENANT_ID\tfixture-tenant-id"
+          ]
+            .filter((line) => line.length > 0)
+            .join("\n")
+        };
+      }
+    ],
+    [
+      {
+        tool: "gh",
+        args: ["api", `/repos/${REPOSITORY}`, "--jq", ".id"],
+        stdout: "101\n"
+      }
+    ]
+  );
+}
+
+async function waitForOperationState(
+  page: Page,
+  operationId: string,
+  state: string
+): Promise<void> {
+  await expect
+    .poll(() =>
+      page.evaluate(async (id) => {
+        const response = await fetch(`/api/operations/${id}`);
+        const payload = (await response.json()) as {
+          operation?: { state?: string };
+        };
+        return payload.operation?.state;
+      }, operationId)
+    )
+    .toBe(state);
+}
+
 async function seed(canvas: CanvasHarness): Promise<void> {
   await fs.mkdir(path.join(canvas.workspacePath, "src", "web"), {
     recursive: true
@@ -227,6 +302,168 @@ async function openEnvironmentWizard(page: Page): Promise<void> {
 test.describe("Radius Canvas in Chromium", () => {
   test.beforeEach(async ({ canvas }) => {
     await seed(canvas);
+  });
+
+  test("deletes an Azure environment through the tracked operation and keeps a dismissed panel gone across a reload @safety", async ({
+    page,
+    canvas
+  }) => {
+    await setScenarioWithoutActiveDeployment(canvas);
+    // Drive the real delete OperationRecord to a clean terminal exactly as the
+    // production runner does (environment-deletion.ts): walk every delete stage
+    // to succeeded and finish the operation. The server owns the record for the
+    // life of the process, so its settled state — and the dismissal recorded
+    // against it — is what a reload re-fetches, rather than the browser
+    // re-deriving it.
+    const deletion = canvas.driveEnvironmentDeletion({ state: "succeeded" });
+
+    await gotoCanvas(page, canvas, "environment");
+    const deleteEnvironment = page.locator(".js-delete-env").first();
+    await expect(deleteEnvironment).toBeVisible();
+    await deleteEnvironment.click();
+
+    // The destructive confirm dialog is the pre-existing environment confirm
+    // modal driven with the deletion copy.
+    const confirmTitle = page.locator("#env-confirm-title");
+    await expect(confirmTitle).toHaveText("Delete environment?");
+    const deleteAccepted = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/delete-environment" &&
+        response.request().method() === "POST"
+    );
+    await page.getByRole("button", { name: "Delete environment" }).click();
+    const { operationId } = (await (await deleteAccepted).json()) as {
+      operationId: string;
+    };
+    expect(operationId).toMatch(/^op_/);
+
+    const panel = page.locator("#env-progress-panel");
+    await expect(panel).toBeVisible();
+    await expect(page.locator("#env-progress-activity")).toHaveAttribute(
+      "aria-live",
+      "polite"
+    );
+
+    await waitForOperationState(page, operationId, "running");
+    await deletion.release();
+
+    // A clean Azure deletion acknowledges through the shared confirm dialog.
+    // The settled operation remains until the progress panel is dismissed.
+    await expect(confirmTitle).toHaveText("Environment deleted");
+    await expectNoWcagViolations(page);
+    const done = page.getByRole("button", { name: "Done" });
+    await expect(done).toBeFocused();
+    await done.click();
+    const dismissRequest = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname.endsWith("/dismiss") &&
+        response.request().method() === "POST"
+    );
+    await page.locator("#env-progress-dismiss").click();
+    // The dismissal must target the very operation the delete route created, not
+    // merely some `/dismiss` POST, or a stray dismissal would pass this assertion.
+    const dismissal = await dismissRequest;
+    expect(new URL(dismissal.url()).pathname).toBe(
+      `/api/operations/${operationId}/dismiss`
+    );
+    await expect(panel).toBeHidden();
+
+    // The key server round trip: the dismissal was recorded against the record,
+    // so the panel does NOT reappear when the environments page is revisited.
+    // jsdom cannot prove this because it never reloads against the real server.
+    await gotoCanvas(page, canvas, "environment");
+    await expect(page.locator(".js-delete-env").first()).toBeVisible();
+    await expect(page.locator("#env-progress-panel")).toBeHidden();
+  });
+
+  test("surfaces a partial deletion failure with the Retry deletion action @safety", async ({
+    page,
+    canvas
+  }) => {
+    await setScenarioWithoutActiveDeployment(canvas);
+    // Drive the delete operation to failed_partial with the first stage failed,
+    // mirroring environment-deletion.ts: a terminal partial failure keeps the
+    // completed stages recorded and offers a resume rather than restarting.
+    const deletion = canvas.driveEnvironmentDeletion({
+      state: "failed_partial",
+      failure: {
+        code: "radius-env-delete-failed",
+        stepSeq: null,
+        message:
+          "Radius could not confirm the environment was deleted from the cluster.",
+        classification: "user-fixable",
+        evidence: null
+      }
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+    await page.locator(".js-delete-env").first().click();
+    const deleteAccepted = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/delete-environment" &&
+        response.request().method() === "POST"
+    );
+    await page.getByRole("button", { name: "Delete environment" }).click();
+    const { operationId } = (await (await deleteAccepted).json()) as {
+      operationId: string;
+    };
+
+    const panel = page.locator("#env-progress-panel");
+    await expect(panel).toBeVisible();
+    await waitForOperationState(page, operationId, "running");
+    await deletion.release();
+    await expect(panel).toContainText(
+      "Deletion stopped before all stages completed. Completed stages remain recorded and will not be repeated."
+    );
+    const retry = panel.getByRole("button", { name: "Retry deletion" });
+    await expect(retry).toBeVisible();
+
+    const resumedDeletion = canvas.driveEnvironmentDeletion({
+      state: "succeeded"
+    });
+    const retryAccepted = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname ===
+          `/api/operations/${operationId}/retry/deletion` &&
+        response.request().method() === "POST"
+    );
+    await retry.click();
+    expect((await retryAccepted).status()).toBe(202);
+    await waitForOperationState(page, operationId, "running");
+    await resumedDeletion.release();
+    await waitForOperationState(page, operationId, "succeeded");
+    await expect(retry).toBeHidden();
+    await expect(page.locator("#env-progress-dismiss")).toBeVisible();
+  });
+
+  test("refuses to delete an environment that still has a deployed application @safety", async ({
+    page,
+    canvas
+  }) => {
+    // The default fixture keeps an active deployment, so the delete route's
+    // active-app guard (routes/environments.ts) answers 409 app-deployed and
+    // nothing is scheduled. The browser converts that refusal into a redirect
+    // prompt instead of opening the progress panel.
+    await canvas.setScenario(defaultFakeCliScenario());
+    const refusal = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/delete-environment" &&
+        response.request().method() === "POST"
+    );
+
+    await gotoCanvas(page, canvas, "environment");
+    await page.locator(".js-delete-env").first().click();
+    const confirmTitle = page.locator("#env-confirm-title");
+    await expect(confirmTitle).toHaveText("Delete environment?");
+    await page.getByRole("button", { name: "Delete environment" }).click();
+
+    expect((await refusal).status()).toBe(409);
+    await expect(confirmTitle).toHaveText("Delete the application first");
+    await expect(
+      page.getByRole("button", { name: "Go to Deployments" })
+    ).toBeVisible();
+    // No tracked deletion was started: the guard ran before any operation.
+    await expect(page.locator("#env-progress-panel")).toBeHidden();
   });
 
   test("does not expose a pre-existing credential cache in browser state, requests, logs, or artifacts @safety", async ({
