@@ -179,6 +179,9 @@ async function successfulSetup(
       // pre-existing and the success contract is unchanged.
       return { code: 0, stdout: "[]", stderr: "" };
     }
+    if (line.startsWith(`ad app show --id ${APP_ID} --query id`)) {
+      return { code: 0, stdout: "app-object", stderr: "" };
+    }
     if (line.includes("federated-credential list")) {
       return { code: 0, stdout: "[]", stderr: "" };
     }
