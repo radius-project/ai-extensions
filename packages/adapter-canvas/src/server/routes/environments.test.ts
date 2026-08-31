@@ -1168,6 +1168,43 @@ describe("environments — list-environments", () => {
     });
   });
 
+  // The workflow resolves the current variable itself, as
+  // `vars.KUBERNETES_NAMESPACE || 'default'`. Once it exists it is
+  // authoritative even when empty, so a superseded legacy value must not be
+  // reported in its place: Edit would show a namespace deployment does not use
+  // and would save it back, moving the environment.
+  it("reports no namespace when the current variable exists but is empty", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: {
+        stdout:
+          "RADIUS_MANAGED\ttrue\nAZURE_AKS_CLUSTER_NAME\tprod-aks\nKUBERNETES_NAMESPACE\t\nRADIUS_NAMESPACE\tstale-ns"
+      },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "" }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        envListCacheSet: vi.fn(),
+        cliExec: cliFake(script),
+        readInstanceEntry: () => undefined,
+        repoMatchesWorkspace: () => false,
+        kickoffWorkflowSync: vi.fn()
+      })
+    );
+    expect(JSON.parse(recording.body).environments[0].config).toEqual({
+      cluster: "prod-aks"
+    });
+  });
+
   it("omits configuration the environment does not carry", async () => {
     const script: CliScript = {
       [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },

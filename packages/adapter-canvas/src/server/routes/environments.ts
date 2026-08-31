@@ -375,6 +375,13 @@ export async function handleDeleteEnvironment(
 // environment created before that rename keeps reporting the namespace it
 // actually holds; reading only the current name would make every such
 // environment look as though it had none.
+//
+// Precedence is decided by whether a variable exists, not by whether it holds a
+// value. The workflow resolves an empty variable itself, as
+// `vars.KUBERNETES_NAMESPACE || 'default'`, so once the current variable exists
+// it is authoritative even when empty. Falling through to a stale legacy value
+// there would report a namespace deployment does not use, and Edit would save
+// that reported value back and move the environment.
 const NAMESPACE_VARIABLES = [
   "KUBERNETES_NAMESPACE",
   "RADIUS_NAMESPACE"
@@ -685,11 +692,13 @@ export async function handleListEnvironments(
           provider === "aws" ? AWS_CONFIG_VARIABLES : AZURE_CONFIG_VARIABLES
         )) {
           for (const variable of variables) {
+            if (!Object.hasOwn(vars, variable)) continue;
+            // The variable exists, so it decides this field. An empty value
+            // still reports nothing, exactly as before, but it stops the
+            // fallback instead of deferring to a superseded name.
             const value = vars[variable];
-            if (value) {
-              config[key] = value;
-              break;
-            }
+            if (value) config[key] = value;
+            break;
           }
         }
         return { name, provider, status, webUrl, credentialProfile, config };
