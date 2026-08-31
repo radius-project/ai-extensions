@@ -50,7 +50,7 @@ jobs:
 
       - name: Generate changeset status
         id: status
-        uses: changesets/action/pr-status@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.0.0-next.4
+        uses: changesets/action/pr-status@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.1.1
 
   comment:
     name: Report changeset status
@@ -67,7 +67,7 @@ jobs:
     steps:
       # Keep the write token isolated from the checkout and untrusted PR files.
       - name: Create or update pull request comment
-        uses: changesets/action/pr-comment@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.0.0-next.4
+        uses: changesets/action/pr-comment@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.1.1
         with:
           body: >-
             ${{ needs.status.outputs.comment-body || 'Changeset check skipped:
