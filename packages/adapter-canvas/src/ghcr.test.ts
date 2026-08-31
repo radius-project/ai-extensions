@@ -437,6 +437,11 @@ test("deletes a validated user-owned state package and confirms absence", async 
       ]
     ]
   );
+  assert.ok(
+    harness.calls
+      .filter((call) => new URL(call.url).pathname.includes("/packages/"))
+      .every((call) => call.headers["X-GitHub-Api-Version"] === "2022-11-28")
+  );
 });
 
 test("treats Packages API-confirmed initial absence as idempotent success", async () => {

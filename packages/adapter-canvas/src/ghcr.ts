@@ -7,6 +7,7 @@ import {
   displayGhCommand,
   type GhCommandPresentation
 } from "./gh-command-display.js";
+import { GITHUB_API_VERSION } from "./azure-oidc.js";
 
 export interface GhCredentials {
   token: string;
@@ -798,7 +799,7 @@ async function githubJson(
     headers: {
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${token}`,
-      "X-GitHub-Api-Version": "2026-03-10"
+      "X-GitHub-Api-Version": GITHUB_API_VERSION
     },
     redirect: "error"
   });
@@ -1156,7 +1157,7 @@ export async function deleteGHCRStatePackage({
       headers: {
         Accept: "application/vnd.github+json",
         Authorization: githubAuthorization(auth.token),
-        "X-GitHub-Api-Version": "2026-03-10"
+        "X-GitHub-Api-Version": GITHUB_API_VERSION
       },
       redirect: "error"
     });
