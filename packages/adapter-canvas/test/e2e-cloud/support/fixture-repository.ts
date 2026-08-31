@@ -52,6 +52,16 @@ export const RESOURCE_GROUP_PREFIX = "radtest-canvas";
 /** Branch prefix the product uses when it lacks `workflow` token scope. */
 export const WORKFLOW_FALLBACK_BRANCH_PREFIX = "radius/setup-";
 
+/**
+ * Prefix every per-run GitHub Environment name carries.
+ *
+ * Exported rather than inlined into `environmentName` because the cleanup
+ * workflow matches stale environments on it. A second copy of the prefix in
+ * YAML would be a destructive operation keyed off a value nothing keeps in
+ * step with this one.
+ */
+export const ENVIRONMENT_NAME_PREFIX = "radtest-";
+
 const PLACEHOLDER_PATTERN = /^TODO-/;
 const UNSET_SHA_PATTERN = /^0+$/;
 
@@ -131,7 +141,7 @@ export function clusterName(uniqueId: string): string {
  * below) cannot be.
  */
 export function environmentName(uniqueId: string): string {
-  return `radtest-${requireUniqueId(uniqueId)}`;
+  return `${ENVIRONMENT_NAME_PREFIX}${requireUniqueId(uniqueId)}`;
 }
 
 /**
@@ -176,4 +186,34 @@ function requireUniqueId(value: string): string {
   if (!value || !value.trim())
     throw new Error("A run unique id is required to name cloud resources.");
   return value;
+}
+
+/**
+ * An Azure region token: lowercase letters, then optionally digits, as in
+ * `westus3` or `eastus2euap`. Deliberately narrow. The value reaches
+ * `az group create --location`, so anything unexpected should be rejected here
+ * with a readable message rather than surfacing forty minutes later as an
+ * opaque `az` failure that triages as an infrastructure fault.
+ */
+const AZURE_REGION_PATTERN = /^[a-z]+[a-z0-9]*$/;
+
+/**
+ * The region CI asks for, or `undefined` to leave the fixture's own default.
+ *
+ * `AIEXT_CLOUD_E2E_AZURE_LOCATION` is published by the upstream Terraform so the
+ * region can move without a code change. It is absent locally and absent until
+ * that Terraform is applied, and an absent value must mean "use the default"
+ * rather than "use the empty string" — `az group create --location ""` fails in
+ * a way that looks nothing like a missing variable.
+ */
+export function resolveFixtureLocation(
+  value: string | undefined
+): string | undefined {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (!AZURE_REGION_PATTERN.test(normalized))
+    throw new Error(
+      `AIEXT_CLOUD_E2E_AZURE_LOCATION must be an Azure region such as "westus3"; received "${value}".`
+    );
+  return normalized;
 }
