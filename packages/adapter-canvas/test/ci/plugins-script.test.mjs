@@ -137,6 +137,7 @@ describe("scripts/plugins.mjs", () => {
       PLUGIN_DIR: "plugins/radius-aws",
       PLUGIN_DIST: "plugins/radius-aws/dist",
       PLUGIN_ARTIFACT: "plugin-dist-radius-aws",
+      PLUGIN_SBOM_ARTIFACT: "plugin-sbom-radius-aws",
       PLUGIN_TARBALL: "radius-aws-plugin.tar.gz",
       PLUGIN_SBOM: "radius-aws-plugin.spdx.json",
       PLUGIN_AWESOME_COPILOT: "radius-aws-awesome-copilot.zip",
@@ -175,6 +176,7 @@ describe("scripts/plugins.mjs", () => {
       "PLUGIN_DIR",
       "PLUGIN_DIST",
       "PLUGIN_ARTIFACT",
+      "PLUGIN_SBOM_ARTIFACT",
       "PLUGIN_TARBALL",
       "PLUGIN_SBOM",
       "PLUGIN_AWESOME_COPILOT"
