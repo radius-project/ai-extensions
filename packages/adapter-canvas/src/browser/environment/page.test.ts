@@ -19,6 +19,7 @@ import {
 } from "./operations.js";
 import {
   GITHUB_ACCOUNT_ENDPOINT,
+  GITHUB_ENVIRONMENT_RECHECK_DELAY_MS,
   PROFILES_PANEL_ENTRY_KEY
 } from "./profiles.js";
 import {
@@ -664,11 +665,32 @@ describe("initializeEnvironmentPage", () => {
     await openWithProfile(page, "azure");
     const environment = pageInput(page, "env-name-input");
     expect(pageInput(page, "deploy-btn").disabled).toBe(false);
+    const checksBeforeEdit = page.browser.net.calls.filter(
+      (call) => call.url === GITHUB_ACCOUNT_ENDPOINT
+    ).length;
 
     environment.value = "prod";
     page.elements["env-name-input"].dispatch("input");
 
     expect(pageInput(page, "deploy-btn").disabled).toBe(true);
+    page.browser.clock.tick(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS - 1);
+    expect(
+      page.browser.net.calls.filter(
+        (call) => call.url === GITHUB_ACCOUNT_ENDPOINT
+      )
+    ).toHaveLength(checksBeforeEdit);
+
+    page.browser.clock.tick(1);
+    await flushPromises();
+
+    const checksAfterSettling = page.browser.net.calls.filter(
+      (call) => call.url === GITHUB_ACCOUNT_ENDPOINT
+    );
+    expect(checksAfterSettling).toHaveLength(checksBeforeEdit + 1);
+    expect(JSON.parse(String(checksAfterSettling.at(-1)?.init?.body))).toEqual(
+      expect.objectContaining({ environment: "prod" })
+    );
+    expect(pageInput(page, "deploy-btn").disabled).toBe(false);
   });
 
   it("fails closed when repository identity changes", async () => {
