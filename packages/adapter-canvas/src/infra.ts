@@ -278,8 +278,8 @@ export {
 };
 
 /**
- * Fetch a workflow template from radius-project/radius `.github/extension/` at
- * the pinned RADIUS_REF. radius-project/radius is the single source of truth,
+ * Fetch a workflow template from radius-project/ai-extensions `.github/extension/` at
+ * the pinned RADIUS_REF. radius-project/ai-extensions is the single source of truth,
  * so a fetch failure (offline, transient API error, or the ref/file missing) is
  * a hard error rather than a fall back to a bundled copy. The underlying cause
  * (gh stderr, 404, decode error) is surfaced in the thrown message.
@@ -383,18 +383,19 @@ export function readBundledWorkflowTemplate(fileName: string): string {
 
 export async function generateVerifyWorkflow(
   env: string,
-  provider: string
+  provider: string,
+  ref: string = RADIUS_REF
 ): Promise<string> {
   const platform = getPlatform(provider);
   if (!platform)
     throw new Error(
       `Unknown provider "${provider}". Supported providers: azure, aws.`
     );
-  // Always use the upstream template from radius-project/radius; no fallback.
+  // Always use the upstream template from radius-project/ai-extensions; no fallback.
   const fileName = verifyTemplateFile(platform);
   if (!fileName)
     throw new Error(`No verify template for provider "${provider}".`);
-  const upstream = await fetchRadiusTemplate(fileName);
+  const upstream = await fetchRadiusTemplate(fileName, ref);
   const workflow = configureVerifyGhcrProbe(
     configureVerifyOperationMarker(
       coreGenerateVerifyWorkflow(env, platform, upstream)
@@ -505,7 +506,7 @@ ${indent}    echo "✅ GHCR accepted a non-mutating upload-session probe."`;
  * runtime by the dispatcher, so all three files are emitted regardless of the
  * environment's cloud.
  *
- * The templates are fetched from radius-project/radius `.github/extension/` at
+ * The templates are fetched from radius-project/ai-extensions `.github/extension/` at
  * the pinned RADIUS_REF so user repos always get the reviewed upstream version;
  * there is no bundled fallback, so a fetch failure surfaces as an error.
  */
@@ -567,8 +568,8 @@ export async function generateDeployWorkflow(
  * Two paths share this generator with different provenance:
  *
  *   - Application delete (`delete-application.yml` + the reusable
- *     `delete-azure.yml`) is fetched from radius-project/radius, which stays the
- *     single source of truth for that reviewed upstream workflow.
+ *     `delete-azure.yml`) is fetched from radius-project/ai-extensions, which
+ *     stays the single source of truth for that reviewed upstream workflow.
  *   - Environment delete (`delete-environment.yml` + its own reusable provider
  *     `delete-environment-azure.yml`) is authored as static YAML in this repo's
  *     `.github/extension/` and shipped inside the plugin (issue #303), so the
@@ -701,9 +702,9 @@ const VERIFY_WORKFLOW_PATH = ".github/workflows/radius-verify-credentials.yml";
 /**
  * Re-fetch the upstream workflow templates and update any workflow files the
  * extension previously committed to `repo` whose content has drifted from
- * upstream (radius-project/radius `.github/extension/`).
+ * upstream (radius-project/ai-extensions `.github/extension/`).
  *
- * radius-project/radius is the single source of truth for the verify, deploy and
+ * radius-project/ai-extensions is the single source of truth for the verify, deploy and
  * delete workflows. Users get a snapshot of those templates committed into their
  * repo at environment-creation time; when upstream changes, those committed
  * copies go stale. This resynchronises them in place.

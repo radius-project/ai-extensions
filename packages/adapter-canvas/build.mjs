@@ -14,8 +14,9 @@
 // the output (the loader resolves @github/copilot-sdk at runtime).
 
 import * as esbuild from "esbuild";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, basename, join, resolve, sep } from "node:path";
 import {
   copyFileSync,
   cpSync,
@@ -80,6 +81,34 @@ const pluginAssetLoaders = { ".json": "copy", ".md": "copy", ".mjs": "copy" };
 // build is distinguishable from a release. A local build leaves the version in
 // the source manifests alone.
 const stampedVersion = process.env.PLUGIN_VERSION?.trim();
+const SOURCE_SHA = /^[0-9a-f]{40}$/;
+// A build with no resolvable source commit cannot pin anything, so it stays
+// unstamped and every release validator rejects it.
+const DEVELOPMENT_REF = "main";
+const sourceRef = resolveSourceRef();
+
+function resolveSourceRef() {
+  const explicit = process.env.RADIUS_SOURCE_REF?.trim();
+  if (explicit) {
+    if (!SOURCE_SHA.test(explicit)) {
+      throw new Error(
+        `RADIUS_SOURCE_REF must be the full source commit SHA, got ${JSON.stringify(explicit)}.`
+      );
+    }
+    return explicit;
+  }
+  try {
+    const head = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    if (SOURCE_SHA.test(head)) return head;
+  } catch {
+    // Building outside a checkout, e.g. from a source archive or a fixture.
+  }
+  return DEVELOPMENT_REF;
+}
 
 function writeThirdPartyNotices(inputs) {
   const packages = new Map();
@@ -177,12 +206,13 @@ async function assembleDist(bundleInputs) {
     logLevel: "silent"
   });
   copyFileSync(join(repoRoot, "LICENSE"), join(distDir, "LICENSE"));
-  copyStaticWorkflows();
+  copyExtensionAssets();
 
   const distPackage = join(distDir, "package.json");
   stripRepositoryScripts(distPackage);
   resolveCatalogSpecifiers(distPackage);
   stampVersion(distPackage, stampedVersion);
+  stampSourceRef(distPackage);
   // The manifest the host reads must advertise the version the package ships,
   // including when a rebuild runs without PLUGIN_VERSION.
   stampVersion(
@@ -226,30 +256,20 @@ function stripRepositoryScripts(manifestPath) {
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
-// The environment-delete workflow (issue #303) is authored as static YAML in
-// this repo's .github/extension/ rather than fetched from radius-project/radius,
-// so it must ship inside the plugin: the runtime reads it from a `workflows/`
-// directory beside extension.mjs (see readBundledWorkflowTemplate in infra.ts)
-// and commits it into the target repo. Copy those files into dist/ here so a
-// built/installed plugin is self-contained.
-const staticWorkflowFiles = [
-  "delete-environment.yml",
-  "delete-environment-azure.yml"
-];
-
-// Copied rather than routed through the esbuild asset loaders above, which
-// deliberately accept only the plugin's own .json/.md/.mjs sources.
-function copyStaticWorkflows() {
+// The complete workflow contract ships beside extension.mjs so a released
+// plugin contains the exact templates, actions and scripts it was built with.
+function copyExtensionAssets() {
   const sourceDir = join(repoRoot, ".github", "extension");
   const targetDir = join(distDir, "workflows");
-  mkdirSync(targetDir, { recursive: true });
-  for (const file of staticWorkflowFiles) {
-    const from = join(sourceDir, file);
-    if (!existsSync(from)) {
-      throw new Error(`Missing required static workflow asset: ${from}`);
-    }
-    cpSync(from, join(targetDir, file));
+  if (!existsSync(sourceDir)) {
+    throw new Error(`Missing required extension assets: ${sourceDir}`);
   }
+  // A nested action package may have been installed locally; only the tracked
+  // workflow contract is part of the release.
+  cpSync(sourceDir, targetDir, {
+    recursive: true,
+    filter: (from) => basename(from) !== "node_modules"
+  });
 }
 
 function stampVersion(manifestPath, version) {
@@ -264,6 +284,13 @@ function stampVersion(manifestPath, version) {
   // exact version into the source manifest.
   const next = raw.replace(versionKey, `$1${version}$2`);
   if (next !== raw) writeFileSync(manifestPath, next);
+}
+
+function stampSourceRef(manifestPath) {
+  if (sourceRef === DEVELOPMENT_REF) return;
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  manifest.radiusSourceRef = sourceRef;
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 // The shipped manifest is read outside this workspace, where pnpm's "catalog:"
@@ -365,19 +392,16 @@ function installToLocal() {
       copyFileSync(manifestFrom, tmp);
       renameSync(tmp, manifestTo);
     }
-    // The static delete-environment workflows must sit beside the installed
-    // extension.mjs so the runtime can read and commit them (see
-    // readBundledWorkflowTemplate in infra.ts).
+    // Replace the whole workflow contract so removed actions and scripts cannot
+    // survive beside a freshly installed extension.
     const workflowsFrom = join(distDir, "workflows");
     if (existsSync(workflowsFrom)) {
       const workflowsTo = join(installDir, "workflows");
-      mkdirSync(workflowsTo, { recursive: true });
-      for (const file of readdirSync(workflowsFrom)) {
-        const to = join(workflowsTo, file);
-        const tmp = `${to}.tmp-${process.pid}`;
-        copyFileSync(join(workflowsFrom, file), tmp);
-        renameSync(tmp, to);
-      }
+      const tmp = `${workflowsTo}.tmp-${process.pid}`;
+      rmSync(tmp, { recursive: true, force: true });
+      cpSync(workflowsFrom, tmp, { recursive: true });
+      rmSync(workflowsTo, { recursive: true, force: true });
+      renameSync(tmp, workflowsTo);
     }
     // Remove any legacy `.dev-reload` sentinel from older installs so it can't
     // keep the (now opt-in) self-reloader armed on this machine.
@@ -489,6 +513,10 @@ const options = {
   format: "esm",
   platform: "node",
   target,
+  define: {
+    "process.env.RADIUS_SOURCE_REF": JSON.stringify(sourceRef),
+    "process.env.RADIUS_DELETE_REF": JSON.stringify(sourceRef)
+  },
   // yaml's Node entry is CommonJS and leaves a dynamic require("process") in
   // the ESM bundle. Its browser entry is equivalent pure ESM parser code.
   alias: { yaml: yamlBrowserEntry },

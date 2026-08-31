@@ -6,7 +6,7 @@
 # continue when applications are still deployed to the environment, deletes the
 # environment (running any recipe deletes against the target cluster), then
 # persists the updated state again and tears the control plane down. The
-# provider-agnostic phases are shared composite actions in radius-project/radius;
+# provider-agnostic phases are shared composite actions in radius-project/ai-extensions;
 # only the Azure-specific steps and the ai-extensions-owned "no deployed
 # applications" guard live here.
 #
@@ -113,7 +113,7 @@ jobs:
             --file "$RADIUS_TARGET_KUBECONFIG"
 
       - name: Set up control plane
-        uses: radius-project/radius/.github/extension/actions/setup-control-plane@{{RADIUS_REF}}
+        uses: radius-project/ai-extensions/.github/extension/actions/setup-control-plane@{{RADIUS_REF}}
 
       - name: Project cloud OIDC tokens into Radius pods
         env:
@@ -172,7 +172,8 @@ jobs:
           echo "External deployment target configured."
 
       - name: Restore Radius state
-        uses: radius-project/radius/.github/extension/actions/restore-state@{{RADIUS_REF}}
+        id: restore-state
+        uses: radius-project/ai-extensions/.github/extension/actions/restore-state@{{RADIUS_REF}}
         with:
           namespace: ${{ vars.KUBERNETES_NAMESPACE || 'default' }}
 
@@ -263,11 +264,13 @@ jobs:
           echo "✅ No applications are deployed to environment '${RESOURCE_NAME}'; safe to delete."
 
       - name: Delete Radius resource
-        uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}
+        uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}
         with:
           resource-type: ${{ inputs.resource_type }}
           name: ${{ inputs.name }}
 
       - name: Teardown
         if: always()
-        uses: radius-project/radius/.github/extension/actions/teardown@{{RADIUS_REF}}
+        uses: radius-project/ai-extensions/.github/extension/actions/teardown@{{RADIUS_REF}}
+        with:
+          state-restored: ${{ steps.restore-state.outputs.state-restored }}
