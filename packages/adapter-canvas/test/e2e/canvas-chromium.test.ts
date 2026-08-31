@@ -16,7 +16,7 @@ import {
   type CanvasHarness,
   type FakeCliCommand
 } from "./support/canvas-harness.js";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 // Bound to the production constants so the retry cadence is exercised at the
 // value the compiled browser bundle actually schedules, not a copy of it.
@@ -99,6 +99,22 @@ async function expectNoWcagViolations(page: Page): Promise<void> {
       targets: violation.nodes.map((node) => node.target.join(" "))
     }))
   ).toEqual([]);
+}
+
+async function expectVerticallyAligned(
+  first: Locator,
+  second: Locator
+): Promise<void> {
+  const firstBox = await first.boundingBox();
+  const secondBox = await second.boundingBox();
+  if (firstBox === null || secondBox === null) {
+    throw new Error("Expected both elements to have layout boxes.");
+  }
+  expect(
+    Math.abs(
+      firstBox.y + firstBox.height / 2 - (secondBox.y + secondBox.height / 2)
+    )
+  ).toBeLessThanOrEqual(1);
 }
 
 function bodyFor(canvas: CanvasHarness, pathName: string): unknown {
@@ -1269,7 +1285,7 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBe(false);
   });
 
-  test("keeps server-owned setup durable across navigation without reporting browser cancellation @safety", async ({
+  test("keeps server-owned setup durable across navigation and downloads redacted diagnostics by keyboard @safety", async ({
     page,
     canvas
   }) => {
@@ -1323,6 +1339,9 @@ test.describe("Radius Canvas in Chromium", () => {
       `${canvas.baseUrl}/?page=environment&operationId=${result.operationId}`
     );
     await expect(page.locator("#env-progress-panel")).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Download diagnostic snapshot" })
+    ).toBeHidden();
     const activity = page.locator("#env-progress-activity");
     await expect(activity).toHaveAttribute("aria-live", "polite");
     await gotoCanvas(page, canvas, "credentials");
@@ -1356,6 +1375,130 @@ test.describe("Radius Canvas in Chromium", () => {
     );
     await expect(page.locator("body")).not.toContainText("cancelled");
     await expect(page.locator("body")).not.toContainText("Cancelled");
+    await resumedPanel.locator("#env-progress-details > summary").click();
+    const diagnosticButton = page.getByRole("button", {
+      name: "Download diagnostic snapshot"
+    });
+    await expect(diagnosticButton).toBeVisible();
+    await expectVerticallyAligned(
+      diagnosticButton,
+      page.locator("#env-progress-diagnostics-note")
+    );
+    await diagnosticButton.focus();
+    await page.keyboard.press("Enter");
+    const diagnosticDialog = page.getByRole("dialog", {
+      name: "Download diagnostic snapshot"
+    });
+    await expect(diagnosticDialog).toBeVisible();
+    await expect(
+      diagnosticDialog.getByLabel("Include contextual identifiers")
+    ).not.toBeChecked();
+    const includeCheckbox = diagnosticDialog.getByLabel(
+      "Include contextual identifiers"
+    );
+    const includeLabel = diagnosticDialog.locator(
+      'label[for="env-diagnostics-include-identifiers"]'
+    );
+    await expectVerticallyAligned(includeCheckbox, includeLabel);
+    await expectNoWcagViolations(page);
+    const diagnosticLink = diagnosticDialog.getByRole("link", {
+      name: "Download snapshot"
+    });
+    await diagnosticLink.focus();
+    await expect(diagnosticLink).toBeFocused();
+    const downloadStarted = page.waitForEvent("download");
+    await page.keyboard.press("Enter");
+    const download = await downloadStarted;
+    expect(download.suggestedFilename()).toBe(
+      "radius-environment-operation-diagnostics.json"
+    );
+    const diagnosticPath = await download.path();
+    if (diagnosticPath === null) {
+      throw new Error("Playwright did not retain the diagnostic download.");
+    }
+    const diagnosticText = await fs.readFile(diagnosticPath, "utf8");
+    expect(diagnosticText).not.toContain(REPOSITORY);
+    expect(diagnosticText).not.toContain("fixture-environment");
+    expect(diagnosticText).not.toContain(PLACEHOLDER_SECRET);
+    expect(JSON.parse(diagnosticText)).toMatchObject({
+      diagnosticSchemaVersion: 2,
+      identifierProfile: "support_safe",
+      contextualIdentifiers: null,
+      operation: {
+        operationId: result.operationId,
+        lifecycle: { state: "failed" }
+      }
+    });
+    await expect(diagnosticDialog).toBeHidden();
+    await expect(diagnosticButton).toBeFocused();
+    await expect(page.locator("#env-progress-diagnostics-status")).toHaveText(
+      "Diagnostic snapshot download started."
+    );
+
+    await diagnosticButton.click();
+    await expect(diagnosticDialog).toBeVisible();
+    await diagnosticDialog.getByLabel("Include contextual identifiers").check();
+    await expect(diagnosticDialog.getByText(REPOSITORY)).toBeVisible();
+    await expect(
+      diagnosticDialog.getByText("fixture-environment", { exact: true })
+    ).toBeVisible();
+    await expect(diagnosticDialog.getByText("repo-user")).toBeVisible();
+    const reviewedCheckbox = diagnosticDialog.getByLabel(
+      "I reviewed these identifiers"
+    );
+    const reviewedLabel = diagnosticDialog.locator(
+      'label[for="env-diagnostics-reviewed-identifiers"]'
+    );
+    await expectVerticallyAligned(reviewedCheckbox, reviewedLabel);
+    await expectNoWcagViolations(page);
+    await diagnosticDialog.getByLabel("I reviewed these identifiers").check();
+    const contextualDownloadStarted = page.waitForEvent("download");
+    await diagnosticLink.click();
+    const contextualDownload = await contextualDownloadStarted;
+    const contextualPath = await contextualDownload.path();
+    if (contextualPath === null) {
+      throw new Error(
+        "Playwright did not retain the contextual diagnostic download."
+      );
+    }
+    const contextualText = await fs.readFile(contextualPath, "utf8");
+    expect(contextualText).not.toContain(PLACEHOLDER_SECRET);
+    expect(JSON.parse(contextualText)).toMatchObject({
+      diagnosticSchemaVersion: 2,
+      identifierProfile: "support_safe_with_identifiers",
+      contextualIdentifiers: {
+        repository: REPOSITORY,
+        branch: WORKTREE_BRANCH,
+        environment: "fixture-environment",
+        githubLogin: "repo-user",
+        omittedFieldCount: 0
+      }
+    });
+    await expect(diagnosticDialog).toBeHidden();
+    await expect(diagnosticButton).toBeFocused();
+    await expect(page.locator("#env-progress-diagnostics-status")).toHaveText(
+      "Diagnostic snapshot download started."
+    );
+
+    await page.route(
+      `**/api/operations/${result.operationId}/diagnostics`,
+      async (route) => {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: '{"code":"diagnostic-export-unavailable"}'
+        });
+      }
+    );
+    await diagnosticButton.click();
+    await diagnosticLink.click();
+    await expect(diagnosticDialog).toBeVisible();
+    await expect(diagnosticDialog.getByRole("alert")).toContainText(
+      "could not download the support-safe diagnostic snapshot"
+    );
+    await page.unroute(`**/api/operations/${result.operationId}/diagnostics`);
+    await diagnosticDialog.getByRole("button", { name: "Cancel" }).click();
+
     expect(bodyFor(canvas, "/api/operations")).toMatchObject({
       repo: REPOSITORY,
       environment: "fixture-environment",
@@ -1610,6 +1753,10 @@ test.describe("Radius Canvas in Chromium", () => {
       )
     ).toEqual([]);
     await expect(page.locator("body")).toContainText("Environment created");
+    await page.locator("#env-progress-details > summary").click();
+    await expect(
+      page.getByRole("button", { name: "Download diagnostic snapshot" })
+    ).toBeHidden();
     await expectNoWcagViolations(page);
   });
 
@@ -1664,6 +1811,10 @@ test.describe("Radius Canvas in Chromium", () => {
     await stop.focus();
     await page.keyboard.press("Enter");
 
+    await page.locator("#env-progress-details > summary").click();
+    await expect(
+      page.getByRole("button", { name: "Download diagnostic snapshot" })
+    ).toBeVisible();
     const cancelWorkflow = page.getByRole("button", {
       name: "Cancel workflow"
     });

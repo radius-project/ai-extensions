@@ -134,6 +134,23 @@ function prepareBuildWorkspace(
     recursive: true
   });
 
+  // The build bundles the static environment-delete workflows from
+  // .github/extension/ (see copyStaticWorkflows in build.mjs). Stage them so the
+  // build reaches the install-copy step this test exercises instead of failing
+  // earlier on a missing static workflow asset.
+  const sourceExtension = join(REPO_ROOT, ".github", "extension");
+  const workspaceExtension = join(workspaceRoot, ".github", "extension");
+  mkdirSync(workspaceExtension, { recursive: true });
+  for (const workflowFile of [
+    "delete-environment.yml",
+    "delete-environment-azure.yml"
+  ]) {
+    copyFileSync(
+      join(sourceExtension, workflowFile),
+      join(workspaceExtension, workflowFile)
+    );
+  }
+
   return workspaceAdapter;
 }
 
@@ -313,6 +330,24 @@ describe("P0-C built Radius extension artifact", () => {
       );
     } else {
       expect(existsSync(join(DIST, "CHANGELOG.md"))).toBe(false);
+    }
+
+    // The environment-delete workflow (issue #303) is authored statically in
+    // this repo and must ship inside the plugin so an installed extension can
+    // commit it into the target repo. Assert both the dispatcher and its Azure
+    // provider are bundled under dist/workflows/ and match the source of truth.
+    for (const workflowFile of [
+      "delete-environment.yml",
+      "delete-environment-azure.yml"
+    ]) {
+      const bundled = join(DIST, "workflows", workflowFile);
+      expect(existsSync(bundled)).toBe(true);
+      expect(readFileSync(bundled, "utf8")).toBe(
+        readFileSync(
+          join(REPO_ROOT, ".github", "extension", workflowFile),
+          "utf8"
+        )
+      );
     }
 
     const sourcePackage = JSON.parse(

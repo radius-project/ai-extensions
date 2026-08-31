@@ -1,6 +1,12 @@
 import type { CanvasRequestContext } from "../request-context.js";
 import type { SelectionHandleClaim } from "../services/github-account-readiness.js";
 import {
+  createOperationDiagnosticContext,
+  createOperationDiagnosticExport,
+  operationDiagnosticContextFingerprint,
+  operationDiagnosticAvailable
+} from "../services/operation-diagnostic-export.js";
+import {
   templatePathParameters,
   type RouteHandlerRegistry
 } from "../route-table.js";
@@ -10,7 +16,7 @@ import {
 // they take the narrow functions they call and nothing else — no registry
 // object, no container, no global server map.
 //
-// The two read routes keep the original four ports. The three POST routes that
+// The read routes keep one narrow dependency set. The three POST routes that
 // register, resume, and abandon environment operations add their own seams below
 // rather than widening a single port object into a general-purpose registry
 // handle: each is a single function, and the test fakes throw on anything a
@@ -20,6 +26,8 @@ export interface OperationsStatusDependencies {
   latestAny(): unknown;
   get(operationId: string): unknown;
   toClientView(record: unknown): unknown;
+  productVersion(): string;
+  now(): number;
 }
 
 interface OperationRequest {
@@ -147,6 +155,8 @@ export interface OperationActionDependencies {
     options?: { failure: Record<string, unknown> }
   ): void;
   isTerminalState(state: unknown): boolean;
+  canDismissOperation(operation: OperationActionRecord): boolean;
+  dismissOperation(operation: OperationActionRecord): void;
   persistOperations(): Promise<void>;
   toClientView(operation: OperationActionRecord): unknown;
   scheduleEnvironmentOperation(
@@ -164,6 +174,8 @@ const ACTION_FUNCTION_DEPENDENCIES = [
   "requireInput",
   "finish",
   "isTerminalState",
+  "canDismissOperation",
+  "dismissOperation",
   "persistOperations",
   "toClientView",
   "scheduleEnvironmentOperation",
@@ -184,9 +196,12 @@ function assertOperationActionDependencies(
 }
 
 const OPERATIONS_PREFIX = "/api/operations/";
+export const OPERATION_DIAGNOSTICS_ROUTE =
+  "/api/operations/:operationId/diagnostics";
 export const RESUME_OPERATION_ROUTE =
   "/api/operations/:operationId/resume/:code";
 export const ABANDON_OPERATION_ROUTE = "/api/operations/:operationId/abandon";
+export const DISMISS_OPERATION_ROUTE = "/api/operations/:operationId/dismiss";
 
 interface ResumeOperationBody extends Record<string, unknown> {
   checkpoint?: string;
@@ -273,6 +288,118 @@ export function handleOperationById(
       : { error: "Unknown operation." }
     )
   );
+}
+
+function sendDiagnosticJson(
+  context: CanvasRequestContext,
+  status: number,
+  payload: unknown,
+  attachment = false
+): void {
+  context.response.setHeader("Content-Type", "application/json");
+  context.response.setHeader("Cache-Control", "no-store");
+  if (attachment) {
+    context.response.setHeader(
+      "Content-Disposition",
+      'attachment; filename="radius-environment-operation-diagnostics.json"'
+    );
+  }
+  context.response.writeHead(status);
+  context.response.end(
+    attachment ?
+      `${JSON.stringify(payload, null, 2)}\n`
+    : JSON.stringify(payload)
+  );
+}
+
+export function handleOperationDiagnostics(
+  context: CanvasRequestContext,
+  dependencies: OperationsStatusDependencies
+): void {
+  const rawOperationId =
+    templatePathParameters(OPERATION_DIAGNOSTICS_ROUTE, context.pathname)
+      ?.operationId ?? "";
+  let operationId: string;
+  try {
+    operationId = decodeURIComponent(rawOperationId);
+  } catch {
+    sendDiagnosticJson(context, 400, {
+      error: "Invalid operation identifier.",
+      code: "invalid-operation-id"
+    });
+    return;
+  }
+
+  const operation = dependencies.get(operationId);
+  if (!operation) {
+    sendDiagnosticJson(context, 404, {
+      error: "Unknown operation.",
+      code: "unknown-operation"
+    });
+    return;
+  }
+  if (!operationDiagnosticAvailable(operation)) {
+    sendDiagnosticJson(context, 409, {
+      error:
+        "Diagnostics are available after Stop is requested, while Radius is waiting for input, or after the operation finishes.",
+      code: "operation-diagnostics-unavailable"
+    });
+    return;
+  }
+
+  try {
+    const identifiers = context.url.searchParams.get("identifiers");
+    if (
+      identifiers !== null &&
+      identifiers !== "preview" &&
+      identifiers !== "include"
+    ) {
+      sendDiagnosticJson(context, 400, {
+        error: "Invalid diagnostic identifier profile.",
+        code: "invalid-diagnostic-profile"
+      });
+      return;
+    }
+    if (identifiers === "preview") {
+      const contextualIdentifiers = createOperationDiagnosticContext(operation);
+      sendDiagnosticJson(context, 200, {
+        contextualIdentifiers,
+        contextFingerprint: operationDiagnosticContextFingerprint(
+          contextualIdentifiers
+        )
+      });
+      return;
+    }
+    if (identifiers === "include") {
+      const contextualIdentifiers = createOperationDiagnosticContext(operation);
+      const expectedFingerprint = operationDiagnosticContextFingerprint(
+        contextualIdentifiers
+      );
+      if (
+        context.url.searchParams.get("contextFingerprint") !==
+        expectedFingerprint
+      ) {
+        sendDiagnosticJson(context, 409, {
+          error:
+            "The contextual identifiers changed after review. Review them again before downloading.",
+          code: "diagnostic-context-changed"
+        });
+        return;
+      }
+    }
+    const diagnostic = createOperationDiagnosticExport({
+      operation,
+      version: dependencies.productVersion(),
+      now: dependencies.now(),
+      includeContext: identifiers === "include"
+    });
+    sendDiagnosticJson(context, 200, diagnostic, true);
+  } catch {
+    sendDiagnosticJson(context, 500, {
+      error: "Radius could not create operation diagnostics.",
+      code: "operation-diagnostics-failed"
+    });
+  }
 }
 
 function jsonError(
@@ -619,6 +746,17 @@ export async function handleResumeOperation(
   if (!operation.request && operation.resumeRequest) {
     operation.request = structuredClone(operation.resumeRequest);
   }
+  const resumeSnapshot = {
+    inputRequired: structuredClone(operation.inputRequired),
+    request:
+      operation.request !== undefined ?
+        structuredClone(operation.request)
+      : undefined,
+    resumeRequest:
+      operation.resumeRequest ?
+        structuredClone(operation.resumeRequest)
+      : undefined
+  };
   if (!isOperationRequest(operation.request)) {
     jsonError(context, 409, {
       error:
@@ -627,36 +765,29 @@ export async function handleResumeOperation(
       operationId
     });
     return;
-  }
-  const resumeSnapshot = {
-    inputRequired: structuredClone(operation.inputRequired),
-    request: structuredClone(operation.request),
-    resumeRequest:
-      operation.resumeRequest ?
-        structuredClone(operation.resumeRequest)
-      : undefined
-  };
-  const request = operation.request;
-  if (code === "service-management-reference-required") {
-    request.azure.serviceManagementReference =
-      data.serviceManagementReference || "";
-    if (operation.resumeRequest?.azure) {
-      operation.resumeRequest.azure.serviceManagementReference =
-        data.serviceManagementReference || "";
-    }
-  } else if (code === "app-selection-required") {
-    request.azure.appId = data.appId || "";
-    request.azure.createNew = data.createNew === true;
-    if (operation.resumeRequest?.azure) {
-      operation.resumeRequest.azure.appId = data.appId || "";
-      operation.resumeRequest.azure.createNew = data.createNew === true;
-    }
   } else {
-    jsonError(context, 400, {
-      error: "Unsupported resume prompt.",
-      code: "unsupported-resume"
-    });
-    return;
+    const request = operation.request;
+    if (code === "service-management-reference-required") {
+      request.azure.serviceManagementReference =
+        data.serviceManagementReference || "";
+      if (operation.resumeRequest?.azure) {
+        operation.resumeRequest.azure.serviceManagementReference =
+          data.serviceManagementReference || "";
+      }
+    } else if (code === "app-selection-required") {
+      request.azure.appId = data.appId || "";
+      request.azure.createNew = data.createNew === true;
+      if (operation.resumeRequest?.azure) {
+        operation.resumeRequest.azure.appId = data.appId || "";
+        operation.resumeRequest.azure.createNew = data.createNew === true;
+      }
+    } else {
+      jsonError(context, 400, {
+        error: "Unsupported resume prompt.",
+        code: "unsupported-resume"
+      });
+      return;
+    }
   }
   dependencies.resumeAfterInput(operation);
   try {
@@ -736,6 +867,44 @@ export async function handleAbandonOperation(
   context.json(200, { operation: dependencies.toClientView(operation) });
 }
 
+export async function handleDismissOperation(
+  context: CanvasRequestContext,
+  dependencies: OperationActionDependencies
+): Promise<void> {
+  const parameters = requiredTemplateParameters(
+    DISMISS_OPERATION_ROUTE,
+    context.pathname
+  );
+  const operationId = decodeURIComponent(parameters.operationId);
+  const operation = dependencies.getOperation(operationId);
+  if (!operation || !dependencies.canDismissOperation(operation)) {
+    jsonError(context, operation ? 409 : 404, {
+      error:
+        operation ?
+          "The operation cannot be dismissed while an action remains available."
+        : "Unknown operation.",
+      code: operation ? "operation-dismiss-mismatch" : "unknown-operation"
+    });
+    return;
+  }
+  const previousDismissedAt = operation.dismissedAt;
+  const previousLastActivityAt = operation.lastActivityAt;
+  dependencies.dismissOperation(operation);
+  try {
+    await dependencies.persistOperations();
+  } catch (error) {
+    operation.dismissedAt = previousDismissedAt;
+    operation.lastActivityAt = previousLastActivityAt;
+    jsonError(context, 500, {
+      error: "Radius could not persist the dismissed operation.",
+      code: "operation-dismiss-persist-failed",
+      detail: dependencies.errorMessage(error)
+    });
+    return;
+  }
+  context.json(200, { operationId });
+}
+
 export function createOperationsStatusRoutes(
   dependencies: OperationsStatusDependencies,
   createDependencies: CreateOperationDependencies,
@@ -745,6 +914,8 @@ export function createOperationsStatusRoutes(
   return {
     "GET /api/operations": (context) =>
       handleLatestOperation(context, dependencies),
+    [`GET ${OPERATION_DIAGNOSTICS_ROUTE}`]: (context) =>
+      handleOperationDiagnostics(context, dependencies),
     "GET /api/operations/": (context) =>
       handleOperationById(context, dependencies),
     "POST /api/operations": (context) =>
@@ -752,6 +923,8 @@ export function createOperationsStatusRoutes(
     "POST /api/operations/:operationId/resume/:code": (context) =>
       handleResumeOperation(context, actionDependencies),
     "POST /api/operations/:operationId/abandon": (context) =>
-      handleAbandonOperation(context, actionDependencies)
+      handleAbandonOperation(context, actionDependencies),
+    "POST /api/operations/:operationId/dismiss": (context) =>
+      handleDismissOperation(context, actionDependencies)
   };
 }

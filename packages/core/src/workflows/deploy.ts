@@ -104,13 +104,11 @@ export function generateDeployWorkflow(
     APP_FILE: appFile,
     RADIUS_REF
   };
+  const fill = (file: string): string => fillTemplate(pick(file), templateVars);
   const files: DeployWorkflowFiles = {
-    [DEPLOY_DISPATCHER_FILE]: fillTemplate(
-      pick(DEPLOY_DISPATCHER_FILE),
-      templateVars
-    ),
-    [DEPLOY_AZURE_FILE]: fillTemplate(pick(DEPLOY_AZURE_FILE), templateVars),
-    [DEPLOY_AWS_FILE]: fillTemplate(pick(DEPLOY_AWS_FILE), templateVars)
+    [DEPLOY_DISPATCHER_FILE]: fill(DEPLOY_DISPATCHER_FILE),
+    [DEPLOY_AZURE_FILE]: fill(DEPLOY_AZURE_FILE),
+    [DEPLOY_AWS_FILE]: fill(DEPLOY_AWS_FILE)
   };
   for (const [file, body] of Object.entries(files)) {
     assertNoUnresolvedPlaceholders(body, `deploy workflow "${file}"`);
