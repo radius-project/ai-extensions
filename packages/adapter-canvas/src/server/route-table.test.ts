@@ -46,7 +46,9 @@ const productionHandlers = {
       latest: () => null,
       latestAny: () => null,
       get: () => null,
-      toClientView: () => null
+      toClientView: () => null,
+      productVersion: () => "0.0.0",
+      now: () => 0
     },
     {
       isValidRepoSlug: () => false,
@@ -506,14 +508,23 @@ describe("server route ownership boundary", () => {
     );
   });
 
-  it("matches the exact operations route before the by-id prefix route", () => {
+  it("matches operations status and diagnostics before the by-id prefix route", () => {
     const latest = matchRoute(table, "GET", "/api/operations");
+    const diagnostics = matchRoute(
+      table,
+      "GET",
+      "/api/operations/op-1/diagnostics"
+    );
     const byId = matchRoute(table, "GET", "/api/operations/abc");
     expect(routeKey(latest!)).toBe("GET /api/operations");
+    expect(routeKey(diagnostics!)).toBe(
+      "GET /api/operations/:operationId/diagnostics"
+    );
     expect(routeKey(byId!)).toBe("GET /api/operations/");
     // The prefix rule must not swallow the exact route, and the two routes must
     // land on genuinely different handlers.
     expect(latest?.handler).not.toBe(byId?.handler);
+    expect(diagnostics?.handler).not.toBe(byId?.handler);
     // A trailing slash with no id is a by-id lookup for the empty id.
     expect(routeKey(matchRoute(table, "GET", "/api/operations/")!)).toBe(
       "GET /api/operations/"
@@ -521,7 +532,8 @@ describe("server route ownership boundary", () => {
     // Declaration order is what makes that true, so pin it.
     expect(
       SERVER_ROUTE_DECLARATIONS.findIndex(
-        (route) => routeKey(route) === "GET /api/operations"
+        (route) =>
+          routeKey(route) === "GET /api/operations/:operationId/diagnostics"
       )
     ).toBeLessThan(
       SERVER_ROUTE_DECLARATIONS.findIndex(

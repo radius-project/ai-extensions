@@ -119,6 +119,13 @@ export const templatePathParameters = (() => {
 export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare("ANY", "/api/ping", "exact", "none", "liveness-source"),
   declare("GET", "/api/operations", "exact", "none", "operations-status"),
+  declare(
+    "GET",
+    "/api/operations/:operationId/diagnostics",
+    "template",
+    "none",
+    "operations-status"
+  ),
   declare("GET", "/api/operations/", "prefix", "none", "operations-status"),
   legacyPost("/api/open-source", "exact", "json", "liveness-source"),
   legacyPost(

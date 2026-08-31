@@ -7,6 +7,7 @@ import type {
   ClipboardPort,
   ClockPort,
   DialogPort,
+  DownloadPort,
   DomDocument,
   DomElement,
   DomEventTarget,
@@ -494,6 +495,54 @@ function createClipboardPort(scope: unknown): ClipboardPort {
   };
 }
 
+function createDownloadPort(
+  scope: unknown,
+  document: DomDocument,
+  clock: ClockPort
+): DownloadPort {
+  const blobConstructor = readMember(scope, "Blob");
+  const urlApi = readMember(scope, "URL");
+  const createObjectUrl = readMember(urlApi, "createObjectURL");
+  const revokeObjectUrl = readMember(urlApi, "revokeObjectURL");
+  return {
+    save(text, mimeType, filename) {
+      const anchor = document.createElement("a");
+      const body = document.body;
+      if (
+        !isCallable(blobConstructor) ||
+        !isCallable(createObjectUrl) ||
+        !isCallable(revokeObjectUrl) ||
+        !isClickableElement(anchor) ||
+        !isContainerElement(body)
+      ) {
+        return false;
+      }
+      const blob: unknown = Reflect.construct(blobConstructor, [
+        [text],
+        { type: mimeType }
+      ]);
+      const objectUrl: unknown = createObjectUrl.call(urlApi, blob);
+      if (typeof objectUrl !== "string" || objectUrl === "") return false;
+      anchor.setAttribute("href", objectUrl);
+      anchor.setAttribute("download", filename);
+      body.appendChild(anchor);
+      let clicked = false;
+      try {
+        anchor.click();
+        clicked = true;
+      } finally {
+        body.removeChild(anchor);
+        if (clicked) {
+          clock.setTimeout(() => revokeObjectUrl.call(urlApi, objectUrl), 0);
+        } else {
+          revokeObjectUrl.call(urlApi, objectUrl);
+        }
+      }
+      return true;
+    }
+  };
+}
+
 // Native dialogs are resolved per call rather than when the context is built.
 // Only the credentials and deployments pages ever open one, so resolving
 // eagerly made every page — including the graph pages — fail to start over a
@@ -551,16 +600,18 @@ export function resolveBrowserContext(
     throw new Error("Radius browser context is missing window.");
   }
   const logger = createLoggerPort(scope);
+  const clock = createClockPort(scope);
   return {
     dom: createDomPort(document, readMember(scope, "Event")),
     page,
     net: createNetworkPort(scope),
     nav: createNavigationPort(scope),
-    clock: createClockPort(scope),
+    clock,
     storage: createStoragePort(scope),
     focus: createFocusPort(document),
     external: createExternalOpenPort(scope, document),
     clipboard: createClipboardPort(scope),
+    download: createDownloadPort(scope, document, clock),
     dialogs: createDialogPort(scope, logger),
     logger,
     bindings

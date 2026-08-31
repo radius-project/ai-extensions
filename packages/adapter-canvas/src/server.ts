@@ -1,7 +1,7 @@
 // Canvas adapter — HTTP server host for the webview.
 //
-// Owns the local loopback server that backs each canvas instance: the 40-route
-// request handler (parse request -> call an @radius-project/core use-case or adapter
+// Owns the local loopback server that backs each canvas instance: the declared
+// route handler (parse request -> call an @radius-project/core use-case or adapter
 // helper -> serialize), the page router, and the idempotent server lifecycle
 // (stable per-instance port, reuse on re-open). The only product logic here is
 // glue; everything substantive is delegated to @radius-project/core or the sibling
@@ -97,6 +97,7 @@ import {
 } from "./azure-oidc.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage } from "./ghcr.js";
+import { resolveGeneratorVersion } from "./generator-version.js";
 import {
   appParams,
   resolveDeployParams,
@@ -712,7 +713,9 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     latest: (repo) => operations.latest(repo),
     latestAny: () => operations.latestAny(),
     get: (operationId) => operations.get(operationId),
-    toClientView
+    toClientView,
+    productVersion: resolveGeneratorVersion,
+    now: () => Date.now()
   },
   {
     isValidRepoSlug,
