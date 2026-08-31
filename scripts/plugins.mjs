@@ -163,6 +163,7 @@ export function pluginRefs(plugin, { version, channel } = {}) {
     PLUGIN_DIR: plugin.dir,
     PLUGIN_DIST: plugin.distDir,
     PLUGIN_ARTIFACT: `plugin-dist-${plugin.name}`,
+    PLUGIN_SBOM_ARTIFACT: `plugin-sbom-${plugin.name}`,
     PLUGIN_TARBALL: `${plugin.name}-plugin.tar.gz`,
     PLUGIN_SBOM: `${plugin.name}-plugin.spdx.json`,
     PLUGIN_AWESOME_COPILOT: `${plugin.name}-awesome-copilot.zip`

@@ -125,7 +125,7 @@ graph TD
     subgraph BuildWF["build.yml (reusable)"]
         Checks["shared checks once<br/>upload build-gate"]
         Resolve["plugin matrix<br/>scoped stable or edge version"]
-        Artifact["validate dist/<br/>upload plugin-dist-plugin"]
+        Artifact["validate dist/<br/>native pnpm SBOM<br/>upload plugin-dist-plugin + plugin-sbom-plugin"]
     end
 
     Main -->|edge push SHA| Checks
@@ -133,11 +133,11 @@ graph TD
     Checks --> Resolve --> Artifact
 
     subgraph EdgeWF["publish.yml"]
-        EdgePush["attest provenance<br/>reject stale source<br/>signed orphan commit<br/>move edge refs"]
+        EdgePush["attest provenance + SBOM<br/>reject stale source<br/>signed orphan commit<br/>move edge refs"]
     end
 
     subgraph RelWF["release.yml — artifact"]
-        RelPush["deterministic package + native pnpm SBOM<br/>attest + selected plugin@version tag<br/>push zero-history tree<br/>draft release + assets, then publish<br/>download and compare bytes<br/>move latest; completion tag last"]
+        RelPush["deterministic package<br/>attest provenance + SBOM<br/>selected plugin@version tag<br/>push zero-history tree<br/>draft release + assets, then publish<br/>download and compare bytes<br/>move latest; completion tag last"]
     end
 
     Artifact --> EdgePush
@@ -163,6 +163,8 @@ A release publishes the pinned branch and `releases/<plugin>/latest` from the sa
 GitHub immutable releases are optional. By default, the release remains mutable and a retry reconciles assets with `gh release upload --clobber`. Setting repository variable `REQUIRE_IMMUTABLE_RELEASES=true` activates two fail-closed checks (before PR creation and before publication), requires Administration read on the GitHub App, and requires the published release response to report `immutable: true`. Both modes use draft-first publication; an immutable retry reuses the published native SBOM rather than regenerating pnpm's run-specific document.
 
 The SBOM is native [`pnpm sbom`](https://pnpm.io/cli/sbom) output filtered to the selected plugin. The plugin declares its build adapter as a workspace `devDependency`, so inlined browser packages are present while pnpm retains ownership of document identity, package IDs, timestamps, licenses, and checksums.
+
+`build.yml` generates it beside the bundle and uploads it as its own artifact, so both channels inventory the same build. Placement is load-bearing rather than incidental: pnpm records the workspace's current version as the SBOM's root package, and for edge that version exists only in the build workspace, stamped there by the snapshot step. Generating the document in a publishing job would inventory the unstamped version and describe something other than the artifact it accompanies. It stays out of the dist artifact because that tree is published verbatim as the install branch, and the SBOM describes the release rather than forming part of what gets installed. Stable uploads it as a release asset; edge has no release to attach it to, so it is recorded as an SBOM attestation over the published files and retrieved with `gh attestation verify`.
 
 ### 3a. The awesome-copilot listing asset
 
