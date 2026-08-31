@@ -5,7 +5,7 @@ description: Deploy a Radius application to a configured environment via the aut
 
 # Radius — Deploy Application
 
-Trigger the `Radius - Run rad Commands` workflow which spins up an ephemeral k3d Radius control plane, connects to the target AKS/EKS cluster, registers the right recipes for the env's provider, restores persisted state from the environment's private GHCR package, runs the requested `rad` commands (deploying by default), and persists state again before tearing the control plane down. `run-rad-commands.yml` is a dispatcher: it detects the environment's provider and calls the matching reusable workflow (`run-rad-commands-azure.yml` / `run-rad-commands-aws.yml`), and the provider workflows reference shared composite actions hosted in `radius-project/radius`.
+Trigger the `Radius - Run rad Commands` workflow which spins up an ephemeral k3d Radius control plane, connects to the target AKS/EKS cluster, registers the right recipes for the env's provider, restores persisted state from the environment's private GHCR package, runs the requested `rad` commands (deploying by default), and persists state again before tearing the control plane down. `run-rad-commands.yml` is a dispatcher: it detects the environment's provider and calls the matching reusable workflow (`run-rad-commands-azure.yml` / `run-rad-commands-aws.yml`), and the provider workflows reference shared composite actions hosted in `radius-project/ai-extensions`.
 
 ## When to use this skill
 
@@ -74,7 +74,7 @@ Use this only for a one-off deploy outside the canvas. It does not populate canv
 
 ## What the workflow does
 
-1. Commits/updates the deploy workflow files if they've changed — the `run-rad-commands.yml` dispatcher plus the `run-rad-commands-azure.yml` / `run-rad-commands-aws.yml` provider workflows (fetched from `radius-project/radius@main` at commit time, with a bundled fallback).
+1. Commits/updates the deploy workflow files if they've changed — the `run-rad-commands.yml` dispatcher plus the `run-rad-commands-azure.yml` / `run-rad-commands-aws.yml` provider workflows. The released extension fetches them from `radius-project/ai-extensions` at the full source commit baked into that plugin build; a fetch failure is a hard error. The release artifact also carries an audit copy of the complete `.github/extension/` tree.
 2. The dispatcher detects the environment's provider (from `AZURE_CLIENT_ID` / `AWS_ROLE_ARN`) and calls the matching provider workflow, which authenticates to that cloud via OIDC.
 3. Fetches a kubeconfig for the target cluster into `RADIUS_TARGET_KUBECONFIG` (EKS via `aws eks describe-cluster` + a static bearer-token kubeconfig; AKS via `az aks get-credentials`).
 4. Installs `k3d`, creates the ephemeral `radius-cp` cluster, and installs the `rad` CLI (edge) and Terraform.
@@ -123,4 +123,4 @@ A deploy started from the canvas Deploy button hands its failure to you automati
 
 - `plugins/radius/dist/extension.mjs` — deploy workflow template generation (`generateDeployWorkflow`) and repo commit of the dispatcher + provider workflows to `.github/workflows/`.
 - `plugins/radius/dist/extension.mjs` — deploy dispatch + run polling (uses `gh workflow run run-rad-commands.yml` and `gh run list`).
-- The deploy workflow templates are canonical in `radius-project/radius` at `.github/extension/` — `run-rad-commands.yml` (dispatcher), `run-rad-commands-{azure,aws}.yml` (provider `workflow_call` workflows), and `actions/*` (shared composite actions: `setup-control-plane`, `restore-state`, `run-rad-commands`, `teardown`). The extension fetches these from `radius-project/radius@main` at commit time (with a bundled fallback) and commits the dispatcher + provider workflows into the user repo at `.github/workflows/`; the composite actions are referenced in place from `radius-project/radius`, not copied.
+- The deploy workflow templates are canonical in `radius-project/ai-extensions` at `.github/extension/` — `run-rad-commands.yml` (dispatcher), `run-rad-commands-{azure,aws}.yml` (provider `workflow_call` workflows), and `actions/*` (shared composite actions: `setup-control-plane`, `restore-state`, `run-rad-commands`, `teardown`). The extension fetches templates at the full source commit recorded in its built `package.json`, commits the dispatcher + provider workflows into the user repo at `.github/workflows/`, and fills every first-party composite-action `uses:` with that same immutable commit SHA. It never generates `@main`, `@edge`, or `@latest` references.

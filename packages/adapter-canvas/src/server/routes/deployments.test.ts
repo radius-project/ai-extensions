@@ -7,6 +7,7 @@ import {
   handleAbandonDeployment,
   handleDeleteDeployment,
   handleDeploy,
+  handleDeployNotification,
   handleDeployReset,
   handleDeployStatus,
   handleListApplications,
@@ -224,10 +225,11 @@ const JSON_HEADERS = {
 };
 
 describe("deployments routes (SU-06)", () => {
-  it("declares exactly the seven routes it owns", () => {
+  it("declares exactly the eight routes it owns", () => {
     const routes = createDeploymentsRoutes(dependencies());
     expect(Object.keys(routes)).toEqual([
       "GET /api/deploy-status",
+      "GET /api/deploy-notification",
       "GET /api/list-applications",
       "GET /api/list-deployments",
       "POST /api/deploy",
@@ -272,6 +274,10 @@ describe("deployments routes (SU-06)", () => {
     await routes["GET /api/deploy-status"](status.context);
     expect(JSON.parse(status.recording.body)).toHaveProperty("logs");
 
+    const notification = context("GET", "/api/deploy-notification");
+    await routes["GET /api/deploy-notification"](notification.context);
+    expect(JSON.parse(notification.recording.body)).toHaveProperty("status");
+
     const applications = context(
       "GET",
       "/api/list-applications?repo=octo/todolist"
@@ -309,6 +315,227 @@ describe("deployments routes (SU-06)", () => {
     expect(JSON.parse(abandon.recording.body)).toEqual({
       error:
         "A valid repo, environment, and application are required to abandon deployment tracking."
+    });
+  });
+
+  describe("GET /api/deploy-notification", () => {
+    // Every other seam in `dependencies()` throws, so these cases also prove
+    // the notification route reads state and nothing else: if it reached
+    // `triggerDeployRepairHandoff` the way `/api/deploy-status` does, the chip
+    // polling from any page would open a repair loop, and the call would throw
+    // here instead of passing quietly.
+    it("answers the empty-state defaults when the instance has no entry", () => {
+      const { recording, context: ctx } = context(
+        "GET",
+        "/api/deploy-notification"
+      );
+      handleDeployNotification(
+        ctx,
+        dependencies({ readInstanceEntry: () => undefined })
+      );
+
+      expect(recording.status).toBe(200);
+      expect(recording.headers).toEqual(JSON_HEADERS);
+      expect(JSON.parse(recording.body)).toEqual({
+        attemptId: "",
+        generation: 0,
+        runId: "",
+        status: "pending",
+        application: "",
+        environment: "",
+        error: "",
+        runUrl: "",
+        repairing: false,
+        finishedAt: 0
+      });
+    });
+
+    it("reports a finished deploy without the resource list or log buffer", () => {
+      const state: CanvasState = {
+        deployAttempt: {
+          id: "attempt-7",
+          targetRepo: "octo/todolist",
+          environment: "dev"
+        },
+        deployRunId: 4242,
+        deployGeneration: 5,
+        deployStatus: "success",
+        deployAppName: "todolist",
+        deployEnvName: "dev",
+        deployRunUrl: "https://github.com/octo/todolist/actions/runs/7",
+        deployFinishedAt: 1700,
+        deployingResources: [{ id: "db", name: "db", type: "Radius.Data/x" }],
+        deployLogs: ["noisy", "log", "lines"]
+      };
+      const { recording, context: ctx } = context(
+        "GET",
+        "/api/deploy-notification"
+      );
+      handleDeployNotification(
+        ctx,
+        dependencies({ readInstanceEntry: () => ({ state }) })
+      );
+
+      expect(JSON.parse(recording.body)).toEqual({
+        attemptId: "attempt-7",
+        generation: 5,
+        runId: "4242",
+        status: "success",
+        application: "todolist",
+        environment: "dev",
+        error: "",
+        runUrl: "https://github.com/octo/todolist/actions/runs/7",
+        repairing: false,
+        finishedAt: 1700
+      });
+    });
+
+    // `deployEnvName` is only written during dispatch, so a deploy that failed
+    // preflight would otherwise be reported against the previous deploy's
+    // environment. The attempt records it when the deploy opens.
+    it("names the current attempt's environment rather than the previous deploy's", () => {
+      const state: CanvasState = {
+        deployAttempt: { id: "attempt-8", environment: "prod" },
+        deployStatus: "failed",
+        deployEnvName: "dev"
+      };
+      const { recording, context: ctx } = context(
+        "GET",
+        "/api/deploy-notification"
+      );
+      handleDeployNotification(
+        ctx,
+        dependencies({ readInstanceEntry: () => ({ state }) })
+      );
+
+      expect(JSON.parse(recording.body)).toMatchObject({
+        environment: "prod"
+      });
+    });
+
+    it("falls back to the dispatched environment when the attempt names none", () => {
+      const state: CanvasState = {
+        deployAttempt: { id: "attempt-8" },
+        deployStatus: "failed",
+        deployEnvName: "dev"
+      };
+      const { recording, context: ctx } = context(
+        "GET",
+        "/api/deploy-notification"
+      );
+      handleDeployNotification(
+        ctx,
+        dependencies({ readInstanceEntry: () => ({ state }) })
+      );
+
+      expect(JSON.parse(recording.body)).toMatchObject({ environment: "dev" });
+    });
+
+    it.each([
+      ["a numeric run id", 99, "99"],
+      ["a string run id", "99", "99"],
+      ["a cleared run id", null, ""]
+    ])("serializes %s", (_name, deployRunId, expected) => {
+      const state: CanvasState = { deployStatus: "in_progress", deployRunId };
+      const { recording, context: ctx } = context(
+        "GET",
+        "/api/deploy-notification"
+      );
+      handleDeployNotification(
+        ctx,
+        dependencies({ readInstanceEntry: () => ({ state }) })
+      );
+
+      expect(JSON.parse(recording.body)).toMatchObject({ runId: expected });
+    });
+
+    // The generation is what separates two deploys that failed before dispatch
+    // inside one repair loop: they share an attempt id, have no run, and never
+    // update the finish time.
+    it("reports the per-invocation generation", () => {
+      const state: CanvasState = {
+        deployStatus: "failed",
+        deployGeneration: 4,
+        deployAttempt: { id: "attempt-8" }
+      };
+      const { recording, context: ctx } = context(
+        "GET",
+        "/api/deploy-notification"
+      );
+      handleDeployNotification(
+        ctx,
+        dependencies({ readInstanceEntry: () => ({ state }) })
+      );
+
+      expect(JSON.parse(recording.body)).toMatchObject({ generation: 4 });
+    });
+
+    it("carries the failure message and repair flag a failed deploy needs", () => {
+      const state: CanvasState = {
+        deployStatus: "failed",
+        deployError: "Bicep template failed to compile",
+        deployRepairing: true
+      };
+      const { recording, context: ctx } = context(
+        "GET",
+        "/api/deploy-notification"
+      );
+      handleDeployNotification(
+        ctx,
+        dependencies({ readInstanceEntry: () => ({ state }) })
+      );
+
+      expect(JSON.parse(recording.body)).toMatchObject({
+        status: "failed",
+        error: "Bicep template failed to compile",
+        repairing: true
+      });
+    });
+
+    it("reports empty-state defaults for a present but blank state", () => {
+      const { recording, context: ctx } = context(
+        "GET",
+        "/api/deploy-notification"
+      );
+      handleDeployNotification(
+        ctx,
+        dependencies({ readInstanceEntry: () => ({ state: {} }) })
+      );
+
+      expect(JSON.parse(recording.body)).toEqual({
+        attemptId: "",
+        generation: 0,
+        runId: "",
+        status: "pending",
+        application: "",
+        environment: "",
+        error: "",
+        runUrl: "",
+        repairing: false,
+        finishedAt: 0
+      });
+    });
+
+    it("normalizes a null run URL and error to empty strings", () => {
+      const state: CanvasState = {
+        deployStatus: "in_progress",
+        deployError: null,
+        deployRunUrl: null
+      };
+      const { recording, context: ctx } = context(
+        "GET",
+        "/api/deploy-notification"
+      );
+      handleDeployNotification(
+        ctx,
+        dependencies({ readInstanceEntry: () => ({ state }) })
+      );
+
+      expect(JSON.parse(recording.body)).toMatchObject({
+        status: "in_progress",
+        error: "",
+        runUrl: ""
+      });
     });
   });
 

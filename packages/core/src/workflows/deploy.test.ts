@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parse as parseYaml } from "yaml";
 import {
   DEFAULT_TARGET_CLUSTER_ARCH_FALLBACK_PLATFORMS,
@@ -36,7 +36,7 @@ env:
 jobs:
   deploy:
     steps:
-      - uses: radius-project/radius/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
+      - uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
 `,
   [DEPLOY_AWS_FILE]: `name: deploy-aws
 env:
@@ -44,7 +44,7 @@ env:
 jobs:
   deploy:
     steps:
-      - uses: radius-project/radius/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
+      - uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
 `
 };
 
@@ -73,9 +73,34 @@ env:
 jobs:
   deploy:
     steps:
-      - uses: radius-project/radius/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
+      - uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}
 `
 };
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.resetModules();
+});
+
+describe("RADIUS_REF source pin", () => {
+  it("pins generated actions to the supplied build source commit", async () => {
+    const source = "a".repeat(40);
+    vi.stubEnv("RADIUS_SOURCE_REF", source);
+    vi.resetModules();
+
+    const reloaded = await import("./deploy.js");
+    const files = reloaded.generateDeployWorkflow(
+      "prod",
+      ".radius/app.bicep",
+      BASE_TEMPLATES
+    );
+
+    expect(reloaded.RADIUS_REF).toBe(source);
+    expect(files[DEPLOY_AZURE_FILE]).toContain(
+      `radius-project/ai-extensions/.github/extension/actions/run-rad-commands@${source}`
+    );
+  });
+});
 
 describe("generateDeployWorkflow", () => {
   it("fills the reserved placeholders in every workflow", () => {
@@ -88,7 +113,7 @@ describe("generateDeployWorkflow", () => {
     expect(files[DEPLOY_DISPATCHER_FILE]).toContain('default: "prod"');
     expect(files[DEPLOY_AZURE_FILE]).toContain('APP_FILE: ".radius/app.bicep"');
     expect(files[DEPLOY_AWS_FILE]).toContain(
-      `radius-project/radius/.github/extension/actions/run-rad-commands@${RADIUS_REF}`
+      `radius-project/ai-extensions/.github/extension/actions/run-rad-commands@${RADIUS_REF}`
     );
   });
 
@@ -168,7 +193,7 @@ describe("generateDeployWorkflow", () => {
     expect(files[DEPLOY_DISPATCHER_FILE]).toContain('default: "prod"');
     expect(files[DEPLOY_AZURE_FILE]).toContain('APP_FILE: ".radius/app.bicep"');
     expect(files[DEPLOY_AZURE_FILE]).toContain(
-      `radius-project/radius/.github/extension/actions/run-rad-commands@${RADIUS_REF}`
+      `radius-project/ai-extensions/.github/extension/actions/run-rad-commands@${RADIUS_REF}`
     );
     expect(files[DEPLOY_DISPATCHER_FILE]).toContain(
       'TARGET_CLUSTER_ARCH_MODE: "single_arch_only"'

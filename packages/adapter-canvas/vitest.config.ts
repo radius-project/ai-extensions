@@ -6,6 +6,7 @@ export default defineConfig({
       "src/**/*.test.ts",
       "test/ci/**/*.test.mjs",
       "test/e2e/support/**/*.test.ts",
+      "test/e2e-cloud/**/*.test.ts",
       "test/integration/runtime/**/*.test.ts",
       "test/integration/http/**/*.test.ts"
     ],

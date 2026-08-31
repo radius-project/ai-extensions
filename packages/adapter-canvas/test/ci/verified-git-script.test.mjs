@@ -26,6 +26,7 @@ const SOURCE_TAG = "e".repeat(40);
 const SOURCE = "f".repeat(40);
 const PACKAGE_BLOB = "1".repeat(40);
 const MARKETPLACE_BLOB = "2".repeat(40);
+const EXTENSION_BLOB = "3".repeat(40);
 // File modes and symlinks are not reproducible on Windows.
 const WINDOWS = process.platform === "win32";
 
@@ -148,11 +149,17 @@ async function completionApi({
   commitVerified = true,
   parents = [],
   commitSource = SOURCE,
+  packageSource = commitSource,
+  includePackageSource = true,
   commitVersion,
   packageVersion = "1.2.0",
   catalogVersion = "1.2.0",
   catalogRef,
   catalogPath = "plugins/radius/dist",
+  includeRootExtension = true,
+  includeBundledExtension = true,
+  rootExtensionBlob = EXTENSION_BLOB,
+  bundledExtensionBlob = rootExtensionBlob,
   releaseDraft = false,
   releaseAssets = [
     "radius-plugin.tar.gz",
@@ -250,12 +257,39 @@ async function completionApi({
               mode: "100644",
               type: "blob",
               sha: "3".repeat(40)
-            }
+            },
+            ...(includeRootExtension ?
+              [
+                {
+                  path: ".github/extension/actions/example/action.yml",
+                  mode: "100644",
+                  type: "blob",
+                  sha: rootExtensionBlob
+                }
+              ]
+            : []),
+            ...(includeBundledExtension ?
+              [
+                {
+                  path: "plugins/radius/dist/workflows/actions/example/action.yml",
+                  mode: "100644",
+                  type: "blob",
+                  sha: bundledExtensionBlob
+                }
+              ]
+            : [])
           ]
         });
       }
       if (route === `GET /git/blobs/${PACKAGE_BLOB}`) {
-        return send(200, jsonBlob({ name: "radius", version: packageVersion }));
+        return send(
+          200,
+          jsonBlob({
+            name: "radius",
+            version: packageVersion,
+            ...(includePackageSource ? { radiusSourceRef: packageSource } : {})
+          })
+        );
       }
       if (route === `GET /git/blobs/${MARKETPLACE_BLOB}`) {
         return send(
@@ -893,6 +927,26 @@ describe("scripts/verified-git.mjs", () => {
       ["the wrong version", { packageVersion: "1.1.0" }, "radius@1.2.0"],
       ["the wrong source", { commitSource: TARGET }, `from ${SOURCE}`],
       [
+        "a package pin on another source",
+        { packageSource: TARGET },
+        `pins ${TARGET}, not recorded source ${SOURCE}`
+      ],
+      [
+        "a missing root extension tree",
+        { includeRootExtension: false },
+        "does not contain .github/extension"
+      ],
+      [
+        "a missing bundled extension tree",
+        { includeBundledExtension: false },
+        "does not bundle an exact copy"
+      ],
+      [
+        "divergent bundled extension assets",
+        { bundledExtensionBlob: TARGET },
+        "does not bundle an exact copy"
+      ],
+      [
         "a source tag on the wrong commit",
         { sourceTarget: TARGET },
         `points at ${TARGET}, not ${SOURCE}`
@@ -980,6 +1034,48 @@ describe("scripts/verified-git.mjs", () => {
         version: "2.0.0",
         source: SOURCE
       });
+    });
+
+    it("inspects a complete legacy latest artifact for forward migration", async () => {
+      const root = repository();
+      const branch = "releases/radius/latest";
+      const { url } = await completionApi({
+        artifactBranch: branch,
+        includePackageSource: false,
+        includeRootExtension: false,
+        includeBundledExtension: false
+      });
+
+      const result = await run(root, url, [
+        "inspect-artifact",
+        "--branch",
+        branch,
+        "--plugin",
+        "radius"
+      ]);
+
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout).source).toBe(SOURCE);
+    });
+
+    it("rejects a partially migrated latest artifact", async () => {
+      const root = repository();
+      const branch = "releases/radius/latest";
+      const { url } = await completionApi({
+        artifactBranch: branch,
+        includeBundledExtension: false
+      });
+
+      const result = await run(root, url, [
+        "inspect-artifact",
+        "--branch",
+        branch,
+        "--plugin",
+        "radius"
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("does not bundle an exact copy");
     });
   });
 });
