@@ -18,6 +18,8 @@ const SCRIPTS = ["plugins.mjs", "validate-plugin-dist.mjs"].map((name) => [
   fileURLToPath(new URL(`../../../../scripts/${name}`, import.meta.url))
 ]);
 const temporaryRepositories = [];
+const SOURCE = "a".repeat(40);
+const OTHER_SOURCE = "b".repeat(40);
 
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
@@ -49,6 +51,7 @@ function repository({
     name: "radius",
     version: "1.2.0",
     main: "extension.mjs",
+    radiusSourceRef: SOURCE,
     ...packageJson
   });
   writeJson(join(dist, "plugin.json"), {
@@ -61,6 +64,7 @@ function repository({
   writeFileSync(join(dist, "README.md"), readme);
   writeFileSync(join(dist, "LICENSE"), "Apache License\n");
   writeFileSync(join(dist, "extension.mjs"), "export {};\n");
+  mkdirSync(join(dist, "workflows"));
   return { root, dist };
 }
 
@@ -92,7 +96,7 @@ describe("scripts/validate-plugin-dist.mjs", () => {
   it("accepts a complete manifest-driven plugin dist", () => {
     const { root } = repository();
 
-    expect(run(root, "--version", "1.2.0")).toMatchObject({
+    expect(run(root, "--version", "1.2.0", "--source", SOURCE)).toMatchObject({
       status: 0,
       stdout: "radius@1.2.0"
     });
@@ -124,6 +128,40 @@ describe("scripts/validate-plugin-dist.mjs", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("expected 1.3.0");
+  });
+
+  it.each([
+    ["a missing source ref", undefined, "must carry a full"],
+    ["a mutable source ref", "main", "must carry a full"],
+    ["an uppercase source ref", SOURCE.toUpperCase(), "must carry a full"]
+  ])("rejects %s", (_label, radiusSourceRef, message) => {
+    const result = run(repository({ packageJson: { radiusSourceRef } }).root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(message);
+  });
+
+  it("rejects a source ref other than the commit the workflow selected", () => {
+    const result = run(repository().root, "--source", OTHER_SOURCE);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`expected ${OTHER_SOURCE}`);
+  });
+
+  it("rejects a mutable expected source ref", () => {
+    const result = run(repository().root, "--source", "main");
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("--source must be a full lowercase");
+  });
+
+  it("requires the extension workflow assets", () => {
+    const { root, dist } = repository();
+    rmSync(join(dist, "workflows"), { recursive: true });
+
+    const result = run(root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("workflows does not exist");
   });
 
   it.each([

@@ -16,7 +16,7 @@ inputs:
   catalog-ref:
     description: Git ref of catalog-repo to fetch the catalog from.
     required: false
-    default: main
+    default: 745ce9cc0fa6391a7de73cf9eb894521b1cb3053
   yq-version:
     description: Pinned yq version installed to read the catalog.
     required: false

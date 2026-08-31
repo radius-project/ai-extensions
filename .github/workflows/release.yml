@@ -374,18 +374,14 @@ jobs:
           name: build-gate
           path: ${{ runner.temp }}/build-gate
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-
+      # Node runs the release scripts, but nothing installs dependencies here:
+      # the bundle and its SBOM both arrive as build artifacts, and every script
+      # below uses only Node built-ins. The job that can move published refs
+      # therefore runs no third-party code at all.
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .node-version
-
-      # The bundle arrives as a build artifact. Skipping lifecycle scripts keeps
-      # dependency code from running in the job that can move published refs.
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
 
       # Every commit and tag below is created through the GitHub API as this
       # app, because that is the only way they come out Verified: a runner holds
@@ -442,11 +438,18 @@ jobs:
           name: ${{ env.PLUGIN_ARTIFACT }}
           path: ${{ env.PLUGIN_DIST }}
 
+      - name: Download plugin SBOM
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ env.PLUGIN_SBOM_ARTIFACT }}
+          path: ${{ runner.temp }}/sbom
+
       - name: Verify the build artifacts are present
         run: |
           set -euo pipefail
           node scripts/validate-plugin-dist.mjs \
-            --plugin "$PLUGIN_NAME" --version "$VERSION"
+            --plugin "$PLUGIN_NAME" --version "$VERSION" \
+            --source "$SOURCE_SHA"
 
       - name: Package the plugin
         id: package
@@ -466,8 +469,9 @@ jobs:
 
       # pnpm owns dependency, license, download, and checksum discovery. The
       # selected plugin's native workspace SBOM includes its build adapter and
-      # inlined browser libraries.
-      - name: Generate the SBOM
+      # inlined browser libraries. build.yml generated it beside the dist, so
+      # both release channels ship an inventory of the same build.
+      - name: Resolve the SBOM
         id: sbom
         env:
           GH_TOKEN: ${{ github.token }}
@@ -489,8 +493,7 @@ jobs:
               --pattern "$(basename "$path")" --dir "$existing"
             cp "$existing/$(basename "$path")" "$path"
           else
-            pnpm sbom --sbom-format spdx --sbom-type application \
-              --filter "$PLUGIN_NAME" --out "$path"
+            cp "$RUNNER_TEMP/sbom/$PLUGIN_SBOM" "$path"
           fi
           echo "path=$path" >>"$GITHUB_OUTPUT"
 
@@ -548,8 +551,9 @@ jobs:
 
           gh auth setup-git
 
-          # Each install branch is an ORPHAN carrying only the built plugin and a
-          # catalog that points at that same branch, so
+          # Each install branch is an ORPHAN carrying the built plugin, a
+          # canonical-path copy of the workflow assets, and a catalog that
+          # points at that same branch, so
           # `marketplace add OWNER/REPO#<branch>` installs exactly what is
           # published there. Naming the two paths explicitly is what keeps
           # anything else out of the published tree, and the API refuses to
@@ -562,7 +566,8 @@ jobs:
               "$catalog" >"$MANIFEST"
             node scripts/verified-git.mjs commit \
               --message "chore(release): ${PLUGIN_SOURCE_TAG} for ${SOURCE_SHA}" \
-              --path "$PLUGIN_DIST" --path "$MANIFEST"
+              --path "$PLUGIN_DIST" --path "$MANIFEST" \
+              --path ".github/extension"
           }
 
           # Always construct the expected versioned orphan tree from this

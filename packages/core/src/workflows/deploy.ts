@@ -1,15 +1,11 @@
 import { assertNoUnresolvedPlaceholders, fillTemplate } from "./template.js";
 
-// The pinned ref of radius-project/ai-extensions that hosts BOTH the shared
-// composite actions (setup-control-plane, restore-state, run-rad-commands,
-// teardown) and the workflow templates the extension commits into user repos.
-// Points at `main`, where the deploy-workflow actions and templates live.
-export const RADIUS_REF = "main";
+// Production builds replace this environment read with the exact source commit
+// so fetched templates and every generated composite-action reference agree.
+export const RADIUS_REF = process.env.RADIUS_SOURCE_REF || "main";
 
 // The canonical home of the workflow templates in radius-project/ai-extensions.
-// The extension fetches them from here at commit time so a user repo always
-// gets the reviewed upstream version. radius-project/ai-extensions is the single
-// source of truth: the extension bundles no template copies of its own.
+// Released extensions fetch the source revision baked into their build.
 export const RADIUS_WORKFLOW_REPO = "radius-project/ai-extensions";
 export const RADIUS_WORKFLOW_DIR = ".github/extension";
 
