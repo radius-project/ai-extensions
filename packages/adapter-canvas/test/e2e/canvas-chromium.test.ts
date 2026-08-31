@@ -2701,6 +2701,276 @@ test.describe("Radius Canvas in Chromium", () => {
     );
   });
 
+  test("announces a finished deploy away from the deployments page and keeps it dismissed", async ({
+    page,
+    canvas
+  }) => {
+    // The gap this closes: the deploy's only surface used to be the modal on
+    // the Deployments page, which auto-hides on success. A user who walked over
+    // to the graph while it ran was never told it finished.
+    let notification: Record<string, unknown> = {
+      attemptId: "attempt-9",
+      runId: "101",
+      status: "in_progress",
+      application: "todolist",
+      environment: "dev",
+      error: "",
+      // A run URL is published as soon as the run is tracked, so a healthy
+      // deploy carries one too. It must not pull the chip out of the canvas.
+      runUrl: "https://github.com/octo/todolist/actions/runs/101",
+      repairing: false,
+      finishedAt: 0
+    };
+    await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await page.route("**/api/deploy-notification**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(notification)
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+    const chip = page.locator("#rad-deploychip");
+    await expect(chip).toBeVisible();
+    await expect(chip).toHaveText("Deploying todolist…");
+
+    notification = { ...notification, status: "success", finishedAt: 1700 };
+    await page.clock.fastForward(6000);
+    await expect(chip).toHaveText("todolist deployed to dev");
+    await expect(chip).toHaveAttribute(
+      "aria-label",
+      "todolist deployed to dev"
+    );
+    // Success stays in the canvas despite its run URL, so following the chip
+    // performs the in-canvas navigation the dismissal has to survive.
+    await expect(chip).toHaveAttribute("href", "/?page=deploying");
+
+    // Following the chip is what dismisses it, and the dismissal has to survive
+    // the navigation it just performed — otherwise the same finished deploy is
+    // re-announced on every page the user visits next.
+    await chip.click();
+    await page.waitForLoadState("domcontentloaded");
+    await page.clock.fastForward(6000);
+    await expect(page.locator("#rad-deploychip")).toBeHidden();
+  });
+
+  test("keeps the canvas in Radius when a failed chip is followed from another page", async ({
+    page,
+    canvas
+  }) => {
+    // The document-level pane navigator treats every `.rad-opchip` as a pane
+    // trigger. Without stopPropagation this click reached it, was handled as
+    // in-canvas navigation to an external URL, failed the pane fetch and fell
+    // back to assigning the location — leaving the webview on a Chromium error
+    // page with the canvas gone. The Applications page hid the bug, because
+    // there the navigator's "already on this pane" guard happens to match an
+    // external URL's default pane id, so this deliberately starts elsewhere.
+    const runUrl = "https://github.com/octo/todolist/actions/runs/101";
+    await page.route("**/api/deploy-notification**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          attemptId: "attempt-9",
+          generation: 2,
+          runId: "101",
+          status: "failed",
+          application: "todolist",
+          environment: "dev",
+          error: "Bicep template failed to compile",
+          runUrl,
+          repairing: false,
+          finishedAt: 1800
+        })
+      });
+    });
+
+    // The host opens an external URL for real; here there is no host, so the
+    // anchor's target="_blank" becomes a live popup navigation. It is routed at
+    // context level — registered after the harness's offline guard, so it takes
+    // precedence — because a popup's initial request never reaches page-level
+    // routing. The request is observed instead of escaping the harness.
+    let externalRequests = 0;
+    await page.context().route("https://github.com/**", async (route) => {
+      externalRequests += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<html><body>GitHub run</body></html>"
+      });
+    });
+
+    await gotoCanvas(page, canvas, "deploying");
+    const chip = page.locator("#rad-deploychip");
+    await expect(chip).toBeVisible();
+    await expect(chip).toHaveAttribute("href", runUrl);
+
+    const before = page.url();
+    await chip.click();
+    // Long enough for a pane fetch and its location fallback to have run.
+    await page.waitForTimeout(1500);
+
+    // The canvas itself must not have moved. With the click reaching the pane
+    // navigator this became the GitHub URL (or a Chromium error page once the
+    // fetch failed), taking the panel down with it.
+    expect(page.url()).toBe(before);
+    expect(externalRequests).toBeGreaterThan(0);
+    await expect(page.locator("#radius-topnav")).toBeVisible();
+    await expect(chip).toBeVisible();
+    await expect(page.locator("#deploy-progress-modal")).toBeAttached();
+  });
+
+  test("does not re-announce an unchanged deploy while it keeps polling", async ({
+    page,
+    canvas
+  }) => {
+    // The chip sits in an aria-live region. Rewriting identical text on every
+    // poll replaces the label's text node, which reads to assistive technology
+    // as a fresh announcement — the same sentence, every few seconds, for the
+    // minutes a deploy runs.
+    await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await page.route("**/api/deploy-notification**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          attemptId: "attempt-9",
+          runId: "101",
+          status: "in_progress",
+          application: "todolist",
+          environment: "dev",
+          error: "",
+          runUrl: "https://github.com/octo/todolist/actions/runs/101",
+          repairing: false,
+          finishedAt: 0
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+    const chip = page.locator("#rad-deploychip");
+    await expect(chip).toBeVisible();
+    await expect(chip).toHaveText("Deploying todolist…");
+
+    const mutations = await page
+      .locator("#rad-deploychip-label")
+      .evaluate((element) => {
+        const scope = globalThis as unknown as Record<string, unknown>;
+        scope.__radiusChipMutations = 0;
+        const Observer = Reflect.get(globalThis, "MutationObserver") as new (
+          callback: () => void
+        ) => { observe: (target: unknown, options: unknown) => void };
+        new Observer(() => {
+          scope.__radiusChipMutations =
+            (scope.__radiusChipMutations as number) + 1;
+        }).observe(element, {
+          childList: true,
+          characterData: true,
+          subtree: true
+        });
+        return 0;
+      });
+    expect(mutations).toBe(0);
+
+    await page.clock.fastForward(6000);
+    await page.clock.fastForward(6000);
+    await page.clock.fastForward(6000);
+
+    const observed = await page.evaluate(() =>
+      Number(Reflect.get(globalThis, "__radiusChipMutations"))
+    );
+    expect(observed).toBe(0);
+    await expect(chip).toHaveText("Deploying todolist…");
+  });
+
+  test("fits three ambient chips in a narrow panel without clipping the nav", async ({
+    page,
+    canvas
+  }) => {
+    // The chips are independent, so an environment setup, a graph build and a
+    // deploy can all be in flight at once. Each label is long enough here to
+    // force the row past its width if the chips cannot shrink.
+    await page.route("**/api/operations**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          operation: {
+            operationId: "op-1",
+            state: "running",
+            environment: "production-eastus",
+            summary: "Creating the production-eastus environment"
+          }
+        })
+      });
+    });
+    await page.route("**/api/progress**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          active: true,
+          view: "graph",
+          elapsedMs: 42000,
+          events: [{ stage: "building_graph", detail: "Building the graph" }]
+        })
+      });
+    });
+    await page.route("**/api/deploy-notification**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          attemptId: "attempt-1",
+          runId: "101",
+          status: "in_progress",
+          application: "contoso-storefront-api",
+          environment: "production-eastus",
+          error: "",
+          runUrl: "",
+          repairing: false,
+          finishedAt: 0
+        })
+      });
+    });
+
+    await page.setViewportSize({ width: 420, height: 900 });
+    await gotoCanvas(page, canvas, "deploying");
+
+    const nav = page.locator("#radius-topnav");
+    await expect(page.locator("#rad-opchip")).toBeVisible();
+    await expect(page.locator("#rad-graphchip")).toBeVisible();
+    await expect(page.locator("#rad-deploychip")).toBeVisible();
+
+    // The row must absorb the pressure by collapsing the nav to icons and
+    // ellipsizing chip labels, not by running past the nav and putting whole
+    // chips out of reach.
+    const overflow = await nav.evaluate(
+      (element) =>
+        Number(Reflect.get(element, "scrollWidth")) -
+        Number(Reflect.get(element, "clientWidth"))
+    );
+    expect(overflow).toBeLessThanOrEqual(1);
+    const documentOverflow = await page
+      .locator("html")
+      .evaluate(
+        (element) =>
+          Number(Reflect.get(element, "scrollWidth")) -
+          Number(Reflect.get(element, "clientWidth"))
+      );
+    expect(documentOverflow).toBeLessThanOrEqual(1);
+
+    // Collapsing to icons must not cost the tabs their accessible names. A
+    // page-wide axe pass is not used here: the Deployments page carries
+    // pre-existing violations (#deploy-now-btn contrast, .rad-table-wrap
+    // focusability) that this nav change neither causes nor fixes.
+    await expect(page.locator(".rad-topnav__label").first()).toBeHidden();
+    for (const name of ["Applications", "Environments", "Deployments"]) {
+      await expect(page.getByRole("link", { name })).toBeVisible();
+    }
+  });
+
   test("reveals the environment form by keyboard and returns focus to the reveal control", async ({
     page,
     canvas
