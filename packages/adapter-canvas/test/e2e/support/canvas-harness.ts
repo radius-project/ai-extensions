@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,6 +45,11 @@ const PROFILE_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 // declaring its own constant for the same value.
 export const PROFILE_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
 export const OPERATION_ID = "operation-fixture-1";
+export const VERIFICATION_WORKFLOW_BLOB_SHA = "b".repeat(40);
+export const VERIFICATION_WORKFLOW_CONTENT = "name: Fixture verification\n";
+export const VERIFICATION_WORKFLOW_CONTENT_SHA256 = createHash("sha256")
+  .update(VERIFICATION_WORKFLOW_CONTENT)
+  .digest("hex");
 
 type ServerModule = typeof import("../../../src/server.js");
 type GhModule = typeof import("../../../src/gh.js");
@@ -1532,8 +1537,8 @@ export class CanvasHarness {
       mode: "default_branch",
       branch: WORKTREE_BRANCH,
       commitSha: "c".repeat(40),
-      blobSha: "b".repeat(40),
-      contentSha256: "d".repeat(64),
+      blobSha: VERIFICATION_WORKFLOW_BLOB_SHA,
+      contentSha256: VERIFICATION_WORKFLOW_CONTENT_SHA256,
       previousBlobSha: null,
       previousBlobKnown: true
     });

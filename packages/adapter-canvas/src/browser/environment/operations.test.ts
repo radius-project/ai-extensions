@@ -1996,7 +1996,7 @@ describe("failure card rendering", () => {
     [
       "anything",
       false,
-      "Cleanup stopped at the commit point, so reusable artifacts were left in place."
+      "Deletion stopped at the commit point, so reusable artifacts were left in place."
     ],
     ["succeeded_with_warnings", undefined, "Cleanup finished with warnings."],
     ["succeeded", undefined, "Cleanup finished."],

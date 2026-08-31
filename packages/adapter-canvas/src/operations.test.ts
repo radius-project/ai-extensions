@@ -5782,6 +5782,9 @@ describe("control record guard rails", () => {
       requested: true,
       boundary: "after-app-registration"
     });
+    expect(toClientView(op).terminal.userMessage).toBe(
+      "Radius finished the step that was already running, recorded what changed, and paused before the next one."
+    );
   });
 });
 

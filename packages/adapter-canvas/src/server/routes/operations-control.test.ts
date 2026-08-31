@@ -501,7 +501,7 @@ describe("POST /api/operations/{id}/stop", () => {
       expect(out.payload()).toMatchObject({
         code: "operation-cleanup-not-stoppable",
         error:
-          "Cleanup is already running and cannot be stopped. Wait for it to finish."
+          "Setup cannot be paused while deletion is already running. Wait for deletion to finish."
       });
       expect(op.stopRequested).toBe(false);
       expect(out.journal.persistCalls).toBe(0);
@@ -1138,6 +1138,12 @@ describe("retryRefusalMessage", () => {
     );
     expect(retryRefusalMessage("setup", "operation-active")).toBe(
       "This setup is still running, so there is nothing to retry yet."
+    );
+    expect(retryRefusalMessage("setup", "setup-retry-not-retryable")).toBe(
+      "Only a paused or partially failed setup can be continued."
+    );
+    expect(retryRefusalMessage("setup", "setup-continue-not-available")).toBe(
+      "This setup is not paused at a point Radius can continue from."
     );
   });
 

@@ -1239,7 +1239,7 @@ export function initializeEnvironmentOperations(
       cleanup.state === "running" ? "Cleanup is still running."
       : cleanup.state === "pending" ? "Cleanup has not started yet."
       : cleanup.rollbackBeforeCommit === false ?
-        "Cleanup stopped at the commit point, so reusable artifacts were left in place."
+        "Deletion stopped at the commit point, so reusable artifacts were left in place."
       : cleanup.state === "succeeded_with_warnings" ?
         "Cleanup finished with warnings."
       : cleanup.state === "succeeded" ? "Cleanup finished."

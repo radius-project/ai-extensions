@@ -4936,7 +4936,7 @@ export function stopAtBoundary(
       reason: "stopped-at-boundary",
       boundary: control.stop.boundary,
       userMessage:
-        "Radius finished the step that was already running, recorded what changed, and stopped before the next one."
+        "Radius finished the step that was already running, recorded what changed, and paused before the next one."
     }
   });
 }

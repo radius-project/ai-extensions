@@ -12,6 +12,8 @@ import {
   PROFILE_SUBSCRIPTION_ID,
   REPOSITORY,
   test,
+  VERIFICATION_WORKFLOW_BLOB_SHA,
+  VERIFICATION_WORKFLOW_CONTENT,
   WORKTREE_BRANCH,
   type CanvasHarness,
   type FakeCliCommand
@@ -2044,6 +2046,43 @@ test.describe("Radius Canvas in Chromium", () => {
         ],
         env: { GH_TOKEN: "fixture-repo-token" },
         stdout: ""
+      },
+      {
+        tool: "gh",
+        args: ["api", `/repos/${REPOSITORY}`],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: '{"permissions":{"admin":true,"push":true,"pull":true}}'
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/contents/.github/workflows/radius-verify-credentials.yml?ref=${encodeURIComponent(WORKTREE_BRANCH)}`
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: JSON.stringify({
+          sha: VERIFICATION_WORKFLOW_BLOB_SHA,
+          content: Buffer.from(VERIFICATION_WORKFLOW_CONTENT).toString("base64")
+        })
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          "--method",
+          "DELETE",
+          `/repos/${REPOSITORY}/contents/.github/workflows/radius-verify-credentials.yml`,
+          "--input",
+          "-"
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: "{}"
+      },
+      {
+        tool: "az",
+        args: ["ad", "app", "show", "--id", "fixture-app-id", "-o", "none"],
+        exitCode: 1,
+        stderr: "Application not found."
       }
     );
     await canvas.setScenario(scenario);
@@ -2169,6 +2208,59 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.keyboard.press("Escape");
     await expect(dialog).toBeHidden();
     await expect(deleteSetup).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+    const confirmDelete = dialog.getByRole("button", { name: "Delete setup" });
+    await expect(dialog.locator("#env-rollback-title")).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(
+      dialog.getByRole("button", { name: "Keep setup" })
+    ).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(confirmDelete).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "gh" &&
+            JSON.stringify(call.args) ===
+              JSON.stringify([
+                "api",
+                "--method",
+                "DELETE",
+                `/repos/${REPOSITORY}/contents/.github/workflows/radius-verify-credentials.yml`,
+                "--input",
+                "-"
+              ])
+        )
+      )
+      .toBe(true);
+    await expect(page.locator("#env-progress-title")).toHaveText(
+      "Setup deleted",
+      { timeout: 15_000 }
+    );
+    await expect(
+      page.getByRole("button", { name: "Delete setup" })
+    ).toHaveCount(0);
+    await expect
+      .poll(async () => {
+        const record = await canvas.operationRecord(operationId);
+        return {
+          state: record.state,
+          reason:
+            (
+              typeof record.terminal === "object" &&
+              record.terminal !== null &&
+              "reason" in record.terminal
+            ) ?
+              record.terminal.reason
+            : null
+        };
+      })
+      .toEqual({ state: "cancelled", reason: "rollback-complete" });
+    await expectNoWcagViolations(page);
   });
 
   test("abandons an interrupted setup without waiting for the active workflow @safety", async ({

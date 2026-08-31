@@ -272,11 +272,11 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   "verification-provenance-incomplete":
     "Radius did not save enough of the workflow, branch, and identity details to repeat verification safely.",
   "setup-retry-not-retryable":
-    "Only a stopped or partially failed setup can be continued.",
+    "Only a paused or partially failed setup can be continued.",
   "setup-retry-request-missing": FORWARD_REQUEST_MISSING,
   "setup-retry-ownership-ambiguous": FORWARD_OWNERSHIP_AMBIGUOUS,
   "setup-continue-not-available":
-    "This setup is not waiting at a stop that Radius can continue from.",
+    "This setup is not paused at a point Radius can continue from.",
   "setup-continue-request-missing": FORWARD_REQUEST_MISSING,
   "setup-continue-ownership-ambiguous": FORWARD_OWNERSHIP_AMBIGUOUS,
   "setup-continue-rolled-back":
@@ -467,7 +467,7 @@ export async function handleStopOperation(
   ) {
     sendJson(context, 409, {
       error:
-        "Cleanup is already running and cannot be stopped. Wait for it to finish.",
+        "Setup cannot be paused while deletion is already running. Wait for deletion to finish.",
       code: "operation-cleanup-not-stoppable",
       operationId,
       operation: clientView(operation)

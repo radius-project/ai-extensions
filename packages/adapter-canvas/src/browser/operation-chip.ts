@@ -30,6 +30,7 @@ export interface OperationStatus {
   state: string;
   environment: string;
   summary: string;
+  terminalReason: string;
 }
 
 export function parseOperationStatus(payload: unknown): OperationStatus | null {
@@ -38,11 +39,13 @@ export function parseOperationStatus(payload: unknown): OperationStatus | null {
   if (!isRecord(operation)) return null;
   const state = readString(operation, "state");
   if (state === "") return null;
+  const terminal = operation.terminal;
   return {
     operationId: readString(operation, "operationId"),
     state,
     environment: readString(operation, "environment"),
-    summary: readString(operation, "summary")
+    summary: readString(operation, "summary"),
+    terminalReason: isRecord(terminal) ? readString(terminal, "reason") : ""
   };
 }
 
@@ -61,6 +64,15 @@ export function operationChipLabel(status: OperationStatus): string {
     case "failed_partial":
       return `${environment} setup failed`;
     case "cancelled":
+      if (
+        status.terminalReason === "rollback-complete" ||
+        status.terminalReason === "cleanup-complete"
+      ) {
+        return `${environment} setup deleted`;
+      }
+      if (status.terminalReason === "setup-exited") {
+        return `${environment} setup closed`;
+      }
       return `${environment} setup paused`;
     default:
       return "";
