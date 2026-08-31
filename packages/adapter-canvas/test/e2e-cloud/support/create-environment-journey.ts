@@ -564,9 +564,11 @@ export function selectFallbackPullRequests(
 /** States `/api/operations/{id}` reports once it will not change again. */
 export const TERMINAL_OPERATION_STATES: readonly string[] = [
   "succeeded",
+  "succeeded_with_warnings",
+  "action_required",
   "failed",
-  "cancelled",
-  "interrupted"
+  "failed_partial",
+  "cancelled"
 ];
 
 export interface OperationSnapshot {
