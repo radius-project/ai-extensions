@@ -450,7 +450,7 @@ export async function persistMutationCheckpoint({
   if (operation?.providerRecovery?.state === "rollback_pending") {
     await fail(
       409,
-      "Radius reconciled the interrupted provider request and must roll back before making any further provider changes.",
+      "Radius reconciled the interrupted provider request and must delete the setup resources before making any further provider changes.",
       "provider-rollback-pending"
     );
     return false;
@@ -4198,7 +4198,7 @@ export async function cleanupAzureSetupArtifacts(
       if (!(error instanceof CleanupJournalPersistenceError)) throw error;
       // The journal did not reach disk. Radius stops here rather than deleting
       // anything else it could not account for afterwards.
-      const detail = `Radius stopped this rollback because it could not save the record of what it was deleting: ${error.message}`;
+      const detail = `Radius stopped this deletion because it could not save the record of what it was deleting: ${error.message}`;
       warnings.push(detail);
       steps?.push(`⚠ ${detail}`);
       await pushResult(
@@ -4438,7 +4438,7 @@ export async function cleanupGitHubEnvironmentArtifact(
   };
 
   if (artifact.state === "created_candidate") {
-    const detail = `GitHub environment "${target}" was left in place because a pre-create 404 followed by GitHub's idempotent PUT cannot prove this request created it. Review it manually and delete it yourself if this setup should be rolled back.`;
+    const detail = `Radius left GitHub environment "${target}" in place because a pre-create 404 followed by GitHub's idempotent PUT could not verify that this setup created it. To finish deleting the setup, review the GitHub environment and delete it manually if it belongs to this setup.`;
     warnings.push(detail);
     steps?.push(`⚠️ ${detail}`);
     recordOutcome("skipped", detail);
@@ -6374,7 +6374,7 @@ function createInstanceRequestCoordinator(
         if (plan.state === "start") {
           addLegacyStep(
             op,
-            "⏳ Rolling back the resources this interrupted attempt created."
+            "⏳ Deleting the resources this interrupted setup created."
           );
         }
         await saveOperation(op);

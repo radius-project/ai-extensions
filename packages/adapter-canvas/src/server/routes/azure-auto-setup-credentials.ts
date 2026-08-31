@@ -984,7 +984,7 @@ export async function configureAzureAutoSetupCredentials({
   if (isRollbackPending(operation)) {
     await fail(
       409,
-      "Radius reconciled an interrupted provider request and must roll back before creating a Service Principal.",
+      "Radius reconciled an interrupted provider request and must delete the setup resources before creating a Service Principal.",
       "provider-rollback-pending",
       { steps, clientId, appName }
     );
@@ -1014,7 +1014,7 @@ export async function configureAzureAutoSetupCredentials({
   steps.push("✅ Service Principal ready");
   if (servicePrincipal.state === "created_candidate") {
     steps.push(
-      "ℹ️ The Service Principal was absent before this step and present after it, but the create command did not report success, so Radius cannot prove it created it and will not remove it during a rollback."
+      "ℹ️ The Service Principal was absent before this step and present after it, but the create command did not report success, so Radius cannot prove it created it and will not remove it during setup deletion."
     );
   }
   dependencies.operations.recordServicePrincipal(operation, {
@@ -1030,7 +1030,7 @@ export async function configureAzureAutoSetupCredentials({
   if (isRollbackPending(operation)) {
     await fail(
       409,
-      "Radius reconciled the interrupted Service Principal request and must roll back before adding federated credentials.",
+      "Radius reconciled the interrupted Service Principal request and must delete the setup resources before adding federated credentials.",
       "provider-rollback-pending",
       { steps, clientId, appName }
     );
@@ -1054,7 +1054,7 @@ export async function configureAzureAutoSetupCredentials({
   if (isRollbackPending(operation)) {
     await fail(
       409,
-      "Radius reconciled an interrupted federated credential request and must roll back before assigning Azure roles.",
+      "Radius reconciled an interrupted federated credential request and must delete the setup resources before assigning Azure roles.",
       "provider-rollback-pending",
       { steps, clientId, appName }
     );
@@ -1128,7 +1128,7 @@ export async function configureAzureAutoSetupCredentials({
   if (isRollbackPending(operation)) {
     await fail(
       409,
-      "Radius reconciled the interrupted Contributor assignment and must roll back before any further provider changes.",
+      "Radius reconciled the interrupted Contributor assignment and must delete the setup resources before any further provider changes.",
       "provider-rollback-pending",
       { steps, clientId, appName }
     );
@@ -1190,7 +1190,7 @@ export async function configureAzureAutoSetupCredentials({
   if (isRollbackPending(operation)) {
     await fail(
       409,
-      "Radius reconciled the interrupted AKS role assignment and must roll back before setup can complete.",
+      "Radius reconciled the interrupted AKS role assignment and must delete the setup resources before setup can complete.",
       "provider-rollback-pending",
       { steps, clientId, appName }
     );

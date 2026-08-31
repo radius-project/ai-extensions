@@ -29,11 +29,13 @@ import type {
   DomEventListener,
   DomEventTarget
 } from "../ports.js";
+import type { ScopeTimer } from "../lifecycle.js";
 
 export const PROFILES_PANEL_ENTRY_KEY = "environment-profiles-panel";
 export const CREDENTIAL_PROFILES_ENDPOINT = "/api/credential-profiles";
 export const GITHUB_IDENTITY_ENDPOINT = "/api/github-identity";
 export const GITHUB_ACCOUNT_ENDPOINT = "/api/github-account";
+export const GITHUB_ENVIRONMENT_RECHECK_DELAY_MS = 2_000;
 export const PROFILE_PLACEHOLDER_TEXT = "Select a credential profile…";
 
 export const PROFILE_MENU_IDS = {
@@ -619,6 +621,9 @@ export function initializeCredentialProfilesPanel(
   let selectedGithubLogin = "";
   let checking = false;
   let githubRequestGeneration = 0;
+  let loadingIdentityGeneration: number | null = null;
+  let environmentNameInvalidated = false;
+  let environmentRecheckTimer: ScopeTimer | null = null;
 
   const profileOptionBindings: Registration[] = [];
   const githubAccountOptionBindings: Registration[] = [];
@@ -850,6 +855,7 @@ export function initializeCredentialProfilesPanel(
 
   const loadGithubIdentity = async (fresh = false): Promise<void> => {
     const generation = ++githubRequestGeneration;
+    loadingIdentityGeneration = generation;
     checking = true;
     githubReadiness = null;
     deps.onReadinessChange?.(null);
@@ -872,7 +878,13 @@ export function initializeCredentialProfilesPanel(
           "";
       }
       renderGithubIdentity();
-      if (selectedGithubLogin) {
+      const environment = deps.environmentName().trim();
+      // A pending debounce owns the account check for the edited environment.
+      if (
+        selectedGithubLogin &&
+        environmentRecheckTimer === null &&
+        (!environmentNameInvalidated || environment !== "")
+      ) {
         await checkGitHubAccount(selectedGithubLogin);
       }
     } catch {
@@ -880,6 +892,9 @@ export function initializeCredentialProfilesPanel(
       if (fieldEl) fieldEl.style.display = "none";
       deps.onReadinessChange?.(null);
     } finally {
+      if (loadingIdentityGeneration === generation) {
+        loadingIdentityGeneration = null;
+      }
       if (generation === githubRequestGeneration) {
         checking = false;
         renderGithubIdentity();
@@ -902,16 +917,34 @@ export function initializeCredentialProfilesPanel(
     }
   };
 
+  const cancelEnvironmentRecheck = (): void => {
+    if (environmentRecheckTimer === null) return;
+    scope.cancel(environmentRecheckTimer);
+    environmentRecheckTimer = null;
+  };
+
   const invalidateReadiness = (): void => {
-    githubRequestGeneration += 1;
+    cancelEnvironmentRecheck();
+    environmentNameInvalidated = true;
+    if (loadingIdentityGeneration !== githubRequestGeneration) {
+      githubRequestGeneration += 1;
+    }
     githubReadiness = null;
-    checking = false;
+    checking = loadingIdentityGeneration === githubRequestGeneration;
     deps.onReadinessChange?.(null);
+    const environment = deps.environmentName().trim();
+    const canScheduleRecheck =
+      environment !== "" &&
+      (selectedGithubLogin !== "" || loadingIdentityGeneration !== null);
     if (noteEl && selectedGithubLogin) {
       setChildren(
         context.dom,
         noteEl,
-        textNote("Re-check GitHub access for this environment.")
+        textNote(
+          canScheduleRecheck ?
+            "GitHub access will be checked automatically."
+          : "Re-check GitHub access for this environment."
+        )
       );
       noteEl.style.color = "var(--rad-warning, #9a6700)";
       noteEl.style.display = "";
@@ -921,9 +954,25 @@ export function initializeCredentialProfilesPanel(
       recheckBtn.style.display = "";
       recheckBtn.textContent = "Re-check";
     }
+    if (!canScheduleRecheck) return;
+    environmentRecheckTimer = scope.after(
+      GITHUB_ENVIRONMENT_RECHECK_DELAY_MS,
+      () => {
+        environmentRecheckTimer = null;
+        const currentEnvironment = deps.environmentName().trim();
+        if (currentEnvironment === "" || selectedGithubLogin === "") return;
+        void checkGitHubAccount(selectedGithubLogin, currentEnvironment);
+      }
+    );
   };
 
-  const checkGitHubAccount = async (login: string): Promise<void> => {
+  const checkGitHubAccount = async (
+    login: string,
+    environment = deps.environmentName().trim() || "dev"
+  ): Promise<void> => {
+    cancelEnvironmentRecheck();
+    loadingIdentityGeneration = null;
+    environmentNameInvalidated = false;
     const generation = ++githubRequestGeneration;
     selectedGithubLogin = login;
     githubReadiness = null;
@@ -940,7 +989,7 @@ export function initializeCredentialProfilesPanel(
         body: JSON.stringify({
           login,
           repo: deps.repo,
-          environment: deps.environmentName().trim() || "dev"
+          environment
         })
       });
       const payload = await response.json();

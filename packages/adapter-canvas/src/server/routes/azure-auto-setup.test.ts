@@ -544,7 +544,7 @@ describe("POST /api/azure-auto-setup admission and validation (SU-08)", () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({
       error:
-        "An earlier setup for octo/app must finish rollback before a new setup can start.",
+        "An earlier setup for octo/app must finish deletion before a new setup can start.",
       code: "previous-cleanup-required",
       operationId: "op-cleanup"
     });
