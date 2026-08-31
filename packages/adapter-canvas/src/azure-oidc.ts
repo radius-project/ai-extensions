@@ -17,7 +17,8 @@
 // `process is not defined` page error.
 import {
   buildOidcSubject,
-  buildFederatedCredentialName
+  buildFederatedCredentialName,
+  buildEnvironmentSuffix
 } from "@radius-project/core/platforms";
 import type { OidcSubjectConfig } from "@radius-project/core/platforms";
 
@@ -444,6 +445,186 @@ export function missingRequiredAppTags(
 /** Build the argv for `az ad app delete`. */
 export function buildAppDeleteArgs({ appId }: { appId: string }): string[] {
   return ["ad", "app", "delete", "--id", appId];
+}
+
+/**
+ * Argv for `az ad app federated-credential list`, used to enumerate the
+ * credentials on an app registration when deciding whether it is now unused.
+ *
+ * `-o json` is passed explicitly so the command emits a JSON array regardless of
+ * the caller's `core.output` config or `AZURE_CORE_OUTPUT` env. Without it, a
+ * machine configured with `core.output=none` returns empty stdout, which the
+ * parse would read as "no credentials" — falsely marking a still-shared app
+ * registration as unused and offering it for deletion.
+ */
+export function buildFederatedCredentialListArgs({
+  appId
+}: {
+  appId: string;
+}): string[] {
+  return [
+    "ad",
+    "app",
+    "federated-credential",
+    "list",
+    "--id",
+    appId,
+    "-o",
+    "json"
+  ];
+}
+
+/**
+ * Argv for `az ad app federated-credential delete`, targeting one credential on
+ * an app registration by its federated-credential id (its name).
+ */
+export function buildFederatedCredentialDeleteArgs({
+  appId,
+  credentialId
+}: {
+  appId: string;
+  credentialId: string;
+}): string[] {
+  return [
+    "ad",
+    "app",
+    "federated-credential",
+    "delete",
+    "--id",
+    appId,
+    "--federated-credential-id",
+    credentialId
+  ];
+}
+
+export interface AzureFederatedCredential {
+  id: string;
+  name: string;
+  subject: string;
+  issuer: string;
+  audiences: string[];
+}
+
+/**
+ * Parse the JSON array emitted by `az ad app federated-credential list` into the
+ * identity fields the deletion flow needs. Callers must first use
+ * `federatedCredentialListUnreadable` so malformed or incomplete identity is
+ * never mistaken for an empty credential list.
+ */
+export function parseFederatedCredentials(
+  stdout: unknown
+): AzureFederatedCredential[] {
+  let parsed: unknown = stdout;
+  if (typeof stdout === "string") {
+    const trimmed = stdout.trim();
+    if (!trimmed) return [];
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(parsed)) return [];
+  const creds: AzureFederatedCredential[] = [];
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const name = typeof record.name === "string" ? record.name : "";
+    if (!name) continue;
+    const audiences =
+      Array.isArray(record.audiences) ?
+        record.audiences.filter(
+          (audience): audience is string => typeof audience === "string"
+        )
+      : [];
+    creds.push({
+      id: typeof record.id === "string" ? record.id : "",
+      name,
+      subject: typeof record.subject === "string" ? record.subject : "",
+      issuer: typeof record.issuer === "string" ? record.issuer : "",
+      audiences
+    });
+  }
+  return creds;
+}
+
+/**
+ * True when `az … federated-credential list` returned output we cannot interpret
+ * as a credential array: a non-empty payload that is not valid JSON, or a
+ * non-array value. This lets the deletion flow distinguish a genuine "no
+ * credentials" result (empty/whitespace stdout, or an empty array) from a
+ * malformed one, so it warns and leaves the app registration in place rather
+ * than reporting a false "nothing to remove" or prompting to delete an app whose
+ * credentials it could not actually read.
+ */
+export function federatedCredentialListUnreadable(stdout: unknown): boolean {
+  if (stdout == null) return true;
+  let parsed: unknown = stdout;
+  if (typeof stdout === "string") {
+    const trimmed = stdout.trim();
+    if (!trimmed) return true;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return true;
+    }
+  }
+  if (!Array.isArray(parsed)) return true;
+  return parsed.some((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      return true;
+    const record = entry as Record<string, unknown>;
+    return (
+      typeof record.id !== "string" ||
+      !record.id ||
+      typeof record.name !== "string" ||
+      !record.name ||
+      typeof record.subject !== "string" ||
+      typeof record.issuer !== "string" ||
+      !record.issuer ||
+      !Array.isArray(record.audiences) ||
+      record.audiences.length === 0 ||
+      record.audiences.some(
+        (audience) => typeof audience !== "string" || !audience
+      )
+    );
+  });
+}
+
+/**
+ * Select the federated credentials on an app registration that belong to one
+ * GitHub environment, so they can be removed when that environment is deleted.
+ *
+ * A credential belongs to the environment when either its `name` matches one of
+ * the names the setup flow mints for it (the bare, `-mutable`, and `-immutable`
+ * variants) or its `subject` is exactly the default subject THIS repository would
+ * mint for the environment (`repo:<owner>/<repo>:environment:<env>`).
+ *
+ * The subject match is deliberately scoped to the current repository. An app
+ * registration is a per-repo deploy identity, but a user can intentionally share
+ * one across repositories; a broad `…:environment:<env>` suffix match would then
+ * select — and delete — another repository's credential that merely shares the
+ * environment name. Matching the full repo-qualified subject (plus the
+ * deterministic per-repo names) keeps deletion confined to this repo.
+ */
+export function selectEnvironmentFederatedCredentials(
+  credentials: AzureFederatedCredential[],
+  { repoFullName, envName }: { repoFullName: string; envName: string }
+): AzureFederatedCredential[] {
+  if (!Array.isArray(credentials) || !envName) return [];
+  const names = new Set(
+    ["", "mutable", "immutable"].map((variant) =>
+      buildFederatedCredentialName({
+        repoFullName,
+        envName,
+        ...(variant ? { variant } : {})
+      })
+    )
+  );
+  const expectedSubject = `repo:${repoFullName}:${buildEnvironmentSuffix(envName)}`;
+  return credentials.filter(
+    (cred) => names.has(cred.name) || cred.subject === expectedSubject
+  );
 }
 
 /**

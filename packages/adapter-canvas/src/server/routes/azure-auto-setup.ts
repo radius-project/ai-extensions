@@ -76,6 +76,8 @@ const OPERATION_FUNCTIONS = [
   "recordAzureApp",
   "recordServicePrincipal",
   "recordCreatedFederatedCredential",
+  "recordFederatedCredentialProvenance",
+  "withCredentialProvenanceLock",
   "recordCreatedRoleAssignment"
 ] as const;
 
@@ -651,6 +653,7 @@ export async function handleAzureAutoSetup(
         oidc,
         oidcSuffix,
         clientId: application.clientId,
+        tenantId,
         appName: application.appName,
         subscriptionId,
         resourceGroup,

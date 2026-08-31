@@ -5,6 +5,7 @@ import type {
   ClipboardPort,
   ClockPort,
   DialogPort,
+  DownloadPort,
   DomClassList,
   DomDocument,
   DomElement,
@@ -659,6 +660,21 @@ class FakeClipboard implements ClipboardPort {
   }
 }
 
+export class FakeDownloads implements DownloadPort {
+  readonly saved: Array<{
+    text: string;
+    mimeType: string;
+    filename: string;
+  }> = [];
+  available = true;
+
+  save(text: string, mimeType: string, filename: string): boolean {
+    if (!this.available) return false;
+    this.saved.push({ text, mimeType, filename });
+    return true;
+  }
+}
+
 export class FakeDialogs implements DialogPort {
   readonly confirmations: string[] = [];
   readonly notifications: string[] = [];
@@ -692,6 +708,7 @@ export function createFakeBrowser() {
   const focus = new FakeFocus(document);
   const external = new FakeExternal();
   const clipboard = new FakeClipboard();
+  const download = new FakeDownloads();
   const dialogs = new FakeDialogs();
   const logger = new FakeLogger();
   class FakeBrowserEvent {
@@ -708,6 +725,7 @@ export function createFakeBrowser() {
     focus,
     external,
     clipboard,
+    download,
     dialogs,
     logger,
     bindings: createBindingRegistry()
@@ -723,6 +741,7 @@ export function createFakeBrowser() {
     focus,
     external,
     clipboard,
+    download,
     dialogs,
     logger,
     bindings: context.bindings

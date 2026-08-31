@@ -8,7 +8,7 @@
 
 ## Overview
 
-Radius Canvas is the visual part of the Radius Copilot extension. It opens a panel where a developer can inspect an application graph, compare branches, configure cloud credentials, create a Radius environment, and deploy or delete an application. The host talks to the extension through the Copilot SDK; the extension starts a private HTTP server on `127.0.0.1`; that server renders one of seven pages; and browser code on the page calls 40 local API routes to read or change state.
+Radius Canvas is the visual part of the Radius Copilot extension. It opens a panel where a developer can inspect an application graph, compare branches, configure cloud credentials, create a Radius environment, and deploy or delete an application. The host talks to the extension through the Copilot SDK; the extension starts a private HTTP server on `127.0.0.1`; that server renders one of seven pages; and browser code on the page calls the declared local API routes to read or change state.
 
 The extension is built as one generated, loadable file at `plugins/radius/dist/extension.mjs`. The test architecture must preserve that packaging contract and the existing server-rendered interface.
 
