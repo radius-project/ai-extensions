@@ -5021,6 +5021,36 @@ describe("triggerDeployRepairHandoff", () => {
     });
   });
 
+  // Nothing else advances for a redeploy that fails before dispatch: the loop
+  // reuses its attempt id, the run id is cleared here and never repopulated,
+  // and deployFinishedAt is only written when a run concludes. The generation
+  // is what keeps two such failures distinguishable to the notification chip.
+  it("advances the deploy generation on every invocation", () => {
+    const entry = failedEntry();
+    const input = {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep"
+    };
+    expect(entry.state.deployGeneration).toBeUndefined();
+
+    beginDeployAttempt(entry.state, { ...input, repairLoop: false });
+    const first = entry.state.deployGeneration;
+    const attemptId = entry.state.deployAttempt?.id;
+    expect(first).toBe(1);
+
+    // A redeploy inside the loop keeps the attempt id it was handed.
+    beginDeployAttempt(entry.state, { ...input, repairLoop: true, attemptId });
+    expect(entry.state.deployAttempt?.id).toBe(attemptId);
+    expect(entry.state.deployGeneration).toBe(2);
+
+    beginDeployAttempt(entry.state, { ...input, repairLoop: true, attemptId });
+    expect(entry.state.deployGeneration).toBe(3);
+    expect(entry.state.deployRunId).toBeNull();
+  });
+
   it("keeps an agent redeploy owned by the repair loop it came from", () => {
     const entry = failedEntry();
     beginDeployAttempt(entry.state, {

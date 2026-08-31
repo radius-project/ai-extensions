@@ -138,6 +138,15 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     background: transparent;
   }
   .rad-topnav__label { white-space: nowrap; }
+  /* A canvas panel is often docked narrow. The tab labels are what make the nav
+     unshrinkable — they are nowrap, so below this width the row would overflow
+     and clip whatever sits at its end, which is exactly where the ambient chips
+     live. Dropping to icons keeps every tab and every chip reachable; the tabs
+     carry an aria-label so hiding the text costs no accessible name. */
+  @media (max-width: 760px) {
+    .rad-topnav { gap: 16px; }
+    .rad-topnav__label { display: none; }
+  }
   /* Ambient progress chips. They sit at the far end of the nav bar,
      deliberately quiet: they are a signal, not a summons. Nothing here moves
      the page or takes focus. The row holds the alignment so a second chip
@@ -155,6 +164,12 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
     display: inline-flex;
     align-items: center;
     gap: 8px;
+    /* Chips must be able to give way. Three can be up in one narrow panel at
+       once, and a flex item defaults to min-width:auto, so without this the
+       nowrap label below sets an unshrinkable floor and the row overflows the
+       nav — clipping whole chips rather than ellipsizing one. */
+    flex: 0 1 auto;
+    min-width: 0;
     max-width: 280px;
     padding: 5px 12px;
     border: 1px solid var(--rad-stroke);
@@ -168,7 +183,7 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   }
   .rad-opchip[hidden] { display: none; }
   .rad-opchip:hover { border-color: var(--rad-brand); color: var(--rad-text); }
-  .rad-opchip__label { overflow: hidden; text-overflow: ellipsis; }
+  .rad-opchip__label { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .rad-opchip__dot {
     flex: 0 0 auto;
     width: 8px; height: 8px;
