@@ -10,12 +10,16 @@ import {
 } from "../../../src/server/routes/operations-status.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import {
+  buildDeleteStages,
   buildStages,
   canResumeInput,
+  canDismissOperation,
   createOperation,
+  dismissOperation,
   finish,
   INPUT_REQUIRED_STATE,
   isTerminalState,
+  OPERATION_KIND_DELETE,
   requireInput,
   resumeAfterInput,
   toClientView
@@ -225,6 +229,8 @@ function start(strictBrowserMutations = false): Harness {
         requireInput,
         finish,
         isTerminalState,
+        canDismissOperation,
+        dismissOperation,
         persistOperations,
         toClientView,
         scheduleEnvironmentOperation,
@@ -572,7 +578,7 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
     expect(harness.scheduled).toEqual([]);
   });
 
-  it("resumes and abandons operation input through the two typed templates", async () => {
+  it("resumes, abandons, and dismisses through typed templates", async () => {
     const harness = start(true);
     const entry = await container!.getOrCreate("panel-a");
     const browserHeaders = {
@@ -655,6 +661,43 @@ describe("operations-status real-loopback HIT (RF-08)", () => {
       ((await abandoned.json()) as { operation: { state: string } }).operation
         .state
     ).toBe("cancelled");
+
+    const dismissable = createOperation({
+      provider: "azure",
+      repo: "octo/dismiss",
+      environment: "dev",
+      stages: buildStages()
+    }) as OperationActionRecord;
+    finish(dismissable, "succeeded");
+    harness.records.set(dismissable.operationId, dismissable);
+    const dismissed = await fetch(
+      `${entry.baseUrl}/api/operations/${encodeURIComponent(dismissable.operationId)}/dismiss`,
+      { method: "POST", headers: browserHeaders }
+    );
+    expect(dismissed.status).toBe(200);
+    expect(dismissable.dismissedAt).toEqual(expect.any(String));
+    expect(await dismissed.json()).toEqual({
+      operationId: dismissable.operationId
+    });
+
+    const deletionStages = buildDeleteStages();
+    const completedDeletion = createOperation({
+      provider: "azure",
+      repo: "octo/delete",
+      environment: "dev",
+      kind: OPERATION_KIND_DELETE,
+      stages: deletionStages
+    }) as OperationActionRecord;
+    deletionStages[0].state = "succeeded";
+    deletionStages[1].state = "warning";
+    finish(completedDeletion, "succeeded_with_warnings");
+    harness.records.set(completedDeletion.operationId, completedDeletion);
+    const exitedDeletion = await fetch(
+      `${entry.baseUrl}/api/operations/${encodeURIComponent(completedDeletion.operationId)}/dismiss`,
+      { method: "POST", headers: browserHeaders }
+    );
+    expect(exitedDeletion.status).toBe(200);
+    expect(completedDeletion.dismissedAt).toEqual(expect.any(String));
 
     // The templates are anchored. An unknown POST subpath still falls through
     // exactly as before instead of being swallowed by a broad operations prefix.

@@ -177,6 +177,7 @@ const CANCELLED_ACTIVITY_MESSAGE = "Environment setup cancelled.";
 const CLEANING_COMMAND_KINDS: ReadonlySet<string> = new Set([
   "rollback",
   "retry_cleanup",
+  "retry_deletion",
   "exit_setup"
 ]);
 
@@ -189,6 +190,7 @@ const COMMAND_STATUS_TEXT: Readonly<Record<string, string>> = {
     "Rollback retry started. Removing the resources still present…",
   continue_setup: "Continuing setup…",
   retry_setup: "Retrying setup…",
+  retry_deletion: "Retrying deletion…",
   exit_setup: "Closing this setup and removing the resources Radius created…"
 };
 
@@ -369,6 +371,7 @@ export interface OperationInputPrompt {
   readonly requestedAt: string;
   readonly code: string;
   readonly checkpoint: unknown;
+  readonly message: string;
   readonly candidates: readonly AppPickerCandidate[];
   readonly defaultAppId: string;
 }
@@ -390,6 +393,7 @@ export type OperationTerminalPayload = Readonly<Record<string, unknown>>;
 
 export interface OperationRecord {
   readonly operationId: string;
+  readonly kind: string;
   readonly environment: string;
   readonly provider: string;
   readonly state: string;
@@ -432,6 +436,11 @@ export interface EnvironmentOperationsDeps {
   showError(message: string): void;
   reloadEnvironmentsTable(): void;
   resetSubmitButton?(): void;
+  // Terminal handler for a resumed delete operation. The page owns the delete
+  // acknowledgement UI (the confirm dialog it renders), so resume routes a
+  // delete op's terminal state here instead of the setup-oriented
+  // `applyTerminal`, keeping the start and rejoin paths consistent.
+  onDeleteTerminal?(op: OperationRecord): void;
   promptServiceManagementReference(): Promise<string>;
   promptAppSelection(request: AppPickerRequest): Promise<AppPickerChoice>;
   prefersReducedMotion?(): boolean;
@@ -738,6 +747,7 @@ function parseInputPrompt(value: unknown): OperationInputPrompt | null {
     requestedAt: readString(value, "requestedAt"),
     code,
     checkpoint: value["checkpoint"],
+    message: readString(value, "message"),
     candidates: parseAppCandidates(
       metadata ? metadata["candidates"] : undefined
     ),
@@ -756,8 +766,10 @@ function parseOperationRecord(
   const operationId = readString(raw, "operationId");
   if (operationId === "") return null;
   const endedAt = readString(raw, "endedAt");
+  const kind = readString(raw, "kind");
   return {
     operationId,
+    kind: kind === "" ? "create" : kind,
     environment: readString(raw, "environment"),
     provider: readString(raw, "provider"),
     state: readString(raw, "state"),
@@ -794,6 +806,14 @@ export function parseOperationResponse(
 ): OperationRecord | null {
   const raw = readRecord(payload, "operation");
   return raw ? parseOperationRecord(raw, ghCommandPresentation) : null;
+}
+
+function visibleOperationActions(
+  operation: OperationRecord | null
+): readonly OperationAction[] {
+  if (operation === null) return [];
+  if (operation.kind !== "delete") return operation.actions;
+  return operation.actions.filter((action) => action.kind === "retry_deletion");
 }
 
 /**
@@ -916,7 +936,8 @@ function isSuccessfulSetup(op: OperationRecord | null): boolean {
   return (
     op !== null &&
     (op.terminalState === "succeeded" ||
-      op.terminalState === "succeeded_with_warnings")
+      op.terminalState === "succeeded_with_warnings") &&
+    op.actions.length === 0
   );
 }
 
@@ -966,6 +987,10 @@ function operationsByRepoUrl(repo: string): string {
 
 function operationUrl(operationId: string): string {
   return `${OPERATIONS_PATH}/${encodeURIComponent(operationId)}`;
+}
+
+function dismissUrl(operationId: string): string {
+  return `${operationUrl(operationId)}/dismiss`;
 }
 
 function diagnosticUrl(
@@ -1048,6 +1073,8 @@ export function initializeEnvironmentOperations(
   // (superseded by a newer track/resume call, or by teardown) is discarded
   // instead of overwriting state that belongs to a newer operation.
   let session = 0;
+  let displayedOperationId = "";
+  let dismissInFlight = false;
 
   function abortInFlight(): void {
     activeAbort?.abort();
@@ -1184,6 +1211,30 @@ export function initializeEnvironmentOperations(
     }
 
     const cleanup = op.cleanup;
+    if (op.kind === "delete") {
+      messageEl.textContent =
+        op.failure && op.failure.message !== "" ?
+          op.failure.message
+        : "The deletion request failed.";
+      const titleEl = dom.byId(PROGRESS_IDS.failureTitle);
+      if (titleEl) {
+        titleEl.textContent =
+          op.headline?.title || "Deletion could not continue";
+      }
+      cleanupEl.textContent =
+        "Deletion stopped before all stages completed. Completed stages remain recorded and will not be repeated.";
+      retryEl.textContent =
+        op.actions.some((action) => action.kind === "retry_deletion") ?
+          "Retry deletion resumes from the unfinished stage."
+        : "";
+      setFailureList(
+        [],
+        dom.byId(PROGRESS_IDS.cleanupWarningsList),
+        dom.byId(PROGRESS_IDS.cleanupWarningsBlock)
+      );
+      card.style.display = "";
+      return;
+    }
     const cleanupStatus =
       cleanup.state === "running" ? "Cleanup is still running."
       : cleanup.state === "pending" ? "Cleanup has not started yet."
@@ -1847,6 +1898,14 @@ export function initializeEnvironmentOperations(
     sendCommand(action, op);
   }
 
+  function applyOperationTerminal(op: OperationRecord): void {
+    if (op.kind === "delete" && deps.onDeleteTerminal) {
+      deps.onDeleteTerminal(op);
+      return;
+    }
+    applyTerminal(op);
+  }
+
   function sendCommand(action: OperationAction, op: OperationRecord): void {
     if (commandInFlight) return;
     const commandSession = session;
@@ -1896,11 +1955,11 @@ export function initializeEnvironmentOperations(
         // result.
         if (updated && updated.terminalState !== null) {
           stopProgress();
-          applyTerminal(updated);
+          applyOperationTerminal(updated);
           return;
         }
         if (repo !== "") {
-          trackProgress(op.environment, op.provider, applyTerminal);
+          trackProgress(op.environment, op.provider, applyOperationTerminal);
           return;
         }
         pollOperation(op.operationId);
@@ -1985,14 +2044,18 @@ export function initializeEnvironmentOperations(
     const dismissEl = dom.byId(PROGRESS_IDS.dismiss);
     if (bottomEl) bottomEl.replaceChildren();
     const acknowledged = isAcknowledgedOutcome(op);
+    const canExitCompletedDeletion =
+      op?.kind === "delete" && op.terminalState === "succeeded_with_warnings";
     if (dismissEl) {
-      dismissEl.textContent = acknowledged ? "OK" : "Dismiss";
-      dismissEl.style.display = acknowledged ? "" : "none";
+      dismissEl.textContent = canExitCompletedDeletion ? "Exit" : "OK";
+      dismissEl.style.display =
+        acknowledged || canExitCompletedDeletion ? "" : "none";
     }
+    const actions = visibleOperationActions(op);
     const bottomActions =
       op === null || acknowledged ?
         []
-      : op.actions.filter((action) => action.placement === "bottom");
+      : actions.filter((action) => action.placement === "bottom");
     if (bottomEl && op !== null) {
       for (const action of bottomActions) {
         bottomEl.appendChild(createCommandButton(action, op));
@@ -2000,7 +2063,9 @@ export function initializeEnvironmentOperations(
     }
     if (actionsEl) {
       actionsEl.style.display =
-        acknowledged || bottomActions.length > 0 ? "flex" : "none";
+        acknowledged || canExitCompletedDeletion || bottomActions.length > 0 ?
+          "flex"
+        : "none";
     }
   }
 
@@ -2011,7 +2076,7 @@ export function initializeEnvironmentOperations(
     const descriptions = dom.byId(PROGRESS_IDS.commandDescriptions);
     if (!container || !buttons || !note) return;
     descriptions?.replaceChildren();
-    const actions = op?.actions ?? [];
+    const actions = visibleOperationActions(op);
     const rowActions = actions.filter(
       (action) => action.placement !== "bottom"
     );
@@ -2133,6 +2198,7 @@ export function initializeEnvironmentOperations(
     // history, but the customer closed it, and a poll or a page reload that put
     // the panel back would undo the one thing Exit setup promised.
     if (op === null || isExitedSetup(op)) {
+      displayedOperationId = "";
       panel.style.display = "none";
       setPanelActive(false);
       renderFailureCard(null);
@@ -2141,6 +2207,7 @@ export function initializeEnvironmentOperations(
       renderHeadline(null);
       return;
     }
+    displayedOperationId = op.operationId;
     if (renderedOperationId !== op.operationId) {
       renderedOperationId = op.operationId;
       followStepTail = true;
@@ -2611,28 +2678,85 @@ export function initializeEnvironmentOperations(
     const mySession = session;
     setCommandBusy(false);
     void fetchTracked(operationsByRepoUrl(repo))
-      .then((response) => response.json())
+      .then((response) => {
+        // A failed request is not evidence that the repo has no operation. If a
+        // deletion is still in flight, hiding its panel on a transient 5xx would
+        // strand the user with no visible progress until the next mount. Treat a
+        // non-OK response like a network error and leave whatever is on screen.
+        if (!response.ok) throw new Error("resume request failed");
+        return response.json();
+      })
       .then((payload) => {
         if (!scope.active || mySession !== session) return;
+        // Only a well-formed envelope is authoritative. A malformed body is, like
+        // a failed request, no reason to tear down a possibly live panel.
+        if (!isRecord(payload)) return;
         const op = parseResponse(payload);
-        if (!op) return;
+        // The server is the authority on what this repo should show. When it
+        // reports nothing — no operation, or one the user has dismissed — the
+        // panel must reflect that, even if a leftover render left it on screen.
+        // Returning early here is what let a dismissed delete reappear when the
+        // user navigated away and came back to a panel still marked visible.
+        if (!op) {
+          renderProgress(null);
+          return;
+        }
         // A closed record is rebuilt too: its stop, retry, and partial-state
         // controls come from the saved operation, so a reload after a failure
         // still offers the same actions.
         renderProgress(op);
         if (op.terminalState !== null) return;
-        trackProgress(op.environment, op.provider, applyTerminal);
+        trackProgress(op.environment, op.provider, applyOperationTerminal);
       })
       .catch(() => {
         /* nothing to resume */
       });
   }
 
+  // Dismissal is a durable command: the server records `dismissedAt` so a
+  // reload or navigation cannot bring a settled panel back. Both the panel's
+  // own dismiss button and the delete acknowledgement dialog route through here
+  // so acknowledging a deletion persists the same way clicking dismiss does.
+  function submitDismissal(operationId: string): void {
+    if (operationId === "" || dismissInFlight) return;
+    const dismissSession = session;
+    dismissInFlight = true;
+    void fetchTracked(dismissUrl(operationId), {
+      method: "POST",
+      headers: {
+        "X-Radius-Mutation-Nonce": options.mutationNonce || ""
+      }
+    })
+      .then((response) => {
+        dismissInFlight = false;
+        if (
+          !scope.active ||
+          session !== dismissSession ||
+          displayedOperationId !== operationId
+        ) {
+          return;
+        }
+        if (!response.ok) throw new Error("Operation dismissal failed.");
+        hideProgress();
+      })
+      .catch(() => {
+        dismissInFlight = false;
+        if (
+          !scope.active ||
+          session !== dismissSession ||
+          displayedOperationId !== operationId
+        ) {
+          return;
+        }
+        setCommandError(
+          "Radius could not save this dismissal. Try dismissing it again."
+        );
+      });
+  }
+
   const dismissEl = dom.byId(PROGRESS_IDS.dismiss);
   if (dismissEl) {
-    scope.on(dismissEl, "click", () => {
-      hideProgress();
-    });
+    scope.on(dismissEl, "click", () => submitDismissal(displayedOperationId));
   }
 
   return {

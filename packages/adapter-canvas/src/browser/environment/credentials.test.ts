@@ -33,6 +33,13 @@ import {
 import type { FakeBrowser } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
 
+function confirm(options: EnvironmentConfirmOptions) {
+  if (!options.onConfirm) {
+    throw new Error("Expected confirmation callback.");
+  }
+  return options.onConfirm();
+}
+
 function buildElements() {
   const elements = {
     credLanding: createFakeElement("cred-landing"),
@@ -92,7 +99,7 @@ function renderPage(repo = "octo/app") {
     notify: vi.fn()
   };
   const confirmDialog = {
-    show: vi.fn((options: EnvironmentConfirmOptions) => options.onConfirm()),
+    show: vi.fn(confirm),
     close: vi.fn(),
     teardown: vi.fn()
   };

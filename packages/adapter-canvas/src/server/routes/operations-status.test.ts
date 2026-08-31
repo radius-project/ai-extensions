@@ -4,8 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 import { createRequestContext } from "../request-context.js";
 import {
   ABANDON_OPERATION_ROUTE,
+  DISMISS_OPERATION_ROUTE,
   createOperationsStatusRoutes,
   handleAbandonOperation,
+  handleDismissOperation,
   handleCreateOperation,
   handleLatestOperation,
   handleOperationDiagnostics,
@@ -208,6 +210,12 @@ function actionDependencies(
     isTerminalState: () => {
       throw new Error("isTerminalState not stubbed");
     },
+    canDismissOperation: () => {
+      throw new Error("canDismissOperation not stubbed");
+    },
+    dismissOperation: () => {
+      throw new Error("dismissOperation not stubbed");
+    },
     persistOperations: () => {
       throw new Error("persistOperations not stubbed");
     },
@@ -326,7 +334,7 @@ function expectJsonNoStore(recording: Recording): void {
 }
 
 describe("operations-status routes (SU-16)", () => {
-  it("declares exactly the six routes it owns, diagnostics before the prefix", () => {
+  it("declares exactly the seven routes it owns, diagnostics before the prefix", () => {
     const routes = createOperationsStatusRoutes(
       dependencies(),
       createDependencies(),
@@ -338,7 +346,8 @@ describe("operations-status routes (SU-16)", () => {
       "GET /api/operations/",
       "POST /api/operations",
       "POST /api/operations/:operationId/resume/:code",
-      "POST /api/operations/:operationId/abandon"
+      "POST /api/operations/:operationId/abandon",
+      "POST /api/operations/:operationId/dismiss"
     ]);
   });
 
@@ -2042,7 +2051,91 @@ describe("operation resume and abandon actions", () => {
     });
   });
 
-  it("wires both template registry keys to their action handlers", async () => {
+  it("persists dismissal only for a terminal operation", async () => {
+    const operation = actionRecord({
+      state: "succeeded",
+      lastActivityAt: "2026-08-25T20:00:00.000Z"
+    });
+    const order: string[] = [];
+    const recording = await runAction(
+      "/api/operations/op-action/dismiss",
+      "",
+      handleDismissOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        canDismissOperation: () => true,
+        dismissOperation: (dismissed) => {
+          order.push("dismiss");
+          dismissed.dismissedAt = "2026-08-25T21:00:00.000Z";
+        },
+        persistOperations: () => {
+          order.push("persist");
+          return Promise.resolve();
+        }
+      })
+    );
+
+    expect(order).toEqual(["dismiss", "persist"]);
+    expect(recording.status).toBe(200);
+    expect(JSON.parse(recording.body)).toEqual({ operationId: "op-action" });
+  });
+
+  it.each([
+    ["unknown operation", null, 404, "unknown-operation"],
+    [
+      "running operation",
+      actionRecord({ state: "running" }),
+      409,
+      "operation-dismiss-mismatch"
+    ]
+  ])("refuses dismissal for an %s", async (_label, operation, status, code) => {
+    const recording = await runAction(
+      "/api/operations/op-action/dismiss",
+      "",
+      handleDismissOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        canDismissOperation: () => false
+      })
+    );
+
+    expect(recording.status).toBe(status);
+    expect(JSON.parse(recording.body).code).toBe(code);
+  });
+
+  it("restores dismissal state when persistence fails", async () => {
+    const operation = actionRecord({
+      state: "succeeded",
+      dismissedAt: null,
+      lastActivityAt: "2026-08-25T20:00:00.000Z"
+    });
+    const recording = await runAction(
+      "/api/operations/op-action/dismiss",
+      "",
+      handleDismissOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        canDismissOperation: () => true,
+        dismissOperation: (dismissed) => {
+          dismissed.dismissedAt = "2026-08-25T21:00:00.000Z";
+          dismissed.lastActivityAt = "2026-08-25T21:00:00.000Z";
+        },
+        persistOperations: () => Promise.reject(new Error("disk unavailable")),
+        errorMessage: (error) => (error as Error).message
+      })
+    );
+
+    expect(operation.dismissedAt).toBeNull();
+    expect(operation.lastActivityAt).toBe("2026-08-25T20:00:00.000Z");
+    expect(recording.status).toBe(500);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Radius could not persist the dismissed operation.",
+      code: "operation-dismiss-persist-failed",
+      detail: "disk unavailable"
+    });
+  });
+
+  it("wires all template registry keys to their action handlers", async () => {
     const operation = actionRecord({ executionActive: true });
     const routes = createOperationsStatusRoutes(
       dependencies(),
@@ -2050,7 +2143,8 @@ describe("operation resume and abandon actions", () => {
       actionDependencies({
         getOperation: () => operation,
         canResumeInput: () => false,
-        isTerminalState: () => false
+        isTerminalState: () => false,
+        canDismissOperation: () => false
       })
     );
     const { recording: resumeRecording, response: resumeResponse } = recorder();
@@ -2069,5 +2163,12 @@ describe("operation resume and abandon actions", () => {
       postContext("/api/operations/op-action/abandon", "", abandonResponse)
     );
     expect(abandonRecording.status).toBe(409);
+
+    const { recording: dismissRecording, response: dismissResponse } =
+      recorder();
+    await routes[`POST ${DISMISS_OPERATION_ROUTE}`](
+      postContext("/api/operations/op-action/dismiss", "", dismissResponse)
+    );
+    expect(dismissRecording.status).toBe(409);
   });
 });

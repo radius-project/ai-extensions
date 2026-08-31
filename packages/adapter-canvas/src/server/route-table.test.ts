@@ -81,6 +81,8 @@ const productionHandlers = {
       requireInput: () => {},
       finish: () => {},
       isTerminalState: () => false,
+      canDismissOperation: () => false,
+      dismissOperation: () => {},
       persistOperations: () => Promise.resolve(),
       toClientView: () => null,
       scheduleEnvironmentOperation: () => true,
@@ -332,7 +334,24 @@ const productionHandlers = {
     resolveRepoAppName: () => Promise.resolve(""),
     resolveEnvDeployment: () => Promise.resolve(null),
     logError: () => {},
+    discoverEnvironmentTarget: () =>
+      Promise.resolve({
+        provider: "",
+        clientId: "",
+        tenantId: "",
+        repoId: 1
+      }),
+    activeDeleteOperation: () => null,
+    createOperation: () => ({ operationId: "op", currentStage: null }),
+    buildDeleteStages: () => [],
+    startOperation: () => ({
+      ok: true as const,
+      operation: { operationId: "op", currentStage: null }
+    }),
+    toClientView: () => ({}),
+    scheduleEnvironmentOperation: () => true,
     cliExec: () => {},
+    activeDeleteEnvironment: () => "",
     envListCacheGet: () => undefined,
     envListCacheSet: () => {},
     envListCacheDelete: () => {},
@@ -473,6 +492,7 @@ describe("server route ownership boundary", () => {
       "POST /api/abandon-deployment",
       "POST /api/operations/:operationId/resume/:code",
       "POST /api/operations/:operationId/abandon",
+      "POST /api/operations/:operationId/dismiss",
       "POST /api/operations/:operationId/stop",
       "POST /api/operations/:operationId/continue",
       "POST /api/operations/:operationId/cancel-workflow",

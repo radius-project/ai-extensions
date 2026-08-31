@@ -155,6 +155,8 @@ export interface OperationActionDependencies {
     options?: { failure: Record<string, unknown> }
   ): void;
   isTerminalState(state: unknown): boolean;
+  canDismissOperation(operation: OperationActionRecord): boolean;
+  dismissOperation(operation: OperationActionRecord): void;
   persistOperations(): Promise<void>;
   toClientView(operation: OperationActionRecord): unknown;
   scheduleEnvironmentOperation(
@@ -172,6 +174,8 @@ const ACTION_FUNCTION_DEPENDENCIES = [
   "requireInput",
   "finish",
   "isTerminalState",
+  "canDismissOperation",
+  "dismissOperation",
   "persistOperations",
   "toClientView",
   "scheduleEnvironmentOperation",
@@ -197,6 +201,7 @@ export const OPERATION_DIAGNOSTICS_ROUTE =
 export const RESUME_OPERATION_ROUTE =
   "/api/operations/:operationId/resume/:code";
 export const ABANDON_OPERATION_ROUTE = "/api/operations/:operationId/abandon";
+export const DISMISS_OPERATION_ROUTE = "/api/operations/:operationId/dismiss";
 
 interface ResumeOperationBody extends Record<string, unknown> {
   checkpoint?: string;
@@ -741,6 +746,17 @@ export async function handleResumeOperation(
   if (!operation.request && operation.resumeRequest) {
     operation.request = structuredClone(operation.resumeRequest);
   }
+  const resumeSnapshot = {
+    inputRequired: structuredClone(operation.inputRequired),
+    request:
+      operation.request !== undefined ?
+        structuredClone(operation.request)
+      : undefined,
+    resumeRequest:
+      operation.resumeRequest ?
+        structuredClone(operation.resumeRequest)
+      : undefined
+  };
   if (!isOperationRequest(operation.request)) {
     jsonError(context, 409, {
       error:
@@ -749,36 +765,29 @@ export async function handleResumeOperation(
       operationId
     });
     return;
-  }
-  const resumeSnapshot = {
-    inputRequired: structuredClone(operation.inputRequired),
-    request: structuredClone(operation.request),
-    resumeRequest:
-      operation.resumeRequest ?
-        structuredClone(operation.resumeRequest)
-      : undefined
-  };
-  const request = operation.request;
-  if (code === "service-management-reference-required") {
-    request.azure.serviceManagementReference =
-      data.serviceManagementReference || "";
-    if (operation.resumeRequest?.azure) {
-      operation.resumeRequest.azure.serviceManagementReference =
-        data.serviceManagementReference || "";
-    }
-  } else if (code === "app-selection-required") {
-    request.azure.appId = data.appId || "";
-    request.azure.createNew = data.createNew === true;
-    if (operation.resumeRequest?.azure) {
-      operation.resumeRequest.azure.appId = data.appId || "";
-      operation.resumeRequest.azure.createNew = data.createNew === true;
-    }
   } else {
-    jsonError(context, 400, {
-      error: "Unsupported resume prompt.",
-      code: "unsupported-resume"
-    });
-    return;
+    const request = operation.request;
+    if (code === "service-management-reference-required") {
+      request.azure.serviceManagementReference =
+        data.serviceManagementReference || "";
+      if (operation.resumeRequest?.azure) {
+        operation.resumeRequest.azure.serviceManagementReference =
+          data.serviceManagementReference || "";
+      }
+    } else if (code === "app-selection-required") {
+      request.azure.appId = data.appId || "";
+      request.azure.createNew = data.createNew === true;
+      if (operation.resumeRequest?.azure) {
+        operation.resumeRequest.azure.appId = data.appId || "";
+        operation.resumeRequest.azure.createNew = data.createNew === true;
+      }
+    } else {
+      jsonError(context, 400, {
+        error: "Unsupported resume prompt.",
+        code: "unsupported-resume"
+      });
+      return;
+    }
   }
   dependencies.resumeAfterInput(operation);
   try {
@@ -858,6 +867,44 @@ export async function handleAbandonOperation(
   context.json(200, { operation: dependencies.toClientView(operation) });
 }
 
+export async function handleDismissOperation(
+  context: CanvasRequestContext,
+  dependencies: OperationActionDependencies
+): Promise<void> {
+  const parameters = requiredTemplateParameters(
+    DISMISS_OPERATION_ROUTE,
+    context.pathname
+  );
+  const operationId = decodeURIComponent(parameters.operationId);
+  const operation = dependencies.getOperation(operationId);
+  if (!operation || !dependencies.canDismissOperation(operation)) {
+    jsonError(context, operation ? 409 : 404, {
+      error:
+        operation ?
+          "The operation cannot be dismissed while an action remains available."
+        : "Unknown operation.",
+      code: operation ? "operation-dismiss-mismatch" : "unknown-operation"
+    });
+    return;
+  }
+  const previousDismissedAt = operation.dismissedAt;
+  const previousLastActivityAt = operation.lastActivityAt;
+  dependencies.dismissOperation(operation);
+  try {
+    await dependencies.persistOperations();
+  } catch (error) {
+    operation.dismissedAt = previousDismissedAt;
+    operation.lastActivityAt = previousLastActivityAt;
+    jsonError(context, 500, {
+      error: "Radius could not persist the dismissed operation.",
+      code: "operation-dismiss-persist-failed",
+      detail: dependencies.errorMessage(error)
+    });
+    return;
+  }
+  context.json(200, { operationId });
+}
+
 export function createOperationsStatusRoutes(
   dependencies: OperationsStatusDependencies,
   createDependencies: CreateOperationDependencies,
@@ -876,6 +923,8 @@ export function createOperationsStatusRoutes(
     "POST /api/operations/:operationId/resume/:code": (context) =>
       handleResumeOperation(context, actionDependencies),
     "POST /api/operations/:operationId/abandon": (context) =>
-      handleAbandonOperation(context, actionDependencies)
+      handleAbandonOperation(context, actionDependencies),
+    "POST /api/operations/:operationId/dismiss": (context) =>
+      handleDismissOperation(context, actionDependencies)
   };
 }

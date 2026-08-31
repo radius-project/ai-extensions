@@ -16,22 +16,27 @@ import {
 } from "../../support/server/operation-fixtures.js";
 import {
   acceptCommand,
+  buildDeleteStages,
   buildStages,
+  canDismissOperation,
   createOperation,
   createRegistry,
   enterStage,
   finish,
   isTerminalState,
+  dismissOperation,
   recordAzureApp,
   recordCommitState,
   recordCommittedWorkflowFile,
   recordGitHubEnvironment,
   recordServicePrincipal,
   setCommandState,
+  setStageState,
   setVerificationWorkflowState,
   stopAtBoundary,
   toClientView,
   INPUT_REQUIRED_STATE,
+  OPERATION_KIND_DELETE,
   STAGE_VERIFY
 } from "../../../src/operations.js";
 import {
@@ -172,6 +177,8 @@ function start(): Harness {
         requireInput: () => {},
         finish,
         isTerminalState,
+        canDismissOperation,
+        dismissOperation,
         persistOperations,
         toClientView,
         scheduleEnvironmentOperation: () => true,
@@ -390,6 +397,51 @@ describe("operation controls real-loopback HIT", () => {
     const polled = await poll(entry.baseUrl, accepted.statusUrl);
     expect(polled.stop.requested).toBe(true);
     expect(polled.nextTransition.code).toBe("stopping");
+  });
+
+  it("offers and schedules only Retry deletion for an incomplete delete", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+    const op = createOperation({
+      provider: "azure",
+      repo: "contoso/store",
+      environment: "dev",
+      kind: OPERATION_KIND_DELETE,
+      stages: buildDeleteStages()
+    }) as OperationFixture;
+    op.stages[0].state = "succeeded";
+    setStageState(op, op.stages[1].id, "failed");
+    finish(op, "failed_partial", {
+      failure: { code: "credential-delete-failed" }
+    });
+    seed(harness, op);
+
+    const before = await poll(
+      entry.baseUrl,
+      `/api/operations/${encodeURIComponent(op.operationId)}`
+    );
+    expect(before.actions.map((entry) => entry.id)).toEqual(["retry-deletion"]);
+    expect(before.actions.map((entry) => entry.label)).not.toContain(
+      "Stop Setup"
+    );
+
+    const response = await post(
+      entry.baseUrl,
+      `/api/operations/${op.operationId}/retry/deletion`
+    );
+    expect(response.status).toBe(202);
+    const accepted = await body(response);
+    expect(accepted.operation.state).toBe("running");
+    expect(accepted.operation.nextTransition).toMatchObject({
+      code: "retrying-deletion"
+    });
+    expect(harness.scheduled).toEqual([
+      {
+        kind: "deletion_retry",
+        instanceId: "panel-a",
+        commandId: accepted.commandId
+      }
+    ]);
   });
 
   it.each(["rollback", "retry_cleanup", "exit_setup"] as const)(

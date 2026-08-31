@@ -58,6 +58,10 @@ function stopUrl(operationId: string): string {
   return `${operationUrl(operationId)}/stop`;
 }
 
+function dismissUrl(operationId: string): string {
+  return `${operationUrl(operationId)}/dismiss`;
+}
+
 function verifyUrl(
   repo: string,
   environment: string,
@@ -185,7 +189,7 @@ const EXIT_ACTION_WITH_DELETIONS = {
 const STOP_ACTION = {
   id: "stop",
   kind: "stop",
-  label: "Stop setup",
+  label: "Stop Setup",
   description: "Radius finishes the current step and stops.",
   path: "/api/operations/op-1/stop",
   pending: false
@@ -778,6 +782,7 @@ describe("parseOperationResponse", () => {
       requestedAt: "2024-01-01T00:00:00.000Z",
       code: "app-selection-required",
       checkpoint: { step: 3 },
+      message: "",
       candidates: [
         {
           appId: "app-1",
@@ -849,19 +854,22 @@ describe("initializeEnvironmentOperations bootstrap", () => {
     expect(browser.bindings.has(ENVIRONMENT_OPERATIONS_ENTRY_KEY)).toBe(true);
   });
 
-  it("hides the panel and stops tracking when the dismiss button is clicked", () => {
+  it("hides settled progress after its dismissal is saved", async () => {
     const browser = setup();
+    browser.net.handle(dismissUrl("op-1"), () =>
+      jsonResponse({ operationId: "op-1" })
+    );
     const controller = controllerFor(browser);
     expect(controller).not.toBeNull();
-    controller?.renderProgress(record());
+    controller?.renderProgress(record({ terminalState: "succeeded" }));
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
 
     browser.els[PROGRESS_IDS.dismiss].dispatch("click");
-    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
-
-    // A second click is a no-op, not a crash.
     browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+    await flushPromises();
+
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(browser.net.calls).toHaveLength(1);
   });
 });
 
@@ -1216,6 +1224,34 @@ describe("trackProgress rendering", () => {
     expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("");
     expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("OK");
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
+  });
+
+  it("offers Retry deletion and Exit when deletion completes with warnings", () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+
+    controller?.renderProgress(
+      record({
+        kind: "delete",
+        terminalState: "succeeded_with_warnings",
+        actions: [
+          {
+            id: "retry-deletion",
+            kind: "retry_deletion",
+            label: "Retry Deletion",
+            description: "Retry unfinished deletion steps.",
+            path: "/api/operations/op-1/retry/deletion",
+            pending: false
+          }
+        ]
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("");
+    expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("Exit");
+    expect(textOf(browser, PROGRESS_IDS.commandButtons)).toEqual([
+      "Retry Deletion"
+    ]);
   });
 
   it("hides stale terminal copy after success", () => {
@@ -2364,7 +2400,7 @@ describe("operation commands", () => {
     const rendered = buttons(browser);
     expect(rendered).toHaveLength(2);
     expect(rendered[0].id).toBe("env-progress-command-stop");
-    expect(rendered[0].textContent).toBe("Stop setup");
+    expect(rendered[0].textContent).toBe("Stop Setup");
     expect(rendered[0].getAttribute("type")).toBe("button");
     expect(rendered[0].className).toBe("rad-btn rad-btn--secondary");
     expect(rendered[0].getAttribute("title")).toBe(STOP_ACTION.description);
@@ -2379,6 +2415,107 @@ describe("operation commands", () => {
     expect(rendered[1].textContent).toBe("Continue");
     expect(Reflect.get(rendered[1], "disabled")).toBe(true);
     expect(browser.els[PROGRESS_IDS.commandNote].textContent).toBe("");
+  });
+
+  it("never renders setup controls for a delete operation", () => {
+    const browser = setup();
+    renderActions(
+      browser,
+      [
+        STOP_ACTION,
+        {
+          id: "retry-deletion",
+          kind: "retry_deletion",
+          label: "Retry Deletion",
+          description: "Retry unfinished deletion steps.",
+          path: "/api/operations/op-1/retry/deletion",
+          pending: false
+        },
+        EXIT_ACTION
+      ],
+      { kind: "delete" }
+    );
+
+    expect(buttons(browser)).toHaveLength(1);
+    expect(buttons(browser)[0].textContent).toBe("Retry Deletion");
+    expect(bottomButtons(browser)).toHaveLength(0);
+  });
+
+  it("renders deletion-specific failure details", () => {
+    const browser = setup();
+    renderActions(
+      browser,
+      [
+        {
+          id: "retry-deletion",
+          kind: "retry_deletion",
+          label: "Retry Deletion",
+          description: "Retry unfinished deletion steps.",
+          path: "/api/operations/op-1/retry/deletion",
+          pending: false
+        }
+      ],
+      {
+        kind: "delete",
+        state: "failed_partial",
+        terminalState: "failed_partial",
+        headline: {
+          title: "Deletion could not continue",
+          message: "Review the error, then retry deletion."
+        },
+        failure: { message: "The delete workflow failed." }
+      }
+    );
+
+    expect(browser.els[PROGRESS_IDS.failureTitle].textContent).toBe(
+      "Deletion could not continue"
+    );
+    expect(browser.els[PROGRESS_IDS.failureMessage].textContent).toBe(
+      "The delete workflow failed."
+    );
+    expect(browser.els[PROGRESS_IDS.cleanupStatus].textContent).toContain(
+      "Deletion stopped before all stages completed."
+    );
+    expect(browser.els[PROGRESS_IDS.retry].textContent).toBe(
+      "Retry deletion resumes from the unfinished stage."
+    );
+  });
+
+  it("renders safe deletion failure fallbacks without a retry action", () => {
+    const browser = setup();
+    renderActions(browser, [], {
+      kind: "delete",
+      state: "failed_partial",
+      terminalState: "failed_partial",
+      headline: { title: "", message: "" },
+      failure: null
+    });
+
+    expect(browser.els[PROGRESS_IDS.failureTitle].textContent).toBe(
+      "Deletion could not continue"
+    );
+    expect(browser.els[PROGRESS_IDS.failureMessage].textContent).toBe(
+      "The deletion request failed."
+    );
+    expect(browser.els[PROGRESS_IDS.retry].textContent).toBe("");
+  });
+
+  it("renders deletion failure details when the optional title is absent", () => {
+    const browser = setupWithout([PROGRESS_IDS.failureTitle]);
+    const controller = controllerFor(browser);
+
+    controller?.renderProgress(
+      record({
+        kind: "delete",
+        state: "failed_partial",
+        terminalState: "failed_partial",
+        failure: { message: "Deletion failed." }
+      })
+    );
+
+    expect(browser.els[PROGRESS_IDS.failureMessage].textContent).toBe(
+      "Deletion failed."
+    );
   });
 
   it("keeps the retry in the command row and Exit setup below the details", () => {
@@ -2729,6 +2866,16 @@ describe("operation commands", () => {
       "Retrying setup…"
     ],
     [
+      "a deletion retry without exposing setup wording",
+      {
+        id: "retry-deletion",
+        kind: "retry_deletion",
+        label: "Retry Deletion",
+        path: "/api/operations/op-1/retry/deletion"
+      },
+      "Retrying deletion…"
+    ],
+    [
       "an unknown command with the general acceptance sentence",
       {
         id: "unknown",
@@ -2750,6 +2897,69 @@ describe("operation commands", () => {
     );
     pending.resolve(jsonResponse({ operation: null }));
     await flushPromises();
+  });
+
+  it("clears the stale failure and refreshes environments when deletion retry starts", async () => {
+    const browser = setup();
+    const deps = createDeps();
+    browser.els[ERROR_BANNER_ID].style.display = "";
+    const action = {
+      id: "retry-deletion",
+      kind: "retry_deletion",
+      label: "Retry Deletion",
+      path: "/api/operations/op-1/retry/deletion"
+    };
+
+    await pressCommand(
+      browser,
+      () =>
+        jsonResponse({
+          operation: op({
+            kind: "delete",
+            state: "running",
+            terminalState: null,
+            actions: []
+          })
+        }),
+      { action, deps: deps.deps }
+    );
+
+    expect(browser.els[ERROR_BANNER_ID].style.display).toBe("none");
+    expect(deps.reloadCount).toBe(1);
+  });
+
+  it("routes an immediately completed deletion retry to the delete terminal handler", async () => {
+    const browser = setup();
+    const deleteTerminals: OperationRecord[] = [];
+    const harness = createDeps({
+      onDeleteTerminal(op) {
+        deleteTerminals.push(op);
+      }
+    });
+    const action = {
+      id: "retry-deletion",
+      kind: "retry_deletion",
+      label: "Retry Deletion",
+      path: "/api/operations/op-1/retry/deletion"
+    };
+
+    await pressCommand(
+      browser,
+      () =>
+        jsonResponse(
+          op({
+            kind: "delete",
+            state: "succeeded_with_warnings",
+            terminalState: "succeeded_with_warnings",
+            actions: []
+          })
+        ),
+      { action, deps: harness.deps }
+    );
+
+    expect(deleteTerminals).toHaveLength(1);
+    expect(deleteTerminals[0].terminalState).toBe("succeeded_with_warnings");
+    expect(harness.successBanners).toEqual([]);
   });
 
   it("degrades quietly when the command region is not on the page", () => {
@@ -3270,7 +3480,7 @@ describe("rollback confirmation", () => {
           {
             id: "stop",
             kind: "stop",
-            label: "Stop setup",
+            label: "Stop Setup",
             description: "",
             path: "/api/operations/op-1/stop",
             pending: false
@@ -3585,11 +3795,15 @@ describe("rollback lifecycle presentation", () => {
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
   });
 
-  it("dismisses the panel from the completed rollback's OK button", () => {
+  it("dismisses the panel from the completed rollback's OK button", async () => {
     const browser = setup();
+    browser.net.handle(dismissUrl("op-1"), () =>
+      jsonResponse({ operationId: "op-1" })
+    );
     controllerFor(browser)?.renderProgress(rollbackComplete());
 
     browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+    await flushPromises();
 
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
   });
@@ -3971,6 +4185,24 @@ describe("terminal handling", () => {
     expect(deps.reloadCount).toBe(1);
     expect(browser.deployButton.textContent).toBe(DEPLOY_BUTTON_IDLE_LABEL);
     expect(browser.deployButton.disabled).toBe(false);
+  });
+
+  it("uses the host reset hook when terminal progress settles", () => {
+    const browser = setup();
+    const harness = createDeps();
+    let resets = 0;
+    const controller = controllerFor(browser, {
+      deps: {
+        ...harness.deps,
+        resetSubmitButton: () => {
+          resets += 1;
+        }
+      }
+    });
+
+    controller?.applyTerminal(record({ terminalState: "succeeded" }));
+
+    expect(resets).toBe(1);
   });
 
   it("marks succeeded_with_warnings the same as succeeded", () => {
@@ -5820,7 +6052,55 @@ describe("exiting a setup", () => {
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
   });
 
-  it("keeps the acknowledgement alone for an outcome that is already settled", () => {
+  it("hides a leftover-visible panel when the server has nothing to show", async () => {
+    const browser = setup();
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse({ operation: null })
+    );
+    const { controller } = controllerWithHarness(browser);
+    // A dismissed operation leaves the panel marked visible from an earlier
+    // render; resuming must reconcile to the server's "nothing here" answer
+    // instead of leaving the stale box on screen.
+    browser.els[PROGRESS_IDS.panel].style.display = "";
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("none");
+  });
+
+  it("leaves a visible panel alone when the resume request fails", async () => {
+    const browser = setup();
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse({ error: "boom" }, false, 500)
+    );
+    const { controller } = controllerWithHarness(browser);
+    // A transient server failure is not proof the repo has no operation, so an
+    // in-flight deletion panel must survive it rather than vanish until remount.
+    browser.els[PROGRESS_IDS.panel].style.display = "";
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+  });
+
+  it("leaves a visible panel alone when the resume payload is malformed", async () => {
+    const browser = setup();
+    browser.net.handle(operationsUrl(), () => jsonResponse("not-an-object"));
+    const { controller } = controllerWithHarness(browser);
+    // A body that is not the expected envelope is treated like a failed request:
+    // it cannot authoritatively tear down a possibly live panel.
+    browser.els[PROGRESS_IDS.panel].style.display = "";
+
+    controller?.resumeProgress();
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("");
+  });
+
+  it("keeps a terminal action instead of replacing it with acknowledgement", () => {
     const browser = setup();
     const { controller } = controllerWithHarness(browser);
 
@@ -5832,8 +6112,8 @@ describe("exiting a setup", () => {
       })
     );
 
-    expect(browser.els[PROGRESS_IDS.bottomButtons].children).toHaveLength(0);
-    expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("OK");
+    expect(browser.els[PROGRESS_IDS.bottomButtons].children).toHaveLength(1);
+    expect(browser.els[PROGRESS_IDS.dismiss].style.display).toBe("none");
     expect(browser.els[PROGRESS_IDS.actions].style.display).toBe("flex");
   });
 
@@ -5867,8 +6147,11 @@ describe("acknowledging a finished deletion pass", () => {
     });
   }
 
-  it("asks the picker once for a completed rollback and nothing more on OK", () => {
+  it("persists a completed outcome dismissal before hiding it", async () => {
     const browser = setup();
+    browser.net.handle(dismissUrl("op-1"), () =>
+      jsonResponse({ operationId: "op-1" })
+    );
     const { controller, harness } = controllerWithHarness(browser);
 
     // The sequence the poller drives: the terminal record is rendered, then
@@ -5880,14 +6163,127 @@ describe("acknowledging a finished deletion pass", () => {
     expect(browser.els[PROGRESS_IDS.dismiss].textContent).toBe("OK");
 
     browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+    await flushPromises();
 
-    // OK acknowledges an outcome the server already reached: it closes the
-    // panel and asks for nothing, because the listing was refreshed when the
-    // rollback ended.
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
     expect(harness.reloadCount).toBe(1);
-    expect(browser.net.calls).toHaveLength(0);
+    expect(browser.net.calls).toEqual([
+      {
+        url: dismissUrl("op-1"),
+        init: {
+          method: "POST",
+          headers: { "X-Radius-Mutation-Nonce": "" },
+          signal: expect.anything()
+        }
+      }
+    ]);
     expect(harness.errors).toEqual([]);
+  });
+
+  it("keeps a completed outcome visible when dismissal cannot be saved", async () => {
+    const browser = setup();
+    browser.net.handle(dismissUrl("op-1"), () =>
+      textResponse("unavailable", false, 500)
+    );
+    const controller = controllerFor(browser);
+    controller?.renderProgress(completedRollback());
+
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).not.toBe("none");
+    expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe(
+      "Radius could not save this dismissal. Try dismissing it again."
+    );
+  });
+
+  it("does not submit dismissal without a displayed operation", () => {
+    const browser = setup();
+    controllerFor(browser);
+
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+
+    expect(browser.net.calls).toHaveLength(0);
+  });
+
+  it("persists the dismissal and hides the panel from the OK button", async () => {
+    const browser = setup();
+    browser.net.handle(dismissUrl("op-1"), () =>
+      jsonResponse({ operationId: "op-1" })
+    );
+    const controller = controllerFor(browser);
+    controller?.renderProgress(completedRollback());
+
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+    expect(browser.net.calls).toEqual([
+      {
+        url: dismissUrl("op-1"),
+        init: {
+          method: "POST",
+          headers: { "X-Radius-Mutation-Nonce": "" },
+          signal: expect.anything()
+        }
+      }
+    ]);
+  });
+
+  it("does nothing when the dismiss button is clicked with no operation displayed", () => {
+    const browser = setup();
+    controllerFor(browser);
+
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+
+    expect(browser.net.calls).toHaveLength(0);
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "ignores dismissal %s after teardown",
+    async (settlement) => {
+      const browser = setup();
+      const deferred = createDeferred<HttpResponse>();
+      browser.net.handle(dismissUrl("op-1"), () => deferred.promise);
+      const controller = controllerFor(browser);
+      controller?.renderProgress(completedRollback());
+
+      browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+      controller?.teardown();
+      if (settlement === "resolve") {
+        deferred.resolve(jsonResponse({ operationId: "op-1" }));
+      } else {
+        deferred.reject(new Error("server stopped"));
+      }
+      await flushPromises();
+
+      expect(browser.els[PROGRESS_IDS.panel].style.display).not.toBe("none");
+      expect(browser.els[PROGRESS_IDS.commandError].textContent).toBe("");
+    }
+  );
+
+  it("does not let a stale dismissal hide a newer operation", async () => {
+    const browser = setup();
+    const deferred = createDeferred<HttpResponse>();
+    browser.net.handle(dismissUrl("op-1"), () => deferred.promise);
+    const controller = controllerFor(browser);
+    controller?.renderProgress(completedRollback());
+    browser.els[PROGRESS_IDS.dismiss].dispatch("click");
+
+    controller?.renderProgress(
+      record({
+        operationId: "op-2",
+        terminalState: null,
+        summary: "Deleting staging…"
+      })
+    );
+    deferred.resolve(jsonResponse({ operationId: "op-1" }));
+    await flushPromises();
+
+    expect(browser.els[PROGRESS_IDS.panel].style.display).not.toBe("none");
+    expect(browser.els[PROGRESS_IDS.title].textContent).toBe(
+      "Deleting staging…"
+    );
   });
 
   it("asks the picker once for an exited setup and closes the panel outright", () => {

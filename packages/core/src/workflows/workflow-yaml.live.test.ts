@@ -25,6 +25,7 @@
 // sets RUN_LIVE_WORKFLOW_TESTS on pull requests, pushes to main, and nightly.
 import { describe, it, expect } from "vitest";
 import { parse as parseYaml } from "yaml";
+import { readFile } from "node:fs/promises";
 import { azure } from "../platforms/azure.js";
 import { aws } from "../platforms/aws.js";
 import {
@@ -39,6 +40,8 @@ import {
 import {
   DELETE_RADIUS_REF,
   DELETE_APP_DISPATCHER_FILE,
+  DELETE_ENV_AZURE_FILE,
+  DELETE_ENV_DISPATCHER_FILE,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE,
   generateDeleteWorkflow
@@ -70,6 +73,19 @@ async function fetchTemplates(
     templates[f] = bodies[i];
   });
   return templates;
+}
+
+async function readLocalDeleteTemplates(): Promise<Record<string, string>> {
+  const files = [DELETE_ENV_DISPATCHER_FILE, DELETE_ENV_AZURE_FILE];
+  const bodies = await Promise.all(
+    files.map((file) =>
+      readFile(
+        new URL(`../../../../.github/extension/${file}`, import.meta.url),
+        "utf8"
+      )
+    )
+  );
+  return Object.fromEntries(files.map((file, index) => [file, bodies[index]]));
 }
 
 function assertAllValidYaml(
@@ -107,7 +123,10 @@ describe.skipIf(!LIVE)(
         [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE],
         DELETE_RADIUS_REF
       );
-      const generated = generateDeleteWorkflow("prod", templates);
+      const generated = generateDeleteWorkflow("prod", {
+        ...templates,
+        ...(await readLocalDeleteTemplates())
+      });
       assertAllValidYaml(generated, DELETE_RADIUS_REF);
     }, 30_000);
 
