@@ -48,6 +48,9 @@ afterEach(async () => {
  */
 async function api({
   verified = true,
+  // Separate from `verified` so a scenario can sign the tag object but not the
+  // commit it targets.
+  commitVerified = verified,
   parents = [],
   refs = [],
   broken,
@@ -91,7 +94,10 @@ async function api({
       if (request.method === "GET" && path.startsWith("/git/commits/")) {
         return send(200, {
           sha: path.slice("/git/commits/".length),
-          verification: { verified, reason: verified ? "valid" : "unsigned" }
+          verification: {
+            verified: commitVerified,
+            reason: commitVerified ? "valid" : "unsigned"
+          }
         });
       }
       if (route === "POST /git/tags") {
@@ -763,6 +769,30 @@ describe("scripts/verified-git.mjs", () => {
 
       expect(result.status).toBe(0);
       expect(result.stdout).toBe(TARGET);
+    });
+
+    it("rejects a signed annotated tag whose target commit is unverified", async () => {
+      const root = repository();
+      const { url } = await api({
+        commitVerified: false,
+        refs: ["refs/tags/radius@1.2.0"],
+        tagObject: { type: "tag", target: TARGET }
+      });
+
+      const result = await run(root, url, [
+        "verify-tag",
+        "--name",
+        "radius@1.2.0"
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "GitHub did not sign the target commit for tag radius@1.2.0"
+      );
+      // A signed tag object must not mask an unsigned target.
+      expect(result.stderr).not.toContain(
+        "GitHub did not sign the tag radius@1.2.0"
+      );
     });
 
     it("rejects an annotated tag GitHub did not sign", async () => {
