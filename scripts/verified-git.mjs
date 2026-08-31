@@ -20,6 +20,9 @@
 //         Creates the annotated tag object and refs/tags/<tag>.
 //   node scripts/verified-git.mjs ref --name refs/heads/<branch> --sha <sha>
 //                                     [--force]
+//   node scripts/verified-git.mjs verify-tag --name <tag> [--target <sha>]
+//         Fails unless refs/tags/<tag> is an annotated tag object that GitHub
+//         verified, so a tag written by anything else is never reused.
 //
 // GITHUB_TOKEN must be a GitHub App installation token with contents write.
 // GITHUB_REPOSITORY and GITHUB_API_URL come from the workflow environment.
@@ -230,6 +233,31 @@ async function ref(args) {
   console.log(await writeRef(name, sha, args.includes("--force")));
 }
 
+async function verifyTag(args) {
+  const name = required(option(args, "--name"), "--name");
+  const expected = option(args, "--target");
+  if (expected !== undefined) requireSha(expected, "--target");
+
+  const existing = await api("GET", `/git/ref/tags/${name}`, undefined, true);
+  if (!existing) fail(`refs/tags/${name} does not exist`);
+  // A lightweight tag has no object of its own, so it can carry no signature.
+  if (existing.object?.type !== "tag") {
+    fail(
+      `${name} must be an annotated tag, but its ref points straight at a ${existing.object?.type}`
+    );
+  }
+
+  const object = requireVerified(
+    await api("GET", `/git/tags/${existing.object.sha}`),
+    `tag ${name}`
+  );
+  const target = object.object?.sha;
+  if (expected !== undefined && target !== expected) {
+    fail(`${name} points at ${target}, not ${expected}`);
+  }
+  console.log(target);
+}
+
 const [command, ...args] = process.argv.slice(2);
 try {
   credentials();
@@ -242,6 +270,9 @@ try {
       break;
     case "ref":
       await ref(args);
+      break;
+    case "verify-tag":
+      await verifyTag(args);
       break;
     default:
       fail(`unknown command: ${command ?? "(none)"}`);

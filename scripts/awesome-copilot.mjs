@@ -100,8 +100,21 @@ function buildEntry(marketplace, manifest, name, sha) {
     fail(`"${name}" source.repo must be in "owner/repo" form`);
   }
   // awesome-copilot resolves the plugin manifest relative to source.path, so it
-  // has to name the directory the manifest sits in rather than the file.
-  if (!source.path) fail(`"${name}" source.path is required`);
+  // has to name the directory the manifest sits in rather than the file, and
+  // its submission validator rejects absolute, backslash and traversing paths.
+  const path = source?.path;
+  if (typeof path !== "string" || path.length === 0) {
+    fail(`"${name}" source.path is required`);
+  }
+  if (
+    path.startsWith("/") ||
+    /^[A-Za-z]:/.test(path) ||
+    path.includes("\\") ||
+    path.split("/").includes("..") ||
+    path.endsWith(".json")
+  ) {
+    fail(`"${name}" source.path must be a relative plugin directory: ${path}`);
+  }
 
   return {
     name: entry.name,

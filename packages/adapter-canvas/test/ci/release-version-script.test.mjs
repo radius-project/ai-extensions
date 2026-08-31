@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { changesetVersionArgs } from "../../../../scripts/release-version.mjs";
+import { versionPlan } from "../../../../scripts/release-version.mjs";
 
 const plugins = [{ name: "radius" }, { name: "radius-aws" }];
 const repoRoot = fileURLToPath(new URL("../../../..", import.meta.url));
@@ -54,8 +54,15 @@ function workspace() {
   writeJson(join(root, "package.json"), { name: "fixture", private: true });
   writeFileSync(
     join(root, "pnpm-workspace.yaml"),
-    "packages:\n  - plugins/*\n"
+    "packages:\n  - plugins/*\n  - packages/*\n"
   );
+  // Mirrors production: the internal packages are permanently ignored in the
+  // config file, which is what makes a CLI `--ignore` illegal.
+  writeJson(join(root, "packages", "core", "package.json"), {
+    name: "@radius-project/core",
+    version: "0.0.0",
+    private: true
+  });
   writeJson(join(root, ".changeset", "config.json"), {
     changelog: false,
     commit: false,
@@ -65,7 +72,7 @@ function workspace() {
     baseBranch: "main",
     updateInternalDependencies: "patch",
     privatePackages: { version: true, tag: false },
-    ignore: []
+    ignore: ["@radius-project/core"]
   });
   writePlugin(root, "radius");
   writePlugin(root, "radius-aws");
@@ -100,37 +107,51 @@ afterEach(() => {
 
 describe("scripts/release-version.mjs", () => {
   it("versions every plugin when no scope is selected", () => {
-    expect(changesetVersionArgs(plugins)).toEqual(["version"]);
-    expect(changesetVersionArgs(plugins, "")).toEqual(["version"]);
+    expect(versionPlan(plugins)).toEqual({ args: ["version"], ignore: [] });
+    expect(versionPlan(plugins, "")).toEqual({ args: ["version"], ignore: [] });
   });
 
-  it("ignores every plugin outside the selected release", () => {
-    expect(changesetVersionArgs(plugins, "radius")).toEqual([
-      "version",
-      "--ignore",
-      "radius-aws"
-    ]);
-    expect(changesetVersionArgs(plugins, "radius-aws")).toEqual([
-      "version",
-      "--ignore",
-      "radius"
-    ]);
+  // `changeset version` rejects the --ignore flag outright when the config file
+  // defines ignores, so the scope has to travel through the config instead.
+  it("scopes a release without passing --ignore to the CLI", () => {
+    expect(versionPlan(plugins, "radius")).toEqual({
+      args: ["version"],
+      ignore: ["radius-aws"]
+    });
+    expect(versionPlan(plugins, "radius-aws")).toEqual({
+      args: ["version"],
+      ignore: ["radius"]
+    });
   });
 
   it("applies the same plugin scope to a snapshot release", () => {
-    expect(changesetVersionArgs(plugins, "radius-aws", "edge")).toEqual([
-      "version",
-      "--snapshot",
-      "edge",
-      "--ignore",
-      "radius"
-    ]);
+    expect(versionPlan(plugins, "radius-aws", "edge")).toEqual({
+      args: ["version", "--snapshot", "edge"],
+      ignore: ["radius"]
+    });
   });
 
   it("rejects a plugin the registry did not discover", () => {
-    expect(() => changesetVersionArgs(plugins, "radius-gcp")).toThrow(
+    expect(() => versionPlan(plugins, "radius-gcp")).toThrow(
       'no plugin named "radius-gcp"'
     );
+  });
+
+  it("restores the changeset config after scoping a release", () => {
+    const root = workspace();
+    const config = join(root, ".changeset", "config.json");
+    const before = readFileSync(config, "utf8");
+
+    const result = spawnSync(
+      process.execPath,
+      [join(root, "scripts", "release-version.mjs"), "--plugin", "radius"],
+      { cwd: root, encoding: "utf8" }
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    // The temporary scope must never reach the release commit.
+    expect(readFileSync(config, "utf8")).toBe(before);
+    expect(JSON.parse(before).ignore).toEqual(["@radius-project/core"]);
   });
 
   it("versions one plugin and leaves the other plugin queued", () => {

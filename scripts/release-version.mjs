@@ -7,11 +7,13 @@
 
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { listPlugins, repoRoot, requirePlugin } from "./plugins.mjs";
 
 const require = createRequire(import.meta.url);
+const CONFIG = ".changeset/config.json";
 
 function fail(message) {
   console.error(`error: ${message}`);
@@ -23,7 +25,7 @@ function option(args, name) {
   return index === -1 ? undefined : args[index + 1];
 }
 
-export function changesetVersionArgs(plugins, selectedName, snapshot) {
+export function versionPlan(plugins, selectedName, snapshot) {
   const selected =
     selectedName === undefined || selectedName === "" ?
       undefined
@@ -32,13 +34,28 @@ export function changesetVersionArgs(plugins, selectedName, snapshot) {
     throw new Error(`no plugin named "${selectedName}"`);
   }
 
-  return [
-    "version",
-    ...(snapshot ? ["--snapshot", snapshot] : []),
-    ...plugins
+  return {
+    args: ["version", ...(snapshot ? ["--snapshot", snapshot] : [])],
+    ignore: plugins
       .filter((plugin) => selected && plugin.name !== selected.name)
-      .flatMap((plugin) => ["--ignore", plugin.name])
-  ];
+      .map((plugin) => plugin.name)
+  };
+}
+
+// The CLI refuses `--ignore` whenever the config file already defines ignores,
+// and this repo permanently ignores its internal packages there. Scope the
+// release by extending that list instead, then put the file back so the release
+// commit never carries the temporary scope.
+function scopeConfig(ignore) {
+  const path = join(repoRoot, CONFIG);
+  const original = readFileSync(path, "utf8");
+  const config = JSON.parse(original);
+  const merged = [...new Set([...(config.ignore ?? []), ...ignore])];
+  writeFileSync(
+    path,
+    `${JSON.stringify({ ...config, ignore: merged }, null, 2)}\n`
+  );
+  return () => writeFileSync(path, original);
 }
 
 function run(command, args) {
@@ -48,7 +65,7 @@ function run(command, args) {
     stdio: "inherit"
   });
   if (result.error) fail(result.error.message);
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  return result.status ?? 1;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -60,10 +77,22 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   }
   if (selectedName !== undefined) requirePlugin(selectedName);
 
-  const changesetsCli = require.resolve("@changesets/cli/bin.js");
-  run(process.execPath, [
-    changesetsCli,
-    ...changesetVersionArgs(listPlugins(), selectedName, snapshot)
+  const plan = versionPlan(listPlugins(), selectedName, snapshot);
+  const restore = plan.ignore.length > 0 ? scopeConfig(plan.ignore) : undefined;
+  let status;
+  try {
+    status = run(process.execPath, [
+      require.resolve("@changesets/cli/bin.js"),
+      ...plan.args
+    ]);
+  } finally {
+    restore?.();
+  }
+  if (status !== 0) process.exit(status);
+
+  const synced = run(process.execPath, [
+    join(repoRoot, "scripts", "version.mjs"),
+    "--sync"
   ]);
-  run(process.execPath, [join(repoRoot, "scripts", "version.mjs"), "--sync"]);
+  if (synced !== 0) process.exit(synced);
 }

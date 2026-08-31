@@ -67,6 +67,11 @@ const args = process.argv.slice(2);
 const plugin = requirePlugin(option(args, "--plugin"));
 const expectedVersion = option(args, "--version");
 const dist = resolve(repoRoot, plugin.distDir);
+// Checked before anything reads through it: every path check below follows a
+// symlinked dist root and would validate files outside the plugin tree.
+if (lstatSync(dist).isSymbolicLink()) {
+  fail(`plugin dist must be a directory, not a symlink: ${plugin.distDir}`);
+}
 const packageJson = readJson(resolve(dist, "package.json"), "package.json");
 const manifest = readJson(resolve(dist, "plugin.json"), "plugin.json");
 
@@ -102,7 +107,7 @@ if (manifest.skills !== undefined) {
     requirePath(dist, path, "plugin.json#skills", "directory");
   }
 }
-if (typeof manifest.extensions === "string") {
+if (manifest.extensions !== undefined) {
   requirePath(dist, manifest.extensions, "plugin.json#extensions", "directory");
 }
 

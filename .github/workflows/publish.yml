@@ -176,6 +176,26 @@ jobs:
           if git ls-remote --exit-code --heads origin "refs/heads/$PLUGIN_CHANNEL_BRANCH" >/dev/null 2>&1; then
             git fetch --no-tags origin \
               "+refs/heads/$PLUGIN_CHANNEL_BRANCH:refs/remotes/origin/$PLUGIN_CHANNEL_BRANCH"
+
+            # Everything below trusts the published commit, including the skip
+            # that reports success, so only an artifact this app actually signed
+            # may stop this run. A rolling branch is force-recreated anyway, so
+            # anything else is re-baselined rather than treated as fatal.
+            current_commit="$(git rev-parse "refs/remotes/origin/$PLUGIN_CHANNEL_BRANCH")"
+            verified="$(gh api "repos/$GITHUB_REPOSITORY/commits/$current_commit" \
+              --jq '.commit.verification.verified' 2>/dev/null || echo false)"
+            parents="$(git rev-list --parents -n 1 "$current_commit" | awk '{ print NF }')"
+            if [ "$verified" != "true" ] || [ "$parents" -ne 1 ]; then
+              echo "::notice::$PLUGIN_CHANNEL_BRANCH holds $current_commit, which is not a verified orphan artifact; re-baselining it on $GITHUB_SHA."
+              trusted=0
+            else
+              trusted=1
+            fi
+          else
+            trusted=0
+          fi
+
+          if [ "$trusted" = 1 ]; then
             current_message="$(git log -1 --format=%s "refs/remotes/origin/$PLUGIN_CHANNEL_BRANCH")"
             if [[ "$current_message" != *" for "* ]]; then
               echo "::error::$PLUGIN_CHANNEL_BRANCH does not record its source commit: $current_message"

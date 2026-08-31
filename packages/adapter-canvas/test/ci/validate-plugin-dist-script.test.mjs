@@ -3,6 +3,7 @@ import {
   copyFileSync,
   mkdirSync,
   mkdtempSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync
@@ -167,6 +168,35 @@ describe("scripts/validate-plugin-dist.mjs", () => {
     const result = run(root);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("contains a symlink");
+  });
+
+  // Every path check reads through the dist root, so a symlinked root would let
+  // validation pass for files outside the plugin tree entirely.
+  it("rejects a dist root that is itself a symlink", () => {
+    const { root, dist } = repository();
+    const elsewhere = join(root, "elsewhere");
+    renameSync(dist, elsewhere);
+    try {
+      symlinkSync(elsewhere, dist, "junction");
+    } catch (error) {
+      if (process.platform === "win32" && error.code === "EPERM") return;
+      throw error;
+    }
+
+    const result = run(root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("not a symlink");
+  });
+
+  it.each([
+    ["a number", 7],
+    ["an array", ["."]],
+    ["an object", {}]
+  ])("rejects an extensions value that is %s", (_label, extensions) => {
+    const result = run(repository({ manifest: { extensions } }).root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("plugin.json#extensions");
   });
 
   it("reports malformed JSON without a stack trace", () => {

@@ -363,6 +363,30 @@ describe("scripts/awesome-copilot.mjs", () => {
     expect(missingPath.stderr).toContain("source.path is required");
   });
 
+  // awesome-copilot's own submission validator rejects these, so a listing
+  // built from one could never pass review in the target repository.
+  it.each([
+    ["absolute", "/plugins/radius/dist"],
+    ["drive-qualified", "C:/plugins/radius/dist"],
+    ["backslashed", "plugins\\radius\\dist"],
+    ["parent-traversing", "../plugins/radius/dist"],
+    ["the manifest file itself", "plugins/radius/dist/plugin.json"]
+  ])("rejects a source.path that is %s", (_label, path) => {
+    const catalog = marketplace();
+    catalog.plugins[0].source.path = path;
+
+    const result = run(
+      writeRepository({ catalog }),
+      "--out",
+      "listing",
+      "--sha",
+      SHA
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("relative plugin directory");
+  });
+
   it("rejects a catalog version that is not semver", () => {
     const catalog = marketplace();
     catalog.plugins[0].version = "0.4";

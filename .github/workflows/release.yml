@@ -274,6 +274,7 @@ jobs:
         env:
           RELEASE_PR: ${{ github.event.pull_request.number }}
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           source_sha="$MERGE_SHA"
@@ -288,6 +289,9 @@ jobs:
             artifact_tag="${plugin}/v${version}"
 
             if git show-ref --verify --quiet "refs/tags/$artifact_tag"; then
+              # The completion marker is what makes this workflow skip the
+              # plugin, so it only counts when this app actually signed it.
+              node scripts/verified-git.mjs verify-tag --name "$artifact_tag" >/dev/null
               echo "Artifact tag $artifact_tag already exists; nothing to publish for $plugin." >>"$GITHUB_STEP_SUMMARY"
               continue
             fi
@@ -506,12 +510,10 @@ jobs:
           gh auth setup-git
 
           if git ls-remote --exit-code --tags origin "refs/tags/$PLUGIN_SOURCE_TAG" >/dev/null 2>&1; then
-            git fetch --force origin "refs/tags/$PLUGIN_SOURCE_TAG:refs/tags/$PLUGIN_SOURCE_TAG"
-            target="$(git rev-list -n 1 "$PLUGIN_SOURCE_TAG")"
-            if [ "$target" != "$SOURCE_SHA" ]; then
-              echo "::error::$PLUGIN_SOURCE_TAG points to $target, not $SOURCE_SHA."
-              exit 1
-            fi
+            # Reusing a tag this workflow did not sign would publish a release
+            # whose source marker nobody can attribute.
+            node scripts/verified-git.mjs verify-tag \
+              --name "$PLUGIN_SOURCE_TAG" --target "$SOURCE_SHA"
           else
             node scripts/verified-git.mjs tag \
               --name "$PLUGIN_SOURCE_TAG" \

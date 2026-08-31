@@ -42,7 +42,13 @@ afterEach(async () => {
  * A stand-in for the GitHub REST API that records every request, so tests can
  * assert on exactly what the script sends as well as how it reacts.
  */
-async function api({ verified = true, parents = [], refs = [], broken } = {}) {
+async function api({
+  verified = true,
+  parents = [],
+  refs = [],
+  broken,
+  tagObject
+} = {}) {
   const calls = [];
   const existing = new Set(refs);
   let blobs = 0;
@@ -86,9 +92,18 @@ async function api({ verified = true, parents = [], refs = [], broken } = {}) {
       }
       if (request.method === "GET" && path.startsWith("/git/ref/")) {
         const name = `refs/${path.slice("/git/ref/".length)}`;
-        return existing.has(name) ?
-            send(200, { ref: name })
-          : send(404, { message: "Not Found" });
+        if (!existing.has(name)) return send(404, { message: "Not Found" });
+        return send(200, {
+          ref: name,
+          ...(tagObject ? { object: { type: tagObject.type, sha: TAG } } : {})
+        });
+      }
+      if (request.method === "GET" && path.startsWith("/git/tags/")) {
+        return send(200, {
+          sha: TAG,
+          object: { type: "commit", sha: tagObject?.target },
+          verification: { verified, reason: verified ? "valid" : "unsigned" }
+        });
       }
       if (route === "POST /git/refs") return send(201, { ref: "created" });
       if (request.method === "PATCH" && path.startsWith("/git/refs/")) {
@@ -510,5 +525,96 @@ describe("scripts/verified-git.mjs", () => {
     expect((await run(root, url, ["push"])).stderr).toContain(
       "unknown command: push"
     );
+  });
+
+  describe("verify-tag", () => {
+    it("accepts an annotated tag GitHub signed at the expected target", async () => {
+      const root = repository();
+      const { url } = await api({
+        refs: ["refs/tags/radius@1.2.0"],
+        tagObject: { type: "tag", target: TARGET }
+      });
+
+      const result = await run(root, url, [
+        "verify-tag",
+        "--name",
+        "radius@1.2.0",
+        "--target",
+        TARGET
+      ]);
+
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe(TARGET);
+    });
+
+    // A lightweight tag has no object of its own, so it carries no signature.
+    it("rejects a lightweight tag", async () => {
+      const root = repository();
+      const { url } = await api({
+        refs: ["refs/tags/radius@1.2.0"],
+        tagObject: { type: "commit", target: TARGET }
+      });
+
+      const result = await run(root, url, [
+        "verify-tag",
+        "--name",
+        "radius@1.2.0"
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("must be an annotated tag");
+    });
+
+    it("rejects an annotated tag GitHub did not sign", async () => {
+      const root = repository();
+      const { url } = await api({
+        verified: false,
+        refs: ["refs/tags/radius@1.2.0"],
+        tagObject: { type: "tag", target: TARGET }
+      });
+
+      const result = await run(root, url, [
+        "verify-tag",
+        "--name",
+        "radius@1.2.0"
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("GitHub did not sign the tag");
+    });
+
+    it("rejects a verified tag pointing somewhere else", async () => {
+      const root = repository();
+      const { url } = await api({
+        refs: ["refs/tags/radius@1.2.0"],
+        tagObject: { type: "tag", target: COMMIT }
+      });
+
+      const result = await run(root, url, [
+        "verify-tag",
+        "--name",
+        "radius@1.2.0",
+        "--target",
+        TARGET
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`points at ${COMMIT}, not ${TARGET}`);
+    });
+
+    it("rejects a tag that does not exist", async () => {
+      const root = repository();
+      const { url } = await api();
+
+      const result = await run(root, url, [
+        "verify-tag",
+        "--name",
+        "radius@9.9.9"
+      ]);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("does not exist");
+    });
   });
 });
