@@ -156,49 +156,45 @@ describeWindows("cliExec Windows process integration", () => {
   // and close the pipe the way runCli already does for every other case. The
   // wider budget then covers the cold interpreter start that the shared 15s
   // default left no margin for.
-  it(
-    "runs the displayed PowerShell invocation for an absolute path",
-    async () => {
-      const command = displayGhCommand(
-        {
-          kind: "absolute",
-          shell: "powershell",
-          executablePath: launcherPath,
-          installationNote: ""
-        },
-        ["version", "two words"]
+  it("runs the displayed PowerShell invocation for an absolute path", async () => {
+    const command = displayGhCommand(
+      {
+        kind: "absolute",
+        shell: "powershell",
+        executablePath: launcherPath,
+        installationNote: ""
+      },
+      ["version", "two words"]
+    );
+    const result = await new Promise<CommandResult>((resolve) => {
+      const child = execFile(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-InputFormat",
+          "None",
+          "-Command",
+          command
+        ],
+        { env: environment, windowsHide: true },
+        (error, stdout, stderr) => {
+          resolve({
+            code: error?.code || 0,
+            stdout: stdout.trim(),
+            stderr: stderr.trim()
+          });
+        }
       );
-      const result = await new Promise<CommandResult>((resolve) => {
-        const child = execFile(
-          "powershell.exe",
-          [
-            "-NoProfile",
-            "-NonInteractive",
-            "-InputFormat",
-            "None",
-            "-Command",
-            command
-          ],
-          { env: environment, windowsHide: true },
-          (error, stdout, stderr) => {
-            resolve({
-              code: error?.code || 0,
-              stdout: stdout.trim(),
-              stderr: stderr.trim()
-            });
-          }
-        );
-        child.stdin?.end();
-      });
+      child.stdin?.end();
+    });
 
-      expect(result).toEqual({
-        code: 0,
-        stdout: '["version","two words"]',
-        stderr: ""
-      });
-    },
-    30_000
-  );
+    expect(result).toEqual({
+      code: 0,
+      stdout: '["version","two words"]',
+      stderr: ""
+    });
+  }, 30_000);
 
   it("preserves a batch command failure and stderr", async () => {
     const result = await runCli("radius-fail.cmd", ["ignored"]);
