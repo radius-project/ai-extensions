@@ -2,7 +2,8 @@
 // dist can be attested, tagged, or pushed.
 //
 // Usage:
-//   node scripts/validate-plugin-dist.mjs --plugin <name> [--version <semver>]
+//   node scripts/validate-plugin-dist.mjs --plugin <name>
+//     [--version <semver>] [--source <full-sha>]
 
 import { lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -10,6 +11,7 @@ import { repoRoot, requirePlugin } from "./plugins.mjs";
 
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+const SHA = /^[0-9a-f]{40}$/;
 
 function fail(message) {
   console.error(`error: ${message}`);
@@ -66,6 +68,10 @@ function rejectSymlinks(directory, root = directory) {
 const args = process.argv.slice(2);
 const plugin = requirePlugin(option(args, "--plugin"));
 const expectedVersion = option(args, "--version");
+const expectedSource = option(args, "--source");
+if (expectedSource !== undefined && !SHA.test(expectedSource)) {
+  fail("--source must be a full lowercase commit SHA");
+}
 const dist = resolve(repoRoot, plugin.distDir);
 // Checked before anything reads through it: every path check below follows a
 // symlinked dist root and would validate files outside the plugin tree.
@@ -88,6 +94,17 @@ if (
 if (expectedVersion && packageJson.version !== expectedVersion) {
   fail(`dist version is ${packageJson.version}, expected ${expectedVersion}`);
 }
+if (
+  typeof packageJson.radiusSourceRef !== "string" ||
+  !SHA.test(packageJson.radiusSourceRef)
+) {
+  fail("dist package.json must carry a full radiusSourceRef commit SHA");
+}
+if (expectedSource && packageJson.radiusSourceRef !== expectedSource) {
+  fail(
+    `dist source ref is ${packageJson.radiusSourceRef}, expected ${expectedSource}`
+  );
+}
 
 requirePath(dist, "README.md", "README.md", "file");
 if (statSync(resolve(dist, "README.md")).size === 0) {
@@ -97,6 +114,7 @@ requirePath(dist, "LICENSE", "LICENSE", "file");
 if (statSync(resolve(dist, "LICENSE")).size === 0) {
   fail("LICENSE must not be empty");
 }
+requirePath(dist, "workflows", "workflows", "directory");
 if (packageJson.main !== undefined) {
   requirePath(dist, packageJson.main, "package.json#main", "file");
 }

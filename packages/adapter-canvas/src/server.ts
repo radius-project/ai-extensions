@@ -2556,6 +2556,13 @@ export function beginDeployAttempt(
   input: DeployAttemptInput
 ): void {
   state.deployStatus = "in_progress";
+  // Advances on every deploy invocation, including each redeploy inside a
+  // repair loop. Nothing else does: the loop reuses its attempt id, the run id
+  // is cleared here and stays empty when a deploy fails before dispatch, and
+  // `deployFinishedAt` is only written when a run concludes. Without this, two
+  // consecutive pre-dispatch failures in one loop are indistinguishable, and a
+  // notification dismissed for the first would hide the second.
+  state.deployGeneration = (state.deployGeneration || 0) + 1;
   state.deployError = null;
   state.deployErrorKind = null;
   state.deployErrorBranch = null;
@@ -2814,7 +2821,7 @@ const DELETE_WORKFLOW_FILE = "delete-application.yml";
 // silently disables all of it. It is exported so a test can pin it.
 //
 // Do not guess at this value: it must match
-// radius-project/radius .github/extension/actions/run-rad-commands/action.yml.
+// radius-project/ai-extensions .github/extension/actions/run-rad-commands/action.yml.
 export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
 
 // ── POST /api/deploy composition root ────────────────────────────────────────
