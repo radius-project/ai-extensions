@@ -602,7 +602,22 @@ describe("GitHub environment variable rollback", () => {
       expectedStatus: "confirmed"
     },
     {
-      label: "unchanged Radius value",
+      label: "unchanged Radius value that must be deleted",
+      variable: artifact({ previousValue: null }),
+      environmentResult: environment(),
+      variableResult: command({
+        stdout: JSON.stringify({
+          name: "AZURE_CLIENT_ID",
+          value: "1"
+        })
+      }),
+      expectedOutcome: "skipped",
+      expectedStatus: "manual_required",
+      expectedDetail:
+        "octo/app:dev variable AZURE_CLIENT_ID is still present after Radius's single deletion request. Radius will not repeat the mutation. Delete it manually."
+    },
+    {
+      label: "unchanged Radius value that must be restored",
       variable: artifact({ previousValue: "old" }),
       environmentResult: environment(),
       variableResult: command({
@@ -612,7 +627,9 @@ describe("GitHub environment variable rollback", () => {
         })
       }),
       expectedOutcome: "skipped",
-      expectedStatus: "manual_required"
+      expectedStatus: "manual_required",
+      expectedDetail:
+        "octo/app:dev variable AZURE_CLIENT_ID is still present after Radius's single deletion request. Radius will not repeat the mutation. Restore its previous value manually."
     },
     {
       label: "manual replacement value",
@@ -669,13 +686,14 @@ describe("GitHub environment variable rollback", () => {
     }
   ] as const)(
     "reconciles a prepared cleanup against $label without replaying it",
-    async ({
-      variable,
-      environmentResult,
-      variableResult,
-      expectedOutcome,
-      expectedStatus
-    }) => {
+    async (testCase) => {
+      const {
+        variable,
+        environmentResult,
+        variableResult,
+        expectedOutcome,
+        expectedStatus
+      } = testCase;
       const operation = { operationId: "op-prepared-cleanup" };
       prepareCleanup(operation, variable);
       let mutations = 0;
@@ -695,6 +713,9 @@ describe("GitHub environment variable rollback", () => {
 
       expect(mutations).toBe(0);
       expect(outcome.results[0]?.outcome).toBe(expectedOutcome);
+      if ("expectedDetail" in testCase) {
+        expect(outcome.results[0]?.detail).toBe(testCase.expectedDetail);
+      }
       expect(
         providerMutationRecord(
           operation,

@@ -3015,8 +3015,8 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
     expect(result.results).toMatchObject([
       { attempt: 2, outcome: "skipped", artifactType: "github_environment" }
     ]);
-    expect(result.warnings[0]).toContain(
-      "cannot prove this request created it"
+    expect(result.warnings[0]).toBe(
+      'Radius left GitHub environment "octo/app:dev" in place because a pre-create 404 followed by GitHub\'s idempotent PUT could not verify that this setup created it. To finish deleting the setup, review the GitHub environment and delete it manually if it belongs to this setup.'
     );
     // Ownership never moves without proof of removal.
     expect(op.setupArtifacts.githubEnvironment.state).toBe("created_candidate");
@@ -4101,7 +4101,7 @@ describe("finalizeSetupFailure", () => {
     });
     expect((failure.body.cleanup as any).warnings).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("cannot prove this request created it")
+        'Radius left GitHub environment "octo/app:dev" in place because a pre-create 404 followed by GitHub\'s idempotent PUT could not verify that this setup created it. To finish deleting the setup, review the GitHub environment and delete it manually if it belongs to this setup.'
       ])
     );
   });
