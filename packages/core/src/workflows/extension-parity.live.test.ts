@@ -78,7 +78,10 @@ const CONTENT_EXCEPTIONS = new Set<string>([
 
 // Paths that exist only in ai-extensions and have no Radius counterpart.
 const ADDITIONS = new Set<string>([
-  "actions/load-contrib-catalog/install-yq.sh"
+  "actions/load-contrib-catalog/install-yq.sh",
+  // The environment-delete Azure provider is authored and owned here (issue
+  // #303); Radius has no counterpart, so it is an intentional addition.
+  "delete-environment-azure.yml"
 ]);
 
 interface RadiusBlob {

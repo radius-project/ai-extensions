@@ -13,7 +13,7 @@ import {
 } from "./delete.js";
 
 // Minimal stand-ins for the delete templates the generator fills. The
-// application-delete templates are fetched from radius-project/radius; the
+// application-delete templates are fetched from radius-project/ai-extensions; the
 // environment-delete templates (dispatcher + provider) are static ai-extensions
 // assets. The dispatchers only use the workflow_dispatch `{{ENV}}` default; the
 // provider workflows also pin their composite actions to `{{RADIUS_REF}}`, and
@@ -52,7 +52,7 @@ env:
 jobs:
   delete:
     steps:
-      - uses: radius-project/radius/.github/extension/actions/delete-resource@{{RADIUS_REF}}
+      - uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}
       - name: ${DELETE_ENV_GUARD_STEP_NAME}
         run: rad application list --output json
 `,
