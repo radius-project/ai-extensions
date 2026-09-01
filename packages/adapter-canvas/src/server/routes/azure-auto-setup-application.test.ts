@@ -5,6 +5,7 @@ import {
 } from "../../operations.js";
 import {
   buildRadiusAppProvenanceTags,
+  parseCallerIdentity,
   type ResolveOidcSubjectResult
 } from "../../azure-oidc.js";
 import {
@@ -18,7 +19,6 @@ import type {
   AzureAutoSetupWorkflow
 } from "./azure-auto-setup-types.js";
 import {
-  CALLER_IDENTITY_COMMAND_PREFIX,
   callerIdentityResult,
   createAzureAutoSetupTestDependencies,
   type FakeCallerIdentity
@@ -70,11 +70,7 @@ function command(
 function harness(
   options: {
     runAz?: (args: string[]) => Promise<AzureAutoSetupCommandResult>;
-    // Answers only the `az account show` caller-identity projection, so the
-    // rest of each fake stays focused on the commands under test. `null` opts
-    // out entirely, letting a test script that command itself and assert the
-    // full call sequence.
-    identity?: FakeCallerIdentity | null;
+    identity?: FakeCallerIdentity;
     runGitHubJson?: AzureAutoSetupWorkflow["runGitHubJson"];
     sleep?: AzureAutoSetupApplicationInput["dependencies"]["sleep"];
     persist?: () => Promise<void>;
@@ -123,15 +119,7 @@ function harness(
     operation,
     steps: [],
     respond: (status, payload) => responses.push({ status, payload }),
-    runAz: async (args) => {
-      if (
-        options.identity !== null &&
-        args.join(" ").startsWith(CALLER_IDENTITY_COMMAND_PREFIX)
-      ) {
-        return callerIdentityResult(options.identity);
-      }
-      return scriptedAz(args);
-    },
+    runAz: scriptedAz,
     runGitHubJson:
       options.runGitHubJson ??
       (async () => ({ ok: false, status: 404, json: null })),
@@ -166,6 +154,9 @@ function harness(
       requestedAppName: "",
       requestedClientId: "",
       serviceManagementReference: "",
+      callerIdentity: parseCallerIdentity(
+        callerIdentityResult(options.identity).stdout
+      ),
       ...options.overrides
     }
   };
@@ -239,13 +230,9 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     const azCalls: string[] = [];
     const test = harness({
       overrides: { requestedClientId: APP_ID },
-      identity: null,
       runAz: async (args) => {
         const line = args.join(" ");
         azCalls.push(line);
-        if (line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX)) {
-          return callerIdentityResult();
-        }
         if (line.startsWith("ad app show --id")) {
           return command({ stdout: "app-object" });
         }
@@ -270,7 +257,6 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     // only its Radius provenance tags can say.
     expect(azCalls).toEqual([
       `ad app show --id ${APP_ID} --query id -o tsv`,
-      "account show --query {type:user.type,name:user.name} -o json",
       "ad signed-in-user show --query id -o tsv",
       `ad app owner list --id ${APP_ID} --query [].id -o tsv`,
       `ad app show --id ${APP_ID} --query tags -o json`
@@ -1219,6 +1205,7 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     });
     let githubVariableReads = 0;
     let unrelatedAppReads = 0;
+    let ownershipReads = 0;
     let test: Harness;
     test = harness({
       checkpoint: async () =>
@@ -1249,9 +1236,11 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
           });
         }
         if (line.startsWith("ad signed-in-user show ")) {
+          ownershipReads += 1;
           return command({ stdout: USER_ID });
         }
         if (line.startsWith("ad app owner list ")) {
+          ownershipReads += 1;
           return command({ stdout: USER_ID });
         }
         if (line.startsWith("ad app show ")) {
@@ -1283,6 +1272,7 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     ).resolves.toBeNull();
     expect(githubVariableReads).toBe(0);
     expect(unrelatedAppReads).toBe(0);
+    expect(ownershipReads).toBe(0);
     expect(operation.providerRecovery.state).toBe("rollback_pending");
     expect(test.recorded).toContainEqual(
       expect.objectContaining({
@@ -1944,14 +1934,11 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
   ): { test: Harness; azCalls: string[] } {
     const azCalls: string[] = [];
     const test = harness({
-      identity: null,
+      identity,
       ...(overrides.sleep ? { sleep: overrides.sleep } : {}),
       runAz: async (args) => {
         const line = args.join(" ");
         azCalls.push(line);
-        if (line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX)) {
-          return callerIdentityResult(identity);
-        }
         if (
           line.startsWith("ad signed-in-user show ") ||
           line.startsWith("ad sp show ")
@@ -1987,14 +1974,10 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
     expect(
       azCalls.filter(
         (line) =>
-          line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX) ||
           line.startsWith("ad signed-in-user show ") ||
           line.startsWith("ad sp show ")
       )
-    ).toEqual([
-      "account show --query {type:user.type,name:user.name} -o json",
-      "ad signed-in-user show --query id -o tsv"
-    ]);
+    ).toEqual(["ad signed-in-user show --query id -o tsv"]);
     expect(azCalls).toContain(
       `ad app owner add --id ${APP_ID} --owner-object-id ${USER_ID}`
     );
@@ -2009,14 +1992,10 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
     expect(
       azCalls.filter(
         (line) =>
-          line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX) ||
           line.startsWith("ad signed-in-user show ") ||
           line.startsWith("ad sp show ")
       )
-    ).toEqual([
-      "account show --query {type:user.type,name:user.name} -o json",
-      `ad sp show --id ${SP_APP_ID} --query id -o tsv`
-    ]);
+    ).toEqual([`ad sp show --id ${SP_APP_ID} --query id -o tsv`]);
     expect(azCalls).toContain(
       `ad app owner add --id ${APP_ID} --owner-object-id ${SP_OBJECT_ID}`
     );
@@ -2028,13 +2007,10 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
   it("resolves the service principal identity once across repeated ownership checks", async () => {
     const azCalls: string[] = [];
     const test = harness({
-      identity: null,
+      identity: SERVICE_PRINCIPAL,
       runAz: async (args) => {
         const line = args.join(" ");
         azCalls.push(line);
-        if (line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX)) {
-          return callerIdentityResult(SERVICE_PRINCIPAL);
-        }
         if (line.startsWith("ad sp show ")) {
           return command({ stdout: SP_OBJECT_ID });
         }
@@ -2062,9 +2038,6 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
 
     expect(await resolveAzureAutoSetupApplication(test.input)).toBeNull();
     expect(
-      azCalls.filter((line) => line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX))
-    ).toHaveLength(1);
-    expect(
       azCalls.filter((line) => line.startsWith("ad sp show "))
     ).toHaveLength(1);
     expect(
@@ -2073,11 +2046,6 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
   });
 
   it.each([
-    [
-      "the caller identity read fails",
-      { code: 1, stderr: "Please run 'az login'" },
-      "Please run 'az login'"
-    ],
     [
       "the caller identity payload is unreadable",
       { stdout: "{oops" },
@@ -2108,13 +2076,10 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
     async (_label, identity: FakeCallerIdentity, expectedDetail) => {
       const azCalls: string[] = [];
       const test = harness({
-        identity: null,
+        identity,
         runAz: async (args) => {
           const line = args.join(" ");
           azCalls.push(line);
-          if (line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX)) {
-            return callerIdentityResult(identity);
-          }
           if (line.startsWith("ad app list ")) return command({ stdout: "[]" });
           if (line.startsWith("ad app show ") && line.includes("--query tags"))
             return command({ stdout: "[]" });

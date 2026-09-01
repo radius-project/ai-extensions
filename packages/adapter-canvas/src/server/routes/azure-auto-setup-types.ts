@@ -1,6 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import type { SelectedGhExecutor } from "../../gh.js";
 import type {
+  CallerIdentity,
   GitHubJsonResponse,
   RadiusAppProvenanceInput,
   ResolveOidcSubjectResult
@@ -250,6 +251,7 @@ export interface AzureAutoSetupApplicationInput {
   requestedAppName: string;
   requestedClientId: string;
   serviceManagementReference: string;
+  callerIdentity: CallerIdentity;
 }
 
 export interface AzureAutoSetupApplicationResult {

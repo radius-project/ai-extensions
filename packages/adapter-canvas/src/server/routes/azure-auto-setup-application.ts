@@ -4,7 +4,6 @@ import {
   buildAppOwnerListArgs,
   buildAppTagPatchArgs,
   buildAppTagShowArgs,
-  buildCallerIdentityArgs,
   buildRadiusAppProvenanceTags,
   buildServicePrincipalObjectIdArgs,
   buildSignedInUserObjectIdArgs,
@@ -18,7 +17,6 @@ import {
   isUuid,
   missingRequiredAppTags,
   parseAppTags,
-  parseCallerIdentity,
   parseDirectoryObjectIds,
   parseServedReposFromSubjects,
   validateAppRegistrationName
@@ -93,7 +91,8 @@ export async function resolveAzureAutoSetupApplication({
   appNameProvided,
   requestedAppName,
   requestedClientId,
-  serviceManagementReference
+  serviceManagementReference,
+  callerIdentity
 }: AzureAutoSetupApplicationInput): Promise<AzureAutoSetupApplicationResult | null> {
   const {
     operation,
@@ -162,25 +161,18 @@ export async function resolveAzureAutoSetupApplication({
   }
 
   let callerObjectId: string | null = null;
-  // Resolves the owner object id of whichever principal the Azure CLI is
-  // authenticated as. The principal type is read from `az account show` rather
-  // than inferred from a failed `az ad signed-in-user show`, so a permission
-  // denial is never mistaken for "this must be a service principal".
+  // Resolves the object id for the principal classified by the account
+  // preflight, so this service does not repeat `az account show`.
   const getCallerObjectId = async (): Promise<
     { ok: true; id: string } | { ok: false; stderr: string }
   > => {
     if (callerObjectId !== null) return { ok: true, id: callerObjectId };
-    const identityResult = await runAz(buildCallerIdentityArgs());
-    if (identityResult.code !== 0 && identityResult.code !== "0") {
-      return { ok: false, stderr: identityResult.stderr };
-    }
-    const identity = parseCallerIdentity(identityResult.stdout);
-    if (identity.kind === "unsupported") {
-      return { ok: false, stderr: identity.reason };
+    if (callerIdentity.kind === "unsupported") {
+      return { ok: false, stderr: callerIdentity.reason };
     }
     const lookupArgs =
-      identity.kind === "servicePrincipal" ?
-        buildServicePrincipalObjectIdArgs({ appId: identity.appId })
+      callerIdentity.kind === "servicePrincipal" ?
+        buildServicePrincipalObjectIdArgs({ appId: callerIdentity.appId })
       : buildSignedInUserObjectIdArgs();
     let lookup = await runAz(lookupArgs);
     for (
@@ -474,35 +466,37 @@ export async function resolveAzureAutoSetupApplication({
 
       const ownedMatches = [];
       let unownedRadiusProvenance: RadiusAppProvenanceInput | undefined;
-      for (const match of matches) {
-        if (!match || !match.appId) continue;
-        // The exact journal reconciliation below owns recovery. Candidate
-        // ownership must not resolve caller identity before that durable state.
-        if (recoveringApplicationCreate) continue;
-        const ownership = await isOwnedByCaller(match.appId);
-        if (!ownership.ok) {
-          await fail(
-            400,
-            `Could not read owners of App Registration ${match.appId}: ` +
-              ownership.stderr,
-            "app-owner-lookup-failed",
-            { steps, azError: ownership.stderr }
-          );
-          return null;
-        }
-        if (ownership.owned) ownedMatches.push(match);
-        else if (!unownedRadiusProvenance) {
-          unownedRadiusProvenance = {
-            tags: Array.isArray(match.tags) ? match.tags : [],
-            repo: oidc.fullName,
-            environment
-          };
+      if (!recoveringApplicationCreate) {
+        for (const match of matches) {
+          if (!match || !match.appId) continue;
+          // The exact journal reconciliation below owns recovery. Candidate
+          // ownership must not resolve caller identity before that durable state.
+          const ownership = await isOwnedByCaller(match.appId);
+          if (!ownership.ok) {
+            await fail(
+              400,
+              `Could not read owners of App Registration ${match.appId}: ` +
+                ownership.stderr,
+              "app-owner-lookup-failed",
+              { steps, azError: ownership.stderr }
+            );
+            return null;
+          }
+          if (ownership.owned) ownedMatches.push(match);
+          else if (!unownedRadiusProvenance) {
+            unownedRadiusProvenance = {
+              tags: Array.isArray(match.tags) ? match.tags : [],
+              repo: oidc.fullName,
+              environment
+            };
+          }
         }
       }
 
       const selection = decideAppSelection({
         ownedMatches,
-        hasUnownedMatch: matches.length > ownedMatches.length,
+        hasUnownedMatch:
+          !recoveringApplicationCreate && matches.length > ownedMatches.length,
         radiusProvenance: unownedRadiusProvenance,
         existingClientId,
         createNew: createNewApp || recoveringApplicationCreate

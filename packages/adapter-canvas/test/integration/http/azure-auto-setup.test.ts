@@ -15,7 +15,6 @@ import type {
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import {
   CALLER_IDENTITY_COMMAND_PREFIX,
-  callerIdentityResult,
   createAzureAutoSetupTestDependencies,
   type FakeCallerIdentity
 } from "../../support/server/azure-auto-setup.js";
@@ -127,12 +126,16 @@ async function successfulSetup(
     if (line === "account show --output json") {
       return {
         code: 0,
-        stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+        stdout: JSON.stringify({
+          id: SUBSCRIPTION,
+          tenantId: TENANT,
+          user: {
+            type: caller.type ?? "user",
+            name: caller.name ?? "dev@contoso.com"
+          }
+        }),
         stderr: ""
       };
-    }
-    if (line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX)) {
-      return callerIdentityResult(caller);
     }
     if (line.startsWith(`ad app show --id ${APP_ID} --query id`)) {
       return { code: 0, stdout: "app-object", stderr: "" };
@@ -424,7 +427,7 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
   });
 
   it("creates and owns the app registration when the CLI is a service principal", async () => {
-    const { running, unmatchedCalls } = await successfulSetup(true, {
+    const { running, unmatchedCalls, azCalls } = await successfulSetup(true, {
       type: "servicePrincipal",
       name: SP_APP_ID
     });
@@ -451,6 +454,12 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     expect(payload.steps).toContain(
       "✅ Azure CLI identity verified as App Registration owner"
     );
+    expect(
+      azCalls.filter((line) => line === "account show --output json")
+    ).toHaveLength(1);
+    expect(
+      azCalls.some((line) => line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX))
+    ).toBe(false);
     expect(unmatchedCalls).toEqual([]);
   });
 
@@ -499,19 +508,16 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
             if (line === "account show --output json") {
               return {
                 code: 0,
-                stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+                stdout: JSON.stringify({
+                  id: SUBSCRIPTION,
+                  tenantId: TENANT,
+                  user: { type: "managedIdentity", name: "contoso" }
+                }),
                 stderr: ""
               };
             }
             if (line.startsWith("ad app list ")) {
               return { code: 0, stdout: "[]", stderr: "" };
-            }
-            if (line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX)) {
-              return {
-                code: 1,
-                stdout: "",
-                stderr: "Please run 'az login' to setup account."
-              };
             }
             throw new Error(`unscripted az call: ${line}`);
           }
@@ -534,7 +540,7 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
       code: string;
     };
     expect(payload.code).toBe("app-owner-lookup-failed");
-    expect(payload.error).toContain("Please run 'az login'");
+    expect(payload.error).toContain("unsupported caller identity type");
     expect(azCalls.some((line) => line.startsWith("ad app create "))).toBe(
       false
     );
