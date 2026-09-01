@@ -562,6 +562,27 @@ export interface OperationSnapshot {
   readonly error: string;
 }
 
+export interface OperationHttpResponse {
+  readonly ok: boolean;
+  readonly status: number;
+  readonly statusText: string;
+  readonly body: string;
+}
+
+/** Validates and parses one `/api/operations/{id}` HTTP response. */
+export function readOperationHttpResponse(
+  response: OperationHttpResponse
+): unknown {
+  if (!response.ok) {
+    const status = `${response.status} ${response.statusText}`.trim();
+    const body = response.body.trim() || "<empty body>";
+    throw new Error(
+      `The operation status request failed with HTTP ${status}: ${body}`
+    );
+  }
+  return parseJsonPayload(response.body, "the operation status request");
+}
+
 /**
  * Narrows one `/api/operations/{id}` poll.
  *

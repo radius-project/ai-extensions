@@ -45,6 +45,7 @@ import {
   readAzureAccount,
   readEnvironmentVariables,
   readOidcSubjectCustomization,
+  readOperationHttpResponse,
   readOperationSnapshot,
   readRepositoryIdentity,
   readServicePrincipalObjectId,
@@ -244,10 +245,17 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
         ReturnType<typeof readOperationSnapshot>
       > =>
         readOperationSnapshot(
-          await page.evaluate(async (id) => {
-            const response = await fetch(`/api/operations/${id}`);
-            return (await response.json()) as unknown;
-          }, operationId)
+          readOperationHttpResponse(
+            await page.evaluate(async (id) => {
+              const response = await fetch(`/api/operations/${id}`);
+              return {
+                ok: response.ok,
+                status: response.status,
+                statusText: response.statusText,
+                body: await response.text()
+              };
+            }, operationId)
+          )
         );
 
       await expect

@@ -13,6 +13,7 @@ import {
   readDirectoryPaths,
   readEnvironmentVariables,
   readOidcSubjectCustomization,
+  readOperationHttpResponse,
   readOperationSnapshot,
   readRepositoryIdentity,
   readServicePrincipalObjectId,
@@ -741,6 +742,56 @@ describe("readOperationSnapshot", () => {
     expect(
       readOperationSnapshot({ operation: { state: "running", error: null } })
     ).toEqual({ state: "running", terminal: false, error: "" });
+  });
+});
+
+describe("readOperationHttpResponse", () => {
+  it("parses a successful operation response", () => {
+    expect(
+      readOperationHttpResponse({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        body: '{"operation":{"state":"running"}}'
+      })
+    ).toEqual({ operation: { state: "running" } });
+  });
+
+  it("reports a failed response with its HTTP status and body", () => {
+    expect(() =>
+      readOperationHttpResponse({
+        ok: false,
+        status: 503,
+        statusText: "Service Unavailable",
+        body: "setup worker unavailable"
+      })
+    ).toThrow(
+      "The operation status request failed with HTTP 503 Service Unavailable: setup worker unavailable"
+    );
+  });
+
+  it("reports an empty failed response body explicitly", () => {
+    expect(() =>
+      readOperationHttpResponse({
+        ok: false,
+        status: 500,
+        statusText: "",
+        body: " "
+      })
+    ).toThrow("HTTP 500: <empty body>");
+  });
+
+  it("identifies malformed JSON from a successful response", () => {
+    expect(() =>
+      readOperationHttpResponse({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        body: "<html>not JSON</html>"
+      })
+    ).toThrow(
+      /operation status request returned output that is not valid JSON/
+    );
   });
 });
 
