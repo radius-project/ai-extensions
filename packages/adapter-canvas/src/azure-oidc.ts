@@ -273,13 +273,9 @@ export function buildSignedInUserObjectIdArgs(): string[] {
  * `az account show` reports a service principal's `user.name` as its appId,
  * while owner add and owner list both speak object ids.
  *
- * This is the same argv as `resolveServicePrincipalObjectId` in
- * `server/routes/azure-auto-setup-credentials.ts`, deliberately without its
- * propagation-retry loop: that call reads the service principal of an
- * application the flow just created, where Entra replication can lag, whereas
- * the caller's own service principal already exists. A failure here means a
- * missing Graph permission, the wrong tenant, or a broken login, so it must
- * fail closed immediately rather than retry a real error slowly.
+ * the caller's own service principal already exists. A failure here should fail
+ * closed (do not guess at another identity), while callers may still apply a
+ * short, bounded retry for transient throttling or network errors.
  */
 export function buildServicePrincipalObjectIdArgs({
   appId
