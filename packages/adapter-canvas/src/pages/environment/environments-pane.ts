@@ -395,6 +395,7 @@ export function environmentsPaneMarkup(
         <div style="display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin:8px 0;">
           <div id="azure-discover-status" style="font-size:12px; color:var(--rad-text-tertiary);">Select a credential profile to discover resources.</div>
           <button type="button" id="azure-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
+          <div id="azure-discover-remediation" hidden></div>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
           <div class="rad-field">

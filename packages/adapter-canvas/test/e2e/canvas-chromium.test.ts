@@ -1511,6 +1511,90 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#azure-namespace-custom")).toBeVisible();
   });
 
+  test("turns Azure MFA discovery failure into a tenant-scoped login callout", async ({
+    page,
+    canvas
+  }) => {
+    const remediationRequests: unknown[] = [];
+    await page.route("**/api/run-remediation", async (route) => {
+      remediationRequests.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ success: true })
+      });
+    });
+    const scenario = defaultFakeCliScenario();
+    const resourceCommands = azureDiscoveryCommands({
+      subscriptionId: PROFILE_SUBSCRIPTION_ID,
+      clusters: [],
+      resourceGroups: []
+    });
+    const clusterList = resourceCommands.find(
+      (command) =>
+        command.tool === "az" &&
+        command.args?.[0] === "aks" &&
+        command.args[1] === "list"
+    );
+    if (!clusterList) {
+      throw new Error("discovery stubs no longer include the AKS list step");
+    }
+    clusterList.exitCode = 1;
+    clusterList.stdout = "";
+    clusterList.stderr =
+      "invalid_grant AADSTS50076 trace-id=not-useful Status_InteractionRequired";
+    scenario.commands.push(...resourceCommands);
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "environment");
+
+    await openEnvironmentWizard(page);
+
+    await expect(page.locator("#azure-discover-status")).toHaveText(
+      "Discovery failed: Azure CLI sign-in is required to discover resources. (AADSTS50076)"
+    );
+    const remediation = page.locator("#azure-discover-remediation");
+    await expect(remediation).toContainText("Sign in to Azure CLI");
+    await expect(remediation).toContainText(
+      `az login --use-device-code --tenant ${VALID_TENANT_ID}`
+    );
+    const runButton = remediation.getByRole("button", {
+      name: COMMAND_RUN_LABEL
+    });
+    await expect(runButton).toBeVisible();
+    await expect(page.locator("body")).not.toContainText("trace-id=not-useful");
+    await expectNoWcagViolations(page);
+
+    await runButton.focus();
+    await expect(runButton).toBeFocused();
+    await runButton.press("Enter");
+    await expect
+      .poll(() => remediationRequests)
+      .toEqual([
+        {
+          id: "azure-cli-login",
+          params: {
+            tenantId: VALID_TENANT_ID,
+            nextStep: "refresh-discovery"
+          },
+          confirmed: false
+        }
+      ]);
+    await expect(remediation.getByRole("status")).toContainText(
+      "Copilot was asked to run this command"
+    );
+
+    clusterList.exitCode = 0;
+    clusterList.stderr = "";
+    clusterList.stdout = "[]";
+    await canvas.setScenario(scenario);
+    await page.getByRole("button", { name: "Refresh" }).click();
+
+    await expect(page.locator("#azure-discover-status")).toHaveText(
+      "Found 0 cluster(s), 0 resource group(s)"
+    );
+    await expect(remediation).toBeEmpty();
+  });
+
   test("verifies Azure credentials through the fake az boundary and keeps secret-shaped stderr out of the page @safety", async ({
     page,
     canvas

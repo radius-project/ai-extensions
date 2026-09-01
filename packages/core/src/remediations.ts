@@ -261,9 +261,14 @@ function buildAzureCliLogin(
   params: Readonly<Record<string, unknown>>
 ): Remediation {
   const tenantId = guid(params.tenantId);
+  const nextStep =
+    params.nextStep === "refresh-discovery" ? "refresh-discovery" : "";
   return {
     id: "azure-cli-login",
-    params: tenantId ? { tenantId } : {},
+    params: {
+      ...(tenantId ? { tenantId } : {}),
+      ...(nextStep ? { nextStep } : {})
+    },
     title: "Sign in to Azure CLI",
     displayCommand: azureLoginCommand(tenantId),
     argv: [azureLoginArgv(tenantId)],
@@ -273,7 +278,10 @@ function buildAzureCliLogin(
     confirmBody:
       "No active Azure session was found. Would you like Copilot to start the Azure login flow?",
     confirmLabel: "Start Azure login",
-    followUp: `After the login finishes, ${RETURN_AND_VERIFY}.`
+    followUp:
+      nextStep === "refresh-discovery" ?
+        "After the login finishes, return to the Radius canvas and refresh resource discovery."
+      : `After the login finishes, ${RETURN_AND_VERIFY}.`
   };
 }
 
@@ -699,7 +707,9 @@ function displayPromptFor(remediation: Remediation): string {
     case "azure-cli-install":
       return "Installing Azure CLI and signing in so the Radius canvas can verify these Azure credentials.";
     case "azure-cli-login":
-      return "Signing in to Azure CLI so the Radius canvas can verify these Azure credentials.";
+      return remediation.params.nextStep === "refresh-discovery" ?
+          "Signing in to Azure CLI so the Radius canvas can refresh Azure resource discovery."
+        : "Signing in to Azure CLI so the Radius canvas can verify these Azure credentials.";
     case "azure-subscription-set":
       return "Selecting the Azure subscription the Radius canvas needs.";
     case "aws-cli-login":
@@ -726,7 +736,9 @@ function reasonFor(remediation: Remediation): string {
     case "azure-cli-install":
       return "Azure CLI is not installed in this environment, so the Radius canvas can't verify Azure credentials yet.";
     case "azure-cli-login":
-      return "The Radius canvas needs an active Azure CLI session before it can verify these credentials.";
+      return remediation.params.nextStep === "refresh-discovery" ?
+          "The Radius canvas needs an active Azure CLI session before it can discover Azure resources."
+        : "The Radius canvas needs an active Azure CLI session before it can verify these credentials.";
     case "azure-subscription-set":
       return "The Radius canvas needs the Azure CLI pointed at a specific subscription before it can continue.";
     case "aws-cli-login":

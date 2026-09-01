@@ -362,6 +362,18 @@ describe("environmentsPaneMarkup — stop, continue and rollback", () => {
     expect(html).toContain('id="env-progress-failure-title"');
   });
 
+  describe("environmentsPaneMarkup — discovery remediation", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+
+    it("provides a stable host beside Azure discovery status and refresh", () => {
+      expect(html).toContain('id="azure-discover-status"');
+      expect(html).toContain('id="azure-refresh-btn"');
+      expect(html).toContain(
+        '<div id="azure-discover-remediation" hidden></div>'
+      );
+    });
+  });
+
   it("renders a guidance list for a path Radius cannot offer", () => {
     expect(html).toContain(
       '<ul id="env-progress-command-guidance" class="env-progress__command-guidance" style="display:none;"></ul>'
