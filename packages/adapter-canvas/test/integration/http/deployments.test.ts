@@ -977,6 +977,9 @@ function startDeploy(monitorOverride?: DeployMonitorService): DeployHarness {
       runGh: () => {
         throw new Error("the deploy harness must not run gh");
       },
+      probeDeleteConflict: () => {
+        throw new Error("the deploy harness must not probe delete conflicts");
+      },
       readProcessEnv: () => ({}),
       setTimer: () => ({}),
       deployRequest,

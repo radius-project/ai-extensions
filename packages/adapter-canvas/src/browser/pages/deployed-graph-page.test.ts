@@ -9,6 +9,7 @@ import {
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
+import type { FakeElement } from "../../../test/support/browser/fakes.js";
 import {
   graphProgressElapsed,
   graphProgressStages
