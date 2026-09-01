@@ -573,6 +573,47 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
     ]);
   });
 
+  it("accepts string-zero exit codes for ownership and provenance reads", async () => {
+    const test = harness({
+      overrides: { explicitAppId: APP_ID },
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad signed-in-user show")) {
+          return command({ stdout: USER_ID });
+        }
+        if (line.startsWith("ad app owner list")) {
+          return command({ code: "0", stdout: USER_ID });
+        }
+        if (line.startsWith("ad app show --id") && line.includes("tags")) {
+          return command({
+            code: "0",
+            stdout: JSON.stringify(
+              buildRadiusAppProvenanceTags({
+                repo: "octo/app",
+                environment: "dev",
+                operationId: "op-earlier"
+              })
+            )
+          });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toMatchObject({
+      clientId: APP_ID,
+      state: "reused"
+    });
+    expect(test.recorded).toEqual([
+      expect.objectContaining({
+        state: "reused",
+        origin: "radius_earlier_setup"
+      })
+    ]);
+  });
+
   it("fails closed when ownership of an explicit application cannot be read", async () => {
     const test = harness({
       overrides: { explicitAppId: APP_ID },

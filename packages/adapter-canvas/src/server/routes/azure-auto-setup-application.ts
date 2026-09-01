@@ -227,7 +227,7 @@ export async function resolveAzureAutoSetupApplication({
     const caller = await getCallerObjectId();
     if (!caller.ok) return { ok: false as const, stderr: caller.stderr };
     const result = await runAz(buildAppOwnerListArgs({ appId }));
-    if (result.code !== 0) {
+    if (result.code !== 0 && result.code !== "0") {
       return { ok: false as const, stderr: result.stderr };
     }
     return {
@@ -239,7 +239,7 @@ export async function resolveAzureAutoSetupApplication({
     appId: string
   ): Promise<RadiusAppProvenanceInput | undefined> => {
     const result = await runAz(buildAppTagShowArgs({ appId }));
-    if (result.code !== 0) return undefined;
+    if (result.code !== 0 && result.code !== "0") return undefined;
     return {
       tags: parseAppTags(result.stdout) || [],
       repo: oidc.fullName,
