@@ -26,6 +26,11 @@ on:
         description: 'Name of the application or environment to delete'
         type: string
         required: true
+      force:
+        description: 'Force the delete even if resources are stuck in a non-terminal state (may orphan external resources)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   id-token: write
@@ -219,6 +224,7 @@ jobs:
         with:
           resource-type: ${{ inputs.resource_type }}
           name: ${{ inputs.name }}
+          force: ${{ inputs.force }}
 
       - name: Teardown
         if: always()

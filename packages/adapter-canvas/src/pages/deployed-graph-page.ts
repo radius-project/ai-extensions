@@ -6,6 +6,7 @@ import {
   ABANDON_DEPLOYMENT_DIALOG_HTML,
   DELETE_DEPLOYMENT_DIALOG_HTML
 } from "./fragments.js";
+import { confirmDialogMarkup } from "./environment/confirm-dialog.js";
 import { inlineJson } from "./encoding.js";
 
 export function deployedGraphPage(state: CanvasState = {}): string {
@@ -56,6 +57,7 @@ ${graphHeader("deployed")}
 </div>
 ${DELETE_DEPLOYMENT_DIALOG_HTML}
 ${ABANDON_DEPLOYMENT_DIALOG_HTML}
+${confirmDialogMarkup()}
 <div id="deployed-deleting-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:60; align-items:center; justify-content:center;">
   <div class="rad-card" style="max-width:520px; width:90%; margin:0; display:flex; align-items:center; gap:18px;">
     <div class="rad-spinner-lg" aria-hidden="true"></div>
