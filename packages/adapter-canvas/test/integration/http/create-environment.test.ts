@@ -2646,7 +2646,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(await response.json()).toMatchObject({
       success: true,
       actionRequired: false,
-      pullRequestUrl: "",
+      pullRequestUrl: "https://github.com/octo/app/pull/7",
       pullRequestBranch: null,
       pullRequestBaseBranch: null,
       verifyRunUrl: "https://github.com/octo/app/actions/runs/4242"
@@ -2658,7 +2658,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
       mode: "pull_request",
       branch: "radius/setup-dev-workflows-op-http",
       baseBranch: "main",
-      pullRequestUrl: null
+      pullRequestUrl: "https://github.com/octo/app/pull/7"
     });
     expect(harness.journal).toContain("setupPushOperationMarker:op-http");
     expect(harness.operation.verification).toMatchObject({
@@ -2820,7 +2820,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
 
     expect(await response.json()).toMatchObject({
       actionRequired: false,
-      pullRequestUrl: "",
+      pullRequestUrl: "https://github.com/octo/app/pull/7",
       pullRequestBranch: null
     });
     expect(harness.operation.verification).toMatchObject({
@@ -2838,7 +2838,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     ).toBe(true);
     expect(harness.commitStates.at(-1)).toMatchObject({
       mode: "pull_request",
-      pullRequestUrl: null
+      pullRequestUrl: "https://github.com/octo/app/pull/7"
     });
   });
 

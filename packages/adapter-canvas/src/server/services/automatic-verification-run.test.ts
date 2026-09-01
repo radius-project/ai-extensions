@@ -63,6 +63,38 @@ describe("automatic verification run discovery", () => {
     ).toContain("without the exact operation marker");
   });
 
+  it.each([
+    {
+      name: "another branch",
+      unrelated: run({ headBranch: "feature/unrelated" })
+    },
+    {
+      name: "before automatic verification started",
+      unrelated: run({
+        createdAt: new Date(STARTED_AT - 1).toISOString(),
+        displayTitle: "Verify dev"
+      })
+    }
+  ])(
+    "ignores a run from $name while waiting for the exact run",
+    async ({ unrelated }) => {
+      const responses = [result([unrelated]), result([run()])];
+      const sleeps: number[] = [];
+
+      const outcome = await discoverAutomaticVerificationRun({
+        identity,
+        listRuns: async () => responses.shift() ?? result([]),
+        stopBoundary: async () => true,
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds);
+        }
+      });
+
+      expect(outcome).toMatchObject({ state: "discovered", runId: "41" });
+      expect(sleeps).toEqual([2000]);
+    }
+  );
+
   it("fails closed when multiple exact runs exist", async () => {
     const outcome = await discoverAutomaticVerificationRun({
       identity,
