@@ -14,6 +14,7 @@ import {
 import { initializeDiscoveryPanel } from "./discovery.js";
 import { createEnvironmentConfirmDialog } from "./confirm-dialog.js";
 import {
+  findNamespaceConflict,
   initializeEnvironmentPane,
   isEnvironmentPaneController,
   type EnvironmentPaneController
@@ -448,6 +449,11 @@ export function initializeEnvironmentPage(
       );
       return;
     }
+    // The profile's identity is validated before the namespace check, because
+    // the check compares on it. A profile that cannot name its subscription or
+    // account makes two same-named clusters indistinguishable, and the check
+    // would report a collision when the real fault is the profile. That
+    // diagnosis is also unactionable: no namespace change fixes it.
     if (provider === "azure" && (subscriptionId === "" || tenantId === "")) {
       showFormError(
         "The selected profile needs both a tenant ID and subscription ID. Delete the profile and create it again with those values before creating the environment."
@@ -457,6 +463,24 @@ export function initializeEnvironmentPage(
     if (provider === "aws" && (accountId === "" || region === "")) {
       showFormError(
         "The selected profile needs both an account ID and region. Delete the profile and create it again with those values before creating the environment."
+      );
+      return;
+    }
+    const namespaceConflict = findNamespaceConflict(
+      environments.listedEnvironments(),
+      {
+        provider,
+        cluster,
+        namespace,
+        subscriptionId,
+        accountId,
+        region,
+        excludeEnvironment: environments.editingEnvironment()
+      }
+    );
+    if (namespaceConflict) {
+      showFormError(
+        `Namespace "${namespace}" on cluster "${cluster}" already belongs to environment "${namespaceConflict.name}". Radius allows one environment per namespace, so choose a different namespace or deploy to "${namespaceConflict.name}".`
       );
       return;
     }
@@ -590,6 +614,13 @@ export function initializeEnvironmentPage(
     environments.loadEnvironmentTable();
   }
   if (queryValue(context.nav.search, "new") === "1") {
+    // The namespace guard can only refuse a duplicate against environments it
+    // has actually listed, and a deep link onto the credentials sub-tab opens
+    // the create form without ever loading them. Load them here so the form is
+    // never submittable against a listing that was never fetched.
+    if (state.activeSubtab === "credentials") {
+      environments.loadEnvironmentTable();
+    }
     environments.showEnvironmentForm({
       name: queryValue(context.nav.search, "name"),
       profile: queryValue(context.nav.search, "profile")
