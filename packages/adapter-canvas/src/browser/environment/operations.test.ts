@@ -947,6 +947,19 @@ describe("describeVerifyFailure", () => {
     expect(desc.guidance).not.toContain("(");
   });
 
+  it("omits the parenthetical when component is the generic cluster label", () => {
+    const desc = describeVerifyFailure(
+      failure({
+        category: "cluster-unreachable",
+        component: "Kubernetes cluster"
+      }),
+      "azure"
+    );
+    // The headline already says "Kubernetes cluster"; repeating it in a
+    // parenthetical reads as "the cluster (Kubernetes cluster)".
+    expect(desc.guidance).not.toContain("(");
+  });
+
   it("describes a cloud-unreachable failure", () => {
     const desc = describeVerifyFailure(
       failure({ category: "cloud-unreachable" }),

@@ -872,6 +872,68 @@ describe("environments — bypass-verification", () => {
     });
   });
 
+  it("400s when a required field is the wrong type instead of throwing", async () => {
+    // A non-string repo must be a clean 400, not a coerced value or a
+    // "trim is not a function" TypeError swallowed as a 500.
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      JSON.stringify({
+        repo: { nested: true },
+        environment: 7,
+        operationId: "op1",
+        runId: "555"
+      })
+    );
+    await handleBypassVerification(ctx, deps({}));
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "repo, environment, operationId and runId are required."
+    });
+  });
+
+  it("400s when runId is neither a string nor a number", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      JSON.stringify({
+        repo: "o/r",
+        environment: "dev",
+        operationId: "op1",
+        runId: { not: "scalar" }
+      })
+    );
+    await handleBypassVerification(ctx, deps({}));
+    expect(recording.status).toBe(400);
+    expect(JSON.parse(recording.body).error).toContain("are required");
+  });
+
+  it("accepts a numeric runId (coerced to a string for matching)", async () => {
+    const { run, executor } = scriptedExecutor();
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      JSON.stringify({
+        repo: "o/r",
+        environment: "dev",
+        operationId: "op1",
+        runId: 555
+      })
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
+        getSelectedGitHubExecutor: () => executor,
+        envListCacheDelete: vi.fn()
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(recording.status).toBe(200);
+    expect(run).toHaveBeenCalledWith(
+      expect.arrayContaining(["variable", "set", "--body", "555"]),
+      { timeout: 20000 }
+    );
+  });
+
   it("an empty body parses to {} and 400s rather than throwing", async () => {
     const { recording, ctx } = context("POST", "/api/bypass-verification", "");
     await handleBypassVerification(ctx, deps({}));

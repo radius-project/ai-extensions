@@ -435,10 +435,19 @@ export async function handleBypassVerification(
     return;
   }
   try {
-    const repo = String(data.repo ?? "").trim();
-    const envName = String(data.environment ?? "").trim();
-    const operationId = String(data.operationId ?? "").trim();
-    const runId = String(data.runId ?? "").trim();
+    // Every identifier is a JSON boundary value. Validate types explicitly so a
+    // non-string field yields a clean 400 rather than a coerced value or a
+    // "trim is not a function" TypeError. A GitHub run id may arrive as either a
+    // JSON number or a string; the rest must be strings.
+    const readStringField = (value: unknown): string =>
+      typeof value === "string" ? value.trim() : "";
+    const repo = readStringField(data.repo);
+    const envName = readStringField(data.environment);
+    const operationId = readStringField(data.operationId);
+    const runId =
+      typeof data.runId === "number" || typeof data.runId === "string" ?
+        String(data.runId).trim()
+      : "";
     if (!repo || !envName || !operationId || !runId) {
       json(400, {
         error: "repo, environment, operationId and runId are required."

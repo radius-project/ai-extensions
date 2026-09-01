@@ -933,7 +933,15 @@ export function describeVerifyFailure(
     };
   }
   if (status.category === "cluster-unreachable") {
-    const named = status.component !== "" ? ` (${status.component})` : "";
+    // The classifier defaults component to the generic "Kubernetes cluster"
+    // label, which the headline already names. Only add the parenthetical when
+    // component is something more specific, so a richer future value still
+    // renders but today's default doesn't read as "the cluster (Kubernetes
+    // cluster)".
+    const named =
+      status.component !== "" && status.component !== "Kubernetes cluster" ?
+        ` (${status.component})`
+      : "";
     return {
       headline: "Radius couldn’t reach the Kubernetes cluster.",
       guidance: `Credentials were accepted, but the cluster${named} couldn’t be reached. Check it is running and reachable, then re-verify — or create the environment now and deploy once it’s reachable.`,
