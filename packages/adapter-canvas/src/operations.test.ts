@@ -1493,6 +1493,9 @@ describe("delete stage inventory", () => {
     expect(
       stages.every((s) => typeof s.label === "string" && s.label.length > 0)
     ).toBe(true);
+    expect(
+      stages.find((stage) => stage.id === STAGE_DELETE_STATE_PACKAGE)?.label
+    ).toBe("Delete GHCR state package");
     expect(stages.every((s) => s.state === "pending")).toBe(true);
   });
 

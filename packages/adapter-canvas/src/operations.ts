@@ -1054,7 +1054,7 @@ const STAGE_LABELS = {
   [STAGE_DELETE_RADIUS_ENV]: "Delete Radius environment",
   [STAGE_DELETE_CREDENTIAL]: "Remove federated credential",
   [STAGE_DELETE_GITHUB_ENV]: "Delete GitHub environment",
-  [STAGE_DELETE_STATE_PACKAGE]: "Delete state package",
+  [STAGE_DELETE_STATE_PACKAGE]: "Delete GHCR state package",
   [STAGE_REVIEW_APP_REGISTRATION]: "Review app registration"
 };
 
