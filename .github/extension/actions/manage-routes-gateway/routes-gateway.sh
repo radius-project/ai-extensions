@@ -44,6 +44,9 @@ readonly -a GATEWAY_API_OBJECTS=(
     "udproutes.gateway.networking.k8s.io"
     "referencegrants.gateway.networking.k8s.io"
 )
+# Together with GATEWAY_API_OBJECTS and networking.k8s.io Ingresses, this is the
+# complete set of Kubernetes APIs watched by the pinned Contour chart. Direct
+# external clients of the Envoy Service cannot be discovered from API objects.
 readonly -a CONTOUR_OBJECTS=(
     "httpproxies.projectcontour.io"
     "tlscertificatedelegations.projectcontour.io"
@@ -536,6 +539,7 @@ desired_service_type() {
 
 desired_external_traffic_policy() {
     if [[ "${EXPOSURE}" == "public" ]]; then
+        # Preserve client IPs; AKS/EKS health-check Local endpoints and route only to nodes with Envoy pods.
         printf 'Local\n'
     else
         printf '\n'
@@ -1164,6 +1168,7 @@ ensure_gateway() {
 cleanup_gateway() {
     local crd_state
     local crd_ownership_states
+    local fresh_release_state
     local gateway_class_ownership_state
     local gateway_ownership_state
     local release_state
@@ -1226,6 +1231,12 @@ cleanup_gateway() {
     delete_resource_for_ownership_state \
         "${gateway_class_ownership_state}" gatewayclass "" \
         "${DEFAULT_GATEWAY_CLASS}"
+    fresh_release_state="$(contour_release_state)" ||
+        fail "failed to refresh Contour Helm release state before uninstall"
+    if [[ "${fresh_release_state}" != "${release_state}" ]]; then
+        echo "Contour Helm release state changed during cleanup; retaining the controller and CRDs."
+        return 0
+    fi
     if [[ "${release_state}" == "owned" ]]; then
         helm_target uninstall "${CONTOUR_RELEASE}" \
             -n "${DEFAULT_GATEWAY_NAMESPACE}" --wait \

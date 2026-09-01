@@ -137,12 +137,25 @@ case "${args}" in
         esac
         ;;
     *" get values contour "*)
-        if [[ "${HELM_VALUES_STATE}" == "failure" ]]; then
+        values_calls_file="${STATE}/helm-values-calls"
+        values_calls=0
+        [[ -f "${values_calls_file}" ]] &&
+            values_calls="$(cat "${values_calls_file}")"
+        values_calls=$((values_calls + 1))
+        printf '%s' "${values_calls}" >"${values_calls_file}"
+        if [[ "${HELM_VALUES_STATE}" == "failure" ||
+            ("${HELM_VALUES_STATE}" == "owned-then-failure" &&
+                "${values_calls}" -gt 1) ]]; then
             echo 'synthetic Helm values failure' >&2
             exit 1
         elif [[ "${HELM_VALUES_STATE}" == "malformed" ]]; then
             printf '%s\n' 'not-json'
+        elif [[ "${HELM_VALUES_STATE}" == "owned-then-unowned" &&
+            "${values_calls}" -gt 1 ]]; then
+            printf '%s\n' '{}'
         elif [[ "${HELM_OWNED}" == "true" ||
+            "${HELM_VALUES_STATE}" == "owned-then-unowned" ||
+            "${HELM_VALUES_STATE}" == "owned-then-failure" ||
             -f "${STATE}/helm-installed" ]]; then
             printf '%s\n' \
                 '{"commonAnnotations":{"radius-project.io/routes-gateway-lifecycle":"v1"}}'
@@ -1156,6 +1169,32 @@ CRDS_OWNED='false'
 export HELM_STATE HELM_OWNED CRDS_OWNED
 run_action cleanup
 assert_success "preserve pre-existing CRDs"
+assert_no_call "kubectl delete customresourcedefinition"
+
+reset_case
+HELM_STATE='present'
+HELM_VALUES_STATE='owned-then-unowned'
+CRDS_OWNED='true'
+GATEWAY_RESOURCES_OWNED='true'
+export HELM_STATE HELM_VALUES_STATE CRDS_OWNED GATEWAY_RESOURCES_OWNED
+run_action cleanup
+assert_success "fresh Helm ownership preserves changed release"
+assert_output "Contour Helm release state changed during cleanup"
+assert_no_call "helm uninstall"
+assert_no_call "kubectl delete customresourcedefinition"
+[[ "$(grep -c 'helm get values contour' "${CALLS}")" == "2" ]] ||
+    fail "cleanup must read Contour ownership again before uninstall"
+
+reset_case
+HELM_STATE='present'
+HELM_VALUES_STATE='owned-then-failure'
+CRDS_OWNED='true'
+GATEWAY_RESOURCES_OWNED='true'
+export HELM_STATE HELM_VALUES_STATE CRDS_OWNED GATEWAY_RESOURCES_OWNED
+run_action cleanup
+assert_failure "fresh Helm ownership discovery failure"
+assert_output "failed to refresh Contour Helm release state before uninstall"
+assert_no_call "helm uninstall"
 assert_no_call "kubectl delete customresourcedefinition"
 
 # Ownership discovery distinguishes confirmed absence from lookup failures and
