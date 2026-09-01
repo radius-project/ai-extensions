@@ -10,8 +10,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 const SCRIPTS = ["plugins.mjs", "validate-plugin-dist.mjs"].map((name) => [
   name,
@@ -20,45 +20,76 @@ const SCRIPTS = ["plugins.mjs", "validate-plugin-dist.mjs"].map((name) => [
 const temporaryRepositories = [];
 const SOURCE = "a".repeat(40);
 const OTHER_SOURCE = "b".repeat(40);
+const MANIFEST_SCHEMA =
+  "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+const schemaFetchResponses = new Map();
+let manifestSchemaResponse;
+const SCHEMA_FETCH_PRELOAD = [
+  "globalThis.fetch = async (url) => {",
+  "  if (url !== process.env.RADIUS_TEST_SCHEMA_URL) {",
+  '    throw new Error("unexpected schema URL: " + url);',
+  "  }",
+  "  if (process.env.RADIUS_TEST_SCHEMA_ERROR !== undefined) {",
+  "    throw new Error(process.env.RADIUS_TEST_SCHEMA_ERROR);",
+  "  }",
+  "  return new Response(process.env.RADIUS_TEST_SCHEMA_BODY, {",
+  "    status: Number(process.env.RADIUS_TEST_SCHEMA_STATUS)",
+  "  });",
+  "};",
+  ""
+].join("\n");
 
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+function configureSchemaFetch(
+  root,
+  { body = manifestSchemaResponse, status = 200, error } = {}
+) {
+  if (body === undefined) throw new Error("schema response is not initialized");
+  schemaFetchResponses.set(root, { body, status, error });
+}
+
 function repository({
+  pluginName = "radius",
   packageJson = {},
   manifest = {},
   readme = "Radius\n"
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "radius-dist-"));
   temporaryRepositories.push(root);
-  const plugin = join(root, "plugins", "radius");
+  const plugin = join(root, "plugins", pluginName);
   const dist = join(plugin, "dist");
   mkdirSync(join(root, "scripts"));
   mkdirSync(join(dist, "skills"), { recursive: true });
   for (const [name, source] of SCRIPTS) {
     copyFileSync(source, join(root, "scripts", name));
   }
+  writeFileSync(join(root, "schema-fetch.mjs"), SCHEMA_FETCH_PRELOAD);
+  configureSchemaFetch(root);
 
   writeJson(join(plugin, "package.json"), {
-    name: "radius",
+    name: pluginName,
     version: "1.2.0",
     scripts: { "test:artifact": "echo tested" }
   });
-  writeJson(join(plugin, "plugin.json"), { name: "radius", version: "1.2.0" });
+  writeJson(join(plugin, "plugin.json"), {
+    name: pluginName,
+    version: "1.2.0"
+  });
   writeFileSync(join(plugin, "README.md"), "Radius source\n");
   writeJson(join(dist, "package.json"), {
-    name: "radius",
+    name: pluginName,
     version: "1.2.0",
     main: "extension.mjs",
     radiusSourceRef: SOURCE,
     ...packageJson
   });
   writeJson(join(dist, "plugin.json"), {
-    name: "radius",
+    $schema: MANIFEST_SCHEMA,
+    name: pluginName,
     version: "1.2.0",
-    skills: "./skills/",
-    extensions: ".",
     ...manifest
   });
   writeFileSync(join(dist, "README.md"), readme);
@@ -69,15 +100,29 @@ function repository({
 }
 
 function run(root, ...args) {
+  const pluginArgs = args.includes("--plugin") ? [] : ["--plugin", "radius"];
+  const schemaResponse = schemaFetchResponses.get(root);
+  if (schemaResponse === undefined) {
+    throw new Error(`schema response is not configured for ${root}`);
+  }
+  const env = {
+    ...process.env,
+    RADIUS_TEST_SCHEMA_URL: MANIFEST_SCHEMA,
+    RADIUS_TEST_SCHEMA_BODY: schemaResponse.body,
+    RADIUS_TEST_SCHEMA_STATUS: String(schemaResponse.status)
+  };
+  if (schemaResponse.error !== undefined) {
+    env.RADIUS_TEST_SCHEMA_ERROR = schemaResponse.error;
+  }
   const result = spawnSync(
     process.execPath,
     [
+      `--import=${pathToFileURL(join(root, "schema-fetch.mjs")).href}`,
       join(root, "scripts", "validate-plugin-dist.mjs"),
-      "--plugin",
-      "radius",
+      ...pluginArgs,
       ...args
     ],
-    { cwd: root, encoding: "utf8" }
+    { cwd: root, encoding: "utf8", env }
   );
   return {
     status: result.status,
@@ -86,20 +131,75 @@ function run(root, ...args) {
   };
 }
 
+beforeAll(async () => {
+  const response = await fetch(MANIFEST_SCHEMA, {
+    headers: { accept: "application/schema+json, application/json" },
+    redirect: "error",
+    signal: AbortSignal.timeout(10_000)
+  });
+  if (!response.ok) {
+    throw new Error(`schema request failed with HTTP ${response.status}`);
+  }
+  manifestSchemaResponse = await response.text();
+}, 15_000);
+
 afterEach(() => {
   while (temporaryRepositories.length > 0) {
-    rmSync(temporaryRepositories.pop(), { recursive: true, force: true });
+    const root = temporaryRepositories.pop();
+    schemaFetchResponses.delete(root);
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
 describe("scripts/validate-plugin-dist.mjs", () => {
   it("accepts a complete manifest-driven plugin dist", () => {
-    const { root } = repository();
+    const { root } = repository({
+      manifest: {
+        description: "Model and deploy applications",
+        author: {
+          name: "Microsoft",
+          email: "radius@example.com",
+          url: "https://example.com/radius"
+        },
+        homepage: "https://radapp.io",
+        repository: "https://github.com/radius-project/ai-extensions",
+        license: "Apache-2.0",
+        keywords: ["radius", "deploy"]
+      }
+    });
 
     expect(run(root, "--version", "1.2.0", "--source", SOURCE)).toMatchObject({
       status: 0,
       stdout: "radius@1.2.0"
     });
+  });
+
+  it.each([
+    ["a network failure", { error: "offline" }, "could not be fetched"],
+    ["an HTTP failure", { status: 503 }, "failed with HTTP 503"],
+    ["malformed JSON", { body: "{broken" }, "not readable JSON"],
+    ["non-object JSON", { body: "null" }, "must be a JSON object"]
+  ])(
+    "fails closed when the schema response has %s",
+    (_label, response, message) => {
+      const { root } = repository();
+      configureSchemaFetch(root, response);
+
+      const result = run(root);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(message);
+    }
+  );
+
+  it("rejects a schema response with an unexpected identity", () => {
+    const { root } = repository();
+    const schema = JSON.parse(manifestSchemaResponse);
+    schema.$id = "https://example.com/plugin.schema.json";
+    configureSchemaFetch(root, { body: JSON.stringify(schema) });
+
+    const result = run(root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("unexpected $id");
   });
 
   it.each([
@@ -170,17 +270,7 @@ describe("scripts/validate-plugin-dist.mjs", () => {
       { packageJson: { main: "missing.mjs" } },
       "does not exist"
     ],
-    ["escaping main", { packageJson: { main: "../outside.mjs" } }, "escapes"],
-    [
-      "missing skills",
-      { manifest: { skills: "./missing/" } },
-      "does not exist"
-    ],
-    [
-      "absolute skills",
-      { manifest: { skills: "/tmp/skills" } },
-      "must stay inside"
-    ]
+    ["escaping main", { packageJson: { main: "../outside.mjs" } }, "escapes"]
   ])("rejects %s", (_label, options, message) => {
     const result = run(repository(options).root);
 
@@ -188,14 +278,15 @@ describe("scripts/validate-plugin-dist.mjs", () => {
     expect(result.stderr).toContain(message);
   });
 
-  it("validates every skills directory in an array", () => {
-    const { root } = repository({
-      manifest: { skills: ["./skills/", "./missing/"] }
-    });
+  // Agent Plugins 1.0.0 discovers skills from the fixed skills/ directory, so a
+  // dist that ships none is unusable no matter what the manifest says.
+  it("requires the fixed skills directory", () => {
+    const { root, dist } = repository();
+    rmSync(join(dist, "skills"), { recursive: true });
 
     const result = run(root);
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("./missing/");
+    expect(result.stderr).toContain("skills does not exist");
   });
 
   it("rejects symlinks in the published tree", () => {
@@ -233,12 +324,143 @@ describe("scripts/validate-plugin-dist.mjs", () => {
   it.each([
     ["a number", 7],
     ["an array", ["."]],
-    ["an object", {}]
+    ["null", null],
+    ["the legacy path string", "."]
   ])("rejects an extensions value that is %s", (_label, extensions) => {
     const result = run(repository({ manifest: { extensions } }).root);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("plugin.json#extensions");
+  });
+
+  it.each([
+    ["keywords", "radius"],
+    ["author", "Microsoft"]
+  ])("rejects a schema-invalid %s value", (field, value) => {
+    const result = run(repository({ manifest: { [field]: value } }).root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`plugin.json#${field}`);
+  });
+
+  it.each(["description", "homepage", "repository", "license"])(
+    "rejects a non-string %s value",
+    (field) => {
+      const result = run(repository({ manifest: { [field]: 7 } }).root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`plugin.json#${field} must be a string`);
+    }
+  );
+
+  it("rejects a non-string keyword", () => {
+    const result = run(
+      repository({ manifest: { keywords: ["radius", 7] } }).root
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("plugin.json#keywords[1] must be a string");
+  });
+
+  it.each([
+    ["an unknown field", { team: "Radius" }, "unknown fields: team"],
+    ["a non-string field", { name: 7 }, "author.name must be a string"]
+  ])("rejects an author object with %s", (_label, author, message) => {
+    const result = run(repository({ manifest: { author } }).root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(message);
+  });
+
+  it("accepts client data under a reverse-domain extension namespace", () => {
+    const { root } = repository({
+      manifest: { extensions: { "com.github.copilot": { logo: "logo.png" } } }
+    });
+
+    expect(run(root)).toMatchObject({ status: 0, stdout: "radius@1.2.0" });
+  });
+
+  it("rejects non-object extension namespace data", () => {
+    const result = run(
+      repository({
+        manifest: { extensions: { "com.github.copilot": "logo.png" } }
+      }).root
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "plugin.json#extensions.com.github.copilot must be an object"
+    );
+  });
+
+  it.each([
+    ["a single label", "copilot"],
+    ["an empty label", "com..copilot"],
+    ["an invalid DNS label", "com.github_copilot"],
+    ["an overlong DNS label", `com.${"a".repeat(64)}`]
+  ])("rejects an extension namespace with %s", (_label, namespace) => {
+    const result = run(
+      repository({ manifest: { extensions: { [namespace]: {} } } }).root
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("reverse-domain namespace");
+  });
+
+  it("accepts a plugin name at the schema length limit", () => {
+    const pluginName = "a".repeat(64);
+    const { root } = repository({ pluginName });
+
+    expect(run(root, "--plugin", pluginName)).toMatchObject({
+      status: 0,
+      stdout: `${pluginName}@1.2.0`
+    });
+  });
+
+  it("rejects a plugin name above the schema length limit", () => {
+    const pluginName = "a".repeat(65);
+    const { root } = repository({ pluginName });
+
+    const result = run(root, "--plugin", pluginName);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("plugin.json#name");
+  });
+
+  it.each([
+    ["a missing schema", undefined, "plugin.json#$schema is required"],
+    [
+      "a superseded schema",
+      "https://agent-plugins.org/schemas/0.9.0/x.json",
+      "plugin.json#$schema must be"
+    ]
+  ])("rejects %s identifier", (_label, schema, message) => {
+    const result = run(repository({ manifest: { $schema: schema } }).root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(message);
+  });
+
+  it("fails closed when the remote schema uses an unsupported keyword", () => {
+    const { root } = repository();
+    const schema = JSON.parse(manifestSchemaResponse);
+    schema.properties.description.format = "uri";
+    configureSchemaFetch(root, { body: JSON.stringify(schema) });
+
+    const result = run(root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("unsupported keyword");
+    expect(result.stderr).toContain("schema.properties.description.format");
+  });
+
+  // The manifest schema is closed, so a field the spec dropped would be
+  // reported and ignored by a conformant client rather than honored.
+  it("rejects fields outside the closed manifest schema", () => {
+    const result = run(repository({ manifest: { skills: "./skills/" } }).root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "plugin.json declares unknown fields: skills"
+    );
   });
 
   it("reports malformed JSON without a stack trace", () => {

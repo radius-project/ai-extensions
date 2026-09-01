@@ -12,9 +12,9 @@ graph TD
     end
 
     subgraph PluginSrc["plugins/radius (source, tracked)"]
-        Manifest["plugin.json<br/>(skills: ./skills/, extensions: .)"]
+        Manifest["plugin.json<br/>(Agent Plugins 1.0.0 manifest)"]
         Pkg["package.json<br/>(type: module, main: extension.mjs)"]
-        Skills["skills/<br/>(6 SKILL.md trees)"]
+        Skills["skills/<br/>(5 SKILL.md trees)"]
     end
 
     subgraph Dist["plugins/radius/dist (generated, git-ignored)"]
@@ -62,15 +62,15 @@ The plugin **source** lives at `plugins/radius/`; the **installable** plugin is 
 
 | Path                                | Origin          | Tracked? | Purpose                                                    |
 |-------------------------------------|-----------------|----------|------------------------------------------------------------|
-| `plugins/radius/plugin.json`        | source          | yes      | Manifest: `skills: "./skills/"`, `extensions: "."`.        |
+| `plugins/radius/plugin.json`        | source          | yes      | [Agent Plugins 1.0.0](https://agent-plugins.org) manifest. |
 | `plugins/radius/package.json`       | source          | yes      | Extension package: `type: module`, `main: extension.mjs`.  |
-| `plugins/radius/skills/`            | source          | yes      | The six skill trees (`SKILL.md` plus `references/`).       |
+| `plugins/radius/skills/`            | source          | yes      | The five skill trees (`SKILL.md` plus `references/`).      |
 | `plugins/radius/README.md`          | source          | yes      | Plugin documentation.                                      |
 | `plugins/radius/dist/`              | built           | no       | The complete installable plugin; git-ignored.              |
 | `plugins/radius/dist/extension.mjs` | built (esbuild) | no       | The canvas bundle, plus its `.map`.                        |
 | `plugins/radius/dist/workflows/`    | copied          | no       | Complete `.github/extension/` templates, actions, scripts. |
 
-Because `plugin.json` declares `extensions: "."`, the canvas `extension.mjs` and its `package.json` sit at the **plugin root** — which, for an install, is `dist/`. The build copies the tracked source into `dist/` so those relative paths resolve.
+The manifest targets the [Agent Plugins](https://agent-plugins.org) 1.0.0 schema, which is **closed**: the only permitted fields are `$schema`, `name`, `version`, `description`, `author`, `homepage`, `repository`, `license`, `keywords`, and `extensions`. Components load from fixed locations rather than manifest paths, so skills are discovered from `skills/` without being declared, and `extensions` — if present at all — is an object keyed by a reverse-domain client namespace, never a path. The canvas `extension.mjs` and its `package.json` sit at the **plugin root**, which for an install is `dist/`; the build copies the tracked source into `dist/` so those relative paths resolve.
 
 ### 2. The build: bundling the workspace, then assembling `dist/`
 
@@ -84,7 +84,7 @@ Because `plugin.json` declares `extensions: "."`, the canvas `extension.mjs` and
 
 esbuild transpiles the TypeScript core and inlines the `workspace:*` dependencies, producing a single self-contained `extension.mjs` (~700 KB minified). This file is the reason a build step is unavoidable: the plugin cannot ship hand-authored source because the canvas imports the **TypeScript** core via `workspace:*`, which must be transpiled and inlined first.
 
-The script then uses esbuild's `copy` loader to place `plugin.json`, `package.json`, `README.md`, and `skills/` next to the bundle, adds the repository `LICENSE`, and copies the complete `.github/extension/` tree to `dist/workflows/`. It writes the full checked-out source SHA to `package.json#radiusSourceRef` and compiles that same value into the workflow generator: remote template fetches and every first-party composite-action `uses:` resolve the commit that produced the plugin, never `main`, `edge`, or `latest`. Both the Node bundle and nested browser/resolver builds emit esbuild metafiles; their complete input union drives `THIRD-PARTY-NOTICES.txt`, including packages such as `yaml` that do not appear in the browser-only graph. The generic dist validator checks names, versions, source SHA, workflow assets, declared paths, README, license, confinement, and symlinks before upload or publication.
+The script then uses esbuild's `copy` loader to place `plugin.json`, `package.json`, `README.md`, and `skills/` next to the bundle, adds the repository `LICENSE`, and copies the complete `.github/extension/` tree to `dist/workflows/`. It writes the full checked-out source SHA to `package.json#radiusSourceRef` and compiles that same value into the workflow generator: remote template fetches and every first-party composite-action `uses:` resolve the commit that produced the plugin, never `main`, `edge`, or `latest`. Both the Node bundle and nested browser/resolver builds emit esbuild metafiles; their complete input union drives `THIRD-PARTY-NOTICES.txt`, including packages such as `yaml` that do not appear in the browser-only graph. The generic dist validator checks names, versions, the Agent Plugins manifest schema, source SHA, workflow assets, the fixed `skills/` location, README, license, confinement, and symlinks before upload or publication.
 
 The whole of `dist/` is git-ignored so `main` never carries large generated files that would cause constant merge conflicts.
 
