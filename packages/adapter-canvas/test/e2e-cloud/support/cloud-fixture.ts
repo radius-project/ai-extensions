@@ -21,7 +21,9 @@ import {
   expectSuccess,
   isGitHubApiNotFound,
   parseJsonArray,
+  parseJsonObject,
   type CloudCommandPort,
+  type CloudCommandResult,
   type CloudFixturePorts
 } from "./cloud-command-port.js";
 import {
@@ -36,6 +38,11 @@ import {
   shortenUniqueId,
   WORKFLOW_FALLBACK_BRANCH_PREFIX
 } from "./fixture-repository.js";
+import {
+  radiusApplicationSelector,
+  readKubernetesWorkloads,
+  type KubernetesWorkload
+} from "./deploy-journey.js";
 
 /** The Entra application the product creates, as the fixture observed it. */
 export interface AppRegistrationRecord {
@@ -84,6 +91,23 @@ export interface CloudFixture {
   assertFederatedCredentialAbsent(subject: string): Promise<void>;
   /** Waits until no role assignment for the principal remains in scope. */
   assertRoleAssignmentAbsent(principalId: string): Promise<void>;
+  /** Waits until Radius has rendered a ready workload on the target cluster. */
+  assertApplicationWorkloadsPresent(
+    application: string,
+    namespace: string
+  ): Promise<readonly KubernetesWorkload[]>;
+  /** Waits until no workload for the application remains on the target cluster. */
+  assertApplicationWorkloadsAbsent(
+    application: string,
+    namespace: string
+  ): Promise<void>;
+  /** Reads application workloads once without polling. */
+  readApplicationWorkloads(
+    application: string,
+    namespace: string
+  ): Promise<readonly KubernetesWorkload[]>;
+  /** Reports whether the application namespace exists on the target cluster. */
+  namespaceExists(namespace: string): Promise<boolean>;
   /**
    * Best-effort removal of product-created state left behind by this run.
    *
@@ -258,6 +282,67 @@ export async function createCloudFixture(
   }
 
   let disposed = false;
+  let kubeconfigPath = "";
+
+  const clusterKubeconfig = async (): Promise<string> => {
+    if (kubeconfigPath) return kubeconfigPath;
+    const directory = await ports.makeWorkspaceDir(
+      `radtest-canvas-kube-${uniqueId}`
+    );
+    unwind.push({
+      describe: `remove kubeconfig directory ${directory}`,
+      run: () => ports.removeDir(directory)
+    });
+    const candidate = `${directory}/kubeconfig`;
+    expectSuccess(
+      await commands.runAz([
+        "aks",
+        "get-credentials",
+        "--resource-group",
+        resourceGroup,
+        "--name",
+        clusterName,
+        "--subscription",
+        subscriptionId,
+        "--file",
+        candidate,
+        "--overwrite-existing",
+        "--only-show-errors"
+      ]),
+      `az aks get-credentials ${clusterName}`
+    );
+    kubeconfigPath = candidate;
+    return kubeconfigPath;
+  };
+
+  const listWorkloads = async (
+    application: string,
+    namespace: string
+  ): Promise<readonly KubernetesWorkload[] | "no-namespace"> => {
+    const kubeconfig = await clusterKubeconfig();
+    const context = `kubectl get deployments -n ${namespace}`;
+    const result = await commands.runKubectl([
+      "--kubeconfig",
+      kubeconfig,
+      "get",
+      "deployments",
+      "--namespace",
+      namespace,
+      "--selector",
+      radiusApplicationSelector(application),
+      "--output",
+      "json"
+    ]);
+    if (result.code !== 0) {
+      if (isMissingNamespace(result)) return "no-namespace";
+      throw new Error(
+        `${context} failed with exit code ${result.code}: ${(
+          result.stderr || result.stdout
+        ).trim()}`
+      );
+    }
+    return readKubernetesWorkloads(parseJsonObject(result, context));
+  };
 
   /**
    * Artifacts this run has independently observed in place.
@@ -542,6 +627,84 @@ export async function createCloudFixture(
         timeoutMessage: () =>
           `Timed out after ${assertionTimeoutMs}ms waiting for the role assignment(s) for principal ` +
           `${principalId} at or below ${scope} to be removed; ${remaining.length} remain(s).`
+      });
+    },
+
+    async namespaceExists(namespace) {
+      const kubeconfig = await clusterKubeconfig();
+      const context = `kubectl get namespace ${namespace}`;
+      const result = await commands.runKubectl([
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "namespace",
+        namespace,
+        "--output",
+        "name"
+      ]);
+      if (result.code === 0) return true;
+      if (isMissingNamespace(result)) return false;
+      throw new Error(
+        `${context} failed with exit code ${result.code}: ${(
+          result.stderr || result.stdout
+        ).trim()}`
+      );
+    },
+
+    async readApplicationWorkloads(application, namespace) {
+      const workloads = await listWorkloads(application, namespace);
+      return workloads === "no-namespace" ? [] : workloads;
+    },
+
+    async assertApplicationWorkloadsPresent(application, namespace) {
+      let lastSeen: readonly KubernetesWorkload[] | "no-namespace" = [];
+      return pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          lastSeen = await listWorkloads(application, namespace);
+          if (lastSeen === "no-namespace" || lastSeen.length === 0)
+            return undefined;
+          if (lastSeen.some((workload) => workload.availableReplicas < 1))
+            return undefined;
+          return lastSeen;
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for Radius to render application "${application}" ` +
+          `into namespace "${namespace}" on cluster ${clusterName}. ` +
+          (lastSeen === "no-namespace" ?
+            "The namespace does not exist, so the deploy never reached this cluster."
+          : lastSeen.length === 0 ?
+            "The namespace exists but carries no workload labelled for the application."
+          : `The application workloads exist but are not ready: ${lastSeen
+              .filter((workload) => workload.availableReplicas < 1)
+              .map(
+                (workload) =>
+                  `"${workload.name}" has ${workload.availableReplicas} available replica(s) of ${workload.desiredReplicas} desired`
+              )
+              .join(", ")}.`)
+      });
+    },
+
+    async assertApplicationWorkloadsAbsent(application, namespace) {
+      let lastSeen: readonly KubernetesWorkload[] = [];
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          const workloads = await listWorkloads(application, namespace);
+          if (workloads === "no-namespace") return true;
+          lastSeen = workloads;
+          return workloads.length === 0 ? true : undefined;
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for the delete to remove application ` +
+          `"${application}" from namespace "${namespace}" on cluster ${clusterName}; ` +
+          `${lastSeen.length} workload(s) remain: ${lastSeen
+            .map((workload) => `"${workload.name}"`)
+            .join(", ")}.`
       });
     },
 
@@ -1074,6 +1237,12 @@ async function readDefaultBranchSha(
 
 function sameSha(left: string, right: string): boolean {
   return left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
+function isMissingNamespace(result: CloudCommandResult): boolean {
+  return /namespaces? "[^"]*" not found/i.test(
+    `${result.stderr}\n${result.stdout}`
+  );
 }
 
 function asRecord(

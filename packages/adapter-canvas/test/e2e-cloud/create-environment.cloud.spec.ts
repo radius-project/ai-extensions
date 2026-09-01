@@ -13,21 +13,20 @@
 //    with the specific reason. An ordinary `pnpm test` is therefore never broken
 //    by absent credentials, and a placeholder pin can never produce a green
 //    cloud result.
-// 2. **It contains no logic.** Every decision — the skip gate, the expected
+// 2. **It contains no policy logic.** Every decision — the skip gate, the expected
 //    federated-credential subjects, which workflow publication path was taken,
 //    whether the GitHub Environment names the right identity, whether a delete
 //    actually succeeded — lives in `support/create-environment-journey.ts` or
 //    `support/delete-environment-journey.ts` behind unit tests, because a rule
 //    written here could only ever be checked by a nightly run against real
-//    infrastructure.
+//    infrastructure. The spec only drives the real UI and gathers evidence.
 //
 // The stages are ordered and share one fixture, so the describe runs serially:
-// stage two deletes what stage one created, and a stage-one failure must skip
-// stage two rather than delete an environment that was never built. Deploying an
-// application, and deleting that deployment, are a separate lifecycle and are not
-// started here.
+// create environment, deploy, prove a live environment cannot be deleted, delete
+// the deployment, then delete the environment. A failure skips every dependent
+// destructive stage rather than acting on state the run never proved exists.
 //
-// Stage two proves the inverse of stage one, which is the only reason either
+// The final stage proves the inverse of stage one, which is the only reason either
 // means much: the same Environment the product created is the one it removes.
 // Absence on its own would prove nothing — a product that never created the
 // Environment would satisfy it just as readily — so the fixture refuses to make
@@ -41,6 +40,7 @@ import {
   type CloudFixturePorts
 } from "./support/cloud-command-port.js";
 import {
+  type AppRegistrationRecord,
   createCloudFixture,
   type AppRegistrationRecord,
   type CloudFixture
@@ -72,6 +72,19 @@ import {
   findDeleteEnvironmentSuccessProblems
 } from "./support/delete-environment-journey.js";
 import {
+  applicationNamespace,
+  classifyDeploymentPresence,
+  describeDeployFailure,
+  describeProblems as describeDeploymentProblems,
+  findDeleteEnvironmentRefusalProblems,
+  findDeployedApplicationProblems,
+  findSurvivingArtifactProblems,
+  readApplicationNames,
+  readDeploymentRows,
+  readDeployStatusSnapshot,
+  requireSingleApplication
+} from "./support/deploy-journey.js";
+import {
   describeUnprovisionedFixtureRepository,
   isFixtureRepositoryProvisioned,
   resolveFixtureLocation
@@ -93,6 +106,7 @@ const OPERATION_TIMEOUT_MS = 20 * 60 * 1000;
 // confirmation dialog, so it is bounded far more tightly than creation. The
 // budget covers GitHub's own propagation rather than any product work.
 const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
+const DEPLOYMENT_TIMEOUT_MS = 45 * 60 * 1000;
 
 const gate = evaluateCreateEnvironmentGate({
   cloudE2eFlag: process.env.RADIUS_CLOUD_E2E,
@@ -167,6 +181,8 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   let federatedSubjects: readonly string[] = [];
   let appRegistration: AppRegistrationRecord | undefined;
   let servicePrincipalId: string | undefined;
+  let deployedApplication = "";
+  let deployedNamespace = "";
 
   test.beforeAll(async () => {
     if (!gate.enabled) return;
@@ -423,6 +439,302 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
           defaultBranch: cloud.defaultBranch
         })
       ).toBe("committed");
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  test("deploys the application through Canvas and proves it is running on AKS", async ({
+    page
+  }, testInfo) => {
+    testInfo.setTimeout(DEPLOYMENT_TIMEOUT_MS + 5 * 60 * 1000);
+    const cloud = fixture;
+    if (!cloud) throw new Error("The cloud fixture was not created.");
+
+    const harness = await CanvasHarness.create({
+      page,
+      title: "cloud-deploy-application",
+      mode: "cloud",
+      workspacePath: cloud.workspacePath,
+      initialPage: "deploying"
+    });
+
+    try {
+      await harness.seedState(
+        cloudCanvasState({
+          repository: cloud.repository,
+          branch: cloud.defaultBranch,
+          workspacePath: cloud.workspacePath
+        })
+      );
+      await page.goto(`${harness.baseUrl}/?page=deploying`);
+      await page.waitForLoadState("domcontentloaded");
+
+      const applications = readApplicationNames(
+        await page.evaluate(async () => {
+          const response = await fetch("/api/list-applications");
+          return (await response.json()) as unknown;
+        })
+      );
+      deployedApplication = requireSingleApplication(applications);
+      deployedNamespace = applicationNamespace(
+        KUBERNETES_NAMESPACE,
+        deployedApplication
+      );
+
+      await page
+        .locator("#deploy-app-select")
+        .selectOption(deployedApplication);
+      await page
+        .locator("#deploy-env-select")
+        .selectOption(cloud.environmentName);
+      await expect(page.locator("#deploy-branch-select")).toHaveValue(
+        cloud.defaultBranch
+      );
+
+      const deployResponse = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/deploy" &&
+          response.request().method() === "POST"
+      );
+      const deployButton = page.locator("#deploy-now-btn:not([disabled])");
+      await expect(deployButton).toHaveText("Deploy");
+      await deployButton.click();
+      expect((await deployResponse).ok()).toBe(true);
+
+      const snapshot = async (): Promise<
+        ReturnType<typeof readDeployStatusSnapshot>
+      > =>
+        readDeployStatusSnapshot(
+          await page.evaluate(async () => {
+            const response = await fetch("/api/deploy-status");
+            return (await response.json()) as unknown;
+          })
+        );
+
+      await expect
+        .poll(async () => (await snapshot()).terminal, {
+          timeout: DEPLOYMENT_TIMEOUT_MS,
+          intervals: [5_000]
+        })
+        .toBe(true);
+      const finished = await snapshot();
+      expect(finished.succeeded, describeDeployFailure(finished, [])).toBe(
+        true
+      );
+
+      const workloads = await cloud.assertApplicationWorkloadsPresent(
+        deployedApplication,
+        deployedNamespace
+      );
+      const deploymentProblems = findDeployedApplicationProblems({
+        application: deployedApplication,
+        namespace: deployedNamespace,
+        namespaceExists: await cloud.namespaceExists(deployedNamespace),
+        workloads
+      });
+      expect(
+        deploymentProblems,
+        describeDeploymentProblems(
+          "The workflow completed but the application was not running on AKS:",
+          deploymentProblems
+        )
+      ).toEqual([]);
+
+      const rows = readDeploymentRows(
+        await page.evaluate(async () => {
+          const response = await fetch("/api/list-deployments?fresh=1");
+          return (await response.json()) as unknown;
+        })
+      );
+      expect(
+        classifyDeploymentPresence(
+          rows,
+          deployedApplication,
+          cloud.environmentName
+        ).present
+      ).toBe(true);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  test("refuses to delete the environment while the deployment is live", async ({
+    page
+  }, testInfo) => {
+    testInfo.setTimeout(DELETE_TIMEOUT_MS + 5 * 60 * 1000);
+    const cloud = fixture;
+    if (!cloud) throw new Error("The cloud fixture was not created.");
+
+    const harness = await CanvasHarness.create({
+      page,
+      title: "cloud-refuse-live-environment-delete",
+      mode: "cloud",
+      workspacePath: cloud.workspacePath,
+      initialPage: "environment"
+    });
+
+    try {
+      await harness.seedState(
+        cloudCanvasState({
+          repository: cloud.repository,
+          branch: cloud.defaultBranch,
+          workspacePath: cloud.workspacePath
+        })
+      );
+      await page.goto(`${harness.baseUrl}/?page=environment`);
+      await page.waitForLoadState("domcontentloaded");
+
+      const deleteButton = page.locator(
+        `.js-delete-env[data-env="${cloud.environmentName}"]`
+      );
+      await expect(deleteButton).toBeVisible({ timeout: DELETE_TIMEOUT_MS });
+      await deleteButton.click();
+      const deleteResponse = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === DELETE_ENVIRONMENT_PATH &&
+          response.request().method() === "POST"
+      );
+      await page.locator("#env-confirm-ok").click();
+      const response = await deleteResponse;
+      await cloud.assertGitHubEnvironmentExists();
+      const problems = findDeleteEnvironmentRefusalProblems({
+        status: response.status(),
+        payload: (await response.json()) as unknown,
+        application: deployedApplication,
+        environmentName: cloud.environmentName,
+        environmentExists: true
+      });
+      expect(
+        problems,
+        describeDeploymentProblems(
+          "The product did not safely refuse the live environment delete:",
+          problems
+        )
+      ).toEqual([]);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  test("deletes the deployment while preserving its environment and identity", async ({
+    page
+  }, testInfo) => {
+    testInfo.setTimeout(DEPLOYMENT_TIMEOUT_MS + 5 * 60 * 1000);
+    const cloud = fixture;
+    const appBefore = appRegistration;
+    if (!cloud) throw new Error("The cloud fixture was not created.");
+    if (!appBefore)
+      throw new Error("The product-created application was not observed.");
+
+    const harness = await CanvasHarness.create({
+      page,
+      title: "cloud-delete-deployment",
+      mode: "cloud",
+      workspacePath: cloud.workspacePath,
+      initialPage: "deploying"
+    });
+
+    try {
+      await harness.seedState(
+        cloudCanvasState({
+          repository: cloud.repository,
+          branch: cloud.defaultBranch,
+          workspacePath: cloud.workspacePath
+        })
+      );
+      await page.goto(`${harness.baseUrl}/?page=deploying`);
+      await page.waitForLoadState("domcontentloaded");
+
+      const deleteButton = page.locator(
+        `.js-del-dep[data-app="${deployedApplication}"][data-env="${cloud.environmentName}"]`
+      );
+      await expect(deleteButton).toBeVisible({ timeout: DELETE_TIMEOUT_MS });
+      await deleteButton.click();
+      await page
+        .getByRole("button", { name: "I want to delete this deployment" })
+        .click();
+      await page
+        .getByRole("button", { name: /have read and understand/i })
+        .click();
+      await page
+        .locator("#del-confirm-input")
+        .fill(`${deployedApplication}/${cloud.environmentName}`);
+
+      const deleteResponse = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/delete-deployment" &&
+          response.request().method() === "POST"
+      );
+      await page.locator("#del-confirm-btn").click();
+      expect((await deleteResponse).ok()).toBe(true);
+
+      await expect
+        .poll(
+          async () => {
+            const rows = readDeploymentRows(
+              await page.evaluate(async () => {
+                const response = await fetch("/api/list-deployments?fresh=1");
+                return (await response.json()) as unknown;
+              })
+            );
+            return classifyDeploymentPresence(
+              rows,
+              deployedApplication,
+              cloud.environmentName
+            ).present;
+          },
+          { timeout: DEPLOYMENT_TIMEOUT_MS, intervals: [5_000] }
+        )
+        .toBe(false);
+
+      await cloud.assertApplicationWorkloadsAbsent(
+        deployedApplication,
+        deployedNamespace
+      );
+      await cloud.assertGitHubEnvironmentExists();
+      for (const subject of federatedSubjects)
+        await cloud.assertFederatedCredentialExists(subject);
+      if (!servicePrincipalId)
+        throw new Error(
+          "The product-created service principal was not observed."
+        );
+      await cloud.assertRoleAssignmentExists(servicePrincipalId);
+      const appAfter = await cloud.assertAppRegistrationExists();
+      const variables = readEnvironmentVariables(
+        await runGh(
+          ports.commands,
+          [
+            "api",
+            `repos/${cloud.repository}/environments/${cloud.environmentName}/variables`
+          ],
+          "gh api the surviving environment's variables"
+        )
+      );
+      const remainingWorkloads = await cloud.readApplicationWorkloads(
+        deployedApplication,
+        deployedNamespace
+      );
+      const survivalProblems = findSurvivingArtifactProblems({
+        environmentName: cloud.environmentName,
+        environmentExists: true,
+        variables,
+        appIdBefore: appBefore.appId,
+        appIdAfter: appAfter.appId,
+        federatedSubjects,
+        expectedFederatedSubjects: federatedSubjects,
+        remainingWorkloads
+      });
+      expect(
+        survivalProblems,
+        describeDeploymentProblems(
+          "Deleting the deployment damaged state owned by the environment:",
+          survivalProblems
+        )
+      ).toEqual([]);
+      await page.reload();
+      await page.waitForLoadState("domcontentloaded");
+      await expect(deleteButton).toHaveCount(0);
     } finally {
       await harness.cleanup();
     }
