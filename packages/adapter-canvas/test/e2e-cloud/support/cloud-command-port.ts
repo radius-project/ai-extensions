@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { redactCredentials } from "../../../src/credential-redaction.js";
 import { cliExec } from "../../../src/gh.js";
 
 export interface CloudCommandResult {
@@ -63,7 +64,12 @@ const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 function runTool(
   tool: string,
   args: readonly string[],
-  cwd?: string
+  cwd?: string,
+  normalize: (
+    error: { code?: string | number | null } | null,
+    stdout: string | undefined,
+    stderr: string | undefined
+  ) => CloudCommandResult = normalizeCommandResult
 ): Promise<CloudCommandResult> {
   return new Promise((resolve) => {
     const child = cliExec(
@@ -75,13 +81,42 @@ function runTool(
         maxBuffer: MAX_OUTPUT_BYTES,
         windowsHide: true
       },
-      (error, stdout, stderr) =>
-        resolve(normalizeCommandResult(error, stdout, stderr))
+      (error, stdout, stderr) => resolve(normalize(error, stdout, stderr))
     );
     // Nothing the fixture runs reads stdin, and an inherited stdin would let a
     // credential prompt hang the run instead of failing it.
     child.stdin?.end();
   });
+}
+
+export function redactAzureCredentials(
+  value: string,
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  return redactCredentials(value, [
+    env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+    env.ARM_ACCESS_TOKEN,
+    env.ARM_CLIENT_SECRET,
+    env.ARM_OIDC_TOKEN,
+    env.AZURE_ACCESS_TOKEN,
+    env.AZURE_CLIENT_SECRET,
+    env.AZURE_FEDERATED_TOKEN,
+    env.AZURE_PASSWORD
+  ]);
+}
+
+export function normalizeAzureCommandResult(
+  error: { code?: string | number | null } | null,
+  stdout: string | undefined,
+  stderr: string | undefined,
+  env: NodeJS.ProcessEnv = process.env
+): CloudCommandResult {
+  const result = normalizeCommandResult(error, stdout, stderr);
+  return {
+    ...result,
+    stdout: redactAzureCredentials(result.stdout, env),
+    stderr: redactAzureCredentials(result.stderr, env)
+  };
 }
 
 /**
@@ -112,7 +147,8 @@ export function normalizeCommandResult(
 export function createNodeCloudFixturePorts(): CloudFixturePorts {
   return {
     commands: {
-      runAz: (args) => runTool("az", args),
+      runAz: (args) =>
+        runTool("az", args, undefined, normalizeAzureCommandResult),
       runGh: (args) => runTool("gh", args),
       runGit: (args, cwd) => runTool("git", args, cwd)
     },
