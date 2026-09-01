@@ -490,15 +490,16 @@ describe("generateDeleteWorkflow", () => {
     expireTemplateCache();
 
     await generateVerifyWorkflow("dev", "azure", "verify-source-ref");
+    await generateVerifyWorkflow("dev", "aws", "verify-source-ref");
     await generateDeployWorkflow("dev", ".radius/app.bicep");
     await generateDeleteWorkflow("dev");
 
     expect(h.fetches).toEqual([
-      {
+      ...["verify-azure.yml", "verify-aws.yml"].map((file) => ({
         repo: "radius-project/ai-extensions",
-        path: ".github/extension/verify-azure.yml",
+        path: `.github/extension/${file}`,
         ref: "verify-source-ref"
-      },
+      })),
       ...[
         "run-rad-commands.yml",
         "run-rad-commands-azure.yml",
