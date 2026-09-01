@@ -4,22 +4,31 @@
 
 A `Radius.Compute/containers` connection declares a generic Radius relationship to another resource. It can project resource properties into the workload, but it does **not** translate them into arbitrary names or formats expected by an application.
 
-Connection projection is version-specific. Depending on the Radius/container schema and recipe, a connection may provide:
+Connection projection is compatibility-specific. Depending on the managed modeling context, resolved Radius/container schema, and Recipe contract already supplied to the skill, a connection may provide:
 
 - a `CONNECTION_<NAME>_PROPERTIES` JSON value;
 - individual `CONNECTION_<NAME>_<PROPERTY>` values, including secret-backed `CONNECTION_<CONNECTION>_<SECRETKEY>` values for connected Secrets and Recipe `result.secrets` entries;
 - relationship metadata; and/or
 - no sensitive outputs.
 
-Inspect the exact configured extension, registered resource schema, recipe output mapping, and Radius runtime before relying on any projection shape. Do not infer it from a different version's documentation.
+Use only compatibility information already supplied by the managed modeling, resolved schema, and Recipe context before relying on a projection shape. Do not execute `rad`, fetch versions or Recipe metadata, or visit external links to discover compatibility.
 
 ## Compatibility and gradual adoption
 
-Secret-backed `CONNECTION_*` projection is behavior of the Kubernetes Container Recipe. It requires compatible Radius control-plane support ([radius#12709](https://github.com/radius-project/radius/pull/12709)) and compatible Container Recipes ([resource-types-contrib#300](https://github.com/radius-project/resource-types-contrib/pull/300) or later). Read the control-plane version with `rad version --output json`, inspect configured Recipe/template metadata with `rad recipe show <name> --resource-type <type> --output json`, and verify the resolved schema plus pinned Recipe tag or digest. These signals establish projection only when they resolve to a known compatible control-plane version and exact template contract; mixed, unknown, or older installations must preserve explicit wiring.
+Automatic secret-backed `CONNECTION_*` projection is Kubernetes Container Recipe behavior only. Use it only when compatibility information already supplied by the managed modeling, resolved schema, and Recipe context explicitly establishes support.
 
-If compatibility cannot be proven, preserve or use the existing schema-supported wiring: explicit `env`, `valueFrom.secretKeyRef`, `envFrom`, the application's native variable, or another contract the target installation supports. For developer-supplied credentials, prefer an authored Secret with `secretKeyRef`; preserve a direct `@secure()` parameter-to-`env.value` binding only when the exact schema or legacy native contract requires it, because the resolved value is stored in the Radius container resource and generated Pod specification. Do not emit a connection-only model that depends on unverified projection. Do not automatically rewrite an existing working `app.bicep`; migration to secret-backed connections requires explicit user intent.
+If the supplied compatibility context does not explicitly establish support, preserve or use the existing schema-supported wiring: explicit `env`, `valueFrom.secretKeyRef`, `envFrom`, the application's native variable, or another equivalent contract the target installation supports. For developer-supplied credentials, prefer an authored Secret with `secretKeyRef`; preserve a direct `@secure()` parameter-to-`env.value` binding only when the exact schema or legacy native contract requires it, because the resolved value is stored in the Radius container resource and generated Pod specification. Do not emit a connection-only model that depends on unverified projection. Do not automatically rewrite an existing working `app.bicep`; migration to secret-backed connections requires explicit user intent.
 
-Azure Container Instances (ACI) behavior is unchanged. Do not recommend Kubernetes secret-backed connection projection for ACI.
+Azure Container Instances (ACI) behavior is unchanged and must not use this Kubernetes projection.
+
+## Kubernetes Container Recipe projection contract
+
+- A connection to an authored `Radius.Security/secrets` resource uses `<secret>.id` and projects its declared data keys as secret-backed variables.
+- A connection to a producer uses `<producer>.id` and may project ordinary resource properties plus secret-backed keys declared by the Recipe in `result.secrets`.
+- `<producer>.properties.secrets.name` is only the Kubernetes Secret name for an explicit `valueFrom.secretKeyRef`. It is never a connection source, and `properties.secrets.id` does not exist.
+- Generated names have the form `CONNECTION_<CONNECTION>_<SUFFIX>`. `<CONNECTION>` is the uppercased connection map key without separator insertion, and a secret suffix is the uppercased authored data key or Recipe `result.secrets` key.
+- An explicit `env` entry wins over a generated variable with the same name. `disableDefaultEnvVars: true` suppresses all generated variables for that connection. Generated names that collide after normalization fail validation instead of selecting one value.
+- Developer-owned credentials remain inputs in authored Secrets or explicit schema-supported wiring. Credentials generated by a Recipe or its infrastructure belong in `result.secrets`; do not copy them into developer-owned inputs or authored wrapper Secrets.
 
 ## Decide wiring from source
 
@@ -137,10 +146,10 @@ env: {
 ## Rules
 
 1. Never assume a connection invents app-specific variables, URLs, credentials, database names, or protocol settings.
-2. Never assume one universal JSON or scalar `CONNECTION_*` projection. Verify the target version.
+2. Never assume one universal JSON or scalar `CONNECTION_*` projection. Use only the compatibility contract already supplied by the managed modeling, resolved schema, and Recipe context.
 3. On a compatible Kubernetes Container Recipe, a connection to a user-authored or reused `Radius.Security/secrets` resource projects its data as secret-backed `CONNECTION_<CONNECTION>_<SECRETKEY>` variables. A connection to a producer projects its Recipe `result.secrets` entries the same way. The suffix is the uppercased exact authored data key or Recipe result key.
    `<CONNECTION>` is the connection map key uppercased without inserting separators: `postgresSecret` becomes `POSTGRESSECRET`, producing names such as `CONNECTION_POSTGRESSECRET_USERNAME`.
-   Use `<producer>.properties.secrets.name` only with `valueFrom.secretKeyRef` when the application requires a custom Kubernetes environment variable name. Never use that Kubernetes Secret name as a connection source, author a wrapper around a Recipe output, or guess a resource convenience property.
+   Use `<producer>.properties.secrets.name` only with `valueFrom.secretKeyRef` when the application requires a custom Kubernetes environment variable name. Never use that Kubernetes Secret name as a connection source, author a wrapper around a Recipe output, or guess a resource convenience property. `properties.secrets.id` does not exist.
    Nonsecret `host`/`port` outputs are an address, not a credential: wiring only the address is complete only where the exact target Recipe provably generates no credential — otherwise it silently drops authentication. When the credential the Recipe generates is exposed in a shape the client cannot parse, report the gap per [Credential shape](secrets-handling.md#credential-shape) instead of wiring the address alone.
 4. Reference a nonsecret read-only output only when the exact schema exposes it and the exact target Recipe maps it. Do not **set** read-only properties.
 5. An explicit `env` entry wins when it has the same name as a generated connection variable. Among generated variables, a managed `result.secrets` reference takes precedence over an ordinary connection value with the same normalized name; two Secret-derived keys that normalize to the same uppercase name fail validation rather than choosing one. Use `disableDefaultEnvVars` only on the connection entry, only when the exact container schema supports it, and only when all generated variables from that connection should be disabled.
