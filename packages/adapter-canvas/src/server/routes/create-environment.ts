@@ -1154,8 +1154,8 @@ export async function handleCreateEnvironment(
     // On the PR path this used to be an unconditional skip, which was right for
     // a first-time setup and wrong for every repository that already had the
     // workflows on its default branch. planCredentialVerification decides
-    // instead, and returns an empty pullRequestUrl when it dispatches so a
-    // merely informational PR is not mistaken for a blocking one.
+    // instead; actionRequired distinguishes blocking and informational pull
+    // requests without discarding the opened pull request's URL.
     let verifyRunUrl = "";
     let verifyRunId: string | number | null = null;
     let dispatchedAt = dependencies.now();
@@ -1170,18 +1170,7 @@ export async function handleCreateEnvironment(
       fetchFile: (repo, path, branch) =>
         dependencies.fetchFileFromRepo(repo, path, branch, selectedExecutor)
     });
-    pullRequestUrl = verifyPlan.pullRequestUrl;
-    if (prState && verifyPlan.trigger !== "none") {
-      // The pull request is informational when verification can run from the
-      // branch immediately. Preserve the pre-existing non-blocking projection
-      // after the earlier provenance checkpoint recorded the actual PR.
-      dependencies.recordCommitState(operation, {
-        mode: "pull_request",
-        branch: prState.branch,
-        baseBranch: prState.base,
-        pullRequestUrl: null
-      });
-    }
+    if (verifyPlan.pullRequestUrl) pullRequestUrl = verifyPlan.pullRequestUrl;
     if (verifyPlan.trigger === "none") {
       verifySkipReason =
         verifyPlan.skipReason ||

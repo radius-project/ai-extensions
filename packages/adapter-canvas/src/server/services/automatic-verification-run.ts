@@ -79,7 +79,10 @@ export async function discoverAutomaticVerificationRun(input: {
     }
     if (
       exact.state === "ambiguous" ||
-      hasPostDispatchVerificationRuns(parsed, null, identity.startedAt)
+      hasPostDispatchVerificationRuns(parsed, null, identity.startedAt, {
+        ref: identity.ref,
+        clockSkewMs: 0
+      })
     ) {
       return manualRequired(
         exact.state === "ambiguous" ?

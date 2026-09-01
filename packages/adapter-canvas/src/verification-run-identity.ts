@@ -61,8 +61,13 @@ export function findExactVerificationRun(
 export function hasPostDispatchVerificationRuns(
   value: unknown,
   baselineRunId: number | null,
-  dispatchedAt: number
+  dispatchedAt: number,
+  options: {
+    ref?: string;
+    clockSkewMs?: number;
+  } = {}
 ): boolean {
+  const clockSkewMs = options.clockSkewMs ?? 60000;
   return (
     Array.isArray(value) &&
     value.some((candidate) => {
@@ -73,7 +78,8 @@ export function hasPostDispatchVerificationRuns(
         Number.isFinite(databaseId) &&
         (baselineRunId === null || databaseId > baselineRunId) &&
         typeof run.createdAt === "string" &&
-        Date.parse(run.createdAt) >= dispatchedAt - 60000
+        Date.parse(run.createdAt) >= dispatchedAt - clockSkewMs &&
+        (options.ref === undefined || run.headBranch === options.ref)
       );
     })
   );
