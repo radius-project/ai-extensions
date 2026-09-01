@@ -94,6 +94,18 @@ function expectMatchingFile(source: string, destination: string): void {
   expect(actual.equals(expected), destination).toBe(true);
 }
 
+function expectWindowsGuiExecutable(
+  executablePath: string,
+  expectedMachine: number
+): void {
+  const executable = readFileSync(executablePath);
+  expect(executable.toString("ascii", 0, 2)).toBe("MZ");
+  const peOffset = executable.readUInt32LE(0x3c);
+  expect(executable.toString("ascii", peOffset, peOffset + 4)).toBe("PE\0\0");
+  expect(executable.readUInt16LE(peOffset + 4)).toBe(expectedMachine);
+  expect(executable.readUInt16LE(peOffset + 24 + 68)).toBe(2);
+}
+
 function prepareBuildWorkspace(
   workspaceRoot: string,
   missingAsset: readonly string[] = []
@@ -174,6 +186,7 @@ function assertCurrentArtifact(): void {
     ...filesUnder(join(REPO_ROOT, "packages", "adapter-shared", "src")).filter(
       (path) => !path.endsWith(".test.ts")
     ),
+    ...filesUnder(join(REPO_ROOT, "packages", "adapter-shared", "native")),
     ...filesUnder(join(REPO_ROOT, "packages", "core", "src")).filter(
       (path) => !path.endsWith(".test.ts")
     ),
@@ -296,6 +309,8 @@ describe("P0-C built Radius extension artifact", () => {
       "README.md",
       "LICENSE",
       "THIRD-PARTY-NOTICES.txt",
+      "bin/windows-radius-launcher-x64.exe",
+      "bin/windows-radius-launcher-arm64.exe",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-bicep/scripts/show-radius-type.mjs",
@@ -306,6 +321,14 @@ describe("P0-C built Radius extension artifact", () => {
     for (const packagedPath of packagedPaths) {
       expect(existsSync(join(DIST, ...packagedPath.split("/")))).toBe(true);
     }
+    expectWindowsGuiExecutable(
+      join(DIST, "bin", "windows-radius-launcher-x64.exe"),
+      0x8664
+    );
+    expectWindowsGuiExecutable(
+      join(DIST, "bin", "windows-radius-launcher-arm64.exe"),
+      0xaa64
+    );
     const radiusTypeResolver = readFileSync(
       join(
         DIST,
@@ -439,7 +462,8 @@ describe("P0-C built Radius extension artifact", () => {
       "===== @reactflow/core@11.11.4 =====",
       "===== graphlib@2.1.8 =====",
       "===== lodash@4.18.1 =====",
-      "===== yaml@2.9.0 ====="
+      "===== yaml@2.9.0 =====",
+      "===== Go standard library ====="
     ]) {
       expect(notices).toContain(marker);
     }
@@ -728,12 +752,15 @@ describe("P0-C built Radius extension artifact", () => {
       "radius-app-graph",
       "REMOVED.md"
     );
+    const staleLauncher = join(installDir, "bin", "removed.exe");
     try {
       writeFileSync(unrelatedRootFile, "keep root\n");
       mkdirSync(dirname(staleWorkflow), { recursive: true });
       writeFileSync(staleWorkflow, "stale\n");
       mkdirSync(dirname(staleSkill), { recursive: true });
       writeFileSync(staleSkill, "stale\n");
+      mkdirSync(dirname(staleLauncher), { recursive: true });
+      writeFileSync(staleLauncher, "stale\n");
 
       execFileSync(process.execPath, ["build.mjs", "--install"], {
         cwd: join(REPO_ROOT, "packages", "adapter-canvas"),
@@ -749,6 +776,9 @@ describe("P0-C built Radius extension artifact", () => {
         "extension.mjs.map",
         "THIRD-PARTY-NOTICES.txt",
         "package.json",
+        ...relativeFilesUnder(join(DIST, "bin")).map(
+          (filePath) => `bin/${filePath}`
+        ),
         ...relativeFilesUnder(join(DIST, "workflows")).map(
           (filePath) => `workflows/${filePath}`
         ),
@@ -765,6 +795,7 @@ describe("P0-C built Radius extension artifact", () => {
       expect(readFileSync(unrelatedRootFile, "utf8")).toBe("keep root\n");
       expect(existsSync(staleWorkflow)).toBe(false);
       expect(existsSync(staleSkill)).toBe(false);
+      expect(existsSync(staleLauncher)).toBe(false);
     } finally {
       rmSync(installDir, { recursive: true, force: true });
     }

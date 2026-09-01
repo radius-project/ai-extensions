@@ -25,7 +25,6 @@
 //     existing binary. It is skipped entirely via RADIUS_RAD_SKIP_VERSION_CHECK,
 //     and a RADIUS_RAD_BINARY override is never replaced.
 
-import { spawn, type ChildProcess } from "node:child_process";
 import https from "node:https";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -40,7 +39,8 @@ import {
   killChildTree,
   managedBicepEnv as processManagedBicepEnv,
   RadProcessError,
-  spawnRad
+  spawnRad,
+  spawnRadChild
 } from "./rad-process.mjs";
 import type { ProcessResult, SpawnRadOptions } from "./rad-process.mjs";
 
@@ -122,6 +122,7 @@ export interface BicepCompileConfig extends Record<string, unknown> {
 export interface RunRadAppGraphOptions {
   log?: Logger;
   timeout?: number;
+  signal?: AbortSignal;
   saveGraphJsonTo?: string;
   /** Platform whose process lifecycle semantics apply; defaults to this host. */
   processPlatform?: NodeJS.Platform;
@@ -162,6 +163,7 @@ export interface RunRadBicepPublishExtensionOptions {
   target: string;
   log?: Logger;
   timeout?: number;
+  signal?: AbortSignal;
 }
 
 /** Options for {@link runRadBicepPublish}. */
@@ -171,12 +173,44 @@ export interface RunRadBicepPublishOptions {
   env?: NodeJS.ProcessEnv;
   log?: Logger;
   timeout?: number;
+  signal?: AbortSignal;
 }
 
 // Narrows an unknown catch binding to a human-readable message without ever
 // assuming it is an Error (a thrown value can be anything in JS/TS).
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function awaitWithAbort<T>(
+  start: () => Promise<T>,
+  signal: AbortSignal | undefined,
+  label: string
+): Promise<T> {
+  // Toolchain installation is shared process-wide, so one caller stops waiting
+  // without canceling preparation that another caller may still require.
+  if (!signal) return start();
+  if (signal.aborted) {
+    return Promise.reject(new RadProcessError(`${label} aborted`, "", ""));
+  }
+  const work = start();
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (complete: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      complete();
+    };
+    const abort = (): void =>
+      finish(() => reject(new RadProcessError(`${label} aborted`, "", "")));
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    work.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error))
+    );
+  });
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -430,50 +464,16 @@ export function parseRadVersionOutput(stdout: string): string | null {
  */
 export function radBinaryVersion(
   radPath: string,
-  { timeout = 10000 }: { timeout?: number } = {}
+  { timeout = 10000, signal }: { timeout?: number; signal?: AbortSignal } = {}
 ): Promise<string | null> {
-  return new Promise((resolve) => {
-    let child: ChildProcess;
-    try {
-      // Keep rad outside the parent job/process group on every platform. Some
-      // Windows rad builds wedge when inherited into the host group; windowsHide
-      // suppresses the detached child's console window.
-      child = spawn(radPath, ["version", "--cli", "--output", "json"], {
-        env: managedBicepEnv(process.env),
-        stdio: ["ignore", "pipe", "ignore"],
-        windowsHide: true,
-        detached: true
-      });
-    } catch {
-      resolve(null);
-      return;
-    }
-
-    let stdout = "";
-    let settled = false;
-    const finish = (value: string | null) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(value);
-    };
-    const timer = setTimeout(() => {
-      killChildTree(child);
-      finish(null);
-    }, timeout);
-
-    child.stdout?.on("data", (c: Buffer) => {
-      if (stdout.length < 1024 * 1024) stdout += c.toString();
-    });
-    child.on("error", () => finish(null));
-    child.on("close", (code) => {
-      if (code !== 0) {
-        finish(null);
-        return;
-      }
-      finish(parseRadVersionOutput(stdout));
-    });
-  });
+  return spawnRad(radPath, ["version", "--cli", "--output", "json"], {
+    env: managedBicepEnv(process.env),
+    timeout,
+    label: "Managed Radius version query",
+    signal
+  })
+    .then(({ stdout }) => parseRadVersionOutput(stdout))
+    .catch(() => null);
 }
 
 // Parses the numeric major.minor.patch core out of a version string
@@ -1003,15 +1003,21 @@ async function spawnManagedRad(
     env = {},
     timeout = 120000,
     label = "rad",
-    log = noop
+    log = noop,
+    signal
   }: SpawnManagedRadOptions = {}
 ): Promise<ProcessResult> {
-  const radPath = await ensureRadBinary({ log });
+  const radPath = await awaitWithAbort(
+    () => ensureRadBinary({ log }),
+    signal,
+    label
+  );
   return await spawnRad(radPath, args, {
     cwd,
     env: managedBicepEnv(env),
     timeout,
-    label
+    label,
+    signal
   });
 }
 
@@ -1049,7 +1055,8 @@ export async function runRadBicepPublishExtension({
   fromFile,
   target,
   log = noop,
-  timeout = 120000
+  timeout = 120000,
+  signal
 }: RunRadBicepPublishExtensionOptions): Promise<string> {
   const from = path.resolve(fromFile);
   const to = path.resolve(target);
@@ -1058,7 +1065,8 @@ export async function runRadBicepPublishExtension({
       cwd: path.dirname(to),
       timeout,
       label: "rad bicep publish-extension",
-      log
+      log,
+      signal
     });
     return to;
   } catch (err) {
@@ -1083,7 +1091,8 @@ export async function runRadBicepPublish({
   target,
   env = {},
   log = noop,
-  timeout = 120000
+  timeout = 120000,
+  signal
 }: RunRadBicepPublishOptions): Promise<string> {
   const src = path.resolve(file);
   try {
@@ -1092,7 +1101,8 @@ export async function runRadBicepPublish({
       env,
       timeout,
       label: "rad bicep publish",
-      log
+      log,
+      signal
     });
     return target;
   } catch (err) {
@@ -1167,11 +1177,23 @@ export async function runRadAppGraph(
     radPath: providedRadPath = "",
     processPlatform = process.platform,
     artifactPollIntervalMs = 100,
-    exitCloseGraceMs = 2000
+    exitCloseGraceMs = 2000,
+    signal
   }: RunRadAppGraphOptions = {}
 ): Promise<unknown> {
-  const radPath = providedRadPath || (await resolveRadForGraph({ log }));
-  await ensureManagedBicep(radPath, { log, timeout });
+  const radPath = await awaitWithAbort(
+    () =>
+      providedRadPath ?
+        Promise.resolve(providedRadPath)
+      : resolveRadForGraph({ log }),
+    signal,
+    "rad app graph"
+  );
+  await awaitWithAbort(
+    () => ensureManagedBicep(radPath, { log, timeout }),
+    signal,
+    "rad app graph"
+  );
   // Resolve to an absolute path: rad runs from a temp cwd, so a relative arg
   // would no longer point at the file.
   const absoluteBicep = path.resolve(bicepFilePath);
@@ -1183,20 +1205,19 @@ export async function runRadAppGraph(
       // app-graph.json into the temp cwd. The child reference is kept (no unref)
       // so Node awaits it and reads the file it wrote. The timeout below is a
       // hard backstop.
-      const child = spawn(
+      if (signal?.aborted) {
+        reject(new RadProcessError("rad app graph aborted", "", ""));
+        return;
+      }
+      const child = spawnRadChild(
         radPath,
         ["app", "graph", absoluteBicep, ...MODELED_APP_GRAPH_FLAGS],
         {
           cwd,
           // Clear GITHUB_ACTIONS so rad writes app-graph.json locally instead of
           // committing to the radius-graph orphan branch. stdin is ignored so rad
-          // never blocks waiting for interactive input. Detaching preserves the
-          // process-group isolation required by Windows rad builds; windowsHide
-          // prevents that isolated process from opening a console window.
-          env: { ...process.env, ...managedBicepEnv(), GITHUB_ACTIONS: "" },
-          stdio: ["ignore", "pipe", "pipe"],
-          windowsHide: true,
-          detached: true
+          // never blocks waiting for interactive input.
+          env: { ...process.env, ...managedBicepEnv(), GITHUB_ACTIONS: "" }
         }
       );
 
@@ -1210,6 +1231,12 @@ export async function runRadAppGraph(
         code: number | null;
         signal: NodeJS.Signals | null;
       } | null = null;
+      const abort = (): void => {
+        if (settled) return;
+        complete();
+        killChildTree(child);
+        reject(new RadProcessError("rad app graph aborted", stdout, stderr));
+      };
       child.stdout?.on("data", (c: Buffer) => {
         if (stdout.length < MAX) stdout += c.toString();
       });
@@ -1222,6 +1249,7 @@ export async function runRadAppGraph(
         settled = true;
         if (graceTimer) clearTimeout(graceTimer);
         if (artifactTimer) clearInterval(artifactTimer);
+        signal?.removeEventListener("abort", abort);
         killChildTree(child);
         reject(
           new RadProcessError(
@@ -1238,6 +1266,7 @@ export async function runRadAppGraph(
         clearTimeout(timer);
         if (graceTimer) clearTimeout(graceTimer);
         if (artifactTimer) clearInterval(artifactTimer);
+        signal?.removeEventListener("abort", abort);
         try {
           child.stdout?.destroy();
         } catch {
@@ -1249,6 +1278,8 @@ export async function runRadAppGraph(
           /* best-effort */
         }
       };
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
 
       function finalize(code: number | null, signal: NodeJS.Signals | null) {
         if (settled) return;

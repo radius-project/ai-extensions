@@ -64,6 +64,14 @@ const radiusTypeResolver = join(
   "scripts",
   "show-radius-type.mjs"
 );
+const windowsLauncherBin = join(
+  repoRoot,
+  "packages",
+  "adapter-shared",
+  "native",
+  "windows-launcher",
+  "bin"
+);
 
 // Tracked plugin sources that must sit beside the bundle for dist/ to be a
 // complete plugin. node_modules is a pnpm workspace symlink and never shipped.
@@ -169,6 +177,19 @@ function writeThirdPartyNotices(inputs) {
       }
       return `===== ${manifest.name}@${manifest.version} =====\n\n${readFileSync(licensePath, "utf8").trim()}`;
     });
+  notices.push(
+    `===== Go standard library =====\n\n${readFileSync(
+      join(
+        repoRoot,
+        "packages",
+        "adapter-shared",
+        "native",
+        "windows-launcher",
+        "LICENSE.txt"
+      ),
+      "utf8"
+    ).trim()}`
+  );
   writeFileSync(
     join(distDir, "THIRD-PARTY-NOTICES.txt"),
     `${notices.join("\n\n")}\n`
@@ -206,6 +227,12 @@ async function assembleDist(bundleInputs) {
     logLevel: "silent"
   });
   copyFileSync(join(repoRoot, "LICENSE"), join(distDir, "LICENSE"));
+  if (!existsSync(windowsLauncherBin)) {
+    throw new Error(
+      `Missing required Windows Radius launcher assets: ${windowsLauncherBin}`
+    );
+  }
+  cpSync(windowsLauncherBin, join(distDir, "bin"), { recursive: true });
   copyExtensionAssets();
 
   const distPackage = join(distDir, "package.json");
@@ -365,6 +392,13 @@ function installToLocal() {
     const noticesTmp = `${noticesTo}.tmp-${process.pid}`;
     copyFileSync(noticesFrom, noticesTmp);
     renameSync(noticesTmp, noticesTo);
+    const binFrom = join(distDir, "bin");
+    const binTo = join(installDir, "bin");
+    const binTmp = `${binTo}.tmp-${process.pid}`;
+    rmSync(binTmp, { recursive: true, force: true });
+    cpSync(binFrom, binTmp, { recursive: true });
+    rmSync(binTo, { recursive: true, force: true });
+    renameSync(binTmp, binTo);
     // Copy the whole skills tree rather than naming files one at a time, so a
     // skill, reference, or script added later is installed without touching
     // this list. SKILL.md and its references are the instructions the agent

@@ -119,8 +119,17 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
 
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: packages/adapter-shared/native/windows-launcher/go.mod
+          cache: false
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Verify Windows launcher binaries
+        run: pnpm run build:windows-launcher:check
 
       - name: Run Windows process integration tests
         run: pnpm run test:integration:windows-process
@@ -229,7 +238,8 @@ jobs:
 
   build-gate:
     name: Shared release gate
-    needs: [static-checks, windows-process-integration, canvas-chromium, node-tests]
+    needs:
+      [static-checks, windows-process-integration, canvas-chromium, node-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: read

@@ -754,6 +754,11 @@ describe("runRadAppGraph artifact completion", () => {
         'fs.writeFileSync("app", "");',
         'if (process.argv[1]?.endsWith("app")) {',
         '  fs.writeFileSync("app-graph.json", "{");',
+        '  if (process.env.FAKE_RAD_SCENARIO === "hang") {',
+        '    process.stdout.write("waiting");',
+        "    setInterval(() => {}, 60000);",
+        "    return;",
+        "  }",
         "  setTimeout(() => {",
         '    fs.writeFileSync("app-graph.json", JSON.stringify({ resources: [] }));',
         '    if (process.env.FAKE_RAD_SCENARIO === "failure") {',
@@ -788,6 +793,22 @@ describe("runRadAppGraph artifact completion", () => {
     }
     prevBinary = process.env.RADIUS_RAD_BINARY;
     process.env.RADIUS_RAD_BINARY = bin;
+  });
+
+  it("does not begin graph preparation when already canceled", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      runRadAppGraph(path.join(binDir, "missing.bicep"), {
+        radPath: bin,
+        signal: controller.signal
+      })
+    ).rejects.toMatchObject({
+      message: "rad app graph aborted",
+      stdout: "",
+      stderr: ""
+    });
   });
 
   afterEach(() => {
@@ -841,6 +862,30 @@ describe("runRadAppGraph artifact completion", () => {
       cause: expect.objectContaining({
         message: expect.stringContaining("rad exited with code 3"),
         stderr: "late graph diagnostic"
+      })
+    });
+  }, 10000);
+
+  it("cancels an in-flight graph process and preserves its output", async () => {
+    process.env.FAKE_RAD_SCENARIO = "hang";
+    const bicepFile = path.join(binDir, "app.bicep");
+    fs.writeFileSync(
+      bicepFile,
+      "resource app 'Radius.Core/applications@2023-10-01-preview' = {}"
+    );
+    const controller = new AbortController();
+    const graph = runRadAppGraph(bicepFile, {
+      radPath: bin,
+      signal: controller.signal,
+      timeout: 5000
+    });
+    setTimeout(() => controller.abort(), 500);
+
+    await expect(graph).rejects.toMatchObject({
+      message: "rad app graph failed: waiting",
+      cause: expect.objectContaining({
+        message: "rad app graph aborted",
+        stdout: "waiting"
       })
     });
   }, 10000);
@@ -1313,6 +1358,25 @@ describe("bicep publish arg builders", () => {
       "--target",
       "br:ghcr.io/acme/app/r:1.0.0"
     ]);
+  });
+
+  it("does not resolve or launch a publish command when already canceled", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      runRadBicepPublishExtension({
+        fromFile: "/a/custom-types.yaml",
+        target: "/a/out.tgz",
+        signal: controller.signal
+      })
+    ).rejects.toMatchObject({
+      message:
+        "rad bicep publish-extension failed: rad bicep publish-extension aborted",
+      cause: expect.objectContaining({
+        message: "rad bicep publish-extension aborted"
+      })
+    });
   });
 });
 

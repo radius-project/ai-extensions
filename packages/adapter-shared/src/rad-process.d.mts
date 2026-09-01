@@ -14,6 +14,7 @@ export interface SpawnRadOptions {
   env?: NodeJS.ProcessEnv;
   timeout?: number;
   label?: string;
+  signal?: AbortSignal;
 }
 
 // bicepPath is required: this low-level helper has no default, so omitting it
@@ -30,6 +31,29 @@ export class RadProcessError extends Error {
 }
 
 export function killChildTree(child: ChildProcess | null | undefined): void;
+
+export function windowsLauncherFilename(architecture: string): string;
+
+export function resolveWindowsLauncherPath(
+  architecture?: string,
+  moduleUrl?: string
+): string;
+
+export function radSpawnCommand(
+  radPath: string,
+  args: string[],
+  options?: {
+    platform?: NodeJS.Platform;
+    architecture?: string;
+    moduleUrl?: string;
+  }
+): { executable: string; args: string[] };
+
+export function spawnRadChild(
+  radPath: string,
+  args: string[],
+  options?: Pick<SpawnRadOptions, "cwd" | "env">
+): ChildProcess;
 
 export function spawnRad(
   radPath: string,

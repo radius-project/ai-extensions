@@ -15,6 +15,78 @@
 // must be mirrored in `rad-process.d.mts` by hand.
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const WINDOWS_LAUNCHER_NAMES = {
+  x64: "windows-radius-launcher-x64.exe",
+  arm64: "windows-radius-launcher-arm64.exe"
+};
+
+export function windowsLauncherFilename(architecture) {
+  const filename = WINDOWS_LAUNCHER_NAMES[architecture];
+  if (!filename) {
+    throw new Error(
+      `Managed Radius does not support Windows architecture "${architecture}".`
+    );
+  }
+  return filename;
+}
+
+export function resolveWindowsLauncherPath(
+  architecture = process.arch,
+  moduleUrl = import.meta.url
+) {
+  const filename = windowsLauncherFilename(architecture);
+  const moduleDirectory = dirname(fileURLToPath(moduleUrl));
+  const candidates = [
+    join(moduleDirectory, "..", "native", "windows-launcher", "bin", filename)
+  ];
+  let ancestor = moduleDirectory;
+  for (let depth = 0; depth < 8; depth += 1) {
+    candidates.push(join(ancestor, "bin", filename));
+    const parent = dirname(ancestor);
+    if (parent === ancestor) break;
+    ancestor = parent;
+  }
+  const launcher = candidates.find((candidate) => existsSync(candidate));
+  if (!launcher) {
+    throw new Error(
+      `The packaged Windows Radius launcher "${filename}" is missing.`
+    );
+  }
+  return launcher;
+}
+
+export function radSpawnCommand(
+  radPath,
+  args,
+  {
+    platform = process.platform,
+    architecture = process.arch,
+    moduleUrl = import.meta.url
+  } = {}
+) {
+  if (platform !== "win32") {
+    return { executable: radPath, args };
+  }
+  return {
+    executable: resolveWindowsLauncherPath(architecture, moduleUrl),
+    args: [String(process.pid), radPath, ...args]
+  };
+}
+
+export function spawnRadChild(radPath, args, { cwd, env = {} } = {}) {
+  const command = radSpawnCommand(radPath, args);
+  return spawn(command.executable, command.args, {
+    cwd,
+    env: { ...process.env, ...env },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+    detached: true
+  });
+}
 
 export function managedBicepEnv(env = {}, bicepPath) {
   return { ...env, BICEP: bicepPath };
@@ -34,10 +106,11 @@ export class RadProcessError extends Error {
   }
 }
 
-// Terminates rad and any bicep child it spawned. On Windows, `taskkill /t` kills
-// the whole process tree; on POSIX, rad is a process-group leader (spawned
-// detached), so signalling the group (-pid) stops rad and its children together.
-// Best-effort — any failure is swallowed.
+// Terminates rad and any bicep child it spawned. On Windows, the PID belongs to
+// the GUI launcher; terminating it closes its kill-on-close Job Object. `taskkill
+// /t` is retained as a second tree-cleanup layer. On POSIX, rad is a detached
+// process-group leader, so signalling the group stops rad and its children.
+// Best-effort -- any failure is swallowed.
 export function killChildTree(child) {
   if (!child || child.pid == null) return;
   try {
@@ -62,25 +135,23 @@ export function killChildTree(child) {
  * spawnRad - the process-handling core every managed-rad invocation needs:
  * spawn `radPath args`, capture stdout/stderr (capped at 32MB), and resolve
  * { stdout, stderr } on a zero exit or reject (with both streams attached) on a
- * non-zero exit, timeout, or spawn error. rad shells out to bicep as a
- * grandchild, so it spawns detached (rad leads its own process group), kills the
- * whole tree on timeout, and uses an exit/close grace window because that
- * grandchild can inherit and hold the stdio pipes open. `label` only names the
- * command in timeout/exit error messages; `env` is merged over process.env.
+ * non-zero exit, timeout, cancellation, or spawn error. On Windows, a detached
+ * GUI-subsystem launcher creates rad with CREATE_NO_WINDOW inside a kill-on-close
+ * Job Object; on POSIX, rad leads a detached process group. Both arrangements
+ * allow complete tree cleanup. `label` only names the command in timeout/exit
+ * error messages; `env` is merged over process.env.
  */
 export function spawnRad(
   radPath,
   args,
-  { cwd, env = {}, timeout = 120000, label = "rad" } = {}
+  { cwd, env = {}, timeout = 120000, label = "rad", signal } = {}
 ) {
   return new Promise((resolve, reject) => {
-    const child = spawn(radPath, args, {
-      cwd,
-      env: { ...process.env, ...env },
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-      detached: true
-    });
+    if (signal?.aborted) {
+      reject(new RadProcessError(`${label} aborted`, "", ""));
+      return;
+    }
+    const child = spawnRadChild(radPath, args, { cwd, env });
 
     const maxOutput = 32 * 1024 * 1024;
     let stdout = "";
@@ -88,6 +159,18 @@ export function spawnRad(
     let settled = false;
     let graceTimer = null;
     let exited = null;
+    const cleanup = () => {
+      clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
+      signal?.removeEventListener("abort", abort);
+    };
+    const abort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      killChildTree(child);
+      reject(new RadProcessError(`${label} aborted`, stdout, stderr));
+    };
     child.stdout?.on("data", (chunk) => {
       if (stdout.length < maxOutput) stdout += chunk.toString();
     });
@@ -98,7 +181,7 @@ export function spawnRad(
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      if (graceTimer) clearTimeout(graceTimer);
+      cleanup();
       killChildTree(child);
       reject(
         new RadProcessError(
@@ -108,12 +191,13 @@ export function spawnRad(
         )
       );
     }, timeout);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
 
     function finalize(code, signal) {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      if (graceTimer) clearTimeout(graceTimer);
+      cleanup();
       try {
         child.stdout?.destroy();
       } catch {
@@ -142,8 +226,7 @@ export function spawnRad(
     child.on("error", (error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      if (graceTimer) clearTimeout(graceTimer);
+      cleanup();
       reject(new RadProcessError(error.message, stdout, stderr));
     });
     child.on("exit", (code, signal) => {
