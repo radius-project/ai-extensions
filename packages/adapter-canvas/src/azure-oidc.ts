@@ -253,9 +253,10 @@ export function buildSignedInUserObjectIdArgs(): string[] {
  * `az account show` reports a service principal's `user.name` as its appId,
  * while owner add and owner list both speak object ids.
  *
- * the caller's own service principal already exists. A failure here should fail
- * closed (do not guess at another identity), while callers may still apply a
- * short, bounded retry for transient throttling or network errors.
+ * The caller's own service principal already exists before setup begins. A
+ * failure here should fail closed (do not guess at another identity), while
+ * callers may still apply a short, bounded retry for transient throttling or
+ * network errors.
  */
 export function buildServicePrincipalObjectIdArgs({
   appId
