@@ -276,6 +276,19 @@ describe("canvas pages over real loopback HTTP", () => {
     expect(entry.state.activeSubtab).toBe("environments");
   });
 
+  it("serves the AWS credential provider as visible but disabled", async () => {
+    resetState({ contextRepo: "octo/app" });
+
+    const response = await get("/?page=credentials");
+
+    expect(response.body).toContain(
+      '<option value="aws" disabled>AWS (coming soon)</option>'
+    );
+    expect(response.body).toContain(
+      '<div id="cred-panel-aws" class="rad-section" style="display:none;">'
+    );
+  });
+
   it("redirects an implicit environment landing to the live deployment", async () => {
     resetState({ contextRepo: "octo/app", deployStatus: "in_progress" });
     await get("/?page=environment");

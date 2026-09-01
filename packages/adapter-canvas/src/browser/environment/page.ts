@@ -27,6 +27,7 @@ import {
 import {
   initializeCredentialProfilesPanel,
   type CredentialProfile,
+  type CredentialProvider,
   type GithubReadiness
 } from "./profiles.js";
 import type { BrowserTeardown } from "../lifecycle.js";
@@ -42,6 +43,10 @@ interface EnvironmentPageState {
   readonly activeSubtab: "credentials" | "environments";
   readonly mutationNonce: string;
   readonly ghCommandPresentation: GhCommandPresentation;
+}
+
+export interface EnvironmentPageOptions {
+  readonly selectableProviders?: readonly CredentialProvider[];
 }
 
 function parsePageState(context: BrowserContext): EnvironmentPageState {
@@ -108,7 +113,8 @@ function optimisticOperation(
 }
 
 export function initializeEnvironmentPage(
-  context: BrowserContext
+  context: BrowserContext,
+  options: EnvironmentPageOptions = {}
 ): BrowserTeardown {
   const newEnvironment = context.dom.byId("new-env-btn");
   const cancelEnvironment = context.dom.byId("cancel-env-btn");
@@ -165,6 +171,7 @@ export function initializeEnvironmentPage(
 
   const profiles = initializeCredentialProfilesPanel(context, {
     repo: state.repo,
+    selectableProviders: options.selectableProviders ?? ["azure"],
     mutationNonce: state.mutationNonce,
     ghCommandPresentation: state.ghCommandPresentation,
     environmentName: () => environmentInput.value,
