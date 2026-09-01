@@ -61,6 +61,8 @@ import {
 const PROFILE_NAME = "cloud-e2e";
 const WORKFLOW_DIRECTORY = ".github/workflows";
 const KUBERNETES_NAMESPACE = "default";
+const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
+const githubToken = process.env.GH_TOKEN?.trim() ?? "";
 
 // Creating an environment provisions an Entra application, a service principal,
 // two federated credentials, a role assignment, a GitHub Environment and its
@@ -72,8 +74,8 @@ const gate = evaluateCreateEnvironmentGate({
   cloudE2eFlag: process.env.RADIUS_CLOUD_E2E,
   fixtureProvisioned: isFixtureRepositoryProvisioned(),
   unprovisionedReason: describeUnprovisionedFixtureRepository(),
-  subscriptionId: process.env.AZURE_SUBSCRIPTION_ID,
-  githubToken: process.env.GH_TOKEN
+  subscriptionId,
+  githubToken
 });
 const skipReason = gate.enabled ? "" : gate.reason;
 
@@ -142,7 +144,7 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
   test.beforeAll(async () => {
     if (!gate.enabled) return;
     fixture = await createCloudFixture({
-      subscriptionId: process.env.AZURE_SUBSCRIPTION_ID || "",
+      subscriptionId,
       ports
     });
     // Turns every assertion below from an observation into a proof: none of the

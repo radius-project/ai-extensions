@@ -18,6 +18,7 @@
 //   Those two share a variable name, and confusing them would make every later
 //   stage authenticate as the privileged runner identity and pass.
 import type { CanvasState } from "../../../src/shared.js";
+import { TERMINAL_STATES } from "../../../src/operations.js";
 import { describeError } from "./cloud-command-port.js";
 
 /** The verify workflow the product publishes, named as a stable anchor. */
@@ -410,18 +411,18 @@ export function findEnvironmentIdentityProblems(
       `AZURE_CLIENT_ID is "${clientId}" but the product created application "${input.createdAppId}".`
     );
 
-  for (const [name, expected] of [
-    ["AZURE_TENANT_ID", input.expected.tenantId],
-    ["AZURE_SUBSCRIPTION_ID", input.expected.subscriptionId],
-    ["AZURE_RESOURCE_GROUP", input.expected.resourceGroup],
-    ["AZURE_AKS_CLUSTER_NAME", input.expected.cluster],
-    ["AZURE_LOCATION", input.expected.location],
-    ["KUBERNETES_NAMESPACE", input.expected.namespace]
+  for (const [name, expected, exact] of [
+    ["AZURE_TENANT_ID", input.expected.tenantId, false],
+    ["AZURE_SUBSCRIPTION_ID", input.expected.subscriptionId, false],
+    ["AZURE_RESOURCE_GROUP", input.expected.resourceGroup, false],
+    ["AZURE_AKS_CLUSTER_NAME", input.expected.cluster, true],
+    ["AZURE_LOCATION", input.expected.location, false],
+    ["KUBERNETES_NAMESPACE", input.expected.namespace, true]
   ] as const) {
     const actual = input.variables.get(name);
     if (actual === undefined)
       problems.push(`${name} is absent; expected "${expected}".`);
-    else if (!sameId(actual, expected))
+    else if (exact ? actual !== expected : !sameId(actual, expected))
       problems.push(`${name} is "${actual}"; expected "${expected}".`);
   }
   return problems;
@@ -461,7 +462,6 @@ export function readServicePrincipalObjectId(payload: unknown): string {
 export interface RepositoryIdentity {
   readonly ownerId: number;
   readonly repoId: number;
-  readonly defaultBranch: string;
 }
 
 /** Narrows `gh api repos/{owner}/{repo}`. */
@@ -470,17 +470,12 @@ export function readRepositoryIdentity(payload: unknown): RepositoryIdentity {
   const owner = asRecord(record?.owner);
   const ownerId = owner?.id;
   const repoId = record?.id;
-  const defaultBranch = record?.default_branch;
   if (typeof ownerId !== "number" || typeof repoId !== "number")
     throw new Error(
       'The repository lookup returned no numeric "owner.id" and "id", so the immutable OIDC subject ' +
         "the product registers cannot be predicted."
     );
-  if (typeof defaultBranch !== "string" || defaultBranch.trim() === "")
-    throw new Error(
-      'The repository lookup returned no usable "default_branch".'
-    );
-  return { ownerId, repoId, defaultBranch: defaultBranch.trim() };
+  return { ownerId, repoId };
 }
 
 /**
@@ -509,7 +504,7 @@ export function workflowFallbackBranchPrefix(environmentName: string): string {
   return `radius/setup-${environmentName}-workflows-`;
 }
 
-/** Selects this run's fallback branches from `gh api repos/{repo}/branches`. */
+/** Selects this run's branches from `gh api .../git/matching-refs/heads/...`. */
 export function selectFallbackBranches(
   payload: unknown,
   environmentName: string
@@ -561,16 +556,6 @@ export function selectFallbackPullRequests(
   return numbers;
 }
 
-/** States `/api/operations/{id}` reports once it will not change again. */
-export const TERMINAL_OPERATION_STATES: readonly string[] = [
-  "succeeded",
-  "succeeded_with_warnings",
-  "action_required",
-  "failed",
-  "failed_partial",
-  "cancelled"
-];
-
 export interface OperationSnapshot {
   readonly state: string;
   readonly terminal: boolean;
@@ -612,7 +597,7 @@ export function readOperationSnapshot(payload: unknown): OperationSnapshot {
   const terminal =
     (typeof operation.terminalState === "string" &&
       operation.terminalState.trim() !== "") ||
-    TERMINAL_OPERATION_STATES.includes(state);
+    TERMINAL_STATES.includes(state);
   return {
     state,
     terminal,

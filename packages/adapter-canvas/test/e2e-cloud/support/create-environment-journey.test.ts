@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { TERMINAL_STATES } from "../../../src/operations.js";
 import {
   classifyWorkflowPublication,
   cloudCanvasState,
@@ -19,7 +20,6 @@ import {
   REQUIRED_DEFAULT_BRANCH_WORKFLOWS,
   selectFallbackBranches,
   selectFallbackPullRequests,
-  TERMINAL_OPERATION_STATES,
   VERIFY_WORKFLOW_PATH
 } from "./create-environment-journey.js";
 
@@ -486,6 +486,23 @@ describe("findEnvironmentIdentityProblems", () => {
     ).toEqual([]);
   });
 
+  it("compares cluster and namespace values exactly", () => {
+    const variables = new Map(complete("app-1"));
+    variables.set("AZURE_AKS_CLUSTER_NAME", "AKS-ABC");
+    variables.set("KUBERNETES_NAMESPACE", "Default");
+
+    expect(
+      findEnvironmentIdentityProblems({
+        variables,
+        createdAppId: "app-1",
+        expected
+      })
+    ).toEqual([
+      'AZURE_AKS_CLUSTER_NAME is "AKS-ABC"; expected "aks-abc".',
+      'KUBERNETES_NAMESPACE is "Default"; expected "default".'
+    ]);
+  });
+
   it("names the bootstrap identity specifically when it reached the environment", () => {
     const problems = findEnvironmentIdentityProblems({
       variables: complete("bootstrap-1"),
@@ -562,37 +579,23 @@ describe("readServicePrincipalObjectId", () => {
 });
 
 describe("readRepositoryIdentity", () => {
-  it("reads the numeric ids and the default branch", () => {
+  it("reads the numeric repository and owner ids", () => {
     expect(
       readRepositoryIdentity({
         id: 222,
-        owner: { id: 111 },
-        default_branch: " main "
+        owner: { id: 111 }
       })
-    ).toEqual({ ownerId: 111, repoId: 222, defaultBranch: "main" });
+    ).toEqual({ ownerId: 111, repoId: 222 });
   });
 
   it.each([
-    ["the owner id is absent", { id: 222, default_branch: "main" }],
-    [
-      "the repository id is a string",
-      { id: "222", owner: { id: 111 }, default_branch: "main" }
-    ],
+    ["the owner id is absent", { id: 222 }],
+    ["the repository id is a string", { id: "222", owner: { id: 111 } }],
     ["the payload is not an object", null]
   ])("rejects a payload where %s", (_label, payload) => {
     expect(() => readRepositoryIdentity(payload)).toThrow(
       /numeric "owner.id" and "id"/
     );
-  });
-
-  it("rejects a payload with no default branch", () => {
-    expect(() =>
-      readRepositoryIdentity({
-        id: 222,
-        owner: { id: 111 },
-        default_branch: ""
-      })
-    ).toThrow(/usable "default_branch"/);
   });
 });
 
@@ -696,7 +699,7 @@ describe("selectFallbackPullRequests", () => {
 });
 
 describe("readOperationSnapshot", () => {
-  it.each(TERMINAL_OPERATION_STATES)("treats %s as terminal", (state) => {
+  it.each(TERMINAL_STATES)("treats %s as terminal", (state) => {
     expect(readOperationSnapshot({ operation: { state } }).terminal).toBe(true);
   });
 
