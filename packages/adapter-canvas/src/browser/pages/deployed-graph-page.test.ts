@@ -1751,6 +1751,107 @@ describe("initializeDeployedGraphPage", () => {
     });
   });
 
+  // The redirect hands the delete to the Deployments page; a forced one has to
+  // arrive there still forced, or its completion drops the orphan caution.
+  it("carries the forced delete and its run into the Deployments page", async () => {
+    const page = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { browser, action, appSelect, envSelect } = page;
+    const { createDialog } = createConfirmingDialog();
+    browser.net.handle(
+      deleteConflictUrl({
+        repo: "octo/app",
+        environment: "dev",
+        application: "app"
+      }),
+      () =>
+        jsonResponse({
+          conflict: true,
+          resourceState: "Updating",
+          forced: false,
+          detail: ""
+        })
+    );
+    browser.net.handle("/api/delete-deployment", () =>
+      jsonResponse({ runUrl: "https://github.com/octo/app/actions/runs/42" })
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    action.dispatch("click");
+    await flushPromises();
+    page.confirm["env-confirm-ok"].dispatch("click");
+    await flushPromises();
+
+    const redirect = browser.nav.assigned.find((url) =>
+      url.includes("page=deploying")
+    );
+    expect(redirect).toContain("delete=forced");
+    expect(redirect).toContain("application=app");
+    expect(redirect).toContain("environment=dev");
+    expect(redirect).toContain(
+      `run=${encodeURIComponent("https://github.com/octo/app/actions/runs/42")}`
+    );
+  });
+
+  // The probe downloads a workflow artifact server-side, so the button says it
+  // is working and a second click cannot start a second probe.
+  it("disables the button while probing and ignores a second click", async () => {
+    const page = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { browser, action, appSelect, envSelect } = page;
+    const { createDialog } = createConfirmingDialog();
+    const probe = createDeferred<HttpResponse>();
+    let probes = 0;
+    browser.net.handle(
+      deleteConflictUrl({
+        repo: "octo/app",
+        environment: "dev",
+        application: "app"
+      }),
+      () => {
+        probes++;
+        return probe.promise;
+      }
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    action.dispatch("click");
+    await flushPromises();
+    expect(action.disabled).toBe(true);
+
+    action.dispatch("click");
+    await flushPromises();
+    expect(probes).toBe(1);
+
+    probe.resolve(
+      jsonResponse({
+        conflict: true,
+        resourceState: "Updating",
+        forced: true,
+        detail: ""
+      })
+    );
+    await flushPromises();
+    expect(action.disabled).toBe(false);
+    expect(page.confirm["env-confirm-message"].textContent).toContain(
+      "previous delete was already forced"
+    );
+  });
+
   it("keeps the ordinary delete when the probe cannot prove a conflict", async () => {
     const page = fixture({
       deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]

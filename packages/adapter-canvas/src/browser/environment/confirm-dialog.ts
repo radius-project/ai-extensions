@@ -15,6 +15,11 @@ export interface EnvironmentConfirmOptions {
   };
   readonly usageLabel?: string;
   readonly usage?: readonly string[];
+  // Shows the block for a `usageLabel` that has no list behind it, for callers
+  // whose label is a standalone caution rather than a heading for `usage`.
+  // Off by default: a caller that labels a list it turned out not to have must
+  // not render a dangling heading over an empty list.
+  readonly showUsageWithoutItems?: boolean;
   readonly confirmLabel: string;
   readonly cancelLabel?: string;
   readonly confirmVariant?: "danger" | "primary";
@@ -162,10 +167,11 @@ export function createEnvironmentConfirmDialog(
       );
       const label = options.usageLabel ?? "";
       usageLabel.textContent = label;
-      // A caution with no list behind it is still a caution: the block shows
-      // whenever there is either a label or at least one usage entry.
+      // A standalone caution has no list behind it, so it opts in explicitly;
+      // every other caller shows the block only for a list it actually has.
+      const standalone = options.showUsageWithoutItems === true && label !== "";
       usageBlock.style.display =
-        (options.usage?.length ?? 0) > 0 || label !== "" ? "" : "none";
+        (options.usage?.length ?? 0) > 0 || standalone ? "" : "none";
       modal.style.display = "flex";
       (hideCancel ? confirm : cancel).focus();
     },

@@ -1024,6 +1024,71 @@ describe("delete flow", () => {
       expect(done).toContain("orphaned external resources");
     });
 
+    // The probe is a server-side artifact download, so the click has to say
+    // something is happening and the second click must not start a second one.
+    it("marks the row busy while probing and ignores a second click", async () => {
+      const { page, button } = await readyWithFailedRow();
+      // A second row shares the delete selector, and only the probed row is
+      // busy — the rest of the table stays clickable.
+      const other = deployRowButton("other", "dev");
+      page.browser.document.addSelectorAll(".js-del-dep", [button, other]);
+      const probe = createDeferred<HttpResponse>();
+      let probes = 0;
+      page.browser.net.handle(
+        deleteConflictUrl({
+          repo: page.repo,
+          environment: "dev",
+          application: "app"
+        }),
+        () => {
+          probes++;
+          return probe.promise;
+        }
+      );
+
+      button.dispatch("click");
+      await flushPromises();
+      expect(button.getAttribute("disabled")).toBe("");
+      expect(button.getAttribute("aria-busy")).toBe("true");
+      expect(other.getAttribute("disabled")).toBe(null);
+
+      button.dispatch("click");
+      await flushPromises();
+      expect(probes).toBe(1);
+
+      probe.resolve(
+        jsonResponse({
+          conflict: true,
+          resourceState: "Updating",
+          forced: false,
+          detail: ""
+        })
+      );
+      await flushPromises();
+      expect(button.getAttribute("disabled")).toBe(null);
+      expect(button.getAttribute("aria-busy")).toBe(null);
+      expect(page.confirm["env-confirm-modal"].style.display).toBe("flex");
+    });
+
+    // A force that hit the same conflict is still forceable — that is the only
+    // way out — but the user is told the next stop is likely the provider.
+    it("says so when the delete it is escalating was already forced", async () => {
+      const { page, button } = await readyWithFailedRow();
+      handleConflict(page, {
+        conflict: true,
+        resourceState: "Updating",
+        forced: true,
+        detail: ""
+      });
+
+      button.dispatch("click");
+      await flushPromises();
+      expect(page.confirm["env-confirm-message"].textContent).toContain(
+        "previous delete was already forced"
+      );
+      expect(page.confirm["env-confirm-ok"].textContent).toBe("Force delete");
+    });
+
     it("cancels without dispatching anything", async () => {
       const { page, button } = await readyWithFailedRow();
       handleConflict(page, {
@@ -2955,6 +3020,58 @@ describe("optimistic deployment rows", () => {
 
     listing.resolve(jsonResponse({ deployments: [] }));
     await flushPromises();
+  });
+});
+
+// A forced delete dispatched on the Deployed graph page finishes here, and the
+// orphan caution the user confirmed has to survive that redirect.
+describe("resuming a redirected forced delete", () => {
+  it("polls the forced delete it was handed and repeats the caution", async () => {
+    const page = fixture({
+      search:
+        "?delete=forced&application=app&environment=dev&run=" +
+        encodeURIComponent("https://github.com/octo/app/actions/runs/42"),
+      deploymentsPayload: {
+        deployments: [{ app: "app", environment: "dev", status: "deleting" }]
+      }
+    });
+    init(page);
+    await flushPromises();
+
+    const started = inlineMessage(page.inlineStatus);
+    expect(started).toContain("Force deleting deployment");
+    expect(started).toContain(
+      'href="https://github.com/octo/app/actions/runs/42"'
+    );
+    expect(page.tableBody.innerHTML).toContain("Deleting");
+    // The deploy resume must not also claim this redirect as a pending deploy.
+    expect(
+      page.browser.net.calls.some((c) => c.url === DEPLOY_STATUS_PATH)
+    ).toBe(false);
+
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () => jsonResponse({ deployments: [] })
+    );
+    page.browser.clock.tick(DELETE_POLL_MS);
+    await flushPromises();
+    const done = inlineMessage(page.inlineStatus);
+    expect(done).toContain("successfully deleted");
+    expect(done).toContain("orphaned external resources");
+    expect(done).toContain(
+      'href="https://github.com/octo/app/actions/runs/42"'
+    );
+  });
+
+  it.each([
+    ["?application=app&environment=dev", "no forced marker"],
+    ["?delete=forced&environment=dev", "no application"],
+    ["?delete=forced&application=app", "no environment"]
+  ])("does not resume a forced delete for %s (%s)", async (search) => {
+    const page = fixture({ search });
+    init(page);
+    await flushPromises();
+    expect(inlineMessage(page.inlineStatus)).not.toContain("Force deleting");
   });
 });
 

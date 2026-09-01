@@ -29,6 +29,7 @@ export interface ForceDeletePrompt {
   readonly title: string;
   readonly message: string;
   readonly usageLabel: string;
+  readonly showUsageWithoutItems: true;
   readonly confirmLabel: string;
   readonly cancelLabel: string;
 }
@@ -42,14 +43,24 @@ export interface ForceDeletePrompt {
 export function forceDeletePrompt(
   application: string,
   environment: string,
-  resourceState: string
+  resourceState: string,
+  previouslyForced = false
 ): ForceDeletePrompt {
   const state =
     resourceState === "" ? "a non-terminal" : `the "${resourceState}"`;
+  // A force that hit this same conflict says the resource is holding out
+  // longer than one force could clear. Forcing again is still the only way to
+  // free the deployment, so it stays on offer — but the user is told the odds
+  // changed, because the likely next step is cleaning up in the provider.
+  const repeat =
+    previouslyForced ?
+      " The previous delete was already forced and hit this same conflict, so this one may not clear it either — expect to check your cloud provider for leftover resources."
+    : "";
   return {
     title: "Force delete this deployment?",
-    message: `Deleting "${application}" from "${environment}" failed because the deployment is still in ${state} state, and it may still be updating. Force deleting removes it from Radius without waiting for that update to finish.`,
+    message: `Deleting "${application}" from "${environment}" failed because the deployment is still in ${state} state, and it may still be updating. Force deleting removes it from Radius without waiting for that update to finish.${repeat}`,
     usageLabel: FORCE_DELETE_ORPHAN_WARNING,
+    showUsageWithoutItems: true,
     confirmLabel: "Force delete",
     cancelLabel: "Cancel"
   };

@@ -63,7 +63,11 @@ jobs:
       environment: ${{ inputs.environment || '{{ENV}}' }}
       resource_type: application
       name: ${{ inputs.application }}
-      force: ${{ inputs.force }}
+      # A workflow_dispatch boolean input arrives as the string "true"/"false",
+      # including its default, but delete-azure.yml/delete-aws.yml declare `force`
+      # as `type: boolean`. Compare to coerce it, so every delete (forced or not)
+      # passes a real boolean. See actions/runner#1483.
+      force: ${{ inputs.force == 'true' }}
     secrets: inherit
 
   aws:
@@ -75,5 +79,9 @@ jobs:
       environment: ${{ inputs.environment || '{{ENV}}' }}
       resource_type: application
       name: ${{ inputs.application }}
-      force: ${{ inputs.force }}
+      # A workflow_dispatch boolean input arrives as the string "true"/"false",
+      # including its default, but delete-azure.yml/delete-aws.yml declare `force`
+      # as `type: boolean`. Compare to coerce it, so every delete (forced or not)
+      # passes a real boolean. See actions/runner#1483.
+      force: ${{ inputs.force == 'true' }}
     secrets: inherit

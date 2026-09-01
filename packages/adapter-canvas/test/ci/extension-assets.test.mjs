@@ -72,6 +72,44 @@ describe(".github/extension release assets", () => {
     }
   });
 
+  // A `workflow_dispatch` boolean input arrives as the string "true"/"false"
+  // (including its declared default), so handing it straight to a reusable
+  // workflow's `type: boolean` input passes a string where a boolean is
+  // declared — on every run, not only the ones that set it. Each such value has
+  // to be coerced, e.g. `${{ inputs.force == 'true' }}`. See actions/runner#1483.
+  it("coerces every dispatch boolean it forwards to a reusable workflow", () => {
+    const workflows = filesUnder(EXTENSION_ROOT).filter((path) =>
+      /\.ya?ml$/u.test(path)
+    );
+    const uncoerced = [];
+    let forwarded = 0;
+    for (const path of workflows) {
+      const workflow = parseYaml(readFileSync(path, "utf8"));
+      const inputs = workflow?.on?.workflow_dispatch?.inputs ?? {};
+      const booleans = Object.entries(inputs)
+        .filter(([, spec]) => spec?.type === "boolean")
+        .map(([name]) => name);
+      if (booleans.length === 0) continue;
+      for (const job of Object.values(workflow?.jobs ?? {})) {
+        if (typeof job?.uses !== "string") continue;
+        for (const [input, value] of Object.entries(job.with ?? {})) {
+          if (typeof value !== "string") continue;
+          const named = booleans.find((name) =>
+            value.includes(`inputs.${name}`)
+          );
+          if (!named) continue;
+          forwarded++;
+          if (!value.includes(`inputs.${named} ==`)) {
+            uncoerced.push(`${path}: ${input}: ${value}`);
+          }
+        }
+      }
+    }
+
+    expect(forwarded).toBeGreaterThan(0);
+    expect(uncoerced).toEqual([]);
+  });
+
   it.each([
     ["edge", "publish.yml", "$GITHUB_SHA"],
     ["stable", "release.yml", "$SOURCE_SHA"]

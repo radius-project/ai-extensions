@@ -173,6 +173,24 @@ describe("forceDeletePrompt", () => {
     expect(prompt.cancelLabel).toBe("Cancel");
   });
 
+  it("opts the standalone caution into a block with no list", () => {
+    expect(forceDeletePrompt("todo-app", "dev", "Updating")).toMatchObject({
+      showUsageWithoutItems: true
+    });
+  });
+
+  // Forcing again is still the only escape, so it stays offered — with the
+  // warning that the provider may need a manual cleanup either way.
+  it("warns when the delete it escalates was itself already forced", () => {
+    const repeated = forceDeletePrompt("todo-app", "dev", "Updating", true);
+    const first = forceDeletePrompt("todo-app", "dev", "Updating", false);
+
+    expect(repeated.message).toContain("previous delete was already forced");
+    expect(repeated.message).toContain("leftover resources");
+    expect(repeated.confirmLabel).toBe("Force delete");
+    expect(first.message).not.toContain("already forced");
+  });
+
   it("falls back to a generic state when the server named none", () => {
     const prompt = forceDeletePrompt("todo-app", "dev", "");
 

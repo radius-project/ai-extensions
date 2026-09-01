@@ -675,7 +675,15 @@ export function initializeDeployedGraphPage(
           );
           return;
         }
-        context.nav.assign("/?page=deploying");
+        // The Deployments page owns the delete from here, and a forced delete
+        // has to stay forced across the navigation: its completion message
+        // repeats the orphan caution the user confirmed. The dispatched run
+        // travels with it, since the deleting row carries no run URL.
+        context.nav.assign(
+          force ?
+            `/?page=deploying&delete=forced&application=${encodeURIComponent(application)}&environment=${encodeURIComponent(environment)}&run=${encodeURIComponent(readString(payload, "runUrl"))}`
+          : "/?page=deploying"
+        );
       })
       .catch((error: unknown) => {
         if (!entry.active) return;
@@ -754,6 +762,12 @@ export function initializeDeployedGraphPage(
   // A delete that already failed may be stuck behind a resource the control
   // plane still holds. Only a server-proven conflict escalates the button to
   // the forced confirmation; anything else keeps the ordinary one.
+  // The probe makes the server list and download a workflow artifact, so the
+  // button can sit for seconds before the dialog opens. It is disabled for that
+  // whole wait: without it the click looks ignored, and a second click would
+  // start a second probe and open a second dialog behind the first.
+  let deleteProbeInFlight = false;
+
   const openDeleteDialog = (target: DeleteDialog): void => {
     const application = selectedApplication();
     const environment = selectedEnvironment();
@@ -761,18 +775,31 @@ export function initializeDeployedGraphPage(
       target.open(application, environment);
       return;
     }
+    if (deleteProbeInFlight) return;
+    deleteProbeInFlight = true;
+    if (action) action.disabled = true;
     void probeDeleteConflict(context, {
       repo: page.repo,
       environment,
       application
     }).then((result) => {
+      deleteProbeInFlight = false;
       if (!entry.active) return;
+      // `refreshControls` owns the button's enabled state, so the wait is
+      // undone by recomputing it rather than by force-enabling a button the
+      // page may since have had reason to keep disabled.
+      refreshControls();
       if (!result.conflict || !forceConfirm) {
         target.open(application, environment);
         return;
       }
       forceConfirm.show({
-        ...forceDeletePrompt(application, environment, result.resourceState),
+        ...forceDeletePrompt(
+          application,
+          environment,
+          result.resourceState,
+          result.forced
+        ),
         onConfirm: () => runDelete(application, environment, true)
       });
     });

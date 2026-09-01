@@ -2473,6 +2473,37 @@ describe("deployments routes (SU-06)", () => {
         expect(recording.status).toBe(200);
       });
 
+      // Once those retries run out the dispatcher on the default branch is
+      // simply behind. Blaming disabled Actions or branch protection sends the
+      // user to settings that are already correct.
+      it("blames the stale force input, not Actions or branch protection", async () => {
+        const { recording, context: ctx } = deleteContext(FORCE_BODY);
+        await handleDeleteDeployment(
+          ctx,
+          forceDependencies({
+            runGh: () =>
+              Promise.resolve({
+                code: 1,
+                stdout: "",
+                stderr: 'HTTP 422: Unexpected inputs provided: ["force"]'
+              }),
+            setTimer: (callback) => {
+              callback();
+              return {};
+            }
+          })
+        );
+
+        expect(recording.status).toBe(400);
+        const error = String(
+          (JSON.parse(recording.body) as { error?: unknown }).error ?? ""
+        );
+        expect(error).toContain("still rejecting the `force` input");
+        expect(error).toContain("wait a moment and retry");
+        expect(error).not.toContain("Actions is disabled");
+        expect(error).not.toContain("protected");
+      });
+
       it("stops retrying a force dispatch that failed without a diagnostic", async () => {
         const attempts: string[] = [];
         const { recording, context: ctx } = deleteContext(FORCE_BODY);

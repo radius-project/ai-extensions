@@ -699,17 +699,51 @@ export function initializeDeployingPage(
     return record ? record.status : "";
   };
 
+  // The probe makes the server list and download a workflow artifact, so the
+  // button can sit for seconds before the dialog opens. The row is marked busy
+  // for that whole wait: without it the click looks ignored, and a second click
+  // would start a second probe and open a second dialog behind the first.
+  const probing = new Set<string>();
+
+  const setDeleteBusy = (
+    app: string,
+    environment: string,
+    busy: boolean
+  ): void => {
+    for (const button of context.dom.all(context.dom.document, ".js-del-dep")) {
+      if (
+        button.getAttribute("data-app") !== app ||
+        button.getAttribute("data-env") !== environment
+      ) {
+        continue;
+      }
+      if (busy) {
+        button.setAttribute("disabled", "");
+        button.setAttribute("aria-busy", "true");
+      } else {
+        button.removeAttribute("disabled");
+        button.removeAttribute("aria-busy");
+      }
+    }
+  };
+
   const openDeleteModal = (app: string, environment: string): void => {
     if (!dialog) return;
     if (rowStatus(app, environment) !== DELETE_FAILED_STATUS) {
       dialog.open(app, environment);
       return;
     }
+    const key = opKey(app, environment);
+    if (probing.has(key)) return;
+    probing.add(key);
+    setDeleteBusy(app, environment, true);
     void probeDeleteConflict(context, {
       repo: options.repo,
       environment,
       application: app
     }).then((result) => {
+      probing.delete(key);
+      setDeleteBusy(app, environment, false);
       if (!entry.active) return;
       // A delete that failed for any other reason is an ordinary delete again,
       // and forcing is never offered without the server's proof.
@@ -718,7 +752,12 @@ export function initializeDeployingPage(
         return;
       }
       forceConfirm.show({
-        ...forceDeletePrompt(app, environment, result.resourceState),
+        ...forceDeletePrompt(
+          app,
+          environment,
+          result.resourceState,
+          result.forced
+        ),
         onConfirm: () => runDelete(app, environment, true)
       });
     });
@@ -998,6 +1037,33 @@ export function initializeDeployingPage(
     }
     deployBtn.disabled = false;
     refreshDeployBtn();
+  };
+
+  // A forced delete started on the Deployed graph page redirects here, and the
+  // warning that made the user confirm has to survive that navigation: without
+  // the flag this page polls an ordinary delete and its completion message
+  // never repeats the orphan caution the forced delete earned. The dispatched
+  // run is carried too, since the deleting row has no run URL of its own.
+  const resumeRedirectedDelete = (): boolean => {
+    if (queryValue(context.nav.search, "delete") !== "forced") return false;
+    const app = queryValue(context.nav.search, "application");
+    const environment = queryValue(context.nav.search, "environment");
+    if (app === "" || environment === "" || !options.repo) return false;
+
+    overrides.set(opKey(app, environment), {
+      app,
+      environment,
+      status: "deleting"
+    });
+    const runLink = workflowRunLink(queryValue(context.nav.search, "run"));
+    showInline(
+      "success",
+      `Force deleting deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has started.${runLink}`,
+      true
+    );
+    void loadDeployments(true, true);
+    pollDeleteCompletion(app, environment, 0, true, runLink);
+    return true;
   };
 
   // Deploys started from the Planned or Deployed graph redirect here,
@@ -1334,7 +1400,9 @@ export function initializeDeployingPage(
   void loadApplications();
   void loadEnvironmentsDropdown();
   void loadBranches();
-  if (!resumeRedirectedDeployment()) void loadDeployments();
+  if (!resumeRedirectedDelete() && !resumeRedirectedDeployment()) {
+    void loadDeployments();
+  }
 
   return () => entry.teardown();
 }

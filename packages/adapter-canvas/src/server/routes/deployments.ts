@@ -752,8 +752,20 @@ export async function handleDeleteDeployment(
         ghCommandPresentation.installationNote ?
           ` ${ghCommandPresentation.installationNote}`
         : "";
+      // An exhausted unexpected-input retry is a stale dispatcher, not a
+      // permissions or Actions problem, so it says so instead of sending the
+      // user to check settings that are already correct.
+      const staleForceInput = force && /unexpected inputs?|HTTP 422/i.test(de);
       const hint =
-        /workflow.{0,20}scope/i.test(de) ?
+        staleForceInput ?
+          " GitHub is still rejecting the `force` input, which means the copy" +
+          " of " +
+          DELETE_APP_DISPATCHER_FILE +
+          " on the default branch of " +
+          repo +
+          " has not picked up that input yet. It is committed automatically," +
+          " so wait a moment and retry the forced delete."
+        : /workflow.{0,20}scope/i.test(de) ?
           refreshCommand ?
             ` Your GitHub token is missing the "workflow" scope. Run \`${refreshCommand}\` in a terminal, then retry.${installation}`
           : ` Your GitHub token is missing the "workflow" scope. ${ghCommandPresentation.installationNote}`
