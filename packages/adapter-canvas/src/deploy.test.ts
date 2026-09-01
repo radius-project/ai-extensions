@@ -590,6 +590,9 @@ describe("classifyDeployCloudAuthDrift", () => {
     expect(out).toContain("Azure");
     expect(out).toContain("federated credential or role assignment");
     expect(out).toContain("Re-verify the environment's credentials");
+    // Prior verification is unknown here, so the message must not assert it.
+    expect(out).toContain("If this environment authenticated before");
+    expect(out).not.toContain("verified earlier");
   });
 
   it("classifies an AWS configure-credentials / assume-role failure", () => {
@@ -686,14 +689,15 @@ describe("classifyDeployCloudAuthDrift", () => {
   });
 
   it("classifies drift when the environment previously verified and login failed", () => {
-    expect(
-      classifyDeployCloudAuthDrift({
-        provider: "aws",
-        resourcesTouched: false,
-        failedStepNames: ["Configure AWS Credentials (OIDC)"],
-        environmentPreviouslyVerified: true
-      })
-    ).toContain("Cloud authentication or authorization failed");
+    const out = classifyDeployCloudAuthDrift({
+      provider: "aws",
+      resourcesTouched: false,
+      failedStepNames: ["Configure AWS Credentials (OIDC)"],
+      environmentPreviouslyVerified: true
+    });
+    expect(out).toContain("Cloud authentication or authorization failed");
+    // Prior success is proven, so the message may assert it.
+    expect(out).toContain("This environment verified earlier");
   });
 });
 

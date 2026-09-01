@@ -819,13 +819,25 @@ export function classifyDeployCloudAuthDrift(
     input.provider === "aws" ?
       "the IAM role's trust policy or permissions were changed or removed"
     : "the federated credential or role assignment was changed or removed";
-  return [
-    "Cloud authentication or authorization failed before any resource was deployed.",
-    "This environment verified earlier, so its " +
+  // Only assert that the environment verified earlier when the caller can prove
+  // it. An environment can now be deployable via the "bypassed" status without
+  // ever passing verification, so when prior success is unknown the message must
+  // not claim a good state that may never have existed.
+  const driftCause =
+    input.environmentPreviouslyVerified === true ?
+      "This environment verified earlier, so its " +
       cloud +
       " credentials appear to have drifted since setup (for example " +
       drift +
-      ").",
+      ")."
+    : "If this environment authenticated before, its " +
+      cloud +
+      " credentials may have drifted since setup (for example " +
+      drift +
+      ").";
+  return [
+    "Cloud authentication or authorization failed before any resource was deployed.",
+    driftCause,
     "Re-verify the environment's credentials, then redeploy."
   ].join("\n");
 }

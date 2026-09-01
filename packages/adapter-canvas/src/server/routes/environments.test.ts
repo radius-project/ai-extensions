@@ -1223,7 +1223,7 @@ describe("environments — bypass-verification", () => {
     });
   });
 
-  it("outer catch: 400 when the body is malformed JSON", async () => {
+  it("400s when the body is malformed JSON (a client error)", async () => {
     const { recording, ctx } = context(
       "POST",
       "/api/bypass-verification",
@@ -1232,6 +1232,26 @@ describe("environments — bypass-verification", () => {
     await handleBypassVerification(ctx, deps({}));
     expect(recording.status).toBe(400);
     expect(typeof JSON.parse(recording.body).error).toBe("string");
+  });
+
+  it("500s when internal work throws (a server error, not a 400)", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
+        getOperation: () => {
+          throw new Error("operation store unavailable");
+        }
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(recording.status).toBe(500);
+    expect(JSON.parse(recording.body).error).toContain(
+      "operation store unavailable"
+    );
   });
 });
 

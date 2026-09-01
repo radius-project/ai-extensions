@@ -404,6 +404,16 @@ const BYPASSABLE_VERIFY_CATEGORIES: ReadonlySet<string> = new Set([
 // treats the environment as bypassed for the specific failed run the user
 // accepted — a different later failure (new run id) is not silently inherited,
 // and a real later success supersedes it.
+//
+// The narrow shape handleBypassVerification reads from the (unknown-typed)
+// tracked operation. Every field is optional and defensively re-checked at the
+// use site so a shape change fails closed instead of throwing.
+interface BypassVerificationOperation {
+  repo?: unknown;
+  environment?: unknown;
+  verification?: { runId?: unknown } | null;
+  context?: { githubLogin?: unknown } | null;
+}
 export async function handleBypassVerification(
   context: CanvasRequestContext,
   dependencies: EnvironmentsDependencies
@@ -415,11 +425,19 @@ export async function handleBypassVerification(
     response.end(JSON.stringify(payload));
   };
   const body = await context.readTextBody();
+  let data: { [key: string]: unknown };
   try {
-    const data = JSON.parse(body || "{}");
-    const repo = (data.repo || "").trim();
-    const envName = (data.environment || "").trim();
-    const operationId = (data.operationId || "").trim();
+    data = JSON.parse(body || "{}");
+  } catch (e) {
+    // Only a malformed request body is a client error. Everything after this is
+    // server-side work whose failures must surface as 5xx, not 400.
+    json(400, { error: dependencies.errorMessage(e) });
+    return;
+  }
+  try {
+    const repo = String(data.repo ?? "").trim();
+    const envName = String(data.environment ?? "").trim();
+    const operationId = String(data.operationId ?? "").trim();
     const runId = String(data.runId ?? "").trim();
     if (!repo || !envName || !operationId || !runId) {
       json(400, {
@@ -430,13 +448,15 @@ export async function handleBypassVerification(
 
     // 1. The request must reference the live verification operation for this
     //    exact repo, environment and run. This binds the bypass to a tracked
-    //    operation instead of an arbitrary caller-supplied target.
-    const verifyOp: any = dependencies.getOperation(operationId);
+    //    operation instead of an arbitrary caller-supplied target. getOperation
+    //    is typed unknown, so read it through a narrow shape rather than `any`.
+    const verifyOp = dependencies.getOperation(operationId) as
+      BypassVerificationOperation | null | undefined;
     if (
       !verifyOp ||
       verifyOp.repo !== repo ||
       verifyOp.environment !== envName ||
-      String(verifyOp.verification?.runId || "") !== runId
+      String(verifyOp.verification?.runId ?? "") !== runId
     ) {
       json(409, {
         error:
@@ -625,7 +645,8 @@ export async function handleBypassVerification(
     dependencies.envListCacheDelete(repo);
     json(200, { success: true, category: classification.category });
   } catch (e) {
-    json(400, { error: dependencies.errorMessage(e) });
+    // The body already parsed; anything thrown here is a server-side failure.
+    json(500, { error: dependencies.errorMessage(e) });
   }
 }
 
