@@ -58,6 +58,7 @@ import type {
 const GH_COMMAND_PRESENTATION = resolveGhCommandPresentation();
 import {
   fetchFileFromRepo,
+  fetchFileFromRepoResult,
   github,
   cliExec,
   runCommand,
@@ -80,6 +81,7 @@ import {
   selectedCreateBranchRef,
   selectedCreatePullRequest,
   selectedFetchFileFromRepo,
+  selectedFetchFileFromRepoResult,
   redactGhCredentials
 } from "./gh.js";
 import type {
@@ -1700,8 +1702,10 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   azureCredential: () => cloudCredential(sharedCredentials.azure),
   awsCredential: () => cloudCredential(sharedCredentials.aws),
   optionalString,
-  generateVerifyWorkflow: (environment, provider) =>
-    generateVerifyWorkflow(environment, provider),
+  generateVerifyWorkflow: (environment, provider, setupPushOperationMarker) =>
+    generateVerifyWorkflow(environment, provider, undefined, {
+      setupPushOperationMarker
+    }),
   generateDeployWorkflow: (environment, appFile) =>
     generateDeployWorkflow(environment, appFile),
   generateDeleteWorkflow: (environment) => generateDeleteWorkflow(environment),
@@ -1719,6 +1723,13 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
     executor ?
       selectedFetchFileFromRepo(executor, repo, path, branch)
     : fetchFileFromRepo(repo, path, branch),
+  fetchFileFromRepoResult: (repo, path, branch, executor) =>
+    executor ?
+      selectedFetchFileFromRepoResult(executor, repo, path, branch)
+    : fetchFileFromRepoResult(repo, path, branch).then((result) => ({
+        ...result,
+        status: result.error?.match(/\bHTTP\s+404\b/i) ? 404 : null
+      })),
   buildVerifyWorkflowDispatchArgs,
   verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
   stageVerify: STAGE_VERIFY,

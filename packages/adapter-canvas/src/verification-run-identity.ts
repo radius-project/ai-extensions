@@ -1,4 +1,5 @@
 export const VERIFY_OPERATION_INPUT = "radius_operation";
+export type VerificationRunEvent = "workflow_dispatch" | "push";
 
 export function verificationRunTitle(
   environment: string,
@@ -23,6 +24,7 @@ export function findExactVerificationRun(
     ref: string;
     environment: string;
     operationMarker: string;
+    event: VerificationRunEvent;
   }
 ):
   | { state: "applied"; runId: string }
@@ -44,7 +46,7 @@ export function findExactVerificationRun(
       typeof run.createdAt === "string" &&
       Date.parse(run.createdAt) >= identity.dispatchedAt - 60000 &&
       run.displayTitle === expectedTitle &&
-      run.event === "workflow_dispatch" &&
+      run.event === identity.event &&
       run.headBranch === identity.ref
     );
   });
