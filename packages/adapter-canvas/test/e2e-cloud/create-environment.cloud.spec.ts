@@ -42,6 +42,7 @@ import {
 } from "./support/cloud-command-port.js";
 import {
   createCloudFixture,
+  type AppRegistrationRecord,
   type CloudFixture
 } from "./support/cloud-fixture.js";
 import {
@@ -160,6 +161,8 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
 
   let fixture: CloudFixture | undefined;
   let federatedSubjects: readonly string[] = [];
+  let appRegistration: AppRegistrationRecord | undefined;
+  let servicePrincipalId: string | undefined;
 
   test.beforeAll(async () => {
     if (!gate.enabled) return;
@@ -295,6 +298,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       ).toBe("succeeded");
 
       const app = await cloud.assertAppRegistrationExists();
+      appRegistration = app;
 
       const identity = readRepositoryIdentity(
         await runGh(
@@ -332,6 +336,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
           `az ad sp show --id ${app.appId}`
         )
       );
+      servicePrincipalId = principalId;
       await cloud.assertRoleAssignmentExists(principalId);
 
       await cloud.assertGitHubEnvironmentExists();
@@ -478,9 +483,16 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         await cloud.assertFederatedCredentialAbsent(subject);
 
       // The app registration and role assignment can be shared, so #398 retains
-      // them deliberately. Their absence mirrors remain available for a future
-      // contract that can prove exclusive ownership; fixture reclamation removes
-      // this repository-scoped test identity after the product assertions.
+      // them deliberately. Re-read both so deleting the shared identity cannot
+      // pass merely because deleting the app also made its credentials absent.
+      if (!appRegistration || !servicePrincipalId)
+        throw new Error(
+          "Stage one did not retain the Azure identity needed for deletion assertions."
+        );
+      await expect(cloud.assertAppRegistrationExists()).resolves.toEqual(
+        appRegistration
+      );
+      await cloud.assertRoleAssignmentExists(servicePrincipalId);
     } finally {
       await harness.cleanup();
     }
