@@ -21,14 +21,39 @@ const SUBSCRIPTION = "22222222-2222-2222-2222-222222222222";
 const TENANT = "11111111-1111-1111-1111-111111111111";
 const APP_ID = "33333333-3333-3333-3333-333333333333";
 const USER_ID = "44444444-4444-4444-4444-444444444444";
+const AZURE_USER = { type: "user", name: "dev@contoso.com" };
 
 describe("Azure account identity parsing", () => {
   it("accepts the subscription and tenant GUIDs Azure reports", () => {
     expect(
       parseAzureAccountIdentity(
-        JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT })
+        JSON.stringify({
+          id: SUBSCRIPTION,
+          tenantId: TENANT,
+          user: AZURE_USER
+        })
       )
-    ).toEqual({ subscriptionId: SUBSCRIPTION, tenantId: TENANT });
+    ).toEqual({
+      subscriptionId: SUBSCRIPTION,
+      tenantId: TENANT,
+      callerIdentity: { kind: "user" }
+    });
+  });
+
+  it("classifies a service-principal caller from the same account payload", () => {
+    expect(
+      parseAzureAccountIdentity(
+        JSON.stringify({
+          id: SUBSCRIPTION,
+          tenantId: TENANT,
+          user: { type: "servicePrincipal", name: APP_ID }
+        })
+      )
+    ).toEqual({
+      subscriptionId: SUBSCRIPTION,
+      tenantId: TENANT,
+      callerIdentity: { kind: "servicePrincipal", appId: APP_ID }
+    });
   });
 
   it.each([
@@ -158,7 +183,11 @@ function orchestrationHarness(
       if (line === "account show --output json") {
         return {
           code: 0,
-          stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+          stdout: JSON.stringify({
+            id: SUBSCRIPTION,
+            tenantId: TENANT,
+            user: AZURE_USER
+          }),
           stderr: ""
         };
       }
@@ -700,7 +729,11 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         set: { code: 0, stdout: "", stderr: "" },
         show: {
           code: 0,
-          stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+          stdout: JSON.stringify({
+            id: SUBSCRIPTION,
+            tenantId: TENANT,
+            user: AZURE_USER
+          }),
           stderr: ""
         }
       },
@@ -713,7 +746,11 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         set: { code: 0, stdout: "", stderr: "" },
         show: {
           code: 0,
-          stdout: JSON.stringify({ id: "not-a-guid", tenantId: TENANT }),
+          stdout: JSON.stringify({
+            id: "not-a-guid",
+            tenantId: TENANT,
+            user: AZURE_USER
+          }),
           stderr: ""
         }
       },
@@ -869,7 +906,11 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       if (line === "account show --output json") {
         return {
           code: 0,
-          stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+          stdout: JSON.stringify({
+            id: SUBSCRIPTION,
+            tenantId: TENANT,
+            user: AZURE_USER
+          }),
           stderr: ""
         };
       }
@@ -944,7 +985,11 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         if (line === "account show --output json") {
           return {
             code: 0,
-            stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+            stdout: JSON.stringify({
+              id: SUBSCRIPTION,
+              tenantId: TENANT,
+              user: AZURE_USER
+            }),
             stderr: ""
           };
         }
@@ -1048,7 +1093,11 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         if (line === "account show --output json") {
           return {
             code: 0,
-            stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+            stdout: JSON.stringify({
+              id: SUBSCRIPTION,
+              tenantId: TENANT,
+              user: AZURE_USER
+            }),
             stderr: ""
           };
         }
@@ -1102,7 +1151,11 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         if (line === "account show --output json") {
           return {
             code: 0,
-            stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+            stdout: JSON.stringify({
+              id: SUBSCRIPTION,
+              tenantId: TENANT,
+              user: AZURE_USER
+            }),
             stderr: ""
           };
         }
@@ -1186,12 +1239,19 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         if (line === "account show --output json") {
           return {
             code: 0,
-            stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+            stdout: JSON.stringify({
+              id: SUBSCRIPTION,
+              tenantId: TENANT,
+              user: AZURE_USER
+            }),
             stderr: ""
           };
         }
         if (line.startsWith("ad app list ")) {
           return { code: 0, stdout: "[]", stderr: "" };
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return { code: 0, stdout: USER_ID, stderr: "" };
         }
         if (line.startsWith("ad app create ")) {
           return { code: 0, stdout: APP_ID, stderr: "" };
@@ -1241,7 +1301,11 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       if (command === "account show --output json") {
         return {
           code: 0,
-          stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+          stdout: JSON.stringify({
+            id: SUBSCRIPTION,
+            tenantId: TENANT,
+            user: AZURE_USER
+          }),
           stderr: ""
         };
       }
@@ -1376,6 +1440,12 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     expect(journal.indexOf("record:app")).toBeLessThan(
       journal.indexOf("record:sp")
     );
+    expect(
+      journal.filter((entry) => entry === "az:account show --output json")
+    ).toHaveLength(1);
+    expect(
+      journal.filter((entry) => entry.startsWith("az:account show "))
+    ).toEqual(["az:account show --output json"]);
     expect(journal.at(-1)).not.toBe("checkpoint");
     expect(journal).toContain("stage:succeeded");
   });

@@ -5,6 +5,8 @@ import {
   buildAppTagPatchArgs,
   buildAppTagShowArgs,
   buildRadiusAppProvenanceTags,
+  buildServicePrincipalObjectIdArgs,
+  buildSignedInUserObjectIdArgs,
   decideAppSelection,
   decideExistingClientId,
   decideRadiusAppOwnership,
@@ -32,9 +34,15 @@ import {
   executeRecoverableMutation,
   providerMutationWillWrite
 } from "../services/provider-mutation-recovery.js";
+import {
+  azureRetryDelayMs,
+  isRetryableAzureReadFailure
+} from "./azure-auto-setup-credentials.js";
 
 export const ENTRA_APP_RETENTION_NOTICE =
   "Radius retains this app registration if you later delete the environment; environment deletion removes only that environment's federated identity credential.";
+
+const CALLER_IDENTITY_LOOKUP_ATTEMPTS = 6;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -83,7 +91,8 @@ export async function resolveAzureAutoSetupApplication({
   appNameProvided,
   requestedAppName,
   requestedClientId,
-  serviceManagementReference
+  serviceManagementReference,
+  callerIdentity
 }: AzureAutoSetupApplicationInput): Promise<AzureAutoSetupApplicationResult | null> {
   const {
     operation,
@@ -151,41 +160,78 @@ export async function resolveAzureAutoSetupApplication({
     }
   }
 
-  let signedInUserId: string | null = null;
-  const getSignedInUserId = async (): Promise<
+  let callerObjectId: string | null = null;
+  // Resolves the object id for the principal classified by the account
+  // preflight, so this service does not repeat `az account show`.
+  const getCallerObjectId = async (): Promise<
     { ok: true; id: string } | { ok: false; stderr: string }
   > => {
-    if (signedInUserId !== null) return { ok: true, id: signedInUserId };
-    const result = await runAz([
-      "ad",
-      "signed-in-user",
-      "show",
-      "--query",
-      "id",
-      "-o",
-      "tsv"
-    ]);
-    if (result.code !== 0) return { ok: false, stderr: result.stderr };
-    signedInUserId = result.stdout.trim().toLowerCase();
-    return { ok: true, id: signedInUserId };
+    if (callerObjectId !== null) return { ok: true, id: callerObjectId };
+    if (callerIdentity.kind === "unsupported") {
+      return { ok: false, stderr: callerIdentity.reason };
+    }
+    const lookupArgs =
+      callerIdentity.kind === "servicePrincipal" ?
+        buildServicePrincipalObjectIdArgs({ appId: callerIdentity.appId })
+      : buildSignedInUserObjectIdArgs();
+    let lookup = await runAz(lookupArgs);
+    for (
+      let attempt = 1;
+      lookup.code !== 0 &&
+      lookup.code !== "0" &&
+      attempt < CALLER_IDENTITY_LOOKUP_ATTEMPTS;
+      attempt++
+    ) {
+      const detail = lookup.stderr || lookup.stdout;
+      if (!isRetryableAzureReadFailure(detail)) break;
+      const delay = azureRetryDelayMs(detail, 2000 * attempt);
+      if (delay === null) break;
+      await dependencies.sleep(delay);
+      lookup = await runAz(lookupArgs);
+    }
+    if (lookup.code !== 0 && lookup.code !== "0") {
+      return {
+        ok: false,
+        stderr: lookup.stderr || lookup.stdout
+      };
+    }
+    const id = lookup.stdout.trim().toLowerCase();
+    // An empty id compares unequal to every owner, which would turn a failed
+    // read into a silent "not owned". Ownership gates destructive setup here.
+    if (!id) {
+      return {
+        ok: false,
+        stderr:
+          "Microsoft Entra returned no object id for the current Azure CLI identity."
+      };
+    }
+    if (!isUuid(id)) {
+      return {
+        ok: false,
+        stderr:
+          "Microsoft Entra returned an invalid object id for the current Azure CLI identity."
+      };
+    }
+    callerObjectId = id;
+    return { ok: true, id };
   };
-  const isOwnedBySignedInUser = async (appId: string) => {
-    const signedIn = await getSignedInUserId();
-    if (!signedIn.ok) return { ok: false as const, stderr: signedIn.stderr };
+  const isOwnedByCaller = async (appId: string) => {
+    const caller = await getCallerObjectId();
+    if (!caller.ok) return { ok: false as const, stderr: caller.stderr };
     const result = await runAz(buildAppOwnerListArgs({ appId }));
-    if (result.code !== 0) {
+    if (result.code !== 0 && result.code !== "0") {
       return { ok: false as const, stderr: result.stderr };
     }
     return {
       ok: true as const,
-      owned: parseDirectoryObjectIds(result.stdout).includes(signedIn.id)
+      owned: parseDirectoryObjectIds(result.stdout).includes(caller.id)
     };
   };
   const readRadiusProvenance = async (
     appId: string
   ): Promise<RadiusAppProvenanceInput | undefined> => {
     const result = await runAz(buildAppTagShowArgs({ appId }));
-    if (result.code !== 0) return undefined;
+    if (result.code !== 0 && result.code !== "0") return undefined;
     return {
       tags: parseAppTags(result.stdout) || [],
       repo: oidc.fullName,
@@ -247,7 +293,7 @@ export async function resolveAzureAutoSetupApplication({
     let owned = false;
     let radiusProvenance: RadiusAppProvenanceInput | undefined;
     if (showStatus === "found") {
-      const ownership = await isOwnedBySignedInUser(existingClientId);
+      const ownership = await isOwnedByCaller(existingClientId);
       if (!ownership.ok) {
         await fail(
           400,
@@ -283,7 +329,7 @@ export async function resolveAzureAutoSetupApplication({
       await fail(
         400,
         decision.reason ||
-          `The repository's AZURE_CLIENT_ID (${existingClientId}) references an App Registration the current signed-in user does not own. Verify or clear the variable and retry.`,
+          `The repository's AZURE_CLIENT_ID (${existingClientId}) references an App Registration the current Azure CLI identity does not own. Verify or clear the variable and retry.`,
         decision.code || "existing-client-id-not-owned",
         { steps }
       );
@@ -338,7 +384,7 @@ export async function resolveAzureAutoSetupApplication({
         );
         return null;
       }
-      const ownership = await isOwnedBySignedInUser(explicitAppId);
+      const ownership = await isOwnedByCaller(explicitAppId);
       if (!ownership.ok) {
         await fail(
           400,
@@ -351,13 +397,13 @@ export async function resolveAzureAutoSetupApplication({
       }
       if (!ownership.owned) {
         const decision = decideRadiusAppOwnership({
-          ownedBySignedInUser: false,
+          ownedByCaller: false,
           radiusProvenance: await readRadiusProvenance(explicitAppId)
         });
         await fail(
           400,
           decision.reason ||
-            "The selected App Registration is not owned by the current signed-in user. Choose one you own or create a new application.",
+            "The selected App Registration is not owned by the current Azure CLI identity. Choose one you own or create a new application.",
           decision.code || "app-registration-not-owned",
           { steps, appName }
         );
@@ -420,32 +466,37 @@ export async function resolveAzureAutoSetupApplication({
 
       const ownedMatches = [];
       let unownedRadiusProvenance: RadiusAppProvenanceInput | undefined;
-      for (const match of matches) {
-        if (!match || !match.appId) continue;
-        const ownership = await isOwnedBySignedInUser(match.appId);
-        if (!ownership.ok) {
-          await fail(
-            400,
-            `Could not read owners of App Registration ${match.appId}: ` +
-              ownership.stderr,
-            "app-owner-lookup-failed",
-            { steps, azError: ownership.stderr }
-          );
-          return null;
-        }
-        if (ownership.owned) ownedMatches.push(match);
-        else if (!unownedRadiusProvenance) {
-          unownedRadiusProvenance = {
-            tags: Array.isArray(match.tags) ? match.tags : [],
-            repo: oidc.fullName,
-            environment
-          };
+      if (!recoveringApplicationCreate) {
+        for (const match of matches) {
+          if (!match || !match.appId) continue;
+          // The exact journal reconciliation below owns recovery. Candidate
+          // ownership must not resolve caller identity before that durable state.
+          const ownership = await isOwnedByCaller(match.appId);
+          if (!ownership.ok) {
+            await fail(
+              400,
+              `Could not read owners of App Registration ${match.appId}: ` +
+                ownership.stderr,
+              "app-owner-lookup-failed",
+              { steps, azError: ownership.stderr }
+            );
+            return null;
+          }
+          if (ownership.owned) ownedMatches.push(match);
+          else if (!unownedRadiusProvenance) {
+            unownedRadiusProvenance = {
+              tags: Array.isArray(match.tags) ? match.tags : [],
+              repo: oidc.fullName,
+              environment
+            };
+          }
         }
       }
 
       const selection = decideAppSelection({
         ownedMatches,
-        hasUnownedMatch: matches.length > ownedMatches.length,
+        hasUnownedMatch:
+          !recoveringApplicationCreate && matches.length > ownedMatches.length,
         radiusProvenance: unownedRadiusProvenance,
         existingClientId,
         createNew: createNewApp || recoveringApplicationCreate
@@ -513,16 +564,32 @@ export async function resolveAzureAutoSetupApplication({
           return null;
         }
       } else {
+        const forwardCreate = providerMutationWillWrite(
+          operation,
+          applicationMutationKind,
+          applicationMutationTarget
+        );
+        let callerBeforeCreate: { ok: true; id: string } | null = null;
+        if (forwardCreate) {
+          const caller = await getCallerObjectId();
+          if (!caller.ok) {
+            await fail(
+              400,
+              "Failed to resolve the current Azure CLI identity before creating the App Registration: " +
+                caller.stderr,
+              "app-owner-lookup-failed",
+              { steps, azError: caller.stderr }
+            );
+            return null;
+          }
+          callerBeforeCreate = caller;
+        }
         steps.push(`Creating Entra app registration: ${appName}...`);
         // Only a forward create is stoppable. A journaled attempt that reaches
         // here to be reconciled is a read, and stopping before it would strand
         // the provenance of a request nobody saw answered.
         if (
-          providerMutationWillWrite(
-            operation,
-            applicationMutationKind,
-            applicationMutationTarget
-          ) &&
+          forwardCreate &&
           !(await stopBoundary("before-app-registration-create"))
         )
           return null;
@@ -694,20 +761,20 @@ export async function resolveAzureAutoSetupApplication({
         });
         if (!(await checkpoint("after-app-registration-create"))) return null;
 
-        const signedIn = await getSignedInUserId();
-        if (!signedIn.ok) {
+        const caller = callerBeforeCreate ?? (await getCallerObjectId());
+        if (!caller.ok) {
           await rollbackCreatedAppAndFail(
-            "Failed to read the signed-in Entra user after creating the App Registration: " +
-              signedIn.stderr,
+            "Failed to resolve the current Azure CLI identity after creating the App Registration: " +
+              caller.stderr,
             "app-owner-lookup-failed",
-            signedIn.stderr
+            caller.stderr
           );
           return null;
         }
         steps.push(
-          "Assigning the signed-in user as an owner of the new App Registration..."
+          "Assigning the Azure CLI identity as an owner of the new App Registration..."
         );
-        const ownerMutationTarget = `${clientId}:${signedIn.id}`;
+        const ownerMutationTarget = `${clientId}:${caller.id}`;
         if (
           providerMutationWillWrite(
             operation,
@@ -730,7 +797,7 @@ export async function resolveAzureAutoSetupApplication({
               const result = await runAz(
                 buildAppOwnerAddArgs({
                   appId: clientId,
-                  ownerObjectId: signedIn.id
+                  ownerObjectId: caller.id
                 })
               );
               return isAppOwnerAlreadyAssignedError(result.stderr) ?
@@ -740,7 +807,7 @@ export async function resolveAzureAutoSetupApplication({
             accept: (result) => result,
             acceptedEvidence: (result) =>
               (result as { alreadyAssigned?: boolean }).alreadyAssigned ?
-                "Entra reported the signed-in user was already an owner, so this operation added nothing."
+                "Entra reported the Azure CLI identity was already an owner, so this operation added nothing."
               : null,
             reconcile: async () => {
               const owners = await runAz(
@@ -754,17 +821,17 @@ export async function resolveAzureAutoSetupApplication({
                 );
               }
               const ownerIds = parseDirectoryObjectIds(owners.stdout);
-              return ownerIds.includes(signedIn.id.toLowerCase()) ?
+              return ownerIds.includes(caller.id.toLowerCase()) ?
                   {
                     state: "applied" as const,
                     value: { code: 0, stdout: owners.stdout, stderr: "" },
                     evidence:
-                      "The exact App Registration and signed-in owner identity matched."
+                      "The exact App Registration and Azure CLI owner identity matched."
                   }
                 : {
                     state: "not_applied" as const,
                     evidence:
-                      "Microsoft Entra confirmed the signed-in user is not an owner."
+                      "Microsoft Entra confirmed the Azure CLI identity is not an owner."
                   };
             }
           });
@@ -782,10 +849,11 @@ export async function resolveAzureAutoSetupApplication({
           return null;
         if (
           ownerAdd.code !== 0 &&
+          ownerAdd.code !== "0" &&
           !isAppOwnerAlreadyAssignedError(ownerAdd.stderr)
         ) {
           await rollbackCreatedAppAndFail(
-            "Failed to assign the signed-in user as an owner of the new App Registration: " +
+            "Failed to assign the Azure CLI identity as an owner of the new App Registration: " +
               ownerAdd.stderr,
             "app-owner-add-failed",
             ownerAdd.stderr
@@ -794,12 +862,12 @@ export async function resolveAzureAutoSetupApplication({
         }
 
         steps.push(
-          "Verifying the signed-in user owns the new App Registration..."
+          "Verifying the Azure CLI identity owns the new App Registration..."
         );
         const ownerList = await runAz(
           buildAppOwnerListArgs({ appId: clientId })
         );
-        if (ownerList.code !== 0) {
+        if (ownerList.code !== 0 && ownerList.code !== "0") {
           await rollbackCreatedAppAndFail(
             "Failed to verify owners of the new App Registration: " +
               ownerList.stderr,
@@ -809,15 +877,15 @@ export async function resolveAzureAutoSetupApplication({
           return null;
         }
         const ownerIds = parseDirectoryObjectIds(ownerList.stdout);
-        if (!ownerIds.includes(signedIn.id.toLowerCase())) {
+        if (!ownerIds.includes(caller.id.toLowerCase())) {
           await rollbackCreatedAppAndFail(
-            "The signed-in user was not present in the App Registration owners after creation.",
+            "The Azure CLI identity was not present in the App Registration owners after creation.",
             "app-owner-verify-failed",
             ownerList.stdout
           );
           return null;
         }
-        steps.push("✅ Signed-in user verified as App Registration owner");
+        steps.push("✅ Azure CLI identity verified as App Registration owner");
         if (!(await checkpoint("after-app-registration-owner-verify")))
           return null;
 
