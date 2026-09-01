@@ -69,6 +69,7 @@ Model separate web, worker, producer, consumer, and init roles separately even w
 For each required app-native input, choose exactly one supported source:
 
 - explicit `env.value` from a literal or verified nonsecret resource output;
+- direct `env.value` from a developer-supplied `@secure()` parameter only as an explicit schema-supported or legacy compatibility fallback when the native contract requires it; prefer an authored Secret with `secretKeyRef` or a compatible Secret connection because direct `env.value` stores the resolved value in the Radius container resource and generated Pod specification;
 - a connection to an authored `Radius.Security/secrets` resource through `<secret>.id`, producing secret-backed `CONNECTION_<CONNECTION>_<SECRETKEY>` values from its data keys;
 - a connection to `<producer>.id`, producing secret-backed `CONNECTION_<CONNECTION>_<SECRETKEY>` values from its Recipe `result.secrets` keys;
 - `valueFrom.secretKeyRef` through `<secret>.name` and a declared authored data key when preserving a required native variable or compatibility fallback;
@@ -87,16 +88,16 @@ An authored secret containing Bicep interpolation that constructs a credential-b
 
 For every workload-to-resource edge, account for all applicable fields:
 
-| Field                | Proof                                                                                                                                                                                |
-|----------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Resource/subresource | Exact database, topic, queue, container, model, or index selected by the profile                                                                                                     |
-| Endpoint             | Complete hostname/FQDN or URL, including any recipe-documented suffix/path transformation                                                                                            |
-| Port                 | Client port from an explicitly mapped Recipe output or a provider-fixed literal proven by the concrete provider profile                                                              |
-| Protocol             | Client wire protocol and version supported by the concrete backend                                                                                                                   |
-| Transport security   | TLS mode, certificate behavior, and encryption flags expected by source                                                                                                              |
-| Authentication       | Mechanism, identity/username, and source-supported config syntax                                                                                                                     |
-| Secret               | An authored-secret connection through `<secret>.id`, a Recipe-output connection through `<producer>.id`, or a custom Kubernetes binding through `<producer>.properties.secrets.name` |
-| Final format         | Native URL, nested environment key, JAAS/config block, or generated file actually parsed by the workload                                                                             |
+| Field                | Proof                                                                                                                                                                                                                                                                                               |
+|----------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Resource/subresource | Exact database, topic, queue, container, model, or index selected by the profile                                                                                                                                                                                                                    |
+| Endpoint             | Complete hostname/FQDN or URL, including any recipe-documented suffix/path transformation                                                                                                                                                                                                           |
+| Port                 | Client port from an explicitly mapped Recipe output or a provider-fixed literal proven by the concrete provider profile                                                                                                                                                                             |
+| Protocol             | Client wire protocol and version supported by the concrete backend                                                                                                                                                                                                                                  |
+| Transport security   | TLS mode, certificate behavior, and encryption flags expected by source                                                                                                                                                                                                                             |
+| Authentication       | Mechanism, identity/username, and source-supported config syntax                                                                                                                                                                                                                                    |
+| Secret               | An authored-secret connection through `<secret>.id`; an authored explicit fallback through `valueFrom.secretKeyRef` with `<secret>.name` and its declared data key; a Recipe-output connection through `<producer>.id`; or a custom Kubernetes binding through `<producer>.properties.secrets.name` |
+| Final format         | Native URL, nested environment key, JAAS/config block, or generated file actually parsed by the workload                                                                                                                                                                                            |
 
 A resource output named `host` may be only one segment of the endpoint. A type name such as Kafka or RabbitMQ does not prove broker compatibility. Apply provider-specific values in `app.bicep` when the application must consume them, while keeping provider provisioning in Environment Bicep.
 
@@ -128,7 +129,7 @@ Do not count an empty default config, placeholder pipeline, admin UI or login-sc
 
 ## Provider compatibility and ownership
 
-Inspect the concrete type, registered recipe, and client source together. Derive FQDN suffixes, TLS, ports, auth modes, connection-string formats, protocol compatibility, network/firewall requirements, and sensitive outputs from that contract. A type named Kafka or RabbitMQ may be backed by a managed service with a compatible surface; the client must support the actual protocol and authentication mode.
+Inspect the concrete type, registered Recipe, and client source together. Read the control-plane version with `rad version --output json`, inspect configured Recipe/template metadata with `rad recipe show <name> --resource-type <type> --output json`, and verify the resolved schema plus pinned Recipe tag or digest. Those signals prove secret-connection projection only when they resolve to a known compatible control-plane version and exact template contract; otherwise preserve explicit wiring. Derive FQDN suffixes, TLS, ports, auth modes, connection-string formats, protocol compatibility, network/firewall requirements, and sensitive outputs from that contract. A type named Kafka or RabbitMQ may be backed by a managed service with a compatible surface; the client must support the actual protocol and authentication mode.
 
 `app.bicep` owns developer intent and runtime wiring. Environment/provider Bicep owns recipe modules, SKUs, region, quota, firewall/network policy, and provider-output mapping. Add provider-specific values to the app model only when the application must consume them at runtime.
 

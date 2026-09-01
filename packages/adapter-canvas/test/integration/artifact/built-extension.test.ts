@@ -461,18 +461,18 @@ describe("P0-C built Radius extension artifact", () => {
     const todoExample = readGuidance("references/todo-list-app-example.md");
     const mysqlExample = bicepBlocks.find(
       (block) =>
-        block.includes(
-          "resource mysqlClientCredentials 'Radius.Security/secrets"
-        ) && block.includes("MYSQL_PASSWORD:")
+        block.includes("resource mysqlCredentials 'Radius.Security/secrets") &&
+        block.includes("source: mysql.id") &&
+        block.includes("source: mysqlCredentials.id")
     );
     expect(mysqlExample).toBeDefined();
+    expect(mysqlExample).toMatch(/password:\s*\{\s*value:\s*password\s*\}/u);
     expect(mysqlExample).toMatch(
-      /password:\s*\{\s*value:\s*mysqlPassword\s*\}/u
+      /mysql:\s*\{\s*source:\s*mysql\.id\s*\}\s*mysqlSecret:\s*\{\s*source:\s*mysqlCredentials\.id/u
     );
-    expect(mysqlExample).toMatch(
+    expect(todoExample).toMatch(
       /MYSQL_PASSWORD:\s*\{\s*valueFrom:\s*\{\s*secretKeyRef:\s*\{\s*secretName:\s*mysqlClientCredentials\.name\s*key:\s*'password'/u
     );
-    expect(mysqlExample).not.toContain("connections:");
     expect(todoExample).toContain(
       "The same `mysqlPassword` parameter supplies the MySQL resource's schema-defined sensitive input"
     );
@@ -487,6 +487,7 @@ describe("P0-C built Radius extension artifact", () => {
       "references/bicep-structure-rules.md"
     );
     const runtimeGuidance = readGuidance("references/runtime-contract.md");
+    const skillGuidance = readGuidance("SKILL.md");
     const redisExample = bicepBlocks.find(
       (block) =>
         block.includes("redis:") && block.includes("source: redisCache.id")
@@ -513,6 +514,38 @@ describe("P0-C built Radius extension artifact", () => {
     expect(connectionGuidance).toContain(
       "Set `disableDefaultEnvVars: true` on a connection only when all generated variables from that connection must be suppressed"
     );
+    expect(skillGuidance).toContain(
+      "`postgresSecret` becomes `POSTGRESSECRET`"
+    );
+    expect(skillGuidance).toContain("`rad version --output json`");
+    expect(skillGuidance).toContain(
+      "`rad recipe show <name> --resource-type <type> --output json`"
+    );
+    expect(skillGuidance).toContain(
+      "These signals do not automatically prove secret-connection projection"
+    );
+    for (const guidance of [connectionGuidance, runtimeGuidance]) {
+      expect(guidance).toContain("`rad version --output json`");
+      expect(guidance).toContain(
+        "`rad recipe show <name> --resource-type <type> --output json`"
+      );
+      expect(guidance).toContain("known compatible control-plane version");
+    }
+    expect(readGuidance("references/secrets-handling.md")).toContain(
+      "`CONNECTION_MYSQLSECRET_PASSWORD`"
+    );
+    for (const guidance of [
+      connectionGuidance,
+      structureGuidance,
+      runtimeGuidance,
+      readGuidance("references/secrets-handling.md")
+    ]) {
+      expect(guidance).toContain("`@secure()`");
+      expect(guidance).toContain("`env.value`");
+      expect(guidance).toMatch(/explicit|legacy/u);
+      expect(guidance).toContain("fallback");
+      expect(guidance).toContain("generated Pod specification");
+    }
     for (const guidance of [
       connectionGuidance,
       structureGuidance,
@@ -523,11 +556,17 @@ describe("P0-C built Radius extension artifact", () => {
       );
     }
 
+    const literalCredentialAssignment =
+      /^\s*(?:[A-Za-z][A-Za-z0-9]*_)*(?:accessKey|apiKey|clientSecret|connectionString|password|secretKey|token)\s*:\s*(?:['"]|\{\s*value:\s*['"])/imu;
+    expect("MYSQL_PASSWORD: { value: 'unsafe-example' }").toMatch(
+      literalCredentialAssignment
+    );
+    expect("APP_PASSWORD_POLICY: { value: 'strict' }").not.toMatch(
+      literalCredentialAssignment
+    );
     expect(bicepBlocks.length).toBeGreaterThan(0);
     for (const block of bicepBlocks) {
-      expect(block).not.toMatch(
-        /^\s*(?:accessKey|apiKey|clientSecret|connectionString|password|secretKey|token)\s*:\s*(?:['"]|\{\s*value:\s*['"])/imu
-      );
+      expect(block).not.toMatch(literalCredentialAssignment);
     }
   });
 

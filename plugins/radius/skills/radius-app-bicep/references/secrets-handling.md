@@ -13,7 +13,7 @@ For every secret, inspect:
 
 Preserve the application's exact environment contract. Connection projection uses `CONNECTION_<CONNECTION>_<SECRETKEY>`; the suffix is the uppercased authored Secret data key or Recipe `result.secrets` key. When the application requires a different Kubernetes environment name, bind that name explicitly through `secretKeyRef`.
 
-Never hardcode passwords, tokens, keys, or credential-bearing URLs. Use a `@secure()` parameter for developer-supplied Bicep inputs, including values placed in an authored `Radius.Security/secrets` resource. When an existing application also requires a different native environment name, an explicit `env.value` from that same secure parameter may coexist with the authored-secret connection to preserve behavior.
+Never hardcode passwords, tokens, keys, or credential-bearing URLs. Use a `@secure()` parameter for developer-supplied Bicep inputs, including values placed in an authored `Radius.Security/secrets` resource. Prefer an authored Secret with `secretKeyRef` or a compatible Secret connection. Bind the secure parameter directly to `env.value` only as an explicit schema-supported or legacy compatibility fallback required by the existing native contract: it is weaker because the resolved value is stored in the Radius container resource and generated Pod specification.
 
 ## Developer-supplied secret inputs
 
@@ -63,7 +63,10 @@ resource apiContainer 'Radius.Compute/containers@2025-08-01-preview' = {
       }
     }
     connections: {
-      database: {
+      mysql: {
+        source: mysql.id
+      }
+      mysqlSecret: {
         source: mysqlCredentials.id
       }
     }
@@ -71,7 +74,7 @@ resource apiContainer 'Radius.Compute/containers@2025-08-01-preview' = {
 }
 ```
 
-The connection above injects secret-backed `CONNECTION_DATABASE_PASSWORD`; `PASSWORD` is the uppercased authored `password` data key. The names are illustrative. Confirm the resource properties, connection key, Secret data key, generated environment name, and required value format against the target version and source. Keep the authored Secret name distinct from Recipe-owned Kubernetes Secret names. If the application requires a different native name, model an explicit supported binding rather than assuming the connection renames it.
+The `mysql` producer connection projects verified ordinary outputs such as `CONNECTION_MYSQL_HOST` and `CONNECTION_MYSQL_PORT`. The authored Secret connection injects `CONNECTION_MYSQLSECRET_PASSWORD`: `MYSQLSECRET` is the `mysqlSecret` connection map key uppercased without inserting a separator, and `PASSWORD` is the uppercased authored `password` data key. The names are illustrative. Confirm the resource properties, connection keys, Secret data key, generated environment names, and required value format against the target version and source. Keep the authored Secret name distinct from Recipe-owned Kubernetes Secret names. If the application requires a different native name, model an explicit supported binding rather than assuming the connection renames it.
 
 ## Recipe-generated secret results
 
