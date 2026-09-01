@@ -5,7 +5,10 @@
 # so the environment, its recipe packs, the application, and the Terraform recipe
 # state all exist and recipe deletes can run. Deletes a single application or
 # environment with the Radius.Core preview surface, then writes a rad-delete-result
-# artifact. State is persisted again by the separate `teardown` action (rad shutdown),
+# artifact (JSON: schemaVersion, outcome, exitCode, resourceType, name, forced, output).
+# The canvas reads that artifact to tell a 409 non-terminal-state conflict apart from
+# any other delete failure, so the `output` field must keep the raw `rad` output.
+# State is persisted again by the separate `teardown` action (rad shutdown),
 # which runs unconditionally after this step.
 name: Radius - Delete resource
 description: Delete a Radius application or environment (Radius.Core preview) and write a result artifact.
@@ -21,6 +24,13 @@ inputs:
     description: Periodically refresh the Azure workload identity token while deletion runs.
     required: false
     default: "false"
+  force:
+    description: >-
+      Pass --force so the delete proceeds even when a resource is stranded in a non-terminal
+      provisioning state (the 409 "target resource is in progress state" conflict). External
+      resources those records created may be left orphaned and need manual cleanup.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -31,6 +41,7 @@ runs:
         RESOURCE_TYPE: ${{ inputs.resource-type }}
         RESOURCE_NAME: ${{ inputs.name }}
         REFRESH_AZURE_OIDC_TOKEN: ${{ inputs.azure-oidc-token-refresh }}
+        FORCE_DELETE: ${{ inputs.force }}
       run: |
         # pipefail so a failed `rad` whose output is piped through `tee` is detected
         # via PIPESTATUS rather than masked by tee's exit code. -e/-u make setup and
@@ -53,14 +64,22 @@ runs:
         EXIT=0
         OIDC_REFRESH_PID=""
         OUTFILE=$(mktemp)
+        # Normalized once so every later branch (the extra rad flag, the log
+        # label, and the result artifact) agrees on whether this is a force
+        # delete; anything other than the literal "true" is treated as false.
+        FORCED=false
+        if [ "${FORCE_DELETE:-false}" = "true" ]; then
+          FORCED=true
+        fi
         write_result() {
           jq -n \
             --arg outcome "$OUTCOME" \
             --argjson exitCode "$EXIT" \
             --arg resourceType "$RESOURCE_TYPE" \
             --arg name "$RESOURCE_NAME" \
+            --argjson forced "$FORCED" \
             --rawfile output "$OUTFILE" \
-            '{schemaVersion:"1.0", outcome:$outcome, exitCode:$exitCode, resourceType:$resourceType, name:$name, output:$output}' \
+            '{schemaVersion:"1.0", outcome:$outcome, exitCode:$exitCode, resourceType:$resourceType, name:$name, forced:$forced, output:$output}' \
             > "$RESULT_FILE"
         }
         cleanup() {
@@ -113,16 +132,27 @@ runs:
 
         # --yes bypasses the interactive confirmation prompt; --preview selects the
         # Radius.Core implementation the deploy workflow provisions (without it the
-        # base command dispatches to the legacy, non-Radius.Core surface).
+        # base command dispatches to the legacy, non-Radius.Core surface). --force is
+        # added only when the caller explicitly asked for it: it makes the control
+        # plane delete records stranded in a non-terminal provisioning state, which
+        # is the only escape from the 409 "target resource is in progress state"
+        # loop, at the cost of possibly orphaning the external resources they own.
+        RAD_ARGS=("${VERB[@]}" "$RESOURCE_NAME" --yes --preview)
+        RAD_FLAGS="--yes --preview"
+        if [ "$FORCED" = "true" ]; then
+          RAD_ARGS+=(--force)
+          RAD_FLAGS="$RAD_FLAGS --force"
+          echo "Forcing the delete: resources stuck in a non-terminal state will be removed from Radius, and the external resources they created may be orphaned."
+        fi
         # Keep the group label constant: RESOURCE_NAME is untrusted and a newline
         # or workflow-command-like text in it could corrupt log rendering or inject
         # workflow commands. The actual `rad` invocation below still carries the name.
-        echo "::group::rad ${VERB[*]} --yes --preview"
+        echo "::group::rad ${VERB[*]} $RAD_FLAGS"
         # Relax -e only for the pipeline so a non-zero `rad` exit is captured via
         # PIPESTATUS and reported below, rather than aborting the step before we
         # can write the result artifact. -e is restored immediately after.
         set +e
-        rad "${VERB[@]}" "$RESOURCE_NAME" --yes --preview 2>&1 | tee "$OUTFILE"
+        rad "${RAD_ARGS[@]}" 2>&1 | tee "$OUTFILE"
         EXIT=${PIPESTATUS[0]}
         set -e
         echo "::endgroup::"

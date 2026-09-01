@@ -2776,6 +2776,71 @@ test.describe("Radius Canvas in Chromium", () => {
     );
   });
 
+  test("forces a delete only after the conflict probe proves the deployment is stuck @safety", async ({
+    page,
+    canvas
+  }) => {
+    const deletes: unknown[] = [];
+    let conflict = false;
+    await routeDeployedPage(page, () => "delete-failed");
+    await page.route("**/api/delete-conflict**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          conflict ?
+            { conflict: true, resourceState: "Updating", forced: false }
+          : { conflict: false }
+        )
+      });
+    });
+    await page.route("**/api/delete-deployment", async (route) => {
+      deletes.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ success: true, forced: conflict })
+      });
+    });
+    await gotoCanvas(page, canvas, "deployed");
+
+    // Without a proven conflict the ordinary confirmation stays in place, so a
+    // routine delete-failed row can never be escalated by accident.
+    await page.getByRole("button", { name: "Retry Delete" }).click();
+    await expect(
+      page.getByRole("button", { name: "I want to delete this deployment" })
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    conflict = true;
+    await page.getByRole("button", { name: "Retry Delete" }).click();
+    // The forced question uses the product's lighter confirmation: one
+    // decision, asked once the ordinary delete has already been answered.
+    const confirmModal = page.locator("#env-confirm-modal");
+    await expect(confirmModal).toContainText("Force delete this deployment?");
+    await expect(confirmModal).toContainText("may still be updating");
+    await expect(confirmModal).toContainText(
+      "may leave orphaned external resources that require manual cleanup"
+    );
+    await expect(page.getByRole("button", { name: "Cancel" })).toBeFocused();
+    await expectNoWcagViolations(page);
+
+    // Cancelling is the safe default and must never delete anything.
+    await page.keyboard.press("Escape");
+    await expect(confirmModal).toBeHidden();
+    expect(deletes).toHaveLength(0);
+
+    await page.getByRole("button", { name: "Retry Delete" }).click();
+    await page.getByRole("button", { name: "Force delete" }).click();
+
+    await expect.poll(() => deletes).toHaveLength(1);
+    expect(deletes[0]).toMatchObject({
+      environment: "fixture-environment",
+      application: "radius-app",
+      force: true
+    });
+  });
+
   test("announces a finished deploy away from the deployments page and keeps it dismissed", async ({
     page,
     canvas
