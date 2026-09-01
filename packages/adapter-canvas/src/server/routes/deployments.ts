@@ -604,24 +604,29 @@ export async function handleDeleteDeployment(
       "",
       [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE]
     );
-    // If the sync couldn't commit the dispatcher to the default branch (e.g.
-    // it's protected, or the token lacks write access), the dispatch below will
-    // 404 on a genuinely-absent workflow. Fail fast with a specific message
-    // naming the branch instead of the generic hint.
+    // Both files are required for a safe dispatch: GitHub resolves the dispatcher
+    // and its reusable provider from the default branch. Never run a stale
+    // provider when either update failed.
+    const requiredDeleteWorkflows = new Set([
+      DELETE_APP_DISPATCHER_FILE,
+      DELETE_AZURE_FILE
+    ]);
     const commitFail = sync.failed.find(
-      (f) => f.path.split("/").pop() === DELETE_APP_DISPATCHER_FILE
+      (failure) =>
+        requiredDeleteWorkflows.has(failure.path.split("/").pop() || "")
     );
     if (commitFail) {
+      const failedFile = commitFail.path.split("/").pop() || commitFail.path;
       releaseReservation();
       respond(400, {
         error:
           "Couldn't commit the delete workflow (" +
-          DELETE_APP_DISPATCHER_FILE +
+          failedFile +
           ') to the "' +
           commitFail.branch +
           '" branch of ' +
           repo +
-          ", so there's nothing to dispatch. The branch may be protected" +
+          ", so the delete was not dispatched. The branch may be protected" +
           " or your GitHub token may lack write access to " +
           repo +
           "."

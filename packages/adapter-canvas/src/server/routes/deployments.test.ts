@@ -1671,35 +1671,38 @@ describe("deployments routes (SU-06)", () => {
       }
     });
 
-    it("releases and answers 400 when the delete workflow cannot be committed", async () => {
-      const { recording, context: ctx } = deleteContext();
-      const released: unknown[] = [];
-      await handleDeleteDeployment(
-        ctx,
-        deleteDependencies({
-          ensureWorkflowsCurrent: () =>
-            Promise.resolve({
-              created: [],
-              failed: [
-                {
-                  path: ".github/workflows/delete-application.yml",
-                  branch: "main"
-                }
-              ]
-            }),
-          releaseDeploymentMutation: (_state, lease) => released.push(lease),
-          runGh: () => {
-            throw new Error("must not dispatch without a committed workflow");
-          }
-        })
-      );
+    it.each(["delete-application.yml", "delete-azure.yml"])(
+      "releases and answers 400 when %s cannot be committed",
+      async (file) => {
+        const { recording, context: ctx } = deleteContext();
+        const released: unknown[] = [];
+        await handleDeleteDeployment(
+          ctx,
+          deleteDependencies({
+            ensureWorkflowsCurrent: () =>
+              Promise.resolve({
+                created: [],
+                failed: [
+                  {
+                    path: `.github/workflows/${file}`,
+                    branch: "main"
+                  }
+                ]
+              }),
+            releaseDeploymentMutation: (_state, lease) => released.push(lease),
+            runGh: () => {
+              throw new Error("must not dispatch without current workflows");
+            }
+          })
+        );
 
-      expect(recording.status).toBe(400);
-      expect(JSON.parse(recording.body).error).toContain(
-        'to the "main" branch of octo/todolist'
-      );
-      expect(released).toEqual([LEASE]);
-    });
+        expect(recording.status).toBe(400);
+        expect(JSON.parse(recording.body).error).toContain(
+          `Couldn't commit the delete workflow (${file}) to the "main" branch of octo/todolist`
+        );
+        expect(released).toEqual([LEASE]);
+      }
+    );
 
     // A failure committing some *other* workflow file is not this route's
     // problem, so it must not short-circuit the dispatch.
