@@ -8,21 +8,27 @@ describe("validateEnvironmentName", () => {
     );
   });
 
-  it("rejects a name that is too long", () => {
-    expect(validateEnvironmentName("a".repeat(64))).toContain(
-      "63 characters or fewer"
+  it("rejects a name that exceeds GitHub's 255-character limit", () => {
+    expect(validateEnvironmentName("a".repeat(256))).toContain(
+      "255 characters or fewer"
     );
   });
 
-  it("rejects a name with disallowed characters", () => {
-    expect(validateEnvironmentName("my env")).toContain("only letters");
+  it("accepts a name at the 255-character limit", () => {
+    expect(validateEnvironmentName("a".repeat(255))).toBe("");
   });
 
-  it("rejects a name that does not start alphanumeric", () => {
-    expect(validateEnvironmentName("-dev")).toContain("only letters");
+  it("rejects a name containing a control character", () => {
+    expect(validateEnvironmentName("dev\tprod")).toContain(
+      "control characters"
+    );
   });
 
-  it("accepts a well-formed name", () => {
-    expect(validateEnvironmentName("dev-1.prod_2")).toBe("");
+  it("accepts a name containing ':' (escaped as %3A in the OIDC subject)", () => {
+    expect(validateEnvironmentName("team:dev")).toBe("");
+  });
+
+  it("accepts a name with spaces, mixed case, dots, hyphens and underscores", () => {
+    expect(validateEnvironmentName("Dev Env-1.prod_2")).toBe("");
   });
 });

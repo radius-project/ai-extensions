@@ -46,7 +46,7 @@ describe("classifyVerifyFailure", () => {
   it("classifies a reachable-but-forbidden AKS access step as permissions", () => {
     const result = classifyVerifyFailure(
       input({
-        failedSteps: [{ name: "Verify AKS access" }],
+        failedSteps: [{ name: "Verify AKS Access" }],
         log: "Error from server (Forbidden): pods is forbidden: User cannot list resource"
       })
     );
@@ -56,7 +56,7 @@ describe("classifyVerifyFailure", () => {
   it("classifies an unreachable EKS cluster as cluster-unreachable", () => {
     const result = classifyVerifyFailure(
       input({
-        failedSteps: [{ name: "Verify EKS access" }],
+        failedSteps: [{ name: "Verify EKS Access" }],
         log: "Unable to connect to the server: dial tcp 10.0.0.1:443: i/o timeout"
       })
     );
@@ -67,14 +67,14 @@ describe("classifyVerifyFailure", () => {
   it("returns generic when a cluster step fails with no reachability or authorization signal", () => {
     const result = classifyVerifyFailure(
       input({
-        failedSteps: [{ name: "Verify AKS access" }],
+        failedSteps: [{ name: "Verify AKS Access" }],
         log: "some unexpected kubectl output"
       })
     );
     expect(result.category).toBe("generic");
   });
 
-  it("classifies a rejected OIDC login (no reachability) as oidc-trust", () => {
+  it("classifies a rejected AWS OIDC login (trust evidence, no reachability) as oidc-trust", () => {
     const result = classifyVerifyFailure(
       input({
         failedSteps: [{ name: "Configure AWS Credentials" }],
@@ -82,6 +82,16 @@ describe("classifyVerifyFailure", () => {
       })
     );
     expect(result.category).toBe("oidc-trust");
+  });
+
+  it("returns generic when a login step fails with neither reachability nor trust evidence", () => {
+    const result = classifyVerifyFailure(
+      input({
+        failedSteps: [{ name: "Azure Login (OIDC)" }],
+        log: "unexpected login failure with no recognizable cause"
+      })
+    );
+    expect(result.category).toBe("generic");
   });
 
   it("classifies an OIDC login that cannot reach the provider as cloud-unreachable", () => {
@@ -95,44 +105,54 @@ describe("classifyVerifyFailure", () => {
     expect(result.component).toBe("cloud provider");
   });
 
-  it("classifies a post-login cloud access step that cannot reach the endpoint as cloud-unreachable", () => {
+  it("classifies a post-login credential check that cannot reach the endpoint as cloud-unreachable", () => {
     const result = classifyVerifyFailure(
       input({
-        failedSteps: [{ name: "Verify access (get-caller-identity)" }],
+        failedSteps: [{ name: "Verify AWS Credentials" }],
         log: "Could not connect to the endpoint URL: no such host"
       })
     );
     expect(result.category).toBe("cloud-unreachable");
   });
 
-  it("classifies a denied post-login cloud access step as permissions", () => {
+  it("classifies a denied post-login credential check as permissions", () => {
     const result = classifyVerifyFailure(
       input({
-        failedSteps: [{ name: "Verify access (get-caller-identity)" }],
+        failedSteps: [{ name: "Verify AWS Credentials" }],
         log: "AccessDenied: User is not authorized to perform sts:GetCallerIdentity"
       })
     );
     expect(result.category).toBe("permissions");
   });
 
-  it("returns generic when a cloud access step fails without a recognizable signal", () => {
+  it("returns generic when a credential check fails without a recognizable signal", () => {
     const result = classifyVerifyFailure(
       input({
-        failedSteps: [{ name: "Verify access" }],
+        failedSteps: [{ name: "Verify Azure Credentials" }],
         log: "unexpected"
       })
     );
     expect(result.category).toBe("generic");
   });
 
-  it("classifies a failed GHCR package-push check as permissions", () => {
+  it("classifies a failed GHCR package-push check with an authorization denial as permissions", () => {
     const result = classifyVerifyFailure(
       input({
         failedSteps: [{ name: "Verify GHCR package push permission" }],
-        log: "403 Forbidden"
+        log: "denied: 403 Forbidden"
       })
     );
     expect(result.category).toBe("permissions");
+  });
+
+  it("returns generic for a GHCR package-push failure with no authorization evidence (operational outage)", () => {
+    const result = classifyVerifyFailure(
+      input({
+        failedSteps: [{ name: "Verify GHCR package push permission" }],
+        log: "ghcr.io returned 503 Service Unavailable"
+      })
+    );
+    expect(result.category).toBe("generic");
   });
 
   it("returns generic when no step matches any known category", () => {
@@ -149,7 +169,7 @@ describe("classifyVerifyFailure", () => {
   it("prefers cluster-unreachable over authorization when both signals appear", () => {
     const result = classifyVerifyFailure(
       input({
-        failedSteps: [{ name: "Verify AKS access" }],
+        failedSteps: [{ name: "Verify AKS Access" }],
         log: "Forbidden earlier, then connection timed out contacting the API server"
       })
     );

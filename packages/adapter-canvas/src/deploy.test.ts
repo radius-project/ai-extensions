@@ -609,13 +609,14 @@ describe("classifyDeployCloudAuthDrift", () => {
   });
 
   it("uses a provider-agnostic label for an unknown provider", () => {
+    // An unknown provider cannot be tied to a provider-specific login step, so
+    // its failure is no longer force-classified as drift.
     const out = classifyDeployCloudAuthDrift({
       provider: "gcp",
       resourcesTouched: false,
       failedStepNames: ["OIDC login"]
     });
-    expect(out).toContain("the cloud provider");
-    expect(out).toContain("the trust or permissions changed");
+    expect(out).toBe("");
   });
 
   it("returns '' once a resource was touched (that is a 5.1 resource failure)", () => {
@@ -646,6 +647,53 @@ describe("classifyDeployCloudAuthDrift", () => {
         failedStepNames: []
       })
     ).toBe("");
+  });
+
+  it("returns '' when a mutation step failed even though login is also listed", () => {
+    // A failed mutation step (e.g. registering credentials with Radius) means
+    // state was already being changed, so this is not clean pre-mutation drift.
+    expect(
+      classifyDeployCloudAuthDrift({
+        provider: "azure",
+        resourcesTouched: false,
+        failedStepNames: [
+          "Azure Login (OIDC)",
+          "Register cloud credentials with Radius"
+        ]
+      })
+    ).toBe("");
+  });
+
+  it("does not misread a mutation step that mentions credentials as a login failure", () => {
+    expect(
+      classifyDeployCloudAuthDrift({
+        provider: "azure",
+        resourcesTouched: false,
+        failedStepNames: ["Refresh external deployment target credentials"]
+      })
+    ).toBe("");
+  });
+
+  it("returns '' when the environment never verified (bypassed), even at the login step", () => {
+    expect(
+      classifyDeployCloudAuthDrift({
+        provider: "azure",
+        resourcesTouched: false,
+        failedStepNames: ["Azure Login (OIDC)"],
+        environmentPreviouslyVerified: false
+      })
+    ).toBe("");
+  });
+
+  it("classifies drift when the environment previously verified and login failed", () => {
+    expect(
+      classifyDeployCloudAuthDrift({
+        provider: "aws",
+        resourcesTouched: false,
+        failedStepNames: ["Configure AWS Credentials (OIDC)"],
+        environmentPreviouslyVerified: true
+      })
+    ).toContain("Cloud authentication or authorization failed");
   });
 });
 

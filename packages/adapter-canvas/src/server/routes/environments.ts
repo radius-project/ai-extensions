@@ -371,31 +371,196 @@ export async function handleDeleteEnvironment(
 // 4.4 permissions and 4.5 unreachable). It is durable because the environment
 // listing derives an environment's status live from its verify run, which stays
 // "failed" forever; the marker is what lets the listing report the environment
-// as usable so it can be selected for a deploy. Re-verifying and passing later
-// supersedes it (a genuine "success" run wins).
+// as usable so it can be selected for a deploy. Its value is the id of the
+// failed run the user accepted, so the listing only treats the environment as
+// bypassed for that exact run — a different later failure is reported as failed
+// and re-examined, and a genuine later "success" run wins on its own.
 const VERIFICATION_BYPASS_VARIABLE = "RADIUS_VERIFICATION_BYPASSED";
 
-// Records a verification bypass for an environment by writing the durable
-// marker variable, then invalidates the repo's cached listing so the picker
-// re-derives the environment as usable on its next read.
+// The exception categories a user is allowed to bypass: a permissions gap (4.4)
+// or an unreachable cluster / cloud endpoint (4.5) can be resolved after the
+// environment record exists. An OIDC-trust gap (4.3) and any unclassified
+// ("generic") failure must be fixed first and are never bypassable.
+const BYPASSABLE_VERIFY_CATEGORIES: ReadonlySet<string> = new Set([
+  "permissions",
+  "cluster-unreachable",
+  "cloud-unreachable"
+]);
+
+// Records a verification bypass for an environment by writing the durable marker
+// variable, then invalidates the repo's cached listing so the picker re-derives
+// the environment as usable on its next read.
+//
+// The bypass is a mutation that makes a failed environment deployable, so it is
+// authorized entirely server-side rather than trusting the caller's word that
+// the failure is bypassable. The request must name the tracked verification
+// operation and the exact run it observed; the handler resolves that operation's
+// pinned GitHub executor, re-fetches and re-classifies the run under that
+// identity, and confirms the target is a Radius-managed environment whose latest
+// verify run genuinely reached a terminal, bypassable failure (4.4 / 4.5) for
+// that same run id. The marker's value is that run id, so the listing only
+// treats the environment as bypassed for the specific failed run the user
+// accepted — a different later failure (new run id) is not silently inherited,
+// and a real later success supersedes it.
 export async function handleBypassVerification(
   context: CanvasRequestContext,
   dependencies: EnvironmentsDependencies
 ): Promise<void> {
   const { response } = context;
+  const json = (status: number, payload: unknown): void => {
+    response.setHeader("Content-Type", "application/json");
+    response.writeHead(status);
+    response.end(JSON.stringify(payload));
+  };
   const body = await context.readTextBody();
   try {
     const data = JSON.parse(body || "{}");
     const repo = (data.repo || "").trim();
     const envName = (data.environment || "").trim();
-    if (!repo || !envName) {
-      response.setHeader("Content-Type", "application/json");
-      response.writeHead(400);
-      response.end(
-        JSON.stringify({ error: "repo and environment are required." })
-      );
+    const operationId = (data.operationId || "").trim();
+    const runId = String(data.runId ?? "").trim();
+    if (!repo || !envName || !operationId || !runId) {
+      json(400, {
+        error: "repo, environment, operationId and runId are required."
+      });
       return;
     }
+
+    // 1. The request must reference the live verification operation for this
+    //    exact repo, environment and run. This binds the bypass to a tracked
+    //    operation instead of an arbitrary caller-supplied target.
+    const verifyOp: any = dependencies.getOperation(operationId);
+    if (
+      !verifyOp ||
+      verifyOp.repo !== repo ||
+      verifyOp.environment !== envName ||
+      String(verifyOp.verification?.runId || "") !== runId
+    ) {
+      json(409, {
+        error:
+          "The verification operation does not match this bypass request. Re-run verification and try again."
+      });
+      return;
+    }
+    if (!dependencies.hasCompleteVerificationIdentity(verifyOp)) {
+      json(409, {
+        error:
+          "The verification operation has incomplete dispatch identity and cannot be bypassed."
+      });
+      return;
+    }
+
+    // 2. Resolve the pinned executor / login that started verification and
+    //    re-fetch the run under that identity, so the server — not the browser —
+    //    decides the run's outcome and classification.
+    const pinnedLogin =
+      typeof verifyOp.context?.githubLogin === "string" ?
+        verifyOp.context.githubLogin.trim()
+      : "";
+    const selectedExecutor =
+      dependencies.getSelectedGitHubExecutor(operationId) || undefined;
+    if (!pinnedLogin || !selectedExecutor) {
+      json(409, {
+        error:
+          "Radius cannot confirm the GitHub account that ran verification, so the failure cannot be bypassed."
+      });
+      return;
+    }
+
+    // 3. Confirm the target is a Radius-managed environment. Anything without
+    //    the RADIUS_MANAGED marker was not created by this extension and is not
+    //    a valid bypass target.
+    let managed = false;
+    try {
+      const varsRaw = await dependencies.runCommand(
+        "gh",
+        [
+          "api",
+          `/repos/${repo}/environments/${encodeURIComponent(
+            envName
+          )}/variables?per_page=100`,
+          "--jq",
+          ".variables[].name"
+        ],
+        { timeout: 20000 }
+      );
+      managed = (varsRaw || "")
+        .split("\n")
+        .map((line) => line.trim())
+        .includes("RADIUS_MANAGED");
+    } catch (e) {
+      json(502, {
+        error:
+          "Could not confirm the environment before recording a bypass: " +
+          dependencies.errorMessage(e)
+      });
+      return;
+    }
+    if (!managed) {
+      json(409, {
+        error:
+          "That environment is not managed by Radius and cannot be bypassed."
+      });
+      return;
+    }
+
+    // 4. Re-fetch and re-classify the run server-side. Only a terminal,
+    //    genuinely failed run whose classification is a bypassable category is
+    //    allowed through.
+    const detail = await dependencies.getRunDetail(
+      repo,
+      runId,
+      selectedExecutor
+    );
+    if (!detail) {
+      json(502, {
+        error:
+          "Could not read the verification run to confirm the bypass. Try again."
+      });
+      return;
+    }
+    if (detail.status !== "completed") {
+      json(409, {
+        error:
+          "Credential verification is still running. Wait for it to finish before bypassing."
+      });
+      return;
+    }
+    if (detail.conclusion === "success") {
+      json(409, {
+        error:
+          "Credential verification passed, so there is nothing to bypass. Reload the environment list."
+      });
+      return;
+    }
+    const failed = (detail.steps || []).filter(
+      (s) =>
+        s.conclusion && s.conclusion !== "success" && s.conclusion !== "skipped"
+    );
+    const log =
+      (await dependencies.fetchRunLog(repo, runId, selectedExecutor)) || "";
+    const azureLoginLog = dependencies.extractGitHubActionsStepLog(
+      log,
+      "Azure Login (OIDC)"
+    );
+    const oidcHelp = dependencies.explainOidcEnterpriseClaim(azureLoginLog);
+    const noSubscriptionsHelp =
+      oidcHelp === "" ? dependencies.explainNoSubscriptions(log) : "";
+    const classification = classifyVerifyFailure({
+      failedSteps: failed,
+      log,
+      oidcHelp,
+      noSubscriptionsHelp
+    });
+    if (!BYPASSABLE_VERIFY_CATEGORIES.has(classification.category)) {
+      json(409, {
+        error:
+          "This verification failure must be fixed before the environment can be used; it cannot be bypassed."
+      });
+      return;
+    }
+
+    // 5. Record the bypass, keyed to the specific run the user accepted.
     try {
       await dependencies.runCommand(
         "gh",
@@ -404,7 +569,7 @@ export async function handleBypassVerification(
           "set",
           VERIFICATION_BYPASS_VARIABLE,
           "--body",
-          "1",
+          runId,
           "--env",
           envName,
           "--repo",
@@ -413,25 +578,17 @@ export async function handleBypassVerification(
         { timeout: 20000 }
       );
     } catch (e) {
-      response.setHeader("Content-Type", "application/json");
-      response.writeHead(500);
-      response.end(
-        JSON.stringify({
-          error:
-            "Could not record the verification bypass: " +
-            dependencies.errorMessage(e)
-        })
-      );
+      json(500, {
+        error:
+          "Could not record the verification bypass: " +
+          dependencies.errorMessage(e)
+      });
       return;
     }
     dependencies.envListCacheDelete(repo);
-    response.setHeader("Content-Type", "application/json");
-    response.writeHead(200);
-    response.end(JSON.stringify({ success: true }));
+    json(200, { success: true, category: classification.category });
   } catch (e) {
-    response.setHeader("Content-Type", "application/json");
-    response.writeHead(400);
-    response.end(JSON.stringify({ error: dependencies.errorMessage(e) }));
+    json(400, { error: dependencies.errorMessage(e) });
   }
 }
 
@@ -718,6 +875,10 @@ export async function handleListEnvironments(
         const depIds = depIdsRaw ? depIdsRaw.split("\n").filter(Boolean) : [];
         let status =
           verifyRunsResult.ok && depIds.length > 0 ? "unknown" : "pending";
+        // The run id that determined `status`, so a bypass marker can be matched
+        // to the specific failed run it was granted for rather than overriding
+        // any later or unrelated failure.
+        let matchedRunId = "";
         if (verifyRunsResult.ok && verifyRuns.size > 0) {
           // Resolve every deployment's originating-run URL in parallel
           // (deployments come back newest-first), then pick the newest one
@@ -742,6 +903,7 @@ export async function handleListEnvironments(
               const run = verifyRuns.get(m[1]);
               if (run) {
                 status = verifyStatusOf(run) || status;
+                matchedRunId = m[1];
                 break;
               }
             }
@@ -749,10 +911,16 @@ export async function handleListEnvironments(
         }
 
         // A user who kept an environment despite a failed verification (4.4 /
-        // 4.5) leaves this durable marker. The verify run stays "failed"
-        // forever, so without the override the environment could never be
-        // selected for a deploy; a real later "success" run still wins.
-        if (VERIFICATION_BYPASS_VARIABLE in vars && status !== "success") {
+        // 4.5) leaves this durable marker, whose value is the run id that
+        // failed. Surface "bypassed" only when the current status is a failure
+        // of that exact run: a real later "success" wins on its own, and a
+        // different later failure (a new run id) is not silently inherited but
+        // reported as failed so it is re-examined.
+        if (
+          status === "failed" &&
+          matchedRunId !== "" &&
+          vars[VERIFICATION_BYPASS_VARIABLE] === matchedRunId
+        ) {
           status = "bypassed";
         }
 

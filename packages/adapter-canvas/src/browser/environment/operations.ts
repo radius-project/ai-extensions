@@ -439,6 +439,7 @@ export interface VerifyStatus {
   readonly terminal: boolean;
   readonly error: string;
   readonly runUrl: string;
+  readonly runId: string;
   readonly activity: string;
   readonly category: VerifyFailureCategory;
   readonly component: string;
@@ -864,12 +865,23 @@ export function parseVerifyStatus(payload: unknown): VerifyStatus {
     terminal: readBoolean(payload, "terminal"),
     error: readString(payload, "error"),
     runUrl: readString(payload, "runUrl"),
+    runId: readRunId(payload),
     activity: readString(payload, "activity"),
     category: readVerifyCategory(payload),
     component: readString(payload, "component"),
     missingPermissions: readStringArray(payload, "missingPermissions"),
     detail: readString(payload, "detail")
   };
+}
+
+// The server reports `runId` as a number, but the bypass request sends it back
+// as a string, so accept either shape and normalize to a string ("" when
+// absent).
+function readRunId(payload: unknown): string {
+  const asString = readString(payload, "runId");
+  if (asString !== "") return asString;
+  const asNumber = readNumber(payload, "runId");
+  return asNumber === null ? "" : String(asNumber);
 }
 
 export interface VerifyFailureDescription {
@@ -1236,6 +1248,16 @@ export function initializeEnvironmentOperations(
     verifyActivity = "";
     abortInFlight();
     setPanelActive(false);
+    // Tear down any "Create environment anyway" control from the previous
+    // tracking session so a stale, still-visible button cannot POST a bypass
+    // against a superseded run. The failed-verification branch calls
+    // stopProgress() before rebuilding the button, so the current offer is
+    // unaffected.
+    const bypassContainer = dom.byId(PROGRESS_IDS.verifyBypass);
+    if (bypassContainer) {
+      bypassContainer.replaceChildren();
+      bypassContainer.style.display = "none";
+    }
     if (progressTimer !== null) {
       scope.cancel(progressTimer);
       progressTimer = null;
@@ -2552,11 +2574,13 @@ export function initializeEnvironmentOperations(
     function renderVerifyBypass(
       offer: boolean,
       provider: string,
-      environment: string
+      environment: string,
+      operationId: string,
+      runId: string
     ): void {
       const container = dom.byId(PROGRESS_IDS.verifyBypass);
       if (!container) return;
-      if (!offer) {
+      if (!offer || operationId === "" || runId === "") {
         container.replaceChildren();
         container.style.display = "none";
         return;
@@ -2572,6 +2596,10 @@ export function initializeEnvironmentOperations(
       errorEl.setAttribute("role", "alert");
       button.addEventListener("click", () => {
         if (button.disabled) return;
+        // Guard activity *before* issuing the mutation, not just after the
+        // response, so a click on a control from a superseded session can never
+        // POST a bypass.
+        if (!active()) return;
         button.disabled = true;
         errorEl.textContent = "";
         void fetchTracked("/api/bypass-verification", {
@@ -2580,17 +2608,24 @@ export function initializeEnvironmentOperations(
             "Content-Type": "application/json",
             "X-Radius-Mutation-Nonce": options.mutationNonce || ""
           },
-          body: JSON.stringify({ repo, environment })
+          body: JSON.stringify({ repo, environment, operationId, runId })
         })
           .then((response) =>
             response
               .json()
-              .catch(() => ({}))
               .then((payload) => ({ ok: response.ok, payload }))
+              .catch(() => ({ ok: false, payload: null }))
           )
           .then((result) => {
             if (!active()) return;
-            if (!result.ok) {
+            // Require the explicit success contract: a 2xx alone (or an
+            // unparseable / success-less body) is treated as a failure so a
+            // malformed response never masquerades as a completed bypass.
+            const succeeded =
+              result.ok &&
+              isRecord(result.payload) &&
+              result.payload.success === true;
+            if (!succeeded) {
               button.disabled = false;
               errorEl.textContent =
                 readString(result.payload, "error") ||
@@ -2667,7 +2702,13 @@ export function initializeEnvironmentOperations(
                 .filter((part) => part !== "")
                 .join(" ");
             }
-            renderVerifyBypass(desc.offerBypass, provider, environment);
+            renderVerifyBypass(
+              desc.offerBypass,
+              provider,
+              environment,
+              operationId,
+              v.runId
+            );
             return;
           }
           if (v.activity !== "") verifyActivity = v.activity;

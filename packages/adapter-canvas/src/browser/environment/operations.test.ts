@@ -816,6 +816,7 @@ describe("parseVerifyStatus", () => {
       terminal: false,
       error: "",
       runUrl: "",
+      runId: "",
       activity: "",
       category: "",
       component: "",
@@ -831,6 +832,7 @@ describe("parseVerifyStatus", () => {
         terminal: true,
         error: "",
         runUrl: "https://example.test/run",
+        runId: 42,
         activity: "Checking credentials"
       })
     ).toEqual({
@@ -838,6 +840,7 @@ describe("parseVerifyStatus", () => {
       terminal: true,
       error: "",
       runUrl: "https://example.test/run",
+      runId: "42",
       activity: "Checking credentials",
       category: "",
       component: "",
@@ -853,6 +856,7 @@ describe("parseVerifyStatus", () => {
         terminal: true,
         error: "denied",
         runUrl: "https://example.test/run",
+        runId: "555",
         activity: "",
         category: "permissions",
         component: "cloud provider",
@@ -864,6 +868,7 @@ describe("parseVerifyStatus", () => {
       terminal: true,
       error: "denied",
       runUrl: "https://example.test/run",
+      runId: "555",
       activity: "",
       category: "permissions",
       component: "cloud provider",
@@ -2078,7 +2083,8 @@ describe("verify status polling", () => {
         state: "failed",
         error: "Actions run failed",
         category: "permissions",
-        missingPermissions: ["Reader"]
+        missingPermissions: ["Reader"],
+        runId: "555"
       })
     );
     await tickClock(browser.clock, 1500);
@@ -2100,13 +2106,47 @@ describe("verify status polling", () => {
     expect(bypassCall?.init?.method).toBe("POST");
     expect(JSON.parse(String(bypassCall?.init?.body ?? ""))).toEqual({
       repo: REPO,
-      environment: "dev"
+      environment: "dev",
+      operationId: "op-1",
+      runId: "555"
     });
     expect(harness.successBanners).toEqual([
       { provider: "azure", environment: "dev" }
     ]);
     expect(harness.reloadCount).toBe(1);
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+  });
+
+  it("ignores a click on a bypass button left over from a superseded session", async () => {
+    const browser = setup();
+    const { controller, harness } = controllerWithHarness(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        category: "permissions",
+        runId: "555"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    const container = browser.els[PROGRESS_IDS.verifyBypass];
+    const button = container.children[0];
+    browser.net.handle("/api/bypass-verification", () =>
+      jsonResponse({ success: true })
+    );
+
+    // Start a new tracking session, then click the detached stale button.
+    controller?.trackProgress("staging", "aws");
+    await flushPromises();
+    button.dispatch("click");
+    await flushPromises();
+
+    expect(
+      browser.net.calls.some((call) => call.url === "/api/bypass-verification")
+    ).toBe(false);
+    expect(harness.successBanners).toEqual([]);
   });
 
   it("does not offer a bypass button for a non-bypassable failure", async () => {
@@ -2135,7 +2175,8 @@ describe("verify status polling", () => {
       jsonResponse({
         state: "failed",
         error: "Actions run failed",
-        category: "cloud-unreachable"
+        category: "cloud-unreachable",
+        runId: "555"
       })
     );
     await tickClock(browser.clock, 1500);
@@ -2164,7 +2205,8 @@ describe("verify status polling", () => {
       jsonResponse({
         state: "failed",
         error: "Actions run failed",
-        category: "permissions"
+        category: "permissions",
+        runId: "555"
       })
     );
     await tickClock(browser.clock, 1500);
@@ -2183,7 +2225,8 @@ describe("verify status polling", () => {
       jsonResponse({
         state: "failed",
         error: "Actions run failed",
-        category: "permissions"
+        category: "permissions",
+        runId: "555"
       })
     );
     await tickClock(browser.clock, 1500);
@@ -2204,7 +2247,7 @@ describe("verify status polling", () => {
     expect(harness.reloadCount).toBe(1);
   });
 
-  it("treats an unparseable bypass response body as a success", async () => {
+  it("treats a 2xx bypass response without success:true as a failure", async () => {
     const browser = setup();
     const { controller, harness } = controllerWithHarness(browser);
     await primeVerifyPoll(browser, controller);
@@ -2212,19 +2255,25 @@ describe("verify status polling", () => {
       jsonResponse({
         state: "failed",
         error: "Actions run failed",
-        category: "permissions"
+        category: "permissions",
+        runId: "555"
       })
     );
     await tickClock(browser.clock, 1500);
 
-    const button = browser.els[PROGRESS_IDS.verifyBypass].children[0];
+    const container = browser.els[PROGRESS_IDS.verifyBypass];
+    const button = container.children[0] as FakeElement & {
+      disabled: boolean;
+    };
     browser.net.handle("/api/bypass-verification", () => textResponse("ok"));
     button.dispatch("click");
     await flushPromises();
 
-    expect(harness.successBanners).toEqual([
-      { provider: "azure", environment: "dev" }
-    ]);
+    expect(harness.successBanners).toEqual([]);
+    expect(button.disabled).toBe(false);
+    expect(container.children[1].textContent).toBe(
+      "Could not create the environment. Try again."
+    );
   });
 
   it("reports a generic error when the bypass request rejects", async () => {
@@ -2235,7 +2284,8 @@ describe("verify status polling", () => {
       jsonResponse({
         state: "failed",
         error: "Actions run failed",
-        category: "permissions"
+        category: "permissions",
+        runId: "555"
       })
     );
     await tickClock(browser.clock, 1500);
@@ -2266,7 +2316,8 @@ describe("verify status polling", () => {
       jsonResponse({
         state: "failed",
         error: "Actions run failed",
-        category: "permissions"
+        category: "permissions",
+        runId: "555"
       })
     );
     await tickClock(browser.clock, 1500);
@@ -2295,7 +2346,8 @@ describe("verify status polling", () => {
       jsonResponse({
         state: "failed",
         error: "Actions run failed",
-        category: "permissions"
+        category: "permissions",
+        runId: "555"
       })
     );
     await tickClock(browser.clock, 1500);
@@ -2313,8 +2365,9 @@ describe("verify status polling", () => {
     await flushPromises();
 
     expect(harness.successBanners).toEqual([]);
-    // The superseded session left the stale error copy untouched.
-    expect(container.children[1].textContent).toBe("");
+    // Superseding the session clears the stale bypass offer; a late rejection
+    // from the abandoned request never writes an error into it.
+    expect(container.children).toHaveLength(0);
   });
 
   it("shows a default message when a failed bypass omits an error", async () => {
@@ -2325,7 +2378,8 @@ describe("verify status polling", () => {
       jsonResponse({
         state: "failed",
         error: "Actions run failed",
-        category: "permissions"
+        category: "permissions",
+        runId: "555"
       })
     );
     await tickClock(browser.clock, 1500);
@@ -2358,7 +2412,8 @@ describe("verify status polling", () => {
       jsonResponse({
         state: "failed",
         error: "Actions run failed",
-        category: "permissions"
+        category: "permissions",
+        runId: "555"
       })
     );
     await tickClock(browser.clock, 1500);

@@ -736,53 +736,89 @@ export function explainNoSubscriptions(logText?: string | null): string {
   ].join("\n");
 }
 
-// Names of the workflow steps that authenticate to the cloud before `rad`
-// runs. The deploy workflow signs in to the cloud in its own step (Azure Login
-// (OIDC) for Azure, Configure AWS Credentials / assume-role for AWS) that runs
-// *before* "Run rad commands", so a failure there means `rad deploy` never
-// started and no resource was touched. Matched case-insensitively against the
-// failed step names so a small wording change in the upstream workflow does not
-// silently disable the classification.
-const CLOUD_AUTH_STEP_PATTERN =
-  /login|credential|assume[\s-]*role|\boidc\b|authenticat/i;
+// The deploy workflow signs in to the cloud in a single, named step that runs
+// *before* any Radius/cluster mutation: "Azure Login (OIDC)" for Azure and
+// "Configure AWS Credentials (OIDC)" (or an assume-role step) for AWS. These are
+// matched exactly rather than with a broad keyword regex, because the deploy
+// workflow's *mutation* steps also mention "credentials"/"oidc" (for example
+// "Register cloud credentials with Radius" or "Project cloud OIDC tokens into
+// Radius pods"), and a broad match would misread a failure in one of those —
+// which happens after state has already been changed — as pre-mutation drift.
+const AZURE_LOGIN_STEP = /^\s*azure login(?:\s*\(oidc\))?\s*$/i;
+const AWS_LOGIN_STEP =
+  /^\s*(?:configure aws credentials(?:\s*\(oidc\))?|assume[\s-]*role)\s*$/i;
+
+// Steps that mutate cluster or Radius control-plane state. They all run after
+// cloud login and up to / including "Run rad commands". If any of them is among
+// the failed steps, a mutation was attempted, so the run is not a clean
+// pre-mutation credential drift regardless of the login step's outcome.
+const DEPLOY_MUTATION_STEPS: readonly RegExp[] = [
+  /project cloud oidc tokens/i,
+  /refresh external deployment target credentials/i,
+  /restore radius state/i,
+  /register cloud credentials with radius/i,
+  /create radius environment/i,
+  /apply custom recipe pack/i,
+  /prepare live deployment progress/i,
+  /run rad commands/i,
+  /publish deployed graph/i
+];
 
 export interface DeployCloudAuthDriftInput {
-  // "aws", "azure", or anything else (falls back to a provider-agnostic label).
+  // "aws" or "azure". Any other value cannot be tied to a provider-specific
+  // login step and is never classified as drift.
   provider?: string | null;
   // Whether `rad deploy` began touching resources. When true this is a
   // mid-deploy resource failure (exception 5.1), never auth drift.
   resourcesTouched: boolean;
   // Names of the run's failed (non-success, non-skipped) steps.
   failedStepNames: readonly (string | undefined)[];
+  // Whether the environment previously passed credential verification. Drift
+  // (5.2) means credentials that *worked before* stopped working; an environment
+  // that never verified (its verification failed and was bypassed) has no prior
+  // good state to drift from, so when this is explicitly false the failure is not
+  // classified as drift. Undefined leaves the classification to the step
+  // evidence, preserving the caller that cannot determine prior state.
+  environmentPreviouslyVerified?: boolean;
 }
 
 // Exception 5.2: a redeploy to an environment that verified earlier now fails
 // cloud authentication or authorization *before any resource is touched*,
 // meaning the trust or permissions drifted since setup (the IAM role's trust
 // policy or permissions, or the Azure federated credential or role assignment,
-// was changed or removed). Detected purely from the run shape — a cloud
-// login/credentials step failed while `rad deploy` never ran — so it is
-// distinct from a mid-deploy resource failure (5.1). Returns a readable,
-// actionable message, or '' when the failure is not auth drift. Pure — no I/O,
-// never throws.
+// was changed or removed). Detected from the run shape — the provider's cloud
+// login step failed, no mutation step ran, and `rad deploy` never touched a
+// resource — so it is distinct from a mid-deploy resource failure (5.1). Returns
+// a readable, actionable message, or '' when the failure is not auth drift.
+// Pure — no I/O, never throws.
 export function classifyDeployCloudAuthDrift(
   input: DeployCloudAuthDriftInput
 ): string {
   if (input.resourcesTouched) return "";
-  const failedAtAuth = input.failedStepNames.some(
-    (name) => !!name && CLOUD_AUTH_STEP_PATTERN.test(name)
+  if (input.environmentPreviouslyVerified === false) return "";
+  const failedNames = input.failedStepNames.filter(
+    (name): name is string => !!name
   );
-  if (!failedAtAuth) return "";
-  const cloud =
-    input.provider === "aws" ? "AWS"
-    : input.provider === "azure" ? "Azure"
-    : "the cloud provider";
+  // A failed mutation step means state was already being changed — not drift.
+  if (
+    failedNames.some((name) =>
+      DEPLOY_MUTATION_STEPS.some((pattern) => pattern.test(name))
+    )
+  ) {
+    return "";
+  }
+  const loginStep =
+    input.provider === "aws" ? AWS_LOGIN_STEP
+    : input.provider === "azure" ? AZURE_LOGIN_STEP
+    : null;
+  if (!loginStep) return "";
+  const failedAtLogin = failedNames.some((name) => loginStep.test(name));
+  if (!failedAtLogin) return "";
+  const cloud = input.provider === "aws" ? "AWS" : "Azure";
   const drift =
     input.provider === "aws" ?
       "the IAM role's trust policy or permissions were changed or removed"
-    : input.provider === "azure" ?
-      "the federated credential or role assignment was changed or removed"
-    : "the trust or permissions changed";
+    : "the federated credential or role assignment was changed or removed";
   return [
     "Cloud authentication or authorization failed before any resource was deployed.",
     "This environment verified earlier, so its " +

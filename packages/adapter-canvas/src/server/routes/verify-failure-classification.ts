@@ -8,9 +8,24 @@
 // specific failure a user must act on — the cloud provider not trusting GitHub
 // (4.3), the identity lacking permissions (4.4), or a cluster / cloud endpoint
 // being unreachable (4.5) — is inferred here from the failed step names and the
-// run log. The function is pure: it performs no I/O and never throws. When no
-// category can be identified confidently it returns "generic" so a novel failure
-// is surfaced with the existing generic message rather than mislabeled.
+// run log.
+//
+// The step names below are the *exact* contracts emitted by those workflows:
+//   verify-azure.yml: Azure Login (OIDC) / Wait for Azure subscription /
+//     Verify Azure Credentials / Set up kubelogin / Verify AKS Access /
+//     Verify GHCR package push permission
+//   verify-aws.yml:   Configure AWS Credentials / Verify AWS Credentials /
+//     Verify EKS Access / Verify GHCR package push permission
+//
+// A failed step name only tells us *where* verification stopped; it is never on
+// its own enough to conclude *why*. Because the bypassable categories
+// (permissions / cluster-unreachable / cloud-unreachable) let a user create the
+// environment before the problem is fixed, we only assign one when the log
+// carries definitive, category-specific evidence (a reachability failure, an
+// authorization denial, or an OIDC-trust rejection). Otherwise the result is
+// "generic" — non-bypassable — so an ambiguous or operational failure is
+// surfaced rather than mislabeled as a bypassable one. The function is pure: it
+// performs no I/O and never throws.
 
 export type VerifyFailureCategory =
   | "oidc-trust"
@@ -47,15 +62,23 @@ export interface VerifyFailureClassification {
   detail?: string;
 }
 
-const OIDC_STEP =
-  /azure login|login\s*\(oidc\)|configure[\s-]aws[\s-]credentials|assume\s*role|assumerolewithwebidentity|\boidc\b/i;
+// Exact production step contracts from verify-azure.yml / verify-aws.yml. A
+// failed step selects which evidence gate to apply; it never classifies alone.
 
-const CLUSTER_STEP = /\b(aks|eks|cluster|kube(?:ctl|login|config)?)\b/i;
+// Federation / login step — where OIDC trust is established.
+const LOGIN_STEP =
+  /azure login|login\s*\(oidc\)|configure\s+aws\s+credentials|assume\s*role/i;
 
-const CLOUD_ACCESS_STEP =
-  /account show|get-caller-identity|caller identity|verify.*access|subscription/i;
+// Post-login credential / subscription check — identity is authenticated but
+// may lack the RBAC to see the subscription or act as itself.
+const CREDENTIAL_STEP =
+  /verify\s+(?:azure|aws)\s+credentials|wait\s+for\s+azure\s+subscription/i;
 
-const GHCR_STEP = /ghcr|package push|packages? push/i;
+// Kubernetes cluster access step.
+const CLUSTER_STEP = /verify\s+(?:aks|eks)\s+access|kubelogin|\b(?:aks|eks)\b/i;
+
+// GHCR state-package push permission step.
+const GHCR_STEP = /ghcr|package\s*push/i;
 
 // Network / reachability failures — the endpoint could not be contacted at all,
 // as opposed to being reached and rejecting the request on authorization.
@@ -65,6 +88,12 @@ const REACHABILITY =
 // Authorization failures — the endpoint was reached and refused the identity.
 const AUTHORIZATION =
   /AuthorizationFailed|\bForbidden\b|not authorized|does not have authorization|insufficient privileges|role assignment|AccessDenied|UnauthorizedOperation|cannot (?:get|list|create|update|patch|delete) resource|\b401\b|\b403\b/i;
+
+// Definitive OIDC-trust rejections — the provider reached GitHub's federation
+// but refused the token over its claims (subject / audience / federated
+// credential). Distinct from a generic authorization denial.
+const TRUST_EVIDENCE =
+  /assumerolewithwebidentity|not authorized to perform sts:assumerole|AADSTS7\d{5}|no matching federated identity|federated\s+(?:identity\s+)?credential|no OpenID ?Connect provider|invalid_client|(?:subject|audience)\s+claim/i;
 
 function matchesStep(
   steps: readonly VerifyFailureStep[],
@@ -114,37 +143,26 @@ export function classifyVerifyFailure(
 
   const hasReachability = REACHABILITY.test(logText);
   const hasAuthorization = AUTHORIZATION.test(logText);
+  const hasTrustEvidence = TRUST_EVIDENCE.test(logText);
 
-  // 3. The Kubernetes-access step failed. Reaching the cluster and being refused
-  //    is a permissions gap (4.4); not reaching it at all is unreachable (4.5).
-  if (matchesStep(failedSteps, CLUSTER_STEP)) {
-    if (hasAuthorization && !hasReachability) {
-      return {
-        category: "permissions",
-        missingPermissions: extractMissingPermissions(logText)
-      };
-    }
+  // 3. The federation / login step failed. Not reaching the provider is
+  //    unreachable (4.5); a token rejected over its claims is a trust problem
+  //    (4.3). Without either signal we cannot claim a bypassable cause, so the
+  //    failure stays generic rather than being assumed a trust gap.
+  if (matchesStep(failedSteps, LOGIN_STEP)) {
     if (hasReachability) {
-      return {
-        category: "cluster-unreachable",
-        component: "Kubernetes cluster"
-      };
+      return { category: "cloud-unreachable", component: "cloud provider" };
+    }
+    if (hasTrustEvidence) {
+      return { category: "oidc-trust" };
     }
     return { category: "generic" };
   }
 
-  // 4. The OIDC / cloud-login step failed. Not reaching the provider is
-  //    unreachable (4.5); reaching it and being rejected is a trust problem
-  //    (4.3), since federation is what the login step establishes.
-  if (matchesStep(failedSteps, OIDC_STEP)) {
-    if (hasReachability) {
-      return { category: "cloud-unreachable", component: "cloud provider" };
-    }
-    return { category: "oidc-trust" };
-  }
-
-  // 5. A post-login cloud access step failed: unreachable vs. denied.
-  if (matchesStep(failedSteps, CLOUD_ACCESS_STEP)) {
+  // 4. A post-login credential / subscription check failed. Reaching the
+  //    provider and being refused is a permissions gap (4.4); not reaching it is
+  //    unreachable (4.5); anything else is generic.
+  if (matchesStep(failedSteps, CREDENTIAL_STEP)) {
     if (hasReachability && !hasAuthorization) {
       return { category: "cloud-unreachable", component: "cloud provider" };
     }
@@ -157,10 +175,34 @@ export function classifyVerifyFailure(
     return { category: "generic" };
   }
 
-  // 6. The GHCR package-push check failed: the token cannot push the state
-  //    package, which is a permissions gap the user resolves on the package.
+  // 5. The Kubernetes-access step failed. Not reaching the cluster is
+  //    unreachable (4.5); reaching it and being refused is a permissions gap
+  //    (4.4). Reachability wins when both appear.
+  if (matchesStep(failedSteps, CLUSTER_STEP)) {
+    if (hasReachability) {
+      return {
+        category: "cluster-unreachable",
+        component: "Kubernetes cluster"
+      };
+    }
+    if (hasAuthorization) {
+      return {
+        category: "permissions",
+        missingPermissions: extractMissingPermissions(logText)
+      };
+    }
+    return { category: "generic" };
+  }
+
+  // 6. The GHCR package-push check failed. Only a definitive authorization
+  //    denial is the bypassable permissions gap (4.4); a registry outage or any
+  //    other cause stays generic so an operational failure is not mislabeled as
+  //    a permissions problem the user is asked to bypass.
   if (matchesStep(failedSteps, GHCR_STEP)) {
-    return { category: "permissions" };
+    if (hasAuthorization) {
+      return { category: "permissions" };
+    }
+    return { category: "generic" };
   }
 
   return { category: "generic" };
