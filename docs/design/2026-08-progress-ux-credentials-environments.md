@@ -905,10 +905,10 @@ No new runtime dependency or packaging format. The new modules are included in t
 
 **Issue #274 ownership and rollback:**
 
-- A newly created Entra app receives the signed-in user as an explicit owner, and setup verifies the owner readback before continuing.
+- A newly created Entra app receives the current Azure CLI caller (a user or service principal) as an explicit owner, and setup verifies the owner readback before continuing.
 - Radius provenance tags record the repository, environment, operation, and managed marker on new apps without changing the owner-based reuse policy.
-- Existing `AZURE_CLIENT_ID`, explicit app selection, and display-name matching all reuse any app the signed-in user owns, whether or not Radius tagged it.
-- All three non-owner paths say that the signed-in user is not listed as an owner. A matching Radius provenance tag adds orphan guidance but never authorizes automatic reclamation.
+- Existing `AZURE_CLIENT_ID`, explicit app selection, and display-name matching all reuse any app the current Azure CLI caller owns, whether or not Radius tagged it.
+- All three non-owner paths say that the current Azure CLI identity is not listed as an owner. A matching Radius provenance tag adds orphan guidance but never authorizes automatic reclamation.
 - A blank or package-scope-deficient GHCR credential fails before the first Azure mutation.
 - Failure injection after app, owner, tag, service-principal, federated-credential, role-assignment, GitHub Environment, workflow, and verification-dispatch steps cleans only current-operation Azure artifacts in reverse dependency order.
 - Reused apps, service principals, federated credentials, role assignments, and pre-existing GitHub Environments are never deleted by rollback.
@@ -1026,7 +1026,7 @@ Building the prototype in draft PR #244 exposed several cases where a correct ba
 | Journey fields were never populated                  | The model had a next-page target but the UI sent none                                                                    | Record repo and branch and render **View planned graph**                                                                                        |
 | Workflow dispatch could target the wrong environment | A PR-ref verify run could trigger a stale default-branch dispatcher                                                      | Inspect whether the dispatcher has `workflow_run`; require an environment match only when it can auto-run                                       |
 | GHCR check rejected a valid repository token         | The shared action assumed GHCR bearer tokens were JWTs; GHCR returned an opaque token with no decodable `access` claim   | Start a blob-upload session and require HTTP 202; upload no content                                                                             |
-| Failed setup left an ownerless Entra app             | App creation assumed the creator became an owner, so retry could call Radius's own leftover app another user's resource  | Add and verify the signed-in user as owner, tag new apps with Radius provenance, and use precise missing-owner language across every reuse path |
+| Failed setup left an ownerless Entra app             | App creation assumed the creator became an owner, so retry could call Radius's own leftover app another user's resource  | Add and verify the CLI caller as owner, tag new apps with Radius provenance, and use precise missing-owner language across every reuse path     |
 | A late setup failure left Azure artifacts behind     | The two setup requests had no shared provenance record or rollback boundary                                              | Carry a server-only artifact ledger by operation ID and clean only current-operation Azure artifacts before verification dispatch or PR handoff |
 | Cleanup could delete or hide the wrong resource      | An idempotent create response could not prove whether this process created a GitHub Environment                          | Treat the environment as a created candidate, retain it, and show manual cleanup guidance; never use a weak timestamp or tag as deletion proof  |
 | Advisory text caused a false enterprise diagnosis    | The classifier scanned the whole run log, including a shell step that mentioned `AADSTS7002381` as hypothetical guidance | Isolate the actual **Azure Login (OIDC)** step before classifying; preserve `No subscriptions found` as the real error                          |

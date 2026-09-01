@@ -4,9 +4,13 @@ import {
   isResourceGroupName,
   isUuid,
   isValidRepoSlug,
+  parseCallerIdentity,
   resolveOidcSubject
 } from "../../azure-oidc.js";
-import type { ResolveOidcSubjectResult } from "../../azure-oidc.js";
+import type {
+  CallerIdentity,
+  ResolveOidcSubjectResult
+} from "../../azure-oidc.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
 import { unresolvedProviderMutations } from "../../operations.js";
@@ -26,6 +30,7 @@ import { setupStartConflictResponse } from "./operation-start-conflict.js";
 interface AzureAccountIdentity {
   subscriptionId: string;
   tenantId: string;
+  callerIdentity: CallerIdentity;
 }
 
 export function parseAzureAccountIdentity(
@@ -40,7 +45,11 @@ export function parseAzureAccountIdentity(
     ) {
       return null;
     }
-    const account = parsed as { id?: unknown; tenantId?: unknown };
+    const account = parsed as {
+      id?: unknown;
+      tenantId?: unknown;
+      user?: unknown;
+    };
     if (
       typeof account.id !== "string" ||
       (account.tenantId !== undefined && typeof account.tenantId !== "string")
@@ -50,7 +59,8 @@ export function parseAzureAccountIdentity(
     return {
       subscriptionId: account.id.trim(),
       tenantId:
-        typeof account.tenantId === "string" ? account.tenantId.trim() : ""
+        typeof account.tenantId === "string" ? account.tenantId.trim() : "",
+      callerIdentity: parseCallerIdentity(JSON.stringify(account.user ?? null))
     };
   } catch {
     return null;
@@ -632,7 +642,8 @@ export async function handleAzureAutoSetup(
       appNameProvided,
       requestedAppName,
       requestedClientId: (data.clientId || "").trim(),
-      serviceManagementReference
+      serviceManagementReference,
+      callerIdentity: account.callerIdentity
     });
     if (!application) return;
 
