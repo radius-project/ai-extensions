@@ -30,7 +30,7 @@ import {
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
 import type { GraphProgressView } from "../graph/progress.js";
-import type { AbortHandle, BrowserContext } from "../ports.js";
+import type { AbortHandle, BrowserContext, DomInputElement } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
 
@@ -768,7 +768,12 @@ export function initializeDeployedGraphPage(
   // start a second probe and open a second dialog behind the first.
   let deleteProbeInFlight = false;
 
-  const openDeleteDialog = (target: DeleteDialog): void => {
+  // The button is passed in rather than read from the outer binding: the only
+  // caller is its own click handler, so there is always one to mark busy.
+  const openDeleteDialog = (
+    target: DeleteDialog,
+    button: DomInputElement
+  ): void => {
     const application = selectedApplication();
     const environment = selectedEnvironment();
     if (selectedStatus() !== DELETE_FAILED_STATUS) {
@@ -777,7 +782,7 @@ export function initializeDeployedGraphPage(
     }
     if (deleteProbeInFlight) return;
     deleteProbeInFlight = true;
-    if (action) action.disabled = true;
+    button.disabled = true;
     void probeDeleteConflict(context, {
       repo: page.repo,
       environment,
@@ -870,7 +875,7 @@ export function initializeDeployedGraphPage(
           () => entry.active
         );
       } else if (dialog && selectedApplication() && selectedEnvironment()) {
-        openDeleteDialog(dialog);
+        openDeleteDialog(dialog, action);
       }
     });
   }
