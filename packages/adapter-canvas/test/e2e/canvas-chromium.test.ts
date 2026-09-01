@@ -1330,6 +1330,8 @@ test.describe("Radius Canvas in Chromium", () => {
       );
     const checksBeforeEdit = accountRequests().length;
     const environment = page.getByLabel("Environment name");
+    const currentTime = await page.evaluate<number>("Date.now()");
+    await page.clock.pauseAt(currentTime + 1_000);
 
     await environment.fill("staging");
     await environment.fill("production");
@@ -1350,6 +1352,7 @@ test.describe("Radius Canvas in Chromium", () => {
     });
     await expect(readiness).toContainText("Ready to configure deployments");
     await expect(page.getByRole("button", { name: "Re-check" })).toBeEnabled();
+    await page.clock.resume();
     await expectNoWcagViolations(page);
   });
 
