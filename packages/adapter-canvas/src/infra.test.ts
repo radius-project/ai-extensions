@@ -449,6 +449,11 @@ ${BASE_UPSTREAM["verify-azure.yml"]}
 });
 
 describe("generateDeleteWorkflow", () => {
+  beforeEach(() => {
+    h.upstream = { ...BASE_UPSTREAM };
+    expireTemplateCache();
+  });
+
   it("emits both dispatchers plus the app and environment Azure providers, never AWS", async () => {
     const files = await generateDeleteWorkflow("dev");
     expect(Object.keys(files).sort()).toEqual([
