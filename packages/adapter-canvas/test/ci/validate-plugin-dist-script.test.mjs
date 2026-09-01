@@ -20,6 +20,8 @@ const SCRIPTS = ["plugins.mjs", "validate-plugin-dist.mjs"].map((name) => [
 const temporaryRepositories = [];
 const SOURCE = "a".repeat(40);
 const OTHER_SOURCE = "b".repeat(40);
+const MANIFEST_SCHEMA =
+  "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
 
 function writeJson(path, value) {
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
@@ -55,10 +57,9 @@ function repository({
     ...packageJson
   });
   writeJson(join(dist, "plugin.json"), {
+    $schema: MANIFEST_SCHEMA,
     name: "radius",
     version: "1.2.0",
-    skills: "./skills/",
-    extensions: ".",
     ...manifest
   });
   writeFileSync(join(dist, "README.md"), readme);
@@ -170,17 +171,7 @@ describe("scripts/validate-plugin-dist.mjs", () => {
       { packageJson: { main: "missing.mjs" } },
       "does not exist"
     ],
-    ["escaping main", { packageJson: { main: "../outside.mjs" } }, "escapes"],
-    [
-      "missing skills",
-      { manifest: { skills: "./missing/" } },
-      "does not exist"
-    ],
-    [
-      "absolute skills",
-      { manifest: { skills: "/tmp/skills" } },
-      "must stay inside"
-    ]
+    ["escaping main", { packageJson: { main: "../outside.mjs" } }, "escapes"]
   ])("rejects %s", (_label, options, message) => {
     const result = run(repository(options).root);
 
@@ -188,14 +179,15 @@ describe("scripts/validate-plugin-dist.mjs", () => {
     expect(result.stderr).toContain(message);
   });
 
-  it("validates every skills directory in an array", () => {
-    const { root } = repository({
-      manifest: { skills: ["./skills/", "./missing/"] }
-    });
+  // Agent Plugins 1.0.0 discovers skills from the fixed skills/ directory, so a
+  // dist that ships none is unusable no matter what the manifest says.
+  it("requires the fixed skills directory", () => {
+    const { root, dist } = repository();
+    rmSync(join(dist, "skills"), { recursive: true });
 
     const result = run(root);
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("./missing/");
+    expect(result.stderr).toContain("skills does not exist");
   });
 
   it("rejects symlinks in the published tree", () => {
@@ -233,12 +225,42 @@ describe("scripts/validate-plugin-dist.mjs", () => {
   it.each([
     ["a number", 7],
     ["an array", ["."]],
-    ["an object", {}]
+    ["null", null],
+    ["the legacy path string", "."]
   ])("rejects an extensions value that is %s", (_label, extensions) => {
     const result = run(repository({ manifest: { extensions } }).root);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("plugin.json#extensions");
+  });
+
+  it("accepts client data under a reverse-domain extension namespace", () => {
+    const { root } = repository({
+      manifest: { extensions: { "com.github.copilot": { logo: "logo.png" } } }
+    });
+
+    expect(run(root)).toMatchObject({ status: 0, stdout: "radius@1.2.0" });
+  });
+
+  it.each([
+    ["a missing schema", undefined],
+    ["a superseded schema", "https://agent-plugins.org/schemas/0.9.0/x.json"]
+  ])("rejects %s identifier", (_label, schema) => {
+    const result = run(repository({ manifest: { $schema: schema } }).root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("plugin.json#$schema must be");
+  });
+
+  // The manifest schema is closed, so a field the spec dropped would be
+  // reported and ignored by a conformant client rather than honored.
+  it("rejects fields outside the closed manifest schema", () => {
+    const result = run(repository({ manifest: { skills: "./skills/" } }).root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "plugin.json declares unknown fields: skills"
+    );
   });
 
   it("reports malformed JSON without a stack trace", () => {

@@ -12,6 +12,23 @@ import { repoRoot, requirePlugin } from "./plugins.mjs";
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const SHA = /^[0-9a-f]{40}$/;
+// Agent Plugins 1.0.0 (https://agent-plugins.org) closes the manifest: only
+// these fields may appear, components load from fixed locations rather than
+// manifest paths, and client data belongs under a reverse-domain namespace.
+const MANIFEST_SCHEMA =
+  "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+const MANIFEST_FIELDS = new Set([
+  "$schema",
+  "name",
+  "version",
+  "description",
+  "author",
+  "homepage",
+  "repository",
+  "license",
+  "keywords",
+  "extensions"
+]);
 
 function fail(message) {
   console.error(`error: ${message}`);
@@ -84,6 +101,23 @@ const manifest = readJson(resolve(dist, "plugin.json"), "plugin.json");
 if (packageJson.name !== plugin.name || manifest.name !== plugin.name) {
   fail(`dist manifests must both be named "${plugin.name}"`);
 }
+if (manifest.$schema !== MANIFEST_SCHEMA) {
+  fail(`plugin.json#$schema must be ${MANIFEST_SCHEMA}`);
+}
+const unknownFields = Object.keys(manifest).filter(
+  (field) => !MANIFEST_FIELDS.has(field)
+);
+if (unknownFields.length > 0) {
+  fail(`plugin.json declares unknown fields: ${unknownFields.join(", ")}`);
+}
+if (
+  manifest.extensions !== undefined &&
+  (typeof manifest.extensions !== "object" ||
+    manifest.extensions === null ||
+    Array.isArray(manifest.extensions))
+) {
+  fail("plugin.json#extensions must be an object keyed by extension namespace");
+}
 if (
   typeof packageJson.version !== "string" ||
   !SEMVER.test(packageJson.version) ||
@@ -115,18 +149,11 @@ if (statSync(resolve(dist, "LICENSE")).size === 0) {
   fail("LICENSE must not be empty");
 }
 requirePath(dist, "workflows", "workflows", "directory");
+// Fixed component location: clients discover skills from here, not from a
+// manifest path.
+requirePath(dist, "skills", "skills", "directory");
 if (packageJson.main !== undefined) {
   requirePath(dist, packageJson.main, "package.json#main", "file");
-}
-if (manifest.skills !== undefined) {
-  for (const path of Array.isArray(manifest.skills) ?
-    manifest.skills
-  : [manifest.skills]) {
-    requirePath(dist, path, "plugin.json#skills", "directory");
-  }
-}
-if (manifest.extensions !== undefined) {
-  requirePath(dist, manifest.extensions, "plugin.json#extensions", "directory");
 }
 
 rejectSymlinks(dist);
