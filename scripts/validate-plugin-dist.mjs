@@ -12,6 +12,7 @@ import { repoRoot, requirePlugin } from "./plugins.mjs";
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const SHA = /^[0-9a-f]{40}$/;
+const MANIFEST_NAME = /^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/;
 // Agent Plugins 1.0.0 (https://agent-plugins.org) closes the manifest: only
 // these fields may appear, components load from fixed locations rather than
 // manifest paths, and client data belongs under a reverse-domain namespace.
@@ -29,6 +30,14 @@ const MANIFEST_FIELDS = new Set([
   "keywords",
   "extensions"
 ]);
+const MANIFEST_STRING_FIELDS = [
+  "description",
+  "homepage",
+  "repository",
+  "license"
+];
+const AUTHOR_FIELDS = new Set(["name", "email", "url"]);
+const DNS_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 
 function fail(message) {
   console.error(`error: ${message}`);
@@ -46,6 +55,15 @@ function readJson(path, label) {
   } catch (error) {
     fail(`${label} is not readable JSON: ${error.message}`);
   }
+}
+
+function isJsonObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isReverseDomainNamespace(namespace) {
+  const labels = namespace.split(".");
+  return labels.length >= 2 && labels.every((label) => DNS_LABEL.test(label));
 }
 
 function requirePath(root, declared, label, type) {
@@ -98,22 +116,17 @@ if (lstatSync(dist).isSymbolicLink()) {
 const packageJson = readJson(resolve(dist, "package.json"), "package.json");
 const manifest = readJson(resolve(dist, "plugin.json"), "plugin.json");
 
-if (
-  typeof packageJson !== "object" ||
-  packageJson === null ||
-  Array.isArray(packageJson)
-) {
+if (!isJsonObject(packageJson)) {
   fail("package.json must be a JSON object");
 }
-if (
-  typeof manifest !== "object" ||
-  manifest === null ||
-  Array.isArray(manifest)
-) {
+if (!isJsonObject(manifest)) {
   fail("plugin.json must be a JSON object");
 }
 if (packageJson.name !== plugin.name || manifest.name !== plugin.name) {
   fail(`dist manifests must both be named "${plugin.name}"`);
+}
+if (manifest.name.length > 64 || !MANIFEST_NAME.test(manifest.name)) {
+  fail("plugin.json#name does not match the Agent Plugins 1.0.0 schema");
 }
 if (manifest.$schema !== MANIFEST_SCHEMA) {
   fail(`plugin.json#$schema must be ${MANIFEST_SCHEMA}`);
@@ -124,18 +137,49 @@ const unknownFields = Object.keys(manifest).filter(
 if (unknownFields.length > 0) {
   fail(`plugin.json declares unknown fields: ${unknownFields.join(", ")}`);
 }
+for (const field of MANIFEST_STRING_FIELDS) {
+  if (Object.hasOwn(manifest, field) && typeof manifest[field] !== "string") {
+    fail(`plugin.json#${field} must be a string`);
+  }
+}
+if (Object.hasOwn(manifest, "author")) {
+  if (!isJsonObject(manifest.author)) {
+    fail("plugin.json#author must be an object");
+  }
+  const unknownAuthorFields = Object.keys(manifest.author).filter(
+    (field) => !AUTHOR_FIELDS.has(field)
+  );
+  if (unknownAuthorFields.length > 0) {
+    fail(
+      `plugin.json#author declares unknown fields: ${unknownAuthorFields.join(", ")}`
+    );
+  }
+  for (const [field, value] of Object.entries(manifest.author)) {
+    if (typeof value !== "string") {
+      fail(`plugin.json#author.${field} must be a string`);
+    }
+  }
+}
+if (
+  Object.hasOwn(manifest, "keywords") &&
+  (!Array.isArray(manifest.keywords) ||
+    manifest.keywords.some((keyword) => typeof keyword !== "string"))
+) {
+  fail("plugin.json#keywords must be an array of strings");
+}
 if (manifest.extensions !== undefined) {
-  if (
-    typeof manifest.extensions !== "object" ||
-    manifest.extensions === null ||
-    Array.isArray(manifest.extensions)
-  ) {
+  if (!isJsonObject(manifest.extensions)) {
     fail(
       "plugin.json#extensions must be an object keyed by extension namespace"
     );
   }
   for (const [namespace, value] of Object.entries(manifest.extensions)) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    if (!isReverseDomainNamespace(namespace)) {
+      fail(
+        `plugin.json#extensions key must be a reverse-domain namespace: ${namespace}`
+      );
+    }
+    if (!isJsonObject(value)) {
       fail(`plugin.json#extensions.${namespace} must be an object`);
     }
   }

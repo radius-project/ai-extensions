@@ -28,13 +28,14 @@ function writeJson(path, value) {
 }
 
 function repository({
+  pluginName = "radius",
   packageJson = {},
   manifest = {},
   readme = "Radius\n"
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "radius-dist-"));
   temporaryRepositories.push(root);
-  const plugin = join(root, "plugins", "radius");
+  const plugin = join(root, "plugins", pluginName);
   const dist = join(plugin, "dist");
   mkdirSync(join(root, "scripts"));
   mkdirSync(join(dist, "skills"), { recursive: true });
@@ -43,14 +44,17 @@ function repository({
   }
 
   writeJson(join(plugin, "package.json"), {
-    name: "radius",
+    name: pluginName,
     version: "1.2.0",
     scripts: { "test:artifact": "echo tested" }
   });
-  writeJson(join(plugin, "plugin.json"), { name: "radius", version: "1.2.0" });
+  writeJson(join(plugin, "plugin.json"), {
+    name: pluginName,
+    version: "1.2.0"
+  });
   writeFileSync(join(plugin, "README.md"), "Radius source\n");
   writeJson(join(dist, "package.json"), {
-    name: "radius",
+    name: pluginName,
     version: "1.2.0",
     main: "extension.mjs",
     radiusSourceRef: SOURCE,
@@ -58,7 +62,7 @@ function repository({
   });
   writeJson(join(dist, "plugin.json"), {
     $schema: MANIFEST_SCHEMA,
-    name: "radius",
+    name: pluginName,
     version: "1.2.0",
     ...manifest
   });
@@ -70,14 +74,10 @@ function repository({
 }
 
 function run(root, ...args) {
+  const pluginArgs = args.includes("--plugin") ? [] : ["--plugin", "radius"];
   const result = spawnSync(
     process.execPath,
-    [
-      join(root, "scripts", "validate-plugin-dist.mjs"),
-      "--plugin",
-      "radius",
-      ...args
-    ],
+    [join(root, "scripts", "validate-plugin-dist.mjs"), ...pluginArgs, ...args],
     { cwd: root, encoding: "utf8" }
   );
   return {
@@ -95,7 +95,20 @@ afterEach(() => {
 
 describe("scripts/validate-plugin-dist.mjs", () => {
   it("accepts a complete manifest-driven plugin dist", () => {
-    const { root } = repository();
+    const { root } = repository({
+      manifest: {
+        description: "Model and deploy applications",
+        author: {
+          name: "Microsoft",
+          email: "radius@example.com",
+          url: "https://example.com/radius"
+        },
+        homepage: "https://radapp.io",
+        repository: "https://github.com/radius-project/ai-extensions",
+        license: "Apache-2.0",
+        keywords: ["radius", "deploy"]
+      }
+    });
 
     expect(run(root, "--version", "1.2.0", "--source", SOURCE)).toMatchObject({
       status: 0,
@@ -234,12 +247,84 @@ describe("scripts/validate-plugin-dist.mjs", () => {
     expect(result.stderr).toContain("plugin.json#extensions");
   });
 
+  it.each([
+    ["keywords", "radius"],
+    ["author", "Microsoft"]
+  ])("rejects a schema-invalid %s value", (field, value) => {
+    const result = run(repository({ manifest: { [field]: value } }).root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(`plugin.json#${field}`);
+  });
+
+  it.each(["description", "homepage", "repository", "license"])(
+    "rejects a non-string %s value",
+    (field) => {
+      const result = run(repository({ manifest: { [field]: 7 } }).root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(`plugin.json#${field} must be a string`);
+    }
+  );
+
+  it("rejects a non-string keyword", () => {
+    const result = run(
+      repository({ manifest: { keywords: ["radius", 7] } }).root
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("must be an array of strings");
+  });
+
+  it.each([
+    ["an unknown field", { company: "Microsoft" }, "unknown fields: company"],
+    ["a non-string field", { name: 7 }, "author.name must be a string"]
+  ])("rejects an author object with %s", (_label, author, message) => {
+    const result = run(repository({ manifest: { author } }).root);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(message);
+  });
+
   it("accepts client data under a reverse-domain extension namespace", () => {
     const { root } = repository({
       manifest: { extensions: { "com.github.copilot": { logo: "logo.png" } } }
     });
 
     expect(run(root)).toMatchObject({ status: 0, stdout: "radius@1.2.0" });
+  });
+
+  it.each([
+    ["a single label", "copilot"],
+    ["an empty label", "com..copilot"],
+    ["an invalid DNS label", "com.github_copilot"],
+    ["an overlong DNS label", `com.${"a".repeat(64)}`]
+  ])("rejects an extension namespace with %s", (_label, namespace) => {
+    const result = run(
+      repository({ manifest: { extensions: { [namespace]: {} } } }).root
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("reverse-domain namespace");
+  });
+
+  it("accepts a plugin name at the schema length limit", () => {
+    const pluginName = "a".repeat(64);
+    const { root } = repository({ pluginName });
+
+    expect(run(root, "--plugin", pluginName)).toMatchObject({
+      status: 0,
+      stdout: `${pluginName}@1.2.0`
+    });
+  });
+
+  it("rejects a plugin name above the schema length limit", () => {
+    const pluginName = "a".repeat(65);
+    const { root } = repository({ pluginName });
+
+    const result = run(root, "--plugin", pluginName);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("plugin.json#name");
   });
 
   it.each([
