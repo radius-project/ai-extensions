@@ -1775,11 +1775,7 @@ describe.sequential("selected GitHub executor", () => {
       commandResult: { stdout: "bWFpbg==" }
     });
     await expect(
-      success.fetchFileFromRepoResult(
-        "octo/app",
-        "workflow.yml",
-        "main"
-      )
+      success.fetchFileFromRepoResult("octo/app", "workflow.yml", "main")
     ).resolves.toEqual({
       content: "main",
       error: null,
