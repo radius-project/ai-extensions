@@ -41,6 +41,7 @@ import {
 } from "./support/cloud-command-port.js";
 import {
   createCloudFixture,
+  type AppRegistrationRecord,
   type CloudFixture
 } from "./support/cloud-fixture.js";
 import {
@@ -165,6 +166,9 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
 
   let fixture: CloudFixture | undefined;
   let productOperationStarted = false;
+  let federatedSubjects: readonly string[] = [];
+  let appRegistration: AppRegistrationRecord | undefined;
+  let servicePrincipalId: string | undefined;
 
   test.beforeAll(async () => {
     if (!gate.enabled) throw new Error(gate.reason);
@@ -318,6 +322,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       ).toBe("succeeded");
 
       const app = await cloud.assertAppRegistrationExists();
+      appRegistration = app;
 
       const identity = readRepositoryIdentity(
         await runGh(
@@ -345,7 +350,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         subjects.supported ? "" : subjects.reason
       ).toBe(true);
       if (subjects.supported)
-        for (const subject of subjects.required)
+        for (const subject of (federatedSubjects = subjects.required))
           await cloud.assertFederatedCredentialExists(subject);
 
       const principalId = readServicePrincipalObjectId(
@@ -355,6 +360,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
           `az ad sp show --id ${app.appId}`
         )
       );
+      servicePrincipalId = principalId;
       await cloud.assertRoleAssignmentExists(principalId);
 
       await cloud.assertGitHubEnvironmentExists();
@@ -503,22 +509,20 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       // The proof. GitHub is asked directly, and the fixture refuses to answer
       // unless stage one observed this same Environment present first.
       await cloud.assertGitHubEnvironmentAbsent();
+      for (const subject of federatedSubjects)
+        await cloud.assertFederatedCredentialAbsent(subject);
 
-      // Deleting an environment currently removes the GitHub Environment and
-      // nothing else, so the Entra application stage one created, its two
-      // federated credentials and its role assignment are all orphaned. That is
-      // the bug PR #398, "Clean up cloud state on environment deletion", fixes.
-      // Asserting the leak here would encode it as the contract and invert the
-      // day #398 merges, so the mirrors that would prove the cleanup are built
-      // and unit-tested but left uncalled. Once #398 is in, delete this comment
-      // and add, using stage one's `app.appId` and `principalId`:
-      //   await cloud.assertAppRegistrationAbsent();
-      //   for (const subject of subjects.required)
-      //     await cloud.assertFederatedCredentialAbsent(subject);
-      //   await cloud.assertRoleAssignmentAbsent(principalId);
-      // The fixture's own reclamation in `dispose()` still runs either way; it
-      // works from Azure resource names, not from the GitHub Environment, so
-      // this stage neither replaces it nor breaks it.
+      // The app registration and role assignment can be shared, so #398 retains
+      // them deliberately. Re-read both so deleting the shared identity cannot
+      // pass merely because deleting the app also made its credentials absent.
+      if (!appRegistration || !servicePrincipalId)
+        throw new Error(
+          "Stage one did not retain the Azure identity needed for deletion assertions."
+        );
+      await expect(cloud.assertAppRegistrationExists()).resolves.toEqual(
+        appRegistration
+      );
+      await cloud.assertRoleAssignmentExists(servicePrincipalId);
     } finally {
       await harness.cleanup();
     }
