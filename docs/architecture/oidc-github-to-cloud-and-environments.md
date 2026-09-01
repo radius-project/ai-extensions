@@ -218,11 +218,7 @@ OIDC surface to the adapter (re-exported via `platforms/index.ts` and the packag
 New adapter module holding the *pure* Azure setup decisions (so they're testable
 without hitting `az`), 697 lines of tests alongside:
 
-- **Idempotent app selection.** `selectAppRegistration` / `decideAppSelection` choose
-  between reusing an owned app registration, honoring an explicitly wired
-  `AZURE_CLIENT_ID`, or creating a new one — filtered to apps the signed-in user
-  **owns** so we don't collide with someone else's app of the same name. This is the
-  "multiple / reused application names" capability.
+- **Idempotent app selection.** `selectAppRegistration` / `decideAppSelection` choose between reusing an owned app registration, honoring an explicitly wired `AZURE_CLIENT_ID`, or creating a new one — filtered to apps the current Azure CLI caller (a user or service principal) **owns** so we don't collide with someone else's app of the same name. This is the "multiple / reused application names" capability.
 - **Governance input.** `buildAppCreateArgs({ appName, serviceManagementReference })`
   adds `--service-management-reference` only when supplied, and
   `isServiceManagementReferenceError` / `SERVICE_MANAGEMENT_REFERENCE_ERROR_IDS`

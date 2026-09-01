@@ -8,7 +8,8 @@
 //   1. Delete the Radius environment on the cluster (via a dispatched workflow).
 //   2. Remove the per-environment Azure federated credential(s).
 //   3. Delete the GitHub environment.
-//   4. Note the app registration: Radius never touches the Entra app
+//   4. Delete the per-environment GHCR state package.
+//   5. Note the app registration: Radius never touches the Entra app
 //      registration during an environment deletion. An app registration can be
 //      shared by other environments or callers, so deleting it — or even probing
 //      it — is out of scope for an environment teardown. This stage only records
@@ -21,15 +22,16 @@
 // environment delete cannot be confirmed (dispatch failure, missing run,
 // timeout, or a non-guard workflow failure) the operation terminates as a
 // retryable partial failure BEFORE any credential or GitHub-environment cleanup
-// runs, so a failed delete never strips the identity a retry needs. Steps 2–4
-// are best-effort and idempotent — a missing credential or app registration is a
-// warning, not a failure — so a partially-completed prior deletion still
-// converges.
+// runs, so a failed delete never strips the identity a retry needs. Every later
+// mutation is idempotent. The package cleanup intentionally runs after the other
+// environment-owned resources, but an unconfirmed result remains a retryable
+// partial failure rather than being reported as success.
 //
 // Only genuine I/O is injected; the pure operation-state mutators and the pure
 // Azure argv/parse helpers are imported directly so the runner stays unit-
 // testable against real OperationRecords with a handful of fakes.
 
+import { stateRegistryForEnvironment } from "@radius-project/core";
 import {
   enterStage,
   addStep,
@@ -41,6 +43,7 @@ import {
   STAGE_DELETE_RADIUS_ENV,
   STAGE_DELETE_CREDENTIAL,
   STAGE_DELETE_GITHUB_ENV,
+  STAGE_DELETE_STATE_PACKAGE,
   STAGE_REVIEW_APP_REGISTRATION
 } from "../../operations.js";
 import {
@@ -59,6 +62,8 @@ import {
 import type { GitHubEnvDeletionOutcome } from "./github-environment.js";
 
 export type { GitHubEnvDeletionOutcome };
+
+export type StatePackageDeletionOutcome = "deleted" | "not_found";
 
 export interface DeletionCommandResult {
   code?: string | number;
@@ -98,6 +103,10 @@ export interface EnvironmentDeletionPorts {
     repo: string;
     environment: string;
   }): Promise<GitHubEnvDeletionOutcome>;
+  deleteStatePackage(input: {
+    repo: string;
+    environment: string;
+  }): Promise<StatePackageDeletionOutcome>;
   // The durable provenance records for a repo + environment (issue #331). Used
   // to prove Radius created a live federated credential before deleting it. An
   // empty list means "no proof", which the plan treats as retain (fail-safe).
@@ -379,7 +388,60 @@ export async function runEnvironmentDeletion(
     }
   }
 
-  // Stage 4 — the Entra app registration. Radius never touches it during an
+  // Stage 4 — delete the dedicated GHCR state package. This runs after the
+  // GitHub environment cleanup so missing package permissions do not retain
+  // other environment-owned resources. A failure is still explicit and
+  // retryable: completed stages stay succeeded and the retry resumes here.
+  if (stagePending(op, STAGE_DELETE_STATE_PACKAGE)) {
+    const statePackage = stateRegistryForEnvironment(repo, environment);
+    enterStage(op, STAGE_DELETE_STATE_PACKAGE);
+    addStep(op, {
+      stage: STAGE_DELETE_STATE_PACKAGE,
+      kind: "mutation",
+      label: "Deleting the environment's GHCR state package",
+      state: "running"
+    });
+    await ports.persist();
+    try {
+      const outcome = await ports.deleteStatePackage({ repo, environment });
+      addStep(op, {
+        stage: STAGE_DELETE_STATE_PACKAGE,
+        kind: outcome === "deleted" ? "mutation" : "observation",
+        label:
+          outcome === "deleted" ?
+            "Deleted the environment's GHCR state package"
+          : "No GHCR state package to delete",
+        state: "succeeded"
+      });
+      setStageState(op, STAGE_DELETE_STATE_PACKAGE, "succeeded");
+      await ports.persist();
+    } catch (error) {
+      const message = ports.errorMessage(error);
+      addStep(op, {
+        stage: STAGE_DELETE_STATE_PACKAGE,
+        kind: "observation",
+        label: "Could not delete the GHCR state package — cleanup stopped",
+        state: "failed"
+      });
+      setStageState(op, STAGE_DELETE_STATE_PACKAGE, "failed");
+      finish(op, "failed_partial", {
+        failure: {
+          code: "state-package-delete-failed",
+          stage: STAGE_DELETE_STATE_PACKAGE,
+          stepSeq: null,
+          message:
+            `${message} Resolve the reported package access, visibility, or repository-link issue, then retry deletion. ` +
+            `Only delete "${statePackage}" manually after GitHub shows that it is private or internal and linked to "${repo}".`,
+          classification: "user-fixable",
+          evidence: null
+        }
+      });
+      await ports.persist();
+      return;
+    }
+  }
+
+  // Stage 5 — the Entra app registration. Radius never touches it during an
   // environment deletion: an app registration can be shared by other
   // environments or callers, so removing it — or even probing it — is out of
   // scope for an environment teardown. Record an informational step so the user
