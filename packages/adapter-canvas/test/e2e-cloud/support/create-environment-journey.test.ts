@@ -703,7 +703,11 @@ describe("readOperationSnapshot", () => {
   it("carries the server's error text on a terminal failure", () => {
     expect(
       readOperationSnapshot({
-        operation: { state: " failed ", error: "Azure said no." }
+        operation: {
+          state: " failed ",
+          terminalState: "failed",
+          failure: { message: "Azure said no." }
+        }
       })
     ).toEqual({ state: "failed", terminal: true, error: "Azure said no." });
   });
