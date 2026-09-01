@@ -100,6 +100,13 @@ const DEFAULT_ASSERTION_POLL_INTERVAL_MS = 1_000;
 // Holding one external ref prevents separate invocations from sharing them.
 const REPOSITORY_LEASE_REF = "refs/heads/radius/cloud-e2e-lease";
 
+export function radiusPurgeCreationTime(value: Date): string {
+  const milliseconds = value.getTime();
+  if (!Number.isFinite(milliseconds))
+    throw new Error("The cloud fixture creation time must be a valid date.");
+  return String(Math.floor(milliseconds / 1_000));
+}
+
 interface UnwindStep {
   readonly describe: string;
   readonly run: () => Promise<void>;
@@ -180,7 +187,7 @@ export async function createCloudFixture(
         "--subscription",
         subscriptionId,
         "--tags",
-        `creationTime=${ports.now().toISOString()}`,
+        `creationTime=${radiusPurgeCreationTime(ports.now())}`,
         "radius-canvas-e2e=true",
         "--output",
         "none"
