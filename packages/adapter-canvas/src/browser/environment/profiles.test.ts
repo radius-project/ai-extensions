@@ -1017,6 +1017,33 @@ describe("credential profile combo menu", () => {
 });
 
 describe("loadProfiles", () => {
+  it("populates the combo and preselects a matching supported profile", async () => {
+    const page = renderProfilesPage();
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_ENDPOINT}?repo=${encodeURIComponent("octo/cat")}`,
+      () => profilesResponse([AZURE_PROFILE])
+    );
+    const { deps, profileChanges, discoverCalls } = makeDeps({
+      selectableProviders: ["azure"]
+    });
+    const handle = initializeCredentialProfilesPanel(
+      page.browser.context,
+      deps
+    );
+
+    await handle?.loadProfiles("azure-prod");
+
+    expect(page.hiddenInput.value).toBe("azure-prod");
+    expect(page.valueEl.textContent).toBe("azure-prod (Azure)");
+    expect(page.optionsEl.children).toHaveLength(1);
+    expect(profileChanges.at(-1)).toEqual(AZURE_PROFILE);
+    expect(discoverCalls.at(-1)?.provider).toBe("azure");
+    expect(page.statusEl.style.display).toBe("");
+    expect(page.deployBtn.disabled).toBe(false);
+    expect(page.identityAzureEl.style.display).toBe("");
+    expect(page.identityAwsEl.style.display).toBe("none");
+  });
+
   it("omits disabled and unknown providers and refuses to preselect them", async () => {
     const page = renderProfilesPage();
     page.browser.net.handle(

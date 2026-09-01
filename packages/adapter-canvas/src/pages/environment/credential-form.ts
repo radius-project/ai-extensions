@@ -22,7 +22,7 @@ export function credentialFormMarkup(): string {
           <div class="rad-select-wrap" style="display:block;">
             <select id="cred-provider-select" style="width:100%; min-width:0;">
               <option value="azure">Azure</option>
-              <option value="aws" disabled hidden>AWS (coming soon)</option>
+              <option value="aws" disabled>AWS (coming soon)</option>
             </select>
           </div>
         </div>

@@ -260,13 +260,13 @@ describe("canvas pages over real loopback HTTP", () => {
     expect(entry.state.activeSubtab).toBe("environments");
   });
 
-  it("serves the AWS credential provider as hidden and disabled", async () => {
+  it("serves the AWS credential provider as visible but disabled", async () => {
     resetState({ contextRepo: "octo/app" });
 
     const response = await get("/?page=credentials");
 
     expect(response.body).toContain(
-      '<option value="aws" disabled hidden>AWS (coming soon)</option>'
+      '<option value="aws" disabled>AWS (coming soon)</option>'
     );
     expect(response.body).toContain(
       '<div id="cred-panel-aws" class="rad-section" style="display:none;">'

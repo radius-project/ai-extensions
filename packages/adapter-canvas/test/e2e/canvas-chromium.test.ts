@@ -1587,7 +1587,7 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBeDisabled();
     await expect(
       page.getByLabel("Provider").locator('option[value="aws"]')
-    ).toHaveAttribute("hidden", "");
+    ).not.toHaveAttribute("hidden", "");
     await expect(
       page.getByLabel("Provider").locator('option[value="aws"]')
     ).toHaveText("AWS (coming soon)");

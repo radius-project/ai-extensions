@@ -39,10 +39,10 @@ describe("credentialFormMarkup", () => {
     }
   });
 
-  it("keeps AWS implementation markup while hiding and disabling its provider option", () => {
+  it("keeps AWS implementation markup while disabling its provider option", () => {
     const html = credentialFormMarkup();
     expect(html).toContain(
-      '<option value="aws" disabled hidden>AWS (coming soon)</option>'
+      '<option value="aws" disabled>AWS (coming soon)</option>'
     );
     expect(html).toContain('<div id="cred-panel-azure" class="rad-section">');
     expect(html).toContain(
