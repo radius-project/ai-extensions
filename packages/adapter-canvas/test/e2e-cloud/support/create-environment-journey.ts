@@ -583,6 +583,16 @@ export function readOperationHttpResponse(
   return parseJsonPayload(response.body, "the operation status request");
 }
 
+/** Reads the operation id returned by `POST /api/operations`. */
+export function readOperationId(payload: unknown): string {
+  const operationId = asRecord(payload)?.operationId;
+  if (typeof operationId !== "string" || operationId.trim() === "")
+    throw new Error(
+      'The create operation response carried no usable "operationId".'
+    );
+  return operationId.trim();
+}
+
 /**
  * Narrows one `/api/operations/{id}` poll.
  *

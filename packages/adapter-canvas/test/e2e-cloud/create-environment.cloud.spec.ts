@@ -46,6 +46,7 @@ import {
   readEnvironmentVariables,
   readOidcSubjectCustomization,
   readOperationHttpResponse,
+  readOperationId,
   readOperationSnapshot,
   readRepositoryIdentity,
   readServicePrincipalObjectId,
@@ -236,9 +237,15 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
       const createEnvironment = page.locator("#deploy-btn:not([disabled])");
       await expect(createEnvironment).toHaveText("Create Environment");
       await createEnvironment.click();
-      const { operationId } = (await (await operationResponse).json()) as {
-        operationId: string;
-      };
+      const createResponse = await operationResponse;
+      const operationId = readOperationId(
+        readOperationHttpResponse({
+          ok: createResponse.ok(),
+          status: createResponse.status(),
+          statusText: createResponse.statusText(),
+          body: await createResponse.text()
+        })
+      );
       expect(operationId).toMatch(/^op_/);
 
       const snapshot = async (): Promise<

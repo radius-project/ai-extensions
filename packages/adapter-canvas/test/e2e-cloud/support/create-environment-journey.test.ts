@@ -14,6 +14,7 @@ import {
   readEnvironmentVariables,
   readOidcSubjectCustomization,
   readOperationHttpResponse,
+  readOperationId,
   readOperationSnapshot,
   readRepositoryIdentity,
   readServicePrincipalObjectId,
@@ -792,6 +793,21 @@ describe("readOperationHttpResponse", () => {
     ).toThrow(
       /operation status request returned output that is not valid JSON/
     );
+  });
+});
+
+describe("readOperationId", () => {
+  it("reads and trims the create response's operation id", () => {
+    expect(readOperationId({ operationId: " op_123 " })).toBe("op_123");
+  });
+
+  it.each([
+    ["a non-object response", null],
+    ["a missing operation id", {}],
+    ["a non-string operation id", { operationId: 7 }],
+    ["a blank operation id", { operationId: " " }]
+  ])("rejects %s", (_label, payload) => {
+    expect(() => readOperationId(payload)).toThrow(/usable "operationId"/);
   });
 });
 
