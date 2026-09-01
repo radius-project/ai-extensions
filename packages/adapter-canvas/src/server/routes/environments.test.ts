@@ -1634,16 +1634,23 @@ describe("environments — list-environments", () => {
     [
       "azure",
       "AZURE_CLIENT_ID\tabc\nAZURE_RESOURCE_GROUP\tprod-rg\nAZURE_AKS_CLUSTER_NAME\tprod-aks\nRADIUS_NAMESPACE\tpayments\nAZURE_SUBSCRIPTION_ID\tsub-1",
-      { resourceGroup: "prod-rg", cluster: "prod-aks", namespace: "payments" }
+      {
+        resourceGroup: "prod-rg",
+        cluster: "prod-aks",
+        namespace: "payments",
+        subscriptionId: "sub-1"
+      }
     ],
     [
       "aws",
-      "AWS_ROLE_ARN\tarn:aws:iam::1:role/r\nAWS_EKS_CLUSTER_NAME\teks-1\nRADIUS_NAMESPACE\tpayments\nRADIUS_VPC_ID\tvpc-1\nRADIUS_SUBNET_IDS\tsub-a,sub-b\nAWS_ACCOUNT_ID\t1",
+      "AWS_ROLE_ARN\tarn:aws:iam::1:role/r\nAWS_EKS_CLUSTER_NAME\teks-1\nRADIUS_NAMESPACE\tpayments\nRADIUS_VPC_ID\tvpc-1\nRADIUS_SUBNET_IDS\tsub-a,sub-b\nAWS_ACCOUNT_ID\t1\nAWS_REGION\tus-east-1",
       {
         cluster: "eks-1",
         namespace: "payments",
         vpcId: "vpc-1",
-        subnetIds: "sub-a,sub-b"
+        subnetIds: "sub-a,sub-b",
+        accountId: "1",
+        region: "us-east-1"
       }
     ]
   ])(

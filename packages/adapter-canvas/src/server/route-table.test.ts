@@ -392,6 +392,11 @@ const productionHandlers = {
     getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
     cliExec: () => ({ stdin: null }),
     readProcessEnv: () => ({}),
+    namespaceClaimsFor: () => ({
+      listEnvironmentNames: () => Promise.resolve({ ok: true, names: [] }),
+      readEnvironmentVariables: () =>
+        Promise.resolve({ ok: true, variables: {} })
+    }),
     isValidRepoSlug: () => false,
     getOperation: () => null,
     isStale: () => false,

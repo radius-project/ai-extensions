@@ -412,8 +412,9 @@ export function environmentsPaneMarkup(
           </div>
           <div class="rad-field">
             <label for="azure-namespace-select">Namespace</label>
-            <select id="azure-namespace-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-namespace-custom" type="text" aria-label="Namespace (custom)" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <select id="azure-namespace-select" aria-describedby="azure-namespace-help"><option value="" disabled selected>Loading…</option></select>
+            <input id="azure-namespace-custom" type="text" aria-label="Namespace (custom)" aria-describedby="azure-namespace-help" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <div class="rad-field__help" id="azure-namespace-help">A namespace backs one environment. Pick one that no other environment on this cluster uses.</div>
           </div>
         </div>
       </div>
@@ -432,8 +433,9 @@ export function environmentsPaneMarkup(
           </div>
           <div class="rad-field">
             <label for="aws-namespace-select">Namespace</label>
-            <select id="aws-namespace-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-namespace-custom" type="text" aria-label="Namespace (custom)" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <select id="aws-namespace-select" aria-describedby="aws-namespace-help"><option value="" disabled selected>Loading…</option></select>
+            <input id="aws-namespace-custom" type="text" aria-label="Namespace (custom)" aria-describedby="aws-namespace-help" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <div class="rad-field__help" id="aws-namespace-help">A namespace backs one environment. Pick one that no other environment on this cluster uses.</div>
           </div>
           <div class="rad-field">
             <label for="aws-vpc-select">VPC</label>

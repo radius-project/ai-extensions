@@ -500,16 +500,16 @@ describe("P0-C built Radius extension artifact", () => {
       "If the Redis Recipe declares `url` in `result.secrets`, the connection injects secret-backed `CONNECTION_REDIS_URL`"
     );
     expect(connectionGuidance).toContain(
-      "If compatibility cannot be proven, preserve or use the existing schema-supported wiring"
+      "If the supplied compatibility context does not explicitly establish support, preserve or use the existing schema-supported wiring"
     );
     expect(connectionGuidance).toContain(
       "Do not automatically rewrite an existing working `app.bicep`"
     );
     expect(connectionGuidance).toContain(
-      "Azure Container Instances (ACI) behavior is unchanged"
+      "Azure Container Instances (ACI) behavior is unchanged and must not use this Kubernetes projection"
     );
     expect(connectionGuidance).toContain(
-      "An explicit `env` entry wins when it has the same name as a generated connection variable"
+      "An explicit `env` entry wins over a generated variable with the same name"
     );
     expect(connectionGuidance).toContain(
       "Set `disableDefaultEnvVars: true` on a connection only when all generated variables from that connection must be suppressed"
@@ -517,19 +517,108 @@ describe("P0-C built Radius extension artifact", () => {
     expect(skillGuidance).toContain(
       "`postgresSecret` becomes `POSTGRESSECRET`"
     );
-    expect(skillGuidance).toContain("`rad version --output json`");
-    expect(skillGuidance).toContain(
-      "`rad recipe show <name> --resource-type <type> --output json`"
-    );
-    expect(skillGuidance).toContain(
-      "These signals do not automatically prove secret-connection projection"
-    );
-    for (const guidance of [connectionGuidance, runtimeGuidance]) {
-      expect(guidance).toContain("`rad version --output json`");
+    // This artifact-boundary test verifies the packaged semantic guidance only.
+    // The repo has no deterministic seam that executes the prompt-driven skill
+    // or evaluates its generated Bicep; https://github.com/radius-project/ai-extensions/issues/685 tracks that evaluation harness.
+    for (const guidance of [
+      skillGuidance,
+      connectionGuidance,
+      runtimeGuidance
+    ]) {
       expect(guidance).toContain(
-        "`rad recipe show <name> --resource-type <type> --output json`"
+        "Do not execute `rad`, fetch versions or Recipe metadata, or visit external links to discover compatibility"
       );
-      expect(guidance).toContain("known compatible control-plane version");
+      expect(guidance).not.toContain("rad version --output json");
+      expect(guidance).not.toContain("rad recipe show");
+    }
+    expect(skillGuidance).toContain(
+      'the required managed `show-radius-type.mjs` result for `Radius.Compute/containers` has `recipe.status: "available"` and its returned `recipe.definition` identifies the Kubernetes Container Recipe'
+    );
+    expect(connectionGuidance).toContain(
+      "Support is established when `recipe.status` is `available` and the returned `recipe.definition` identifies the Kubernetes Container Recipe"
+    );
+    expect(runtimeGuidance).toContain(
+      "For the managed-default profile, Recipe inspection means reading the complete `recipe.definition` already returned by the required `show-radius-type.mjs` batch"
+    );
+    expect(skillGuidance).toContain(
+      "The skill handoff itself and a resolved resource schema alone do not establish runtime projection support"
+    );
+    expect(connectionGuidance).toContain(
+      "The skill handoff itself and a resolved resource schema alone are insufficient"
+    );
+    expect(skillGuidance).toContain(
+      "If the Recipe is absent, unavailable, unresolved, or not the Kubernetes Container Recipe, preserve schema-supported `env`, `secretKeyRef`, `envFrom`, native variables, or equivalent explicit wiring"
+    );
+    expect(skillGuidance).toContain(
+      "`<CONNECTION>` is the uppercased connection map key without separator insertion"
+    );
+    expect(connectionGuidance).toContain(
+      "`<CONNECTION>` is the uppercased connection map key without separator insertion"
+    );
+    expect(skillGuidance).toContain(
+      "`<SECRETKEY>` is the uppercased authored Secret data key or Recipe `result.secrets` key"
+    );
+    expect(connectionGuidance).toContain(
+      "a secret suffix is the uppercased authored data key or Recipe `result.secrets` key"
+    );
+    expect(skillGuidance).toContain(
+      "The Kubernetes Container Recipe applies generated ordinary and secret-backed `CONNECTION_*` variables to both regular containers and init containers under the same precedence, disabling, and collision rules"
+    );
+    expect(connectionGuidance).toContain(
+      "Generated ordinary and secret-backed `CONNECTION_*` variables apply to both regular containers and init containers under the same precedence, disabling, and collision rules"
+    );
+    expect(skillGuidance).toContain(
+      "Do not migrate a working `app.bicep` without explicit user intent"
+    );
+    expect(connectionGuidance).toContain(
+      "Do not automatically rewrite an existing working `app.bicep`"
+    );
+    expect(skillGuidance).toContain(
+      "An authored `Radius.Security/secrets` connection uses `<secret>.id` and projects its declared data keys"
+    );
+    expect(connectionGuidance).toContain(
+      "A connection to an authored `Radius.Security/secrets` resource uses `<secret>.id` and projects its declared data keys"
+    );
+    expect(skillGuidance).toContain(
+      "A producer connection uses `<producer>.id` and may project ordinary properties plus keys declared by the Recipe in `result.secrets`"
+    );
+    expect(connectionGuidance).toContain(
+      "A connection to a producer uses `<producer>.id` and may project ordinary resource properties plus secret-backed keys declared by the Recipe in `result.secrets`"
+    );
+    for (const guidance of [skillGuidance, connectionGuidance]) {
+      expect(guidance).toContain(
+        "Automatic secret-backed `CONNECTION_*` projection is Kubernetes Container Recipe behavior only"
+      );
+      expect(guidance).toContain("<secret>.id");
+      expect(guidance).toContain("<producer>.id");
+      expect(guidance).toContain("`result.secrets`");
+      expect(guidance).toContain("`<producer>.properties.secrets.name`");
+      expect(guidance).toContain("`properties.secrets.id` does not exist");
+      expect(guidance).toContain(
+        "An explicit `env` entry wins over a generated variable"
+      );
+      expect(guidance).toContain(
+        "`disableDefaultEnvVars: true` suppresses all generated variables for that connection"
+      );
+      expect(guidance).toContain(
+        "When an ordinary projected property and a managed secret-derived value normalize to the same generated name, the managed secret value wins"
+      );
+      expect(guidance).toContain(
+        "When two secret-derived values normalize to the same generated name, fail rather than choose silently"
+      );
+      expect(guidance).not.toMatch(
+        /Normalized generated-name collisions fail|Generated names that collide after normalization fail/u
+      );
+      expect(guidance).toContain("Developer-owned credentials");
+      expect(guidance).toMatch(
+        /generated by a Recipe[\s\S]*`result\.secrets`/u
+      );
+      expect(guidance).toContain(
+        "Azure Container Instances (ACI) behavior is unchanged and must not use this Kubernetes projection"
+      );
+      expect(guidance).not.toMatch(
+        /github\.com\/radius-project\/(?:radius|resource-types-contrib)\/(?:pull|issues)\//u
+      );
     }
     expect(readGuidance("references/secrets-handling.md")).toContain(
       "`CONNECTION_MYSQLSECRET_PASSWORD`"
