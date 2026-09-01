@@ -31,6 +31,56 @@ describe("normalizeCommandResult", () => {
     expect(normalizeCommandResult({ code: 3 }, "", "boom").code).toBe(3);
   });
 
+  it("surfaces a missing tool's spawn diagnostic when both streams are empty", () => {
+    const outcome = normalizeCommandResult(
+      { code: "ENOENT", message: "spawn az ENOENT" },
+      "",
+      ""
+    );
+
+    expect(outcome).toEqual({
+      code: 1,
+      stdout: "",
+      stderr: "spawn az ENOENT"
+    });
+  });
+
+  it("does not replace captured stderr with the spawn diagnostic", () => {
+    expect(
+      normalizeCommandResult(
+        { code: 1, message: "command failed" },
+        "",
+        "specific stderr"
+      )
+    ).toEqual({
+      code: 1,
+      stdout: "",
+      stderr: "specific stderr"
+    });
+  });
+
+  it("does not move an error message into stderr when stdout has output", () => {
+    expect(
+      normalizeCommandResult(
+        { code: 1, message: "command failed" },
+        "specific stdout",
+        ""
+      )
+    ).toEqual({
+      code: 1,
+      stdout: "specific stdout",
+      stderr: ""
+    });
+  });
+
+  it("keeps empty streams when an error has no message", () => {
+    expect(normalizeCommandResult({ code: "ENOENT" }, "", "")).toEqual({
+      code: 1,
+      stdout: "",
+      stderr: ""
+    });
+  });
+
   it.each([
     ["a signal or timeout code", { code: "ETIMEDOUT" }],
     ["a null code", { code: null }],

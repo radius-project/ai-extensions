@@ -336,3 +336,23 @@ describe("run-command callout styles", () => {
     expect(SHELL_STYLE_CSS).toContain("white-space: pre-wrap;");
   });
 });
+
+describe("top navigation under a narrow panel", () => {
+  it("lets the ambient chips shrink instead of forcing the row wider", () => {
+    // A flex item defaults to min-width:auto, so without these the nowrap chip
+    // label sets an unshrinkable floor and three chips push the row past the
+    // nav — clipping whole chips rather than ellipsizing one.
+    expect(SHELL_STYLE_CSS).toMatch(
+      /\.rad-opchip \{[^}]*flex: 0 1 auto;[^}]*min-width: 0;/
+    );
+    expect(SHELL_STYLE_CSS).toMatch(
+      /\.rad-opchip__label \{[^}]*text-overflow: ellipsis;[^}]*min-width: 0;/
+    );
+  });
+
+  it("collapses the tabs to icons before the row can overflow", () => {
+    expect(SHELL_STYLE_CSS).toMatch(
+      /@media \(max-width: 760px\) \{[\s\S]*\.rad-topnav__label \{ display: none; \}/
+    );
+  });
+});

@@ -1,9 +1,10 @@
 // The conformance check against the real fixture repository.
 //
-// Opt-in, following `deploy-dispatch-az-contract.live.test.ts`: it is collected
-// on every run but skips unless `RADIUS_CLOUD_E2E` is set *and* the fixture
-// repository constants have been provisioned, so `pnpm test` is never broken by
-// an absent credential or a placeholder SHA.
+// Opt-in, following the structure of the existing `.live.test.ts` files: it is
+// collected on every run but skipped unless explicitly enabled. Unlike those
+// files, this check is deliberately gated on `RADIUS_CLOUD_E2E` and is not run
+// by `live-tests.yml`, because it needs the provisioned fixture repository, not
+// only a live CLI. Provisioning placeholders keep the normal suite skipped too.
 //
 // The compile port is the product's own `buildGraphViaRad` rather than a second
 // Bicep invocation, so a baseline this check accepts is one the product can

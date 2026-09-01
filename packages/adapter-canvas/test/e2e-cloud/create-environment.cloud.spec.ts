@@ -159,6 +159,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   test.skip(!gate.enabled, skipReason);
 
   let fixture: CloudFixture | undefined;
+  let federatedSubjects: readonly string[] = [];
 
   test.beforeAll(async () => {
     if (!gate.enabled) return;
@@ -182,12 +183,12 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     fixture = undefined;
     if (!current) return;
     try {
-      // Stage two deletes the GitHub Environment, so on a complete run this
-      // reclaims only what the product leaks: the Entra application, its
-      // credentials and its role assignment, which delete-environment does not
-      // yet remove. On a run that failed before stage two it still reclaims the
-      // Environment as well. `dispose()` then removes the fixture's own Azure
-      // resources, which it names directly rather than deriving from GitHub.
+      // Stage two deletes the GitHub Environment and its per-environment
+      // federated credentials. The app registration and role assignment are
+      // deliberately retained because they can be shared, so the fixture
+      // reclaims them after proving the product-owned deletions. On a run that
+      // failed before stage two it also reclaims any remaining Environment or
+      // credential. `dispose()` then removes the fixture's own Azure resources.
       const reclaimed = await current.reclaimLeakedProductArtifacts();
       if (reclaimed.length > 0)
         console.info(
@@ -321,7 +322,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         subjects.supported ? "" : subjects.reason
       ).toBe(true);
       if (subjects.supported)
-        for (const subject of subjects.required)
+        for (const subject of (federatedSubjects = subjects.required))
           await cloud.assertFederatedCredentialExists(subject);
 
       const principalId = readServicePrincipalObjectId(
@@ -473,22 +474,13 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       // The proof. GitHub is asked directly, and the fixture refuses to answer
       // unless stage one observed this same Environment present first.
       await cloud.assertGitHubEnvironmentAbsent();
+      for (const subject of federatedSubjects)
+        await cloud.assertFederatedCredentialAbsent(subject);
 
-      // Deleting an environment currently removes the GitHub Environment and
-      // nothing else, so the Entra application stage one created, its two
-      // federated credentials and its role assignment are all orphaned. That is
-      // the bug PR #398, "Clean up cloud state on environment deletion", fixes.
-      // Asserting the leak here would encode it as the contract and invert the
-      // day #398 merges, so the mirrors that would prove the cleanup are built
-      // and unit-tested but left uncalled. Once #398 is in, delete this comment
-      // and add, using stage one's `app.appId` and `principalId`:
-      //   await cloud.assertAppRegistrationAbsent();
-      //   for (const subject of subjects.required)
-      //     await cloud.assertFederatedCredentialAbsent(subject);
-      //   await cloud.assertRoleAssignmentAbsent(principalId);
-      // The fixture's own reclamation in `dispose()` still runs either way; it
-      // works from Azure resource names, not from the GitHub Environment, so
-      // this stage neither replaces it nor breaks it.
+      // The app registration and role assignment can be shared, so #398 retains
+      // them deliberately. Their absence mirrors remain available for a future
+      // contract that can prove exclusive ownership; fixture reclamation removes
+      // this repository-scoped test identity after the product assertions.
     } finally {
       await harness.cleanup();
     }

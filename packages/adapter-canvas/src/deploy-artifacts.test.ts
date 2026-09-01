@@ -711,7 +711,7 @@ describe("settleDeployStatuses", () => {
 });
 
 // A real payload, captured verbatim from a run of the producer's
-// publish-deploy-status step (radius-project/radius). The producer has the
+// publish-deploy-status step (radius-project/ai-extensions). The producer has the
 // mirror-image test asserting it still emits this shape. Together they close the
 // loop on a one-sided contract change, which would otherwise fail silently:
 // an empty Deployed graph with nothing red anywhere.

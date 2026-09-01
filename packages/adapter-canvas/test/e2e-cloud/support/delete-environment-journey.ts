@@ -25,17 +25,17 @@ export interface DeleteEnvironmentOutcome {
  *
  * An environment with nothing deployed to it deletes cleanly: the handler's
  * `resolveEnvDeployment` check finds no active deployment, the `app-deployed`
- * guard does not fire, and the GitHub Environment is removed. Anything other
- * than a 200 carrying `success` means the product refused, failed closed, or
- * reported an outcome the environments page cannot act on — so the reason it
- * gave is quoted rather than summarised, since a nightly run's failure message
- * is the only diagnostic anyone gets.
+ * guard does not fire, and the product starts a tracked delete operation.
+ * Anything other than a 202 carrying an operation id means the product refused,
+ * failed closed, or reported an outcome the environments page cannot act on —
+ * so the reason it gave is quoted rather than summarised, since a nightly run's
+ * failure message is the only diagnostic anyone gets.
  */
 export function findDeleteEnvironmentSuccessProblems(
   outcome: DeleteEnvironmentOutcome
 ): string[] {
   const record = asRecord(outcome.payload);
-  if (outcome.status !== 200) {
+  if (outcome.status !== 202) {
     const error = record?.error;
     const detail =
       typeof error === "string" && error.trim() !== "" ? `: ${error}` : ".";
@@ -43,17 +43,17 @@ export function findDeleteEnvironmentSuccessProblems(
     const codeDetail =
       typeof code === "string" && code.trim() !== "" ? ` (code "${code}")` : "";
     return [
-      `Deleting environment "${outcome.environmentName}" answered ${outcome.status}, not 200${codeDetail}${detail}`
+      `Deleting environment "${outcome.environmentName}" answered ${outcome.status}, not 202${codeDetail}${detail}`
     ];
   }
   if (!record)
     return [
-      `Deleting environment "${outcome.environmentName}" answered 200 but its body was not a JSON object: ` +
+      `Deleting environment "${outcome.environmentName}" answered 202 but its body was not a JSON object: ` +
         `${JSON.stringify(outcome.payload)}`
     ];
-  if (record.success !== true)
+  if (typeof record.operationId !== "string" || record.operationId.trim() === "")
     return [
-      `Deleting environment "${outcome.environmentName}" answered 200 but did not report success: ` +
+      `Deleting environment "${outcome.environmentName}" answered 202 but did not identify the delete operation: ` +
         `${JSON.stringify(outcome.payload)}`
     ];
   return [];

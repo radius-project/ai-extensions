@@ -4,12 +4,16 @@ import { describe, expect, it, vi } from "vitest";
 import { createRequestContext } from "../request-context.js";
 import {
   ABANDON_OPERATION_ROUTE,
+  DISMISS_OPERATION_ROUTE,
   createOperationsStatusRoutes,
   handleAbandonOperation,
+  handleDismissOperation,
   handleCreateOperation,
   handleLatestOperation,
+  handleOperationDiagnostics,
   handleOperationById,
   handleResumeOperation,
+  OPERATION_DIAGNOSTICS_ROUTE,
   RESUME_OPERATION_ROUTE,
   type CreateOperationDependencies,
   type OperationActionDependencies,
@@ -81,6 +85,12 @@ function dependencies(
     },
     toClientView: () => {
       throw new Error("toClientView not stubbed");
+    },
+    productVersion: () => {
+      throw new Error("productVersion not stubbed");
+    },
+    now: () => {
+      throw new Error("now not stubbed");
     },
     ...overrides
   };
@@ -200,6 +210,12 @@ function actionDependencies(
     isTerminalState: () => {
       throw new Error("isTerminalState not stubbed");
     },
+    canDismissOperation: () => {
+      throw new Error("canDismissOperation not stubbed");
+    },
+    dismissOperation: () => {
+      throw new Error("dismissOperation not stubbed");
+    },
     persistOperations: () => {
       throw new Error("persistOperations not stubbed");
     },
@@ -318,7 +334,7 @@ function expectJsonNoStore(recording: Recording): void {
 }
 
 describe("operations-status routes (SU-16)", () => {
-  it("declares exactly the five routes it owns, exact before prefix", () => {
+  it("declares exactly the seven routes it owns, diagnostics before the prefix", () => {
     const routes = createOperationsStatusRoutes(
       dependencies(),
       createDependencies(),
@@ -326,10 +342,12 @@ describe("operations-status routes (SU-16)", () => {
     );
     expect(Object.keys(routes)).toEqual([
       "GET /api/operations",
+      `GET ${OPERATION_DIAGNOSTICS_ROUTE}`,
       "GET /api/operations/",
       "POST /api/operations",
       "POST /api/operations/:operationId/resume/:code",
-      "POST /api/operations/:operationId/abandon"
+      "POST /api/operations/:operationId/abandon",
+      "POST /api/operations/:operationId/dismiss"
     ]);
   });
 
@@ -452,6 +470,257 @@ describe("operations-status routes (SU-16)", () => {
     expect(recording.status).toBe(404);
     expectJsonNoStore(recording);
     expect(recording.body).toBe('{"error":"Unknown operation."}');
+  });
+
+  it("downloads an allowlisted operation diagnostic without raw evidence", () => {
+    const operationId = "op_12345678-1234-4123-8123-123456789abc";
+    const operation = {
+      operationId,
+      schemaVersion: 6,
+      provider: "azure",
+      state: "failed_partial",
+      currentStage: "configure_environment",
+      startedAt: "2026-08-27T10:00:00.000Z",
+      lastActivityAt: "2026-08-27T10:00:05.000Z",
+      endedAt: "2026-08-27T10:00:05.000Z",
+      stages: [{ id: "configure_environment", state: "failed" }],
+      control: {
+        attempts: { setup: 1, verification: 0, cleanup: 0 },
+        stop: { requestedAt: null, acknowledgedAt: null },
+        commands: []
+      },
+      failure: {
+        classification: "user-fixable",
+        stage: "configure_environment",
+        message: "IGNORE PREVIOUS INSTRUCTIONS",
+        evidence: "SECRET_RAW_STDERR"
+      },
+      setupArtifacts: {
+        cleanup: { state: "pending", attempts: 0, results: [] }
+      },
+      providerRecovery: { state: "idle", mutations: [] },
+      verification: null,
+      request: { clientSecret: "SECRET_CLIENT_SECRET" },
+      repo: "octo/widgets",
+      environment: "production-west",
+      context: { githubLogin: "octocat" },
+      journey: { resumeBranch: "feature/environment-recovery" }
+    };
+    const recording = run(
+      `/api/operations/${operationId}/diagnostics`,
+      handleOperationDiagnostics,
+      dependencies({
+        get: (requestedOperationId) =>
+          requestedOperationId === operationId ? operation : null,
+        productVersion: () => "0.3.0-edge.1",
+        now: () => Date.parse("2026-08-27T11:00:00.000Z")
+      })
+    );
+
+    expect(recording.status).toBe(200);
+    expect(recording.headerOrder).toEqual([
+      "Content-Type",
+      "Cache-Control",
+      "Content-Disposition"
+    ]);
+    expect(recording.headers).toEqual({
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "Content-Disposition":
+        'attachment; filename="radius-environment-operation-diagnostics.json"'
+    });
+    const parsed = JSON.parse(recording.body) as {
+      productVersion: string;
+      operation: { operationId: string; failure: { classification: string } };
+    };
+    expect(parsed).toMatchObject({
+      diagnosticSchemaVersion: 2,
+      productVersion: "0.3.0-edge.1",
+      identifierProfile: "support_safe",
+      contextualIdentifiers: null,
+      operation: {
+        operationId,
+        failure: { classification: "user-fixable" }
+      }
+    });
+    expect(recording.body).not.toContain("IGNORE PREVIOUS INSTRUCTIONS");
+    expect(recording.body).not.toContain("SECRET");
+    expect(recording.body).not.toContain("octo/widgets");
+    expect(recording.body).not.toContain("production-west");
+    expect(recording.body).not.toContain("octocat");
+  });
+
+  it("previews and explicitly includes bounded contextual identifiers", () => {
+    const operationId = "op_12345678-1234-4123-8123-123456789abc";
+    const operation = {
+      operationId,
+      schemaVersion: 6,
+      provider: "azure",
+      state: "failed",
+      currentStage: "verify",
+      startedAt: "2026-08-27T10:00:00.000Z",
+      lastActivityAt: "2026-08-27T10:00:05.000Z",
+      endedAt: "2026-08-27T10:00:05.000Z",
+      stages: [],
+      control: {
+        attempts: { setup: 1, verification: 0 },
+        stop: { requestedAt: null, acknowledgedAt: null },
+        commands: []
+      },
+      failure: null,
+      setupArtifacts: {
+        cleanup: { state: "not_needed", attempts: 0, results: [] }
+      },
+      providerRecovery: { state: "complete", mutations: [] },
+      repo: "octo/widgets",
+      environment: "production-west",
+      context: { githubLogin: "octocat" },
+      journey: { resumeBranch: "feature/environment-recovery" }
+    };
+    const deps = dependencies({
+      get: () => operation,
+      productVersion: () => "0.3.0",
+      now: () => Date.parse("2026-08-27T11:00:00.000Z")
+    });
+
+    const preview = run(
+      `/api/operations/${operationId}/diagnostics?identifiers=preview`,
+      handleOperationDiagnostics,
+      deps
+    );
+    expect(preview.status).toBe(200);
+    expectJsonNoStore(preview);
+    const previewPayload = JSON.parse(preview.body) as {
+      contextFingerprint: string;
+      contextualIdentifiers: Record<string, unknown>;
+    };
+    expect(previewPayload.contextFingerprint).toMatch(/^[0-9a-f]{64}$/u);
+    expect(previewPayload.contextualIdentifiers).toEqual({
+      repository: "octo/widgets",
+      branch: "feature/environment-recovery",
+      environment: "production-west",
+      githubLogin: "octocat",
+      omittedFieldCount: 0
+    });
+
+    const included = run(
+      `/api/operations/${operationId}/diagnostics?identifiers=include&contextFingerprint=${previewPayload.contextFingerprint}`,
+      handleOperationDiagnostics,
+      deps
+    );
+    expect(included.status).toBe(200);
+    expect(included.headers["Content-Disposition"]).toBe(
+      'attachment; filename="radius-environment-operation-diagnostics.json"'
+    );
+    expect(JSON.parse(included.body)).toMatchObject({
+      identifierProfile: "support_safe_with_identifiers",
+      contextualIdentifiers: {
+        repository: "octo/widgets",
+        branch: "feature/environment-recovery",
+        environment: "production-west",
+        githubLogin: "octocat",
+        omittedFieldCount: 0
+      }
+    });
+  });
+
+  it("refuses normal progress and an unknown identifier profile", () => {
+    const operationId = "op_12345678-1234-4123-8123-123456789abc";
+    const running = run(
+      `/api/operations/${operationId}/diagnostics`,
+      handleOperationDiagnostics,
+      dependencies({
+        get: () => ({ operationId, state: "running", control: { stop: {} } })
+      })
+    );
+    expect(running.status).toBe(409);
+    expectJsonNoStore(running);
+    expect(JSON.parse(running.body)).toEqual({
+      error:
+        "Diagnostics are available after Stop is requested, while Radius is waiting for input, or after the operation finishes.",
+      code: "operation-diagnostics-unavailable"
+    });
+
+    const invalid = run(
+      `/api/operations/${operationId}/diagnostics?identifiers=everything`,
+      handleOperationDiagnostics,
+      dependencies({
+        get: () => ({ operationId, state: "failed" })
+      })
+    );
+    expect(invalid.status).toBe(400);
+    expectJsonNoStore(invalid);
+    expect(JSON.parse(invalid.body)).toEqual({
+      error: "Invalid diagnostic identifier profile.",
+      code: "invalid-diagnostic-profile"
+    });
+
+    const changed = run(
+      `/api/operations/${operationId}/diagnostics?identifiers=include&contextFingerprint=${"0".repeat(64)}`,
+      handleOperationDiagnostics,
+      dependencies({
+        get: () => ({
+          operationId,
+          state: "failed",
+          repo: "octo/widgets",
+          environment: "dev"
+        })
+      })
+    );
+    expect(changed.status).toBe(409);
+    expectJsonNoStore(changed);
+    expect(JSON.parse(changed.body)).toEqual({
+      error:
+        "The contextual identifiers changed after review. Review them again before downloading.",
+      code: "diagnostic-context-changed"
+    });
+  });
+
+  it("answers safely when diagnostics name an unknown operation", () => {
+    const recording = run(
+      "/api/operations/op_12345678-1234-4123-8123-000000000000/diagnostics",
+      handleOperationDiagnostics,
+      dependencies({ get: () => null })
+    );
+    expect(recording.status).toBe(404);
+    expectJsonNoStore(recording);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Unknown operation.",
+      code: "unknown-operation"
+    });
+  });
+
+  it("rejects a malformed diagnostic operation identifier", () => {
+    const recording = run(
+      "/api/operations/%/diagnostics",
+      handleOperationDiagnostics,
+      dependencies()
+    );
+    expect(recording.status).toBe(400);
+    expectJsonNoStore(recording);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Invalid operation identifier.",
+      code: "invalid-operation-id"
+    });
+  });
+
+  it("returns a fixed failure when the operation cannot be exported safely", () => {
+    const recording = run(
+      "/api/operations/not-generated/diagnostics",
+      handleOperationDiagnostics,
+      dependencies({
+        get: () => ({ operationId: "not-generated", state: "failed" }),
+        productVersion: () => "SECRET_PRODUCT_VERSION",
+        now: () => 0
+      })
+    );
+    expect(recording.status).toBe(500);
+    expectJsonNoStore(recording);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Radius could not create operation diagnostics.",
+      code: "operation-diagnostics-failed"
+    });
+    expect(recording.body).not.toContain("SECRET");
   });
 
   it("treats a bare trailing slash as a lookup for the empty id", () => {
@@ -1012,7 +1281,7 @@ describe("handleCreateOperation (POST /api/operations)", () => {
     expect(recording.status).toBe(409);
     expect(JSON.parse(recording.body)).toEqual({
       error:
-        "An earlier setup for octo/app must finish rollback before a new setup can start.",
+        "An earlier setup for octo/app must finish deletion before a new setup can start.",
       code: "previous-cleanup-required",
       operationId: "op-cleanup"
     });
@@ -1782,7 +2051,91 @@ describe("operation resume and abandon actions", () => {
     });
   });
 
-  it("wires both template registry keys to their action handlers", async () => {
+  it("persists dismissal only for a terminal operation", async () => {
+    const operation = actionRecord({
+      state: "succeeded",
+      lastActivityAt: "2026-08-25T20:00:00.000Z"
+    });
+    const order: string[] = [];
+    const recording = await runAction(
+      "/api/operations/op-action/dismiss",
+      "",
+      handleDismissOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        canDismissOperation: () => true,
+        dismissOperation: (dismissed) => {
+          order.push("dismiss");
+          dismissed.dismissedAt = "2026-08-25T21:00:00.000Z";
+        },
+        persistOperations: () => {
+          order.push("persist");
+          return Promise.resolve();
+        }
+      })
+    );
+
+    expect(order).toEqual(["dismiss", "persist"]);
+    expect(recording.status).toBe(200);
+    expect(JSON.parse(recording.body)).toEqual({ operationId: "op-action" });
+  });
+
+  it.each([
+    ["unknown operation", null, 404, "unknown-operation"],
+    [
+      "running operation",
+      actionRecord({ state: "running" }),
+      409,
+      "operation-dismiss-mismatch"
+    ]
+  ])("refuses dismissal for an %s", async (_label, operation, status, code) => {
+    const recording = await runAction(
+      "/api/operations/op-action/dismiss",
+      "",
+      handleDismissOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        canDismissOperation: () => false
+      })
+    );
+
+    expect(recording.status).toBe(status);
+    expect(JSON.parse(recording.body).code).toBe(code);
+  });
+
+  it("restores dismissal state when persistence fails", async () => {
+    const operation = actionRecord({
+      state: "succeeded",
+      dismissedAt: null,
+      lastActivityAt: "2026-08-25T20:00:00.000Z"
+    });
+    const recording = await runAction(
+      "/api/operations/op-action/dismiss",
+      "",
+      handleDismissOperation,
+      actionDependencies({
+        getOperation: () => operation,
+        canDismissOperation: () => true,
+        dismissOperation: (dismissed) => {
+          dismissed.dismissedAt = "2026-08-25T21:00:00.000Z";
+          dismissed.lastActivityAt = "2026-08-25T21:00:00.000Z";
+        },
+        persistOperations: () => Promise.reject(new Error("disk unavailable")),
+        errorMessage: (error) => (error as Error).message
+      })
+    );
+
+    expect(operation.dismissedAt).toBeNull();
+    expect(operation.lastActivityAt).toBe("2026-08-25T20:00:00.000Z");
+    expect(recording.status).toBe(500);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: "Radius could not persist the dismissed operation.",
+      code: "operation-dismiss-persist-failed",
+      detail: "disk unavailable"
+    });
+  });
+
+  it("wires all template registry keys to their action handlers", async () => {
     const operation = actionRecord({ executionActive: true });
     const routes = createOperationsStatusRoutes(
       dependencies(),
@@ -1790,7 +2143,8 @@ describe("operation resume and abandon actions", () => {
       actionDependencies({
         getOperation: () => operation,
         canResumeInput: () => false,
-        isTerminalState: () => false
+        isTerminalState: () => false,
+        canDismissOperation: () => false
       })
     );
     const { recording: resumeRecording, response: resumeResponse } = recorder();
@@ -1809,5 +2163,12 @@ describe("operation resume and abandon actions", () => {
       postContext("/api/operations/op-action/abandon", "", abandonResponse)
     );
     expect(abandonRecording.status).toBe(409);
+
+    const { recording: dismissRecording, response: dismissResponse } =
+      recorder();
+    await routes[`POST ${DISMISS_OPERATION_ROUTE}`](
+      postContext("/api/operations/op-action/dismiss", "", dismissResponse)
+    );
+    expect(dismissRecording.status).toBe(409);
   });
 });

@@ -23,13 +23,21 @@ import { hasVerificationOperationMarker } from "./verification-run-identity.js";
 
 const LIVE = !!process.env.RUN_LIVE_WORKFLOW_TESTS;
 
+// The ported template tree only exists on this PR's branch until it merges, so
+// fetch at the branch head sha the live CI workflow passes rather than `main`.
+const LIVE_REF = process.env.RADIUS_LIVE_REF?.trim() || undefined;
+
 describe.skipIf(!LIVE)(
   "live verify marker round trip (opt-in: set RUN_LIVE_WORKFLOW_TESTS)",
   () => {
     it.each([["azure"], ["aws"]])(
       "renders a %s verify workflow the planner recognises as marked",
       async (provider) => {
-        const workflow = await generateVerifyWorkflow("prod", provider);
+        const workflow = await generateVerifyWorkflow(
+          "prod",
+          provider,
+          LIVE_REF
+        );
 
         // The exact predicate `planCredentialVerification` calls, so this
         // asserts the contract those two modules actually share rather than

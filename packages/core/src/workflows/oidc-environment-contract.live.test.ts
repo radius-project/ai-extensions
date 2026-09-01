@@ -1,5 +1,5 @@
 // Opt-in live contract test. Fetches the CURRENT deploy/verify workflow
-// templates from radius-project/radius `.github/extension/` and asserts that the
+// templates from radius-project/ai-extensions `.github/extension/` and asserts that the
 // jobs which mint the Azure OIDC token are still bound to a GitHub Environment.
 //
 // Why this matters: the extension computes each federated-identity subject as
@@ -28,16 +28,25 @@ import {
   DEPLOY_DISPATCHER_FILE
 } from "./deploy.js";
 import { VERIFY_AZURE_FILE } from "./verify.js";
+import { fetchExtensionFile } from "../../test/support/live-github.js";
 
 const LIVE = !!process.env.RUN_LIVE_WORKFLOW_TESTS;
 
-async function fetchWorkflow(file: string): Promise<string> {
-  const url = `https://raw.githubusercontent.com/${RADIUS_WORKFLOW_REPO}/${RADIUS_REF}/${RADIUS_WORKFLOW_DIR}/${file}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`failed to fetch ${url}: ${res.status} ${res.statusText}`);
-  }
-  return res.text();
+// The ref whose templates are validated. CI sets this to the PR head on pull
+// requests so a PR checks its own `.github/extension/` templates; otherwise it
+// falls back to RADIUS_REF (`main`).
+const LIVE_REF = process.env.RADIUS_LIVE_REF?.trim() || RADIUS_REF;
+
+// radius-project/ai-extensions is an internal repo, so the templates are not
+// reachable over anonymous raw.githubusercontent.com. Fetch them through the
+// authenticated GitHub contents API (raw media type) using the CI token.
+function fetchWorkflow(file: string): Promise<string> {
+  return fetchExtensionFile(
+    RADIUS_WORKFLOW_REPO,
+    RADIUS_WORKFLOW_DIR,
+    file,
+    LIVE_REF
+  );
 }
 
 // Return the body of the top-level job (a 2-space-indented `name:` header under

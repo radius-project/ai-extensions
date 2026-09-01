@@ -119,6 +119,13 @@ export const templatePathParameters = (() => {
 export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare("ANY", "/api/ping", "exact", "none", "liveness-source"),
   declare("GET", "/api/operations", "exact", "none", "operations-status"),
+  declare(
+    "GET",
+    "/api/operations/:operationId/diagnostics",
+    "template",
+    "none",
+    "operations-status"
+  ),
   declare("GET", "/api/operations/", "prefix", "none", "operations-status"),
   legacyPost("/api/open-source", "exact", "json", "liveness-source"),
   legacyPost(
@@ -186,6 +193,7 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare("GET", "/api/progress", "exact", "none", "graphs-planning"),
   declare("GET", "/api/deployed-graph", "exact", "none", "graphs-planning"),
   declare("GET", "/api/deploy-status", "exact", "none", "deployments"),
+  declare("GET", "/api/deploy-notification", "exact", "none", "deployments"),
   legacyPost("/api/load-graph", "exact", "json", "graphs-planning"),
   declare("GET", "/api/list-environments", "exact", "none", "environments"),
   declare("GET", "/api/list-applications", "exact", "none", "deployments"),
@@ -211,6 +219,13 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare(
     "POST",
     "/api/operations/:operationId/abandon",
+    "template",
+    "none",
+    "operations-status"
+  ),
+  declare(
+    "POST",
+    "/api/operations/:operationId/dismiss",
     "template",
     "none",
     "operations-status"

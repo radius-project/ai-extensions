@@ -24,14 +24,19 @@ describe("DELETE_ENVIRONMENT_PATH", () => {
 describe("findDeleteEnvironmentSuccessProblems", () => {
   it("accepts a delete the product reported as successful", () => {
     expect(
-      findDeleteEnvironmentSuccessProblems(outcome(200, { success: true }))
+      findDeleteEnvironmentSuccessProblems(
+        outcome(202, { operationId: "op_delete" })
+      )
     ).toEqual([]);
   });
 
   it("ignores extra fields alongside the success flag", () => {
     expect(
       findDeleteEnvironmentSuccessProblems(
-        outcome(200, { success: true, environment: ENVIRONMENT })
+        outcome(202, {
+          operationId: "op_delete",
+          environment: ENVIRONMENT
+        })
       )
     ).toEqual([]);
   });
@@ -45,7 +50,7 @@ describe("findDeleteEnvironmentSuccessProblems", () => {
         })
       )
     ).toEqual([
-      `Deleting environment "${ENVIRONMENT}" answered 409, not 200 (code "app-deployed"): ` +
+      `Deleting environment "${ENVIRONMENT}" answered 409, not 202 (code "app-deployed"): ` +
         'Application "demo" is still deployed.'
     ]);
   });
@@ -58,7 +63,7 @@ describe("findDeleteEnvironmentSuccessProblems", () => {
         })
       )
     ).toEqual([
-      `Deleting environment "${ENVIRONMENT}" answered 503, not 200: ` +
+      `Deleting environment "${ENVIRONMENT}" answered 503, not 202: ` +
         "Could not determine whether an app is deployed"
     ]);
   });
@@ -73,7 +78,7 @@ describe("findDeleteEnvironmentSuccessProblems", () => {
     ["a blank code", { code: "  ", error: "" }]
   ])("reports a failure carrying %s without inventing a reason", (_l, body) => {
     expect(findDeleteEnvironmentSuccessProblems(outcome(500, body))).toEqual([
-      `Deleting environment "${ENVIRONMENT}" answered 500, not 200.`
+      `Deleting environment "${ENVIRONMENT}" answered 500, not 202.`
     ]);
   });
 
@@ -83,7 +88,7 @@ describe("findDeleteEnvironmentSuccessProblems", () => {
         outcome(400, { code: 7, error: "bad request" })
       )
     ).toEqual([
-      `Deleting environment "${ENVIRONMENT}" answered 400, not 200: bad request`
+      `Deleting environment "${ENVIRONMENT}" answered 400, not 202: bad request`
     ]);
   });
 
@@ -91,26 +96,26 @@ describe("findDeleteEnvironmentSuccessProblems", () => {
     ["null", null],
     ["a string", "ok"],
     ["an array", [{ success: true }]]
-  ])("reports a 200 whose body was %s", (_label, payload) => {
+  ])("reports a 202 whose body was %s", (_label, payload) => {
     const problems = findDeleteEnvironmentSuccessProblems(
-      outcome(200, payload)
+      outcome(202, payload)
     );
     expect(problems).toHaveLength(1);
     expect(problems[0]).toMatch(
-      /answered 200 but its body was not a JSON object/
+      /answered 202 but its body was not a JSON object/
     );
   });
 
   it.each([
-    ["an absent flag", {}],
-    ["a false flag", { success: false }],
-    ["a truthy non-boolean flag", { success: "true" }]
-  ])("reports a 200 carrying %s", (_label, payload) => {
+    ["an absent operation id", {}],
+    ["an empty operation id", { operationId: " " }],
+    ["a non-string operation id", { operationId: 7 }]
+  ])("reports a 202 carrying %s", (_label, payload) => {
     const problems = findDeleteEnvironmentSuccessProblems(
-      outcome(200, payload)
+      outcome(202, payload)
     );
     expect(problems).toHaveLength(1);
-    expect(problems[0]).toMatch(/did not report success/);
+    expect(problems[0]).toMatch(/did not identify the delete operation/);
   });
 });
 
