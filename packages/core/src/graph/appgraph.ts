@@ -75,10 +75,15 @@ export function projectGraphOutputMetadata(
     "apiVersion",
     "deployStatus",
     "portalUrl",
-    "iconHash",
     "icon"
   ]) {
     copyString(projected, value, key);
+  }
+  if (
+    typeof value.iconHash === "string" &&
+    DIFF_HASH_PATTERN.test(value.iconHash)
+  ) {
+    projected.iconHash = value.iconHash;
   }
   return projected;
 }
@@ -113,10 +118,15 @@ export function projectGraphResourceMetadata(
     "portalUrl",
     "codeReference",
     "definitionFile",
-    "iconHash",
     "icon"
   ]) {
     copyString(projected, value, key);
+  }
+  if (
+    typeof value.iconHash === "string" &&
+    DIFF_HASH_PATTERN.test(value.iconHash)
+  ) {
+    projected.iconHash = value.iconHash;
   }
   copyNumber(projected, value, "definitionLine");
 
@@ -156,11 +166,29 @@ export function projectSafeApplicationGraph(
     .map(projectGraphResourceMetadata)
     .filter((entry) => entry !== null);
   if (!isRecord(appGraph) || !isRecord(appGraph.icons)) return { resources };
-  const icons = Object.fromEntries(
-    Object.entries(appGraph.icons).filter(
-      (entry): entry is [string, string] => typeof entry[1] === "string"
-    )
-  );
+  const referencedIconHashes = new Set<string>();
+  for (const resource of resources) {
+    if (typeof resource.iconHash === "string") {
+      referencedIconHashes.add(resource.iconHash);
+    }
+    const outputs =
+      Array.isArray(resource.outputResources) ? resource.outputResources : [];
+    for (const output of outputs) {
+      if (isRecord(output) && typeof output.iconHash === "string") {
+        referencedIconHashes.add(output.iconHash);
+      }
+    }
+  }
+  const icons = Object.create(null) as Record<string, string>;
+  for (const [key, value] of Object.entries(appGraph.icons)) {
+    if (
+      DIFF_HASH_PATTERN.test(key) &&
+      referencedIconHashes.has(key) &&
+      typeof value === "string"
+    ) {
+      icons[key] = value;
+    }
+  }
   return { resources, icons };
 }
 
