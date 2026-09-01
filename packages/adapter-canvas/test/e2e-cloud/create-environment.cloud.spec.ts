@@ -42,7 +42,6 @@ import {
 import {
   type AppRegistrationRecord,
   createCloudFixture,
-  type AppRegistrationRecord,
   type CloudFixture
 } from "./support/cloud-fixture.js";
 import {
