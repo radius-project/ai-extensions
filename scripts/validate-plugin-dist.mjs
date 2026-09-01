@@ -12,36 +12,31 @@ import { repoRoot, requirePlugin } from "./plugins.mjs";
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const SHA = /^[0-9a-f]{40}$/;
-const MANIFEST_NAME = /^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/;
-// Agent Plugins 1.0.0 (https://agent-plugins.org) closes the manifest: only
-// these fields may appear, components load from fixed locations rather than
-// manifest paths, and client data belongs under a reverse-domain namespace.
-const MANIFEST_SCHEMA =
+const MANIFEST_SCHEMA_URL =
   "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
-const MANIFEST_FIELDS = new Set([
+// Publish jobs run without installed packages, so evaluate the fetched schema
+// here and reject future keywords rather than silently skipping a new contract.
+const SUPPORTED_SCHEMA_KEYWORDS = new Set([
   "$schema",
-  "name",
-  "version",
+  "$id",
+  "title",
   "description",
-  "author",
-  "homepage",
-  "repository",
-  "license",
-  "keywords",
-  "extensions"
+  "type",
+  "properties",
+  "required",
+  "additionalProperties",
+  "const",
+  "minLength",
+  "maxLength",
+  "pattern",
+  "items"
 ]);
-const MANIFEST_STRING_FIELDS = [
-  "description",
-  "homepage",
-  "repository",
-  "license"
-];
-const AUTHOR_FIELDS = new Set(["name", "email", "url"]);
 const DNS_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 
+class Failure extends Error {}
+
 function fail(message) {
-  console.error(`error: ${message}`);
-  process.exit(1);
+  throw new Failure(message);
 }
 
 function option(args, name) {
@@ -49,16 +44,167 @@ function option(args, name) {
   return index === -1 ? undefined : args[index + 1];
 }
 
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function readJson(path, label) {
   try {
     return JSON.parse(readFileSync(path, "utf8"));
   } catch (error) {
-    fail(`${label} is not readable JSON: ${error.message}`);
+    fail(`${label} is not readable JSON: ${errorMessage(error)}`);
   }
 }
 
 function isJsonObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function fetchManifestSchema() {
+  let response;
+  try {
+    response = await fetch(MANIFEST_SCHEMA_URL, {
+      headers: { accept: "application/schema+json, application/json" },
+      redirect: "error",
+      signal: AbortSignal.timeout(10_000)
+    });
+  } catch (error) {
+    fail(
+      `Agent Plugins schema could not be fetched from ${MANIFEST_SCHEMA_URL}: ${errorMessage(error)}`
+    );
+  }
+
+  if (!response.ok) {
+    fail(`Agent Plugins schema request failed with HTTP ${response.status}`);
+  }
+
+  let schema;
+  try {
+    schema = await response.json();
+  } catch (error) {
+    fail(`Agent Plugins schema is not readable JSON: ${errorMessage(error)}`);
+  }
+  if (!isJsonObject(schema)) {
+    fail("Agent Plugins schema must be a JSON object");
+  }
+  if (schema.$id !== MANIFEST_SCHEMA_URL) {
+    fail(`Agent Plugins schema has unexpected $id: ${String(schema.$id)}`);
+  }
+  return schema;
+}
+
+function childLocation(location, property) {
+  return `${location}${location.includes("#") ? "." : "#"}${property}`;
+}
+
+function findUnsupportedSchemaKeyword(schema, location = "schema") {
+  for (const keyword of Object.keys(schema)) {
+    if (!SUPPORTED_SCHEMA_KEYWORDS.has(keyword)) {
+      return `${location}.${keyword}`;
+    }
+  }
+
+  for (const [property, propertySchema] of Object.entries(
+    schema.properties ?? {}
+  )) {
+    const unsupported = findUnsupportedSchemaKeyword(
+      propertySchema,
+      `${location}.properties.${property}`
+    );
+    if (unsupported !== undefined) return unsupported;
+  }
+
+  if (isJsonObject(schema.additionalProperties)) {
+    const unsupported = findUnsupportedSchemaKeyword(
+      schema.additionalProperties,
+      `${location}.additionalProperties`
+    );
+    if (unsupported !== undefined) return unsupported;
+  }
+  if (isJsonObject(schema.items)) {
+    return findUnsupportedSchemaKeyword(schema.items, `${location}.items`);
+  }
+  return undefined;
+}
+
+function matchesSchemaType(value, type) {
+  if (type === "array") return Array.isArray(value);
+  if (type === "object") return isJsonObject(value);
+  return typeof value === type;
+}
+
+function schemaTypeDescription(type) {
+  return `${type === "array" || type === "object" ? "an" : "a"} ${type}`;
+}
+
+function validateSchema(value, schema, location) {
+  if (schema.type !== undefined && !matchesSchemaType(value, schema.type)) {
+    return `${location} must be ${schemaTypeDescription(schema.type)}`;
+  }
+  if (Object.hasOwn(schema, "const") && value !== schema.const) {
+    return `${location} must be ${schema.const}`;
+  }
+
+  if (typeof value === "string") {
+    const length = [...value].length;
+    if (schema.minLength !== undefined && length < schema.minLength) {
+      return `${location} must contain at least ${schema.minLength} characters`;
+    }
+    if (schema.maxLength !== undefined && length > schema.maxLength) {
+      return `${location} must contain at most ${schema.maxLength} characters`;
+    }
+    if (
+      schema.pattern !== undefined &&
+      !new RegExp(schema.pattern).test(value)
+    ) {
+      return `${location} does not match the required pattern`;
+    }
+  }
+
+  if (Array.isArray(value) && schema.items !== undefined) {
+    for (const [index, item] of value.entries()) {
+      const error = validateSchema(item, schema.items, `${location}[${index}]`);
+      if (error !== undefined) return error;
+    }
+  }
+
+  if (isJsonObject(value)) {
+    for (const required of schema.required ?? []) {
+      if (!Object.hasOwn(value, required)) {
+        return `${childLocation(location, required)} is required`;
+      }
+    }
+
+    const properties = schema.properties ?? {};
+    for (const [property, propertySchema] of Object.entries(properties)) {
+      if (!Object.hasOwn(value, property)) continue;
+      const error = validateSchema(
+        value[property],
+        propertySchema,
+        childLocation(location, property)
+      );
+      if (error !== undefined) return error;
+    }
+
+    const additional = Object.keys(value).filter(
+      (property) => !Object.hasOwn(properties, property)
+    );
+    if (schema.additionalProperties === false && additional.length > 0) {
+      return `${location} declares unknown fields: ${additional.join(", ")}`;
+    }
+    if (isJsonObject(schema.additionalProperties)) {
+      for (const property of additional) {
+        const error = validateSchema(
+          value[property],
+          schema.additionalProperties,
+          childLocation(location, property)
+        );
+        if (error !== undefined) return error;
+      }
+    }
+  }
+
+  return undefined;
 }
 
 function isReverseDomainNamespace(namespace) {
@@ -100,127 +246,96 @@ function rejectSymlinks(directory, root = directory) {
   }
 }
 
-const args = process.argv.slice(2);
-const plugin = requirePlugin(option(args, "--plugin"));
-const expectedVersion = option(args, "--version");
-const expectedSource = option(args, "--source");
-if (expectedSource !== undefined && !SHA.test(expectedSource)) {
-  fail("--source must be a full lowercase commit SHA");
-}
-const dist = resolve(repoRoot, plugin.distDir);
-// Checked before anything reads through it: every path check below follows a
-// symlinked dist root and would validate files outside the plugin tree.
-if (lstatSync(dist).isSymbolicLink()) {
-  fail(`plugin dist must be a directory, not a symlink: ${plugin.distDir}`);
-}
-const packageJson = readJson(resolve(dist, "package.json"), "package.json");
-const manifest = readJson(resolve(dist, "plugin.json"), "plugin.json");
+async function main() {
+  const args = process.argv.slice(2);
+  const plugin = requirePlugin(option(args, "--plugin"));
+  const expectedVersion = option(args, "--version");
+  const expectedSource = option(args, "--source");
+  if (expectedSource !== undefined && !SHA.test(expectedSource)) {
+    fail("--source must be a full lowercase commit SHA");
+  }
+  const dist = resolve(repoRoot, plugin.distDir);
+  // Checked before anything reads through it: every path check below follows a
+  // symlinked dist root and would validate files outside the plugin tree.
+  if (lstatSync(dist).isSymbolicLink()) {
+    fail(`plugin dist must be a directory, not a symlink: ${plugin.distDir}`);
+  }
+  const packageJson = readJson(resolve(dist, "package.json"), "package.json");
+  const manifest = readJson(resolve(dist, "plugin.json"), "plugin.json");
 
-if (!isJsonObject(packageJson)) {
-  fail("package.json must be a JSON object");
-}
-if (!isJsonObject(manifest)) {
-  fail("plugin.json must be a JSON object");
-}
-if (packageJson.name !== plugin.name || manifest.name !== plugin.name) {
-  fail(`dist manifests must both be named "${plugin.name}"`);
-}
-if (manifest.name.length > 64 || !MANIFEST_NAME.test(manifest.name)) {
-  fail("plugin.json#name does not match the Agent Plugins 1.0.0 schema");
-}
-if (manifest.$schema !== MANIFEST_SCHEMA) {
-  fail(`plugin.json#$schema must be ${MANIFEST_SCHEMA}`);
-}
-const unknownFields = Object.keys(manifest).filter(
-  (field) => !MANIFEST_FIELDS.has(field)
-);
-if (unknownFields.length > 0) {
-  fail(`plugin.json declares unknown fields: ${unknownFields.join(", ")}`);
-}
-for (const field of MANIFEST_STRING_FIELDS) {
-  if (Object.hasOwn(manifest, field) && typeof manifest[field] !== "string") {
-    fail(`plugin.json#${field} must be a string`);
+  if (!isJsonObject(packageJson)) {
+    fail("package.json must be a JSON object");
   }
-}
-if (Object.hasOwn(manifest, "author")) {
-  if (!isJsonObject(manifest.author)) {
-    fail("plugin.json#author must be an object");
-  }
-  const unknownAuthorFields = Object.keys(manifest.author).filter(
-    (field) => !AUTHOR_FIELDS.has(field)
-  );
-  if (unknownAuthorFields.length > 0) {
+  const manifestSchema = await fetchManifestSchema();
+  const unsupportedSchemaKeyword = findUnsupportedSchemaKeyword(manifestSchema);
+  if (unsupportedSchemaKeyword !== undefined) {
     fail(
-      `plugin.json#author declares unknown fields: ${unknownAuthorFields.join(", ")}`
+      `Agent Plugins schema uses an unsupported keyword: ${unsupportedSchemaKeyword}`
     );
   }
-  for (const [field, value] of Object.entries(manifest.author)) {
-    if (typeof value !== "string") {
-      fail(`plugin.json#author.${field} must be a string`);
+  const manifestError = validateSchema(manifest, manifestSchema, "plugin.json");
+  if (manifestError !== undefined) fail(manifestError);
+
+  if (packageJson.name !== plugin.name || manifest.name !== plugin.name) {
+    fail(`dist manifests must both be named "${plugin.name}"`);
+  }
+  if (manifest.extensions !== undefined) {
+    for (const namespace of Object.keys(manifest.extensions)) {
+      if (!isReverseDomainNamespace(namespace)) {
+        fail(
+          `plugin.json#extensions key must be a reverse-domain namespace: ${namespace}`
+        );
+      }
     }
   }
-}
-if (
-  Object.hasOwn(manifest, "keywords") &&
-  (!Array.isArray(manifest.keywords) ||
-    manifest.keywords.some((keyword) => typeof keyword !== "string"))
-) {
-  fail("plugin.json#keywords must be an array of strings");
-}
-if (manifest.extensions !== undefined) {
-  if (!isJsonObject(manifest.extensions)) {
+  if (
+    typeof packageJson.version !== "string" ||
+    !SEMVER.test(packageJson.version) ||
+    manifest.version !== packageJson.version
+  ) {
     fail(
-      "plugin.json#extensions must be an object keyed by extension namespace"
+      "dist package.json and plugin.json must carry the same semver version"
     );
   }
-  for (const [namespace, value] of Object.entries(manifest.extensions)) {
-    if (!isReverseDomainNamespace(namespace)) {
-      fail(
-        `plugin.json#extensions key must be a reverse-domain namespace: ${namespace}`
-      );
-    }
-    if (!isJsonObject(value)) {
-      fail(`plugin.json#extensions.${namespace} must be an object`);
-    }
+  if (expectedVersion && packageJson.version !== expectedVersion) {
+    fail(`dist version is ${packageJson.version}, expected ${expectedVersion}`);
   }
-}
-if (
-  typeof packageJson.version !== "string" ||
-  !SEMVER.test(packageJson.version) ||
-  manifest.version !== packageJson.version
-) {
-  fail("dist package.json and plugin.json must carry the same semver version");
-}
-if (expectedVersion && packageJson.version !== expectedVersion) {
-  fail(`dist version is ${packageJson.version}, expected ${expectedVersion}`);
-}
-if (
-  typeof packageJson.radiusSourceRef !== "string" ||
-  !SHA.test(packageJson.radiusSourceRef)
-) {
-  fail("dist package.json must carry a full radiusSourceRef commit SHA");
-}
-if (expectedSource && packageJson.radiusSourceRef !== expectedSource) {
-  fail(
-    `dist source ref is ${packageJson.radiusSourceRef}, expected ${expectedSource}`
-  );
+  if (
+    typeof packageJson.radiusSourceRef !== "string" ||
+    !SHA.test(packageJson.radiusSourceRef)
+  ) {
+    fail("dist package.json must carry a full radiusSourceRef commit SHA");
+  }
+  if (expectedSource && packageJson.radiusSourceRef !== expectedSource) {
+    fail(
+      `dist source ref is ${packageJson.radiusSourceRef}, expected ${expectedSource}`
+    );
+  }
+
+  requirePath(dist, "README.md", "README.md", "file");
+  if (statSync(resolve(dist, "README.md")).size === 0) {
+    fail("README.md must not be empty");
+  }
+  requirePath(dist, "LICENSE", "LICENSE", "file");
+  if (statSync(resolve(dist, "LICENSE")).size === 0) {
+    fail("LICENSE must not be empty");
+  }
+  requirePath(dist, "workflows", "workflows", "directory");
+  // Fixed component location: clients discover skills from here, not from a
+  // manifest path.
+  requirePath(dist, "skills", "skills", "directory");
+  if (packageJson.main !== undefined) {
+    requirePath(dist, packageJson.main, "package.json#main", "file");
+  }
+
+  rejectSymlinks(dist);
+  console.log(`${plugin.name}@${packageJson.version}`);
 }
 
-requirePath(dist, "README.md", "README.md", "file");
-if (statSync(resolve(dist, "README.md")).size === 0) {
-  fail("README.md must not be empty");
+try {
+  await main();
+} catch (error) {
+  if (!(error instanceof Failure)) throw error;
+  console.error(`error: ${error.message}`);
+  process.exitCode = 1;
 }
-requirePath(dist, "LICENSE", "LICENSE", "file");
-if (statSync(resolve(dist, "LICENSE")).size === 0) {
-  fail("LICENSE must not be empty");
-}
-requirePath(dist, "workflows", "workflows", "directory");
-// Fixed component location: clients discover skills from here, not from a
-// manifest path.
-requirePath(dist, "skills", "skills", "directory");
-if (packageJson.main !== undefined) {
-  requirePath(dist, packageJson.main, "package.json#main", "file");
-}
-
-rejectSymlinks(dist);
-console.log(`${plugin.name}@${packageJson.version}`);
