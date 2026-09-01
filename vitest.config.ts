@@ -3,7 +3,7 @@ import coverageBaseline from "./coverage-baseline.json" with { type: "json" };
 
 export default defineConfig({
   test: {
-    projects: ["packages/*/vitest.config.ts", "plugins/*/vitest.config.ts"],
+    projects: ["packages/*/vitest.config.ts"],
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary", "lcov"],

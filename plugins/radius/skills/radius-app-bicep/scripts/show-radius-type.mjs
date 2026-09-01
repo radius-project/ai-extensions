@@ -618,14 +618,17 @@ async function loadCachedText(
   } = {}
 ) {
   const file = cacheFile(cacheRoot, commit, relativePath);
+  let validationResult;
   const validateText = (value) => {
     if (typeof value !== "string") {
       throw new Error("Cached managed Recipe source must be text.");
     }
-    validate(value);
+    validationResult = validate(value);
   };
   const cached = await readCache(file, validateText);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) {
+    return { text: cached, validationResult };
+  }
 
   const text = await fetchText(url, {
     fetchImpl,
@@ -633,7 +636,7 @@ async function loadCachedText(
     maxBytes: maxResponseBytes,
     sleep
   });
-  validate(text);
+  validationResult = validate(text);
   try {
     await writeCache(file, JSON.stringify(text));
   } catch (error) {
@@ -641,19 +644,18 @@ async function loadCachedText(
       `Warning: could not cache managed Radius Recipe source: ${message(error)}`
     );
   }
-  return text;
+  return { text, validationResult };
 }
 
 async function loadManagedAzureRecipePack(releaseCommit, options) {
-  const defaults = await loadCachedText(
+  const { validationResult: pin } = await loadCachedText(
     `${MANAGED_RECIPES_CACHE_PATH}/defaults.json`,
     releaseCommit,
     `${GENERATED_ROOT}/${releaseCommit}/${RADIUS_DEFAULTS_PATH}`,
     parseAzureRecipePackPin,
     options
   );
-  const pin = parseAzureRecipePackPin(defaults);
-  const source = await loadCachedText(
+  const { text: source } = await loadCachedText(
     `${MANAGED_RECIPES_CACHE_PATH}/azure/${pin.commit}/aks-recipepack.json`,
     releaseCommit,
     `https://raw.githubusercontent.com/${pin.repository}/${pin.commit}/${AZURE_RECIPE_PACK_PATH}`,

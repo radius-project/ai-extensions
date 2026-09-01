@@ -22,15 +22,18 @@ export function parseAzureRecipePackPin(source) {
     }
     const trimmed = line.trim();
     const indentation = /^[ \t]*/u.exec(line)[0].length;
+    const nameMatch = /^([ \t]*)-\s+name:\s*(\S+)\s*$/u.exec(line);
+    const indentationlessEntry =
+      nameMatch !== null && indentation === recipePacksIndent;
     if (
       trimmed !== "" &&
       !trimmed.startsWith("#") &&
-      indentation <= recipePacksIndent
+      indentation <= recipePacksIndent &&
+      !indentationlessEntry
     ) {
       break;
     }
 
-    const nameMatch = /^([ \t]*)-\s+name:\s*(\S+)\s*$/u.exec(line);
     const name = nameMatch?.[2];
     if (name !== undefined) {
       if (current !== undefined) entries.push(current);

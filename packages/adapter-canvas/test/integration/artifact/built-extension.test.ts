@@ -417,9 +417,8 @@ describe("P0-C built Radius extension artifact", () => {
         join(REPO_ROOT, "plugins", "radius").length + 1
       );
       if (
-        relative.endsWith(".test.ts") ||
         relative.replaceAll("\\", "/") ===
-          "skills/radius-app-bicep/scripts/show-radius-type.mjs"
+        "skills/radius-app-bicep/scripts/show-radius-type.mjs"
       ) {
         continue;
       }
@@ -428,9 +427,7 @@ describe("P0-C built Radius extension artifact", () => {
       );
     }
     expect(relativeFilesUnder(DIST_SKILL)).toEqual(
-      relativeFilesUnder(SOURCE_SKILL).filter(
-        (path) => !path.endsWith(".test.ts")
-      )
+      relativeFilesUnder(SOURCE_SKILL)
     );
     expectMatchingFile(SOURCE_CODE_REFERENCE, DIST_CODE_REFERENCE);
     const notices = readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8");

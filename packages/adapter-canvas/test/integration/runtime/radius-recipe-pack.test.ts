@@ -1,13 +1,20 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import {
+
+const repositoryRoot = new URL("../../../../../", import.meta.url);
+const {
   extractRecipeDefinition,
   parseAzureRecipePackPin,
   validateAzureRecipePack
-} from "./radius-recipe-pack.mjs";
+} = await import(
+  new URL(
+    "plugins/radius/skills/radius-app-bicep/scripts/radius-recipe-pack.mjs",
+    repositoryRoot
+  ).href
+);
 
 const fixtureRoot = new URL(
-  "../../../../../packages/adapter-canvas/test/fixtures/radius-type-definition/",
+  "../../fixtures/radius-type-definition/",
   import.meta.url
 );
 const defaults = readFileSync(new URL("defaults.yaml", fixtureRoot), "utf8");
@@ -54,6 +61,19 @@ describe("parseAzureRecipePackPin", () => {
           .map((line) => `  ${line}`)
           .join("\r\n")
       )
+    ).toEqual({
+      repository: "radius-project/resource-types-contrib",
+      commit: resourceTypesContribCommit
+    });
+  });
+
+  it("accepts an indentationless Recipe-pack sequence", () => {
+    expect(
+      parseAzureRecipePackPin(`recipePacks:
+- name: azure
+  repo: github.com/radius-project/resource-types-contrib
+  ref: ${resourceTypesContribCommit}
+defaultRegistration: []`)
     ).toEqual({
       repository: "radius-project/resource-types-contrib",
       commit: resourceTypesContribCommit

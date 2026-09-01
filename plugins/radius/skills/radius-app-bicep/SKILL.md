@@ -353,7 +353,7 @@ Rules:
 When one container calls another `Radius.Compute/containers` resource in the same application (inter-service HTTP/gRPC in a microservices app), address the peer by referencing its read-only **`hosts`** output — a map of container name to that container's in-cluster Service DNS name, published by the containers recipe — never a hand-composed Service name:
 
 ```text
-http://${<peerSymbolicName>.properties.hosts.<containerKey>}:<containerPort>
+http://${<peerSymbolicName>.properties.hosts['<containerKey>']}:<containerPort>
 ```
 
 Rules:
