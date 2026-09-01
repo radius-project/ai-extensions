@@ -284,7 +284,8 @@ function selectOfferedValue(
 function renderAzureClusters(
   context: BrowserContext,
   list: readonly DiscoveryOption[],
-  keepValue: string
+  keepValue: string,
+  allowAutoSelect = true
 ): void {
   const select = context.dom.selectById("azure-cluster-select");
   if (!select) return;
@@ -293,7 +294,7 @@ function renderAzureClusters(
     // Both callers pass a non-empty value only after confirming it is present
     // in the list, so no second membership branch is needed here.
     select.value = keepValue;
-  } else if (list.length === 1) {
+  } else if (allowAutoSelect && list.length === 1) {
     select.value = list[0].id;
   }
 }
@@ -609,6 +610,10 @@ export function initializeDiscoveryPanel(
     provider: "azure" | "aws";
     config: EnvironmentInfrastructure;
   } | null = null;
+  // A saved namespace survives one extra discovery round trip: the first,
+  // untargeted request cannot list namespaces, so the restored value has to be
+  // reapplied once the follow-up request returns the cluster's real list.
+  let pendingAzureNamespace = "";
 
   const comboValue = (selectId: string, customId: string): string => {
     const select = context.dom.selectById(selectId);
@@ -800,7 +805,10 @@ export function initializeDiscoveryPanel(
           }
         : { ...item, id: optionValue(item, index) }
       ),
-      keepValue
+      keepValue,
+      // A caller asking to keep a specific cluster that the list no longer
+      // offers must fail closed rather than silently target another cluster.
+      keepCluster === ""
     );
   };
 
@@ -983,7 +991,17 @@ export function initializeDiscoveryPanel(
           ),
           "Select namespace…"
         );
-        selectOfferedValue(context, "azure-namespace-select", "default");
+        if (pendingAzureNamespace !== "") {
+          const namespace = pendingAzureNamespace;
+          pendingAzureNamespace = "";
+          restoreInfrastructureValue(
+            "azure-namespace-select",
+            "azure-namespace-custom",
+            namespace
+          );
+        } else {
+          selectOfferedValue(context, "azure-namespace-select", "default");
+        }
         wireAzureInfraFilter();
       } else {
         if (statusEl) statusEl.textContent = discoverStatusText(data, "aws");
@@ -1023,12 +1041,13 @@ export function initializeDiscoveryPanel(
           "Select subnets…"
         );
       }
-      applyPendingInfrastructure(provider);
+      const restoredNamespace = applyPendingInfrastructure(provider);
       if (
         provider === "azure" &&
         cluster === "" &&
         selectedAzureClusterId() !== ""
       ) {
+        pendingAzureNamespace = restoredNamespace;
         void rediscoverAzureNamespaces();
       }
     } catch (error) {
@@ -1071,16 +1090,22 @@ export function initializeDiscoveryPanel(
     customId: string,
     value: string
   ): void => {
-    if (value === "" || selectOfferedValue(context, selectId, value)) return;
+    if (value === "") return;
     const custom = context.dom.inputById(customId);
+    if (selectOfferedValue(context, selectId, value)) {
+      // A previous restore may have revealed the custom input; the select now
+      // carries the value directly, so the leftover input must not stay visible.
+      if (custom) custom.style.display = "none";
+      return;
+    }
     if (!custom || !selectOfferedValue(context, selectId, "__custom__")) return;
     custom.value = value;
     custom.style.display = "";
   };
 
-  const applyPendingInfrastructure = (provider: "azure" | "aws"): void => {
+  const applyPendingInfrastructure = (provider: "azure" | "aws"): string => {
     const pending = pendingInfrastructure;
-    if (!pending || pending.provider !== provider) return;
+    if (!pending || pending.provider !== provider) return "";
     const config = pending.config;
     pendingInfrastructure = null;
     if (provider === "azure") {
@@ -1098,7 +1123,7 @@ export function initializeDiscoveryPanel(
         "azure-namespace-custom",
         config.namespace ?? ""
       );
-      return;
+      return config.namespace ?? "";
     }
     restoreInfrastructureValue(
       "aws-cluster-select",
@@ -1120,6 +1145,7 @@ export function initializeDiscoveryPanel(
       "aws-subnets-custom",
       config.subnetIds ?? ""
     );
+    return "";
   };
 
   return {
@@ -1129,6 +1155,7 @@ export function initializeDiscoveryPanel(
     discoverResources,
     findAzureClusterResourceGroup,
     setPendingInfraSelection(config, provider) {
+      pendingAzureNamespace = "";
       pendingInfrastructure = config ? { provider, config } : null;
     },
     currentInfraSelection(provider) {

@@ -1180,6 +1180,54 @@ describe("discoverResources", () => {
     ]);
   });
 
+  it("keeps a saved namespace across the follow-up cluster discovery", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      const body = JSON.parse(init?.body ?? "{}");
+      return discoverResponse(
+        azurePayload({
+          namespaces: body.cluster ? ["default", "team-a"] : []
+        })
+      );
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(
+      { resourceGroup: "rg-1", cluster: "aks-1", namespace: "team-a" },
+      "azure"
+    );
+
+    await handle?.discoverResources("azure", "", "");
+    await flushPromises();
+
+    // The first request cannot list namespaces, so the saved value has to
+    // survive until the targeted follow-up returns the cluster's real list.
+    expect(page.selects["azure-namespace-select"].value).toBe("team-a");
+    expect(page.customs["azure-namespace-custom"].style.display).toBe("none");
+    expect(handle?.currentInfraSelection("azure").namespace).toBe("team-a");
+  });
+
+  it("leaves the cluster unselected when the saved one is gone", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(azurePayload())
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    handle?.setPendingInfraSelection(
+      { resourceGroup: "rg-1", cluster: "aks-gone" },
+      "azure"
+    );
+
+    await handle?.discoverResources("azure", "", "");
+    await flushPromises();
+
+    // rg-1 offers exactly one cluster, but silently substituting it for the
+    // deleted saved cluster would retarget the environment without telling
+    // the user.
+    expect(page.selects["azure-rg-select"].value).toBe("rg-1");
+    expect(page.selects["azure-cluster-select"].value).toBe("");
+    expect(page.browser.net.calls).toHaveLength(1);
+  });
+
   it("does not guess a resource group for a saved duplicate AKS name", async () => {
     const page = renderDiscoveryPage();
     page.browser.net.handle(DISCOVER_ENDPOINT, () =>
