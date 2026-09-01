@@ -2573,6 +2573,28 @@ describe("failure card rendering", () => {
     expect(host.children.length).toBe(0);
   });
 
+  it("does nothing when the host page omits the failure-command callout", () => {
+    const browser = setupWithout([PROGRESS_IDS.failureCommand]);
+    const controller = controllerFor(browser);
+
+    expect(() =>
+      controller?.renderProgress(
+        record({
+          terminalState: "failed",
+          failure: {
+            message: "boom",
+            remediation: {
+              id: "github-account-scopes",
+              params: { login: "pubuser", packages: "true" }
+            }
+          }
+        })
+      )
+    ).not.toThrow();
+
+    expect(browser.els[PROGRESS_IDS.failureCommand]).toBeUndefined();
+  });
+
   it("clears the callout when the panel moves off a failed operation", () => {
     const browser = setup();
     const controller = controllerFor(browser);
@@ -4974,6 +4996,27 @@ describe("stale response ordering and operation identity", () => {
       (browser.els[DIAGNOSTIC_IDS.reviewedIdentifiers] as FakeInputElement)
         .checked
     ).toBe(false);
+    expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toContain(
+      "contextual identifiers changed"
+    );
+  });
+
+  it("tolerates the reviewed toggle disappearing before a context change resolves", async () => {
+    const browser = setup();
+    await reviewDiagnosticIdentifiers(browser);
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle(CONTEXTUAL_DIAGNOSTIC_URL, () => pending.promise);
+
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    await flushPromises();
+
+    // A host re-render drops the reviewed toggle while the request is inflight.
+    browser.document.remove(DIAGNOSTIC_IDS.reviewedIdentifiers);
+    pending.resolve(
+      textResponse('{"code":"diagnostic-context-changed"}', false, 409)
+    );
+    await flushPromises();
+
     expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toContain(
       "contextual identifiers changed"
     );
