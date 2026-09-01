@@ -20,7 +20,8 @@ set -euo pipefail
 #   YQ_CHECKSUM_<OS>_<ARCH>   SHA-256 for that platform (e.g.
 #                             YQ_CHECKSUM_LINUX_AMD64). Empty fetches it from the
 #                             release's published checksums file.
-#   YQ_INSTALL_DIR            Install directory. Default: $HOME/.local/bin.
+#   YQ_INSTALL_DIR            Install directory. When empty the first writable
+#                             candidate is used, starting with $HOME/.local/bin.
 #   GITHUB_TOKEN              If set, authenticates GitHub requests (higher rate
 #                             limits; required for private repositories).
 
@@ -113,13 +114,51 @@ verify_checksum() {
     fi
 }
 
+# Succeeds when the directory exists (or can be created) and the current user can
+# write to it. A directory can exist and still be unwritable -- on GitHub-hosted
+# runners container steps routinely leave root-owned directories under $HOME --
+# so existence alone is not enough and the write is probed directly.
+dir_is_usable() {
+    local dir="$1" probe
+    mkdir -p "$dir" 2>/dev/null || return 1
+    probe="${dir}/.install-yq-write-test.$$"
+    touch "$probe" 2>/dev/null || return 1
+    rm -f "$probe"
+}
+
+# Choose where to install. An explicitly requested directory is honoured or the
+# script fails, since silently installing elsewhere would surprise the caller.
+# Otherwise the first writable candidate wins, so an unwritable $HOME/.local/bin
+# degrades to the runner temp directory instead of aborting the job.
+resolve_install_dir() {
+    local requested="$1" candidate
+
+    if [ -n "$requested" ]; then
+        dir_is_usable "$requested" || fail "install directory '${requested}' is not writable"
+        printf '%s\n' "$requested"
+        return 0
+    fi
+
+    for candidate in "${HOME}/.local/bin" "${RUNNER_TEMP:-}/yq-bin" "${TMPDIR:-/tmp}/yq-bin"; do
+        case "$candidate" in /yq-bin) continue ;; esac
+        if dir_is_usable "$candidate"; then
+            if [ "$candidate" != "${HOME}/.local/bin" ]; then
+                log "'${HOME}/.local/bin' is not writable; installing to ${candidate} instead"
+            fi
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    fail "found no writable install directory (tried \$HOME/.local/bin, \$RUNNER_TEMP and \$TMPDIR)"
+}
+
 main() {
-    local install_dir os arch platform asset version checksum
+    local requested_dir install_dir os arch platform asset version checksum
 
     command -v curl >/dev/null 2>&1 || fail "curl is required but was not found"
 
-    install_dir="${1:-${YQ_INSTALL_DIR:-}}"
-    [ -n "$install_dir" ] || install_dir="${HOME}/.local/bin"
+    requested_dir="${1:-${YQ_INSTALL_DIR:-}}"
 
     os="$(detect_os)"
     arch="$(detect_arch)"
@@ -142,6 +181,10 @@ main() {
         log "yq ${version} already installed: $(command -v yq)"
         return 0
     fi
+
+    # Resolved before downloading so an unusable destination fails fast, and after
+    # the early return above so an already-installed yq needs no writable directory.
+    install_dir="$(resolve_install_dir "$requested_dir")"
 
     WORKDIR="$(mktemp -d)"
 
@@ -166,7 +209,6 @@ main() {
     verify_checksum "$checksum" "${WORKDIR}/yq"
     chmod 0755 "${WORKDIR}/yq"
 
-    mkdir -p "$install_dir"
     mv "${WORKDIR}/yq" "${install_dir}/yq"
     "${install_dir}/yq" --version >/dev/null 2>&1 \
         || fail "installed yq failed to run (${install_dir}/yq)"
