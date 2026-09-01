@@ -1220,7 +1220,7 @@ export async function handleCreateEnvironment(
       }
       verifyRunId = automatic.runId;
       verifyRunUrl = automatic.runUrl;
-      steps.push("✅ Credentials verification started automatically.");
+      steps.push("✅ Credential verification started automatically.");
       steps.push("Verify run: " + verifyRunUrl);
       operation.verification = {
         ...((
@@ -1333,7 +1333,7 @@ export async function handleCreateEnvironment(
         );
       }
       if (dispatch.state === "accepted") {
-        steps.push("✅ Credentials verification dispatched.");
+        steps.push("✅ Credential verification dispatched.");
         verifyRunId = dispatch.runId;
         verifyRunUrl = dispatch.runUrl;
         steps.push("Verify run: " + verifyRunUrl);
