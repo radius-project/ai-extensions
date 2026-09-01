@@ -1333,26 +1333,31 @@ test.describe("Radius Canvas in Chromium", () => {
     const currentTime = await page.evaluate<number>("Date.now()");
     await page.clock.pauseAt(currentTime + 1_000);
 
-    await environment.fill("staging");
-    await environment.fill("production");
-    await expect(
-      page.getByRole("button", { name: "Create Environment" })
-    ).toBeDisabled();
+    try {
+      await environment.fill("staging");
+      await environment.fill("production");
+      await expect(
+        page.getByRole("button", { name: "Create Environment" })
+      ).toBeDisabled();
 
-    await page.clock.fastForward(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS - 1);
-    expect(accountRequests()).toHaveLength(checksBeforeEdit);
+      await page.clock.fastForward(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS - 1);
+      expect(accountRequests()).toHaveLength(checksBeforeEdit);
 
-    await page.clock.fastForward(1);
-    await expect
-      .poll(() => accountRequests().length)
-      .toBe(checksBeforeEdit + 1);
+      await page.clock.fastForward(1);
+      await expect
+        .poll(() => accountRequests().length)
+        .toBe(checksBeforeEdit + 1);
 
-    expect(accountRequests().at(-1)?.body).toMatchObject({
-      environment: "production"
-    });
-    await expect(readiness).toContainText("Ready to configure deployments");
-    await expect(page.getByRole("button", { name: "Re-check" })).toBeEnabled();
-    await page.clock.resume();
+      expect(accountRequests().at(-1)?.body).toMatchObject({
+        environment: "production"
+      });
+      await expect(readiness).toContainText("Ready to configure deployments");
+      await expect(
+        page.getByRole("button", { name: "Re-check" })
+      ).toBeEnabled();
+    } finally {
+      await page.clock.resume();
+    }
     await expectNoWcagViolations(page);
   });
 
