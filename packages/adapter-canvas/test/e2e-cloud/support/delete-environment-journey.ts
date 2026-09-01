@@ -41,7 +41,9 @@ export function findDeleteEnvironmentSuccessProblems(
       typeof error === "string" && error.trim() !== "" ? `: ${error}` : ".";
     const code = record?.code;
     const codeDetail =
-      typeof code === "string" && code.trim() !== "" ? ` (code "${code}")` : "";
+      typeof code === "string" && code.trim() !== "" ?
+        ` (code "${code}")`
+      : "";
     return [
       `Deleting environment "${outcome.environmentName}" answered ${outcome.status}, not 202${codeDetail}${detail}`
     ];
@@ -51,7 +53,10 @@ export function findDeleteEnvironmentSuccessProblems(
       `Deleting environment "${outcome.environmentName}" answered 202 but its body was not a JSON object: ` +
         `${JSON.stringify(outcome.payload)}`
     ];
-  if (typeof record.operationId !== "string" || record.operationId.trim() === "")
+  if (
+    typeof record.operationId !== "string" ||
+    record.operationId.trim() === ""
+  )
     return [
       `Deleting environment "${outcome.environmentName}" answered 202 but did not identify the delete operation: ` +
         `${JSON.stringify(outcome.payload)}`

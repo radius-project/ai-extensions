@@ -66,10 +66,7 @@ function runTool(
   args: readonly string[],
   cwd?: string,
   normalize: (
-    error: {
-      code?: string | number | null;
-      message?: string;
-    } | null,
+    error: { code?: string | number | null; message?: string } | null,
     stdout: string | undefined,
     stderr: string | undefined
   ) => CloudCommandResult = normalizeCommandResult
@@ -109,10 +106,7 @@ export function redactAzureCredentials(
 }
 
 export function normalizeAzureCommandResult(
-  error: {
-    code?: string | number | null;
-    message?: string;
-  } | null,
+  error: { code?: string | number | null; message?: string } | null,
   stdout: string | undefined,
   stderr: string | undefined,
   env: NodeJS.ProcessEnv = process.env
@@ -134,10 +128,7 @@ export function normalizeAzureCommandResult(
  * a caller can never mistake a killed command for a successful one.
  */
 export function normalizeCommandResult(
-  error: {
-    code?: string | number | null;
-    message?: string;
-  } | null,
+  error: { code?: string | number | null; message?: string } | null,
   stdout: string | undefined,
   stderr: string | undefined
 ): CloudCommandResult {

@@ -43,6 +43,23 @@ describe("normalizeCommandResult", () => {
       stdout: "",
       stderr: "spawn az ENOENT"
     });
+    expect(() => expectSuccess(outcome, "az account show")).toThrow(
+      "az account show failed with exit code 1: spawn az ENOENT"
+    );
+  });
+
+  it("surfaces a timeout diagnostic when both streams are empty", () => {
+    expect(
+      normalizeCommandResult(
+        { code: "ETIMEDOUT", message: "Command timed out after 900000ms" },
+        "",
+        ""
+      )
+    ).toEqual({
+      code: 1,
+      stdout: "",
+      stderr: "Command timed out after 900000ms"
+    });
   });
 
   it("does not replace captured stderr with the spawn diagnostic", () => {
