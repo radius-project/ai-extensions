@@ -180,7 +180,8 @@ export function feedbackWidget(): string {
     `<circle cx="8.5" cy="11.5" r="1.1" fill="currentColor"/><circle cx="12" cy="11.5" r="1.1" fill="currentColor"/><circle cx="15.5" cy="11.5" r="1.1" fill="currentColor"/></svg>`;
   const feedbackUrl =
     "https://github.com/radius-project/ai-extensions/issues/new?template=feedback-or-bug-report.yml";
-  const learnUrl = "https://radapp.io";
+  const learnUrl =
+    "https://edge.docs.radapp.io/integrations/github-copilot-app/canvas-extension/";
   return `<div id="rad-feedback" class="rad-feedback">
   <div id="rad-feedback-pop" class="rad-feedback__pop" style="display:none;">
     <a class="rad-feedback__link" href="${feedbackUrl}" target="_blank" rel="noopener noreferrer" title="${feedbackUrl}">Share feedback</a>
