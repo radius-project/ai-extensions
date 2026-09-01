@@ -45,8 +45,8 @@ resource myContainer 'Radius.Compute/containers@2025-08-01-preview' = {
       }
     }
     connections: {                    // optional TOP-LEVEL relationship map
-      mysqldb: {                     // object map, NOT array
-        source: mysqlDb.id
+      credentials: {                 // object map, NOT array
+        source: dbSecret.id           // authored secret, or producer.id for Recipe outputs
       }
     }
   }
@@ -59,13 +59,15 @@ Rules:
 - `ports` is an object map, NOT an array
 - `connections` is an object map, NOT an array
 - `connections` is a TOP-LEVEL property under `properties` — NOT inside `containers`
-- `disableDefaultEnvVars` goes on the connection entry, NOT on the container
+- `disableDefaultEnvVars` goes on the connection entry, NOT on the container; omit it when the workload relies on generated `CONNECTION_<CONNECTION>_<SECRETKEY>` variables
 - Port property is `containerPort`, NOT `port`
-- `env` values use `{ value: ... }` for a literal, a verified nonsecret output, or a developer-supplied `@secure()` parameter (Radius encrypts and injects it); use `{ valueFrom: { secretKeyRef: { secretName: ..., key: ... } } }` only for a Recipe-generated managed secret via `<resource>.properties.secrets.name`
+- `env.value` uses `{ value: ... }` for a literal or verified nonsecret output. Direct `{ value: <secure-param> }` is allowed only as an explicit schema-supported or legacy compatibility fallback required by the native contract; prefer an authored Secret with `secretKeyRef` or a compatible Secret connection because the direct form stores the resolved value in the Radius container resource and generated Pod specification. Use `{ valueFrom: { secretKeyRef: { secretName: ..., key: ... } } }` with `<secret>.name` and a declared authored data key when preserving a native variable or compatibility fallback, or with `<producer>.properties.secrets.name` and a declared Recipe `result.secrets` key for a custom Kubernetes name
 - `containerPort` exposes the process port; it does not configure the process listener
 - `command` replaces the image `ENTRYPOINT`, and `args` replaces `CMD`; override only after inspecting the image contract and required binaries
 - Never **set** a read-only property. Reference a nonsecret read-only output only when the exact schema declares it and the exact target Recipe explicitly maps it
-- A direct resource output, image, or secret reference creates dependency ordering; `connections` is not mandatory for ordering
+- A connection to an authored or reused Secret uses `<secret>.id`; a connection for Recipe-generated `result.secrets` entries uses only `<producer>.id`. In `CONNECTION_<CONNECTION>_<SECRETKEY>`, `<CONNECTION>` is the connection map key uppercased without inserting separators, and `<SECRETKEY>` is the uppercased authored data key or Recipe result key; case-normalized Secret-key collisions fail validation
+- An explicit `env` entry with the same name takes precedence over a generated connection variable. `disableDefaultEnvVars: true` suppresses all generated variables for that connection
+- A direct resource output, image, or secret reference creates dependency ordering; `connections` is not mandatory for ordering except when connection projection is consumed
 - Include every co-scheduled role required by the selected profile in the `containers` map. A producer, consumer, proxy, worker, or sidecar must have its own complete image/process/configuration entry
 - A startup-generated config file is valid only when the pinned image contains the shell/tools, the destination is writable, interpolation is safe, and the process is explicitly launched with that file
 
@@ -115,7 +117,7 @@ resource workload 'Radius.Compute/containers@2025-08-01-preview' = {
 }
 ```
 
-Confirm the mounted filename, process argument, and secret/container schemas at the configured versions. Keep credentials out of the file when it can reference environment variables; bind a developer-supplied `@secure()` parameter through `env.value` or a Recipe-managed value through its exact `secretKeyRef`. Use startup generation only when mounting cannot satisfy the source contract and the image's shell, tools, writable path, expansion, and final command are all verified.
+Confirm the mounted filename, process argument, and secret/container schemas at the configured versions. Keep credentials out of the file when it can reference environment variables; use an authored-secret connection for a developer-supplied credential, or a producer connection for a Recipe-managed value. Preserve an existing custom native name with an explicit supported binding when required. Use startup generation only when mounting cannot satisfy the source contract and the image's shell, tools, writable path, expansion, and final command are all verified.
 
 ## Radius.Compute/containerImages structure
 
@@ -301,7 +303,7 @@ Rules:
 - Developer-facing props (`database`, `version`, `size`, `topic`, `queue`, `container`) are derived from source — do NOT hardcode; only set properties the schema defines
 - Do NOT set readOnly properties (`host`, `port`, `connectionString`) — these are recipe outputs
 - A nonsecret read-only output such as `host`, `port`, or `endpoint` may be referenced for app-native wiring only when the exact schema declares it and the selected Recipe explicitly maps it. Schema presence alone is insufficient; use a provider-fixed literal only with proof from the concrete provider contract
-- Resolve sensitive outputs from the exact schema and recipe. If that version exposes managed-secret metadata, bind its declared name/key directly through `valueFrom.secretKeyRef`; never copy the value into an authored secret or guess a sibling convenience property. Do not assume one universal `properties.secrets` shape. See [secrets-handling.md](secrets-handling.md)
+- Resolve sensitive results from the exact schema and Recipe `result.secrets` contract. On a verified compatible Kubernetes Container Recipe, connect to the producer for standard `CONNECTION_*` projection; for an explicit custom Kubernetes environment name, bind its declared name/key through `valueFrom.secretKeyRef`. Never copy the value into an authored Secret or guess a sibling convenience property. See [secrets-handling.md](secrets-handling.md)
 - A selected resource is incomplete until a workload's primary feature consumes its exact subresource, endpoint, protocol/TLS/auth settings, and secret contract
 
 ## Radius.Security/secrets structure
@@ -337,8 +339,9 @@ Rules:
 - `data` is an object map, NOT an array
 - Keys in `data` must match their exact consumer or schema contract; do not impose universal casing
 - `USERNAME` is the database administrator you author (e.g. `myadmin`) — it is not derived from the source
-- A `@secure()` parameter assigned directly to `env.value` is encrypted and injected by Radius, so it stays out of plain state; a developer-supplied credential needs no authored secret and no `secretKeyRef`
-- `valueFrom.secretKeyRef` is reserved for Recipe-generated managed secrets exposed through `<resource>.properties.secrets.name`. Use authored `Radius.Security/secrets` only for app secrets/config files delivered through a schema-supported mount or for a type whose schema requires `secretName`; do not author one to wrap a Recipe output
+- A developer-supplied credential consumed through connection projection belongs in an authored `Radius.Security/secrets`; connect the workload to `<secret>.id` so Radius injects a secret-backed `CONNECTION_<CONNECTION>_<SECRETKEY>` variable
+- For Recipe-generated credentials, connect only to `<producer>.id`. Use `valueFrom.secretKeyRef` with `<producer>.properties.secrets.name` and the declared Recipe `result.secrets` key only when an explicit custom Kubernetes environment variable name is required
+- Never use `<producer>.properties.secrets.name` as a connection source or author a secret to wrap a Recipe output
 - Never use authored secret `data.value` interpolation to manufacture a credential-bearing URL or configuration value
 
 ## Radius.Compute/routes structure

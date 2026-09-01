@@ -2,6 +2,13 @@ import { optionalBrowserFunction, requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
 import { createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl, parseGraphResources } from "../graph/model.js";
+import { createEnvironmentConfirmDialog } from "../environment/confirm-dialog.js";
+import {
+  DELETE_FAILED_STATUS,
+  FORCE_DELETE_ORPHAN_NOTICE,
+  forceDeletePrompt,
+  probeDeleteConflict
+} from "../force-delete.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { queryValue } from "../query.js";
 import {
@@ -23,7 +30,7 @@ import {
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
 import type { GraphProgressView } from "../graph/progress.js";
-import type { AbortHandle, BrowserContext } from "../ports.js";
+import type { AbortHandle, BrowserContext, DomInputElement } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
 
@@ -628,11 +635,18 @@ export function initializeDeployedGraphPage(
         markEnvironmentsUnavailable(error);
       });
 
-  const runDelete = (application: string, environment: string): void => {
+  const runDelete = (
+    application: string,
+    environment: string,
+    force = false
+  ): void => {
     const modal = context.dom.byId("deployed-deleting-modal");
     const text = context.dom.byId("deployed-deleting-text");
     if (text) {
-      text.textContent = `Deleting application ${application} from ${environment} with rad app delete. This may take a few minutes.`;
+      text.textContent =
+        force ?
+          `Force deleting application ${application} from ${environment} with rad app delete --force. ${FORCE_DELETE_ORPHAN_NOTICE}`
+        : `Deleting application ${application} from ${environment} with rad app delete. This may take a few minutes.`;
     }
     if (modal) modal.style.display = "flex";
     void context.net
@@ -642,7 +656,8 @@ export function initializeDeployedGraphPage(
         body: JSON.stringify({
           repo: page.repo,
           environment,
-          application
+          application,
+          force
         })
       })
       .then((response) =>
@@ -660,7 +675,15 @@ export function initializeDeployedGraphPage(
           );
           return;
         }
-        context.nav.assign("/?page=deploying");
+        // The Deployments page owns the delete from here, and a forced delete
+        // has to stay forced across the navigation: its completion message
+        // repeats the orphan caution the user confirmed. The dispatched run
+        // travels with it, since the deleting row carries no run URL.
+        context.nav.assign(
+          force ?
+            `/?page=deploying&delete=forced&application=${encodeURIComponent(application)}&environment=${encodeURIComponent(environment)}&run=${encodeURIComponent(readString(payload, "runUrl"))}`
+          : "/?page=deploying"
+        );
       })
       .catch((error: unknown) => {
         if (!entry.active) return;
@@ -736,13 +759,76 @@ export function initializeDeployedGraphPage(
       });
   };
 
+  // A delete that already failed may be stuck behind a resource the control
+  // plane still holds. Only a server-proven conflict escalates the button to
+  // the forced confirmation; anything else keeps the ordinary one.
+  // The probe makes the server list and download a workflow artifact, so the
+  // button can sit for seconds before the dialog opens. It is disabled for that
+  // whole wait: without it the click looks ignored, and a second click would
+  // start a second probe and open a second dialog behind the first.
+  let deleteProbeInFlight = false;
+
+  // The button is passed in rather than read from the outer binding: the only
+  // caller is its own click handler, so there is always one to mark busy.
+  const openDeleteDialog = (
+    target: DeleteDialog,
+    button: DomInputElement
+  ): void => {
+    const application = selectedApplication();
+    const environment = selectedEnvironment();
+    if (selectedStatus() !== DELETE_FAILED_STATUS) {
+      target.open(application, environment);
+      return;
+    }
+    if (deleteProbeInFlight) return;
+    deleteProbeInFlight = true;
+    button.disabled = true;
+    void probeDeleteConflict(context, {
+      repo: page.repo,
+      environment,
+      application
+    }).then((result) => {
+      deleteProbeInFlight = false;
+      if (!entry.active) return;
+      // `refreshControls` owns the button's enabled state, so the wait is
+      // undone by recomputing it rather than by force-enabling a button the
+      // page may since have had reason to keep disabled.
+      refreshControls();
+      if (!result.conflict || !forceConfirm) {
+        target.open(application, environment);
+        return;
+      }
+      forceConfirm.show({
+        ...forceDeletePrompt(
+          application,
+          environment,
+          result.resourceState,
+          result.forced
+        ),
+        onConfirm: () => runDelete(application, environment, true)
+      });
+    });
+  };
+
+  // The lighter shared confirmation carries the forced-delete question, so it
+  // reads like every other confirm in the product rather than repeating the
+  // three-step flow the user already completed for the delete that failed.
+  const forceConfirm = createEnvironmentConfirmDialog(context);
+  if (forceConfirm) entry.onTeardown(() => forceConfirm.teardown());
+
   const createDialog = optionalBrowserFunction(
     globalScope,
     "radiusCreateDeleteDeploymentDialog"
   );
   const dialog =
     createDialog ?
-      asDeleteDialog(createDialog({ onConfirm: runDelete }))
+      asDeleteDialog(
+        createDialog({
+          onConfirm: (application: string, environment: string) => {
+            runDelete(application, environment);
+          }
+        })
+      )
     : null;
   const abandonDialog =
     createDialog ?
@@ -789,7 +875,7 @@ export function initializeDeployedGraphPage(
           () => entry.active
         );
       } else if (dialog && selectedApplication() && selectedEnvironment()) {
-        dialog.open(selectedApplication(), selectedEnvironment());
+        openDeleteDialog(dialog, action);
       }
     });
   }
