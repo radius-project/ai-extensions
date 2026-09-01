@@ -98,10 +98,18 @@ if (lstatSync(dist).isSymbolicLink()) {
 const packageJson = readJson(resolve(dist, "package.json"), "package.json");
 const manifest = readJson(resolve(dist, "plugin.json"), "plugin.json");
 
-if (typeof packageJson !== "object" || packageJson === null || Array.isArray(packageJson)) {
+if (
+  typeof packageJson !== "object" ||
+  packageJson === null ||
+  Array.isArray(packageJson)
+) {
   fail("package.json must be a JSON object");
 }
-if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) {
+if (
+  typeof manifest !== "object" ||
+  manifest === null ||
+  Array.isArray(manifest)
+) {
   fail("plugin.json must be a JSON object");
 }
 if (packageJson.name !== plugin.name || manifest.name !== plugin.name) {
@@ -122,7 +130,9 @@ if (manifest.extensions !== undefined) {
     manifest.extensions === null ||
     Array.isArray(manifest.extensions)
   ) {
-    fail("plugin.json#extensions must be an object keyed by extension namespace");
+    fail(
+      "plugin.json#extensions must be an object keyed by extension namespace"
+    );
   }
   for (const [namespace, value] of Object.entries(manifest.extensions)) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
