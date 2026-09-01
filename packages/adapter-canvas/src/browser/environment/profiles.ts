@@ -515,6 +515,7 @@ export function profileDetailSpecs(
 
 export interface CredentialProfilesPanelDeps {
   readonly repo: string;
+  readonly selectableProviders: readonly CredentialProvider[];
   readonly mutationNonce?: string;
   readonly ghCommandPresentation?: GhCommandPresentation;
   environmentName(): string;
@@ -730,7 +731,11 @@ export function initializeCredentialProfilesPanel(
       );
       const payload = await response.json();
       if (!scope.active || token !== profilesToken) return;
-      profiles = parseCredentialProfiles(payload);
+      profiles = parseCredentialProfiles(payload).filter((profile) =>
+        deps.selectableProviders.includes(
+          profile.provider === "aws" ? "aws" : "azure"
+        )
+      );
       renderProfileOptions();
       setProfileValue(
         preselectName === "" ? null : findProfile(profiles, preselectName)

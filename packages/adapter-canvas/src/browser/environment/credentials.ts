@@ -181,7 +181,9 @@ export function credentialRowsMarkup(
         )}</td>` +
         `<td>${environmentStatusMarkup(profile.status)}</td>` +
         '<td class="rad-table__actions">' +
-        `<button class="rad-btn rad-btn--neutral js-cred-createenv" data-name="${name}" style="margin:0;">Create Env</button>` +
+        (profile.provider === "aws" ?
+          '<button class="rad-btn rad-btn--neutral" style="margin:0;" disabled title="AWS environments are not yet supported">Create Env</button>'
+        : `<button class="rad-btn rad-btn--neutral js-cred-createenv" data-name="${name}" style="margin:0;">Create Env</button>`) +
         `<button class="rad-btn rad-btn--danger-outline js-cred-delete" data-name="${name}" style="margin:0;">Delete Profile</button>` +
         "</td></tr>"
       );

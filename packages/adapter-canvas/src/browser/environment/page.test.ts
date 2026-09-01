@@ -325,7 +325,9 @@ async function openWithProfile(
         }
     )
   );
-  const teardown = initializeEnvironmentPage(page.browser.context);
+  const teardown = initializeEnvironmentPage(page.browser.context, {
+    selectableProviders: ["azure", "aws"]
+  });
   await flushPromises();
   await flushPromises();
   return teardown;
@@ -465,6 +467,25 @@ describe("initializeEnvironmentPage", () => {
     expect(page.elements["env-profile-detail"].style.display).toBe("");
     expect(pageInput(page, "env-step1-next").disabled).toBe(false);
     expect(page.elements["env-step1-hint"].style.display).toBe("none");
+  });
+
+  it("keeps AWS profiles unavailable in the production environment wizard", async () => {
+    const page = fixture();
+    page.browser.nav.search = "?page=environment&new=1&profile=aws-prod";
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => jsonResponse({ profiles: [profile("aws")] })
+    );
+
+    initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+    await flushPromises();
+
+    expect(page.elements["env-profile-summary"].textContent).toBe(
+      "No credential profile selected"
+    );
+    expect(pageInput(page, "env-step1-next").disabled).toBe(true);
+    expect(page.elements["env-profile-options"].children).toHaveLength(0);
   });
 
   it("keeps the wizard locked while no credential profile is chosen", async () => {
@@ -786,7 +807,9 @@ describe("initializeEnvironmentPage", () => {
           namespaces: ["default"]
         })
       );
-      initializeEnvironmentPage(page.browser.context);
+      initializeEnvironmentPage(page.browser.context, {
+        selectableProviders: ["azure", "aws"]
+      });
       await flushPromises();
       await flushPromises();
       pageInput(page, "env-name-input").value = "dev";
@@ -972,7 +995,9 @@ describe("initializeEnvironmentPage", () => {
         subnets: []
       })
     );
-    initializeEnvironmentPage(page.browser.context);
+    initializeEnvironmentPage(page.browser.context, {
+      selectableProviders: ["azure", "aws"]
+    });
     await flushPromises();
     await flushPromises();
     pageInput(page, "env-name-input").value = "prod";

@@ -1582,6 +1582,12 @@ test.describe("Radius Canvas in Chromium", () => {
   }) => {
     await gotoCanvas(page, canvas, "credentials");
     await page.getByRole("button", { name: "New Credential Profile" }).click();
+    await expect(
+      page.getByLabel("Provider").locator('option[value="aws"]')
+    ).toBeDisabled();
+    await expect(
+      page.getByLabel("Provider").locator('option[value="aws"]')
+    ).toHaveAttribute("hidden", "");
     await page.getByRole("button", { name: "Verify Credentials" }).click();
 
     await expect(page.locator("#cred-verify-status")).toContainText(

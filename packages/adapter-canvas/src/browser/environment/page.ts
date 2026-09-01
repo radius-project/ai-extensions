@@ -43,6 +43,10 @@ interface EnvironmentPageState {
   readonly ghCommandPresentation: GhCommandPresentation;
 }
 
+export interface EnvironmentPageOptions {
+  readonly selectableProviders?: readonly ("azure" | "aws")[];
+}
+
 function parsePageState(context: BrowserContext): EnvironmentPageState {
   const state = readPageState(context, ENVIRONMENT_PAGE_STATE_ID);
   return {
@@ -107,7 +111,8 @@ function optimisticOperation(
 }
 
 export function initializeEnvironmentPage(
-  context: BrowserContext
+  context: BrowserContext,
+  options: EnvironmentPageOptions = {}
 ): BrowserTeardown {
   const newEnvironment = context.dom.byId("new-env-btn");
   const cancelEnvironment = context.dom.byId("cancel-env-btn");
@@ -164,6 +169,7 @@ export function initializeEnvironmentPage(
 
   const profiles = initializeCredentialProfilesPanel(context, {
     repo: state.repo,
+    selectableProviders: options.selectableProviders ?? ["azure"],
     mutationNonce: state.mutationNonce,
     ghCommandPresentation: state.ghCommandPresentation,
     environmentName: () => environmentInput.value,
