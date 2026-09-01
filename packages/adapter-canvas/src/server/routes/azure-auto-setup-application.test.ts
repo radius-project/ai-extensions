@@ -209,13 +209,13 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
       runAz: async (args) => {
         const line = args.join(" ");
         if (line.startsWith("ad app show --id")) {
-          return command({ stdout: "app-object" });
+          return command({ code: "0", stdout: "app-object" });
         }
         if (line.startsWith("ad signed-in-user show")) {
-          return command({ stdout: USER_ID });
+          return command({ code: "0", stdout: USER_ID });
         }
         if (line.startsWith("ad app owner list")) {
-          return command({ stdout: USER_ID });
+          return command({ code: "0", stdout: USER_ID });
         }
         throw new Error(`unscripted az call: ${line}`);
       }
@@ -681,6 +681,7 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
         }
         if (line.includes("federated-credential list")) {
           return command({
+            code: "0",
             stdout: JSON.stringify(["repo:octo/served:environment:production"])
           });
         }
@@ -1656,6 +1657,39 @@ describe("Azure auto-setup App Registration service (SU-08)", () => {
         ...[callerObjectId, create, ownerAdd, ownerList, tagPatch, tagShow]
       ].sort((left, right) => left - right)
     );
+  });
+
+  it("continues a new application setup when Azure reports string-zero exit codes", async () => {
+    const requiredTags = buildRadiusAppProvenanceTags({
+      repo: "octo/app",
+      environment: "dev",
+      operationId: "op-app"
+    });
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.startsWith("ad app list ")) {
+          return command({ code: "0", stdout: "[]" });
+        }
+        if (line.startsWith("ad signed-in-user show "))
+          return command({ code: "0", stdout: USER_ID });
+        if (line.startsWith("ad app create "))
+          return command({ code: "0", stdout: APP_ID });
+        if (line.startsWith("ad app owner add ")) return command({ code: "0" });
+        if (line.startsWith("ad app owner list "))
+          return command({ code: "0", stdout: USER_ID });
+        if (line.startsWith("rest --method PATCH "))
+          return command({ code: "0" });
+        if (line.startsWith("ad app show ") && line.includes("--query tags")) {
+          return command({ code: "0", stdout: JSON.stringify(requiredTags) });
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toMatchObject({ clientId: APP_ID, state: "created" });
   });
 
   it("reports a non-policy application creation failure", async () => {

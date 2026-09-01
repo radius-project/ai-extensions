@@ -295,7 +295,11 @@ export async function resolveAzureAutoSetupApplication({
       "tsv"
     ]);
     const showStatus =
-      showResult.code === 0 && showResult.stdout.trim() ? "found"
+      (
+        (showResult.code === 0 || showResult.code === "0") &&
+        showResult.stdout.trim()
+      ) ?
+        "found"
       : isAzResourceNotFound(showResult.stderr) ? "not-found"
       : "lookup-failed";
     let owned = false;
@@ -374,7 +378,7 @@ export async function resolveAzureAutoSetupApplication({
         "-o",
         "json"
       ]);
-      if (result.code !== 0) return undefined;
+      if (result.code !== 0 && result.code !== "0") return undefined;
       try {
         return parseServedReposFromSubjects(JSON.parse(result.stdout));
       } catch {
@@ -440,7 +444,7 @@ export async function resolveAzureAutoSetupApplication({
         "-o",
         "json"
       ]);
-      if (listResult.code !== 0) {
+      if (listResult.code !== 0 && listResult.code !== "0") {
         await fail(
           400,
           "Failed to look up existing App Registrations: " + listResult.stderr,
@@ -855,6 +859,7 @@ export async function resolveAzureAutoSetupApplication({
           return null;
         if (
           ownerAdd.code !== 0 &&
+          ownerAdd.code !== "0" &&
           !isAppOwnerAlreadyAssignedError(ownerAdd.stderr)
         ) {
           await rollbackCreatedAppAndFail(
@@ -872,7 +877,7 @@ export async function resolveAzureAutoSetupApplication({
         const ownerList = await runAz(
           buildAppOwnerListArgs({ appId: clientId })
         );
-        if (ownerList.code !== 0) {
+        if (ownerList.code !== 0 && ownerList.code !== "0") {
           await rollbackCreatedAppAndFail(
             "Failed to verify owners of the new App Registration: " +
               ownerList.stderr,
@@ -971,7 +976,7 @@ export async function resolveAzureAutoSetupApplication({
             };
         if (!(await checkpoint("after-app-registration-tag-update")))
           return null;
-        if (tagPatch.code !== 0) {
+        if (tagPatch.code !== 0 && tagPatch.code !== "0") {
           await rollbackCreatedAppAndFail(
             "Failed to apply Radius provenance tags to the new App Registration: " +
               tagPatch.stderr,
@@ -982,7 +987,7 @@ export async function resolveAzureAutoSetupApplication({
         }
         steps.push("Verifying Radius provenance tags...");
         const tagShow = await runAz(buildAppTagShowArgs({ appId: clientId }));
-        if (tagShow.code !== 0) {
+        if (tagShow.code !== 0 && tagShow.code !== "0") {
           await rollbackCreatedAppAndFail(
             "Failed to read the App Registration tags after update: " +
               tagShow.stderr,
