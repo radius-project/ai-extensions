@@ -368,6 +368,14 @@ describe("mergeDeployedGraphMetadata", () => {
     expect(mergeDeployedGraphMetadata([{ name: "no-id" }], null)).toEqual([
       { name: "no-id", connections: [], outputResources: [] }
     ]);
+    expect(
+      mergeDeployedGraphMetadata(
+        [null, "invalid", { id: "valid", name: "valid" }] as any[],
+        null
+      )
+    ).toEqual([
+      { id: "valid", name: "valid", connections: [], outputResources: [] }
+    ]);
   });
 
   it("ignores malformed deployed parents and output collections", () => {

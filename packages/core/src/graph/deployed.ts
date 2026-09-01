@@ -96,8 +96,9 @@ export function mergeDeployedGraphMetadata(
     const id = typeof projected?.id === "string" ? projected.id.trim() : "";
     if (id && !deployedById.has(id)) deployedById.set(id, projected);
   }
-  return modeled.map((resource) => {
-    const projected = projectGraphResourceMetadata(resource) ?? {};
+  return modeled.flatMap((resource) => {
+    const projected = projectGraphResourceMetadata(resource);
+    if (!projected) return [];
     const id = typeof resource?.id === "string" ? resource.id.trim() : "";
     const metadata = id ? deployedById.get(id) : undefined;
     const outputs =
@@ -108,26 +109,28 @@ export function mergeDeployedGraphMetadata(
         metadata.outputResources
       : Array.isArray(resource?.outputResources) ? resource.outputResources
       : [];
-    return {
-      ...projected,
-      connections:
-        Array.isArray(resource?.connections) ?
-          resource.connections
-            .map(projectGraphConnectionMetadata)
-            .filter(
-              (
-                connection: Record<string, unknown> | null
-              ): connection is Record<string, unknown> => connection !== null
-            )
-        : [],
-      outputResources: outputs
-        .map(projectGraphOutputMetadata)
-        .filter(
-          (
-            output: Record<string, unknown> | null
-          ): output is Record<string, unknown> => output !== null
-        )
-    };
+    return [
+      {
+        ...projected,
+        connections:
+          Array.isArray(resource?.connections) ?
+            resource.connections
+              .map(projectGraphConnectionMetadata)
+              .filter(
+                (
+                  connection: Record<string, unknown> | null
+                ): connection is Record<string, unknown> => connection !== null
+              )
+          : [],
+        outputResources: outputs
+          .map(projectGraphOutputMetadata)
+          .filter(
+            (
+              output: Record<string, unknown> | null
+            ): output is Record<string, unknown> => output !== null
+          )
+      }
+    ];
   });
 }
 

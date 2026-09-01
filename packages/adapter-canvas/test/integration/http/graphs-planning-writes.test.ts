@@ -1,6 +1,10 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { computeGraphDiff } from "@radius-project/core";
+import {
+  applicationGraphToResources,
+  computeGraphDiff,
+  projectSafeApplicationGraph
+} from "@radius-project/core";
 import { RadProcessError } from "@radius-project/adapter-shared";
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
@@ -214,6 +218,46 @@ describe("graphs-planning writes real-loopback HIT", () => {
     );
     expect(harness.state.graphLoaded).toBe(true);
     expect(harness.state.graphTargetRepo).toBe("octo/app");
+  });
+
+  it("does not expose rejected icon entries in the modeled graph response", async () => {
+    const sentinel = "fixture-private-field";
+    const iconHash = `sha256:${"a".repeat(64)}`;
+    const projected = projectSafeApplicationGraph({
+      resources: [
+        {
+          id: "res-a",
+          name: "api",
+          type: "Radius.Compute/containers",
+          diffHash: `sha256:${"b".repeat(64)}`,
+          iconHash
+        }
+      ],
+      icons: {
+        [iconHash]: "<svg>safe</svg>",
+        "not-a-hash": sentinel,
+        [`sha256:${"c".repeat(64)}`]: sentinel
+      }
+    });
+    start({
+      selections: { main: selectionOf("main", "resource app = {}") },
+      compiled: {
+        main: applicationGraphToResources(projected) as CanvasGraphResource[]
+      }
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/load-graph",
+      '{"repo":"octo/app"}'
+    );
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(body).toContain("<svg>safe</svg>");
+    expect(body).not.toContain(sentinel);
+    expect(body).not.toContain("not-a-hash");
   });
 
   it("answers the app-bicep handoff payload when the branch has no model", async () => {

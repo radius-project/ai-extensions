@@ -259,6 +259,27 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(sinceBody).not.toHaveProperty("logs");
   });
 
+  it("does not expose unsafe deployed graph state over the real status endpoint", async () => {
+    const harness = start();
+    const sentinel = "fixture-private-field";
+    harness.state.deployedGraph = [
+      {
+        id: "unsafe",
+        name: "unsafe",
+        type: "Radius.Security/secrets",
+        properties: { data: { privateField: sentinel } }
+      }
+    ];
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deploy-status`);
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse(body).deployedGraph).toBeNull();
+    expect(body).not.toContain(sentinel);
+  });
+
   it("serves the ambient deploy notification without the poll's payload or side effects", async () => {
     const harness = start();
     harness.state.deployAttempt = {

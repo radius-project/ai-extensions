@@ -368,6 +368,47 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     ]);
   });
 
+  it("omits unknown deployed artifact fields from the real graph response", async () => {
+    const harness = start();
+    const sentinel = "fixture-private-field";
+    harness.state.contextRepo = "octo/app";
+    harness.modeledResources.push({
+      id: "res-a",
+      name: "api",
+      type: "Radius.Compute/containers"
+    });
+    harness.reader.graph = {
+      graph: {
+        resources: [
+          {
+            id: "res-a",
+            name: "api",
+            type: "Radius.Compute/containers",
+            properties: { privateField: sentinel },
+            outputResources: [
+              {
+                id: "provider-output",
+                type: "apps/Deployment",
+                privateField: sentinel
+              }
+            ]
+          }
+        ]
+      },
+      status: "ok"
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deployed-graph`);
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(body).not.toContain(sentinel);
+    expect(JSON.parse(body).resources[0].outputResources).toEqual([
+      { id: "provider-output", type: "apps/Deployment" }
+    ]);
+  });
+
   it("preserves full modeled topology and settles a partial failed deploy", async () => {
     const harness = start();
     harness.state.contextRepo = "octo/voting";

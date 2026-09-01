@@ -11,6 +11,7 @@ import {
   displayGhCommand,
   type GhCommandPresentation
 } from "../../gh-command-display.js";
+import { projectSafeApplicationGraph } from "@radius-project/core";
 
 // What the webview needs to decide whether to keep polling after a failed
 // deploy. Shaped to match `deployHandoffStatus` in `server.ts`, which is
@@ -228,7 +229,18 @@ export function handleDeployStatus(
   const errorPaths = entry?.state?.deployErrorPaths || null;
   const startedAt = entry?.state?.deployStartedAt || null;
   const finishedAt = entry?.state?.deployFinishedAt || null;
-  const deployedGraph = entry?.state?.deployedGraph || null;
+  let deployedGraph: unknown[] | null = null;
+  if (entry?.state?.deployedGraph) {
+    try {
+      deployedGraph = projectSafeApplicationGraph(
+        entry.state.deployedGraph
+      ).resources;
+    } catch {
+      // Legacy in-memory state may predate artifact projection. Fail closed at
+      // the HTTP boundary instead of exposing or echoing unsafe graph data.
+      deployedGraph = null;
+    }
+  }
   const deployRunUrl = entry?.state?.deployRunUrl || null;
   const attempt = entry?.state?.deployAttempt || null;
   const active = status === "in_progress";

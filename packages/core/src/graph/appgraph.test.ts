@@ -508,7 +508,11 @@ describe("applicationGraphToResources — icon resolution", () => {
             ]
           }
         ],
-        icons: { [frontendIconHash]: frontendIcon, ignored: 7 },
+        icons: {
+          [frontendIconHash]: frontendIcon,
+          [alternateHash]: "unreferenced-icon",
+          ignored: 7
+        },
         unknown: "do-not-serialize"
       });
 
@@ -558,6 +562,60 @@ describe("applicationGraphToResources — icon resolution", () => {
         icons: { [frontendIconHash]: frontendIcon }
       });
       expect(JSON.stringify(projected)).not.toContain("do-not-serialize");
+      expect(JSON.stringify(projected)).not.toContain("unreferenced-icon");
+      expect(Object.getPrototypeOf(projected.icons)).toBeNull();
+    });
+
+    it("keeps only referenced SHA-256 icon entries and drops invalid icon hashes", () => {
+      const icons = Object.create(null) as Record<string, string>;
+      icons[frontendIconHash] = frontendIcon;
+      icons[alternateHash] = "unreferenced-icon";
+      icons["not-a-hash"] = "invalid-icon";
+      icons.__proto__ = "magic-icon";
+
+      const projected = projectSafeApplicationGraph({
+        resources: [
+          {
+            id: frontendId,
+            type: "Radius.Compute/containers",
+            iconHash: frontendIconHash,
+            outputResources: [
+              { id: "valid-output", iconHash: outputIconHash },
+              { id: "invalid-output", iconHash: "not-a-hash" }
+            ]
+          },
+          {
+            id: cacheId,
+            type: "Radius.Data/redisCaches",
+            iconHash: "not-a-hash"
+          }
+        ],
+        icons
+      });
+
+      expect(projected.resources).toEqual([
+        {
+          id: frontendId,
+          type: "Radius.Compute/containers",
+          iconHash: frontendIconHash,
+          connections: [],
+          outputResources: [
+            { id: "valid-output", iconHash: outputIconHash },
+            { id: "invalid-output" }
+          ]
+        },
+        {
+          id: cacheId,
+          type: "Radius.Data/redisCaches",
+          connections: [],
+          outputResources: []
+        }
+      ]);
+      expect(projected.icons).toEqual({ [frontendIconHash]: frontendIcon });
+      expect(Object.getPrototypeOf(projected.icons)).toBeNull();
+      expect(JSON.stringify(projected)).not.toContain("unreferenced-icon");
+      expect(JSON.stringify(projected)).not.toContain("invalid-icon");
+      expect(JSON.stringify(projected)).not.toContain("magic-icon");
     });
 
     it("accepts redacted Secret data and retains only its relationship metadata", () => {

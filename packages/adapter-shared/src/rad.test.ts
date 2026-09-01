@@ -852,6 +852,8 @@ describe("runRadAppGraph artifact completion", () => {
 
   it("persists and returns only safety-projected graph metadata", async () => {
     const sentinel = "fixture-plaintext-value";
+    const iconHash = `sha256:${"e".repeat(64)}`;
+    const unreferencedIconHash = `sha256:${"f".repeat(64)}`;
     process.env.FAKE_RAD_GRAPH = JSON.stringify({
       resources: [
         {
@@ -859,6 +861,7 @@ describe("runRadAppGraph artifact completion", () => {
           name: "container",
           type: "Radius.Compute/containers",
           diffHash: `sha256:${"a".repeat(64)}`,
+          iconHash,
           properties: {
             codeReference: "src/index.ts#L1",
             token: sentinel
@@ -879,7 +882,13 @@ describe("runRadAppGraph artifact completion", () => {
             }
           ]
         }
-      ]
+      ],
+      icons: {
+        [iconHash]: "<svg>safe</svg>",
+        [unreferencedIconHash]: sentinel,
+        "not-a-hash": sentinel,
+        __proto__: sentinel
+      }
     });
     const bicepFile = path.join(binDir, "app.bicep");
     const saved = path.join(binDir, ".radius", "app-graph.json");
@@ -907,8 +916,19 @@ describe("runRadAppGraph artifact completion", () => {
           ],
           outputResources: [{ id: "provider/output", type: "Provider/type" }]
         }
-      ]
+      ],
+      icons: { [iconHash]: "<svg>safe</svg>" }
     });
+    if (
+      !result ||
+      typeof result !== "object" ||
+      !("icons" in result) ||
+      !result.icons ||
+      typeof result.icons !== "object"
+    ) {
+      throw new Error("projected graph did not retain its referenced icon map");
+    }
+    expect(Object.getPrototypeOf(result.icons)).toBeNull();
   }, 10000);
 
   it("refuses graph-visible Secret data before saving the workspace artifact", async () => {
