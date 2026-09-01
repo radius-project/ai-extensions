@@ -306,7 +306,10 @@ function controllerWithHarness(
 ) {
   const harness = createDeps();
   return {
-    controller: controllerFor(browser, { deps: harness.deps }),
+    controller: controllerFor(browser, {
+      deps: harness.deps,
+      mutationNonce: "browser-nonce"
+    }),
     harness
   };
 }
@@ -2117,6 +2120,13 @@ describe("verify status polling", () => {
       (call) => call.url === "/api/bypass-verification"
     );
     expect(bypassCall?.init?.method).toBe("POST");
+    // The bypass is a nonce-protected mutation: the request must carry the
+    // browser's mutation nonce or the server rejects it.
+    expect(
+      (bypassCall?.init?.headers as Record<string, string>)?.[
+        "X-Radius-Mutation-Nonce"
+      ]
+    ).toBe("browser-nonce");
     expect(JSON.parse(String(bypassCall?.init?.body ?? ""))).toEqual({
       repo: REPO,
       environment: "dev",
@@ -6728,7 +6738,7 @@ describe("acknowledging a finished deletion pass", () => {
         url: dismissUrl("op-1"),
         init: {
           method: "POST",
-          headers: { "X-Radius-Mutation-Nonce": "" },
+          headers: { "X-Radius-Mutation-Nonce": "browser-nonce" },
           signal: expect.anything()
         }
       }

@@ -489,6 +489,43 @@ describe("deploy outcome on failure", () => {
     );
   });
 
+  it.each(["cancelled", "timed_out"])(
+    "does not classify or stamp auth drift when the run concluded %s at the cloud login step",
+    async (conclusion) => {
+      // Only a genuine "failure" can be credential drift. A run cancelled or
+      // timed out at the cloud-login step touched no resource, but that is not
+      // the user's credentials drifting, so the classifier must not run and the
+      // kind must stay unset.
+      let classifierCalls = 0;
+      const { request, state } = outcomeRequest({
+        conclusion,
+        provider: "aws",
+        deployStepStartedAt: 0,
+        steps: [
+          { name: "Configure AWS Credentials", conclusion },
+          { name: "Run rad commands", conclusion: "skipped" }
+        ]
+      });
+      const service = createDeployOutcomeService(
+        dependencies({
+          classifyDeployCloudAuthDrift: () => {
+            classifierCalls += 1;
+            return "Cloud authentication failed. Re-verify.";
+          }
+        })
+      );
+
+      await service.settle(request);
+
+      expect(classifierCalls).toBe(0);
+      expect(state.deployStatus).toBe("failed");
+      expect(state.deployErrorKind).toBeUndefined();
+      expect(state.deployError).not.toContain(
+        "Cloud authentication failed. Re-verify."
+      );
+    }
+  );
+
   it("leaves the kind unset when the failure is not auth drift", async () => {
     const { request, state } = outcomeRequest({
       conclusion: "failure",

@@ -292,19 +292,24 @@ export function createDeployOutcomeService(
       // it as credential drift. `deployStepStartedAt` is 0 until that step is
       // observed running, which is the "no resource touched" signal. Computed
       // here (before the guarded describeFailure read) so the degraded-message
-      // path below still gets the drift prefix and kind.
-      const authDriftMessage = dependencies.classifyDeployCloudAuthDrift({
-        provider,
-        resourcesTouched: deployStepStartedAt > 0,
-        failedStepNames: request.steps
-          .filter(
-            (s) =>
-              s.conclusion &&
-              s.conclusion !== "success" &&
-              s.conclusion !== "skipped"
-          )
-          .map((s) => s.name)
-      });
+      // path below still gets the drift prefix and kind. Only a genuine
+      // "failure" conclusion can be drift: a "cancelled" or "timed_out" run that
+      // happened to stop at the cloud-login step must not be stamped as drift.
+      const authDriftMessage =
+        conclusion === "failure" ?
+          dependencies.classifyDeployCloudAuthDrift({
+            provider,
+            resourcesTouched: deployStepStartedAt > 0,
+            failedStepNames: request.steps
+              .filter(
+                (s) =>
+                  s.conclusion &&
+                  s.conclusion !== "success" &&
+                  s.conclusion !== "skipped"
+              )
+              .map((s) => s.name)
+          })
+        : "";
       // Assemble the error BEFORE flipping the status to "failed". The webview's
       // /api/deploy-status poll fires triggerDeployRepairHandoff the instant it
       // observes "failed", and describeFailure awaits network reads (run log +
