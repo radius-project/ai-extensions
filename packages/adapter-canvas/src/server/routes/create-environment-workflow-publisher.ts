@@ -11,6 +11,7 @@ import {
   displayGhCommand,
   type GhCommandPresentation
 } from "../../gh-command-display.js";
+import { FORK_REPOSITORY_SETUP_GUIDANCE } from "../../repository-access-guidance.js";
 
 // Seam 5 of the `POST /api/create-environment` slice: steps 2, 3, 4 and 4b —
 // writing the provider's configuration onto the GitHub environment, then
@@ -26,8 +27,7 @@ import {
 // this code was inline: after each committed file. The use case still owns what
 // a gate means and when cancellation is observed; this module only calls it.
 
-export const WRITE_ACCESS_HINT =
-  " Check that you have write access to the repository and that GitHub Actions is enabled.";
+export const WRITE_ACCESS_HINT = ` Check that you have write access to the repository and that GitHub Actions is enabled. ${FORK_REPOSITORY_SETUP_GUIDANCE}`;
 
 function workflowScopeHint(
   ghCommandPresentation: GhCommandPresentation

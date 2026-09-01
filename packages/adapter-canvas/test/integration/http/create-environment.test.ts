@@ -2220,7 +2220,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(harness.committedFiles).toEqual([]);
   });
 
-  it("fails 400 with the write-access hint for any other commit refusal", async () => {
+  it("fails 400 with fork and access recovery for any other commit refusal", async () => {
     start({
       gh: [
         {
@@ -2235,7 +2235,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(response.status).toBe(400);
     const payload = (await response.json()) as { error: string };
     expect(payload.error).toContain(
-      "Check that you have write access to the repository"
+      "fork the repository and start a new Copilot session from the fork's GitHub URL"
     );
   });
 
