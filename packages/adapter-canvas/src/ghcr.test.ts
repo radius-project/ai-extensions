@@ -444,11 +444,17 @@ test("deletes a validated user-owned state package and confirms absence", async 
   );
 });
 
-test("treats Packages API-confirmed initial absence as idempotent success", async () => {
+test("treats initial absence confirmed with read-only package access as idempotent success", async () => {
   const harness = createDeletionHarness({ metadata: null });
 
   const result = await deleteGHCRStatePackage({
     ...deleteOptions,
+    credentials: {
+      username: "octocat",
+      token: "keyring-token",
+      source: "keyring",
+      scopes: ["read:packages"]
+    },
     fetchImpl: harness.fetchImpl
   });
 
@@ -472,11 +478,11 @@ test("fails closed when a package 404 is masked by insufficient credential scope
         username: "octocat",
         token: "keyring-token",
         source: "keyring",
-        scopes: ["read:packages"]
+        scopes: ["delete:packages"]
       },
       fetchImpl: harness.fetchImpl
     }),
-    /does not prove read and delete package access.*read:packages,delete:packages/
+    /does not prove package read access.*--scopes read:packages/
   );
   assert.equal(
     harness.calls.some((call) => call.method === "DELETE"),

@@ -1132,14 +1132,11 @@ export async function deleteGHCRStatePackage({
   );
   if (existingValue === GITHUB_NOT_FOUND) {
     const scopes = auth.scopes || [];
-    if (
-      !scopes.includes("read:packages") ||
-      !scopes.includes("delete:packages")
-    ) {
+    if (!scopes.includes("read:packages")) {
       throw packageAuthError(
-        "GitHub returned HTTP 404 for the state package, but the selected credential does not prove read and delete package access",
+        "GitHub returned HTTP 404 for the state package, but the selected credential does not prove package read access",
         ghCommandPresentation,
-        "read:packages,delete:packages",
+        "read:packages",
         auth.source
       );
     }
