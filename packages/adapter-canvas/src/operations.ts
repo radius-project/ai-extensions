@@ -47,10 +47,11 @@ import { remediationReference } from "./remediation-reference.js";
 // post-commit rollback closed instead of guessing.
 // records load with a zero deletion-attempt count and no command, while an older
 // extension rejects a newer record instead of dropping an in-flight retry.
-// Version 6 adds the GitHub environment-variable artifact ledger.
-export const OPERATION_SCHEMA_VERSION = 6;
+// Version 6 adds the GitHub environment-variable artifact ledger. Version 7
+// adds the GHCR state-package stage to resumable environment deletion records.
+export const OPERATION_SCHEMA_VERSION = 7;
 export const SUPPORTED_OPERATION_SCHEMA_VERSIONS = Object.freeze([
-  1, 2, 3, 4, 5, 6
+  1, 2, 3, 4, 5, 6, 7
 ]);
 
 // `deleted` is written only after a cleanup attempt proved the resource is gone
@@ -1038,10 +1039,12 @@ export const STAGE_VERIFY = "verify";
 // it owns its own stage inventory rather than reusing the create stages: it
 // deletes the Radius environment on the cluster (via a dispatched workflow),
 // removes the per-environment federated credential, deletes the GitHub
-// environment, and finally reviews whether the app registration is now unused.
+// environment and GHCR state package, and finally records that the shared app
+// registration was retained.
 export const STAGE_DELETE_RADIUS_ENV = "delete_radius_environment";
 export const STAGE_DELETE_CREDENTIAL = "delete_federated_credential";
 export const STAGE_DELETE_GITHUB_ENV = "delete_github_environment";
+export const STAGE_DELETE_STATE_PACKAGE = "delete_state_package";
 export const STAGE_REVIEW_APP_REGISTRATION = "review_app_registration";
 
 const STAGE_LABELS = {
@@ -1051,6 +1054,7 @@ const STAGE_LABELS = {
   [STAGE_DELETE_RADIUS_ENV]: "Delete Radius environment",
   [STAGE_DELETE_CREDENTIAL]: "Remove federated credential",
   [STAGE_DELETE_GITHUB_ENV]: "Delete GitHub environment",
+  [STAGE_DELETE_STATE_PACKAGE]: "Delete GHCR state package",
   [STAGE_REVIEW_APP_REGISTRATION]: "Review app registration"
 };
 
@@ -1125,7 +1129,7 @@ export function buildDeleteStages({
 }: any = {}): any[] {
   const ids = [STAGE_DELETE_RADIUS_ENV];
   if (includeAzureCleanup) ids.push(STAGE_DELETE_CREDENTIAL);
-  ids.push(STAGE_DELETE_GITHUB_ENV);
+  ids.push(STAGE_DELETE_GITHUB_ENV, STAGE_DELETE_STATE_PACKAGE);
   if (includeAzureCleanup) ids.push(STAGE_REVIEW_APP_REGISTRATION);
   return ids.map((id) => ({ id, label: STAGE_LABELS[id], state: "pending" }));
 }
@@ -5644,6 +5648,29 @@ export function fromPersistedOperation(value: any): any {
   }
   if (!Array.isArray(record.stages) || !Array.isArray(record.steps)) {
     throw new Error("Invalid persisted operation stages or steps.");
+  }
+  if (
+    record.schemaVersion < 7 &&
+    record.kind === OPERATION_KIND_DELETE &&
+    record.state !== "succeeded" &&
+    !record.stages.some(
+      (stage: { id?: unknown }) => stage.id === STAGE_DELETE_STATE_PACKAGE
+    )
+  ) {
+    const statePackageStage = {
+      id: STAGE_DELETE_STATE_PACKAGE,
+      label: STAGE_LABELS[STAGE_DELETE_STATE_PACKAGE],
+      state: "pending"
+    };
+    const reviewIndex = record.stages.findIndex(
+      (stage: { id?: unknown }) => stage.id === STAGE_REVIEW_APP_REGISTRATION
+    );
+    record.stages.splice(
+      reviewIndex < 0 ? record.stages.length : reviewIndex,
+      0,
+      statePackageStage
+    );
+    record.requiresDurableRewrite = true;
   }
   record.control = readOperationControl(value.control);
   record.providerRecovery = readProviderRecovery(value.providerRecovery);
