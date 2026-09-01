@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 
 interface RecordedCommit {
   path: string;
@@ -62,7 +61,7 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
 
 for (const file of ["delete-environment.yml", "delete-environment-azure.yml"]) {
   const body = readFileSync(
-    resolve(import.meta.dirname, "../../../.github/extension", file),
+    new URL(`../../../.github/extension/${file}`, import.meta.url),
     "utf8"
   );
   BASE_UPSTREAM[file] = body;
