@@ -52,11 +52,11 @@ cat >"${TEST_ROOT}/policy/bad.yml" <<'YAML'
 ---
 name: bad
 env:
-  REVISION: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  RADIUS_INSTALL_REF: f4b44130e6ccbf52405fcfba59b24912aa45eeb8
 jobs: {}
 YAML
 if run_source_check "${TEST_ROOT}/policy" 2>/dev/null; then
-    fail "source-of-truth check accepted a standalone revision"
+    fail "source-of-truth check accepted a full installer commit SHA"
 fi
 
 cat >"${TEST_ROOT}/policy/bad.yml" <<'YAML'

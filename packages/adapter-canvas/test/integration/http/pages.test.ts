@@ -68,6 +68,9 @@ describe("canvas pages over real loopback HTTP", () => {
     expect(response.body).toContain(
       '<a href="?page=graph" data-page="graph" data-radius-graph-page="graph" class="rad-subtab rad-subtab--active"'
     );
+    expect(response.body).toContain(
+      'href="https://edge.docs.radapp.io/integrations/github-copilot-app/canvas-extension/"'
+    );
   });
 
   it.each([
