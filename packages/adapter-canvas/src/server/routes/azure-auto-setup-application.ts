@@ -171,7 +171,7 @@ export async function resolveAzureAutoSetupApplication({
   > => {
     if (callerObjectId !== null) return { ok: true, id: callerObjectId };
     const identityResult = await runAz(buildCallerIdentityArgs());
-    if (identityResult.code !== 0) {
+    if (identityResult.code !== 0 && identityResult.code !== "0") {
       return { ok: false, stderr: identityResult.stderr };
     }
     const identity = parseCallerIdentity(identityResult.stdout);
