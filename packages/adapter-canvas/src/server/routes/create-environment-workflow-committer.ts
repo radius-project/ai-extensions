@@ -722,6 +722,12 @@ export function createWorkflowFileCommitter(
                   `GitHub returned unreadable commit history for "${path}" on "${branch || "the default branch"}". ` +
                   "Radius will not accept, overwrite, or remove that workflow."
               });
+              const ambiguousHistory = () => ({
+                state: "manual_required" as const,
+                guidance:
+                  `Radius could not prove one exact commit for "${path}" on "${branch || "the default branch"}" using this operation's immutable marker. ` +
+                  "It will not accept, overwrite, or remove that workflow."
+              });
               let matchingCommits: Array<{ sha: string }> = [];
               for (let page = 1; page <= 100; page += 1) {
                 const commitsPath =
@@ -764,6 +770,7 @@ export function createWorkflowFileCommitter(
                       )
                   )
                 );
+                if (matchingCommits.length > 1) return ambiguousHistory();
                 if (matchingCommits.length === 1) break;
                 if (parsed.length < 100) break;
                 if (page === 100) {
@@ -775,14 +782,7 @@ export function createWorkflowFileCommitter(
                   };
                 }
               }
-              if (matchingCommits.length !== 1) {
-                return {
-                  state: "manual_required" as const,
-                  guidance:
-                    `Radius could not prove one exact commit for "${path}" on "${branch || "the default branch"}" using this operation's immutable marker. ` +
-                    "It will not accept, overwrite, or remove that workflow."
-                };
-              }
+              if (matchingCommits.length !== 1) return ambiguousHistory();
               return {
                 state: "applied" as const,
                 value: {

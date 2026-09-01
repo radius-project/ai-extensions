@@ -370,6 +370,52 @@ describe("committing a workflow file", () => {
     ).toHaveLength(1);
   });
 
+  it("stops pagination once the operation marker is ambiguous", async () => {
+    const operationMarker =
+      "radius-operation:op_workflow:workflow:.github/workflows/a.yml:fff71b97a5a94949";
+    const history = [
+      {
+        sha: "a".repeat(40),
+        commit: { message: `Add a\n\nRadius-Operation: ${operationMarker}` }
+      },
+      {
+        sha: "b".repeat(40),
+        commit: { message: `Add a\n\nRadius-Operation: ${operationMarker}` }
+      },
+      ...Array.from({ length: 98 }, () => ({
+        sha: "d".repeat(40),
+        commit: { message: "Unrelated commit" }
+      }))
+    ];
+    const h = harness({
+      runGh: [
+        { code: 1, stderr: "HTTP 404: Not Found" },
+        {
+          code: 0,
+          stdout: JSON.stringify({ sha: "blob-recovered", content: CONTENT })
+        },
+        { code: 0, stdout: JSON.stringify(history) }
+      ],
+      runGhWorkflow: [{ code: 1, timedOut: true }]
+    });
+    const operation = createOperation({ operationId: "op_workflow" });
+    h.ports.mutationRecovery = { operation, persist: async () => {} };
+
+    await expect(
+      createWorkflowFileCommitter(h.ports, target).commitWorkflowFileSmart(
+        ".github/workflows/a.yml",
+        CONTENT,
+        "Add a"
+      )
+    ).rejects.toMatchObject({
+      code: "provider-mutation-manual-required",
+      message: expect.stringContaining("one exact commit")
+    });
+    expect(
+      h.calls.filter((call) => call.args[1]?.includes("/commits?"))
+    ).toHaveLength(1);
+  });
+
   it.each([
     ["invalid JSON", "not-json"],
     ["a non-array response", JSON.stringify({ message: "unexpected" })]
