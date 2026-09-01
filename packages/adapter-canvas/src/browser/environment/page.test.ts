@@ -637,14 +637,14 @@ describe("initializeEnvironmentPage", () => {
     );
   });
 
-  it("rejects an environment name with invalid characters", async () => {
+  it("rejects an environment name with control characters", async () => {
     const page = fixture();
     await openWithProfile(page, "azure");
-    pageInput(page, "env-name-input").value = "my env";
+    pageInput(page, "env-name-input").value = "dev\u0007";
     page.elements["deploy-btn"].dispatch("click");
 
     expect(page.elements["deploy-status"].textContent).toContain(
-      "only letters"
+      "control characters"
     );
     expect(
       page.browser.net.calls.filter(
