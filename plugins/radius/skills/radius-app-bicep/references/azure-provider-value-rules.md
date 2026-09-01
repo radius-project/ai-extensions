@@ -1,6 +1,6 @@
 # Azure provider value rules
 
-Use these rules only after resolving the canonical Azure Recipe Pack for the target Environment. They describe values that the pack copies into Azure resources. Do not apply them to AWS, Kubernetes, or a custom Recipe unless its mapping has been checked against the same Azure contract.
+Use these rules for a predefined type when its `show-radius-type.mjs` result has an available managed-default Azure Recipe: `recipe.status` is `available`, `recipe.provenance` is `managed-release-default`, and `recipe.recipePack` is `azure`. In that case, `recipe.definition` is the exact matching Recipe, and `recipe.repository`, `recipe.commit`, and `recipe.path` identify its pinned source.
 
 Check these values before writing `app.bicep`. Write each one as a string literal or a parameter with a literal default. If the application requires a value that the Recipe cannot deploy, stop and report the conflict. Do not silently rename a required database, container, topic, or model.
 
@@ -27,16 +27,6 @@ Before generating an AI model resource, verify the exact Recipe, model, version,
 
 ## Defaults
 
-When the source does not set an optional property, confirm the exact schema default and check that value against the selected Recipe. The canonical pack currently uses these defaults:
-
-| Property              | Default       |
-|-----------------------|---------------|
-| PostgreSQL `database` | `postgres_db` |
-| MySQL `database`      | `mysql_db`    |
-| SQL `database`        | `appdb`       |
-| Blob `containerName`  | `data`        |
-| Kafka `topic`         | `events`      |
-| MongoDB `database`    | `mongo_db`    |
-| AI `model`            | `gpt-5-mini`  |
+When the source does not set an optional property, use the exact default from the resolved schema and check that value against the selected Recipe.
 
 Administrator usernames are required and have no schema default. Use `myadmin` only when the application does not require a specific login.
