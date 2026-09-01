@@ -8,6 +8,7 @@ import { createDeploymentAbandonmentService } from "../../../src/server/services
 import { createDeployRequestService } from "../../../src/server/services/deploy-request.js";
 import { createDeployDispatchService } from "../../../src/server/services/deploy-dispatch.js";
 import { resolveEnvironmentDeployment } from "../../../src/server/services/deployment-resolver.js";
+import { probeDeleteConflict } from "../../../src/server/services/delete-conflict.js";
 import {
   createDeployMonitorService,
   type DeployMonitorService
@@ -30,6 +31,10 @@ import type {
   DeployListCacheEntry,
   DeploymentRow
 } from "../../../src/server/routes/deployments.js";
+import type {
+  ArtifactFiles,
+  WorkflowArtifact
+} from "../../../src/deploy-artifacts.js";
 import type { DeployMonitorRequest } from "../../../src/server/services/deploy-monitor.js";
 import type { CanvasState } from "../../../src/shared.js";
 
@@ -63,6 +68,11 @@ interface Harness {
   processEnv: NodeJS.ProcessEnv;
   timeOutDispatch(): void;
   failDispatchWith(stderr: string): void;
+  // The evidence the force-delete gate reads: the artifact the failed delete
+  // run left behind, or its absence.
+  artifacts: WorkflowArtifact[];
+  artifactFiles: ArtifactFiles | null;
+  setArtifactFiles(files: ArtifactFiles | null): void;
 }
 
 function row(environment: string, status = "deployed"): DeploymentRow {
@@ -85,6 +95,8 @@ function start(): Harness {
   const workflowSyncs: unknown[][] = [];
   const ghApiCalls: string[][] = [];
   const processEnv: NodeJS.ProcessEnv = {};
+  const artifacts: WorkflowArtifact[] = [];
+  let artifactFiles: ArtifactFiles | null = null;
   let entryMissing = false;
   let deploymentStatus = "deployed";
   let dispatchTimedOut = false;
@@ -173,6 +185,12 @@ function start(): Harness {
       },
       readProcessEnv: () => processEnv,
       setTimer: () => ({}),
+      probeDeleteConflict: (request) =>
+        probeDeleteConflict(request, {
+          resolveEnvDeployment,
+          listArtifacts: () => Promise.resolve(artifacts),
+          downloadArtifact: () => Promise.resolve(artifactFiles)
+        }),
       // The deploy route has its own harness below, which drives the real
       // admission service. Reaching it from this one is a wiring bug.
       deployRequest: {
@@ -228,6 +246,13 @@ function start(): Harness {
     },
     failDispatchWith(stderr) {
       dispatchStderr = stderr;
+    },
+    artifacts,
+    get artifactFiles() {
+      return artifactFiles;
+    },
+    setArtifactFiles(files) {
+      artifactFiles = files;
     }
   };
 }
@@ -436,7 +461,8 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(response.headers.get("content-type")).toBe("application/json");
     expect(await response.json()).toEqual({
       success: true,
-      runUrl: "https://github.com/octo/todo/actions/runs/7"
+      runUrl: "https://github.com/octo/todo/actions/runs/7",
+      forced: false
     });
     expect(harness.dispatches).toEqual([
       [
@@ -483,6 +509,128 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(harness.dispatches).toHaveLength(1);
     const body = (await response.json()) as { error: string };
     expect(body.error).toContain('missing the "workflow" scope');
+  });
+
+  // The force path is destructive in a way the ordinary delete is not: it drops
+  // control-plane records whose external resources may still exist. These cases
+  // prove the real probe, the real precondition and the real dispatch agree
+  // over a real socket.
+  it("offers the force delete only once the failed run's artifact proves the conflict", async () => {
+    const harness = start();
+    harness.setDeploymentStatus("delete-failed");
+    harness.setDeploymentResolver((_repo, environment) =>
+      Promise.resolve({
+        app: "todo-app",
+        environment,
+        provider: "azure",
+        status: "delete-failed",
+        deploymentId: `dep-${environment}`,
+        runUrl: "https://github.com/octo/todo/actions/runs/7"
+      })
+    );
+    harness.artifacts.push({
+      id: 11,
+      name: "rad-delete-result",
+      workflow_run: { id: 7 }
+    });
+    harness.setArtifactFiles({
+      "rad-delete-result.json": JSON.stringify({
+        outcome: "failed",
+        forced: false,
+        output:
+          'code Conflict: err the target resource is in progress state: "Updating"'
+      })
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const probe = await fetch(
+      `${entry.baseUrl}/api/delete-conflict?repo=octo%2Ftodo&environment=dev&application=todo-app`
+    );
+    expect(probe.status).toBe(200);
+    expect(probe.headers.get("cache-control")).toBe("no-store");
+    expect(await probe.json()).toEqual({
+      conflict: true,
+      resourceState: "Updating",
+      forced: false,
+      detail: ""
+    });
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app",
+        force: true
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      success: true,
+      runUrl: "https://github.com/octo/todo/actions/runs/7",
+      forced: true
+    });
+    expect(harness.dispatches[0]).toContain("force=true");
+  });
+
+  it("reports no conflict over a real socket when the failed run left no artifact", async () => {
+    const harness = start();
+    harness.setDeploymentResolver((_repo, environment) =>
+      Promise.resolve({
+        app: "todo-app",
+        environment,
+        provider: "azure",
+        status: "delete-failed",
+        deploymentId: `dep-${environment}`,
+        runUrl: "https://github.com/octo/todo/actions/runs/7"
+      })
+    );
+    const entry = await container!.getOrCreate("panel-a");
+
+    const probe = await fetch(
+      `${entry.baseUrl}/api/delete-conflict?repo=octo%2Ftodo&environment=dev&application=todo-app`
+    );
+    expect(probe.status).toBe(200);
+    const body = (await probe.json()) as {
+      conflict: boolean;
+      detail: string;
+    };
+    expect(body.conflict).toBe(false);
+    expect(body.detail).toContain("rad-delete-result");
+  });
+
+  it("refuses an incomplete conflict probe over a real socket", async () => {
+    start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/delete-conflict?repo=octo%2Ftodo`
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "A valid repo, environment, and application are required."
+    });
+  });
+
+  it("refuses to force a delete that has not failed, over a real socket", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app",
+        force: true
+      })
+    );
+
+    expect(response.status).toBe(409);
+    expect(harness.dispatches).toEqual([]);
   });
 
   it("refuses an incomplete delete over a real socket", async () => {

@@ -21,7 +21,7 @@ import {
 } from "./delete-dialog.js";
 
 interface OpenableDialog {
-  open(app: string, environment: string): void;
+  open(app: string, environment: string, variant?: string): void;
   close(): void;
 }
 
@@ -151,6 +151,49 @@ describe("delete dialog browser entry", () => {
     expect(fakeText(body)).toContain("does not delete cloud resources");
     fakeById(body, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
     expect(fakeText(body)).toContain("may remain");
+  });
+
+  it("forwards the force variant and reports it back to the confirm handler", () => {
+    const browser = createFakeBrowserScope();
+    const { body } = dialogMarkup(browser);
+    const confirmed: unknown[][] = [];
+    installDeleteDialogEntry(browser.scope);
+    const dialog = asDialog(
+      requireBrowserFunction(
+        browser.scope,
+        DELETE_DIALOG_FACTORY_GLOBAL
+      )({
+        variant: "force",
+        onConfirm: (...args: unknown[]) => confirmed.push(args)
+      })
+    );
+
+    dialog.open("store", "prod");
+    expect(fakeText(body)).toContain("may still be updating");
+    fakeById(body, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
+    expect(fakeText(body)).toContain("orphaned external resources");
+    fakeById(body, DELETE_DIALOG_STEP2_BUTTON_ID).dispatch("click");
+    const input = fakeInputById(body, DELETE_DIALOG_CONFIRM_INPUT_ID);
+    input.value = "store/prod";
+    input.dispatch("input");
+    fakeInputById(body, DELETE_DIALOG_CONFIRM_BUTTON_ID).dispatch("click");
+
+    expect(confirmed).toEqual([["store", "prod", "force"]]);
+  });
+
+  it("falls back to the ordinary delete for an unrecognized variant", () => {
+    const browser = createFakeBrowserScope();
+    const { body } = dialogMarkup(browser);
+    installDeleteDialogEntry(browser.scope);
+    const dialog = asDialog(
+      requireBrowserFunction(
+        browser.scope,
+        DELETE_DIALOG_FACTORY_GLOBAL
+      )({ variant: "obliterate" })
+    );
+
+    dialog.open("store", "prod");
+    expect(fakeText(body)).toContain("confirm your intention");
   });
 
   it("ignores malformed option fields and non-callable handlers", () => {

@@ -14,6 +14,7 @@ import {
   graphProgressStages
 } from "../../../test/support/browser/graph-progress.js";
 import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
+import { DELETE_CONFLICT_PATH, deleteConflictUrl } from "../force-delete.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
 import {
@@ -188,22 +189,30 @@ function globals(overrides: Record<string, unknown> = {}) {
 // plain object (rather than a reassigned `let`) sidesteps the closure and
 // avoids relying on non-null assertions to invoke it later.
 function createConfirmingDialog() {
-  const holder: { confirmed: (() => void) | null; opened: boolean } = {
+  const holder: {
+    confirmed: (() => void) | null;
+    opened: boolean;
+    variant: string;
+  } = {
     confirmed: null,
-    opened: false
+    opened: false,
+    variant: ""
   };
   const createDialog = vi.fn(
-    (options: { onConfirm: (a: string, e: string) => void }) => ({
-      open: (application: string, environment: string) => {
+    (options: { onConfirm: (a: string, e: string, v?: string) => void }) => ({
+      open: (application: string, environment: string, variant?: string) => {
         holder.opened = true;
-        holder.confirmed = () => options.onConfirm(application, environment);
+        holder.variant = variant ?? "";
+        holder.confirmed = () =>
+          options.onConfirm(application, environment, variant);
       }
     })
   );
   return {
     createDialog,
     confirm: (): void => holder.confirmed?.(),
-    wasOpened: (): boolean => holder.opened
+    wasOpened: (): boolean => holder.opened,
+    openedVariant: (): string => holder.variant
   };
 }
 
@@ -1665,6 +1674,153 @@ describe("initializeDeployedGraphPage", () => {
 
     expect(browser.nav.assigned).toEqual(["/?page=deploying"]);
     expect(modal.style.display).toBe("none");
+  });
+
+  // Only a server-proven stranded-resource conflict may escalate this button to
+  // the forced delete, and only that delete may carry `force`.
+  it("forces the delete once the server proves the stranded-resource conflict", async () => {
+    const { browser, action, appSelect, envSelect, modalText } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { createDialog, confirm, openedVariant } = createConfirmingDialog();
+    let dispatched: unknown;
+    browser.net.handle(
+      deleteConflictUrl({
+        repo: "octo/app",
+        environment: "dev",
+        application: "app"
+      }),
+      () =>
+        jsonResponse({
+          conflict: true,
+          resourceState: "Updating",
+          forced: false,
+          detail: ""
+        })
+    );
+    browser.net.handle("/api/delete-deployment", (init) => {
+      dispatched = init?.body;
+      return jsonResponse({});
+    });
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    action.dispatch("click");
+    await flushPromises();
+    expect(openedVariant()).toBe("force");
+
+    confirm();
+    expect(modalText.textContent).toContain("Force deleting application app");
+    expect(modalText.textContent).toContain("orphaned external resources");
+    await flushPromises();
+    expect(JSON.parse(String(dispatched))).toEqual({
+      repo: "octo/app",
+      environment: "dev",
+      application: "app",
+      force: true
+    });
+  });
+
+  it("keeps the ordinary delete when the probe cannot prove a conflict", async () => {
+    const { browser, action, appSelect, envSelect } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { createDialog, confirm, openedVariant } = createConfirmingDialog();
+    let dispatched: unknown;
+    browser.net.handle(
+      deleteConflictUrl({
+        repo: "octo/app",
+        environment: "dev",
+        application: "app"
+      }),
+      () => jsonResponse({ conflict: false, detail: "artifact expired." })
+    );
+    browser.net.handle("/api/delete-deployment", (init) => {
+      dispatched = init?.body;
+      return jsonResponse({});
+    });
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    action.dispatch("click");
+    await flushPromises();
+    expect(openedVariant()).toBe("delete");
+
+    confirm();
+    await flushPromises();
+    expect(JSON.parse(String(dispatched))).toEqual({
+      repo: "octo/app",
+      environment: "dev",
+      application: "app",
+      force: false
+    });
+  });
+
+  it("never probes for a deployment whose delete has not failed", async () => {
+    const { browser, action, appSelect, envSelect } = fixture();
+    const { createDialog, wasOpened, openedVariant } = createConfirmingDialog();
+    browser.net.handle("/api/delete-deployment", () => jsonResponse({}));
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    action.dispatch("click");
+
+    expect(wasOpened()).toBe(true);
+    expect(openedVariant()).toBe("");
+    expect(
+      browser.net.calls.some((call) =>
+        call.url.startsWith(DELETE_CONFLICT_PATH)
+      )
+    ).toBe(false);
+  });
+
+  it("does not open the dialog when the page is torn down mid-probe", async () => {
+    const { browser, action, appSelect, envSelect } = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { createDialog, wasOpened } = createConfirmingDialog();
+    browser.net.handle(
+      deleteConflictUrl({
+        repo: "octo/app",
+        environment: "dev",
+        application: "app"
+      }),
+      () =>
+        jsonResponse({
+          conflict: true,
+          resourceState: "Updating",
+          forced: false,
+          detail: ""
+        })
+    );
+    const teardown = initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    action.dispatch("click");
+    teardown();
+    await flushPromises();
+
+    expect(wasOpened()).toBe(false);
   });
 
   it("keeps cloud teardown available after a failed redeploy", async () => {

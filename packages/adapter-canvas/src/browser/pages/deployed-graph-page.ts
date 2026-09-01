@@ -2,6 +2,11 @@ import { optionalBrowserFunction, requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
 import { createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl, parseGraphResources } from "../graph/model.js";
+import {
+  DELETE_FAILED_STATUS,
+  FORCE_DELETE_ORPHAN_NOTICE,
+  probeDeleteConflict
+} from "../force-delete.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { queryValue } from "../query.js";
 import {
@@ -23,6 +28,7 @@ import {
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
 import type { GraphProgressView } from "../graph/progress.js";
+import type { DeploymentDialogVariant } from "../delete-dialog.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
@@ -50,7 +56,11 @@ interface DeploymentState {
 }
 
 interface DeleteDialog {
-  open(application: string, environment: string): void;
+  open(
+    application: string,
+    environment: string,
+    variant?: DeploymentDialogVariant
+  ): void;
   teardown?: () => void;
 }
 
@@ -59,8 +69,8 @@ function asDeleteDialog(value: unknown): DeleteDialog | null {
   const open = value.open;
   const teardown = value.teardown;
   return {
-    open: (application, environment) => {
-      open(application, environment);
+    open: (application, environment, variant) => {
+      open(application, environment, variant);
     },
     teardown:
       isCallable(teardown) ?
@@ -628,11 +638,19 @@ export function initializeDeployedGraphPage(
         markEnvironmentsUnavailable(error);
       });
 
-  const runDelete = (application: string, environment: string): void => {
+  const runDelete = (
+    application: string,
+    environment: string,
+    variant: DeploymentDialogVariant = "delete"
+  ): void => {
+    const force = variant === "force";
     const modal = context.dom.byId("deployed-deleting-modal");
     const text = context.dom.byId("deployed-deleting-text");
     if (text) {
-      text.textContent = `Deleting application ${application} from ${environment} with rad app delete. This may take a few minutes.`;
+      text.textContent =
+        force ?
+          `Force deleting application ${application} from ${environment} with rad app delete --force. ${FORCE_DELETE_ORPHAN_NOTICE}`
+        : `Deleting application ${application} from ${environment} with rad app delete. This may take a few minutes.`;
     }
     if (modal) modal.style.display = "flex";
     void context.net
@@ -642,7 +660,8 @@ export function initializeDeployedGraphPage(
         body: JSON.stringify({
           repo: page.repo,
           environment,
-          application
+          application,
+          force
         })
       })
       .then((response) =>
@@ -736,6 +755,30 @@ export function initializeDeployedGraphPage(
       });
   };
 
+  // A delete that already failed may be stuck behind a resource the control
+  // plane still holds. Only a server-proven conflict escalates the button to
+  // the forced confirmation; anything else keeps the ordinary one.
+  const openDeleteDialog = (target: DeleteDialog): void => {
+    const application = selectedApplication();
+    const environment = selectedEnvironment();
+    if (selectedStatus() !== DELETE_FAILED_STATUS) {
+      target.open(application, environment);
+      return;
+    }
+    void probeDeleteConflict(context, {
+      repo: page.repo,
+      environment,
+      application
+    }).then((result) => {
+      if (!entry.active) return;
+      target.open(
+        application,
+        environment,
+        result.conflict ? "force" : "delete"
+      );
+    });
+  };
+
   const createDialog = optionalBrowserFunction(
     globalScope,
     "radiusCreateDeleteDeploymentDialog"
@@ -789,7 +832,7 @@ export function initializeDeployedGraphPage(
           () => entry.active
         );
       } else if (dialog && selectedApplication() && selectedEnvironment()) {
-        dialog.open(selectedApplication(), selectedEnvironment());
+        openDeleteDialog(dialog);
       }
     });
   }

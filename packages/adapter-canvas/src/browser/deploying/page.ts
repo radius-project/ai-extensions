@@ -8,6 +8,12 @@
 import { remediationView } from "@radius-project/core/remediations";
 import { createCommandAction } from "../command-action.js";
 import { createDeleteDeploymentDialog } from "../delete-dialog.js";
+import type { DeploymentDialogVariant } from "../delete-dialog.js";
+import {
+  DELETE_FAILED_STATUS,
+  FORCE_DELETE_ORPHAN_NOTICE,
+  probeDeleteConflict
+} from "../force-delete.js";
 import { escapeBrowserHtml } from "../html.js";
 import { isRecord, readBoolean, readRecord, readString } from "../json.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
@@ -672,21 +678,49 @@ export function initializeDeployingPage(
       });
   };
 
+  // The status the table is showing for this row, including an optimistic
+  // override, so the conflict probe only runs for a delete that has failed.
+  const rowStatus = (app: string, environment: string): string => {
+    const override = overrides.get(opKey(app, environment));
+    if (override) return override.status;
+    const record = lastRecords.find(
+      (row) => row.app === app && row.environment === environment
+    );
+    return record ? record.status : "";
+  };
+
   const openDeleteModal = (app: string, environment: string): void => {
-    dialog?.open(app, environment);
+    if (!dialog) return;
+    if (rowStatus(app, environment) !== DELETE_FAILED_STATUS) {
+      dialog.open(app, environment);
+      return;
+    }
+    void probeDeleteConflict(context, {
+      repo: options.repo,
+      environment,
+      application: app
+    }).then((result) => {
+      if (!entry.active) return;
+      dialog.open(app, environment, result.conflict ? "force" : "delete");
+    });
   };
 
   // Dispatch the delete, then let the row reflect "Deleting…" while the
   // workflow runs. Fails closed: a missing repository, application, or
   // environment identity never reaches the delete endpoint.
-  const runDelete = (app: string, environment: string): void => {
+  const runDelete = (
+    app: string,
+    environment: string,
+    variant: DeploymentDialogVariant = "delete"
+  ): void => {
     if (!options.repo || app === "" || environment === "") return;
+    const force = variant === "force";
     const key = opKey(app, environment);
     overrides.set(key, { app, environment, status: "deleting" });
     void loadDeployments(true, true);
     showInline(
       "success",
-      `Deleting deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has started.`,
+      `${force ? "Force deleting" : "Deleting"} deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has started.`,
       true
     );
     void context.net
@@ -696,7 +730,8 @@ export function initializeDeployingPage(
         body: JSON.stringify({
           repo: options.repo,
           environment,
-          application: app
+          application: app,
+          force
         })
       })
       .then((response) =>
@@ -714,7 +749,7 @@ export function initializeDeployingPage(
           );
           return;
         }
-        pollDeleteCompletion(app, environment, 0);
+        pollDeleteCompletion(app, environment, 0, force);
       })
       .catch(() => {
         if (!entry.active) return;
@@ -734,7 +769,8 @@ export function initializeDeployingPage(
   const pollDeleteCompletion = (
     app: string,
     environment: string,
-    tries: number
+    tries: number,
+    forced = false
   ): void => {
     if (tries > DELETE_POLL_LIMIT) {
       overrides.delete(opKey(app, environment));
@@ -758,7 +794,7 @@ export function initializeDeployingPage(
             readString(result.payload, "error") ||
             !hasDeploymentsArray(result.payload)
           ) {
-            pollDeleteCompletion(app, environment, tries + 1);
+            pollDeleteCompletion(app, environment, tries + 1, forced);
             return;
           }
           const deployments = parseDeploymentRecords(result.payload);
@@ -771,17 +807,20 @@ export function initializeDeployingPage(
             void loadDeployments(true, true);
             showInline(
               "success",
-              `Deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has been successfully deleted.`,
+              `Deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has been successfully deleted.` +
+                (forced ?
+                  ` ${escapeBrowserHtml(FORCE_DELETE_ORPHAN_NOTICE)}`
+                : ""),
               true
             );
             return;
           }
           void loadDeployments(true, true);
-          pollDeleteCompletion(app, environment, tries + 1);
+          pollDeleteCompletion(app, environment, tries + 1, forced);
         })
         .catch(() => {
           if (!entry.active) return;
-          pollDeleteCompletion(app, environment, tries + 1);
+          pollDeleteCompletion(app, environment, tries + 1, forced);
         });
     });
   };

@@ -5,6 +5,7 @@ import { createRequestContext } from "../request-context.js";
 import {
   createDeploymentsRoutes,
   handleAbandonDeployment,
+  handleDeleteConflict,
   handleDeleteDeployment,
   handleDeploy,
   handleDeployNotification,
@@ -152,6 +153,9 @@ function dependencies(
         throw new Error("abandonment.abandon not stubbed");
       }
     },
+    probeDeleteConflict: () => {
+      throw new Error("probeDeleteConflict not stubbed");
+    },
     ...overrides
   };
 }
@@ -225,13 +229,14 @@ const JSON_HEADERS = {
 };
 
 describe("deployments routes (SU-06)", () => {
-  it("declares exactly the eight routes it owns", () => {
+  it("declares exactly the nine routes it owns", () => {
     const routes = createDeploymentsRoutes(dependencies());
     expect(Object.keys(routes)).toEqual([
       "GET /api/deploy-status",
       "GET /api/deploy-notification",
       "GET /api/list-applications",
       "GET /api/list-deployments",
+      "GET /api/delete-conflict",
       "POST /api/deploy",
       "POST /api/deploy-reset",
       "POST /api/delete-deployment",
@@ -1742,7 +1747,8 @@ describe("deployments routes (SU-06)", () => {
       });
       expect(JSON.parse(recording.body)).toEqual({
         success: true,
-        runUrl: "https://github.com/octo/todolist/actions/runs/42"
+        runUrl: "https://github.com/octo/todolist/actions/runs/42",
+        forced: false
       });
       expect(dispatched).toEqual([
         [
@@ -1770,7 +1776,8 @@ describe("deployments routes (SU-06)", () => {
 
       expect(JSON.parse(recording.body)).toEqual({
         success: true,
-        runUrl: ""
+        runUrl: "",
+        forced: false
       });
     });
 
@@ -2187,6 +2194,371 @@ describe("deployments routes (SU-06)", () => {
       expect(released).toEqual([LEASE]);
       fire();
       expect(released).toEqual([LEASE]);
+    });
+
+    // Forcing removes control-plane records whose external resources may still
+    // exist, so the route treats it as a strictly narrower operation than an
+    // ordinary delete rather than as another flag to pass along.
+    describe("force", () => {
+      const FORCE_BODY = JSON.stringify({
+        repo: "octo/todolist",
+        environment: "dev",
+        application: "todolist",
+        force: true
+      });
+
+      function forceDependencies(
+        overrides: Partial<DeploymentsDependencies> = {}
+      ): DeploymentsDependencies {
+        return deleteDependencies({
+          resolveEnvDeployment: () =>
+            Promise.resolve(row("dev", "delete-failed")),
+          ...overrides
+        });
+      }
+
+      it("adds --force to the dispatch once a previous delete has failed", async () => {
+        const dispatched: string[][] = [];
+        const { recording, context: ctx } = deleteContext(FORCE_BODY);
+        await handleDeleteDeployment(
+          ctx,
+          forceDependencies({
+            runGh: (args) => {
+              dispatched.push(args);
+              return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+            }
+          })
+        );
+
+        expect(recording.status).toBe(200);
+        expect(JSON.parse(recording.body)).toEqual({
+          success: true,
+          runUrl: "",
+          forced: true
+        });
+        expect(dispatched).toEqual([
+          [
+            "workflow",
+            "run",
+            "delete-application.yml",
+            "-f",
+            "environment=dev",
+            "-f",
+            "application=todolist",
+            "-f",
+            "force=true",
+            "--repo",
+            "octo/todolist"
+          ]
+        ]);
+      });
+
+      it.each([
+        ["nothing is deployed", null],
+        ["the deployment never failed a delete", row("dev", "success")]
+      ])("refuses to force when %s", async (_case, current) => {
+        const released: unknown[] = [];
+        const { recording, context: ctx } = deleteContext(FORCE_BODY);
+        await handleDeleteDeployment(
+          ctx,
+          forceDependencies({
+            resolveEnvDeployment: () => Promise.resolve(current),
+            releaseDeploymentMutation: (_state, lease) => released.push(lease),
+            runGh: () => {
+              throw new Error("must refuse before dispatching");
+            }
+          })
+        );
+
+        expect(recording.status).toBe(409);
+        expect(JSON.parse(recording.body)).toEqual({
+          error:
+            "A delete can only be forced after a previous delete of this application failed. Run the delete normally first."
+        });
+        expect(released).toEqual([LEASE]);
+      });
+
+      it.each([
+        ["a string", '"true"'],
+        ["a number", "1"],
+        ["absent", "false"]
+      ])(
+        "does not force when the requested value is %s rather than true",
+        async (_case, value) => {
+          const dispatched: string[][] = [];
+          const { recording, context: ctx } = deleteContext(
+            `{"repo":"octo/todolist","environment":"dev","application":"todolist","force":${value}}`
+          );
+          await handleDeleteDeployment(
+            ctx,
+            forceDependencies({
+              runGh: (args) => {
+                dispatched.push(args);
+                return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+              }
+            })
+          );
+
+          expect(recording.status).toBe(200);
+          expect(JSON.parse(recording.body)).toEqual({
+            success: true,
+            runUrl: "",
+            forced: false
+          });
+          expect(dispatched[0]).not.toContain("force=true");
+        }
+      );
+
+      // GitHub answers 422 until it has re-read the freshly committed
+      // dispatcher that declares the `force` input, so that refusal is a race
+      // rather than an answer.
+      it("retries a force dispatch GitHub refuses as an unexpected input", async () => {
+        const attempts: string[] = [];
+        const { recording, context: ctx } = deleteContext(FORCE_BODY);
+        await handleDeleteDeployment(
+          ctx,
+          forceDependencies({
+            runGh: () => {
+              attempts.push("dispatch");
+              return Promise.resolve(
+                attempts.length < 3 ?
+                  {
+                    code: 1,
+                    stdout: "",
+                    stderr: 'HTTP 422: Unexpected inputs provided: ["force"]'
+                  }
+                : { code: 0, stdout: "", stderr: "" }
+              );
+            },
+            setTimer: (callback) => {
+              callback();
+              return {};
+            }
+          })
+        );
+
+        expect(attempts).toHaveLength(3);
+        expect(recording.status).toBe(200);
+      });
+
+      it("stops retrying a force dispatch that failed without a diagnostic", async () => {
+        const attempts: string[] = [];
+        const { recording, context: ctx } = deleteContext(FORCE_BODY);
+        await handleDeleteDeployment(
+          ctx,
+          forceDependencies({
+            runGh: () => {
+              attempts.push("dispatch");
+              return Promise.resolve({ code: 1, stdout: "", stderr: "" });
+            },
+            setTimer: (callback) => {
+              callback();
+              return {};
+            }
+          })
+        );
+
+        expect(attempts).toHaveLength(1);
+        expect(recording.status).toBe(400);
+      });
+
+      // The 422 retry exists only because a just-committed workflow may not
+      // declare `force` yet, so an ordinary delete must not inherit it.
+      it("does not retry an unforced dispatch refused as an unexpected input", async () => {
+        const attempts: string[] = [];
+        const { recording, context: ctx } = deleteContext();
+        await handleDeleteDeployment(
+          ctx,
+          forceDependencies({
+            runGh: () => {
+              attempts.push("dispatch");
+              return Promise.resolve({
+                code: 1,
+                stdout: "",
+                stderr: "HTTP 422: Unexpected inputs provided"
+              });
+            },
+            setTimer: (callback) => {
+              callback();
+              return {};
+            }
+          })
+        );
+
+        expect(attempts).toHaveLength(1);
+        expect(recording.status).toBe(400);
+      });
+
+      it("stops retrying a force dispatch GitHub refuses for another reason", async () => {
+        const attempts: string[] = [];
+        const { recording, context: ctx } = deleteContext(FORCE_BODY);
+        await handleDeleteDeployment(
+          ctx,
+          forceDependencies({
+            runGh: () => {
+              attempts.push("dispatch");
+              return Promise.resolve({
+                code: 1,
+                stdout: "",
+                stderr: "Actions are disabled for this repository"
+              });
+            },
+            setTimer: (callback) => {
+              callback();
+              return {};
+            }
+          })
+        );
+
+        expect(attempts).toHaveLength(1);
+        expect(recording.status).toBe(400);
+      });
+    });
+  });
+
+  // Read-only probe in front of the destructive route: it decides whether the
+  // page may offer the force-delete confirmation at all.
+  describe("GET /api/delete-conflict", () => {
+    const QUERY =
+      "/api/delete-conflict?repo=octo%2Ftodolist&environment=dev&application=todolist";
+
+    it.each([
+      ["repo is missing", "/api/delete-conflict?environment=dev&application=a"],
+      [
+        "environment is missing",
+        "/api/delete-conflict?repo=octo%2Ftodolist&application=a"
+      ],
+      [
+        "application is missing",
+        "/api/delete-conflict?repo=octo%2Ftodolist&environment=dev"
+      ],
+      [
+        "repo is not a valid slug",
+        "/api/delete-conflict?repo=invalid&environment=dev&application=a"
+      ]
+    ])("refuses the probe when %s", async (_case, url) => {
+      const { recording, context: ctx } = context("GET", url);
+      await handleDeleteConflict(
+        ctx,
+        dependencies({
+          probeDeleteConflict: () => {
+            throw new Error("must refuse before probing");
+          }
+        })
+      );
+
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({
+        error: "A valid repo, environment, and application are required."
+      });
+    });
+
+    it("reports a stranded-resource conflict and never caches the answer", async () => {
+      const probed: unknown[] = [];
+      const { recording, context: ctx } = context("GET", QUERY);
+      await handleDeleteConflict(
+        ctx,
+        dependencies({
+          probeDeleteConflict: (request) => {
+            probed.push(request);
+            return Promise.resolve({
+              state: "conflict",
+              resourceState: "Updating",
+              forced: false
+            });
+          }
+        })
+      );
+
+      expect(recording.status).toBe(200);
+      expect(recording.headers).toEqual(JSON_HEADERS);
+      expect(JSON.parse(recording.body)).toEqual({
+        conflict: true,
+        resourceState: "Updating",
+        forced: false,
+        detail: ""
+      });
+      expect(probed).toEqual([
+        { repo: "octo/todolist", environment: "dev", application: "todolist" }
+      ]);
+    });
+
+    it("reports that the stranded delete had already been forced", async () => {
+      const { recording, context: ctx } = context("GET", QUERY);
+      await handleDeleteConflict(
+        ctx,
+        dependencies({
+          probeDeleteConflict: () =>
+            Promise.resolve({
+              state: "conflict",
+              resourceState: "Deleting",
+              forced: true
+            })
+        })
+      );
+
+      expect(JSON.parse(recording.body)).toEqual({
+        conflict: true,
+        resourceState: "Deleting",
+        forced: true,
+        detail: ""
+      });
+    });
+
+    it("reports no conflict when the probe is clear", async () => {
+      const { recording, context: ctx } = context("GET", QUERY);
+      await handleDeleteConflict(
+        ctx,
+        dependencies({
+          probeDeleteConflict: () => Promise.resolve({ state: "clear" })
+        })
+      );
+
+      expect(recording.status).toBe(200);
+      expect(JSON.parse(recording.body)).toEqual({
+        conflict: false,
+        resourceState: "",
+        forced: false,
+        detail: ""
+      });
+    });
+
+    it("passes an inconclusive probe through as no conflict with its reason", async () => {
+      const { recording, context: ctx } = context("GET", QUERY);
+      await handleDeleteConflict(
+        ctx,
+        dependencies({
+          probeDeleteConflict: () =>
+            Promise.resolve({ state: "unknown", detail: "artifact expired." })
+        })
+      );
+
+      expect(JSON.parse(recording.body)).toEqual({
+        conflict: false,
+        resourceState: "",
+        forced: false,
+        detail: "artifact expired."
+      });
+    });
+
+    // The probe runs on a delete click, so a thrown port must never be what the
+    // user sees instead of the ordinary delete confirmation.
+    it("reports no conflict when the probe itself throws", async () => {
+      const { recording, context: ctx } = context("GET", QUERY);
+      await handleDeleteConflict(
+        ctx,
+        dependencies({
+          probeDeleteConflict: () => Promise.reject(new Error("gh exploded"))
+        })
+      );
+
+      expect(recording.status).toBe(200);
+      expect(JSON.parse(recording.body)).toEqual({
+        conflict: false,
+        resourceState: "",
+        forced: false,
+        detail: "gh exploded"
+      });
     });
   });
 

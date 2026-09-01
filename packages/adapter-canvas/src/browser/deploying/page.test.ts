@@ -29,6 +29,7 @@ import {
   ENVIRONMENTS_PATH,
   WORKTREE_SHA
 } from "../repositories.js";
+import { DELETE_CONFLICT_PATH, deleteConflictUrl } from "../force-delete.js";
 import {
   DELETE_DEPLOYMENT_PATH,
   DELETE_POLL_LIMIT,
@@ -830,6 +831,7 @@ describe("delete flow", () => {
     await flushPromises();
     expect(page.tableBody.innerHTML).toContain("Deleting");
     expect(JSON.parse(String(deleteCalled))).toEqual({
+      force: false,
       repo: "octo/app",
       environment: "dev",
       application: "app"
@@ -843,6 +845,159 @@ describe("delete flow", () => {
     page.browser.clock.tick(DELETE_POLL_MS);
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toContain("successfully deleted");
+  });
+
+  // The force escalation is offered only for a delete that already failed and
+  // that the server can prove is stuck, and only that path may force.
+  describe("force delete after a failed delete", () => {
+    async function readyWithFailedRow(app = "app", environment = "dev") {
+      const page = fixture({
+        deploymentsPayload: {
+          deployments: [{ app, environment, status: "delete-failed" }]
+        }
+      });
+      const button = deployRowButton(app, environment);
+      page.browser.document.addSelectorAll(".js-del-dep", [button]);
+      const teardown = init(page);
+      await flushPromises();
+      return { page, button, teardown };
+    }
+
+    function handleConflict(
+      page: Awaited<ReturnType<typeof readyWithFailedRow>>["page"],
+      payload: unknown
+    ): string[] {
+      const asked: string[] = [];
+      page.browser.net.handle(
+        deleteConflictUrl({
+          repo: page.repo,
+          environment: "dev",
+          application: "app"
+        }),
+        () => {
+          asked.push("probe");
+          return jsonResponse(payload);
+        }
+      );
+      return asked;
+    }
+
+    it("offers the forced confirmation and forces the delete once the conflict is proven", async () => {
+      const { page, button } = await readyWithFailedRow();
+      const asked = handleConflict(page, {
+        conflict: true,
+        resourceState: "Updating",
+        forced: false,
+        detail: ""
+      });
+      let dispatched: unknown;
+      page.browser.net.handle(DELETE_DEPLOYMENT_PATH, (init) => {
+        dispatched = init?.body;
+        return jsonResponse({ ok: true });
+      });
+
+      button.dispatch("click");
+      await flushPromises();
+      expect(asked).toEqual(["probe"]);
+      expect(page.deleteModal.style.display).toBe("flex");
+      expect(fakeText(page.deleteBody)).toContain("may still be updating");
+
+      confirmDeleteDialog(page.deleteBody, "app", "dev");
+      await flushPromises();
+      expect(JSON.parse(String(dispatched))).toEqual({
+        force: true,
+        repo: "octo/app",
+        environment: "dev",
+        application: "app"
+      });
+      expect(inlineMessage(page.inlineStatus)).toContain("Force deleting");
+
+      page.browser.net.handle(
+        `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+        () => jsonResponse({ deployments: [] })
+      );
+      page.browser.clock.tick(DELETE_POLL_MS);
+      await flushPromises();
+      const done = inlineMessage(page.inlineStatus);
+      expect(done).toContain("successfully deleted");
+      expect(done).toContain("orphaned external resources");
+    });
+
+    it("keeps the ordinary confirmation when the probe finds no conflict", async () => {
+      const { page, button } = await readyWithFailedRow();
+      handleConflict(page, { conflict: false, detail: "artifact expired." });
+      let dispatched: unknown;
+      page.browser.net.handle(DELETE_DEPLOYMENT_PATH, (init) => {
+        dispatched = init?.body;
+        return jsonResponse({ ok: true });
+      });
+
+      button.dispatch("click");
+      await flushPromises();
+      expect(fakeText(page.deleteBody)).toContain("confirm your intention");
+
+      confirmDeleteDialog(page.deleteBody, "app", "dev");
+      await flushPromises();
+      expect(JSON.parse(String(dispatched))).toEqual({
+        force: false,
+        repo: "octo/app",
+        environment: "dev",
+        application: "app"
+      });
+    });
+
+    it("does not probe at all for a deployment whose delete has not failed", async () => {
+      const { page, button } = await readyWithRow("app", "dev");
+      button.dispatch("click");
+      await flushPromises();
+
+      expect(
+        page.browser.net.calls.some((call) =>
+          call.url.startsWith(DELETE_CONFLICT_PATH)
+        )
+      ).toBe(false);
+      expect(fakeText(page.deleteBody)).toContain("confirm your intention");
+    });
+
+    // Once a delete is in flight the row is optimistically "deleting", and the
+    // conflict that justified forcing is no longer the row's state.
+    it("does not probe again while the forced delete it started is in flight", async () => {
+      const { page, button } = await readyWithFailedRow();
+      const asked = handleConflict(page, {
+        conflict: true,
+        resourceState: "Updating",
+        forced: false,
+        detail: ""
+      });
+      page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+        jsonResponse({ ok: true })
+      );
+
+      button.dispatch("click");
+      await flushPromises();
+      confirmDeleteDialog(page.deleteBody, "app", "dev");
+      await flushPromises();
+
+      button.dispatch("click");
+      await flushPromises();
+      expect(asked).toEqual(["probe"]);
+      expect(fakeText(page.deleteBody)).toContain("confirm your intention");
+    });
+
+    it("does not open the dialog when the page was torn down mid-probe", async () => {
+      const { page, button, teardown } = await readyWithFailedRow();
+      handleConflict(page, {
+        conflict: true,
+        resourceState: "Updating",
+        forced: false,
+        detail: ""
+      });
+
+      button.dispatch("click");
+      teardown();
+      await flushPromises();
+      expect(page.deleteModal.style.display).not.toBe("flex");
+    });
   });
 
   it("fails closed and never dispatches when the application identity is missing", async () => {

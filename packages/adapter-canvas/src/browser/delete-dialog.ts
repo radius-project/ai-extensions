@@ -25,12 +25,22 @@ export const DELETE_DIALOG_IDS = {
   close: "deploy-delete-close"
 } as const;
 
+/**
+ * The orphaned-resource caution the `rad` CLI prints for a forced delete, which
+ * the dialog states before forcing and the pages restate once it finishes.
+ */
+export const FORCE_DELETE_ORPHAN_WARNING =
+  "Force deleting an application. Resources in non-terminal states may leave orphaned external resources that require manual cleanup.";
+
 export const DELETE_DIALOG_STEP1_BUTTON_ID = "del-step1-btn";
 export const DELETE_DIALOG_STEP2_BUTTON_ID = "del-step2-btn";
 export const DELETE_DIALOG_CONFIRM_INPUT_ID = "del-confirm-input";
 export const DELETE_DIALOG_CONFIRM_BUTTON_ID = "del-confirm-btn";
 
-export type DeploymentDialogVariant = "delete" | "abandon";
+// `force` is the escape hatch for a delete the control plane refuses because
+// the resource is stuck in a non-terminal state. It is strictly more dangerous
+// than `delete`, so it gets its own copy rather than a flag on the delete copy.
+export type DeploymentDialogVariant = "delete" | "abandon" | "force";
 
 export interface DeleteDialogOptions {
   modalId?: string;
@@ -39,11 +49,19 @@ export interface DeleteDialogOptions {
   envId?: string;
   closeId?: string;
   variant?: DeploymentDialogVariant;
-  onConfirm?: (app: string, environment: string) => void;
+  onConfirm?: (
+    app: string,
+    environment: string,
+    variant: DeploymentDialogVariant
+  ) => void;
 }
 
 export interface DeleteDialogHandle {
-  open(app: string, environment: string): void;
+  open(
+    app: string,
+    environment: string,
+    variant?: DeploymentDialogVariant
+  ): void;
   close(): void;
   teardown(): void;
 }
@@ -88,6 +106,22 @@ export function deleteDialogIntentSpecs(
         className: "rad-ddlg__btn",
         attrs: { type: "button" },
         text: "I want to stop tracking this deployment"
+      }
+    ];
+  }
+  if (variant === "force") {
+    return [
+      {
+        tag: "p",
+        className: "rad-ddlg__text",
+        text: "The last delete failed because this deployment may still be updating. Force deleting removes it from Radius without waiting for that update to finish."
+      },
+      {
+        tag: "button",
+        id: DELETE_DIALOG_STEP1_BUTTON_ID,
+        className: "rad-ddlg__btn",
+        attrs: { type: "button" },
+        text: "I want to force delete this deployment"
       }
     ];
   }
@@ -149,6 +183,47 @@ export function deleteDialogEffectsSpecs(
         className: "rad-ddlg__btn",
         attrs: { type: "button" },
         text: "I understand cloud resources may remain"
+      }
+    ];
+  }
+  if (variant === "force") {
+    return [
+      {
+        tag: "div",
+        className: "rad-ddlg__warn",
+        children: [
+          { tag: "span", attrs: { "aria-hidden": "true" }, text: "⚠" },
+          {
+            tag: "span",
+            text: FORCE_DELETE_ORPHAN_WARNING
+          }
+        ]
+      },
+      {
+        tag: "div",
+        className: "rad-ddlg__bullet",
+        children: [
+          {
+            tag: "span",
+            children: [
+              { tag: "span", text: "This will force delete " },
+              { tag: "strong", text: target.app },
+              { tag: "span", text: " from environment " },
+              { tag: "strong", text: target.environment },
+              {
+                tag: "span",
+                text: ", and you must check your cloud provider for resources it leaves behind."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        tag: "button",
+        id: DELETE_DIALOG_STEP2_BUTTON_ID,
+        className: "rad-ddlg__btn",
+        attrs: { type: "button" },
+        text: "I understand resources may be orphaned"
       }
     ];
   }
@@ -226,8 +301,8 @@ export function deleteDialogConfirmSpecs(
       className: "rad-ddlg__delete",
       attrs: { type: "button" },
       text:
-        variant === "abandon" ?
-          "Stop tracking deployment"
+        variant === "abandon" ? "Stop tracking deployment"
+        : variant === "force" ? "Force delete this deployment"
         : "Delete this deployment"
     }
   ];
@@ -255,7 +330,10 @@ export function createDeleteDeploymentDialog(
   const appEl = dom.byId(options.appId ?? DELETE_DIALOG_IDS.app);
   const envEl = dom.byId(options.envId ?? DELETE_DIALOG_IDS.environment);
   const closeEl = dom.byId(options.closeId ?? DELETE_DIALOG_IDS.close);
-  const variant = options.variant ?? "delete";
+  const defaultVariant = options.variant ?? "delete";
+  // The page decides between the ordinary and the forced confirmation on each
+  // click, so the variant belongs to the open dialog rather than to the handle.
+  let variant = defaultVariant;
 
   const owned: Registration[] = [];
   const stepBindings: Registration[] = [];
@@ -312,8 +390,9 @@ export function createDeleteDeploymentDialog(
   };
 
   const confirmNow = (target: DeleteTarget): void => {
+    const confirmed = variant;
     close();
-    options.onConfirm?.(target.app, target.environment);
+    options.onConfirm?.(target.app, target.environment, confirmed);
   };
 
   const showIntent = (target: DeleteTarget): void => {
@@ -355,7 +434,12 @@ export function createDeleteDeploymentDialog(
     input.focus();
   };
 
-  const open = (app: string, environment: string): void => {
+  const open = (
+    app: string,
+    environment: string,
+    requested?: DeploymentDialogVariant
+  ): void => {
+    variant = requested ?? defaultVariant;
     returnFocusTo = context.focus.active();
     if (appEl) appEl.textContent = app;
     if (envEl) envEl.textContent = environment;
