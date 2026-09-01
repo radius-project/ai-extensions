@@ -202,6 +202,7 @@ interface RequestContext {
   deadline: number;
   requestTimeoutMs: number;
   operation: "bootstrap" | "deletion";
+  credentialSource: GhCredentials["source"];
 }
 
 interface RequestOptions {
@@ -807,7 +808,11 @@ async function githubJson(
   if (response.status === 401 || response.status === 403) {
     throw packageAuthError(
       `GitHub Packages API rejected access (HTTP ${response.status})`,
-      ghCommandPresentation
+      ghCommandPresentation,
+      requests.operation === "deletion" ?
+        "read:packages,delete:packages"
+      : undefined,
+      requests.credentialSource
     );
   }
   if (!response.ok) {
@@ -978,18 +983,19 @@ export async function bootstrapGHCRStatePackage({
   ) {
     throw new Error("GHCR timeout values must be positive finite numbers.");
   }
+  const auth =
+    credentials || (await loadGhKeyringCredentials({ ghCommandPresentation }));
   const requests: RequestContext = {
     fetchImpl,
     sleep,
     now,
     deadline: now() + bootstrapTimeoutMs,
     requestTimeoutMs,
-    operation: "bootstrap"
+    operation: "bootstrap",
+    credentialSource: auth.source
   };
   const canonicalTargetRepository = targetRepository.toLowerCase();
   const parsed = parseRegistry(registry, registryOrigin);
-  const auth =
-    credentials || (await loadGhKeyringCredentials({ ghCommandPresentation }));
   const endpoint = await packageEndpoint({
     requests,
     apiBaseUrl: apiBaseUrl.replace(/\/+$/, ""),
@@ -1100,21 +1106,22 @@ export async function deleteGHCRStatePackage({
     );
   }
 
-  const requests: RequestContext = {
-    fetchImpl,
-    sleep,
-    now,
-    deadline: now() + deletionTimeoutMs,
-    requestTimeoutMs,
-    operation: "deletion"
-  };
-  const parsed = parseRegistry(registry);
   const auth =
     credentials ||
     (await loadGhKeyringCredentials({
       runKeyringCommand,
       ghCommandPresentation
     }));
+  const requests: RequestContext = {
+    fetchImpl,
+    sleep,
+    now,
+    deadline: now() + deletionTimeoutMs,
+    requestTimeoutMs,
+    operation: "deletion",
+    credentialSource: auth.source
+  };
+  const parsed = parseRegistry(registry);
   const endpoint = await packageEndpoint({
     requests,
     apiBaseUrl: apiBaseUrl.replace(/\/+$/, ""),

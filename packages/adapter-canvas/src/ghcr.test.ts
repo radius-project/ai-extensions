@@ -352,12 +352,14 @@ function createDeletionHarness({
     repository: { full_name: "acme/app" }
   },
   deleteStatus = 204,
+  packageReadStatus = 200,
   disappearAfterReads = 0,
   commitThenThrow = false
 }: {
   accountType?: string;
   metadata?: unknown;
   deleteStatus?: number;
+  packageReadStatus?: number;
   disappearAfterReads?: number;
   commitThenThrow?: boolean;
 } = {}) {
@@ -381,6 +383,9 @@ function createDeletionHarness({
       deleted = deleteStatus < 400 || deleteStatus === 404;
       if (commitThenThrow) throw new Error("connection reset after deletion");
       return new Response(null, { status: deleteStatus });
+    }
+    if (packageReadStatus !== 200) {
+      return new Response(null, { status: packageReadStatus });
     }
     if (deleted) {
       readsAfterDelete++;
@@ -507,6 +512,29 @@ test("gives source-aware guidance for an injected credential denied deletion", a
     /GH_TOKEN or GITHUB_TOKEN.*gh auth refresh cannot change it/
   );
 });
+
+test.each([401, 403])(
+  "reports deletion scopes when the initial package lookup is rejected with HTTP %i",
+  async (packageReadStatus) => {
+    const harness = createDeletionHarness({ packageReadStatus });
+
+    await assert.rejects(
+      deleteGHCRStatePackage({
+        ...deleteOptions,
+        fetchImpl: harness.fetchImpl
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(
+          error.message,
+          /gh auth refresh --hostname github\.com --scopes read:packages,delete:packages/
+        );
+        assert.doesNotMatch(error.message, /write:packages/);
+        return true;
+      }
+    );
+  }
+);
 
 test("uses the organization package endpoint", async () => {
   const harness = createDeletionHarness({ accountType: "Organization" });
