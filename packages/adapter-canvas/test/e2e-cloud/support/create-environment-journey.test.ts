@@ -861,6 +861,15 @@ describe("readWorkflowDirectory", () => {
     ).toThrow(/failed with exit code 4: gh: HTTP 500/);
   });
 
+  it("does not treat generic not-found text as an absent directory", () => {
+    expect(() =>
+      readWorkflowDirectory(
+        { code: 1, stdout: "", stderr: "GraphQL: repository Not Found" },
+        "the workflow listing"
+      )
+    ).toThrow(/failed with exit code 1: GraphQL: repository Not Found/);
+  });
+
   it("falls back to stdout when a failure wrote nothing to stderr", () => {
     expect(() =>
       readWorkflowDirectory(

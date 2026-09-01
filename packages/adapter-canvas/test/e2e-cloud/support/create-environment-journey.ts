@@ -678,8 +678,7 @@ export function readWorkflowDirectory(
   context: string
 ): string[] {
   if (result.code !== 0) {
-    if (/HTTP 404|Not Found/i.test(`${result.stderr}\n${result.stdout}`))
-      return [];
+    if (/HTTP 404/i.test(`${result.stderr}\n${result.stdout}`)) return [];
     throw new Error(
       `${context} failed with exit code ${result.code}: ${(
         result.stderr || result.stdout
