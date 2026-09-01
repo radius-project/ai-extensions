@@ -607,8 +607,7 @@ export function readOperationSnapshot(payload: unknown): OperationSnapshot {
   const error =
     typeof failure?.message === "string" && failure.message.trim() !== "" ?
       failure.message.trim()
-    : typeof operation.error === "string" ?
-      operation.error
+    : typeof operation.error === "string" ? operation.error
     : "";
   const terminal =
     (typeof operation.terminalState === "string" &&
