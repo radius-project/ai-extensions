@@ -1663,6 +1663,79 @@ describe("discoverResources", () => {
     ).toEqual([""]);
   });
 
+  it("supersedes an in-flight namespace lookup when editing another Azure environment", async () => {
+    const page = renderDiscoveryPage();
+    let resolveEnvironmentA: (value: HttpResponse) => void = () => {};
+    const environmentAResponse = new Promise<HttpResponse>((resolve) => {
+      resolveEnvironmentA = resolve;
+    });
+    const bodies: Array<Record<string, string>> = [];
+    const resources = azurePayload({
+      clusters: [
+        { id: "aks-a", name: "AKS A", resourceGroup: "rg-a" },
+        { id: "aks-b", name: "AKS B", resourceGroup: "rg-b" }
+      ],
+      resourceGroups: [
+        { id: "rg-a", name: "rg-a" },
+        { id: "rg-b", name: "rg-b" }
+      ]
+    });
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      const body = JSON.parse(init?.body ?? "{}");
+      bodies.push(body);
+      if (body.cluster === "aks-a") return environmentAResponse;
+      return discoverResponse({
+        ...resources,
+        namespaces: body.cluster === "aks-b" ? ["team-b"] : []
+      });
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context);
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+    const resourceGroupSelect = page.selects["azure-rg-select"];
+    resourceGroupSelect.value = "rg-a";
+    resourceGroupSelect.dispatch("change");
+    await flushPromises();
+
+    handle?.setPendingInfraSelection(
+      { resourceGroup: "rg-b", cluster: "aks-b", namespace: "team-b" },
+      "azure"
+    );
+    await handle?.discoverResources("azure", "sub-1", "tenant-1");
+    await flushPromises();
+
+    resolveEnvironmentA(
+      discoverResponse({ ...resources, namespaces: ["team-a"] })
+    );
+    await flushPromises();
+
+    expect(bodies).toEqual([
+      { provider: "azure", subscriptionId: "sub-1", tenantId: "tenant-1" },
+      {
+        provider: "azure",
+        subscriptionId: "sub-1",
+        tenantId: "tenant-1",
+        resourceGroup: "rg-a",
+        cluster: "aks-a"
+      },
+      { provider: "azure", subscriptionId: "sub-1", tenantId: "tenant-1" },
+      {
+        provider: "azure",
+        subscriptionId: "sub-1",
+        tenantId: "tenant-1",
+        resourceGroup: "rg-b",
+        cluster: "aks-b"
+      }
+    ]);
+    expect(resourceGroupSelect.value).toBe("rg-b");
+    expect(page.selects["azure-cluster-select"].value).toBe("aks-b");
+    expect(
+      Array.from(page.selects["azure-namespace-select"].options).map(
+        (option) => option.value
+      )
+    ).toEqual(["", "team-b", "__custom__"]);
+    expect(page.selects["azure-namespace-select"].value).toBe("team-b");
+  });
+
   it("suppresses a duplicate Azure discovery when the namespace select is absent", async () => {
     const browser = createFakeBrowser();
     let resolveFirst: (value: HttpResponse) => void = () => {};

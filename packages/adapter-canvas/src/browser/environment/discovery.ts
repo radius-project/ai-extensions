@@ -901,12 +901,15 @@ export function initializeDiscoveryPanel(
         previousAccount.tenantId !== tenantId);
     discoveryAccounts[provider] = { subscriptionId, tenantId };
     accountDiscovered[provider] = true;
+    const hasPendingSelection = pendingInfrastructure?.provider === provider;
     const deploymentResourceGroup =
-      provider === "azure" && !accountChanged ?
+      provider === "azure" && !accountChanged && !hasPendingSelection ?
         (context.dom.selectById("azure-rg-select")?.value ?? "")
       : "";
     const cluster =
-      provider === "azure" && !accountChanged ? selectedAzureClusterId() : "";
+      provider === "azure" && !accountChanged && !hasPendingSelection ?
+        selectedAzureClusterId()
+      : "";
     const discoveredClusterResourceGroup =
       provider === "azure" ? findAzureClusterResourceGroup(cluster) : "";
     const clusterResourceGroup =
@@ -1157,6 +1160,14 @@ export function initializeDiscoveryPanel(
     setPendingInfraSelection(config, provider) {
       pendingAzureNamespace = "";
       pendingInfrastructure = config ? { provider, config } : null;
+      const request = discoveryRequests[provider];
+      if (config && request.identity !== null) {
+        // Editing another environment changes what the pending response should
+        // restore, even when the account and currently rendered target match.
+        // Supersede that response so the new selection starts target-free.
+        request.token += 1;
+        request.identity = null;
+      }
     },
     currentInfraSelection(provider) {
       return provider === "aws" ?
