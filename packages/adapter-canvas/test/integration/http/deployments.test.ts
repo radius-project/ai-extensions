@@ -575,6 +575,74 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(harness.dispatches[0]).toContain("force=true");
   });
 
+  // The POST must stand on its own evidence. A client that skips the probe, or
+  // whose probe went stale because a later ordinary retry failed for an
+  // unrelated reason, must not be able to force a delete.
+  it.each([
+    [
+      "the failed run left no artifact",
+      null,
+      "The previous delete failure could not be verified, so this delete was not forced:"
+    ],
+    [
+      "the artifact is malformed",
+      { "rad-delete-result.json": "{not json" },
+      "The previous delete failure could not be verified, so this delete was not forced:"
+    ],
+    [
+      "the delete failed for an unrelated reason",
+      {
+        "rad-delete-result.json": JSON.stringify({
+          outcome: "failed",
+          forced: false,
+          output: "ERROR: failed to authenticate with the cloud provider"
+        })
+      },
+      "The previous delete did not fail because a resource was stuck in a non-terminal state"
+    ]
+  ])(
+    "refuses a forced delete over a real socket when %s",
+    async (_case, files, expected) => {
+      const harness = start();
+      harness.setDeploymentStatus("delete-failed");
+      harness.setDeploymentResolver((_repo, environment) =>
+        Promise.resolve({
+          app: "todo-app",
+          environment,
+          provider: "azure",
+          status: "delete-failed",
+          deploymentId: `dep-${environment}`,
+          runUrl: "https://github.com/octo/todo/actions/runs/7"
+        })
+      );
+      harness.artifacts.push({
+        id: 11,
+        name: "rad-delete-result",
+        workflow_run: { id: 7 }
+      });
+      harness.setArtifactFiles(files);
+      const entry = await container!.getOrCreate("panel-a");
+
+      const response = await post(
+        entry.baseUrl,
+        "/api/delete-deployment",
+        JSON.stringify({
+          repo: "octo/todo",
+          environment: "dev",
+          application: "todo-app",
+          force: true
+        })
+      );
+
+      expect(response.status).toBe(409);
+      expect(((await response.json()) as { error: string }).error).toContain(
+        expected
+      );
+      // Nothing was dispatched, so no external resource can be orphaned.
+      expect(harness.dispatches).toEqual([]);
+    }
+  );
+
   it("reports no conflict over a real socket when the failed run left no artifact", async () => {
     const harness = start();
     harness.setDeploymentResolver((_repo, environment) =>

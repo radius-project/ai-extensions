@@ -2213,6 +2213,12 @@ describe("deployments routes (SU-06)", () => {
         return deleteDependencies({
           resolveEnvDeployment: () =>
             Promise.resolve(row("dev", "delete-failed")),
+          probeDeleteConflict: () =>
+            Promise.resolve({
+              state: "conflict",
+              resourceState: "Updating",
+              forced: false
+            }),
           ...overrides
         });
       }
@@ -2276,6 +2282,132 @@ describe("deployments routes (SU-06)", () => {
             "A delete can only be forced after a previous delete of this application failed. Run the delete normally first."
         });
         expect(released).toEqual([LEASE]);
+      });
+
+      // `delete-failed` alone is not proof. A delete that failed for credential,
+      // network or workflow-configuration reasons must not be forceable, so the
+      // route re-reads the artifact itself instead of trusting that the client
+      // probed, and fails closed on anything short of a proven conflict.
+      it("re-proves the conflict itself rather than trusting the client", async () => {
+        const asked: unknown[] = [];
+        const { recording, context: ctx } = deleteContext(FORCE_BODY);
+        await handleDeleteDeployment(
+          ctx,
+          forceDependencies({
+            probeDeleteConflict: (request) => {
+              asked.push(request);
+              return Promise.resolve({
+                state: "conflict",
+                resourceState: "Updating",
+                forced: false
+              });
+            },
+            runGh: () => Promise.resolve({ code: 0, stdout: "", stderr: "" })
+          })
+        );
+
+        expect(recording.status).toBe(200);
+        expect(asked).toEqual([
+          {
+            repo: "octo/todolist",
+            environment: "dev",
+            application: "todolist"
+          }
+        ]);
+      });
+
+      it("refuses to force a failure that was not the stranded-resource conflict", async () => {
+        const released: unknown[] = [];
+        const { recording, context: ctx } = deleteContext(FORCE_BODY);
+        await handleDeleteDeployment(
+          ctx,
+          forceDependencies({
+            probeDeleteConflict: () => Promise.resolve({ state: "clear" }),
+            releaseDeploymentMutation: (_state, lease) => released.push(lease),
+            runGh: () => {
+              throw new Error("must refuse before dispatching");
+            }
+          })
+        );
+
+        expect(recording.status).toBe(409);
+        expect(JSON.parse(recording.body)).toEqual({
+          error:
+            "The previous delete did not fail because a resource was stuck in a non-terminal state, so forcing would not help. Run the delete normally and address the reported failure."
+        });
+        expect(released).toEqual([LEASE]);
+      });
+
+      // An expired, missing or malformed artifact is "unknown", not "clear":
+      // the conflict is unproven either way, so forcing is refused.
+      it("refuses to force when the previous failure cannot be verified", async () => {
+        const released: unknown[] = [];
+        const { recording, context: ctx } = deleteContext(FORCE_BODY);
+        await handleDeleteDeployment(
+          ctx,
+          forceDependencies({
+            probeDeleteConflict: () =>
+              Promise.resolve({
+                state: "unknown",
+                detail: "the delete result artifact has expired."
+              }),
+            releaseDeploymentMutation: (_state, lease) => released.push(lease),
+            runGh: () => {
+              throw new Error("must refuse before dispatching");
+            }
+          })
+        );
+
+        expect(recording.status).toBe(409);
+        expect(JSON.parse(recording.body)).toEqual({
+          error:
+            "The previous delete failure could not be verified, so this delete was not forced: the delete result artifact has expired."
+        });
+        expect(released).toEqual([LEASE]);
+      });
+
+      it("refuses to force when the proof lookup itself throws", async () => {
+        const released: unknown[] = [];
+        const { recording, context: ctx } = deleteContext(FORCE_BODY);
+        await handleDeleteDeployment(
+          ctx,
+          forceDependencies({
+            probeDeleteConflict: () => Promise.reject(new Error("gh exploded")),
+            releaseDeploymentMutation: (_state, lease) => released.push(lease),
+            runGh: () => {
+              throw new Error("must refuse before dispatching");
+            }
+          })
+        );
+
+        expect(recording.status).toBe(503);
+        expect(JSON.parse(recording.body)).toEqual({
+          error:
+            "The previous delete failure could not be verified, so this delete was not forced: gh exploded"
+        });
+        expect(released).toEqual([LEASE]);
+      });
+
+      // The unforced path must not pay for the proof, nor be blocked by it.
+      it("never reads the artifact for an ordinary delete", async () => {
+        const { recording, context: ctx } = deleteContext(
+          JSON.stringify({
+            repo: "octo/todolist",
+            environment: "dev",
+            application: "todolist"
+          })
+        );
+        await handleDeleteDeployment(
+          ctx,
+          forceDependencies({
+            probeDeleteConflict: () => {
+              throw new Error("an ordinary delete must not need proof");
+            },
+            runGh: () => Promise.resolve({ code: 0, stdout: "", stderr: "" })
+          })
+        );
+
+        expect(recording.status).toBe(200);
       });
 
       it.each([

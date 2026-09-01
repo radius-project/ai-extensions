@@ -580,9 +580,7 @@ export async function handleDeleteDeployment(
     }
     // Forcing removes control-plane records whose external resources may still
     // exist, so it is not an alternative way to run a first delete: it is only
-    // reachable as a retry of a delete GitHub already recorded as failed. The
-    // client's conflict probe decides whether to offer it; this is the
-    // server-side precondition that fails closed when it did not.
+    // reachable as a retry of a delete GitHub already recorded as failed.
     if (force && current?.status !== DELETE_FAILED_STATUS) {
       releaseReservation();
       respond(409, {
@@ -590,6 +588,38 @@ export async function handleDeleteDeployment(
           "A delete can only be forced after a previous delete of this application failed. Run the delete normally first."
       });
       return;
+    }
+    // `delete-failed` alone is not proof: a delete can fail for credential,
+    // network or workflow-configuration reasons that forcing cannot fix and
+    // must not paper over. Forcing is only for a resource stranded in a
+    // non-terminal provisioning state, so re-read the failed run's artifact
+    // here rather than trusting the client's probe, which may be stale or
+    // absent entirely. Fails closed: anything but a proven conflict refuses.
+    if (force) {
+      let proof: DeleteConflictProbe;
+      try {
+        proof = await dependencies.probeDeleteConflict({
+          repo,
+          environment,
+          application
+        });
+      } catch (error) {
+        releaseReservation();
+        respond(503, {
+          error: `The previous delete failure could not be verified, so this delete was not forced: ${errorMessage(error)}`
+        });
+        return;
+      }
+      if (proof.state !== "conflict") {
+        releaseReservation();
+        respond(409, {
+          error:
+            proof.state === "clear" ?
+              "The previous delete did not fail because a resource was stuck in a non-terminal state, so forcing would not help. Run the delete normally and address the reported failure."
+            : `The previous delete failure could not be verified, so this delete was not forced: ${proof.detail}`
+        });
+        return;
+      }
     }
 
     // Dispatching a workflow requires the `workflow` scope, which an injected
