@@ -222,7 +222,8 @@ export function createGhNamespaceClaimsPorts(
           if (error) {
             resolve({
               ok: false,
-              reason: (stderr || stdout || error.message || "").trim() || "gh failed."
+              reason:
+                (stderr || stdout || error.message || "").trim() || "gh failed."
             });
             return;
           }
