@@ -101,7 +101,7 @@ describe("DEPLOY_RAD_COMMANDS_STEP", () => {
   it("matches the step name in the upstream run-rad-commands action", () => {
     // The deploy monitor gates all of its in-flight handling on finding a step
     // with this name. It previously read "Deploy Application", which exists
-    // nowhere in radius-project/radius, so that entire code path never ran on
+    // nowhere in radius-project/ai-extensions, so that entire code path never ran on
     // a real deploy. Pin the value so the same silent break cannot recur.
     expect(DEPLOY_RAD_COMMANDS_STEP).toBe("Run rad commands");
   });
@@ -3015,8 +3015,8 @@ describe("cleanupGitHubEnvironmentArtifact", () => {
     expect(result.results).toMatchObject([
       { attempt: 2, outcome: "skipped", artifactType: "github_environment" }
     ]);
-    expect(result.warnings[0]).toContain(
-      "cannot prove this request created it"
+    expect(result.warnings[0]).toBe(
+      'Radius left GitHub environment "octo/app:dev" in place because a pre-create 404 followed by GitHub\'s idempotent PUT could not verify that this setup created it. To finish deleting the setup, review the GitHub environment and delete it manually if it belongs to this setup.'
     );
     // Ownership never moves without proof of removal.
     expect(op.setupArtifacts.githubEnvironment.state).toBe("created_candidate");
@@ -4101,7 +4101,7 @@ describe("finalizeSetupFailure", () => {
     });
     expect((failure.body.cleanup as any).warnings).toEqual(
       expect.arrayContaining([
-        expect.stringContaining("cannot prove this request created it")
+        'Radius left GitHub environment "octo/app:dev" in place because a pre-create 404 followed by GitHub\'s idempotent PUT could not verify that this setup created it. To finish deleting the setup, review the GitHub environment and delete it manually if it belongs to this setup.'
       ])
     );
   });
@@ -5019,6 +5019,36 @@ describe("triggerDeployRepairHandoff", () => {
       state: "idle",
       attempts: 0
     });
+  });
+
+  // Nothing else advances for a redeploy that fails before dispatch: the loop
+  // reuses its attempt id, the run id is cleared here and never repopulated,
+  // and deployFinishedAt is only written when a run concludes. The generation
+  // is what keeps two such failures distinguishable to the notification chip.
+  it("advances the deploy generation on every invocation", () => {
+    const entry = failedEntry();
+    const input = {
+      repo: "octo/app",
+      branch: "feat",
+      provider: "azure",
+      environment: "dev",
+      appFile: ".radius/app.bicep"
+    };
+    expect(entry.state.deployGeneration).toBeUndefined();
+
+    beginDeployAttempt(entry.state, { ...input, repairLoop: false });
+    const first = entry.state.deployGeneration;
+    const attemptId = entry.state.deployAttempt?.id;
+    expect(first).toBe(1);
+
+    // A redeploy inside the loop keeps the attempt id it was handed.
+    beginDeployAttempt(entry.state, { ...input, repairLoop: true, attemptId });
+    expect(entry.state.deployAttempt?.id).toBe(attemptId);
+    expect(entry.state.deployGeneration).toBe(2);
+
+    beginDeployAttempt(entry.state, { ...input, repairLoop: true, attemptId });
+    expect(entry.state.deployGeneration).toBe(3);
+    expect(entry.state.deployRunId).toBeNull();
   });
 
   it("keeps an agent redeploy owned by the repair loop it came from", () => {

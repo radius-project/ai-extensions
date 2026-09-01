@@ -128,14 +128,19 @@ export function normalizeAzureCommandResult(
  * a caller can never mistake a killed command for a successful one.
  */
 export function normalizeCommandResult(
-  error: { code?: string | number | null } | null,
+  error: { code?: string | number | null; message?: string } | null,
   stdout: string | undefined,
   stderr: string | undefined
 ): CloudCommandResult {
+  const normalizedStdout = stdout || "";
+  const normalizedStderr = stderr || "";
   return {
     code: error ? Number(error.code ?? 1) || 1 : 0,
-    stdout: stdout || "",
-    stderr: stderr || ""
+    stdout: normalizedStdout,
+    stderr:
+      !normalizedStdout && !normalizedStderr ?
+        error?.message || ""
+      : normalizedStderr
   };
 }
 

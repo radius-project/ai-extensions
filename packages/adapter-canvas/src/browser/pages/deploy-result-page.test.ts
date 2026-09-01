@@ -55,9 +55,17 @@ describe("initializeDeployResultPage", () => {
   });
 
   it.each([
-    ["an HTTP error", jsonResponse({ error: "no" }, false, 500)],
-    ["a malformed success", jsonResponse({ ok: "yes" })]
-  ])("fails closed on %s", async (_name, response) => {
+    [
+      "an HTTP error",
+      jsonResponse({ error: "The deployment attempt is stale." }, false, 409),
+      "The deployment attempt is stale."
+    ],
+    [
+      "a malformed success",
+      jsonResponse({ ok: "yes" }),
+      "The deployment view could not be reset."
+    ]
+  ])("fails closed on %s", async (_name, response, expected) => {
     const browser = renderResult();
     browser.net.handle(DEPLOY_RESET_PATH, () => response);
     initializeDeployResultPage(browser.context);
@@ -69,24 +77,27 @@ describe("initializeDeployResultPage", () => {
     expect(browser.button.disabled).toBe(false);
     expect(browser.button.textContent).toBe("← Back to Deploy");
     expect(browser.status.style.display).toBe("block");
-    expect(browser.status.textContent).toBe(
-      "The deployment view could not be reset."
-    );
+    expect(browser.status.textContent).toBe(expected);
   });
 
-  it("surfaces a request failure and permits a retry", async () => {
+  it("hides a raw request failure behind the generic message and permits a retry", async () => {
     const browser = renderResult("");
     let calls = 0;
     browser.net.handle(DEPLOY_RESET_PATH, () => {
       calls += 1;
-      if (calls === 1) return Promise.reject(new Error("offline"));
+      if (calls === 1) {
+        return Promise.reject(new Error("connect ECONNREFUSED ghp_secret"));
+      }
       return jsonResponse({ ok: true });
     });
     initializeDeployResultPage(browser.context);
 
     browser.button.dispatch("click");
     await flushPromises();
-    expect(browser.status.textContent).toBe("offline");
+    expect(browser.status.textContent).toBe(
+      "The deployment view could not be reset."
+    );
+    expect(browser.status.textContent).not.toContain("ghp_secret");
     expect(browser.button.disabled).toBe(false);
 
     browser.button.dispatch("click");

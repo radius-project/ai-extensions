@@ -7,9 +7,11 @@
 import { createCommandAction } from "../command-action.js";
 import type { CommandActionHandle } from "../command-action.js";
 import { escapeBrowserHtml } from "../html.js";
+import { requireSuccessfulJsonResponse, ServerResponseError } from "../http.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { isRecord, readArray, readBoolean, readString } from "../json.js";
 import { environmentStatusMarkup, providerLabel } from "./environments.js";
+import { tableErrorRowMarkup } from "./table-error.js";
 import type { BrowserTeardown } from "../lifecycle.js";
 import type {
   BrowserContext,
@@ -38,6 +40,9 @@ export const CREDENTIAL_SAVE_PATH = "/api/save-credential-profile";
 export const GITHUB_IDENTITY_PATH = "/api/github-identity";
 export const VERIFY_AZURE_PATH = "/api/verify-azure-login";
 export const VERIFY_AWS_PATH = "/api/verify-aws-login";
+const CREDENTIAL_PROFILES_FAILURE = "Could not load credential profiles.";
+const CREDENTIAL_USAGE_FAILURE =
+  "Could not check which environments use this profile.";
 /**
  * Rebuild a remediation view from a server payload.
  *
@@ -598,10 +603,9 @@ export function initializeCredentialsPane(
         `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(options.repo)}`,
         tableAbort ? { signal: tableAbort.signal } : undefined
       )
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
+      .then((response) =>
+        requireSuccessfulJsonResponse(response, CREDENTIAL_PROFILES_FAILURE)
+      )
       .then(
         (payload) => {
           if (!active || request !== tableRequest) return;
@@ -617,8 +621,11 @@ export function initializeCredentialsPane(
           ) {
             return;
           }
-          credTableBody.innerHTML =
-            '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Could not load credential profiles.</td></tr>';
+          credTableBody.innerHTML = tableErrorRowMarkup(
+            error,
+            4,
+            CREDENTIAL_PROFILES_FAILURE
+          );
         }
       );
   };
@@ -731,16 +738,10 @@ export function initializeCredentialsPane(
     // action always has a repository to look usage up against.
     const usageRequest = context.net
       .fetch(`/api/list-environments?repo=${encodeURIComponent(options.repo)}`)
-      .then((response) => {
-        // The handler reports its own failures as HTTP 200 with an `error`
-        // field, so a non-OK status is not the only failure shape to catch.
-        if (!response.ok) throw new Error("list-environments request failed");
-        return response.json();
-      })
+      .then((response) =>
+        requireSuccessfulJsonResponse(response, CREDENTIAL_USAGE_FAILURE)
+      )
       .then((payload) => {
-        if (readString(payload, "error") !== "") {
-          throw new Error("list-environments reported an error");
-        }
         return {
           usage: readArray(payload, "environments")
             .filter(isRecord)
@@ -750,19 +751,25 @@ export function initializeCredentialsPane(
             )
             .map((environment) => readString(environment, "name"))
             .filter((environment) => environment !== ""),
-          checked: true
+          checked: true,
+          failure: ""
         };
       })
-      .catch(() => ({ usage: [] as string[], checked: false }));
-    void usageRequest.then(({ usage, checked }) => {
+      .catch((error: unknown) => ({
+        usage: [] as string[],
+        checked: false,
+        failure: error instanceof ServerResponseError ? error.message : ""
+      }));
+    void usageRequest.then(({ usage, checked, failure }) => {
       if (!active) return;
       setButtonState(button, false, "Delete Profile");
       options.confirmDialog?.show({
         title: "Delete credential profile?",
         message: `This deletes the credential profile "${name}". You will not be able to create new environments from it.${
-          checked ? "" : (
-            "\n\nCould not check which environments use this profile."
-          )
+          checked ? ""
+          : failure && failure !== CREDENTIAL_USAGE_FAILURE ?
+            `\n\n${CREDENTIAL_USAGE_FAILURE} ${failure}`
+          : `\n\n${CREDENTIAL_USAGE_FAILURE}`
         }`,
         usageLabel:
           usage.length === 1 ?

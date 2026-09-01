@@ -13,6 +13,7 @@ export type BrowserEntryName =
   | "heartbeat"
   | "operation-chip"
   | "graph-chip"
+  | "deploy-chip"
   | "deploy-result-page"
   | "environment-page"
   | "deploying-page"
@@ -76,6 +77,12 @@ export const BROWSER_ENTRIES: readonly BrowserEntrySpec<BrowserEntryName>[] = [
     name: "graph-chip",
     file: "./entries/graph-chip.ts",
     initializer: "installGraphChipEntry",
+    globals: []
+  },
+  {
+    name: "deploy-chip",
+    file: "./entries/deploy-chip.ts",
+    initializer: "installDeployChipEntry",
     globals: []
   },
   {

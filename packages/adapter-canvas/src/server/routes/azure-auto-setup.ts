@@ -21,6 +21,7 @@ import type {
   AzureAutoSetupWorkflow
 } from "./azure-auto-setup-types.js";
 import { ProviderMutationRecoveryError } from "../services/provider-mutation-recovery.js";
+import { setupStartConflictResponse } from "./operation-start-conflict.js";
 
 interface AzureAccountIdentity {
   subscriptionId: string;
@@ -76,6 +77,8 @@ const OPERATION_FUNCTIONS = [
   "recordAzureApp",
   "recordServicePrincipal",
   "recordCreatedFederatedCredential",
+  "recordFederatedCredentialProvenance",
+  "withCredentialProvenanceLock",
   "recordCreatedRoleAssignment"
 ] as const;
 
@@ -399,18 +402,7 @@ export async function handleAzureAutoSetup(
       const started = dependencies.operations.start(operation);
       if (!started.ok) {
         operation = null;
-        const previousCleanup = started.reason === "previous-cleanup-required";
-        respond(context, 409, {
-          error:
-            previousCleanup ?
-              `An earlier setup for ${targetRepo} must finish rollback before a new setup can start.`
-            : `Setup is already running for ${targetRepo}.`,
-          code:
-            previousCleanup ?
-              "previous-cleanup-required"
-            : "operation-in-progress",
-          operationId: started.conflict.operationId
-        });
+        respond(context, 409, setupStartConflictResponse(targetRepo, started));
         return;
       }
       try {
@@ -651,6 +643,7 @@ export async function handleAzureAutoSetup(
         oidc,
         oidcSuffix,
         clientId: application.clientId,
+        tenantId,
         appName: application.appName,
         subscriptionId,
         resourceGroup,

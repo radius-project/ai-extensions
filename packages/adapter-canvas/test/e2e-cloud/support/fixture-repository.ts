@@ -21,16 +21,16 @@
  * change that switches the suite on. `isFixtureRepositoryProvisioned()` is what
  * stops a placeholder from masquerading as a passing cloud check.
  */
-// TODO(#581): replace with the real fixture repository owner once provisioned.
+// TODO(#639): replace with the real fixture repository owner once provisioned.
 export const FIXTURE_REPO_OWNER = "TODO-owner";
-// TODO(#581): replace with the real fixture repository name once provisioned.
+// TODO(#639): replace with the real fixture repository name once provisioned.
 export const FIXTURE_REPO_NAME = "TODO-repo";
-// TODO(#581): confirm the default branch of the provisioned repository.
+// TODO(#639): confirm the default branch of the provisioned repository.
 export const FIXTURE_REPO_DEFAULT_BRANCH = "main";
 /**
  * The commit the fixture repository is reset to before and after every run.
  *
- * TODO(#581): replace with the real baseline commit once the repository carries
+ * TODO(#639): replace with the real baseline commit once the repository carries
  * `.radius/app.bicep`, `.radius/bicepconfig.json`, and `.radius/app.origin.json`.
  */
 export const FIXTURE_BASELINE_SHA = "0".repeat(40);

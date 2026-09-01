@@ -18,12 +18,17 @@ import {
   generateDeleteWorkflow as coreGenerateDeleteWorkflow,
   DELETE_RADIUS_REF,
   DELETE_APP_DISPATCHER_FILE,
+  DELETE_ENV_DISPATCHER_FILE,
+  DELETE_ENV_AZURE_FILE,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE
 } from "@radius-project/core";
 import { VERIFY_OPERATION_INPUT } from "./verification-run-identity.js";
 import type { DeployWorkflowOptions } from "@radius-project/core";
 import { parse as parseYaml } from "yaml";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
 import {
   fetchFileFromRepoResult,
   fetchFileFromRepo,
@@ -264,11 +269,17 @@ function assertTrustedGeneratedWorkflow(
 }
 
 export { DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE };
-export { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE };
+export {
+  DELETE_APP_DISPATCHER_FILE,
+  DELETE_ENV_DISPATCHER_FILE,
+  DELETE_ENV_AZURE_FILE,
+  DELETE_AZURE_FILE,
+  DELETE_AWS_FILE
+};
 
 /**
- * Fetch a workflow template from radius-project/radius `.github/extension/` at
- * the pinned RADIUS_REF. radius-project/radius is the single source of truth,
+ * Fetch a workflow template from radius-project/ai-extensions `.github/extension/` at
+ * the pinned RADIUS_REF. radius-project/ai-extensions is the single source of truth,
  * so a fetch failure (offline, transient API error, or the ref/file missing) is
  * a hard error rather than a fall back to a bundled copy. The underlying cause
  * (gh stderr, 404, decode error) is surfaced in the thrown message.
@@ -304,20 +315,87 @@ async function fetchRadiusTemplate(
   return content;
 }
 
+// Candidate directories to read a bundled static workflow template from, in
+// priority order. `import.meta.url` resolves to the compiled bundle
+// (plugins/radius/dist/extension.mjs or the installed copy) at runtime, whose
+// sibling `workflows/` directory is populated by build.mjs. When running from a
+// built bundle that sibling is the ONLY source of truth: the walk up to a
+// `.github/extension/` directory is deliberately skipped so a production install
+// can never read a `delete-environment.yml` that happens to sit in the user's
+// own repository checkout. In tests and source runs `import.meta.url` resolves
+// to this file under `src/`, so the walk locates the repository's own
+// `.github/extension/`.
+function bundledWorkflowDirs(): string[] {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return computeBundledWorkflowDirs(here, existsSync(join(here, "workflows")));
+}
+
+// Pure, testable core of bundledWorkflowDirs: given the directory this module
+// runs from and whether its sibling `workflows/` directory exists, return the
+// candidate template directories in priority order.
+export function computeBundledWorkflowDirs(
+  here: string,
+  bundleWorkflowsPresent: boolean
+): string[] {
+  const dirs = [join(here, "workflows")];
+  // The presence of the sibling `workflows/` directory (populated by build.mjs
+  // beside the installed extension.mjs) is what tells us we are running from a
+  // built bundle — every install layout has it, but no path-segment name is
+  // reliable across them (`~/.copilot/extensions/radius/`,
+  // `~/.copilot/installed-plugins/.../radius-edge/`, and in-repo
+  // `plugins/radius/dist/` all differ). When it is present that sibling is the
+  // only source of truth, so skip the walk up to the in-repo `.github/extension/`
+  // templates. Source/test runs have no sibling `workflows/`, so they walk up.
+  if (!bundleWorkflowsPresent) {
+    let cursor = here;
+    for (let depth = 0; depth < 8; depth++) {
+      dirs.push(join(cursor, ".github", "extension"));
+      const parent = dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+    }
+  }
+  return dirs;
+}
+
+/**
+ * Read a static, ai-extensions-owned workflow template shipped inside the
+ * plugin. Unlike fetchRadiusTemplate this never touches the network: the
+ * environment-delete workflows (issue #303) are committed in this repo and
+ * bundled beside the extension. A missing file is a hard error — there is no
+ * fallback — so a packaging regression surfaces immediately.
+ */
+export function readBundledWorkflowTemplate(fileName: string): string {
+  for (const dir of bundledWorkflowDirs()) {
+    const candidate = join(dir, fileName);
+    if (existsSync(candidate)) {
+      const body = readFileSync(candidate, "utf8");
+      if (!body || !body.trim()) {
+        throw new Error(`Bundled workflow template ${candidate} is empty.`);
+      }
+      return body;
+    }
+  }
+  throw new Error(
+    `Bundled workflow template "${fileName}" was not found beside the extension or in .github/extension.`
+  );
+}
+
 export async function generateVerifyWorkflow(
   env: string,
-  provider: string
+  provider: string,
+  ref: string = RADIUS_REF
 ): Promise<string> {
   const platform = getPlatform(provider);
   if (!platform)
     throw new Error(
       `Unknown provider "${provider}". Supported providers: azure, aws.`
     );
-  // Always use the upstream template from radius-project/radius; no fallback.
+  // Always use the upstream template from radius-project/ai-extensions; no fallback.
   const fileName = verifyTemplateFile(platform);
   if (!fileName)
     throw new Error(`No verify template for provider "${provider}".`);
-  const upstream = await fetchRadiusTemplate(fileName);
+  const upstream = await fetchRadiusTemplate(fileName, ref);
   const workflow = configureVerifyGhcrProbe(
     configureVerifyOperationMarker(
       coreGenerateVerifyWorkflow(env, platform, upstream)
@@ -428,7 +506,7 @@ ${indent}    echo "✅ GHCR accepted a non-mutating upload-session probe."`;
  * runtime by the dispatcher, so all three files are emitted regardless of the
  * environment's cloud.
  *
- * The templates are fetched from radius-project/radius `.github/extension/` at
+ * The templates are fetched from radius-project/ai-extensions `.github/extension/` at
  * the pinned RADIUS_REF so user repos always get the reviewed upstream version;
  * there is no bundled fallback, so a fetch failure surfaces as an error.
  */
@@ -482,41 +560,72 @@ export async function generateDeployWorkflow(
 }
 
 /**
- * Generate the application-delete workflow files (dispatcher + Azure provider
- * workflow). Returns an object mapping bare workflow filename -> YAML content;
- * the caller commits each under `.github/workflows/`. As with deploy, the AWS
- * provider workflow is never fetched or committed and the dispatcher's `aws:`
- * job is stripped.
+ * Generate the delete workflow files. Returns an object mapping bare workflow
+ * filename -> YAML content; the caller commits each under `.github/workflows/`.
+ * As with deploy, the AWS provider workflow is never committed and the
+ * application dispatcher's `aws:` job is stripped.
  *
- * The templates + the `delete-resource` composite action they reference live in
- * radius-project/radius `.github/extension`, so both the fetch and the
- * `{{RADIUS_REF}}` pinned into the provider workflows use DELETE_RADIUS_REF.
+ * Two paths share this generator with different provenance:
+ *
+ *   - Application delete (`delete-application.yml` + the reusable
+ *     `delete-azure.yml`) is fetched from radius-project/ai-extensions, which
+ *     stays the single source of truth for that reviewed upstream workflow.
+ *   - Environment delete (`delete-environment.yml` + its own reusable provider
+ *     `delete-environment-azure.yml`) is authored as static YAML in this repo's
+ *     `.github/extension/` and shipped inside the plugin (issue #303), so the
+ *     ai-extensions-owned "no deployed applications" guard can be reviewed here.
+ *     Those two files are read from the bundled plugin rather than fetched.
+ *
+ * The `{{RADIUS_REF}}` pinned into every provider workflow's composite actions
+ * uses DELETE_RADIUS_REF regardless of where the template body came from.
  */
 export async function generateDeleteWorkflow(
   env: string
 ): Promise<Record<string, string>> {
-  const files = [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE];
-  const bodies = await Promise.all(
-    files.map((f) => fetchRadiusTemplate(f, DELETE_RADIUS_REF))
+  // Application-delete templates come from upstream; environment-delete
+  // templates are static local assets read from the bundled plugin.
+  const fetched = [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE];
+  const fetchedBodies = await Promise.all(
+    fetched.map((f) => fetchRadiusTemplate(f, DELETE_RADIUS_REF))
   );
   const templates: Record<string, string> = {};
-  files.forEach((f, i) => {
-    templates[f] = bodies[i];
+  fetched.forEach((f, i) => {
+    templates[f] = fetchedBodies[i];
   });
+  templates[DELETE_ENV_DISPATCHER_FILE] = readBundledWorkflowTemplate(
+    DELETE_ENV_DISPATCHER_FILE
+  );
+  templates[DELETE_ENV_AZURE_FILE] = readBundledWorkflowTemplate(
+    DELETE_ENV_AZURE_FILE
+  );
   templates[DELETE_AWS_FILE] = templates[DELETE_AZURE_FILE];
   const generated = coreGenerateDeleteWorkflow(env, templates);
   delete generated[DELETE_AWS_FILE];
-  if (generated && typeof generated[DELETE_APP_DISPATCHER_FILE] === "string") {
-    generated[DELETE_APP_DISPATCHER_FILE] = stripAwsDispatcherJob(
-      generated[DELETE_APP_DISPATCHER_FILE]
-    );
+  // The application dispatcher references the never-committed AWS provider file
+  // via its `aws:` job; strip it so GitHub can parse the committed workflow. The
+  // static environment dispatcher is authored Azure-only, so this is a no-op for
+  // it, but running it keeps both dispatchers guarded the same way.
+  for (const dispatcher of [
+    DELETE_APP_DISPATCHER_FILE,
+    DELETE_ENV_DISPATCHER_FILE
+  ]) {
+    if (typeof generated[dispatcher] === "string") {
+      generated[dispatcher] = stripAwsDispatcherJob(generated[dispatcher]);
+    }
   }
   for (const [file, workflow] of Object.entries(generated)) {
+    const isDispatcher =
+      file === DELETE_APP_DISPATCHER_FILE ||
+      file === DELETE_ENV_DISPATCHER_FILE;
+    const providerWorkflow =
+      file === DELETE_APP_DISPATCHER_FILE ? DELETE_AZURE_FILE
+      : file === DELETE_ENV_DISPATCHER_FILE ? DELETE_ENV_AZURE_FILE
+      : undefined;
     assertTrustedGeneratedWorkflow(
       workflow,
-      file === DELETE_APP_DISPATCHER_FILE ? "dispatcher" : "provider",
+      isDispatcher ? "dispatcher" : "provider",
       `delete workflow "${file}"`,
-      file === DELETE_APP_DISPATCHER_FILE ? DELETE_AZURE_FILE : undefined
+      providerWorkflow
     );
   }
   return generated;
@@ -593,9 +702,9 @@ const VERIFY_WORKFLOW_PATH = ".github/workflows/radius-verify-credentials.yml";
 /**
  * Re-fetch the upstream workflow templates and update any workflow files the
  * extension previously committed to `repo` whose content has drifted from
- * upstream (radius-project/radius `.github/extension/`).
+ * upstream (radius-project/ai-extensions `.github/extension/`).
  *
- * radius-project/radius is the single source of truth for the verify, deploy and
+ * radius-project/ai-extensions is the single source of truth for the verify, deploy and
  * delete workflows. Users get a snapshot of those templates committed into their
  * repo at environment-creation time; when upstream changes, those committed
  * copies go stale. This resynchronises them in place.
@@ -735,7 +844,17 @@ export async function syncRepoWorkflows(
   };
 
   for (const branch of branches) {
+    // The env-delete dispatcher (`delete-environment.yml`) hard-references its
+    // reusable provider via `uses: ./.github/workflows/delete-environment-azure.yml`,
+    // so the two static files must always be committed together. byPath is built
+    // with the dispatcher inserted before the provider, so this flag is set while
+    // the dispatcher is processed and read when the provider is reached: whenever
+    // the dispatcher is present on a branch, author the provider too even in the
+    // background pass (no `opts.create`), so a drift rewrite of the dispatcher can
+    // never leave a dangling `uses:` reference behind.
+    let envDeleteDispatcherPresent = false;
     for (const [path, candidates] of byPath.entries()) {
+      const fileName = path.split("/").pop();
       const committed = await fetchFileFromRepo(repo, path, branch);
       const missing = committed == null || committed === "";
       if (missing) {
@@ -743,14 +862,20 @@ export async function syncRepoWorkflows(
         // that), and an unpushed working branch simply reads as "missing" and is
         // skipped. When `opts.create` is set, author the file so the workflow is
         // present on the branch it will run from — but only if the branch exists
-        // on the remote, so we never author onto an unpushed working branch.
-        if (!opts.create) continue;
+        // on the remote, so we never author onto an unpushed working branch. The
+        // env-delete provider is additionally force-authored when its dispatcher
+        // is present (see envDeleteDispatcherPresent), since a committed
+        // dispatcher without its provider is always a broken workflow; a
+        // `workflow_call`-only provider never triggers a run on push, so
+        // authoring it early is safe.
+        const forceAuthorEnvDeleteProvider =
+          fileName === DELETE_ENV_AZURE_FILE && envDeleteDispatcherPresent;
+        if (!opts.create && !forceAuthorEnvDeleteProvider) continue;
         if (!(await remoteHasBranch(branch))) {
           log(`skipped creating ${path} on "${branch}" (branch not on remote)`);
           continue;
         }
         const choice = candidates[0];
-        const fileName = path.split("/").pop();
         try {
           await commitFileToRepo(
             repo,
@@ -767,6 +892,10 @@ export async function syncRepoWorkflows(
         }
         continue;
       }
+      // The env-delete dispatcher is present on this branch, so its reusable
+      // provider must be committed alongside it (see envDeleteDispatcherPresent).
+      if (fileName === DELETE_ENV_DISPATCHER_FILE)
+        envDeleteDispatcherPresent = true;
       // In sync if the committed copy matches any environment's generated
       // content — the only per-env difference is the cosmetic dispatch default.
       if (candidates.some((c) => c.content === committed)) continue;
@@ -783,7 +912,6 @@ export async function syncRepoWorkflows(
         (committedProvider &&
           candidates.find((c) => c.provider === committedProvider)) ||
         candidates[0];
-      const fileName = path.split("/").pop();
       try {
         await commitFileToRepo(
           repo,

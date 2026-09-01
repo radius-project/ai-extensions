@@ -264,6 +264,35 @@ describe("environmentPage — stop, continue and rollback styling", () => {
     }
   });
 
+  it("styles the diagnostic review and disabled download from theme tokens", () => {
+    const markup = html();
+    expect(markup).toContain(
+      ".env-diagnostics__panel { background:var(--rad-surface)"
+    );
+    expect(markup).toContain(".env-diagnostics__identifiers { display:grid;");
+    expect(markup).toContain(
+      '.env-diagnostics__buttons a[aria-disabled="true"] { pointer-events:none; opacity:0.55; }'
+    );
+    expect(markup).toContain(
+      ".env-diagnostics__option { display:flex; align-items:center;"
+    );
+    expect(markup).toContain(
+      ".env-diagnostics__option label { margin:0; line-height:1.4; }"
+    );
+    expect(markup).toContain(
+      ".env-progress__diagnostics .rad-btn { margin-top:0; }"
+    );
+    expect(markup).toContain(".env-progress__diagnostics-status { width:100%;");
+    expect(markup).toContain(
+      ".env-progress__bottom-buttons:empty { display:none; }"
+    );
+    const panelStyles = markup.slice(
+      markup.indexOf(".env-diagnostics__panel"),
+      markup.indexOf(".env-progress__step")
+    );
+    expect(panelStyles).not.toContain("#fff;");
+  });
+
   it("distinguishes a running rollback from a running setup without colour alone", () => {
     const markup = html();
     expect(markup).toContain(

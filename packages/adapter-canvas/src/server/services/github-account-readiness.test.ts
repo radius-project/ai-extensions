@@ -5,6 +5,7 @@ import {
   probeGhcrPackageWriteAccess
 } from "./github-account-readiness.js";
 import { createGitHubAccountCoordinator } from "./github-account-coordinator.js";
+import { FORK_REPOSITORY_SETUP_GUIDANCE } from "../../repository-access-guidance.js";
 import type {
   GitHubAccountCoordinator,
   GitHubAccountLeaseResult
@@ -385,6 +386,7 @@ describe("GitHub account readiness", () => {
     expect(result.checks.repository.state).toBe("missing");
     expect(result.checks.environment.state).toBe("missing");
     expect(result.repair).toContain("repository administrator access");
+    expect(result.repair).toContain(FORK_REPOSITORY_SETUP_GUIDANCE);
     // A repository grant is not something a command can fix, so the wizard
     // must keep showing prose rather than an actionable callout.
     expect(result.repairRemediation).toBeNull();

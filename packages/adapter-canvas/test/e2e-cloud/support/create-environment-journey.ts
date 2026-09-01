@@ -564,9 +564,11 @@ export function selectFallbackPullRequests(
 /** States `/api/operations/{id}` reports once it will not change again. */
 export const TERMINAL_OPERATION_STATES: readonly string[] = [
   "succeeded",
+  "succeeded_with_warnings",
+  "action_required",
   "failed",
-  "cancelled",
-  "interrupted"
+  "failed_partial",
+  "cancelled"
 ];
 
 export interface OperationSnapshot {
@@ -601,10 +603,19 @@ export function readOperationSnapshot(payload: unknown): OperationSnapshot {
       'The operation status response carried a non-string "operation.error".'
     );
   const state = operation.state.trim();
-  const error = typeof operation.error === "string" ? operation.error : "";
+  const failure = asRecord(operation.failure);
+  const error =
+    typeof failure?.message === "string" && failure.message.trim() !== "" ?
+      failure.message.trim()
+    : typeof operation.error === "string" ? operation.error
+    : "";
+  const terminal =
+    (typeof operation.terminalState === "string" &&
+      operation.terminalState.trim() !== "") ||
+    TERMINAL_OPERATION_STATES.includes(state);
   return {
     state,
-    terminal: TERMINAL_OPERATION_STATES.includes(state),
+    terminal,
     error
   };
 }
