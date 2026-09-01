@@ -450,7 +450,7 @@ export async function persistMutationCheckpoint({
   if (operation?.providerRecovery?.state === "rollback_pending") {
     await fail(
       409,
-      "Radius reconciled the interrupted provider request and must roll back before making any further provider changes.",
+      "Radius reconciled the interrupted provider request and must delete the setup resources before making any further provider changes.",
       "provider-rollback-pending"
     );
     return false;
@@ -2556,6 +2556,13 @@ export function beginDeployAttempt(
   input: DeployAttemptInput
 ): void {
   state.deployStatus = "in_progress";
+  // Advances on every deploy invocation, including each redeploy inside a
+  // repair loop. Nothing else does: the loop reuses its attempt id, the run id
+  // is cleared here and stays empty when a deploy fails before dispatch, and
+  // `deployFinishedAt` is only written when a run concludes. Without this, two
+  // consecutive pre-dispatch failures in one loop are indistinguishable, and a
+  // notification dismissed for the first would hide the second.
+  state.deployGeneration = (state.deployGeneration || 0) + 1;
   state.deployError = null;
   state.deployErrorKind = null;
   state.deployErrorBranch = null;
@@ -2814,7 +2821,7 @@ const DELETE_WORKFLOW_FILE = "delete-application.yml";
 // silently disables all of it. It is exported so a test can pin it.
 //
 // Do not guess at this value: it must match
-// radius-project/radius .github/extension/actions/run-rad-commands/action.yml.
+// radius-project/ai-extensions .github/extension/actions/run-rad-commands/action.yml.
 export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
 
 // ── POST /api/deploy composition root ────────────────────────────────────────
@@ -4198,7 +4205,7 @@ export async function cleanupAzureSetupArtifacts(
       if (!(error instanceof CleanupJournalPersistenceError)) throw error;
       // The journal did not reach disk. Radius stops here rather than deleting
       // anything else it could not account for afterwards.
-      const detail = `Radius stopped this rollback because it could not save the record of what it was deleting: ${error.message}`;
+      const detail = `Radius stopped this deletion because it could not save the record of what it was deleting: ${error.message}`;
       warnings.push(detail);
       steps?.push(`⚠ ${detail}`);
       await pushResult(
@@ -4438,7 +4445,7 @@ export async function cleanupGitHubEnvironmentArtifact(
   };
 
   if (artifact.state === "created_candidate") {
-    const detail = `GitHub environment "${target}" was left in place because a pre-create 404 followed by GitHub's idempotent PUT cannot prove this request created it. Review it manually and delete it yourself if this setup should be rolled back.`;
+    const detail = `Radius left GitHub environment "${target}" in place because a pre-create 404 followed by GitHub's idempotent PUT could not verify that this setup created it. To finish deleting the setup, review the GitHub environment and delete it manually if it belongs to this setup.`;
     warnings.push(detail);
     steps?.push(`⚠️ ${detail}`);
     recordOutcome("skipped", detail);
@@ -6374,7 +6381,7 @@ function createInstanceRequestCoordinator(
         if (plan.state === "start") {
           addLegacyStep(
             op,
-            "⏳ Rolling back the resources this interrupted attempt created."
+            "⏳ Deleting the resources this interrupted setup created."
           );
         }
         await saveOperation(op);

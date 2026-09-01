@@ -376,7 +376,7 @@ export function createWorkflowFileCommitter(
           rejectionGuidance: (result) =>
             `Radius could not remove the setup branch "${branch}" it recovered in ${target.targetRepo}: ` +
             `${result.stderr?.trim() || result.stdout?.trim() || "GitHub refused the request."} ` +
-            "It did not repeat the delete and did not start a rollback, because a rollback that leaves this branch behind would report work it has not done. " +
+            "It did not repeat the delete and did not start setup deletion, because deleting other resources while leaving this branch behind would report work it has not done. " +
             "Remove that exact branch yourself, then start setup again.",
           accept: () => true,
           reconcile: async () => {
@@ -417,14 +417,14 @@ export function createWorkflowFileCommitter(
               guidance:
                 current.state === "present" && current.sha !== baseSha ?
                   `Recovered branch "${branch}" now points to a different commit. Radius will not delete it because it may contain replacement work.`
-                : `Recovered branch "${branch}" still exists after Radius's single rollback request. Radius will not repeat the delete blindly. Delete that exact branch manually before retrying setup.`
+                : `Recovered branch "${branch}" still exists after Radius's single deletion request. Radius will not repeat the delete blindly. Delete that exact branch manually before retrying setup.`
             };
           }
         });
         if (removal.state !== "applied") {
           const guidance =
             `Radius could not remove the setup branch "${branch}" it recovered in ${target.targetRepo}. ` +
-            "It did not repeat the delete and did not start a rollback, because a rollback that leaves this branch behind would report work it has not done. " +
+            "It did not repeat the delete and did not start setup deletion, because deleting other resources while leaving this branch behind would report work it has not done. " +
             "Remove that exact branch yourself, then start setup again.";
           settleProviderMutation(
             ports.mutationRecovery.operation,
@@ -448,7 +448,7 @@ export function createWorkflowFileCommitter(
         }
         await ports.mutationRecovery.persist();
         throw new ProviderMutationRecoveryError(
-          `Radius reconciled and removed recovered setup branch "${branch}". The remaining proven-owned setup resources will now be rolled back.`,
+          `Radius reconciled and removed recovered setup branch "${branch}". The remaining proven-owned setup resources will now be deleted.`,
           "provider-mutation-recovered-rollback"
         );
       }
@@ -680,7 +680,7 @@ export function createWorkflowFileCommitter(
                 return {
                   state: "manual_required" as const,
                   guidance:
-                    `Radius does not have complete pre-write rollback provenance for "${path}" on "${branch || "the default branch"}". ` +
+                    `Radius does not have complete pre-write deletion provenance for "${path}" on "${branch || "the default branch"}". ` +
                     "It will not accept, overwrite, or remove that workflow."
                 };
               }

@@ -161,14 +161,14 @@ const COMMAND_BUTTON_CLASS = "rad-btn rad-btn--secondary";
 const COMMAND_REFUSED_MESSAGE = "Radius could not accept that request.";
 const COMMAND_UNREACHABLE_MESSAGE =
   "Radius could not reach the setup service. Try again.";
-const STOPPING_MESSAGE = "Stopping after the current step…";
+const STOPPING_MESSAGE = "Pausing after the current step…";
 const COMMAND_ACCEPTED_MESSAGE = "Radius accepted the request…";
 const ROLLBACK_UNAVAILABLE_MESSAGE =
-  "Radius could not open the rollback confirmation.";
+  "Radius could not open the delete confirmation.";
 const DEFAULT_FAILURE_TITLE = "Setup didn’t finish";
-const DEFAULT_ROLLBACK_TITLE = "Roll back resources created by this setup?";
-const DEFAULT_ROLLBACK_CONFIRM = "Roll back resources";
-const DEFAULT_ROLLBACK_CANCEL = "Keep resources";
+const DEFAULT_ROLLBACK_TITLE = "Delete this setup and its created resources?";
+const DEFAULT_ROLLBACK_CONFIRM = "Delete setup";
+const DEFAULT_ROLLBACK_CANCEL = "Keep setup";
 const DIAGNOSTIC_FILENAME = "radius-environment-operation-diagnostics.json";
 const CANCELLED_ACTIVITY_MESSAGE = "Environment setup cancelled.";
 // Commands that delete. Accepting one supersedes the failure the landing is
@@ -185,9 +185,9 @@ const CLEANING_COMMAND_KINDS: ReadonlySet<string> = new Set([
 // are different promises, so none of them borrows another's wording.
 const COMMAND_STATUS_TEXT: Readonly<Record<string, string>> = {
   stop: STOPPING_MESSAGE,
-  rollback: "Rollback started. Removing the resources Radius created…",
+  rollback: "Setup deletion started. Removing the resources Radius created…",
   retry_cleanup:
-    "Rollback retry started. Removing the resources still present…",
+    "Deletion retry started. Removing the resources still present…",
   continue_setup: "Continuing setup…",
   retry_setup: "Retrying setup…",
   retry_deletion: "Retrying deletion…",
@@ -1239,7 +1239,7 @@ export function initializeEnvironmentOperations(
       cleanup.state === "running" ? "Cleanup is still running."
       : cleanup.state === "pending" ? "Cleanup has not started yet."
       : cleanup.rollbackBeforeCommit === false ?
-        "Cleanup stopped at the commit point, so reusable artifacts were left in place."
+        "Deletion stopped at the commit point, so reusable artifacts were left in place."
       : cleanup.state === "succeeded_with_warnings" ?
         "Cleanup finished with warnings."
       : cleanup.state === "succeeded" ? "Cleanup finished."

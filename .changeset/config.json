@@ -1,5 +1,5 @@
 {
-  "$schema": "https://unpkg.com/@changesets/config@4.0.0-next.9/schema.json",
+  "$schema": "https://unpkg.com/@changesets/config@4.0.0/schema.json",
   "changelog": "@changesets/changelog-github",
   "commit": false,
   "fixed": [],
@@ -9,7 +9,7 @@
   "updateInternalDependencies": "patch",
   "privatePackages": {
     "version": true,
-    "tag": true
+    "tag": false
   },
   "snapshot": {
     "useCalculatedVersion": true,

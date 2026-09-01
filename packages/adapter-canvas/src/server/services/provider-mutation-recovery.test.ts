@@ -101,7 +101,7 @@ describe("provider mutation recovery", () => {
       ).rejects.toMatchObject({
         code: "provider-mutation-manual-required",
         message: expect.stringContaining(
-          "could not record the rollback provenance"
+          "could not record the deletion provenance"
         )
       });
 

@@ -193,6 +193,7 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare("GET", "/api/progress", "exact", "none", "graphs-planning"),
   declare("GET", "/api/deployed-graph", "exact", "none", "graphs-planning"),
   declare("GET", "/api/deploy-status", "exact", "none", "deployments"),
+  declare("GET", "/api/deploy-notification", "exact", "none", "deployments"),
   legacyPost("/api/load-graph", "exact", "json", "graphs-planning"),
   declare("GET", "/api/list-environments", "exact", "none", "environments"),
   declare("GET", "/api/list-applications", "exact", "none", "deployments"),

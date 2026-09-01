@@ -17,7 +17,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: radius-project/radius/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}
+      - uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}
         with:
           registry: \${{ secrets.REGISTRY }}
 `;
@@ -42,7 +42,7 @@ describe("generateVerifyWorkflow", () => {
 
         expect(yaml).toContain('default: "prod"');
         expect(yaml).toContain(
-          `radius-project/radius/.github/extension/actions/verify-ghcr-push@${RADIUS_REF}`
+          `radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@${RADIUS_REF}`
         );
       });
 

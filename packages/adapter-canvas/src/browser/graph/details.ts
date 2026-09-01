@@ -7,6 +7,7 @@
 // listener per container so re-rendering a graph can never stack handlers.
 
 import { escapeBrowserHtml } from "../html.js";
+import { safeExternalUrl } from "../external-url.js";
 import { buildSourceUrl, githubSourceReferenceUrl } from "./model.js";
 import { isLocalSourceNode } from "./build.js";
 import type { BrowserContext, DomElement } from "../ports.js";
@@ -58,14 +59,10 @@ export function linkRow(
   );
 }
 
-export function safeExternalUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "https:" ? parsed.href : "";
-  } catch {
-    return "";
-  }
-}
+// Re-exported so this panel's existing importers keep one import site while the
+// deploy chip, which cannot pull in the graph modules this file depends on,
+// shares the same definition.
+export { safeExternalUrl };
 
 // A local link row: same look as linkRow, but opens an on-disk worktree file in
 // the editor canvas instead of navigating. The repo-relative path/line and a

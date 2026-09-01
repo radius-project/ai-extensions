@@ -2284,10 +2284,10 @@ function formatGitHubEnvironmentVariableLabel(variable: any): string {
 // that gap, so every retained entry carries the reason it is being kept.
 
 const UNPROVEN_GITHUB_ENVIRONMENT_ACTION =
-  "Radius cannot prove it created this GitHub environment, so it was left in place. Delete it yourself if this setup should be rolled back.";
+  "Radius left this GitHub environment in place because it could not verify that this setup created it. To finish deleting the setup, review the GitHub environment and delete it manually if it belongs to this setup.";
 
 const UNPROVEN_SERVICE_PRINCIPAL_ACTION =
-  "Radius could not prove whether it created this Service Principal — the principal was absent before setup ran and present afterwards, but the create command did not report success — so it was left in place. Review it and delete it yourself if this setup should be rolled back.";
+  "Radius left this Service Principal in place because it could not verify that this setup created it: the principal was absent before setup ran and present afterward, but the create command did not report success. To finish deleting the setup, review the Service Principal and delete it manually if it belongs to this setup.";
 
 const REUSE_NOUNS: Record<string, string> = {
   azure_app: "App Registration",
@@ -2302,7 +2302,7 @@ const RETAINED_KEEP_ACTION =
 function reuseExplanation(kind: string, origin: any): string {
   const noun = REUSE_NOUNS[kind] || "resource";
   if (origin === "radius_earlier_setup") {
-    return `An earlier Radius setup for this repository and environment created this ${noun}, and this attempt reused it instead of creating a second one. Rolling back this attempt does not remove it.`;
+    return `An earlier Radius setup for this repository and environment created this ${noun}, and this attempt reused it instead of creating a second one. Deleting this setup does not remove it.`;
   }
   if (origin === "pre_existing") {
     return `This ${noun} already existed before this attempt started, so Radius reused it rather than creating one.`;
@@ -2887,7 +2887,7 @@ function projectPartialState(
       target: String(entry.target || ""),
       action:
         entry.detail ||
-        "Review this resource in the Azure or GitHub portal and remove it if this setup should be rolled back."
+        "Review this resource in the Azure or GitHub portal and remove it if this setup should be deleted."
     }));
   // Reverse table order: the GitHub environment is the resource a customer is
   // most likely to find first, so it leads the manual list.
@@ -4185,19 +4185,19 @@ function projectAbandonPreview(op: any): any {
  */
 const UNAVAILABLE_GUIDANCE_MESSAGES: Record<string, string> = {
   "rollback-nothing-owned":
-    "Radius did not create any resources in this attempt, so there is nothing to roll back.",
+    "Radius did not create any resources in this attempt, so there is nothing to delete.",
   "rollback-environment-verified":
     "Credential verification succeeded, so this environment is finished setup. Remove it from the environment list with Delete Environment.",
   "rollback-provenance-incomplete":
     "Radius cannot prove the committed workflow files are still exactly what it wrote, so it will not remove them or the resources they depend on. Review and remove them yourself.",
   "rollback-already-attempted":
-    "Radius already ran a rollback for this attempt. Anything still listed needs the retry above or a manual removal.",
+    "Radius already attempted deletion for this setup. Anything still listed needs the retry above or a manual removal.",
   "setup-continue-request-missing":
     "Radius no longer holds the environment details needed to continue this setup.",
   "setup-continue-ownership-ambiguous":
     "Radius cannot prove ownership of a remaining resource, so continuing could duplicate it. Remove it manually if needed.",
   "setup-continue-rolled-back":
-    "Radius rolled back what this attempt created. Start a new environment setup when you are ready."
+    "Radius deleted what this attempt created. Start a new environment setup when you are ready."
 };
 
 // Refusals whose sentence is the reconciliation's own guidance rather than a
@@ -4277,7 +4277,7 @@ export function projectOperationHeadline(op: any): any {
     if (activeCleanup === "rollback" || activeCleanup === "retry_cleanup") {
       return {
         code: "rolling-back",
-        title: "Rolling back created resources…",
+        title: "Deleting setup resources…",
         message:
           "Radius is removing the resources it proved it created during this attempt."
       };
@@ -4337,7 +4337,7 @@ export function projectOperationHeadline(op: any): any {
     if (cleanupCommand) {
       return {
         code: "rollback-complete",
-        title: "Rollback complete",
+        title: "Setup deleted",
         message:
           "Radius removed the resources it created during this attempt. Anything it reused was left alone."
       };
@@ -4345,11 +4345,11 @@ export function projectOperationHeadline(op: any): any {
     const workflowState = verificationWorkflowState(op);
     return {
       code: "stopped",
-      title: "Environment setup stopped",
+      title: "Environment setup paused",
       message:
         workflowState === "active" || workflowState === "cancelling" ?
-          "Radius stopped this setup, but its GitHub Actions workflow may still be running. Cancel it or wait for it to finish before rolling back or exiting."
-        : "Radius stopped before the next setup step. Review what exists, then roll it back or continue setup."
+          "Radius paused this setup, but its GitHub Actions workflow may still be running. Cancel it or wait for it to finish before deleting or exiting."
+        : "Radius paused before the next setup step. Review what exists, then delete this setup or continue setup."
     };
   }
   if (op.state === "failed_partial" && cleanupCommand) {
@@ -4360,14 +4360,14 @@ export function projectOperationHeadline(op: any): any {
     if (op.failure?.code === "setup-rollback-blocked") {
       return {
         code: "rollback-blocked",
-        title: "Rollback stopped before removing anything",
+        title: "Deletion stopped before removing anything",
         message:
           "The committed workflow files are no longer exactly what Radius wrote, so it removed nothing and left every resource in place. Review the files below, then remove what you want by hand."
       };
     }
     return {
       code: "rollback-incomplete",
-      title: "Rollback finished with items still present",
+      title: "Deletion finished with items still present",
       message:
         "Radius removed what it could. The resources below are still present and need another attempt or a manual removal."
     };
@@ -4380,11 +4380,13 @@ export function projectOperationHeadline(op: any): any {
     return {
       code: "continue-failed",
       title: "Setup could not continue",
-      message: `Radius stopped at ${setupStepLabel(op.resumeFrom)}. Review what exists, then retry setup or roll back what this attempt created.`
+      message: `Radius stopped at ${setupStepLabel(op.resumeFrom)}. Review what exists, then retry setup or delete what this attempt created.`
     };
   }
   return null;
 }
+
+const PAUSE_SETUP_LABEL = "Pause setup";
 
 export function projectOperationActions(op: any): any[] {
   if (!op) return [];
@@ -4431,12 +4433,12 @@ export function projectOperationActions(op: any): any[] {
       {
         id: "stop",
         kind: "stop",
-        label: "Stop setup",
+        label: PAUSE_SETUP_LABEL,
         placement: "row",
         tone: "neutral",
         requiresConfirmation: false,
         description:
-          "Radius stops this setup. If its exact GitHub Actions run is still active, you can cancel it next.",
+          "Radius pauses this setup. If its exact GitHub Actions run is still active, you can cancel it next.",
         method: "POST",
         path: `${base}/stop`,
         pending: false
@@ -4455,14 +4457,14 @@ export function projectOperationActions(op: any): any[] {
       {
         id: "stop",
         kind: "stop",
-        label: "Stop Setup",
+        label: PAUSE_SETUP_LABEL,
         placement: "row",
         tone: "neutral",
         requiresConfirmation: false,
         description:
           waitingForInput ?
-            "Radius is waiting for your answer, so it stops immediately."
-          : "Radius will finish the current Azure or GitHub step, record what changed, and stop before the next step.",
+            "Radius is waiting for your answer, so it pauses immediately."
+          : "Radius will finish the current Azure or GitHub step, record what changed, and pause before the next step.",
         method: "POST",
         path: `${base}/stop`,
         pending: Boolean(control.stop.requestedAt)
@@ -4577,19 +4579,13 @@ export function projectOperationActions(op: any): any[] {
     actions.push({
       id: "rollback",
       kind: "rollback",
-      label:
-        postCommit ?
-          "Roll back environment setup"
-        : "Roll back created resources",
+      label: "Delete setup",
       placement: "row",
       tone: "danger",
       requiresConfirmation: true,
-      confirmTitle:
-        postCommit ?
-          "Roll back this environment setup?"
-        : "Roll back resources created by this setup?",
-      confirmLabel: postCommit ? "Roll back setup" : "Roll back resources",
-      cancelLabel: "Keep resources",
+      confirmTitle: "Delete this setup and its created resources?",
+      confirmLabel: "Delete setup",
+      cancelLabel: "Keep setup",
       description:
         postCommit ?
           "Radius reverts the workflow files it committed with a new commit, then removes the GitHub environment and cloud identity it created. It checks first that every file is still exactly what it wrote and stops without removing anything if it is not. This cannot be undone."
@@ -4609,13 +4605,13 @@ export function projectOperationActions(op: any): any[] {
     actions.push({
       id: "retry-cleanup",
       kind: "retry_cleanup",
-      label: "Retry rollback",
+      label: "Retry deletion",
       placement: "row",
       tone: "danger",
       requiresConfirmation: true,
-      confirmTitle: "Retry the rollback for the resources still present?",
-      confirmLabel: "Retry rollback",
-      cancelLabel: "Keep resources",
+      confirmTitle: "Retry deleting the remaining setup resources?",
+      confirmLabel: "Retry deletion",
+      cancelLabel: "Keep setup",
       description:
         "Radius removes only the resources it proved it created and could not delete on the last attempt.",
       method: "POST",
@@ -4708,13 +4704,13 @@ export function projectNextTransition(op: any): any {
   if (active === "rollback") {
     return {
       code: "rolling-back",
-      message: "Rolling back created resources…"
+      message: "Deleting setup resources…"
     };
   }
   if (active === "retry_cleanup") {
     return {
       code: "retrying-rollback",
-      message: "Retrying the rollback for the resources still present…"
+      message: "Retrying deletion for the setup resources still present…"
     };
   }
   if (active === EXIT_COMMAND_KIND) {
@@ -4726,7 +4722,7 @@ export function projectNextTransition(op: any): any {
   if (isStopPending(op)) {
     return {
       code: "stopping",
-      message: "Stopping after the current step…"
+      message: "Pausing after the current step…"
     };
   }
   if (op.state === INPUT_REQUIRED_STATE) {
@@ -4942,7 +4938,7 @@ export function stopAtBoundary(
       reason: "stopped-at-boundary",
       boundary: control.stop.boundary,
       userMessage:
-        "Radius finished the step that was already running, recorded what changed, and stopped before the next one."
+        "Radius finished the step that was already running, recorded what changed, and paused before the next one."
     }
   });
 }
@@ -5251,9 +5247,9 @@ export function summarize(op: any): string {
       if (active === EXIT_COMMAND_KIND)
         return `Closing the setup for ${env} and removing what it created…`;
       if (active === "rollback" || active === "retry_cleanup")
-        return `Rolling back the resources created for ${env}…`;
+        return `Deleting setup resources for ${env}…`;
       if (isStopPending(op))
-        return `Stopping ${env} setup after the current step…`;
+        return `Pausing ${env} setup after the current step…`;
       const stage = op.stages.find((s) => s.id === op.currentStage);
       return `Creating ${env} — ${
         stage ? stage.label.toLowerCase() : "working"
@@ -5293,8 +5289,8 @@ export function summarize(op: any): string {
     case "cancelled": {
       const command = latestCommand(op);
       if (command && CLEANUP_COMMAND_KINDS.includes(command.kind))
-        return `Rolled back the resources created for "${env}".`;
-      return `Creating environment "${env}" was stopped.`;
+        return `Deleted the setup resources created for "${env}".`;
+      return `Creating environment "${env}" was paused.`;
     }
     default:
       return "";

@@ -1,11 +1,11 @@
 // Opt-in live regression test. Fetches the CURRENT workflow templates from
-// radius-project/radius `.github/extension/` and asserts that, once the
+// radius-project/ai-extensions `.github/extension/` and asserts that, once the
 // extension fills them, every generated file parses as valid YAML.
 //
 // Why this matters: the extension renders templates fetched from
-// radius-project/radius at RUNTIME (RADIUS_REF, currently `main`) — it bundles
-// no copy. `generateDeployWorkflow` injects GitHub Actions expressions whose
-// string defaults are single-quoted (`${{ vars.RADIUS_BUILD_ARCH_MODE ||
+// radius-project/ai-extensions at RUNTIME (RADIUS_REF, currently `main`) — it
+// bundles no copy. `generateDeployWorkflow` injects GitHub Actions expressions
+// whose string defaults are single-quoted (`${{ vars.RADIUS_BUILD_ARCH_MODE ||
 // 'detect' }}`). If an upstream template wraps such a placeholder in a
 // single-quoted YAML scalar, the injected quotes nest and the rendered file
 // becomes invalid YAML — every deploy dispatch then fails upstream with
@@ -20,9 +20,12 @@
 // templates and asserted to produce valid YAML, so a malformed scalar,
 // indentation, or quoting change in ANY of those upstream templates is caught.
 //
-// This hits the network and depends on an external repo's moving ref, so it is
-// NOT part of the default hermetic suite. A separate non-required CI workflow
-// sets RUN_LIVE_WORKFLOW_TESTS on pull requests, pushes to main, and nightly.
+// This hits the network and depends on a repo's moving ref, so it is NOT part
+// of the default hermetic suite. A separate non-required CI workflow sets
+// RUN_LIVE_WORKFLOW_TESTS on pull requests, pushes to main, and nightly. It also
+// sets RADIUS_LIVE_REF to the ref under test (the PR head on pull requests) so a
+// PR validates ITS OWN templates; runs without the override fall back to
+// RADIUS_REF (`main`).
 import { describe, it, expect } from "vitest";
 import { parse as parseYaml } from "yaml";
 import { readFile } from "node:fs/promises";
@@ -38,14 +41,15 @@ import {
   generateDeployWorkflow
 } from "./deploy.js";
 import {
-  DELETE_RADIUS_REF,
   DELETE_APP_DISPATCHER_FILE,
   DELETE_ENV_AZURE_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_AZURE_FILE,
   DELETE_AWS_FILE,
+  DELETE_RADIUS_REF,
   generateDeleteWorkflow
 } from "./delete.js";
+import { fetchExtensionFile } from "../../test/support/live-github.js";
 import {
   VERIFY_AZURE_FILE,
   VERIFY_AWS_FILE,
@@ -54,13 +58,28 @@ import {
 
 const LIVE = !!process.env.RUN_LIVE_WORKFLOW_TESTS;
 
-async function fetchWorkflow(file: string, ref: string): Promise<string> {
-  const url = `https://raw.githubusercontent.com/${RADIUS_WORKFLOW_REPO}/${ref}/${RADIUS_WORKFLOW_DIR}/${file}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`failed to fetch ${url}: ${res.status} ${res.statusText}`);
-  }
-  return res.text();
+// The ref whose templates are validated. CI sets this to the PR head on pull
+// requests so a PR checks its own `.github/extension/` templates; otherwise it
+// falls back to RADIUS_REF (`main`).
+const LIVE_REF = process.env.RADIUS_LIVE_REF?.trim() || RADIUS_REF;
+
+// The delete templates and the `delete-resource` composite action can be
+// re-pinned independently via RADIUS_DELETE_REF (DELETE_RADIUS_REF). Without an
+// explicit RADIUS_LIVE_REF, validate the delete templates on that override so
+// the re-pin path stays exercised live rather than silently on RADIUS_REF.
+const DELETE_LIVE_REF =
+  process.env.RADIUS_LIVE_REF?.trim() || DELETE_RADIUS_REF;
+
+// radius-project/ai-extensions is an internal repo, so the templates are not
+// reachable over anonymous raw.githubusercontent.com. Fetch them through the
+// authenticated GitHub contents API (raw media type) using the CI token.
+function fetchWorkflow(file: string, ref: string): Promise<string> {
+  return fetchExtensionFile(
+    RADIUS_WORKFLOW_REPO,
+    RADIUS_WORKFLOW_DIR,
+    file,
+    ref
+  );
 }
 
 async function fetchTemplates(
@@ -108,26 +127,26 @@ describe.skipIf(!LIVE)(
     it("renders valid YAML from the current upstream deploy templates", async () => {
       const templates = await fetchTemplates(
         [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE],
-        RADIUS_REF
+        LIVE_REF
       );
       const generated = generateDeployWorkflow(
         "prod",
         ".radius/app.bicep",
         templates
       );
-      assertAllValidYaml(generated, RADIUS_REF);
+      assertAllValidYaml(generated, LIVE_REF);
     }, 30_000);
 
     it("renders valid YAML from the current upstream delete templates", async () => {
       const templates = await fetchTemplates(
         [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE, DELETE_AWS_FILE],
-        DELETE_RADIUS_REF
+        DELETE_LIVE_REF
       );
       const generated = generateDeleteWorkflow("prod", {
         ...templates,
         ...(await readLocalDeleteTemplates())
       });
-      assertAllValidYaml(generated, DELETE_RADIUS_REF);
+      assertAllValidYaml(generated, DELETE_LIVE_REF);
     }, 30_000);
 
     it("renders valid YAML from the current upstream verify templates", async () => {
@@ -135,9 +154,9 @@ describe.skipIf(!LIVE)(
         [azure, VERIFY_AZURE_FILE],
         [aws, VERIFY_AWS_FILE]
       ] as const) {
-        const template = await fetchWorkflow(file, RADIUS_REF);
+        const template = await fetchWorkflow(file, LIVE_REF);
         const rendered = generateVerifyWorkflow("prod", platform, template);
-        assertAllValidYaml({ [file]: rendered }, RADIUS_REF);
+        assertAllValidYaml({ [file]: rendered }, LIVE_REF);
       }
     }, 30_000);
   }
