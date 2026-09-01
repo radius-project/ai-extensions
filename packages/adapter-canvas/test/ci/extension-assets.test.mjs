@@ -9,6 +9,7 @@ const REPO_ROOT = resolve(TEST_DIR, "../../../..");
 const EXTENSION_ROOT = join(REPO_ROOT, ".github", "extension");
 const INTERNAL_PREFIX =
   "radius-project/ai-extensions/.github/extension/actions/";
+const EXTENSION_ACTION_PATH = "/.github/extension/actions/";
 const FULL_SHA_REFERENCE = /^[^@\s]+@[0-9a-f]{40}$/;
 
 function filesUnder(directory) {
@@ -58,6 +59,11 @@ describe(".github/extension release assets", () => {
     expect(references.length).toBeGreaterThan(0);
     for (const reference of references) {
       if (reference.uses.startsWith("./")) continue;
+      if (reference.uses.includes(EXTENSION_ACTION_PATH)) {
+        expect(reference.uses, reference.path).toMatch(
+          /^radius-project\/ai-extensions\/\.github\/extension\/actions\//u
+        );
+      }
       if (reference.uses.startsWith(INTERNAL_PREFIX)) {
         expect(reference.uses).toMatch(/@\{\{RADIUS_REF\}\}$/u);
       } else {

@@ -485,14 +485,23 @@ describe("generateDeleteWorkflow", () => {
     );
   });
 
-  it("fetches every delete template from ai-extensions at the pinned ref", async () => {
+  it("fetches every workflow template from ai-extensions at its pinned ref", async () => {
     h.fetches = [];
     expireTemplateCache();
 
+    await generateVerifyWorkflow("dev", "azure", "verify-source-ref");
+    await generateDeployWorkflow("dev", ".radius/app.bicep");
     await generateDeleteWorkflow("dev");
 
-    expect(h.fetches).toEqual(
-      [
+    expect(h.fetches).toEqual([
+      {
+        repo: "radius-project/ai-extensions",
+        path: ".github/extension/verify-azure.yml",
+        ref: "verify-source-ref"
+      },
+      ...[
+        "run-rad-commands.yml",
+        "run-rad-commands-azure.yml",
         "delete-application.yml",
         "delete-azure.yml",
         "delete-environment.yml",
@@ -502,7 +511,7 @@ describe("generateDeleteWorkflow", () => {
         path: `.github/extension/${file}`,
         ref: "main"
       }))
-    );
+    ]);
   });
 
   it("fails when an environment-delete template cannot be fetched from ai-extensions", async () => {
