@@ -2,4 +2,4 @@
 "@radius-project/adapter-canvas": patch
 ---
 
-Hide unsupported AWS credential and environment creation options while preserving the implementation for future enablement.
+Disable AWS credential provider selection and block environment creation from unsupported credential providers while preserving the implementation for future enablement.
