@@ -30,6 +30,7 @@ export type {
   DeleteOperationRecord,
   DeleteStartResult
 } from "./environments-types.js";
+import type { EnvironmentRunStep } from "./environments-types.js";
 import { classifyProvider } from "../../provider-classification.js";
 
 const BROWSER_DIAGNOSTIC_MAX_LENGTH = 2000;
@@ -467,13 +468,13 @@ export async function handleBypassVerification(
       return;
     }
 
-    // 3. Confirm the target is a Radius-managed environment. Anything without
-    //    the RADIUS_MANAGED marker was not created by this extension and is not
-    //    a valid bypass target.
+    // 3. Confirm the target is a Radius-managed environment, reading under the
+    //    pinned executor so the check runs as the authorized identity — not the
+    //    server's ambient gh auth. Anything without the RADIUS_MANAGED marker
+    //    was not created by this extension and is not a valid bypass target.
     let managed = false;
     try {
-      const varsRaw = await dependencies.runCommand(
-        "gh",
+      const varsResult = await selectedExecutor.run(
         [
           "api",
           `/repos/${repo}/environments/${encodeURIComponent(
@@ -484,7 +485,12 @@ export async function handleBypassVerification(
         ],
         { timeout: 20000 }
       );
-      managed = (varsRaw || "")
+      if (varsResult.code !== 0 && varsResult.code !== "0") {
+        throw new Error(
+          varsResult.stderr || varsResult.stdout || "gh api failed"
+        );
+      }
+      managed = (varsResult.stdout || "")
         .split("\n")
         .map((line) => line.trim())
         .includes("RADIUS_MANAGED");
@@ -504,14 +510,22 @@ export async function handleBypassVerification(
       return;
     }
 
-    // 4. Re-fetch and re-classify the run server-side. Only a terminal,
-    //    genuinely failed run whose classification is a bypassable category is
-    //    allowed through.
-    const detail = await dependencies.getRunDetail(
-      repo,
-      runId,
-      selectedExecutor
-    );
+    // 4. Re-fetch and re-classify the run server-side under the pinned identity.
+    //    A GitHub read failure fails closed (502) like the checks above, never
+    //    falling through to the outer client-error handler. Only a terminal run
+    //    that genuinely *failed* (not cancelled, timed out or skipped) and whose
+    //    classification is a bypassable category is allowed through.
+    let detail: Awaited<ReturnType<typeof dependencies.getRunDetail>>;
+    try {
+      detail = await dependencies.getRunDetail(repo, runId, selectedExecutor);
+    } catch (e) {
+      json(502, {
+        error:
+          "Could not read the verification run to confirm the bypass: " +
+          dependencies.errorMessage(e)
+      });
+      return;
+    }
     if (!detail) {
       json(502, {
         error:
@@ -533,12 +547,29 @@ export async function handleBypassVerification(
       });
       return;
     }
+    if (detail.conclusion !== "failure") {
+      json(409, {
+        error:
+          "Credential verification did not fail cleanly (it may have been cancelled or timed out). Re-run verification before deciding whether to bypass."
+      });
+      return;
+    }
     const failed = (detail.steps || []).filter(
-      (s) =>
+      (s: EnvironmentRunStep) =>
         s.conclusion && s.conclusion !== "success" && s.conclusion !== "skipped"
     );
-    const log =
-      (await dependencies.fetchRunLog(repo, runId, selectedExecutor)) || "";
+    let log: string;
+    try {
+      log =
+        (await dependencies.fetchRunLog(repo, runId, selectedExecutor)) || "";
+    } catch (e) {
+      json(502, {
+        error:
+          "Could not read the verification run log to confirm the bypass: " +
+          dependencies.errorMessage(e)
+      });
+      return;
+    }
     const azureLoginLog = dependencies.extractGitHubActionsStepLog(
       log,
       "Azure Login (OIDC)"
@@ -560,10 +591,10 @@ export async function handleBypassVerification(
       return;
     }
 
-    // 5. Record the bypass, keyed to the specific run the user accepted.
+    // 5. Record the bypass under the pinned executor, keyed to the specific run
+    //    the user accepted.
     try {
-      await dependencies.runCommand(
-        "gh",
+      const writeResult = await selectedExecutor.run(
         [
           "variable",
           "set",
@@ -577,6 +608,11 @@ export async function handleBypassVerification(
         ],
         { timeout: 20000 }
       );
+      if (writeResult.code !== 0 && writeResult.code !== "0") {
+        throw new Error(
+          writeResult.stderr || writeResult.stdout || "gh variable set failed"
+        );
+      }
     } catch (e) {
       json(500, {
         error:

@@ -6,6 +6,7 @@ import {
 } from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
+import type { SelectedGhExecutor } from "../../gh.js";
 import { createCanvasServer } from "../create-canvas-server.js";
 import { createRequestContext } from "../request-context.js";
 import { createRequestHandler } from "../create-request-handler.js";
@@ -806,9 +807,28 @@ describe("environments — bypass-verification", () => {
     verification: { runId: "555" },
     ...over
   });
-  // The gh reads the handler issues in order: (1) the environment's variable
-  // names for the RADIUS_MANAGED check. The marker write is (2).
+  // The gh calls the handler issues run through the pinned executor, in order:
+  // (1) `api .../variables` for the RADIUS_MANAGED check, then (2) `variable set`
+  // to write the marker. managedVars is the stdout of the variables read.
   const managedVars = "RADIUS_MANAGED\nAZURE_CLIENT_ID";
+  type GhResult = Awaited<ReturnType<SelectedGhExecutor["run"]>>;
+  const ok = (stdout = ""): GhResult => ({ code: 0, stdout, stderr: "" });
+  // Builds an executor whose run() scripts the two gh calls the handler makes:
+  // the `api` variables read and the `variable set` marker write.
+  const scriptedExecutor = (
+    script: {
+      variables?: () => Promise<GhResult>;
+      write?: () => Promise<GhResult>;
+    } = {}
+  ) => {
+    const run = vi.fn(((args: readonly string[]) =>
+      args[0] === "api" ?
+        (script.variables || (() => Promise.resolve(ok(managedVars))))()
+      : (
+          script.write || (() => Promise.resolve(ok()))
+        )()) as SelectedGhExecutor["run"]);
+    return { run, executor: successfulSelectedGhExecutor({ run }) };
+  };
   const bypassBody = (over: Record<string, unknown> = {}) =>
     JSON.stringify({
       repo: "o/r",
@@ -822,7 +842,7 @@ describe("environments — bypass-verification", () => {
   const passingDeps = (over: Partial<EnvironmentsDependencies> = {}) =>
     deps({
       getOperation: () => bypassOp(),
-      getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
+      getSelectedGitHubExecutor: () => scriptedExecutor().executor,
       hasCompleteVerificationIdentity: () => true,
       getRunDetail: () =>
         Promise.resolve({
@@ -927,7 +947,9 @@ describe("environments — bypass-verification", () => {
   });
 
   it("502s when the managed-environment check cannot be read", async () => {
-    const runCommand = vi.fn(() => Promise.reject(new Error("boom")));
+    const { executor } = scriptedExecutor({
+      variables: () => Promise.reject(new Error("boom"))
+    });
     const { recording, ctx } = context(
       "POST",
       "/api/bypass-verification",
@@ -935,7 +957,27 @@ describe("environments — bypass-verification", () => {
     );
     await handleBypassVerification(
       ctx,
-      passingDeps({ runCommand } as Partial<EnvironmentsDependencies>)
+      passingDeps({ getSelectedGitHubExecutor: () => executor })
+    );
+    expect(recording.status).toBe(502);
+    expect(JSON.parse(recording.body).error).toContain(
+      "Could not confirm the environment"
+    );
+  });
+
+  it("502s when the managed-environment check exits non-zero", async () => {
+    const { executor } = scriptedExecutor({
+      variables: () =>
+        Promise.resolve({ code: 1, stdout: "", stderr: "gh boom" })
+    });
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({ getSelectedGitHubExecutor: () => executor })
     );
     expect(recording.status).toBe(502);
     expect(JSON.parse(recording.body).error).toContain(
@@ -944,7 +986,9 @@ describe("environments — bypass-verification", () => {
   });
 
   it("409s when the target is not a Radius-managed environment", async () => {
-    const runCommand = vi.fn(() => Promise.resolve("SOME_OTHER_VAR"));
+    const { executor } = scriptedExecutor({
+      variables: () => Promise.resolve(ok("SOME_OTHER_VAR"))
+    });
     const { recording, ctx } = context(
       "POST",
       "/api/bypass-verification",
@@ -952,14 +996,13 @@ describe("environments — bypass-verification", () => {
     );
     await handleBypassVerification(
       ctx,
-      passingDeps({ runCommand } as Partial<EnvironmentsDependencies>)
+      passingDeps({ getSelectedGitHubExecutor: () => executor })
     );
     expect(recording.status).toBe(409);
     expect(JSON.parse(recording.body).error).toContain("not managed by Radius");
   });
 
   it("502s when the run cannot be re-read", async () => {
-    const runCommand = vi.fn(() => Promise.resolve(managedVars));
     const { recording, ctx } = context(
       "POST",
       "/api/bypass-verification",
@@ -968,7 +1011,6 @@ describe("environments — bypass-verification", () => {
     await handleBypassVerification(
       ctx,
       passingDeps({
-        runCommand,
         getRunDetail: () => Promise.resolve(null)
       } as Partial<EnvironmentsDependencies>)
     );
@@ -978,8 +1020,7 @@ describe("environments — bypass-verification", () => {
     );
   });
 
-  it("409s when the run is still in progress", async () => {
-    const runCommand = vi.fn(() => Promise.resolve(managedVars));
+  it("502s when re-reading the run throws (fails closed)", async () => {
     const { recording, ctx } = context(
       "POST",
       "/api/bypass-verification",
@@ -988,7 +1029,42 @@ describe("environments — bypass-verification", () => {
     await handleBypassVerification(
       ctx,
       passingDeps({
-        runCommand,
+        getRunDetail: () => Promise.reject(new Error("gh api 502"))
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(recording.status).toBe(502);
+    expect(JSON.parse(recording.body).error).toContain(
+      "Could not read the verification run to confirm the bypass: gh api 502"
+    );
+  });
+
+  it("502s when reading the run log throws (fails closed)", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
+        fetchRunLog: () => Promise.reject(new Error("log unreadable"))
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(recording.status).toBe(502);
+    expect(JSON.parse(recording.body).error).toContain(
+      "Could not read the verification run log to confirm the bypass: log unreadable"
+    );
+  });
+
+  it("409s when the run is still in progress", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
         getRunDetail: () =>
           Promise.resolve({
             status: "in_progress",
@@ -1002,7 +1078,6 @@ describe("environments — bypass-verification", () => {
   });
 
   it("409s when verification actually passed", async () => {
-    const runCommand = vi.fn(() => Promise.resolve(managedVars));
     const { recording, ctx } = context(
       "POST",
       "/api/bypass-verification",
@@ -1011,7 +1086,6 @@ describe("environments — bypass-verification", () => {
     await handleBypassVerification(
       ctx,
       passingDeps({
-        runCommand,
         getRunDetail: () =>
           Promise.resolve({
             status: "completed",
@@ -1024,8 +1098,7 @@ describe("environments — bypass-verification", () => {
     expect(JSON.parse(recording.body).error).toContain("nothing to bypass");
   });
 
-  it("409s when the failure category is not bypassable", async () => {
-    const runCommand = vi.fn(() => Promise.resolve(managedVars));
+  it("409s when the run ended in a non-failure conclusion (cancelled/timed out)", async () => {
     const { recording, ctx } = context(
       "POST",
       "/api/bypass-verification",
@@ -1034,7 +1107,27 @@ describe("environments — bypass-verification", () => {
     await handleBypassVerification(
       ctx,
       passingDeps({
-        runCommand,
+        getRunDetail: () =>
+          Promise.resolve({
+            status: "completed",
+            conclusion: "cancelled",
+            steps: []
+          })
+      } as Partial<EnvironmentsDependencies>)
+    );
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body).error).toContain("did not fail cleanly");
+  });
+
+  it("409s when the failure category is not bypassable", async () => {
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({
         // Login step + trust evidence classifies as oidc-trust (not bypassable).
         getRunDetail: () =>
           Promise.resolve({
@@ -1055,10 +1148,9 @@ describe("environments — bypass-verification", () => {
   });
 
   it("500s when writing the marker variable fails", async () => {
-    const runCommand = vi
-      .fn()
-      .mockResolvedValueOnce(managedVars)
-      .mockRejectedValueOnce(new Error("boom"));
+    const { executor } = scriptedExecutor({
+      write: () => Promise.reject(new Error("boom"))
+    });
     const { recording, ctx } = context(
       "POST",
       "/api/bypass-verification",
@@ -1066,7 +1158,7 @@ describe("environments — bypass-verification", () => {
     );
     await handleBypassVerification(
       ctx,
-      passingDeps({ runCommand } as Partial<EnvironmentsDependencies>)
+      passingDeps({ getSelectedGitHubExecutor: () => executor })
     );
     expect(recording.status).toBe(500);
     expect(JSON.parse(recording.body)).toEqual({
@@ -1074,8 +1166,28 @@ describe("environments — bypass-verification", () => {
     });
   });
 
+  it("500s when writing the marker variable exits non-zero", async () => {
+    const { executor } = scriptedExecutor({
+      write: () =>
+        Promise.resolve({ code: 1, stdout: "", stderr: "write denied" })
+    });
+    const { recording, ctx } = context(
+      "POST",
+      "/api/bypass-verification",
+      bypassBody()
+    );
+    await handleBypassVerification(
+      ctx,
+      passingDeps({ getSelectedGitHubExecutor: () => executor })
+    );
+    expect(recording.status).toBe(500);
+    expect(JSON.parse(recording.body).error).toContain(
+      "Could not record the verification bypass"
+    );
+  });
+
   it("clean pass: writes the run-id marker, invalidates the cache, and 200s", async () => {
-    const runCommand = vi.fn().mockResolvedValue(managedVars);
+    const { run, executor } = scriptedExecutor();
     const envListCacheDelete = vi.fn();
     const { recording, ctx } = context(
       "POST",
@@ -1085,12 +1197,11 @@ describe("environments — bypass-verification", () => {
     await handleBypassVerification(
       ctx,
       passingDeps({
-        runCommand,
+        getSelectedGitHubExecutor: () => executor,
         envListCacheDelete
       } as Partial<EnvironmentsDependencies>)
     );
-    expect(runCommand).toHaveBeenCalledWith(
-      "gh",
+    expect(run).toHaveBeenCalledWith(
       [
         "variable",
         "set",
@@ -2847,10 +2958,16 @@ describe("environments — real loopback", () => {
   });
 
   it("records a verification bypass over controlled HTTP", async () => {
-    const runCommand = vi.fn().mockResolvedValue("RADIUS_MANAGED");
+    const run = vi.fn(((args: readonly string[]) =>
+      args[0] === "api" ?
+        Promise.resolve({ code: 0, stdout: "RADIUS_MANAGED", stderr: "" })
+      : Promise.resolve({
+          code: 0,
+          stdout: "",
+          stderr: ""
+        })) as SelectedGhExecutor["run"]);
     const envListCacheDelete = vi.fn();
     const container = createControlledEnvironmentServer({
-      runCommand,
       envListCacheDelete,
       getOperation: () => ({
         repo: "octo/app",
@@ -2858,7 +2975,7 @@ describe("environments — real loopback", () => {
         context: { githubLogin: "octocat" },
         verification: { runId: "555" }
       }),
-      getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
+      getSelectedGitHubExecutor: () => successfulSelectedGhExecutor({ run }),
       hasCompleteVerificationIdentity: () => true,
       getRunDetail: () =>
         Promise.resolve({
@@ -2889,8 +3006,7 @@ describe("environments — real loopback", () => {
         success: true,
         category: "permissions"
       });
-      expect(runCommand).toHaveBeenCalledWith(
-        "gh",
+      expect(run).toHaveBeenCalledWith(
         [
           "variable",
           "set",

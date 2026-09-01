@@ -102,7 +102,18 @@ export function createDeployOutcomeService(
     dependencies,
     REQUIRED_DEPENDENCIES
   );
-
+  // assertDeployDependencies only guards function-typed dependencies, so the
+  // string-valued cloudAuthDriftKind is validated here: an empty or missing
+  // value would silently stamp auth-drift failures with a blank kind and defeat
+  // the repair guard that relies on it.
+  if (
+    typeof dependencies.cloudAuthDriftKind !== "string" ||
+    dependencies.cloudAuthDriftKind.trim() === ""
+  ) {
+    throw new Error(
+      "createDeployOutcomeService requires a non-empty cloudAuthDriftKind."
+    );
+  }
   // The producer publishes its artifact from a step that runs after
   // `rad deploy` and before teardown, so by the time the run reports completed
   // the upload has normally landed. Retry a few times anyway to absorb

@@ -104,6 +104,17 @@ describe("deploy outcome construction", () => {
       `createDeployOutcomeService is missing required dependencies: ${name}`
     );
   });
+
+  it.each(["", "   ", undefined])(
+    "refuses to construct when cloudAuthDriftKind is %o",
+    (value) => {
+      const invalid = dependencies();
+      invalid.cloudAuthDriftKind = value as never;
+      expect(() => createDeployOutcomeService(invalid)).toThrow(
+        "createDeployOutcomeService requires a non-empty cloudAuthDriftKind."
+      );
+    }
+  );
 });
 
 describe("deploy outcome on success", () => {
