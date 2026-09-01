@@ -258,6 +258,26 @@ describe("credential profile parsing and markup", () => {
     expect(markup).toContain("js-cred-createenv");
     expect(markup).not.toContain("AWS environments are not yet supported");
   });
+
+  it("disables environment creation for unknown credential providers", () => {
+    const markup = credentialRowsMarkup([
+      {
+        name: "future-profile",
+        provider: "future-cloud",
+        status: "verified",
+        tenantId: "",
+        subscriptionId: "",
+        accountId: "",
+        region: "",
+        roleArn: ""
+      }
+    ]);
+    expect(markup).not.toContain("js-cred-createenv");
+    expect(markup).toContain(
+      'disabled title="This credential provider is not supported"'
+    );
+    expect(markup).toContain("future-cloud");
+  });
 });
 
 const LEGACY_IDENTITY = {
