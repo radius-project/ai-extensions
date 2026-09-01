@@ -66,6 +66,7 @@ import {
   workflowFallbackBranchPrefix
 } from "./support/create-environment-journey.js";
 import {
+  assertEnvironmentDeletionIdentityOutcome,
   DELETE_ENVIRONMENT_PATH,
   describeProblems,
   findDeleteEnvironmentSuccessProblems
@@ -747,7 +748,15 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   }, testInfo) => {
     testInfo.setTimeout(DELETE_TIMEOUT_MS + 5 * 60 * 1000);
     const cloud = fixture;
+    const appBefore = appRegistration;
+    const principalId = servicePrincipalId;
     if (!cloud) throw new Error("The cloud fixture was not created.");
+    if (!appBefore)
+      throw new Error("The product-created application was not observed.");
+    if (!principalId)
+      throw new Error(
+        "The product-created service principal was not observed."
+      );
 
     const harness = await CanvasHarness.create({
       page,
@@ -810,20 +819,12 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       // The proof. GitHub is asked directly, and the fixture refuses to answer
       // unless stage one observed this same Environment present first.
       await cloud.assertGitHubEnvironmentAbsent();
-      for (const subject of federatedSubjects)
-        await cloud.assertFederatedCredentialAbsent(subject);
-
-      // The app registration and role assignment can be shared, so #398 retains
-      // them deliberately. Re-read both so deleting the shared identity cannot
-      // pass merely because deleting the app also made its credentials absent.
-      if (!appRegistration || !servicePrincipalId)
-        throw new Error(
-          "Stage one did not retain the Azure identity needed for deletion assertions."
-        );
-      await expect(cloud.assertAppRegistrationExists()).resolves.toEqual(
-        appRegistration
-      );
-      await cloud.assertRoleAssignmentExists(servicePrincipalId);
+      await assertEnvironmentDeletionIdentityOutcome({
+        assertions: cloud,
+        expectedAppRegistration: appBefore,
+        federatedSubjects,
+        principalId
+      });
     } finally {
       await harness.cleanup();
     }

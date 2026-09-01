@@ -5,6 +5,52 @@
 // infrastructure. These are checked by `delete-environment-journey.test.ts` on
 // every pull request instead.
 
+import type { AppRegistrationRecord, CloudFixture } from "./cloud-fixture.js";
+
+type IdentityDeletionAssertions = Pick<
+  CloudFixture,
+  | "assertAppRegistrationExists"
+  | "assertFederatedCredentialAbsent"
+  | "assertRoleAssignmentExists"
+>;
+
+export interface DeletedEnvironmentIdentity {
+  readonly assertions: IdentityDeletionAssertions;
+  readonly expectedAppRegistration: AppRegistrationRecord;
+  readonly federatedSubjects: readonly string[];
+  readonly principalId: string;
+}
+
+/**
+ * Proves deletion removed only the environment-owned Entra state.
+ *
+ * The shared app registration and role assignment must survive; only each
+ * environment-scoped credential becomes absent. App identity is checked before
+ * and after because credential absence also converges when its app is gone.
+ */
+export async function assertEnvironmentDeletionIdentityOutcome(
+  identity: DeletedEnvironmentIdentity
+): Promise<void> {
+  const assertExpectedAppRegistration = async (): Promise<void> => {
+    const actual = await identity.assertions.assertAppRegistrationExists();
+    if (
+      actual.appId !== identity.expectedAppRegistration.appId ||
+      actual.objectId !== identity.expectedAppRegistration.objectId
+    )
+      throw new Error(
+        `Expected app registration ${identity.expectedAppRegistration.appId} ` +
+          `(${identity.expectedAppRegistration.objectId}) to survive environment deletion, ` +
+          `but found ${actual.appId} (${actual.objectId}).`
+      );
+  };
+
+  await assertExpectedAppRegistration();
+  for (const subject of identity.federatedSubjects)
+    await identity.assertions.assertFederatedCredentialAbsent(subject);
+  await identity.assertions.assertRoleAssignmentExists(identity.principalId);
+  await assertExpectedAppRegistration();
+}
+
 /** The path the environments page posts to. Mirrors the browser's constant. */
 export const DELETE_ENVIRONMENT_PATH = "/api/delete-environment";
 
