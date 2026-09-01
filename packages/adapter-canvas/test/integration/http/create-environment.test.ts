@@ -1367,7 +1367,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     const response = await post({ repo: "octo/app", environment: "dev" });
     const payload = (await response.json()) as { steps: string[] };
 
-    expect(payload.steps).toContain("✅ Credentials verification dispatched.");
+    expect(payload.steps).toContain("✅ Credential verification dispatched.");
     const dispatchStep = payload.steps.find((step) =>
       step.includes('workflow "radius-verify-credentials.yml"')
     );
@@ -1381,7 +1381,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     );
     expect(
       payload.steps.filter(
-        (step) => step === "✅ Credentials verification dispatched."
+        (step) => step === "✅ Credential verification dispatched."
       )
     ).toHaveLength(1);
     expect(payload.steps).not.toEqual(
@@ -1391,7 +1391,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
         )
       ])
     );
-    expect(harness.steps).toContain("✅ Credentials verification dispatched.");
+    expect(harness.steps).toContain("✅ Credential verification dispatched.");
     expect(
       harness.ghCalls.find((call) => call.startsWith("workflow run "))
     ).toContain("--ref main");
@@ -2861,7 +2861,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     // The claim is only honest once the dispatch was accepted, so it must
     // follow it rather than predict it.
     expect(
-      harness.steps.indexOf("\u2705 Credentials verification dispatched.")
+      harness.steps.indexOf("\u2705 Credential verification dispatched.")
     ).toBeLessThan(
       harness.steps.findIndex((step) => step.includes("is running against"))
     );

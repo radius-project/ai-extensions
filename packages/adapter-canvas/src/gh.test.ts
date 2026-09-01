@@ -1620,6 +1620,37 @@ describe.sequential("selected GitHub executor", () => {
       status: 200
     });
   });
+
+  it("preserves success and failure status on default-account repository reads", async () => {
+    const success = await loadGh("linux", {
+      commandResult: { stdout: "bWFpbg==" }
+    });
+    await expect(
+      success.fetchFileFromRepoResult(
+        "octo/app",
+        "workflow.yml",
+        "main"
+      )
+    ).resolves.toEqual({
+      content: "main",
+      error: null,
+      status: 200
+    });
+
+    const denied = await loadGh("linux", {
+      commandResult: {
+        error: "HTTP 403",
+        stderr: "HTTP 403: Resource not accessible"
+      }
+    });
+    await expect(
+      denied.fetchFileFromRepoResult("octo/app", "workflow.yml", "main")
+    ).resolves.toEqual({
+      content: null,
+      error: "HTTP 403: Resource not accessible",
+      status: 403
+    });
+  });
 });
 
 describe.sequential("getGitHubIdentity", () => {

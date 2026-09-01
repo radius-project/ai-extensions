@@ -1701,10 +1701,7 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   fetchFileFromRepoResult: (repo, path, branch, executor) =>
     executor ?
       selectedFetchFileFromRepoResult(executor, repo, path, branch)
-    : fetchFileFromRepoResult(repo, path, branch).then((result) => ({
-        ...result,
-        status: result.error?.match(/\bHTTP\s+404\b/i) ? 404 : null
-      })),
+    : fetchFileFromRepoResult(repo, path, branch),
   buildVerifyWorkflowDispatchArgs,
   verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
   stageVerify: STAGE_VERIFY,

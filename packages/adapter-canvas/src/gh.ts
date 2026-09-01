@@ -126,6 +126,7 @@ export interface SelectedGhExecutor {
 export interface ContentResult {
   content: string | null;
   error: string | null;
+  status: number | null;
 }
 
 export interface ContentBytesTooLarge {
@@ -1506,22 +1507,33 @@ export function ghApiGetContentResult(
           const detail = redactGhCredentials(
             (stderr && stderr.trim()) || err.message || String(err)
           );
-          resolve({ content: null, error: detail.trim() });
+          const statusMatch = detail.match(/\bHTTP\s+(\d{3})\b/i);
+          resolve({
+            content: null,
+            error: detail.trim(),
+            status: statusMatch ? Number(statusMatch[1]) : null
+          });
           return;
         }
         if (!stdout || !stdout.trim()) {
-          resolve({ content: null, error: "empty response from gh api" });
+          resolve({
+            content: null,
+            error: "empty response from gh api",
+            status: 200
+          });
           return;
         }
         try {
           resolve({
             content: Buffer.from(stdout.trim(), "base64").toString("utf8"),
-            error: null
+            error: null,
+            status: 200
           });
         } catch (e) {
           resolve({
             content: null,
-            error: `failed to decode response: ${errorMessage(e)}`
+            error: `failed to decode response: ${errorMessage(e)}`,
+            status: 200
           });
         }
       }
@@ -1529,7 +1541,7 @@ export function ghApiGetContentResult(
   });
 }
 
-/** Repo-file variant of ghApiGetContentResult. Resolves `{ content, error }`. */
+/** Repo-file variant of ghApiGetContentResult. */
 export function fetchFileFromRepoResult(
   repo: string,
   path: string,
