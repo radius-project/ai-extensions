@@ -40,7 +40,8 @@ export function findDeleteEnvironmentSuccessProblems(
     const detail =
       typeof error === "string" && error.trim() !== "" ? `: ${error}` : ".";
     const code = record?.code;
-    const codeDetail = typeof code === "string" && code.trim() !== "" ? ` (code "${code}")` : "";
+    const codeDetail =
+      typeof code === "string" && code.trim() !== "" ? ` (code "${code}")` : "";
     return [
       `Deleting environment "${outcome.environmentName}" answered ${outcome.status}, not 202${codeDetail}${detail}`
     ];
