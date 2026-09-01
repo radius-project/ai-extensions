@@ -153,7 +153,9 @@ export function initializeEnvironmentPage(
   const scope = beginEntry(context, ENVIRONMENT_PAGE_ENTRY_KEY);
   if (!scope) return NOOP_TEARDOWN;
 
-  const discovery = initializeDiscoveryPanel(context);
+  const discovery = initializeDiscoveryPanel(context, {
+    mutationNonce: state.mutationNonce
+  });
   let selectedProfile: CredentialProfile | null = null;
   let githubReadiness: GithubReadiness | null = null;
   let creating = false;
