@@ -31,8 +31,6 @@ describe("environmentsPaneMarkup", () => {
   it("names each custom infrastructure input independently of its select", () => {
     const html = environmentsPaneMarkup(baseOptions);
     for (const [id, name] of [
-      ["azure-rg-custom", "Resource Group (custom)"],
-      ["azure-cluster-custom", "Cluster (custom)"],
       ["azure-namespace-custom", "Namespace (custom)"],
       ["aws-cluster-custom", "EKS Cluster (custom)"],
       ["aws-namespace-custom", "Namespace (custom)"],
@@ -43,6 +41,16 @@ describe("environmentsPaneMarkup", () => {
       expect(tag, `${id} should be rendered`).not.toBe("");
       expect(tag).toContain(`aria-label="${name}"`);
     }
+  });
+
+  it("requires discovered Azure infrastructure while explaining namespace creation", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toContain(
+      "Select an existing Azure resource group and AKS cluster, then choose the Kubernetes namespace for this environment. To use a new namespace, enter its name and Radius will create it during environment setup."
+    );
+    expect(html).not.toContain('id="azure-rg-custom"');
+    expect(html).not.toContain('id="azure-cluster-custom"');
+    expect(html).toContain('id="azure-namespace-custom"');
   });
 
   it("renders one visible section when the environments sub-tab is active", () => {
