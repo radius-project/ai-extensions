@@ -2,9 +2,11 @@ import { optionalBrowserFunction, requireBrowserFunction } from "../globals.js";
 import { asGraphController } from "../graph/surface.js";
 import { createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl, parseGraphResources } from "../graph/model.js";
+import { createEnvironmentConfirmDialog } from "../environment/confirm-dialog.js";
 import {
   DELETE_FAILED_STATUS,
   FORCE_DELETE_ORPHAN_NOTICE,
+  forceDeletePrompt,
   probeDeleteConflict
 } from "../force-delete.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
@@ -28,7 +30,6 @@ import {
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
 import type { GraphProgressView } from "../graph/progress.js";
-import type { DeploymentDialogVariant } from "../delete-dialog.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
@@ -56,11 +57,7 @@ interface DeploymentState {
 }
 
 interface DeleteDialog {
-  open(
-    application: string,
-    environment: string,
-    variant?: DeploymentDialogVariant
-  ): void;
+  open(application: string, environment: string): void;
   teardown?: () => void;
 }
 
@@ -69,8 +66,8 @@ function asDeleteDialog(value: unknown): DeleteDialog | null {
   const open = value.open;
   const teardown = value.teardown;
   return {
-    open: (application, environment, variant) => {
-      open(application, environment, variant);
+    open: (application, environment) => {
+      open(application, environment);
     },
     teardown:
       isCallable(teardown) ?
@@ -641,9 +638,8 @@ export function initializeDeployedGraphPage(
   const runDelete = (
     application: string,
     environment: string,
-    variant: DeploymentDialogVariant = "delete"
+    force = false
   ): void => {
-    const force = variant === "force";
     const modal = context.dom.byId("deployed-deleting-modal");
     const text = context.dom.byId("deployed-deleting-text");
     if (text) {
@@ -771,13 +767,22 @@ export function initializeDeployedGraphPage(
       application
     }).then((result) => {
       if (!entry.active) return;
-      target.open(
-        application,
-        environment,
-        result.conflict ? "force" : "delete"
-      );
+      if (!result.conflict || !forceConfirm) {
+        target.open(application, environment);
+        return;
+      }
+      forceConfirm.show({
+        ...forceDeletePrompt(application, environment, result.resourceState),
+        onConfirm: () => runDelete(application, environment, true)
+      });
     });
   };
+
+  // The lighter shared confirmation carries the forced-delete question, so it
+  // reads like every other confirm in the product rather than repeating the
+  // three-step flow the user already completed for the delete that failed.
+  const forceConfirm = createEnvironmentConfirmDialog(context);
+  if (forceConfirm) entry.onTeardown(() => forceConfirm.teardown());
 
   const createDialog = optionalBrowserFunction(
     globalScope,
@@ -785,7 +790,13 @@ export function initializeDeployedGraphPage(
   );
   const dialog =
     createDialog ?
-      asDeleteDialog(createDialog({ onConfirm: runDelete }))
+      asDeleteDialog(
+        createDialog({
+          onConfirm: (application: string, environment: string) => {
+            runDelete(application, environment);
+          }
+        })
+      )
     : null;
   const abandonDialog =
     createDialog ?

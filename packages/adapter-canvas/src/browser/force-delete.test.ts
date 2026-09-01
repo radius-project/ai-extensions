@@ -3,7 +3,9 @@ import {
   DELETE_CONFLICT_PATH,
   DELETE_FAILED_STATUS,
   FORCE_DELETE_ORPHAN_NOTICE,
+  FORCE_DELETE_ORPHAN_WARNING,
   deleteConflictUrl,
+  forceDeletePrompt,
   parseDeleteConflict,
   probeDeleteConflict
 } from "./force-delete.js";
@@ -155,5 +157,26 @@ describe("force delete conflict probe", () => {
       ).resolves.toEqual(NO_CONFLICT);
       expect(browser.net.calls).toEqual([]);
     });
+  });
+});
+
+describe("forceDeletePrompt", () => {
+  it("names the resource state the server proved", () => {
+    const prompt = forceDeletePrompt("todo-app", "dev", "Updating");
+
+    expect(prompt.title).toBe("Force delete this deployment?");
+    expect(prompt.message).toContain('"todo-app"');
+    expect(prompt.message).toContain('"dev"');
+    expect(prompt.message).toContain('still in the "Updating" state');
+    expect(prompt.usageLabel).toBe(FORCE_DELETE_ORPHAN_WARNING);
+    expect(prompt.confirmLabel).toBe("Force delete");
+    expect(prompt.cancelLabel).toBe("Cancel");
+  });
+
+  it("falls back to a generic state when the server named none", () => {
+    const prompt = forceDeletePrompt("todo-app", "dev", "");
+
+    expect(prompt.message).toContain("still in a non-terminal state");
+    expect(prompt.message).not.toContain('""');
   });
 });

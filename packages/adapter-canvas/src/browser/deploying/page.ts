@@ -8,10 +8,11 @@
 import { remediationView } from "@radius-project/core/remediations";
 import { createCommandAction } from "../command-action.js";
 import { createDeleteDeploymentDialog } from "../delete-dialog.js";
-import type { DeploymentDialogVariant } from "../delete-dialog.js";
+import { createEnvironmentConfirmDialog } from "../environment/confirm-dialog.js";
 import {
   DELETE_FAILED_STATUS,
   FORCE_DELETE_ORPHAN_NOTICE,
+  forceDeletePrompt,
   probeDeleteConflict
 } from "../force-delete.js";
 import { escapeBrowserHtml } from "../html.js";
@@ -83,6 +84,15 @@ const RETRY_ROW =
   '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments. Retrying…</td></tr>';
 const LOAD_FAILURE_ROW =
   '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments.</td></tr>';
+
+// A deleting row carries no run URL of its own, so the inline status is the
+// only place the dispatched delete run is reachable from. Only an absolute
+// https URL is rendered: anything else could turn a server-supplied string
+// into a javascript: or relative navigation.
+export function workflowRunLink(runUrl: string): string {
+  if (runUrl.indexOf("https://") !== 0) return "";
+  return `<br><a href="${escapeBrowserHtml(runUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link);">View delete workflow run in GitHub ↗</a>`;
+}
 
 export interface DeployingPageOptions {
   repo: string;
@@ -701,28 +711,29 @@ export function initializeDeployingPage(
       application: app
     }).then((result) => {
       if (!entry.active) return;
-      dialog.open(app, environment, result.conflict ? "force" : "delete");
+      // A delete that failed for any other reason is an ordinary delete again,
+      // and forcing is never offered without the server's proof.
+      if (!result.conflict || !forceConfirm) {
+        dialog.open(app, environment);
+        return;
+      }
+      forceConfirm.show({
+        ...forceDeletePrompt(app, environment, result.resourceState),
+        onConfirm: () => runDelete(app, environment, true)
+      });
     });
   };
 
   // Dispatch the delete, then let the row reflect "Deleting…" while the
   // workflow runs. Fails closed: a missing repository, application, or
   // environment identity never reaches the delete endpoint.
-  const runDelete = (
-    app: string,
-    environment: string,
-    variant: DeploymentDialogVariant = "delete"
-  ): void => {
+  const runDelete = (app: string, environment: string, force = false): void => {
     if (!options.repo || app === "" || environment === "") return;
-    const force = variant === "force";
     const key = opKey(app, environment);
     overrides.set(key, { app, environment, status: "deleting" });
     void loadDeployments(true, true);
-    showInline(
-      "success",
-      `${force ? "Force deleting" : "Deleting"} deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has started.`,
-      true
-    );
+    const started = `${force ? "Force deleting" : "Deleting"} deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has started.`;
+    showInline("success", started, true);
     void context.net
       .fetch(DELETE_DEPLOYMENT_PATH, {
         method: "POST",
@@ -749,7 +760,12 @@ export function initializeDeployingPage(
           );
           return;
         }
-        pollDeleteCompletion(app, environment, 0, force);
+        // The dispatched run is the only place the user can watch a delete,
+        // and the deleting row carries no run URL of its own, so surface the
+        // one the server just resolved.
+        const runUrl = workflowRunLink(readString(result.payload, "runUrl"));
+        if (runUrl) showInline("success", `${started}${runUrl}`, true);
+        pollDeleteCompletion(app, environment, 0, force, runUrl);
       })
       .catch(() => {
         if (!entry.active) return;
@@ -770,7 +786,8 @@ export function initializeDeployingPage(
     app: string,
     environment: string,
     tries: number,
-    forced = false
+    forced = false,
+    runLink = ""
   ): void => {
     if (tries > DELETE_POLL_LIMIT) {
       overrides.delete(opKey(app, environment));
@@ -794,7 +811,7 @@ export function initializeDeployingPage(
             readString(result.payload, "error") ||
             !hasDeploymentsArray(result.payload)
           ) {
-            pollDeleteCompletion(app, environment, tries + 1, forced);
+            pollDeleteCompletion(app, environment, tries + 1, forced, runLink);
             return;
           }
           const deployments = parseDeploymentRecords(result.payload);
@@ -810,25 +827,32 @@ export function initializeDeployingPage(
               `Deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has been successfully deleted.` +
                 (forced ?
                   ` ${escapeBrowserHtml(FORCE_DELETE_ORPHAN_NOTICE)}`
-                : ""),
+                : "") +
+                runLink,
               true
             );
             return;
           }
           void loadDeployments(true, true);
-          pollDeleteCompletion(app, environment, tries + 1, forced);
+          pollDeleteCompletion(app, environment, tries + 1, forced, runLink);
         })
         .catch(() => {
           if (!entry.active) return;
-          pollDeleteCompletion(app, environment, tries + 1, forced);
+          pollDeleteCompletion(app, environment, tries + 1, forced, runLink);
         });
     });
   };
 
   const dialog = createDeleteDeploymentDialog(context, {
-    onConfirm: runDelete
+    onConfirm: (app, environment) => runDelete(app, environment)
   });
   if (dialog) entry.onTeardown(() => dialog.teardown());
+
+  // The lighter shared confirmation carries the forced-delete question, so it
+  // reads like every other confirm in the product rather than repeating the
+  // three-step flow the user already completed for the delete that failed.
+  const forceConfirm = createEnvironmentConfirmDialog(context);
+  if (forceConfirm) entry.onTeardown(() => forceConfirm.teardown());
 
   // Restores the deploy modal to its default "in progress" (spinner) layout;
   // the modal is mutated in place on failure, so this runs before each attempt.

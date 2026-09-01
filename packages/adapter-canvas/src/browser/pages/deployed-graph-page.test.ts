@@ -102,8 +102,15 @@ function fixture(options: FixtureOptions = {}) {
   const container = createFakeElement("graph-container");
   const modal = createFakeElement("deployed-deleting-modal");
   const modalText = createFakeElement("deployed-deleting-text");
+  // The lighter shared confirmation this page renders for the forced delete.
+  const confirmElements: Record<string, FakeElement> = {};
+  for (const id of CONFIRM_DIALOG_IDS) {
+    const element = createFakeElement(id);
+    if (id === "env-confirm-modal") element.style.display = "none";
+    confirmElements[id] = element;
+  }
 
-  const elements = [state];
+  const elements = [state, ...Object.values(confirmElements)];
   const progressHost = createFakeElement("deployed-progress-steps");
   elements.push(progressHost);
   if (withAppSelect) elements.push(appSelect);
@@ -160,6 +167,7 @@ function fixture(options: FixtureOptions = {}) {
   );
 
   return {
+    confirm: confirmElements,
     browser,
     appSelect,
     envSelect,
@@ -178,6 +186,18 @@ function fixture(options: FixtureOptions = {}) {
   };
 }
 
+// The lighter shared confirmation's markup ids, rendered by this page.
+const CONFIRM_DIALOG_IDS = [
+  "env-confirm-modal",
+  "env-confirm-title",
+  "env-confirm-message",
+  "env-confirm-usage",
+  "env-confirm-usage-label",
+  "env-confirm-usage-list",
+  "env-confirm-cancel",
+  "env-confirm-ok"
+] as const;
+
 function globals(overrides: Record<string, unknown> = {}) {
   return {
     radiusRenderGraph: vi.fn(),
@@ -192,27 +212,22 @@ function createConfirmingDialog() {
   const holder: {
     confirmed: (() => void) | null;
     opened: boolean;
-    variant: string;
   } = {
     confirmed: null,
-    opened: false,
-    variant: ""
+    opened: false
   };
   const createDialog = vi.fn(
-    (options: { onConfirm: (a: string, e: string, v?: string) => void }) => ({
-      open: (application: string, environment: string, variant?: string) => {
+    (options: { onConfirm: (a: string, e: string) => void }) => ({
+      open: (application: string, environment: string) => {
         holder.opened = true;
-        holder.variant = variant ?? "";
-        holder.confirmed = () =>
-          options.onConfirm(application, environment, variant);
+        holder.confirmed = () => options.onConfirm(application, environment);
       }
     })
   );
   return {
     createDialog,
     confirm: (): void => holder.confirmed?.(),
-    wasOpened: (): boolean => holder.opened,
-    openedVariant: (): string => holder.variant
+    wasOpened: (): boolean => holder.opened
   };
 }
 
@@ -1679,10 +1694,11 @@ describe("initializeDeployedGraphPage", () => {
   // Only a server-proven stranded-resource conflict may escalate this button to
   // the forced delete, and only that delete may carry `force`.
   it("forces the delete once the server proves the stranded-resource conflict", async () => {
-    const { browser, action, appSelect, envSelect, modalText } = fixture({
+    const page = fixture({
       deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
     });
-    const { createDialog, confirm, openedVariant } = createConfirmingDialog();
+    const { browser, action, appSelect, envSelect, modalText } = page;
+    const { createDialog, wasOpened } = createConfirmingDialog();
     let dispatched: unknown;
     browser.net.handle(
       deleteConflictUrl({
@@ -1712,9 +1728,17 @@ describe("initializeDeployedGraphPage", () => {
     envSelect.value = "dev";
     action.dispatch("click");
     await flushPromises();
-    expect(openedVariant()).toBe("force");
+    // The three-step dialog stays shut; the forced question is asked by the
+    // same lighter confirmation the rest of the product uses.
+    expect(wasOpened()).toBe(false);
+    expect(page.confirm["env-confirm-title"].textContent).toBe(
+      "Force delete this deployment?"
+    );
+    expect(page.confirm["env-confirm-usage-label"].textContent).toContain(
+      "orphaned external resources"
+    );
 
-    confirm();
+    page.confirm["env-confirm-ok"].dispatch("click");
     expect(modalText.textContent).toContain("Force deleting application app");
     expect(modalText.textContent).toContain("orphaned external resources");
     await flushPromises();
@@ -1727,10 +1751,11 @@ describe("initializeDeployedGraphPage", () => {
   });
 
   it("keeps the ordinary delete when the probe cannot prove a conflict", async () => {
-    const { browser, action, appSelect, envSelect } = fixture({
+    const page = fixture({
       deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
     });
-    const { createDialog, confirm, openedVariant } = createConfirmingDialog();
+    const { browser, action, appSelect, envSelect } = page;
+    const { createDialog, confirm, wasOpened } = createConfirmingDialog();
     let dispatched: unknown;
     browser.net.handle(
       deleteConflictUrl({
@@ -1754,7 +1779,8 @@ describe("initializeDeployedGraphPage", () => {
     envSelect.value = "dev";
     action.dispatch("click");
     await flushPromises();
-    expect(openedVariant()).toBe("delete");
+    expect(wasOpened()).toBe(true);
+    expect(page.confirm["env-confirm-modal"].style.display).toBe("none");
 
     confirm();
     await flushPromises();
@@ -1766,9 +1792,50 @@ describe("initializeDeployedGraphPage", () => {
     });
   });
 
+  it("dispatches nothing when the forced confirmation is cancelled", async () => {
+    const page = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { browser, action, appSelect, envSelect } = page;
+    const { createDialog } = createConfirmingDialog();
+    let dispatched = false;
+    browser.net.handle(
+      deleteConflictUrl({
+        repo: "octo/app",
+        environment: "dev",
+        application: "app"
+      }),
+      () =>
+        jsonResponse({
+          conflict: true,
+          resourceState: "Updating",
+          forced: false,
+          detail: ""
+        })
+    );
+    browser.net.handle("/api/delete-deployment", () => {
+      dispatched = true;
+      return jsonResponse({});
+    });
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    action.dispatch("click");
+    await flushPromises();
+    page.confirm["env-confirm-cancel"].dispatch("click");
+    await flushPromises();
+    expect(dispatched).toBe(false);
+    expect(page.confirm["env-confirm-modal"].style.display).toBe("none");
+  });
+
   it("never probes for a deployment whose delete has not failed", async () => {
     const { browser, action, appSelect, envSelect } = fixture();
-    const { createDialog, wasOpened, openedVariant } = createConfirmingDialog();
+    const { createDialog, wasOpened } = createConfirmingDialog();
     browser.net.handle("/api/delete-deployment", () => jsonResponse({}));
     initializeDeployedGraphPage(
       browser.context,
@@ -1781,7 +1848,6 @@ describe("initializeDeployedGraphPage", () => {
     action.dispatch("click");
 
     expect(wasOpened()).toBe(true);
-    expect(openedVariant()).toBe("");
     expect(
       browser.net.calls.some((call) =>
         call.url.startsWith(DELETE_CONFLICT_PATH)

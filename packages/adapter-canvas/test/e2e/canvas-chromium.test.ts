@@ -2764,23 +2764,24 @@ test.describe("Radius Canvas in Chromium", () => {
 
     conflict = true;
     await page.getByRole("button", { name: "Retry Delete" }).click();
-    const dialog = page.getByRole("dialog");
-    const intent = page.getByRole("button", {
-      name: "I want to force delete this deployment"
-    });
-    await expect(intent).toBeFocused();
-    await expect(dialog).toContainText("may still be updating");
-    await page.keyboard.press("Enter");
-    await expect(dialog).toContainText(
+    // The forced question uses the product's lighter confirmation: one
+    // decision, asked once the ordinary delete has already been answered.
+    const confirmModal = page.locator("#env-confirm-modal");
+    await expect(confirmModal).toContainText("Force delete this deployment?");
+    await expect(confirmModal).toContainText("may still be updating");
+    await expect(confirmModal).toContainText(
       "may leave orphaned external resources that require manual cleanup"
     );
+    await expect(page.getByRole("button", { name: "Cancel" })).toBeFocused();
     await expectNoWcagViolations(page);
-    await page.keyboard.press("Enter");
 
-    const input = page.locator("#del-confirm-input");
-    await expect(input).toBeFocused();
-    await page.keyboard.type("radius-app/fixture-environment");
-    await page.keyboard.press("Enter");
+    // Cancelling is the safe default and must never delete anything.
+    await page.keyboard.press("Escape");
+    await expect(confirmModal).toBeHidden();
+    expect(deletes).toHaveLength(0);
+
+    await page.getByRole("button", { name: "Retry Delete" }).click();
+    await page.getByRole("button", { name: "Force delete" }).click();
 
     await expect.poll(() => deletes).toHaveLength(1);
     expect(deletes[0]).toMatchObject({

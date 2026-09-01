@@ -199,6 +199,26 @@ describe("createEnvironmentConfirmDialog", () => {
     expect(elements["env-confirm-usage-label"].textContent).toBe("");
   });
 
+  // A standalone caution, such as the forced-delete orphan warning, has no
+  // list behind it but must still be shown.
+  it("shows the caution block for a label with no usage entries", () => {
+    const { dialog, elements } = openDialog();
+
+    dialog.show({
+      title: "Force delete this deployment?",
+      message: "It may still be updating.",
+      usageLabel: "Resources may be left behind.",
+      confirmLabel: "Force delete",
+      onConfirm: vi.fn()
+    });
+
+    expect(elements["env-confirm-usage"].style.display).toBe("");
+    expect(elements["env-confirm-usage-label"].textContent).toBe(
+      "Resources may be left behind."
+    );
+    expect(fakeText(elements["env-confirm-usage-list"])).toBe("");
+  });
+
   it("does not leak one caller's presentation into the next dialog", () => {
     const { dialog, elements } = openDialog();
 

@@ -160,8 +160,12 @@ export function createEnvironmentConfirmDialog(
           return element;
         })
       );
-      usageLabel.textContent = options.usageLabel ?? "";
-      usageBlock.style.display = (options.usage?.length ?? 0) > 0 ? "" : "none";
+      const label = options.usageLabel ?? "";
+      usageLabel.textContent = label;
+      // A caution with no list behind it is still a caution: the block shows
+      // whenever there is either a label or at least one usage entry.
+      usageBlock.style.display =
+        (options.usage?.length ?? 0) > 0 || label !== "" ? "" : "none";
       modal.style.display = "flex";
       (hideCancel ? confirm : cancel).focus();
     },

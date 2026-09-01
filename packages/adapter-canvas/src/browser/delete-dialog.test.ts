@@ -6,7 +6,6 @@ import {
   DELETE_DIALOG_IDS,
   DELETE_DIALOG_STEP1_BUTTON_ID,
   DELETE_DIALOG_STEP2_BUTTON_ID,
-  FORCE_DELETE_ORPHAN_WARNING,
   createDeleteDeploymentDialog,
   deleteDialogConfirmSpecs,
   deleteDialogConfirmToken,
@@ -140,36 +139,6 @@ describe("delete dialog step specs", () => {
     expect(confirm[0].text).toContain('"store/prod"');
     expect(confirm[2].text).toBe("Stop tracking deployment");
   });
-
-  // Forcing is the only variant that can leave real cloud resources behind
-  // without recording them anywhere, so its copy has to say so at every step.
-  it("builds a force-delete warning that states the orphaned-resource risk", () => {
-    const intent = deleteDialogIntentSpecs("force");
-    const effects = deleteDialogEffectsSpecs(
-      { app: "store", environment: "prod" },
-      "force"
-    );
-    const confirm = deleteDialogConfirmSpecs(
-      { app: "store", environment: "prod" },
-      "force"
-    );
-
-    expect(intent[0].text).toContain("may still be updating");
-    expect(intent[1].text).toBe("I want to force delete this deployment");
-    expect(effects[0].children?.[1].text).toBe(FORCE_DELETE_ORPHAN_WARNING);
-    expect(
-      effects[1].children?.[0].children?.map((child) => child.text)
-    ).toEqual([
-      "This will force delete ",
-      "store",
-      " from environment ",
-      "prod",
-      ", and you must check your cloud provider for resources it leaves behind."
-    ]);
-    expect(effects[2].text).toBe("I understand resources may be orphaned");
-    expect(confirm[0].text).toContain('"store/prod"');
-    expect(confirm[2].text).toBe("Force delete this deployment");
-  });
 });
 
 describe("delete deployment dialog", () => {
@@ -253,56 +222,6 @@ describe("delete deployment dialog", () => {
 
     expect(confirmed).toEqual([["store", "prod"]]);
     expect(browser.modal.style.display).toBe("none");
-  });
-
-  // The page decides which confirmation a click deserves, so the variant is
-  // chosen per open rather than baked into the handle at construction.
-  it("escalates to the forced confirmation only for the open that asked for it", () => {
-    const browser = setup();
-    const confirmed: Array<[string, string, string]> = [];
-    const dialog = createDeleteDeploymentDialog(browser.context, {
-      onConfirm: (app, environment, variant) =>
-        confirmed.push([app, environment, variant])
-    });
-
-    dialog?.open("store", "prod", "force");
-    expect(fakeText(browser.body)).toContain("may still be updating");
-    const forced = advanceToConfirmation(browser);
-    expect(fakeText(browser.body)).toContain("Force delete this deployment");
-    forced.input.value = "store/prod";
-    forced.input.dispatch("input");
-    forced.confirm.dispatch("click");
-
-    expect(confirmed).toEqual([["store", "prod", "force"]]);
-
-    // The next open is an ordinary delete again: the escalation must not stick.
-    dialog?.open("store", "prod");
-    expect(fakeText(browser.body)).toContain("confirm your intention");
-    const plain = advanceToConfirmation(browser);
-    expect(fakeText(browser.body)).toContain("Delete this deployment");
-    plain.input.value = "store/prod";
-    plain.input.dispatch("input");
-    plain.confirm.dispatch("click");
-
-    expect(confirmed).toEqual([
-      ["store", "prod", "force"],
-      ["store", "prod", "delete"]
-    ]);
-  });
-
-  it("states the orphaned-resource risk before the forced delete is confirmed", () => {
-    const browser = setup();
-    const dialog = createDeleteDeploymentDialog(browser.context, {
-      variant: "force"
-    });
-
-    dialog?.open("store", "prod");
-    fakeById(browser.body, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
-
-    expect(fakeText(browser.body)).toContain(FORCE_DELETE_ORPHAN_WARNING);
-    expect(fakeText(browser.body)).toContain(
-      "I understand resources may be orphaned"
-    );
   });
 
   it("keeps deletion disabled until the token matches exactly", () => {

@@ -21,6 +21,40 @@ export const DELETE_FAILED_STATUS = "delete-failed";
 export const FORCE_DELETE_ORPHAN_NOTICE =
   "This delete was forced. Resources in non-terminal states may leave orphaned external resources in your cloud provider that require manual cleanup.";
 
+/** The caution the `rad` CLI prints for a forced delete, shown before it runs. */
+export const FORCE_DELETE_ORPHAN_WARNING =
+  "Force deleting an application. Resources in non-terminal states may leave orphaned external resources that require manual cleanup.";
+
+export interface ForceDeletePrompt {
+  readonly title: string;
+  readonly message: string;
+  readonly usageLabel: string;
+  readonly confirmLabel: string;
+  readonly cancelLabel: string;
+}
+
+/**
+ * The forced-delete question, in the repository's lighter confirmation shape.
+ * The full three-step type-to-confirm flow was already answered for the delete
+ * that failed, so forcing asks the one thing that is genuinely new: whether to
+ * proceed while the resource may still be updating.
+ */
+export function forceDeletePrompt(
+  application: string,
+  environment: string,
+  resourceState: string
+): ForceDeletePrompt {
+  const state =
+    resourceState === "" ? "a non-terminal" : `the "${resourceState}"`;
+  return {
+    title: "Force delete this deployment?",
+    message: `Deleting "${application}" from "${environment}" failed because the deployment is still in ${state} state, and it may still be updating. Force deleting removes it from Radius without waiting for that update to finish.`,
+    usageLabel: FORCE_DELETE_ORPHAN_WARNING,
+    confirmLabel: "Force delete",
+    cancelLabel: "Cancel"
+  };
+}
+
 export interface DeleteConflictRequest {
   readonly repo: string;
   readonly environment: string;
