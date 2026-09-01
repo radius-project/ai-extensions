@@ -819,6 +819,7 @@ export async function handleCreateEnvironment(
     // This is the commit point. After it, a stop keeps the resources in place
     // rather than removing them, because the workflow files may already be
     // visible to the repository.
+    if (!(await stopBoundary("before-workflow-policy-read"))) return;
     const [defaultVerify, defaultDispatcher] = await Promise.all([
       dependencies.fetchFileFromRepoResult(
         targetRepo,
@@ -841,15 +842,37 @@ export async function handleCreateEnvironment(
       credentialsComplete && automaticPolicy.state === "enabled" ?
         operation.operationId
       : undefined;
-    const automaticStartedAt = dependencies.now();
+    const existingVerification =
+      (
+        operation.verification &&
+        typeof operation.verification === "object" &&
+        !Array.isArray(operation.verification)
+      ) ?
+        (operation.verification as Record<string, unknown>)
+      : null;
+    const existingAutomaticIdentity =
+      (
+        existingVerification?.event === "push" &&
+        existingVerification.operationMarker === operation.operationId &&
+        typeof existingVerification.ref === "string" &&
+        existingVerification.ref &&
+        Number.isFinite(Number(existingVerification.dispatchedAt))
+      ) ?
+        existingVerification
+      : null;
+    const automaticStartedAt =
+      existingAutomaticIdentity ?
+        Number(existingAutomaticIdentity.dispatchedAt)
+      : dependencies.now();
     const automaticRef =
+      (existingAutomaticIdentity?.ref as string | undefined) ||
       recordedSetupBranchCreate(operation, targetRepo)?.branch ||
       setupWorkflowBranchName(
         envName,
         operation.operationId,
         automaticStartedAt
       );
-    if (setupPushOperationMarker) {
+    if (setupPushOperationMarker && !existingVerification) {
       operation.verification = {
         dispatchedAt: automaticStartedAt,
         workflow: dependencies.verifyWorkflowFile,

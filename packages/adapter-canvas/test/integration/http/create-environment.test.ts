@@ -818,11 +818,15 @@ function start(script: Script = {}): Harness {
       ) ?
         MARKED_VERIFY_WORKFLOW
       : null),
-    fetchFileFromRepoResult: async (_repo, path) =>
-      script.fileReadResults?.[path] ??
-      (script.files && path in script.files ?
-        { content: script.files[path], error: null, status: 200 }
-      : { content: null, error: "HTTP 404: Not Found", status: 404 }),
+    fetchFileFromRepoResult: async (_repo, path) => {
+      journal.push(`fetchFileFromRepoResult:${path}`);
+      return (
+        script.fileReadResults?.[path] ??
+        (script.files && path in script.files ?
+          { content: script.files[path], error: null, status: 200 }
+        : { content: null, error: "HTTP 404: Not Found", status: 404 })
+      );
+    },
     buildVerifyWorkflowDispatchArgs,
     verifyWorkflowFile: "radius-verify-credentials.yml",
     stageVerify: STAGE_VERIFY,
@@ -2666,6 +2670,34 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(harness.finished).toEqual([]);
   });
 
+  it("preserves and reuses a persisted automatic verification identity", async () => {
+    const harness = start(protectedScript);
+    harness.operation.verification = {
+      dispatchedAt: 1699999990000,
+      workflow: "radius-verify-credentials.yml",
+      ref: "radius/setup-dev-workflows-op-http",
+      environment: "dev",
+      event: "push",
+      operationMarker: "op-http",
+      baselineRunId: null,
+      runId: null,
+      runUrl: null,
+      recoveryMarker: "preserved"
+    };
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(response.status).toBe(200);
+    expect(harness.operation.verification).toMatchObject({
+      dispatchedAt: 1699999990000,
+      ref: "radius/setup-dev-workflows-op-http",
+      event: "push",
+      operationMarker: "op-http",
+      runId: "4242",
+      recoveryMarker: "preserved"
+    });
+  });
+
   it("keeps merge-required guidance when the default dispatcher has a legacy chain", async () => {
     const harness = start({
       ...protectedScript,
@@ -3152,6 +3184,7 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
       "stopBoundary:after-state-package-configuration",
       "stopBoundary:before-provider-configuration",
       "stopBoundary:after-provider-configuration",
+      "stopBoundary:before-workflow-policy-read",
       "stopBoundary:before-workflow-commit",
       "stopBoundary:before-workflow-provider-mutation",
       "stopBoundary:after-workflow-commit",
@@ -3194,20 +3227,33 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
   // reaches it. The property under test is the same every time: the write that
   // was already running completes, and nothing after the boundary starts.
   it.each([
-    { boundary: "before-workflow-commit", committed: false, dispatched: false },
+    {
+      boundary: "before-workflow-policy-read",
+      committed: false,
+      dispatched: false,
+      policyRead: false
+    },
+    {
+      boundary: "before-workflow-commit",
+      committed: false,
+      dispatched: false,
+      policyRead: true
+    },
     {
       boundary: "before-verification-dispatch",
       committed: true,
-      dispatched: false
+      dispatched: false,
+      policyRead: true
     },
     {
       boundary: "after-verification-dispatch",
       committed: true,
-      dispatched: true
+      dispatched: true,
+      policyRead: true
     }
   ])(
     "honors a stop that arrives as the run reaches the $boundary boundary",
-    async ({ boundary, committed, dispatched }) => {
+    async ({ boundary, committed, dispatched, policyRead }) => {
       const harness = start();
       harness.setJournalHook((entry) => {
         if (entry === `stopBoundary:${boundary}`)
@@ -3227,6 +3273,11 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
       expect(harness.journal.includes("dispatchVerifyWorkflow")).toBe(
         dispatched
       );
+      expect(
+        harness.journal.some((entry) =>
+          entry.startsWith("fetchFileFromRepoResult:")
+        )
+      ).toBe(policyRead);
       // A stopped run never reports success.
       expect(body.success).toBeUndefined();
     }
