@@ -218,6 +218,7 @@ Do not return the definition as deployable with the dependency unwired, silently
 - The input property, authored secret, producer connection, managed-secret name, and key all exist in the exact configured schemas and Recipe.
 - Every container variable uses the exact native name and format read by source.
 - Every developer-supplied credential consumed through connection projection is in an authored `Radius.Security/secrets` connected through `<secret>.id`.
+- Every authored Secret used for an explicit native or compatibility-fallback binding is referenced through `valueFrom.secretKeyRef` with `<secret>.name` and its exact declared data key.
 - Every Recipe-generated credential consumed through standard connection projection comes from a connection to `<producer>.id`, and its `CONNECTION_<CONNECTION>_<SECRETKEY>` suffix is the uppercased declared Recipe `result.secrets` key.
 - Every custom Kubernetes environment name for a Recipe-generated credential uses `valueFrom.secretKeyRef` with `<producer>.properties.secrets.name` and the exact declared key.
 - No authored secret `data.value` references a recipe resource output or guessed convenience property.

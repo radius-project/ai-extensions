@@ -483,6 +483,10 @@ describe("P0-C built Radius extension artifact", () => {
     const connectionGuidance = readGuidance(
       "references/connection-conventions.md"
     );
+    const structureGuidance = readGuidance(
+      "references/bicep-structure-rules.md"
+    );
+    const runtimeGuidance = readGuidance("references/runtime-contract.md");
     const redisExample = bicepBlocks.find(
       (block) =>
         block.includes("redis:") && block.includes("source: redisCache.id")
@@ -509,6 +513,15 @@ describe("P0-C built Radius extension artifact", () => {
     expect(connectionGuidance).toContain(
       "Set `disableDefaultEnvVars: true` on a connection only when all generated variables from that connection must be suppressed"
     );
+    for (const guidance of [
+      connectionGuidance,
+      structureGuidance,
+      runtimeGuidance
+    ]) {
+      expect(guidance).toMatch(
+        /secretKeyRef[^\n]*<secret>\.name[^\n]*(?:native variable|compatibility fallback)/u
+      );
+    }
 
     expect(bicepBlocks.length).toBeGreaterThan(0);
     for (const block of bicepBlocks) {

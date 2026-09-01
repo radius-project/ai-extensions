@@ -33,7 +33,8 @@ For every dependency:
    - explicit `env.value` from a verified nonsecret output or literal;
    - a user-authored `Radius.Security/secrets` connection through `<secret>.id` for a developer-supplied credential;
    - a producer connection through `<producer>.id` for a Recipe-generated credential;
-   - `valueFrom.secretKeyRef` through `<producer>.properties.secrets.name` only when the source requires a custom Kubernetes environment variable name;
+   - `valueFrom.secretKeyRef` through `<secret>.name` and a declared authored data key when preserving a native variable or compatibility fallback;
+   - `valueFrom.secretKeyRef` through `<producer>.properties.secrets.name` only when a Recipe result requires a custom Kubernetes environment variable name;
    - runtime composition; or
    - generic connection projection only when the source explicitly consumes that applicable contract.
 

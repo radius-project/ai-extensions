@@ -71,7 +71,8 @@ For each required app-native input, choose exactly one supported source:
 - explicit `env.value` from a literal or verified nonsecret resource output;
 - a connection to an authored `Radius.Security/secrets` resource through `<secret>.id`, producing secret-backed `CONNECTION_<CONNECTION>_<SECRETKEY>` values from its data keys;
 - a connection to `<producer>.id`, producing secret-backed `CONNECTION_<CONNECTION>_<SECRETKEY>` values from its Recipe `result.secrets` keys;
-- `valueFrom.secretKeyRef` through `<producer>.properties.secrets.name` and a declared key only for a required custom Kubernetes environment variable name;
+- `valueFrom.secretKeyRef` through `<secret>.name` and a declared authored data key when preserving a required native variable or compatibility fallback;
+- `valueFrom.secretKeyRef` through `<producer>.properties.secrets.name` and a declared Recipe result key only for a required custom Kubernetes environment variable name;
 - an authored `Radius.Security/secrets` delivered through a schema-supported mount for app secrets/config files, or referenced by a resource schema that requires `secretName`;
 - runtime composition from previously bound values when the app requires a larger URL/config value; or
 - a generic Radius connection only when the source parses the exact connection projection supplied by the configured Radius version.

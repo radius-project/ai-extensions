@@ -61,7 +61,7 @@ Rules:
 - `connections` is a TOP-LEVEL property under `properties` — NOT inside `containers`
 - `disableDefaultEnvVars` goes on the connection entry, NOT on the container; omit it when the workload relies on generated `CONNECTION_<CONNECTION>_<SECRETKEY>` variables
 - Port property is `containerPort`, NOT `port`
-- `env` values use `{ value: ... }` for a literal, a verified nonsecret output, or a developer-supplied `@secure()` parameter (Radius encrypts and injects it); use `{ valueFrom: { secretKeyRef: { secretName: ..., key: ... } } }` only for a Recipe-generated managed secret via `<resource>.properties.secrets.name`
+- `env` values use `{ value: ... }` for a literal, a verified nonsecret output, or an existing schema-supported developer-supplied `@secure()` parameter binding. Use `{ valueFrom: { secretKeyRef: { secretName: ..., key: ... } } }` with `<secret>.name` and a declared authored data key when preserving a native variable or compatibility fallback, or with `<producer>.properties.secrets.name` and a declared Recipe `result.secrets` key for a custom Kubernetes name
 - `containerPort` exposes the process port; it does not configure the process listener
 - `command` replaces the image `ENTRYPOINT`, and `args` replaces `CMD`; override only after inspecting the image contract and required binaries
 - Never **set** a read-only property. Reference a nonsecret read-only output only when the exact schema declares it and the exact target Recipe explicitly maps it
