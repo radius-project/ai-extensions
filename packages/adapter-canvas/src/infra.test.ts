@@ -35,11 +35,11 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
     // so a template without it would 422, and the operation marker is inserted
     // into that same inputs block.
     "verify-azure.yml":
-      "name: verify\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
+      "name: verify\non:\n  push:\n    branches:\n      - 'radius/setup-**'\n    paths:\n      - '.github/workflows/radius-verify-credentials.yml'\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
     "verify-aws.yml":
-      "name: verify\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
+      "name: verify\non:\n  push:\n    branches:\n      - 'radius/setup-**'\n    paths:\n      - '.github/workflows/radius-verify-credentials.yml'\n  workflow_dispatch:\n    inputs:\n      environment:\n        required: true\njobs:\n  v:\n    default: '{{ENV}}'\n    steps:\n      - name: Verify GHCR package push permission\n        uses: radius-project/ai-extensions/.github/extension/actions/verify-ghcr-push@{{RADIUS_REF}}\n",
     "run-rad-commands.yml":
-      "name: deploy\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\n  workflow_run:\n    workflows: [verify]\n    types: [completed]\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/run-rad-commands-azure.yml\n  aws:\n    uses: ./.github/workflows/run-rad-commands-aws.yml\n",
+      "name: deploy\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/run-rad-commands-azure.yml\n  aws:\n    uses: ./.github/workflows/run-rad-commands-aws.yml\n",
     "run-rad-commands-azure.yml":
       "name: deploy-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\nenv:\n  APP_FILE: '{{APP_FILE}}'\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}\n",
     "delete-application.yml":
@@ -138,7 +138,7 @@ jobs:
 `);
 
     expect(workflow).toContain(
-      "run-name: Radius verify ${{ inputs.environment }} [${{ inputs.radius_operation }}]"
+      "run-name: Radius verify ${{ inputs.environment || '' }} [${{ inputs.radius_operation || '' }}]"
     );
     expect(workflow).toContain("      radius_operation:");
     expect(workflow).toContain("        required: false");
@@ -158,6 +158,24 @@ jobs:
         )
       ).toBe(true);
     }
+  });
+
+  it("preserves only the constrained push trigger with an operation fallback", async () => {
+    const workflow = await generateVerifyWorkflow("dev", "azure", undefined, {
+      setupPushOperationMarker: "op_123"
+    });
+
+    expect(workflow).toContain("  push:");
+    expect(workflow).toContain("      - 'radius/setup-**'");
+    expect(workflow).toContain(
+      "run-name: Radius verify ${{ inputs.environment || 'dev' }} [${{ inputs.radius_operation || 'op_123' }}]"
+    );
+  });
+
+  it("strips setup push when no exact operation marker is supplied", async () => {
+    expect(await generateVerifyWorkflow("dev", "azure")).not.toContain(
+      "  push:"
+    );
   });
 
   it("refuses a template that no longer exposes a dispatch inputs block", () => {
@@ -259,21 +277,30 @@ describe("generated workflow YAML validation", () => {
     );
   });
 
-  it.each([
-    "push",
-    "pull_request",
-    "pull_request_target",
-    "workflow_run",
-    "schedule"
-  ])("rejects the unsafe automatic `%s` trigger", async (trigger) => {
+  it.each(["pull_request", "pull_request_target", "workflow_run", "schedule"])(
+    "rejects the unsafe automatic `%s` trigger",
+    async (trigger) => {
+      h.upstream["verify-azure.yml"] = BASE_UPSTREAM[
+        "verify-azure.yml"
+      ].replace("  workflow_dispatch:", `  ${trigger}:\n  workflow_dispatch:`);
+
+      await expect(generateVerifyWorkflow("prod", "azure")).rejects.toThrow(
+        `unsafe automatic trigger \`${trigger}\` is not allowed`
+      );
+    }
+  );
+
+  it("rejects a broad push trigger", async () => {
     h.upstream["verify-azure.yml"] = BASE_UPSTREAM["verify-azure.yml"].replace(
-      "  workflow_dispatch:",
-      `  ${trigger}:\n  workflow_dispatch:`
+      "    branches:\n      - 'radius/setup-**'\n    paths:\n      - '.github/workflows/radius-verify-credentials.yml'",
+      "    branches:\n      - '**'"
     );
 
-    await expect(generateVerifyWorkflow("prod", "azure")).rejects.toThrow(
-      `unsafe automatic trigger \`${trigger}\` is not allowed`
-    );
+    await expect(
+      generateVerifyWorkflow("prod", "azure", undefined, {
+        setupPushOperationMarker: "op_123"
+      })
+    ).rejects.toThrow(/push trigger must be limited/u);
   });
 
   it("rejects unresolved placeholders not recognized by the core renderer", async () => {
@@ -346,7 +373,7 @@ describe("generated workflow YAML validation", () => {
     );
 
     await expect(generateDeleteWorkflow("prod")).rejects.toThrow(
-      /unsafe automatic trigger `push` is not allowed/u
+      /reusable `workflow_call` trigger must be the only trigger/u
     );
   });
 

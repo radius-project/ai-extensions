@@ -91,12 +91,14 @@ function errorMessage(error: unknown): string {
 type GeneratedWorkflowArtifact = "verify" | "dispatcher" | "provider";
 
 const UNSAFE_AUTOMATIC_TRIGGERS = new Set([
-  "push",
   "pull_request",
   "pull_request_target",
   "workflow_run",
   "schedule"
 ]);
+
+const VERIFY_SETUP_BRANCH_PATTERN = "radius/setup-**";
+const VERIFY_WORKFLOW_PATH = ".github/workflows/radius-verify-credentials.yml";
 
 function isMapping(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -190,11 +192,10 @@ function assertTrustedGeneratedWorkflow(
     return;
   }
 
-  if (triggerNames.length !== 1 || triggerNames[0] !== "workflow_dispatch") {
-    fail("the workflow must be triggered only by `workflow_dispatch`.");
-  }
-
   if (artifact === "dispatcher") {
+    if (triggerNames.length !== 1 || triggerNames[0] !== "workflow_dispatch") {
+      fail("the workflow must be triggered only by `workflow_dispatch`.");
+    }
     const dispatch = requireMapping(
       triggers.workflow_dispatch,
       "`on.workflow_dispatch` must be a mapping."
@@ -223,6 +224,33 @@ function assertTrustedGeneratedWorkflow(
     return;
   }
 
+  const verifyTriggerNames = new Set(triggerNames);
+  if (
+    !verifyTriggerNames.has("workflow_dispatch") ||
+    [...verifyTriggerNames].some(
+      (trigger) => trigger !== "workflow_dispatch" && trigger !== "push"
+    )
+  ) {
+    fail(
+      "the verify workflow may only use `workflow_dispatch` and the constrained setup-branch `push` trigger."
+    );
+  }
+  if (verifyTriggerNames.has("push")) {
+    const push = requireMapping(triggers.push, "`on.push` must be a mapping.");
+    if (
+      !Array.isArray(push.branches) ||
+      push.branches.length !== 1 ||
+      push.branches[0] !== VERIFY_SETUP_BRANCH_PATTERN ||
+      !Array.isArray(push.paths) ||
+      push.paths.length !== 1 ||
+      push.paths[0] !== VERIFY_WORKFLOW_PATH
+    ) {
+      fail(
+        "the push trigger must be limited to `radius/setup-**` and the generated verify workflow path."
+      );
+    }
+  }
+
   const dispatch = requireMapping(
     triggers.workflow_dispatch,
     "`on.workflow_dispatch` must be a mapping."
@@ -239,8 +267,8 @@ function assertTrustedGeneratedWorkflow(
   const runName = document["run-name"];
   if (
     typeof runName !== "string" ||
-    !runName.includes("${{ inputs.environment }}") ||
-    !runName.includes(`\${{ inputs.${VERIFY_OPERATION_INPUT} }}`)
+    !runName.includes("${{ inputs.environment ||") ||
+    !runName.includes(`\${{ inputs.${VERIFY_OPERATION_INPUT} ||`)
   ) {
     fail(
       "the marker-bearing `run-name` must include the environment and Radius operation inputs."
@@ -315,7 +343,8 @@ async function fetchRadiusTemplate(
 export async function generateVerifyWorkflow(
   env: string,
   provider: string,
-  ref: string = RADIUS_REF
+  ref: string = RADIUS_REF,
+  options: { setupPushOperationMarker?: string } = {}
 ): Promise<string> {
   const platform = getPlatform(provider);
   if (!platform)
@@ -327,10 +356,17 @@ export async function generateVerifyWorkflow(
   if (!fileName)
     throw new Error(`No verify template for provider "${provider}".`);
   const upstream = await fetchRadiusTemplate(fileName, ref);
+  const rendered = coreGenerateVerifyWorkflow(env, platform, upstream);
+  const pushMarker = options.setupPushOperationMarker?.trim() || "";
+  if (pushMarker && !/^  push:\s*$/mu.test(rendered)) {
+    throw new Error(
+      "The upstream verify workflow template no longer exposes the constrained setup-branch push trigger."
+    );
+  }
+  const triggerConfigured =
+    pushMarker ? rendered : stripSetupPushTrigger(rendered);
   const workflow = configureVerifyGhcrProbe(
-    configureVerifyOperationMarker(
-      coreGenerateVerifyWorkflow(env, platform, upstream)
-    )
+    configureVerifyOperationMarker(triggerConfigured, env, pushMarker)
   );
   assertTrustedGeneratedWorkflow(
     workflow,
@@ -340,7 +376,15 @@ export async function generateVerifyWorkflow(
   return workflow;
 }
 
-export function configureVerifyOperationMarker(workflow: string): string {
+function githubExpressionString(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+export function configureVerifyOperationMarker(
+  workflow: string,
+  environment = "",
+  pushOperationMarker = ""
+): string {
   const lines = workflow.split("\n");
   const onIndex = lines.findIndex((line) => /^on:\s*$/.test(line));
   const dispatchIndex = lines.findIndex((line) =>
@@ -375,8 +419,18 @@ export function configureVerifyOperationMarker(workflow: string): string {
   lines.splice(
     onIndex,
     0,
-    `run-name: Radius verify \${{ inputs.environment }} [\${{ inputs.${VERIFY_OPERATION_INPUT} }}]`
+    `run-name: Radius verify \${{ inputs.environment || ${githubExpressionString(environment)} }} [\${{ inputs.${VERIFY_OPERATION_INPUT} || ${githubExpressionString(pushOperationMarker)} }}]`
   );
+  return lines.join("\n");
+}
+
+function stripSetupPushTrigger(yaml: string): string {
+  const lines = yaml.split("\n");
+  const start = lines.findIndex((line) => /^  push:\s*$/.test(line));
+  if (start === -1) return yaml;
+  let to = start + 1;
+  while (to < lines.length && /^    /.test(lines[to])) to += 1;
+  lines.splice(start, to - start);
   return lines.join("\n");
 }
 
@@ -614,9 +668,6 @@ export function generatePortalUrl(
 ): string {
   return coreGeneratePortalUrl(resourceType, provider);
 }
-
-// Repo path of the shared verify-credentials workflow the extension commits.
-const VERIFY_WORKFLOW_PATH = ".github/workflows/radius-verify-credentials.yml";
 
 /**
  * Re-fetch the upstream workflow templates and update any workflow files the

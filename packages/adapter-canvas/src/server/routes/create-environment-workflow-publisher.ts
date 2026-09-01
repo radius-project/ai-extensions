@@ -279,7 +279,8 @@ export interface WorkflowPublisherPorts {
   ghCommandPresentation?: GhCommandPresentation;
   generateVerifyWorkflow(
     environment: string,
-    provider: string
+    provider: string,
+    setupPushOperationMarker?: string
   ): Promise<string>;
   generateDeployWorkflow(
     environment: string,
@@ -321,6 +322,7 @@ export interface WorkflowPublisherTarget {
   envName: string;
   provider: string;
   defaultBranch: string;
+  setupPushOperationMarker?: string;
 }
 
 // Steps 3, 4 and 4b. The verify and deploy workflows are required; the delete
@@ -330,7 +332,14 @@ export async function publishWorkflowFiles(
   ports: WorkflowPublisherPorts,
   target: WorkflowPublisherTarget
 ): Promise<WorkflowPublishResult> {
-  const { operation, targetRepo, envName, provider, defaultBranch } = target;
+  const {
+    operation,
+    targetRepo,
+    envName,
+    provider,
+    defaultBranch,
+    setupPushOperationMarker
+  } = target;
   // Every field a rollback needs to prove this exact write, recorded with the
   // file rather than derived later: the branch it landed on, the commit it
   // created, the blob it produced, the digest of the bytes Radius sent, and the
@@ -348,7 +357,11 @@ export async function publishWorkflowFiles(
 
   // Step 3: Commit the verify-credentials workflow
   ports.pushStep("Committing verify-credentials workflow...");
-  const verifyWorkflow = await ports.generateVerifyWorkflow(envName, provider);
+  const verifyWorkflow = await ports.generateVerifyWorkflow(
+    envName,
+    provider,
+    setupPushOperationMarker
+  );
   const verifyContent = Buffer.from(verifyWorkflow).toString("base64");
 
   const verifyCommit = await ports.commitWorkflowFileSmart(

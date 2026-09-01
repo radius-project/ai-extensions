@@ -1,5 +1,6 @@
 import { hasVerificationOperationMarker } from "./verification-run-identity.js";
 import { githubCredentialSourceLabel } from "./github-credential-source.js";
+import { parse as parseYaml } from "yaml";
 
 export interface PullRequestState {
   branch: string;
@@ -8,6 +9,7 @@ export interface PullRequestState {
 
 export interface CredentialVerificationPlan {
   shouldDispatch: boolean;
+  trigger: "workflow_dispatch" | "push" | "none";
   ref: string;
   defaultBranch: string;
   dispatcherChains?: boolean;
@@ -15,6 +17,23 @@ export interface CredentialVerificationPlan {
   skipReason: string;
   supportsOperationMarker: boolean;
 }
+
+export interface WorkflowFileReadResult {
+  content: string | null;
+  error: string | null;
+  status: number | null;
+}
+
+export type AutomaticBranchVerificationPolicy =
+  | { state: "enabled" }
+  | {
+      state: "disabled";
+      reason:
+        | "verify-present"
+        | "verify-unreadable"
+        | "dispatcher-legacy-chain"
+        | "dispatcher-unreadable";
+    };
 
 type FetchFile = (
   repo: string,
@@ -30,6 +49,52 @@ export function hasWorkflowRunTrigger(workflow: unknown): boolean {
   return lines.slice(0, end).some((line) => /^\s+workflow_run:\s*$/.test(line));
 }
 
+export function automaticBranchVerificationPolicy(input: {
+  verify: WorkflowFileReadResult;
+  dispatcher: WorkflowFileReadResult;
+}): AutomaticBranchVerificationPolicy {
+  const fileState = (
+    result: WorkflowFileReadResult
+  ): "present" | "absent" | "unreadable" => {
+    if (typeof result.content === "string" && result.content.trim())
+      return "present";
+    return result.status === 404 ? "absent" : "unreadable";
+  };
+  const verifyState = fileState(input.verify);
+  if (verifyState === "present") {
+    return { state: "disabled", reason: "verify-present" };
+  }
+  if (verifyState === "unreadable") {
+    return { state: "disabled", reason: "verify-unreadable" };
+  }
+  const dispatcherState = fileState(input.dispatcher);
+  if (dispatcherState === "unreadable") {
+    return { state: "disabled", reason: "dispatcher-unreadable" };
+  }
+  if (dispatcherState === "present") {
+    try {
+      const parsed: unknown = parseYaml(input.dispatcher.content || "");
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        Array.isArray(parsed) ||
+        !("on" in parsed) ||
+        !parsed.on ||
+        typeof parsed.on !== "object" ||
+        Array.isArray(parsed.on)
+      ) {
+        return { state: "disabled", reason: "dispatcher-unreadable" };
+      }
+      if (Object.prototype.hasOwnProperty.call(parsed.on, "workflow_run")) {
+        return { state: "disabled", reason: "dispatcher-legacy-chain" };
+      }
+    } catch {
+      return { state: "disabled", reason: "dispatcher-unreadable" };
+    }
+  }
+  return { state: "enabled" };
+}
+
 export async function planCredentialVerification({
   targetRepo,
   defaultBranch,
@@ -37,6 +102,7 @@ export async function planCredentialVerification({
   pullRequestUrl = "",
   verifyWorkflowPath = ".github/workflows/radius-verify-credentials.yml",
   dispatcherWorkflowPath = ".github/workflows/run-rad-commands.yml",
+  automaticPushEnabled = false,
   fetchFile
 }: {
   targetRepo: string;
@@ -45,6 +111,7 @@ export async function planCredentialVerification({
   pullRequestUrl?: string;
   verifyWorkflowPath?: string;
   dispatcherWorkflowPath?: string;
+  automaticPushEnabled?: boolean;
   fetchFile: FetchFile;
 }): Promise<CredentialVerificationPlan> {
   if (!prState) {
@@ -61,11 +128,24 @@ export async function planCredentialVerification({
     );
     return {
       shouldDispatch: true,
+      trigger: "workflow_dispatch",
       ref: defaultBranch,
       defaultBranch,
       pullRequestUrl: "",
       skipReason: "",
       supportsOperationMarker: hasVerificationOperationMarker(directWorkflow)
+    };
+  }
+
+  if (automaticPushEnabled) {
+    return {
+      shouldDispatch: false,
+      trigger: "push",
+      ref: prState.branch,
+      defaultBranch,
+      pullRequestUrl: "",
+      skipReason: "",
+      supportsOperationMarker: true
     };
   }
 
@@ -95,6 +175,7 @@ export async function planCredentialVerification({
   const shouldDispatch = verifyExists && !dispatcherChains;
   return {
     shouldDispatch,
+    trigger: shouldDispatch ? "workflow_dispatch" : "none",
     ref: prState.branch,
     defaultBranch,
     dispatcherChains,
@@ -186,7 +267,7 @@ export function describePullRequestNextStep({
     return `Merging the pull request above puts the workflows on "${baseBranch}", but credential verification is waiting on the cloud credentials above, not on the merge.`;
   if (outcome === "awaiting-merge-and-credentials")
     return `Merge the pull request above to put the workflows on "${baseBranch}", and finish the cloud credentials above. Credential verification is waiting on both, so merging alone will not start it.`;
-  return `Merge the pull request above to finish setup; credential verification and deploys run once it lands on "${baseBranch}".`;
+  return `Merge the pull request above to put the workflows on "${baseBranch}", then retry credential verification.`;
 }
 
 // The terminal message the customer reads in the panel headline and the
@@ -208,7 +289,7 @@ export function describeMergeRequiredTerminal({
   if (hasPullRequest)
     return alsoCredentials ?
         "Merge the pull request and finish the cloud credentials to complete setup. Credential verification is waiting on both, so merging alone will not start it."
-      : "Merge the pull request to finish setup; credential verification and deploys run once it lands.";
+      : "Merge the pull request, then retry credential verification to finish setup.";
   return alsoCredentials ?
       `Open and merge a pull request from "${branch}" into "${baseBranch}", and finish the cloud credentials, to complete setup. Credential verification is waiting on both, so merging alone will not start it.`
     : `Open and merge a pull request from "${branch}" into "${baseBranch}" to finish setup.`;

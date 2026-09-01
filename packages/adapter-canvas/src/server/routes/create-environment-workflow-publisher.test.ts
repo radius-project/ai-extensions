@@ -315,11 +315,27 @@ function publisherRecorder(script: PublisherScript = {}) {
     previousBlobSha: string | null;
   }> = [];
   const commitCalls: string[] = [];
+  const verifyGenerationCalls: Array<{
+    environment: string;
+    provider: string;
+    setupPushOperationMarker: string | undefined;
+  }> = [];
   const journal: string[] = [];
   let gateCalls = 0;
 
   const ports: WorkflowPublisherPorts = {
-    generateVerifyWorkflow: async () => "verify-yaml",
+    generateVerifyWorkflow: async (
+      environment,
+      provider,
+      setupPushOperationMarker
+    ) => {
+      verifyGenerationCalls.push({
+        environment,
+        provider,
+        setupPushOperationMarker
+      });
+      return "verify-yaml";
+    },
     generateDeployWorkflow: async () =>
       script.deployFiles ?? { "run-rad-commands.yml": "deploy-yaml" },
     generateDeleteWorkflow: async () => {
@@ -376,12 +392,30 @@ function publisherRecorder(script: PublisherScript = {}) {
     steps,
     committed,
     commitCalls,
+    verifyGenerationCalls,
     journal,
     gateCount: () => gateCalls
   };
 }
 
 describe("publishWorkflowFiles", () => {
+  it("passes the approved automatic operation marker only to verify generation", async () => {
+    const recorder = publisherRecorder();
+
+    await publishWorkflowFiles(recorder.ports, {
+      ...recorder.target,
+      setupPushOperationMarker: "op-1"
+    });
+
+    expect(recorder.verifyGenerationCalls).toEqual([
+      {
+        environment: "dev",
+        provider: "azure",
+        setupPushOperationMarker: "op-1"
+      }
+    ]);
+  });
+
   it("commits verify, deploy and delete workflows in that order and gates after each", async () => {
     const recorder = publisherRecorder();
 

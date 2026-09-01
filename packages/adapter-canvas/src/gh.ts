@@ -1001,6 +1001,52 @@ export async function selectedFetchFileFromRepo(
   return Buffer.from(result.stdout.trim(), "base64").toString("utf8");
 }
 
+export async function selectedFetchFileFromRepoResult(
+  executor: SelectedGhExecutor,
+  repo: string,
+  path: string,
+  branch = "main"
+): Promise<{
+  content: string | null;
+  error: string | null;
+  status: number | null;
+}> {
+  const result = await executor.run(
+    [
+      "api",
+      `/repos/${repo}/contents/${path}?ref=${branch}`,
+      "--jq",
+      ".content"
+    ],
+    { timeout: 15000 }
+  );
+  const statusMatch = result.stderr.match(/\bHTTP\s+(\d{3})\b/i);
+  const status =
+    result.code === 0 ? 200
+    : statusMatch ? Number(statusMatch[1])
+    : null;
+  if (result.code !== 0) {
+    return {
+      content: null,
+      error:
+        (result.stderr || result.stdout || "").trim() || "GitHub API failed.",
+      status
+    };
+  }
+  if (!result.stdout.trim()) {
+    return {
+      content: null,
+      error: "GitHub returned an empty repository file.",
+      status: 200
+    };
+  }
+  return {
+    content: Buffer.from(result.stdout.trim(), "base64").toString("utf8"),
+    error: null,
+    status: 200
+  };
+}
+
 export async function selectedGetDefaultBranch(
   executor: SelectedGhExecutor,
   repo: string

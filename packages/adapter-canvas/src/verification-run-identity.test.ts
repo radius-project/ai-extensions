@@ -16,7 +16,8 @@ const identity = {
   dispatchedAt: Date.parse("2026-08-22T00:00:00Z"),
   ref: "main",
   environment: "dev",
-  operationMarker: "op_verify"
+  operationMarker: "op_verify",
+  event: "workflow_dispatch" as const
 };
 
 function run(overrides: Record<string, unknown> = {}) {
@@ -36,6 +37,15 @@ describe("verification run identity", () => {
       state: "applied",
       runId: "41"
     });
+  });
+
+  it("adopts an exact push run only when push is expected", () => {
+    expect(
+      findExactVerificationRun([run({ event: "push" })], {
+        ...identity,
+        event: "push"
+      })
+    ).toEqual({ state: "applied", runId: "41" });
   });
 
   it.each([
@@ -172,7 +182,8 @@ describe("the pre-dispatch verification record", () => {
         dispatchedAt: saved.dispatchedAt,
         ref: saved.ref,
         environment: saved.environment,
-        operationMarker: saved.operationMarker
+        operationMarker: saved.operationMarker,
+        event: "workflow_dispatch"
       })
     ).toEqual({ state: "applied", runId: "41" });
   });
@@ -193,7 +204,8 @@ describe("the pre-dispatch verification record", () => {
         dispatchedAt: saved.dispatchedAt,
         ref: saved.ref,
         environment: saved.environment,
-        operationMarker: saved.operationMarker || ""
+        operationMarker: saved.operationMarker || "",
+        event: "workflow_dispatch"
       })
     ).toEqual({ state: "not_found" });
   });

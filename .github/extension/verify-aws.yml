@@ -2,6 +2,11 @@
 ---
 name: Radius - Verify Credentials
 on:
+  push:
+    branches:
+      - "radius/setup-**"
+    paths:
+      - ".github/workflows/radius-verify-credentials.yml"
   workflow_dispatch:
     inputs:
       environment:
@@ -19,7 +24,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    environment: ${{ inputs.environment }}
+    environment: ${{ inputs.environment || '{{ENV}}' }}
     steps:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -47,6 +52,6 @@ jobs:
       - name: Summary
         run: |
           echo "## ✅ Credentials Verified" >> $GITHUB_STEP_SUMMARY
-          echo "Environment: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "Environment: ${{ inputs.environment || '{{ENV}}' }}" >> $GITHUB_STEP_SUMMARY
           echo "Provider: aws" >> $GITHUB_STEP_SUMMARY
           echo "GHCR package push: ${GHCR_PUSH_CHECK:-unknown}" >> $GITHUB_STEP_SUMMARY
