@@ -17,10 +17,12 @@ import {
   handleDeleteEnvironment,
   handleListEnvironments,
   handleVerifyStatus,
+  overlayDeletingStatus,
   type EnvironmentActiveDeployment,
   type EnvironmentRunDetail,
   type EnvironmentsDependencies,
-  type EnvironmentsInstanceEntry
+  type EnvironmentsInstanceEntry,
+  type DeleteOperationRecord
 } from "./environments.js";
 import type { CanvasServerEntry } from "../types.js";
 import { getOrCreateServer, persistBestEffort } from "../../server.js";
@@ -106,6 +108,9 @@ function deps(
   const base: EnvironmentsDependencies = {
     errorMessage: (error) =>
       error instanceof Error ? error.message : String(error),
+    // Deliberately distinct from identity so a route that forgets to redact a
+    // browser-visible diagnostic is detectable.
+    redactDiagnostic: (value) => value.replaceAll("ghp_secret", "[REDACTED]"),
     repoMatchesWorkspace: unset("repoMatchesWorkspace") as never,
     readInstanceEntry: unset("readInstanceEntry") as never,
     runCommand: unset("runCommand") as never,
@@ -114,7 +119,17 @@ function deps(
     resolveRepoAppName: unset("resolveRepoAppName") as never,
     resolveEnvDeployment: unset("resolveEnvDeployment") as never,
     logError: unset("logError") as never,
+    discoverEnvironmentTarget: unset("discoverEnvironmentTarget") as never,
+    createOperation: unset("createOperation") as never,
+    activeDeleteOperation: () => null,
+    buildDeleteStages: unset("buildDeleteStages") as never,
+    startOperation: unset("startOperation") as never,
+    toClientView: unset("toClientView") as never,
+    scheduleEnvironmentOperation: unset(
+      "scheduleEnvironmentOperation"
+    ) as never,
     cliExec: unset("cliExec") as never,
+    activeDeleteEnvironment: () => "",
     envListCacheGet: unset("envListCacheGet") as never,
     envListCacheSet: unset("envListCacheSet") as never,
     envListCacheGeneration: unset("envListCacheGeneration") as never,
@@ -514,8 +529,10 @@ describe("environments — delete-environment refusal ladder", () => {
     });
   });
 
-  it("rung 4: 500 when the DELETE command fails", async () => {
-    const runCommand = vi.fn(() => Promise.reject(new Error("boom")));
+  it("rung 4: 503 fail-closed when provider/identity discovery fails", async () => {
+    const discoverEnvironmentTarget = vi.fn(() =>
+      Promise.reject(new Error("boom"))
+    );
     const { recording, ctx } = context(
       "POST",
       "/api/delete-environment",
@@ -527,18 +544,36 @@ describe("environments — delete-environment refusal ladder", () => {
         readInstanceEntry: () => entryWith(),
         resolveRepoAppName: () => Promise.resolve("app"),
         resolveEnvDeployment: () => Promise.resolve(null),
-        runCommand
+        discoverEnvironmentTarget
       })
     );
-    expect(recording.status).toBe(500);
-    expect(JSON.parse(recording.body)).toEqual({
-      error: "Could not delete environment: boom"
-    });
+    expect(recording.status).toBe(503);
+    const body = JSON.parse(recording.body);
+    expect(body.error).toContain(
+      'Could not read the configuration for environment "dev"'
+    );
+    expect(body.error).toContain("boom");
   });
 
-  it("clean pass: deletes, invalidates the cache, and 200s", async () => {
-    const runCommand = vi.fn(() => Promise.resolve(""));
-    const envListCacheDelete = vi.fn();
+  it("clean pass: starts a delete operation and 202s with the client view", async () => {
+    const op: DeleteOperationRecord = {
+      operationId: "op-del-1",
+      currentStage: "delete-radius-env"
+    };
+    const createOperation = vi.fn(() => op);
+    const buildDeleteStages = vi.fn(() => [{ id: "s", state: "pending" }]);
+    const startOperation = vi.fn(() => ({ ok: true as const, operation: op }));
+    const persistOperations = vi.fn(() => Promise.resolve());
+    const toClientView = vi.fn(() => ({ operationId: "op-del-1", view: true }));
+    const scheduleEnvironmentOperation = vi.fn(() => true);
+    const discoverEnvironmentTarget = vi.fn(() =>
+      Promise.resolve({
+        provider: "azure",
+        clientId: "app-123",
+        tenantId: "tenant-1",
+        repoId: 7
+      })
+    );
     const { recording, ctx } = context(
       "POST",
       "/api/delete-environment",
@@ -550,18 +585,204 @@ describe("environments — delete-environment refusal ladder", () => {
         readInstanceEntry: () => entryWith(),
         resolveRepoAppName: () => Promise.resolve("app"),
         resolveEnvDeployment: () => Promise.resolve(null),
-        runCommand,
-        envListCacheDelete
+        discoverEnvironmentTarget,
+        createOperation,
+        buildDeleteStages,
+        startOperation,
+        persistOperations,
+        toClientView,
+        scheduleEnvironmentOperation
       })
     );
-    expect(runCommand).toHaveBeenCalledWith(
-      "gh",
-      ["api", "--method", "DELETE", "/repos/o/r/environments/dev"],
-      { timeout: 20000 }
+    expect(buildDeleteStages).toHaveBeenCalledWith({
+      includeAzureCleanup: true
+    });
+    expect(op.request).toEqual({
+      repo: "o/r",
+      environment: "dev",
+      provider: "azure",
+      clientId: "app-123",
+      tenantId: "tenant-1",
+      repoId: 7
+    });
+    expect(startOperation).toHaveBeenCalledWith(op);
+    expect(persistOperations).toHaveBeenCalledOnce();
+    expect(recording.status).toBe(202);
+    expect(recording.headers["Location"]).toBe("/api/operations/op-del-1");
+    const body = JSON.parse(recording.body);
+    expect(body.operationId).toBe("op-del-1");
+    expect(body.operation).toEqual({ operationId: "op-del-1", view: true });
+    expect(scheduleEnvironmentOperation).toHaveBeenCalledWith(
+      ctx.instanceId,
+      op
     );
-    expect(envListCacheDelete).toHaveBeenCalledWith("o/r");
-    expect(recording.status).toBe(200);
-    expect(JSON.parse(recording.body)).toEqual({ success: true });
+  });
+
+  it("includes Azure cleanup even when the client id could not be read", async () => {
+    const op: DeleteOperationRecord = {
+      operationId: "op-del-2",
+      currentStage: "delete-radius-env"
+    };
+    const buildDeleteStages = vi.fn(() => [{ id: "s", state: "pending" }]);
+    const startOperation = vi.fn(() => ({ ok: true as const, operation: op }));
+    const { recording, ctx } = context(
+      "POST",
+      "/api/delete-environment",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+    await handleDeleteEnvironment(
+      ctx,
+      deps({
+        readInstanceEntry: () => entryWith(),
+        resolveRepoAppName: () => Promise.resolve("app"),
+        resolveEnvDeployment: () => Promise.resolve(null),
+        // Azure provider but no readable AZURE_CLIENT_ID — the credential is most
+        // likely orphaned, so the Azure stages must still run (and warn).
+        discoverEnvironmentTarget: () =>
+          Promise.resolve({
+            provider: "azure",
+            clientId: "",
+            tenantId: "",
+            repoId: 7
+          }),
+        createOperation: () => op,
+        buildDeleteStages,
+        startOperation,
+        persistOperations: () => Promise.resolve(),
+        toClientView: () => ({ operationId: "op-del-2" }),
+        scheduleEnvironmentOperation: () => true
+      })
+    );
+    expect(buildDeleteStages).toHaveBeenCalledWith({
+      includeAzureCleanup: true
+    });
+    expect(op.request).toEqual({
+      repo: "o/r",
+      environment: "dev",
+      provider: "azure",
+      clientId: "",
+      tenantId: "",
+      repoId: 7
+    });
+    expect(recording.status).toBe(202);
+  });
+
+  it("409s when an operation is already running for the repo", async () => {
+    const op: DeleteOperationRecord = {
+      operationId: "op-new",
+      currentStage: null
+    };
+    const startOperation = vi.fn(() => ({
+      ok: false as const,
+      conflict: { operationId: "op-existing" }
+    }));
+    const { recording, ctx } = context(
+      "POST",
+      "/api/delete-environment",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+    await handleDeleteEnvironment(
+      ctx,
+      deps({
+        readInstanceEntry: () => entryWith(),
+        resolveRepoAppName: () => Promise.resolve("app"),
+        resolveEnvDeployment: () => Promise.resolve(null),
+        discoverEnvironmentTarget: () =>
+          Promise.resolve({
+            provider: "azure",
+            clientId: "",
+            tenantId: "",
+            repoId: 7
+          }),
+        createOperation: () => op,
+        buildDeleteStages: () => [],
+        startOperation
+      })
+    );
+    expect(recording.status).toBe(409);
+    const body = JSON.parse(recording.body);
+    expect(body.code).toBe("operation-in-progress");
+    expect(body.operationId).toBe("op-existing");
+  });
+
+  it("returns the existing delete operation without starting another run", async () => {
+    const existing: DeleteOperationRecord = {
+      operationId: "op-existing-delete",
+      currentStage: "delete-radius-env"
+    };
+    const resolveEnvDeployment = vi.fn();
+    const discoverEnvironmentTarget = vi.fn();
+    const createOperation = vi.fn();
+    const startOperation = vi.fn();
+    const toClientView = vi.fn(() => ({
+      operationId: existing.operationId,
+      kind: "delete"
+    }));
+    const { recording, ctx } = context(
+      "POST",
+      "/api/delete-environment",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+
+    await handleDeleteEnvironment(
+      ctx,
+      deps({
+        activeDeleteOperation: (repo, environment) =>
+          repo === "o/r" && environment === "dev" ? existing : null,
+        resolveEnvDeployment,
+        discoverEnvironmentTarget,
+        createOperation,
+        startOperation,
+        toClientView
+      })
+    );
+
+    expect(recording.status).toBe(409);
+    expect(JSON.parse(recording.body)).toEqual({
+      error: 'Deletion is already running for environment "dev".',
+      code: "delete-operation-in-progress",
+      operationId: "op-existing-delete",
+      operation: { operationId: "op-existing-delete", kind: "delete" }
+    });
+    expect(resolveEnvDeployment).not.toHaveBeenCalled();
+    expect(discoverEnvironmentTarget).not.toHaveBeenCalled();
+    expect(createOperation).not.toHaveBeenCalled();
+    expect(startOperation).not.toHaveBeenCalled();
+  });
+
+  it("400s with provider-unsupported guidance for an AWS environment", async () => {
+    const createOperation = vi.fn();
+    const startOperation = vi.fn();
+    const { recording, ctx } = context(
+      "POST",
+      "/api/delete-environment",
+      JSON.stringify({ repo: "o/r", environment: "dev" })
+    );
+    await handleDeleteEnvironment(
+      ctx,
+      deps({
+        readInstanceEntry: () => entryWith(),
+        resolveRepoAppName: () => Promise.resolve("app"),
+        resolveEnvDeployment: () => Promise.resolve(null),
+        discoverEnvironmentTarget: () =>
+          Promise.resolve({
+            provider: "aws",
+            clientId: "",
+            tenantId: "",
+            repoId: 7
+          }),
+        createOperation,
+        startOperation
+      })
+    );
+    expect(recording.status).toBe(400);
+    const body = JSON.parse(recording.body);
+    expect(body.code).toBe("provider-unsupported");
+    expect(body.error).toContain("AWS");
+    expect(body.error).toContain('"dev" was not deleted');
+    // Nothing was started: no operation is created for an unsupported provider.
+    expect(createOperation).not.toHaveBeenCalled();
+    expect(startOperation).not.toHaveBeenCalled();
   });
 
   it("outer catch: 400 when the body is malformed JSON", async () => {
@@ -752,6 +973,88 @@ describe("environments — list-environments", () => {
     expect(JSON.parse(recording.body)).toEqual({
       environments: [],
       error: "403"
+    });
+  });
+
+  it("redacts credential-shaped stderr before the browser-visible envelope", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+      [ENV_PATH.names("o/r")]: {
+        error: new Error("no auth"),
+        stderr: "gh: authentication failed using ghp_secret"
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        cliExec: cliFake(script)
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      environments: [],
+      error: "gh: authentication failed using [REDACTED]"
+    });
+    expect(recording.body).not.toContain("ghp_secret");
+  });
+
+  it("falls back to generic text when redaction empties the diagnostic", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+      [ENV_PATH.names("o/r")]: {
+        error: Object.assign(new Error(""), { message: "" }),
+        stderr: "   "
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        cliExec: cliFake(script)
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      environments: [],
+      error: "Failed to list environments."
+    });
+  });
+
+  it("bounds browser-visible gh stderr", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+      [ENV_PATH.names("o/r")]: {
+        error: new Error("failed"),
+        stderr: "x".repeat(2001)
+      }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        cliExec: cliFake(script)
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      environments: [],
+      error: `${"x".repeat(2000)}...`
     });
   });
 
@@ -965,6 +1268,95 @@ describe("environments — list-environments", () => {
     }
   );
 
+  // The namespace the deployment workflow reads is KUBERNETES_NAMESPACE. An
+  // environment created before that rename still carries RADIUS_NAMESPACE, and
+  // reporting no namespace for either would leave the form's namespace field
+  // empty, which a save turns into "default".
+  it.each([
+    [
+      "the name deployments read",
+      "AZURE_AKS_CLUSTER_NAME\tprod-aks\nKUBERNETES_NAMESPACE\tpayments",
+      "payments"
+    ],
+    [
+      "the legacy name",
+      "AZURE_AKS_CLUSTER_NAME\tprod-aks\nRADIUS_NAMESPACE\tlegacy-ns",
+      "legacy-ns"
+    ],
+    [
+      "the current name ahead of the legacy one",
+      "AZURE_AKS_CLUSTER_NAME\tprod-aks\nKUBERNETES_NAMESPACE\tpayments\nRADIUS_NAMESPACE\tstale-ns",
+      "payments"
+    ]
+  ])("reports the namespace from %s", async (_label, variables, expected) => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: {
+        stdout: `RADIUS_MANAGED\ttrue\n${variables}`
+      },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "" }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        envListCacheSet: vi.fn(),
+        cliExec: cliFake(script),
+        readInstanceEntry: () => undefined,
+        repoMatchesWorkspace: () => false,
+        kickoffWorkflowSync: vi.fn()
+      })
+    );
+    expect(JSON.parse(recording.body).environments[0].config).toEqual({
+      cluster: "prod-aks",
+      namespace: expected
+    });
+  });
+
+  // The workflow resolves the current variable itself, as
+  // `vars.KUBERNETES_NAMESPACE || 'default'`. Once it exists it is
+  // authoritative even when empty, so a superseded legacy value must not be
+  // reported in its place: Edit would show a namespace deployment does not use
+  // and would save it back, moving the environment.
+  it("reports no namespace when the current variable exists but is empty", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: {
+        stdout:
+          "RADIUS_MANAGED\ttrue\nAZURE_AKS_CLUSTER_NAME\tprod-aks\nKUBERNETES_NAMESPACE\t\nRADIUS_NAMESPACE\tstale-ns"
+      },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "" }
+    };
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        envListCacheSet: vi.fn(),
+        cliExec: cliFake(script),
+        readInstanceEntry: () => undefined,
+        repoMatchesWorkspace: () => false,
+        kickoffWorkflowSync: vi.fn()
+      })
+    );
+    expect(JSON.parse(recording.body).environments[0].config).toEqual({
+      cluster: "prod-aks"
+    });
+  });
+
   it("omits configuration the environment does not carry", async () => {
     const script: CliScript = {
       [ENV_PATH.verifyRuns("o/r")]: { stdout: "" },
@@ -1029,6 +1421,133 @@ describe("environments — list-environments", () => {
     expect(JSON.parse(recording.body)).toEqual({
       environments: [],
       error: "spawn failed"
+    });
+  });
+
+  it("uses a generic top-level error when redaction removes the diagnostic", async () => {
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    const cliExec = (
+      _command: string,
+      args: string[],
+      _options: { timeout: number },
+      callback: (error: Error | null, stdout: string, stderr: string) => void
+    ) => {
+      if (args.includes("--paginate")) throw new Error("sensitive");
+      callback(null, "", "");
+    };
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheGeneration: () => 0,
+        cliExec,
+        redactDiagnostic: () => ""
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      environments: [],
+      error: "Failed to list environments."
+    });
+  });
+
+  it("overlays a live deleting status onto the matching environment on a cache hit", async () => {
+    const now = vi.fn(() => 1000);
+    const envListCacheGet = vi.fn(() => ({
+      at: 900,
+      payload: {
+        environments: [
+          { name: "dev", status: "success" },
+          { name: "prod", status: "success" }
+        ]
+      }
+    }));
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now,
+        envListCacheGet,
+        envListTtlMs: 15000,
+        activeDeleteEnvironment: (repo) => (repo === "o/r" ? "prod" : "")
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      environments: [
+        { name: "dev", status: "success" },
+        { name: "prod", status: "deleting" }
+      ]
+    });
+  });
+
+  it("caches the real status but serves the deleting overlay on a fresh list", async () => {
+    const script: CliScript = {
+      [ENV_PATH.verifyRuns("o/r")]: { stdout: "42\tcompleted\tsuccess" },
+      [ENV_PATH.names("o/r")]: { stdout: "7\tdev" },
+      [ENV_PATH.vars("o/r", "dev")]: { stdout: "RADIUS_MANAGED\ttrue" },
+      [ENV_PATH.deployments("o/r", "dev")]: { stdout: "100" },
+      [ENV_PATH.statuses("o/r", "100")]: {
+        stdout: "https://github.com/o/r/actions/runs/42"
+      }
+    };
+    const envListCacheSet = vi.fn();
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now: () => 0,
+        envListCacheGet: () => undefined,
+        envListCacheSet,
+        envListCacheGeneration: () => 0,
+        cliExec: cliFake(script),
+        readInstanceEntry: () => undefined,
+        repoMatchesWorkspace: () => false,
+        kickoffWorkflowSync: vi.fn(),
+        activeDeleteEnvironment: () => "dev"
+      })
+    );
+    // The response is overlaid...
+    expect(JSON.parse(recording.body).environments[0]).toMatchObject({
+      name: "dev",
+      status: "deleting"
+    });
+    // ...but the cache keeps the real verify status so the marker clears once
+    // the deletion reaches a terminal state.
+    const cached = envListCacheSet.mock.calls[0][1] as {
+      payload: { environments: { name: string; status: string }[] };
+    };
+    expect(cached.payload.environments[0].status).toBe("success");
+  });
+
+  it("leaves the listing untouched when no deletion is in progress", async () => {
+    const now = vi.fn(() => 1000);
+    const { recording, ctx } = context(
+      "GET",
+      "/api/list-environments?repo=o/r"
+    );
+    await handleListEnvironments(
+      ctx,
+      deps({
+        now,
+        envListCacheGet: () => ({
+          at: 900,
+          payload: { environments: [{ name: "dev", status: "success" }] }
+        }),
+        envListTtlMs: 15000,
+        activeDeleteEnvironment: () => ""
+      })
+    );
+    expect(JSON.parse(recording.body)).toEqual({
+      environments: [{ name: "dev", status: "success" }]
     });
   });
 
@@ -1125,6 +1644,61 @@ describe("environments — list-environments", () => {
           environments: [expect.objectContaining({ name: "dev" })]
         }
       });
+    });
+  });
+});
+
+describe("environments — overlayDeletingStatus", () => {
+  it("sets only the named environment to deleting", () => {
+    const payload = {
+      environments: [
+        { name: "dev", status: "success" },
+        { name: "prod", status: "pending" }
+      ]
+    };
+    expect(overlayDeletingStatus(payload, "prod")).toEqual({
+      environments: [
+        { name: "dev", status: "success" },
+        { name: "prod", status: "deleting" }
+      ]
+    });
+  });
+
+  it("returns the payload unchanged when the environment name is empty", () => {
+    const payload = { environments: [{ name: "dev", status: "success" }] };
+    expect(overlayDeletingStatus(payload, "")).toBe(payload);
+  });
+
+  it("preserves sibling fields on the payload and each environment", () => {
+    const payload = {
+      environments: [{ name: "dev", status: "success", provider: "azure" }],
+      error: undefined
+    };
+    const result = overlayDeletingStatus(payload, "dev") as {
+      environments: { provider: string; status: string }[];
+    };
+    expect(result.environments[0]).toEqual({
+      name: "dev",
+      status: "deleting",
+      provider: "azure"
+    });
+  });
+
+  it.each([
+    ["null", null],
+    ["a non-object", 42],
+    ["an object without environments", { error: "boom" }],
+    ["environments that is not an array", { environments: "nope" }]
+  ])("returns %s payloads unchanged", (_label, payload) => {
+    expect(overlayDeletingStatus(payload, "dev")).toBe(payload);
+  });
+
+  it("ignores non-object environment entries while overlaying the match", () => {
+    const payload = {
+      environments: [null, { name: "dev", status: "success" }]
+    };
+    expect(overlayDeletingStatus(payload, "dev")).toEqual({
+      environments: [null, { name: "dev", status: "deleting" }]
     });
   });
 });
@@ -2390,15 +2964,29 @@ describe("environments — real loopback", () => {
     }
   });
 
-  it("deletes and invalidates the environment cache over controlled HTTP", async () => {
-    const runCommand = vi.fn(() => Promise.resolve(""));
-    const envListCacheDelete = vi.fn();
+  it("starts a delete operation and 202s over controlled HTTP", async () => {
+    const op: DeleteOperationRecord = {
+      operationId: "op-http-del",
+      currentStage: "delete-radius-env"
+    };
+    const scheduleEnvironmentOperation = vi.fn(() => true);
     const container = createControlledEnvironmentServer({
       readInstanceEntry: () => undefined,
       resolveRepoAppName: () => Promise.resolve("todo-app"),
       resolveEnvDeployment: () => Promise.resolve(null),
-      runCommand,
-      envListCacheDelete
+      discoverEnvironmentTarget: () =>
+        Promise.resolve({
+          provider: "azure",
+          clientId: "app-xyz",
+          tenantId: "tenant-1",
+          repoId: 7
+        }),
+      createOperation: () => op,
+      buildDeleteStages: () => [{ id: "s", state: "pending" }],
+      startOperation: () => ({ ok: true as const, operation: op }),
+      persistOperations: () => Promise.resolve(),
+      toClientView: () => ({ operationId: "op-http-del" }),
+      scheduleEnvironmentOperation
     });
     try {
       const controlled = await container.getOrCreate("delete-success");
@@ -2407,14 +2995,15 @@ describe("environments — real loopback", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo: "octo/app", environment: "dev" })
       });
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ success: true });
-      expect(runCommand).toHaveBeenCalledWith(
-        "gh",
-        ["api", "--method", "DELETE", "/repos/octo/app/environments/dev"],
-        { timeout: 20000 }
-      );
-      expect(envListCacheDelete).toHaveBeenCalledWith("octo/app");
+      expect(res.status).toBe(202);
+      expect(res.headers.get("Location")).toBe("/api/operations/op-http-del");
+      const body = (await res.json()) as {
+        operationId: string;
+        operation: unknown;
+      };
+      expect(body.operationId).toBe("op-http-del");
+      expect(body.operation).toEqual({ operationId: "op-http-del" });
+      expect(scheduleEnvironmentOperation).toHaveBeenCalledOnce();
     } finally {
       await container.stopAll();
     }

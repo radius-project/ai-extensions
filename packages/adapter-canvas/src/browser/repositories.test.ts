@@ -1975,7 +1975,8 @@ describe("deployed pane state", () => {
     ["bypassed", true],
     ["", false],
     ["pending", false],
-    ["failed", false]
+    ["failed", false],
+    ["deleting", false]
   ])("treats %s as deployable=%s", (status, allowed) => {
     expect(environmentAllowsDeploy(status)).toBe(allowed);
   });
@@ -1990,6 +1991,11 @@ describe("deployed pane state", () => {
       "failed",
       'Environment "dev" was not created successfully, so it cannot be deployed to. Fix or recreate it first.',
       "was not created successfully"
+    ],
+    [
+      "deleting",
+      'Environment "dev" is being deleted, so it cannot be deployed to. Wait for the deletion to finish.',
+      "is being deleted"
     ],
     [
       "",
@@ -2029,7 +2035,7 @@ describe("deployed pane state", () => {
     );
   });
 
-  it.each([["pending"], ["failed"], [""]])(
+  it.each([["pending"], ["failed"], ["deleting"], [""]])(
     "blocks the deploy while the environment is %s",
     (status) => {
       const { browser, button, hint } = deployedPage();
@@ -2125,6 +2131,13 @@ describe("deployed pane state", () => {
         status: "pending"
       })
     ).toBe("dev (being created…)");
+    expect(
+      environmentOptionLabel({
+        name: "dev",
+        provider: "azure",
+        status: "deleting"
+      })
+    ).toBe("dev (being deleted…)");
     // A missing status is genuinely unknown, not evidence of an in-flight
     // creation, so it must not claim the environment is being created.
     expect(environmentOptionLabel({ name: "dev", provider: "azure" })).toBe(

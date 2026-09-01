@@ -21,6 +21,41 @@ import type {
   AzureAutoSetupWorkflow
 } from "./azure-auto-setup-types.js";
 import { ProviderMutationRecoveryError } from "../services/provider-mutation-recovery.js";
+import { setupStartConflictResponse } from "./operation-start-conflict.js";
+
+interface AzureAccountIdentity {
+  subscriptionId: string;
+  tenantId: string;
+}
+
+export function parseAzureAccountIdentity(
+  stdout: string
+): AzureAccountIdentity | null {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return null;
+    }
+    const account = parsed as { id?: unknown; tenantId?: unknown };
+    if (
+      typeof account.id !== "string" ||
+      (account.tenantId !== undefined && typeof account.tenantId !== "string")
+    ) {
+      return null;
+    }
+    return {
+      subscriptionId: account.id.trim(),
+      tenantId:
+        typeof account.tenantId === "string" ? account.tenantId.trim() : ""
+    };
+  } catch {
+    return null;
+  }
+}
 
 const OPERATION_FUNCTIONS = [
   "get",
@@ -42,6 +77,8 @@ const OPERATION_FUNCTIONS = [
   "recordAzureApp",
   "recordServicePrincipal",
   "recordCreatedFederatedCredential",
+  "recordFederatedCredentialProvenance",
+  "withCredentialProvenanceLock",
   "recordCreatedRoleAssignment"
 ] as const;
 
@@ -98,10 +135,6 @@ function record(value: unknown): Record<string, unknown> {
     return {};
   }
   return Object.fromEntries(Object.entries(value));
-}
-
-function optionalString(value: unknown): string {
-  return typeof value === "string" ? value : "";
 }
 
 function errorMessage(error: unknown): string {
@@ -369,18 +402,7 @@ export async function handleAzureAutoSetup(
       const started = dependencies.operations.start(operation);
       if (!started.ok) {
         operation = null;
-        const previousCleanup = started.reason === "previous-cleanup-required";
-        respond(context, 409, {
-          error:
-            previousCleanup ?
-              `An earlier setup for ${targetRepo} must finish rollback before a new setup can start.`
-            : `Setup is already running for ${targetRepo}.`,
-          code:
-            previousCleanup ?
-              "previous-cleanup-required"
-            : "operation-in-progress",
-          operationId: started.conflict.operationId
-        });
+        respond(context, 409, setupStartConflictResponse(targetRepo, started));
         return;
       }
       try {
@@ -526,20 +548,18 @@ export async function handleAzureAutoSetup(
       );
       return;
     }
-    let account: Record<string, unknown>;
-    try {
-      account = record(JSON.parse(accountResult.stdout));
-    } catch {
+    const account = parseAzureAccountIdentity(accountResult.stdout);
+    if (!account) {
       await fail(
         400,
-        'Could not parse "az account show" output.',
+        'Azure CLI returned an invalid account identity from "az account show".',
         "az-account-parse",
         { steps }
       );
       return;
     }
-    const activeTenantId = optionalString(account.tenantId);
-    subscriptionId = optionalString(account.id) || subscriptionId;
+    const activeTenantId = account.tenantId;
+    subscriptionId = account.subscriptionId;
     if (
       tenantId &&
       activeTenantId &&
@@ -564,10 +584,10 @@ export async function handleAzureAutoSetup(
       );
       return;
     }
-    if (!activeTenantId) {
+    if (!isUuid(activeTenantId)) {
       await fail(
         400,
-        'Could not determine the active Azure tenant. Run "az login" and "az account set --subscription <id>", then try again.',
+        'Could not determine a valid active Azure tenant. Run "az login" and "az account set --subscription <id>", then try again.',
         "az-account-incomplete",
         { steps }
       );
@@ -623,6 +643,7 @@ export async function handleAzureAutoSetup(
         oidc,
         oidcSuffix,
         clientId: application.clientId,
+        tenantId,
         appName: application.appName,
         subscriptionId,
         resourceGroup,

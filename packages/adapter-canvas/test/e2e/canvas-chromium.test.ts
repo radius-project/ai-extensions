@@ -2,20 +2,25 @@ import { promises as fs, type Dirent } from "node:fs";
 import path from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import {
+  azureDiscoveryCommands,
   baseCanvasState,
   CREDENTIAL_SENTINEL,
   defaultFakeCliScenario,
   expect,
   PLACEHOLDER_SECRET,
   PROFILE_NAME,
+  PROFILE_SUBSCRIPTION_ID,
   REPOSITORY,
   test,
+  VERIFICATION_WORKFLOW_BLOB_SHA,
+  VERIFICATION_WORKFLOW_CONTENT,
   WORKTREE_BRANCH,
   type CanvasHarness,
   type FakeCliCommand
 } from "./support/canvas-harness.js";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
+import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environment/profiles.js";
 // Bound to the production constants so the retry cadence is exercised at the
 // value the compiled browser bundle actually schedules, not a copy of it.
 import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
@@ -23,7 +28,6 @@ import { GRAPH_RETRY_MS } from "../../src/browser/pages/graph-page.js";
 import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
-const VALID_SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222";
 const SOURCE_FILE = "src/web/app.ts";
 const SOURCE_LINE = 12;
 const REMOVED_SOURCE_FILE = "src/web/worker.ts";
@@ -53,6 +57,81 @@ async function filesContainingText(
     if (content.includes(Buffer.from(text))) matches.push(filePath);
   }
   return matches;
+}
+
+// The environment-deletion route refuses (409 app-deployed) while an
+// application is still deployed to the environment, and only deletes
+// Azure-backed environments (it reads AZURE_CLIENT_ID / AZURE_TENANT_ID to plan
+// the credential and app-registration cleanup). The default fixture has an
+// active deployment (dep-1) and no Azure identity variables, so the deletion
+// journeys start from a scenario where the environment has no active app and is
+// classified Azure: the two deployment-list lookups the active-app guard runs
+// return empty, the environment's variable listing carries the Azure identity,
+// and the repository-id lookup the target discovery makes resolves.
+async function setScenarioWithoutActiveDeployment(
+  canvas: CanvasHarness
+): Promise<void> {
+  const argsOf = (command: FakeCliCommand): string[] => command.args ?? [];
+  await canvas.setScenarioOverrides(
+    defaultFakeCliScenario(),
+    [
+      (command) => {
+        const listsEnvironmentDeployments =
+          command.tool === "gh" &&
+          argsOf(command).some(
+            (arg) =>
+              arg.includes("/deployments?") &&
+              arg.includes("environment=fixture-environment")
+          );
+        if (listsEnvironmentDeployments) return { ...command, stdout: "" };
+        return command;
+      },
+      (command) => {
+        const listsEnvironmentVariablesWithValues =
+          command.tool === "gh" &&
+          argsOf(command).some((arg) =>
+            arg.includes("/environments/fixture-environment/variables")
+          ) &&
+          argsOf(command).some((arg) => arg.includes(".value"));
+        if (!listsEnvironmentVariablesWithValues) return command;
+        return {
+          ...command,
+          stdout: [
+            command.stdout ?? "",
+            "AZURE_CLIENT_ID\tfixture-client-id",
+            "AZURE_TENANT_ID\tfixture-tenant-id"
+          ]
+            .filter((line) => line.length > 0)
+            .join("\n")
+        };
+      }
+    ],
+    [
+      {
+        tool: "gh",
+        args: ["api", `/repos/${REPOSITORY}`, "--jq", ".id"],
+        stdout: "101\n"
+      }
+    ]
+  );
+}
+
+async function waitForOperationState(
+  page: Page,
+  operationId: string,
+  state: string
+): Promise<void> {
+  await expect
+    .poll(() =>
+      page.evaluate(async (id) => {
+        const response = await fetch(`/api/operations/${id}`);
+        const payload = (await response.json()) as {
+          operation?: { state?: string };
+        };
+        return payload.operation?.state;
+      }, operationId)
+    )
+    .toBe(state);
 }
 
 async function seed(canvas: CanvasHarness): Promise<void> {
@@ -98,6 +177,22 @@ async function expectNoWcagViolations(page: Page): Promise<void> {
       targets: violation.nodes.map((node) => node.target.join(" "))
     }))
   ).toEqual([]);
+}
+
+async function expectVerticallyAligned(
+  first: Locator,
+  second: Locator
+): Promise<void> {
+  const firstBox = await first.boundingBox();
+  const secondBox = await second.boundingBox();
+  if (firstBox === null || secondBox === null) {
+    throw new Error("Expected both elements to have layout boxes.");
+  }
+  expect(
+    Math.abs(
+      firstBox.y + firstBox.height / 2 - (secondBox.y + secondBox.height / 2)
+    )
+  ).toBeLessThanOrEqual(1);
 }
 
 function bodyFor(canvas: CanvasHarness, pathName: string): unknown {
@@ -210,6 +305,168 @@ async function openEnvironmentWizard(page: Page): Promise<void> {
 test.describe("Radius Canvas in Chromium", () => {
   test.beforeEach(async ({ canvas }) => {
     await seed(canvas);
+  });
+
+  test("deletes an Azure environment through the tracked operation and keeps a dismissed panel gone across a reload @safety", async ({
+    page,
+    canvas
+  }) => {
+    await setScenarioWithoutActiveDeployment(canvas);
+    // Drive the real delete OperationRecord to a clean terminal exactly as the
+    // production runner does (environment-deletion.ts): walk every delete stage
+    // to succeeded and finish the operation. The server owns the record for the
+    // life of the process, so its settled state — and the dismissal recorded
+    // against it — is what a reload re-fetches, rather than the browser
+    // re-deriving it.
+    const deletion = canvas.driveEnvironmentDeletion({ state: "succeeded" });
+
+    await gotoCanvas(page, canvas, "environment");
+    const deleteEnvironment = page.locator(".js-delete-env").first();
+    await expect(deleteEnvironment).toBeVisible();
+    await deleteEnvironment.click();
+
+    // The destructive confirm dialog is the pre-existing environment confirm
+    // modal driven with the deletion copy.
+    const confirmTitle = page.locator("#env-confirm-title");
+    await expect(confirmTitle).toHaveText("Delete environment?");
+    const deleteAccepted = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/delete-environment" &&
+        response.request().method() === "POST"
+    );
+    await page.getByRole("button", { name: "Delete environment" }).click();
+    const { operationId } = (await (await deleteAccepted).json()) as {
+      operationId: string;
+    };
+    expect(operationId).toMatch(/^op_/);
+
+    const panel = page.locator("#env-progress-panel");
+    await expect(panel).toBeVisible();
+    await expect(page.locator("#env-progress-activity")).toHaveAttribute(
+      "aria-live",
+      "polite"
+    );
+
+    await waitForOperationState(page, operationId, "running");
+    await deletion.release();
+
+    // A clean Azure deletion acknowledges through the shared confirm dialog.
+    // The settled operation remains until the progress panel is dismissed.
+    await expect(confirmTitle).toHaveText("Environment deleted");
+    await expectNoWcagViolations(page);
+    const done = page.getByRole("button", { name: "Done" });
+    await expect(done).toBeFocused();
+    await done.click();
+    const dismissRequest = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname.endsWith("/dismiss") &&
+        response.request().method() === "POST"
+    );
+    await page.locator("#env-progress-dismiss").click();
+    // The dismissal must target the very operation the delete route created, not
+    // merely some `/dismiss` POST, or a stray dismissal would pass this assertion.
+    const dismissal = await dismissRequest;
+    expect(new URL(dismissal.url()).pathname).toBe(
+      `/api/operations/${operationId}/dismiss`
+    );
+    await expect(panel).toBeHidden();
+
+    // The key server round trip: the dismissal was recorded against the record,
+    // so the panel does NOT reappear when the environments page is revisited.
+    // jsdom cannot prove this because it never reloads against the real server.
+    await gotoCanvas(page, canvas, "environment");
+    await expect(page.locator(".js-delete-env").first()).toBeVisible();
+    await expect(page.locator("#env-progress-panel")).toBeHidden();
+  });
+
+  test("surfaces a partial deletion failure with the Retry deletion action @safety", async ({
+    page,
+    canvas
+  }) => {
+    await setScenarioWithoutActiveDeployment(canvas);
+    // Drive the delete operation to failed_partial with the first stage failed,
+    // mirroring environment-deletion.ts: a terminal partial failure keeps the
+    // completed stages recorded and offers a resume rather than restarting.
+    const deletion = canvas.driveEnvironmentDeletion({
+      state: "failed_partial",
+      failure: {
+        code: "radius-env-delete-failed",
+        stepSeq: null,
+        message:
+          "Radius could not confirm the environment was deleted from the cluster.",
+        classification: "user-fixable",
+        evidence: null
+      }
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+    await page.locator(".js-delete-env").first().click();
+    const deleteAccepted = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/delete-environment" &&
+        response.request().method() === "POST"
+    );
+    await page.getByRole("button", { name: "Delete environment" }).click();
+    const { operationId } = (await (await deleteAccepted).json()) as {
+      operationId: string;
+    };
+
+    const panel = page.locator("#env-progress-panel");
+    await expect(panel).toBeVisible();
+    await waitForOperationState(page, operationId, "running");
+    await deletion.release();
+    await expect(panel).toContainText(
+      "Deletion stopped before all stages completed. Completed stages remain recorded and will not be repeated."
+    );
+    const retry = panel.getByRole("button", { name: "Retry deletion" });
+    await expect(retry).toBeVisible();
+
+    const resumedDeletion = canvas.driveEnvironmentDeletion({
+      state: "succeeded"
+    });
+    const retryAccepted = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname ===
+          `/api/operations/${operationId}/retry/deletion` &&
+        response.request().method() === "POST"
+    );
+    await retry.click();
+    expect((await retryAccepted).status()).toBe(202);
+    await waitForOperationState(page, operationId, "running");
+    await resumedDeletion.release();
+    await waitForOperationState(page, operationId, "succeeded");
+    await expect(retry).toBeHidden();
+    await expect(page.locator("#env-progress-dismiss")).toBeVisible();
+  });
+
+  test("refuses to delete an environment that still has a deployed application @safety", async ({
+    page,
+    canvas
+  }) => {
+    // The default fixture keeps an active deployment, so the delete route's
+    // active-app guard (routes/environments.ts) answers 409 app-deployed and
+    // nothing is scheduled. The browser converts that refusal into a redirect
+    // prompt instead of opening the progress panel.
+    await canvas.setScenario(defaultFakeCliScenario());
+    const refusal = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/delete-environment" &&
+        response.request().method() === "POST"
+    );
+
+    await gotoCanvas(page, canvas, "environment");
+    await page.locator(".js-delete-env").first().click();
+    const confirmTitle = page.locator("#env-confirm-title");
+    await expect(confirmTitle).toHaveText("Delete environment?");
+    await page.getByRole("button", { name: "Delete environment" }).click();
+
+    expect((await refusal).status()).toBe(409);
+    await expect(confirmTitle).toHaveText("Delete the application first");
+    await expect(
+      page.getByRole("button", { name: "Go to Deployments" })
+    ).toBeVisible();
+    // No tracked deletion was started: the guard ran before any operation.
+    await expect(page.locator("#env-progress-panel")).toBeHidden();
   });
 
   test("does not expose a pre-existing credential cache in browser state, requests, logs, or artifacts @safety", async ({
@@ -925,6 +1182,15 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }) => {
+    await canvas.seedState({
+      ...baseCanvasState(canvas.workspacePath),
+      ghCommandPresentation: {
+        kind: "absolute",
+        shell: "posix",
+        executablePath: "/opt/Copilot Tools/gh",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    });
     // No account can supply the workflow scope, so the injected token stays in
     // effect and the acting account is the one the warning must name.
     await canvas.setGitHubKeyringScopes(["repo"]);
@@ -950,12 +1216,37 @@ test.describe("Radius Canvas in Chromium", () => {
     // disclosure, and it is reachable by keyboard.
     const repair = page.locator("#env-gh-repair");
     await expect(repair).toBeVisible();
-    await expect(repair).toContainText("gh auth switch");
+    await expect(repair).toContainText("'/opt/Copilot Tools/gh' auth switch");
+    await expect(note).toContainText("Install GitHub CLI system-wide.");
     const runButton = repair.getByRole("button", { name: COMMAND_RUN_LABEL });
     await expect(repair.getByRole("button", { name: "Copy" })).toBeVisible();
     await runButton.focus();
     await expect(runButton).toBeFocused();
     await canvas.expectCliInvoked("gh");
+  });
+
+  test("surfaces escaped server errors when environment loading fails @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.route("**/api/list-environments**", async (route) => {
+      await route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: "Repository <strong>administrator access</strong> is required."
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+
+    const table = page.locator("#env-table-body");
+    await expect(table).toContainText(
+      "Repository <strong>administrator access</strong> is required."
+    );
+    await expect(table.locator("strong")).toHaveCount(0);
+    await expectNoWcagViolations(page);
   });
 
   test("plans a deployment for an existing environment from its row", async ({
@@ -1023,6 +1314,45 @@ test.describe("Radius Canvas in Chromium", () => {
     await expectNoWcagViolations(page);
   });
 
+  test("re-checks GitHub access after the final environment name settles", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    await gotoCanvas(page, canvas, "environment");
+    await openEnvironmentWizard(page);
+    const readiness = page.locator("#env-gh-identity-note");
+    await expect(readiness).toContainText("Ready to configure deployments");
+    const accountRequests = () =>
+      canvas.requests.filter(
+        (request) =>
+          request.method === "POST" && request.path === "/api/github-account"
+      );
+    const checksBeforeEdit = accountRequests().length;
+    const environment = page.getByLabel("Environment name");
+
+    await environment.fill("staging");
+    await environment.fill("production");
+    await expect(
+      page.getByRole("button", { name: "Create Environment" })
+    ).toBeDisabled();
+
+    await page.clock.fastForward(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS - 1);
+    expect(accountRequests()).toHaveLength(checksBeforeEdit);
+
+    await page.clock.fastForward(1);
+    await expect
+      .poll(() => accountRequests().length)
+      .toBe(checksBeforeEdit + 1);
+
+    expect(accountRequests().at(-1)?.body).toMatchObject({
+      environment: "production"
+    });
+    await expect(readiness).toContainText("Ready to configure deployments");
+    await expect(page.getByRole("button", { name: "Re-check" })).toBeEnabled();
+    await expectNoWcagViolations(page);
+  });
+
   test("checks GitHub accounts through the real listbox and returns focus to the combo", async ({
     page,
     canvas
@@ -1079,69 +1409,20 @@ test.describe("Radius Canvas in Chromium", () => {
     canvas
   }) => {
     const scenario = defaultFakeCliScenario();
-    const resourceCommands: FakeCliCommand[] = [
-      {
-        tool: "az",
-        args: ["account", "set", "--subscription", VALID_SUBSCRIPTION_ID],
-        stdout: ""
-      },
-      {
-        tool: "az",
-        args: [
-          "aks",
-          "list",
-          "--query",
-          "[].{id:name, name:name, resourceGroup:resourceGroup}",
-          "-o",
-          "json",
-          "--subscription",
-          VALID_SUBSCRIPTION_ID
-        ],
-        stdout: JSON.stringify([
-          { id: "aks-first", name: "AKS First", resourceGroup: "rg-first" },
-          {
-            id: "aks-selected",
-            name: "AKS Selected",
-            resourceGroup: "rg-selected"
-          }
-        ])
-      },
-      {
-        tool: "az",
-        args: [
-          "group",
-          "list",
-          "--query",
-          "[].{id:name, name:name}",
-          "-o",
-          "json",
-          "--subscription",
-          VALID_SUBSCRIPTION_ID
-        ],
-        stdout: JSON.stringify([
-          { id: "rg-first", name: "rg-first" },
-          { id: "rg-selected", name: "rg-selected" }
-        ])
-      },
-      {
-        tool: "az",
-        argsPrefix: [
-          "aks",
-          "get-credentials",
-          "--name",
-          "aks-selected",
-          "--resource-group",
-          "rg-selected",
-          "--file"
-        ],
-        stdout: ""
-      },
-      {
-        tool: "kubectl",
-        argsPrefix: ["--kubeconfig"],
-        stdout: "default selected-team"
-      }
-    ];
+    const selected = {
+      id: "aks-selected",
+      name: "AKS Selected",
+      resourceGroup: "rg-selected"
+    };
+    const resourceCommands: FakeCliCommand[] = azureDiscoveryCommands({
+      subscriptionId: PROFILE_SUBSCRIPTION_ID,
+      clusters: [
+        { id: "aks-first", name: "AKS First", resourceGroup: "rg-first" },
+        selected
+      ],
+      selected,
+      namespaces: ["default", "selected-team"]
+    });
     scenario.commands.push(...resourceCommands);
     await canvas.setScenario(scenario);
     await gotoCanvas(page, canvas, "environment");
@@ -1150,14 +1431,14 @@ test.describe("Radius Canvas in Chromium", () => {
     const resourceGroup = page.getByLabel("Resource Group", { exact: true });
     const cluster = page.getByLabel("Cluster", { exact: true });
     const namespace = page.locator("#azure-namespace-select");
-    await expect(resourceGroup).toContainText("rg-selected");
-    await resourceGroup.selectOption("rg-selected");
+    await expect(resourceGroup).toContainText(selected.resourceGroup);
+    await resourceGroup.selectOption(selected.resourceGroup);
     await expect(cluster.locator("option")).toHaveText([
       "Select AKS cluster…",
-      "AKS Selected",
+      selected.name,
       "+ Enter custom..."
     ]);
-    await expect(cluster).toHaveValue("aks-selected");
+    await expect(cluster).toHaveValue(selected.id);
     await expect(namespace).toBeDisabled();
     await expect(namespace).toContainText("selected-team");
     await expect(namespace).toBeEnabled();
@@ -1174,7 +1455,7 @@ test.describe("Radius Canvas in Chromium", () => {
             call.args.includes("rg-selected") &&
             call.args.includes("--file") &&
             call.args.includes("--overwrite-existing") &&
-            call.args.includes(VALID_SUBSCRIPTION_ID)
+            call.args.includes(PROFILE_SUBSCRIPTION_ID)
         )
       )
       .toBe(true);
@@ -1187,16 +1468,16 @@ test.describe("Radius Canvas in Chromium", () => {
       )
     ).toBe(false);
 
-    const credentials = resourceCommands.find(
-      (command) =>
-        command.tool === "az" &&
-        (command.args?.includes("get-credentials") ||
-          command.argsPrefix?.includes("get-credentials"))
-    );
-    if (credentials) {
-      credentials.exitCode = 1;
-      credentials.stderr = "selected cluster unavailable";
+    // Second to last by construction: the factory appends the credential and
+    // namespace commands in the order discovery issues them. Throwing rather
+    // than skipping keeps a shape change here from silently turning the refresh
+    // failure below into an assertion about a scenario that never changed.
+    const credentials = resourceCommands.at(-2);
+    if (!credentials?.argsPrefix?.includes("get-credentials")) {
+      throw new Error("discovery stubs no longer end with the namespace step");
     }
+    credentials.exitCode = 1;
+    credentials.stderr = "selected cluster unavailable";
     await canvas.setScenario(scenario);
     await page.getByRole("button", { name: "Refresh" }).click();
     await expect(namespace).toBeDisabled();
@@ -1206,7 +1487,7 @@ test.describe("Radius Canvas in Chromium", () => {
     );
 
     await expect(page.locator("#azure-discover-status")).toContainText(
-      "Discovery failed: selected cluster unavailable"
+      "Discovery failed: az aks get-credentials failed: selected cluster unavailable"
     );
     await expect(namespace).toBeEnabled();
     await expect(namespace.locator("option")).toHaveCount(2);
@@ -1238,7 +1519,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await page.getByRole("button", { name: "New Credential Profile" }).click();
     await page.getByLabel("Profile Name").fill("failing-azure");
     await page.getByLabel("Tenant ID").fill(VALID_TENANT_ID);
-    await page.getByLabel("Subscription ID").fill(VALID_SUBSCRIPTION_ID);
+    await page.getByLabel("Subscription ID").fill(PROFILE_SUBSCRIPTION_ID);
     const verifyResponse = page.waitForResponse(
       (response) =>
         new URL(response.url()).pathname === "/api/verify-azure-login" &&
@@ -1266,7 +1547,7 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBeEnabled();
     expect(bodyFor(canvas, "/api/verify-azure-login")).toEqual({
       tenantId: VALID_TENANT_ID,
-      subscriptionId: VALID_SUBSCRIPTION_ID
+      subscriptionId: PROFILE_SUBSCRIPTION_ID
     });
     expect(verifyPayload).not.toContain(PLACEHOLDER_SECRET);
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
@@ -1283,6 +1564,15 @@ test.describe("Radius Canvas in Chromium", () => {
         )
       )
       .toBe(true);
+    await page.mouse.move(0, 0);
+    const verifyButton = page.getByRole("button", {
+      name: "Verify Credentials"
+    });
+    await expect(verifyButton).toHaveCSS("opacity", "1");
+    await expect(verifyButton).toHaveCSS(
+      "background-color",
+      "rgb(35, 135, 65)"
+    );
     await expectNoWcagViolations(page);
   });
 
@@ -1307,7 +1597,7 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBe(false);
   });
 
-  test("keeps server-owned setup durable across navigation without reporting browser cancellation @safety", async ({
+  test("keeps server-owned setup durable across navigation and downloads redacted diagnostics by keyboard @safety", async ({
     page,
     canvas
   }) => {
@@ -1361,6 +1651,9 @@ test.describe("Radius Canvas in Chromium", () => {
       `${canvas.baseUrl}/?page=environment&operationId=${result.operationId}`
     );
     await expect(page.locator("#env-progress-panel")).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Download diagnostic snapshot" })
+    ).toBeHidden();
     const activity = page.locator("#env-progress-activity");
     await expect(activity).toHaveAttribute("aria-live", "polite");
     await gotoCanvas(page, canvas, "credentials");
@@ -1394,6 +1687,130 @@ test.describe("Radius Canvas in Chromium", () => {
     );
     await expect(page.locator("body")).not.toContainText("cancelled");
     await expect(page.locator("body")).not.toContainText("Cancelled");
+    await resumedPanel.locator("#env-progress-details > summary").click();
+    const diagnosticButton = page.getByRole("button", {
+      name: "Download diagnostic snapshot"
+    });
+    await expect(diagnosticButton).toBeVisible();
+    await expectVerticallyAligned(
+      diagnosticButton,
+      page.locator("#env-progress-diagnostics-note")
+    );
+    await diagnosticButton.focus();
+    await page.keyboard.press("Enter");
+    const diagnosticDialog = page.getByRole("dialog", {
+      name: "Download diagnostic snapshot"
+    });
+    await expect(diagnosticDialog).toBeVisible();
+    await expect(
+      diagnosticDialog.getByLabel("Include contextual identifiers")
+    ).not.toBeChecked();
+    const includeCheckbox = diagnosticDialog.getByLabel(
+      "Include contextual identifiers"
+    );
+    const includeLabel = diagnosticDialog.locator(
+      'label[for="env-diagnostics-include-identifiers"]'
+    );
+    await expectVerticallyAligned(includeCheckbox, includeLabel);
+    await expectNoWcagViolations(page);
+    const diagnosticLink = diagnosticDialog.getByRole("link", {
+      name: "Download snapshot"
+    });
+    await diagnosticLink.focus();
+    await expect(diagnosticLink).toBeFocused();
+    const downloadStarted = page.waitForEvent("download");
+    await page.keyboard.press("Enter");
+    const download = await downloadStarted;
+    expect(download.suggestedFilename()).toBe(
+      "radius-environment-operation-diagnostics.json"
+    );
+    const diagnosticPath = await download.path();
+    if (diagnosticPath === null) {
+      throw new Error("Playwright did not retain the diagnostic download.");
+    }
+    const diagnosticText = await fs.readFile(diagnosticPath, "utf8");
+    expect(diagnosticText).not.toContain(REPOSITORY);
+    expect(diagnosticText).not.toContain("fixture-environment");
+    expect(diagnosticText).not.toContain(PLACEHOLDER_SECRET);
+    expect(JSON.parse(diagnosticText)).toMatchObject({
+      diagnosticSchemaVersion: 2,
+      identifierProfile: "support_safe",
+      contextualIdentifiers: null,
+      operation: {
+        operationId: result.operationId,
+        lifecycle: { state: "failed" }
+      }
+    });
+    await expect(diagnosticDialog).toBeHidden();
+    await expect(diagnosticButton).toBeFocused();
+    await expect(page.locator("#env-progress-diagnostics-status")).toHaveText(
+      "Diagnostic snapshot download started."
+    );
+
+    await diagnosticButton.click();
+    await expect(diagnosticDialog).toBeVisible();
+    await diagnosticDialog.getByLabel("Include contextual identifiers").check();
+    await expect(diagnosticDialog.getByText(REPOSITORY)).toBeVisible();
+    await expect(
+      diagnosticDialog.getByText("fixture-environment", { exact: true })
+    ).toBeVisible();
+    await expect(diagnosticDialog.getByText("repo-user")).toBeVisible();
+    const reviewedCheckbox = diagnosticDialog.getByLabel(
+      "I reviewed these identifiers"
+    );
+    const reviewedLabel = diagnosticDialog.locator(
+      'label[for="env-diagnostics-reviewed-identifiers"]'
+    );
+    await expectVerticallyAligned(reviewedCheckbox, reviewedLabel);
+    await expectNoWcagViolations(page);
+    await diagnosticDialog.getByLabel("I reviewed these identifiers").check();
+    const contextualDownloadStarted = page.waitForEvent("download");
+    await diagnosticLink.click();
+    const contextualDownload = await contextualDownloadStarted;
+    const contextualPath = await contextualDownload.path();
+    if (contextualPath === null) {
+      throw new Error(
+        "Playwright did not retain the contextual diagnostic download."
+      );
+    }
+    const contextualText = await fs.readFile(contextualPath, "utf8");
+    expect(contextualText).not.toContain(PLACEHOLDER_SECRET);
+    expect(JSON.parse(contextualText)).toMatchObject({
+      diagnosticSchemaVersion: 2,
+      identifierProfile: "support_safe_with_identifiers",
+      contextualIdentifiers: {
+        repository: REPOSITORY,
+        branch: WORKTREE_BRANCH,
+        environment: "fixture-environment",
+        githubLogin: "repo-user",
+        omittedFieldCount: 0
+      }
+    });
+    await expect(diagnosticDialog).toBeHidden();
+    await expect(diagnosticButton).toBeFocused();
+    await expect(page.locator("#env-progress-diagnostics-status")).toHaveText(
+      "Diagnostic snapshot download started."
+    );
+
+    await page.route(
+      `**/api/operations/${result.operationId}/diagnostics`,
+      async (route) => {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: '{"code":"diagnostic-export-unavailable"}'
+        });
+      }
+    );
+    await diagnosticButton.click();
+    await diagnosticLink.click();
+    await expect(diagnosticDialog).toBeVisible();
+    await expect(diagnosticDialog.getByRole("alert")).toContainText(
+      "could not download the support-safe diagnostic snapshot"
+    );
+    await page.unroute(`**/api/operations/${result.operationId}/diagnostics`);
+    await diagnosticDialog.getByRole("button", { name: "Cancel" }).click();
+
     expect(bodyFor(canvas, "/api/operations")).toMatchObject({
       repo: REPOSITORY,
       environment: "fixture-environment",
@@ -1404,7 +1821,106 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("body")).not.toContainText(PLACEHOLDER_SECRET);
   });
 
-  test("retries restored verification through the selected account and exact run identity @safety", async ({
+  test("follows the latest setup detail until the user scrolls up", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let stepCount = 12;
+    const operationPayload = (stepCount: number) => ({
+      operation: {
+        operationId: "op_scroll_follow",
+        environment: "fixture-environment",
+        provider: "azure",
+        state: "running",
+        terminalState: null,
+        summary: "Creating fixture-environment…",
+        currentStage: "provision",
+        stages: [{ state: "running", label: "Provision" }],
+        steps: Array.from({ length: stepCount }, (_, index) => ({
+          state: index === stepCount - 1 ? "running" : "succeeded",
+          label: `Setup detail ${index + 1}`
+        })),
+        failure: null,
+        cleanup: null,
+        verification: null,
+        inputRequired: null,
+        startedAt: new Date(0).toISOString(),
+        endedAt: null,
+        terminal: null
+      }
+    });
+    await page.route("**/api/operations**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(operationPayload(stepCount))
+      });
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+    const details = page.locator("#env-progress-details");
+    const steps = page.locator("#env-progress-steps");
+    await expect(details).toBeVisible();
+    await steps.evaluate((element) => {
+      Reflect.set(Reflect.get(element, "style"), "maxHeight", "48px");
+    });
+    await details.locator("summary").click();
+    await expect
+      .poll(() =>
+        steps.evaluate(
+          (element) =>
+            Number(Reflect.get(element, "scrollHeight")) -
+            Number(Reflect.get(element, "scrollTop")) -
+            Number(Reflect.get(element, "clientHeight"))
+        )
+      )
+      .toBeLessThanOrEqual(4);
+
+    await steps.hover();
+    await page.mouse.wheel(0, -1000);
+    await expect
+      .poll(() =>
+        steps.evaluate((element) => Number(Reflect.get(element, "scrollTop")))
+      )
+      .toBe(0);
+    stepCount = 13;
+    await page.clock.fastForward(1500);
+    await expect(steps).toContainText("Setup detail 13");
+    await expect
+      .poll(() =>
+        steps.evaluate((element) => Number(Reflect.get(element, "scrollTop")))
+      )
+      .toBe(0);
+
+    await steps.hover();
+    await page.mouse.wheel(0, 1000);
+    await expect
+      .poll(() =>
+        steps.evaluate(
+          (element) =>
+            Number(Reflect.get(element, "scrollHeight")) -
+            Number(Reflect.get(element, "scrollTop")) -
+            Number(Reflect.get(element, "clientHeight"))
+        )
+      )
+      .toBeLessThanOrEqual(4);
+    stepCount = 14;
+    await page.clock.fastForward(1500);
+    await expect(steps).toContainText("Setup detail 14");
+    await expect
+      .poll(() =>
+        steps.evaluate(
+          (element) =>
+            Number(Reflect.get(element, "scrollHeight")) -
+            Number(Reflect.get(element, "scrollTop")) -
+            Number(Reflect.get(element, "clientHeight"))
+        )
+      )
+      .toBeLessThanOrEqual(4);
+  });
+
+  test("retries verification through the selected account and returned run URL @safety", async ({
     page,
     canvas
   }) => {
@@ -1420,7 +1936,7 @@ test.describe("Radius Canvas in Chromium", () => {
           "list",
           "--workflow=radius-verify-credentials.yml",
           "--limit",
-          "10",
+          "1",
           "--json",
           "databaseId",
           "--repo",
@@ -1445,7 +1961,7 @@ test.describe("Radius Canvas in Chromium", () => {
           WORKTREE_BRANCH
         ],
         env: { GH_TOKEN: "fixture-repo-token" },
-        stdout: ""
+        stdout: `https://github.com/${REPOSITORY}/actions/runs/41`
       },
       {
         tool: "gh",
@@ -1538,8 +2054,307 @@ test.describe("Radius Canvas in Chromium", () => {
         })
       ]
     });
+    expect(
+      (await canvas.cliCalls()).filter(
+        (call) =>
+          call.tool === "gh" &&
+          call.args[0] === "run" &&
+          call.args.includes(
+            "databaseId,createdAt,displayTitle,event,headBranch"
+          )
+      )
+    ).toEqual([]);
     await expect(page.locator("body")).toContainText("Environment created");
+    await page.locator("#env-progress-details > summary").click();
+    await expect(
+      page.getByRole("button", { name: "Download diagnostic snapshot" })
+    ).toBeHidden();
     await expectNoWcagViolations(page);
+  });
+
+  test("pauses an interrupted setup before offering exact-run cancellation and deletion by keyboard @safety", async ({
+    page,
+    canvas
+  }) => {
+    const operationId = await canvas.seedInterruptedVerification();
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      {
+        tool: "gh",
+        args: ["run", "view", "39", "--json", "status", "--repo", REPOSITORY],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: '{"status":"in_progress"}'
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          "--method",
+          "POST",
+          `repos/${REPOSITORY}/actions/runs/39/cancel`
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: ""
+      },
+      {
+        tool: "gh",
+        args: ["api", `/repos/${REPOSITORY}`],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: '{"permissions":{"admin":true,"push":true,"pull":true}}'
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          `/repos/${REPOSITORY}/contents/.github/workflows/radius-verify-credentials.yml?ref=${encodeURIComponent(WORKTREE_BRANCH)}`
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: JSON.stringify({
+          sha: VERIFICATION_WORKFLOW_BLOB_SHA,
+          content: Buffer.from(VERIFICATION_WORKFLOW_CONTENT).toString("base64")
+        })
+      },
+      {
+        tool: "gh",
+        args: [
+          "api",
+          "--method",
+          "DELETE",
+          `/repos/${REPOSITORY}/contents/.github/workflows/radius-verify-credentials.yml`,
+          "--input",
+          "-"
+        ],
+        env: { GH_TOKEN: "fixture-repo-token" },
+        stdout: "{}"
+      },
+      {
+        tool: "az",
+        args: ["ad", "app", "show", "--id", "fixture-app-id", "-o", "none"],
+        exitCode: 1,
+        stderr: "Application not found."
+      }
+    );
+    await canvas.setScenario(scenario);
+    await page.goto(
+      `${canvas.baseUrl}/?page=environment&operationId=${operationId}`
+    );
+
+    await expect(page.locator("#env-progress-title")).toContainText(
+      "Environment setup was interrupted"
+    );
+    await expect(
+      page.getByRole("button", { name: "Continue setup" })
+    ).toBeVisible();
+    const stop = page.getByRole("button", { name: "Pause setup" });
+    await expect(stop).toBeVisible();
+    await expect(stop).toHaveAttribute(
+      "title",
+      "Radius pauses this setup. If its exact GitHub Actions run is still active, you can cancel it next."
+    );
+    await expect(stop).toHaveAccessibleDescription(
+      "Radius pauses this setup. If its exact GitHub Actions run is still active, you can cancel it next."
+    );
+    await expect(
+      page.getByRole("button", { name: "Cancel workflow" })
+    ).toHaveCount(0);
+    await stop.focus();
+    await page.keyboard.press("Enter");
+
+    await page.locator("#env-progress-details > summary").click();
+    await expect(
+      page.getByRole("button", { name: "Download diagnostic snapshot" })
+    ).toBeVisible();
+    const cancelWorkflow = page.getByRole("button", {
+      name: "Cancel workflow"
+    });
+    await expect(cancelWorkflow).toBeVisible();
+    await expect(cancelWorkflow).toHaveAccessibleDescription(
+      "Radius cancels only the exact GitHub Actions run recorded for this setup."
+    );
+    await expect(
+      page.getByRole("button", { name: "Delete setup" })
+    ).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Exit setup" })).toHaveCount(
+      0
+    );
+    await expect(
+      page.getByRole("button", { name: "Abandon setup" })
+    ).toHaveAccessibleDescription(
+      "Radius closes this setup without deleting resources that may still be used by external work. You can start Create Environment again, but you may need to remove or reuse the remaining resources manually."
+    );
+    await cancelWorkflow.focus();
+    await page.keyboard.press("Enter");
+
+    const dialog = page.locator("#env-rollback-modal");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAccessibleName(
+      "Cancel the verification workflow?"
+    );
+    await expectNoWcagViolations(page);
+    const confirm = dialog.getByRole("button", { name: "Cancel workflow" });
+    await confirm.focus();
+    await page.keyboard.press("Enter");
+
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "gh" &&
+            JSON.stringify(call.args) ===
+              JSON.stringify([
+                "api",
+                "--method",
+                "POST",
+                `repos/${REPOSITORY}/actions/runs/39/cancel`
+              ])
+        )
+      )
+      .toBe(true);
+    const workflowStatus = scenario.commands.find(
+      (command) =>
+        command.tool === "gh" &&
+        JSON.stringify(command.args) ===
+          JSON.stringify([
+            "run",
+            "view",
+            "39",
+            "--json",
+            "status",
+            "--repo",
+            REPOSITORY
+          ])
+    );
+    if (!workflowStatus) throw new Error("Expected workflow status command.");
+    workflowStatus.stdout = '{"status":"completed"}';
+    await canvas.setScenario(scenario);
+
+    const checkWorkflow = page.getByRole("button", {
+      name: "Check workflow status"
+    });
+    await expect(checkWorkflow).toBeVisible({ timeout: 15_000 });
+    await checkWorkflow.focus();
+    await page.keyboard.press("Enter");
+
+    const deleteSetup = page.getByRole("button", { name: "Delete setup" });
+    await expect(deleteSetup).toBeVisible();
+    await expect(deleteSetup).toHaveAccessibleDescription(
+      "Radius reverts the workflow files it committed with a new commit, then removes the GitHub environment and cloud identity it created. It checks first that every file is still exactly what it wrote and stops without removing anything if it is not. This cannot be undone."
+    );
+    await deleteSetup.focus();
+    await page.keyboard.press("Enter");
+
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAccessibleName(
+      "Delete this setup and its created resources?"
+    );
+    await expect(
+      dialog.getByRole("button", { name: "Keep setup" })
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Delete setup" })
+    ).toBeVisible();
+    await expectNoWcagViolations(page);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(deleteSetup).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(dialog).toBeVisible();
+    const confirmDelete = dialog.getByRole("button", { name: "Delete setup" });
+    await expect(dialog.locator("#env-rollback-title")).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(
+      dialog.getByRole("button", { name: "Keep setup" })
+    ).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(confirmDelete).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    await expect
+      .poll(async () =>
+        (await canvas.cliCalls()).some(
+          (call) =>
+            call.tool === "gh" &&
+            JSON.stringify(call.args) ===
+              JSON.stringify([
+                "api",
+                "--method",
+                "DELETE",
+                `/repos/${REPOSITORY}/contents/.github/workflows/radius-verify-credentials.yml`,
+                "--input",
+                "-"
+              ])
+        )
+      )
+      .toBe(true);
+    await expect(page.locator("#env-progress-title")).toHaveText(
+      "Setup deleted",
+      { timeout: 15_000 }
+    );
+    await expect(
+      page.getByRole("button", { name: "Delete setup" })
+    ).toHaveCount(0);
+    await expect
+      .poll(async () => {
+        const record = await canvas.operationRecord(operationId);
+        return {
+          state: record.state,
+          reason:
+            (
+              typeof record.terminal === "object" &&
+              record.terminal !== null &&
+              "reason" in record.terminal
+            ) ?
+              record.terminal.reason
+            : null
+        };
+      })
+      .toEqual({ state: "cancelled", reason: "rollback-complete" });
+    await expectNoWcagViolations(page);
+  });
+
+  test("abandons an interrupted setup without waiting for the active workflow @safety", async ({
+    page,
+    canvas
+  }) => {
+    const operationId = await canvas.seedInterruptedVerification();
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push({
+      tool: "gh",
+      args: ["run", "view", "39", "--json", "status", "--repo", REPOSITORY],
+      env: { GH_TOKEN: "fixture-repo-token" },
+      stdout: '{"status":"in_progress"}'
+    });
+    await canvas.setScenario(scenario);
+    await page.goto(
+      `${canvas.baseUrl}/?page=environment&operationId=${operationId}`
+    );
+
+    await page.getByRole("button", { name: "Pause setup" }).click();
+    const abandon = page.getByRole("button", { name: "Abandon setup" });
+    await expect(abandon).toBeVisible();
+    await abandon.click();
+
+    const dialog = page.locator("#env-rollback-modal");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toHaveAccessibleName(
+      "Abandon setup and leave remaining resources?"
+    );
+    await expect(dialog).toContainText("Radius will keep");
+    await expect(dialog).toContainText(
+      "the command you are confirming leaves it in place"
+    );
+    await expectNoWcagViolations(page);
+    await dialog.getByRole("button", { name: "Abandon setup" }).click();
+
+    await expect(page.locator("#env-progress-panel")).toBeHidden();
+    await expect(page.locator("#new-env-btn")).toBeVisible();
+    expect(
+      (await canvas.cliCalls()).some(
+        (call) =>
+          call.tool === "gh" &&
+          call.args.some((arg) => arg.endsWith("/actions/runs/39/cancel"))
+      )
+    ).toBe(false);
   });
 
   test("sends the worktree branch the page selected when Deploy is activated @safety", async ({
@@ -1884,6 +2699,276 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#deployed-delete-btn")).toHaveText(
       "Deploy Application"
     );
+  });
+
+  test("announces a finished deploy away from the deployments page and keeps it dismissed", async ({
+    page,
+    canvas
+  }) => {
+    // The gap this closes: the deploy's only surface used to be the modal on
+    // the Deployments page, which auto-hides on success. A user who walked over
+    // to the graph while it ran was never told it finished.
+    let notification: Record<string, unknown> = {
+      attemptId: "attempt-9",
+      runId: "101",
+      status: "in_progress",
+      application: "todolist",
+      environment: "dev",
+      error: "",
+      // A run URL is published as soon as the run is tracked, so a healthy
+      // deploy carries one too. It must not pull the chip out of the canvas.
+      runUrl: "https://github.com/octo/todolist/actions/runs/101",
+      repairing: false,
+      finishedAt: 0
+    };
+    await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await page.route("**/api/deploy-notification**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(notification)
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+    const chip = page.locator("#rad-deploychip");
+    await expect(chip).toBeVisible();
+    await expect(chip).toHaveText("Deploying todolist…");
+
+    notification = { ...notification, status: "success", finishedAt: 1700 };
+    await page.clock.fastForward(6000);
+    await expect(chip).toHaveText("todolist deployed to dev");
+    await expect(chip).toHaveAttribute(
+      "aria-label",
+      "todolist deployed to dev"
+    );
+    // Success stays in the canvas despite its run URL, so following the chip
+    // performs the in-canvas navigation the dismissal has to survive.
+    await expect(chip).toHaveAttribute("href", "/?page=deploying");
+
+    // Following the chip is what dismisses it, and the dismissal has to survive
+    // the navigation it just performed — otherwise the same finished deploy is
+    // re-announced on every page the user visits next.
+    await chip.click();
+    await page.waitForLoadState("domcontentloaded");
+    await page.clock.fastForward(6000);
+    await expect(page.locator("#rad-deploychip")).toBeHidden();
+  });
+
+  test("keeps the canvas in Radius when a failed chip is followed from another page", async ({
+    page,
+    canvas
+  }) => {
+    // The document-level pane navigator treats every `.rad-opchip` as a pane
+    // trigger. Without stopPropagation this click reached it, was handled as
+    // in-canvas navigation to an external URL, failed the pane fetch and fell
+    // back to assigning the location — leaving the webview on a Chromium error
+    // page with the canvas gone. The Applications page hid the bug, because
+    // there the navigator's "already on this pane" guard happens to match an
+    // external URL's default pane id, so this deliberately starts elsewhere.
+    const runUrl = "https://github.com/octo/todolist/actions/runs/101";
+    await page.route("**/api/deploy-notification**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          attemptId: "attempt-9",
+          generation: 2,
+          runId: "101",
+          status: "failed",
+          application: "todolist",
+          environment: "dev",
+          error: "Bicep template failed to compile",
+          runUrl,
+          repairing: false,
+          finishedAt: 1800
+        })
+      });
+    });
+
+    // The host opens an external URL for real; here there is no host, so the
+    // anchor's target="_blank" becomes a live popup navigation. It is routed at
+    // context level — registered after the harness's offline guard, so it takes
+    // precedence — because a popup's initial request never reaches page-level
+    // routing. The request is observed instead of escaping the harness.
+    let externalRequests = 0;
+    await page.context().route("https://github.com/**", async (route) => {
+      externalRequests += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<html><body>GitHub run</body></html>"
+      });
+    });
+
+    await gotoCanvas(page, canvas, "deploying");
+    const chip = page.locator("#rad-deploychip");
+    await expect(chip).toBeVisible();
+    await expect(chip).toHaveAttribute("href", runUrl);
+
+    const before = page.url();
+    await chip.click();
+    // Long enough for a pane fetch and its location fallback to have run.
+    await page.waitForTimeout(1500);
+
+    // The canvas itself must not have moved. With the click reaching the pane
+    // navigator this became the GitHub URL (or a Chromium error page once the
+    // fetch failed), taking the panel down with it.
+    expect(page.url()).toBe(before);
+    expect(externalRequests).toBeGreaterThan(0);
+    await expect(page.locator("#radius-topnav")).toBeVisible();
+    await expect(chip).toBeVisible();
+    await expect(page.locator("#deploy-progress-modal")).toBeAttached();
+  });
+
+  test("does not re-announce an unchanged deploy while it keeps polling", async ({
+    page,
+    canvas
+  }) => {
+    // The chip sits in an aria-live region. Rewriting identical text on every
+    // poll replaces the label's text node, which reads to assistive technology
+    // as a fresh announcement — the same sentence, every few seconds, for the
+    // minutes a deploy runs.
+    await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+    await page.route("**/api/deploy-notification**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          attemptId: "attempt-9",
+          runId: "101",
+          status: "in_progress",
+          application: "todolist",
+          environment: "dev",
+          error: "",
+          runUrl: "https://github.com/octo/todolist/actions/runs/101",
+          repairing: false,
+          finishedAt: 0
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+    const chip = page.locator("#rad-deploychip");
+    await expect(chip).toBeVisible();
+    await expect(chip).toHaveText("Deploying todolist…");
+
+    const mutations = await page
+      .locator("#rad-deploychip-label")
+      .evaluate((element) => {
+        const scope = globalThis as unknown as Record<string, unknown>;
+        scope.__radiusChipMutations = 0;
+        const Observer = Reflect.get(globalThis, "MutationObserver") as new (
+          callback: () => void
+        ) => { observe: (target: unknown, options: unknown) => void };
+        new Observer(() => {
+          scope.__radiusChipMutations =
+            (scope.__radiusChipMutations as number) + 1;
+        }).observe(element, {
+          childList: true,
+          characterData: true,
+          subtree: true
+        });
+        return 0;
+      });
+    expect(mutations).toBe(0);
+
+    await page.clock.fastForward(6000);
+    await page.clock.fastForward(6000);
+    await page.clock.fastForward(6000);
+
+    const observed = await page.evaluate(() =>
+      Number(Reflect.get(globalThis, "__radiusChipMutations"))
+    );
+    expect(observed).toBe(0);
+    await expect(chip).toHaveText("Deploying todolist…");
+  });
+
+  test("fits three ambient chips in a narrow panel without clipping the nav", async ({
+    page,
+    canvas
+  }) => {
+    // The chips are independent, so an environment setup, a graph build and a
+    // deploy can all be in flight at once. Each label is long enough here to
+    // force the row past its width if the chips cannot shrink.
+    await page.route("**/api/operations**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          operation: {
+            operationId: "op-1",
+            state: "running",
+            environment: "production-eastus",
+            summary: "Creating the production-eastus environment"
+          }
+        })
+      });
+    });
+    await page.route("**/api/progress**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          active: true,
+          view: "graph",
+          elapsedMs: 42000,
+          events: [{ stage: "building_graph", detail: "Building the graph" }]
+        })
+      });
+    });
+    await page.route("**/api/deploy-notification**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          attemptId: "attempt-1",
+          runId: "101",
+          status: "in_progress",
+          application: "contoso-storefront-api",
+          environment: "production-eastus",
+          error: "",
+          runUrl: "",
+          repairing: false,
+          finishedAt: 0
+        })
+      });
+    });
+
+    await page.setViewportSize({ width: 420, height: 900 });
+    await gotoCanvas(page, canvas, "deploying");
+
+    const nav = page.locator("#radius-topnav");
+    await expect(page.locator("#rad-opchip")).toBeVisible();
+    await expect(page.locator("#rad-graphchip")).toBeVisible();
+    await expect(page.locator("#rad-deploychip")).toBeVisible();
+
+    // The row must absorb the pressure by collapsing the nav to icons and
+    // ellipsizing chip labels, not by running past the nav and putting whole
+    // chips out of reach.
+    const overflow = await nav.evaluate(
+      (element) =>
+        Number(Reflect.get(element, "scrollWidth")) -
+        Number(Reflect.get(element, "clientWidth"))
+    );
+    expect(overflow).toBeLessThanOrEqual(1);
+    const documentOverflow = await page
+      .locator("html")
+      .evaluate(
+        (element) =>
+          Number(Reflect.get(element, "scrollWidth")) -
+          Number(Reflect.get(element, "clientWidth"))
+      );
+    expect(documentOverflow).toBeLessThanOrEqual(1);
+
+    // Collapsing to icons must not cost the tabs their accessible names. A
+    // page-wide axe pass is not used here: the Deployments page carries
+    // pre-existing violations (#deploy-now-btn contrast, .rad-table-wrap
+    // focusability) that this nav change neither causes nor fixes.
+    await expect(page.locator(".rad-topnav__label").first()).toBeHidden();
+    for (const name of ["Applications", "Environments", "Deployments"]) {
+      await expect(page.getByRole("link", { name })).toBeVisible();
+    }
   });
 
   test("reveals the environment form by keyboard and returns focus to the reveal control", async ({

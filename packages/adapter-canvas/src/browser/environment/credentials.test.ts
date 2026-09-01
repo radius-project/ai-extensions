@@ -33,6 +33,13 @@ import {
 import type { FakeBrowser } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
 
+function confirm(options: EnvironmentConfirmOptions) {
+  if (!options.onConfirm) {
+    throw new Error("Expected confirmation callback.");
+  }
+  return options.onConfirm();
+}
+
 function buildElements() {
   const elements = {
     credLanding: createFakeElement("cred-landing"),
@@ -92,7 +99,7 @@ function renderPage(repo = "octo/app") {
     notify: vi.fn()
   };
   const confirmDialog = {
-    show: vi.fn((options: EnvironmentConfirmOptions) => options.onConfirm()),
+    show: vi.fn(confirm),
     close: vi.fn(),
     teardown: vi.fn()
   };
@@ -416,6 +423,17 @@ describe("GitHub Packages identity parsing and rendering", () => {
     expect(errored.statusHtml).toBeNull();
   });
 
+  it("surfaces installation guidance when GitHub CLI is unavailable", () => {
+    const view = renderGitHubAccessView(pkgIdentity({ actingLogin: "" }), {
+      kind: "unavailable",
+      shell: "posix",
+      installationNote: "Install GitHub CLI system-wide."
+    });
+
+    expect(view.statusText).toBe("Install GitHub CLI system-wide.");
+    expect(view.commandVisible).toBe(false);
+  });
+
   it("renders the verified view with an escaped login", () => {
     const view = renderGitHubAccessView({
       error: "",
@@ -436,11 +454,36 @@ describe("GitHub Packages identity parsing and rendering", () => {
       actingHasPackages: false,
       ...LEGACY_IDENTITY
     });
+
     expect(view.packagesVerified).toBe(false);
     expect(view.commandVisible).toBe(true);
     expect(view.retryVisible).toBe(true);
     expect(view.remediation?.command).toBe(
       "gh auth switch -h github.com -u octocat\ngh auth refresh -h github.com -s read:packages -s write:packages"
+    );
+  });
+
+  it("renders a bundled GitHub CLI path and installation alternative", () => {
+    const view = renderGitHubAccessView(
+      pkgIdentity({
+        actingLogin: "octocat",
+        packagesLogin: "octocat",
+        packagesHasWrite: false,
+        packagesCredentialSource: "keyring"
+      }),
+      {
+        kind: "absolute",
+        shell: "powershell",
+        executablePath: "C:\\Copilot Tools\\gh.exe",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(view.remediation?.command).toContain(
+      "& 'C:\\Copilot Tools\\gh.exe' auth switch"
+    );
+    expect(view.remediation?.warning).toContain(
+      "Install GitHub CLI system-wide."
     );
   });
 
@@ -580,9 +623,22 @@ describe("credential table loading", () => {
     );
     page.controller.loadCredentialTable();
     await flushPromises();
-    expect(page.elements.credTableBody.innerHTML).toContain(
-      "Could not load credential profiles"
+    expect(page.elements.credTableBody.innerHTML).toContain("server exploded");
+  });
+
+  it("escapes a server-provided profile error before displaying it", async () => {
+    const page = renderPage();
+    page.browser.net.handle(`${CREDENTIAL_PROFILES_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({ error: "<script>alert(1)</script>" }, false, 500)
     );
+
+    page.controller.loadCredentialTable();
+    await flushPromises();
+
+    expect(page.elements.credTableBody.innerHTML).toContain(
+      "&lt;script&gt;alert(1)&lt;/script&gt;"
+    );
+    expect(page.elements.credTableBody.innerHTML).not.toContain("<script>");
   });
 
   it("shows a load failure on a network error", async () => {
@@ -754,6 +810,7 @@ describe("row actions", () => {
     expect(shown.message).toContain(
       "Could not check which environments use this profile."
     );
+    expect(shown.message).toContain("repo lookup failed");
   });
 
   it("warns in the dialog when the usage lookup returns a non-OK status", async () => {

@@ -6,6 +6,11 @@ import type { DeployRequestService } from "../services/deploy-request.js";
 import type { DeploymentRow } from "../services/deployment-resolver.js";
 import { shouldRetryWithKeyringCredential } from "../services/workflow-credential-fallback.js";
 import { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE } from "../../infra.js";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
 
 // What the webview needs to decide whether to keep polling after a failed
 // deploy. Shaped to match `deployHandoffStatus` in `server.ts`, which is
@@ -77,6 +82,7 @@ export interface DeploymentsInstanceEntry {
 }
 
 export interface DeploymentsDependencies {
+  ghCommandPresentation?: GhCommandPresentation;
   isValidRepoSlug(value: unknown): boolean;
   readInstanceEntry(instanceId: string): DeploymentsInstanceEntry | undefined;
   triggerDeployRepairHandoff(
@@ -661,9 +667,25 @@ export async function handleDeleteDeployment(
       const de = (dispatch.stderr || "").trim();
       // `{0,20}` vs `{1,20}` differs only for the literal "workflowscope" with
       // no separator, which no real `gh` diagnostic emits; left alive.
+      const ghCommandPresentation =
+        dependencies.ghCommandPresentation || BARE_GH_COMMAND_PRESENTATION;
+      const refreshCommand = displayGhCommand(ghCommandPresentation, [
+        "auth",
+        "refresh",
+        "-h",
+        "github.com",
+        "-s",
+        "workflow"
+      ]);
+      const installation =
+        ghCommandPresentation.installationNote ?
+          ` ${ghCommandPresentation.installationNote}`
+        : "";
       const hint =
         /workflow.{0,20}scope/i.test(de) ?
-          ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
+          refreshCommand ?
+            ` Your GitHub token is missing the "workflow" scope. Run \`${refreshCommand}\` in a terminal, then retry.${installation}`
+          : ` Your GitHub token is missing the "workflow" scope. ${ghCommandPresentation.installationNote}`
         : " The delete workflow is committed to the default branch" +
           " automatically before dispatch, so a persistent failure usually" +
           " means GitHub Actions is disabled for " +
@@ -746,12 +768,57 @@ export async function handleDeploy(
   context.json(result.status, result.body);
 }
 
+// The ambient deploy chip's read-only source. Deliberately NOT served from
+// `/api/deploy-status`: that route drives the repair handoff and the failure
+// notice as a side effect of being polled, and the chip polls from every page
+// in the canvas. Reusing it would let a graph page open a repair loop simply by
+// being open. This handler only reads state, and reports the few fields a
+// notification needs rather than the resource list and log buffer.
+export function handleDeployNotification(
+  context: CanvasRequestContext,
+  dependencies: DeploymentsDependencies
+): void {
+  const state = dependencies.readInstanceEntry(context.instanceId)?.state;
+  const runId = state?.deployRunId;
+  context.json(
+    200,
+    {
+      attemptId: state?.deployAttempt?.id || "",
+      // Advanced by `beginDeployAttempt` on every deploy invocation, so two
+      // pre-dispatch failures inside one repair loop — which share an attempt
+      // id, have no run, and never update the finish time — are still distinct
+      // notifications rather than one the user already dismissed.
+      generation: state?.deployGeneration || 0,
+      // Part of the notification's outcome identity: a repair loop reuses its
+      // attempt id across redeploys, so the run is what separates one outcome
+      // from the next. Reset to null at attempt start, so a dispatch that never
+      // reached GitHub reports "" rather than the previous run.
+      runId: runId === null || runId === undefined ? "" : String(runId),
+      status: state?.deployStatus || "pending",
+      application: state?.deployAppName || "",
+      // The attempt records the environment atomically when the deploy opens,
+      // whereas `deployEnvName` is only written later, during dispatch. Reading
+      // the attempt first stops a deploy that failed preflight from being
+      // reported against the *previous* deploy's environment.
+      environment:
+        state?.deployAttempt?.environment || state?.deployEnvName || "",
+      error: state?.deployError || "",
+      runUrl: state?.deployRunUrl || "",
+      repairing: state?.deployRepairing || false,
+      finishedAt: state?.deployFinishedAt || 0
+    },
+    { "Cache-Control": "no-store" }
+  );
+}
+
 export function createDeploymentsRoutes(
   dependencies: DeploymentsDependencies
 ): RouteHandlerRegistry {
   return {
     "GET /api/deploy-status": (context) =>
       handleDeployStatus(context, dependencies),
+    "GET /api/deploy-notification": (context) =>
+      handleDeployNotification(context, dependencies),
     "GET /api/list-applications": (context) =>
       handleListApplications(context, dependencies),
     "GET /api/list-deployments": (context) =>

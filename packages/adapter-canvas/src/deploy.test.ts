@@ -12,25 +12,41 @@ import {
   findWorkflowRun,
   getRunDetail,
   isSelectedGhAuthorizationError,
-  selectedCommandAuthorizationError
+  selectedCommandAuthorizationError,
+  selectWorkflowRunId
 } from "./deploy.js";
+import { FORK_REPOSITORY_SETUP_GUIDANCE } from "./repository-access-guidance.js";
 import { successfulSelectedGhExecutor } from "../test/support/server/selected-gh.js";
 
 describe("selected-account workflow reads", () => {
-  it("classifies direct selected-account command authorization failures", async () => {
+  it.each([
+    ["gh: Forbidden (HTTP 403)", 403],
+    [
+      "Resource protected by organization SAML enforcement. You must grant your OAuth token access.",
+      403
+    ]
+  ])(
+    "classifies direct selected-account command authorization failure %j",
+    async (stderr, status) => {
+      const executor = successfulSelectedGhExecutor({ login: "alice" });
+
+      await expect(
+        selectedCommandAuthorizationError(executor, "contoso/store", {
+          code: 1,
+          stdout: "",
+          stderr
+        })
+      ).resolves.toMatchObject({
+        name: "SelectedGhAuthorizationError",
+        login: "alice",
+        status
+      });
+    }
+  );
+
+  it("does not classify rate limiting as selected-account authorization failure", async () => {
     const executor = successfulSelectedGhExecutor({ login: "alice" });
 
-    await expect(
-      selectedCommandAuthorizationError(executor, "contoso/store", {
-        code: 1,
-        stdout: "",
-        stderr: "gh: Forbidden (HTTP 403)"
-      })
-    ).resolves.toMatchObject({
-      name: "SelectedGhAuthorizationError",
-      login: "alice",
-      status: 403
-    });
     await expect(
       selectedCommandAuthorizationError(executor, "contoso/store", {
         code: 1,
@@ -665,6 +681,29 @@ describe("explainRepoAccessForEnvSetup", () => {
     expect(out).toContain("ryanwaite");
     expect(out).toContain("azure-cto/app");
     expect(out).toContain("gh auth switch");
+    expect(out).toContain(FORK_REPOSITORY_SETUP_GUIDANCE);
+  });
+
+  it("uses the bundled GitHub CLI path in switch-account guidance", () => {
+    const out = explainRepoAccessForEnvSetup(
+      {
+        repo: "azure-cto/app",
+        login: "ryanwaite",
+        readFailed: true,
+        permissions: null
+      },
+      {
+        kind: "absolute",
+        shell: "powershell",
+        executablePath: "C:\\Copilot Tools\\gh.exe",
+        installationNote: "Install GitHub CLI system-wide."
+      }
+    );
+
+    expect(out).toContain(
+      "& 'C:\\Copilot Tools\\gh.exe' auth switch --user <account>"
+    );
+    expect(out).toContain("Install GitHub CLI system-wide.");
   });
 
   it("read failure with unknown login → 'the active gh account'", () => {
@@ -699,6 +738,7 @@ describe("explainRepoAccessForEnvSetup", () => {
     expect(out).toContain("Maintain");
     expect(out).toContain("grant");
     expect(out).not.toContain("gh auth switch");
+    expect(out).toContain(FORK_REPOSITORY_SETUP_GUIDANCE);
   });
 
   it("push-only → role label Write", () => {
@@ -765,5 +805,68 @@ describe("isRepoNotFoundError", () => {
     expect(isRepoNotFoundError("")).toBe(false);
     expect(isRepoNotFoundError(undefined)).toBe(false);
     expect(isRepoNotFoundError(null)).toBe(false);
+  });
+});
+
+describe("selectWorkflowRunId", () => {
+  const at = (iso: string) => Date.parse(iso);
+  const since = at("2026-08-20T10:00:00Z");
+
+  it("returns null for a non-array payload", () => {
+    expect(selectWorkflowRunId(null, since)).toBeNull();
+    expect(selectWorkflowRunId({}, since)).toBeNull();
+  });
+
+  it("picks the newest run created within the skew window", () => {
+    const runs = [
+      { databaseId: 3, createdAt: "2026-08-20T10:00:05Z" },
+      { databaseId: 2, createdAt: "2026-08-20T09:59:59Z" }
+    ];
+    expect(selectWorkflowRunId(runs, since)).toBe(3);
+  });
+
+  it("ignores stale runs created before the ~60s cutoff", () => {
+    const runs = [{ databaseId: 9, createdAt: "2026-08-20T09:58:00Z" }];
+    expect(selectWorkflowRunId(runs, since)).toBeNull();
+  });
+
+  it("tolerates ~60s of clock skew before dispatch", () => {
+    const runs = [{ databaseId: 7, createdAt: "2026-08-20T09:59:10Z" }];
+    expect(selectWorkflowRunId(runs, since)).toBe(7);
+  });
+
+  it("matches only the run whose display title carries the correlation id", () => {
+    const runs = [
+      {
+        databaseId: 5,
+        createdAt: "2026-08-20T10:00:06Z",
+        displayTitle: "Radius - Delete Environment prod other-id"
+      },
+      {
+        databaseId: 4,
+        createdAt: "2026-08-20T10:00:04Z",
+        displayTitle: "Radius - Delete Environment prod del-abc-123"
+      }
+    ];
+    expect(selectWorkflowRunId(runs, since, "del-abc-123")).toBe(4);
+  });
+
+  it("returns null when no run carries the requested correlation id", () => {
+    const runs = [
+      {
+        databaseId: 5,
+        createdAt: "2026-08-20T10:00:06Z",
+        displayTitle: "Radius - Delete Environment prod other-id"
+      }
+    ];
+    expect(selectWorkflowRunId(runs, since, "del-missing")).toBeNull();
+  });
+
+  it("skips entries missing a databaseId", () => {
+    const runs = [
+      { createdAt: "2026-08-20T10:00:06Z" },
+      { databaseId: 8, createdAt: "2026-08-20T10:00:05Z" }
+    ];
+    expect(selectWorkflowRunId(runs, since)).toBe(8);
   });
 });

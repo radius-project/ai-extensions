@@ -14,8 +14,9 @@
 // the output (the loader resolves @github/copilot-sdk at runtime).
 
 import * as esbuild from "esbuild";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
+import { dirname, basename, join, resolve, sep } from "node:path";
 import {
   copyFileSync,
   cpSync,
@@ -25,6 +26,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync
 } from "node:fs";
 import { homedir } from "node:os";
@@ -71,26 +73,64 @@ const pluginSources = ["plugin.json", "package.json", "README.md", "skills"];
 // build but not in a plain local one.
 const optionalPluginSources = ["CHANGELOG.md"];
 
+// esbuild refuses a file it has no loader for, so an unlisted extension added
+// to the plugin tree fails the build instead of silently not shipping.
+const pluginAssetLoaders = { ".json": "copy", ".md": "copy", ".mjs": "copy" };
+
 // CI stamps an edge version (e.g. 0.1.0-edge-0b33186) so a published
 // build is distinguishable from a release. A local build leaves the version in
 // the source manifests alone.
 const stampedVersion = process.env.PLUGIN_VERSION?.trim();
+const SOURCE_SHA = /^[0-9a-f]{40}$/;
+// A build with no resolvable source commit cannot pin anything, so it stays
+// unstamped and every release validator rejects it.
+const DEVELOPMENT_REF = "main";
+const sourceRef = resolveSourceRef();
+
+function resolveSourceRef() {
+  const explicit = process.env.RADIUS_SOURCE_REF?.trim();
+  if (explicit) {
+    if (!SOURCE_SHA.test(explicit)) {
+      throw new Error(
+        `RADIUS_SOURCE_REF must be the full source commit SHA, got ${JSON.stringify(explicit)}.`
+      );
+    }
+    return explicit;
+  }
+  try {
+    const head = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    if (SOURCE_SHA.test(head)) return head;
+  } catch {
+    // Building outside a checkout, e.g. from a source archive or a fixture.
+  }
+  return DEVELOPMENT_REF;
+}
 
 function writeThirdPartyNotices(inputs) {
   const packages = new Map();
   for (const input of inputs) {
-    if (!/[\\/]node_modules[\\/]/.test(input)) continue;
+    if (!/(?:^|[\\/])node_modules[\\/]/.test(input)) continue;
     let current = dirname(input);
-    while (!existsSync(join(current, "package.json"))) {
+    let manifest;
+    while (true) {
+      const manifestPath = join(current, "package.json");
+      if (existsSync(manifestPath)) {
+        const candidate = JSON.parse(readFileSync(manifestPath, "utf8"));
+        if (candidate.name && candidate.version) {
+          manifest = candidate;
+          break;
+        }
+      }
       const parent = dirname(current);
       if (parent === current) {
         throw new Error(`Unable to locate package metadata for "${input}".`);
       }
       current = parent;
     }
-    const manifest = JSON.parse(
-      readFileSync(join(current, "package.json"), "utf8")
-    );
     const key = `${manifest.name}@${manifest.version}`;
     if (packages.has(key)) continue;
     packages.set(key, {
@@ -99,17 +139,19 @@ function writeThirdPartyNotices(inputs) {
     });
   }
   if (packages.size === 0) {
-    throw new Error(
-      "The browser bundles contained no third-party package inputs."
-    );
+    throw new Error("The bundles contained no third-party package inputs.");
   }
 
   const notices = [...packages.values()]
-    .sort(
-      (a, b) =>
-        String(a.manifest.name).localeCompare(String(b.manifest.name)) ||
-        String(a.manifest.version).localeCompare(String(b.manifest.version))
-    )
+    .sort((a, b) => {
+      const left = `${a.manifest.name}\0${a.manifest.version}`;
+      const right = `${b.manifest.name}\0${b.manifest.version}`;
+      return (
+        left < right ? -1
+        : left > right ? 1
+        : 0
+      );
+    })
     .map(({ manifest, root }) => {
       const licensePath = [
         "LICENSE",
@@ -133,30 +175,51 @@ function writeThirdPartyNotices(inputs) {
   );
 }
 
-async function assembleDist() {
+// esbuild globs are POSIX-style and match files, so a directory has to become a
+// recursive pattern.
+function pluginAssetEntryPoint(from) {
+  const pattern = from.split(sep).join("/");
+  return statSync(from).isDirectory() ? `${pattern}/**/*` : pattern;
+}
+
+async function assembleDist(bundleInputs) {
+  const entryPoints = [];
   for (const entry of pluginSources) {
     const from = join(pluginDir, entry);
     if (!existsSync(from)) {
       throw new Error(`Missing required plugin source: ${from}`);
     }
-    cpSync(from, join(distDir, entry), { recursive: true });
+    entryPoints.push(pluginAssetEntryPoint(from));
   }
   for (const entry of optionalPluginSources) {
     const from = join(pluginDir, entry);
-    if (!existsSync(from)) continue;
-    cpSync(from, join(distDir, entry), { recursive: true });
+    if (existsSync(from)) entryPoints.push(pluginAssetEntryPoint(from));
   }
+
+  // The copy loader reproduces each file verbatim, so the same tool that emits
+  // the bundle also lays out the rest of dist/.
+  await esbuild.build({
+    entryPoints,
+    outbase: pluginDir,
+    outdir: distDir,
+    loader: pluginAssetLoaders,
+    logLevel: "silent"
+  });
+  copyFileSync(join(repoRoot, "LICENSE"), join(distDir, "LICENSE"));
+  copyExtensionAssets();
+
   const distPackage = join(distDir, "package.json");
+  stripRepositoryScripts(distPackage);
   resolveCatalogSpecifiers(distPackage);
-  writeThirdPartyNotices(browserBundleInputs);
   stampVersion(distPackage, stampedVersion);
+  stampSourceRef(distPackage);
   // The manifest the host reads must advertise the version the package ships,
   // including when a rebuild runs without PLUGIN_VERSION.
   stampVersion(
     join(distDir, "plugin.json"),
     JSON.parse(readFileSync(distPackage, "utf8")).version
   );
-  await esbuild.build({
+  const resolverBuild = await esbuild.build({
     entryPoints: [radiusTypeResolver],
     outfile: join(
       distDir,
@@ -170,11 +233,42 @@ async function assembleDist() {
     platform: "node",
     target,
     charset: "utf8",
+    metafile: true,
     legalComments: "none",
     logLevel: "silent",
     banner: {
       js: "// AUTO-GENERATED by packages/adapter-canvas/build.mjs — do not edit by hand."
     }
+  });
+  writeThirdPartyNotices([
+    ...bundleInputs,
+    ...browserBundleInputs,
+    ...Object.keys(resolverBuild.metafile.inputs)
+  ]);
+}
+
+// The plugin package declares its own `build` script so CI can build any plugin
+// by name, but that script is meaningless outside this workspace.
+function stripRepositoryScripts(manifestPath) {
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  delete manifest.scripts;
+  delete manifest.devDependencies;
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+// The complete workflow contract ships beside extension.mjs so a released
+// plugin contains the exact templates, actions and scripts it was built with.
+function copyExtensionAssets() {
+  const sourceDir = join(repoRoot, ".github", "extension");
+  const targetDir = join(distDir, "workflows");
+  if (!existsSync(sourceDir)) {
+    throw new Error(`Missing required extension assets: ${sourceDir}`);
+  }
+  // A nested action package may have been installed locally; only the tracked
+  // workflow contract is part of the release.
+  cpSync(sourceDir, targetDir, {
+    recursive: true,
+    filter: (from) => basename(from) !== "node_modules"
   });
 }
 
@@ -190,6 +284,13 @@ function stampVersion(manifestPath, version) {
   // exact version into the source manifest.
   const next = raw.replace(versionKey, `$1${version}$2`);
   if (next !== raw) writeFileSync(manifestPath, next);
+}
+
+function stampSourceRef(manifestPath) {
+  if (sourceRef === DEVELOPMENT_REF) return;
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  manifest.radiusSourceRef = sourceRef;
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 // The shipped manifest is read outside this workspace, where pnpm's "catalog:"
@@ -291,6 +392,17 @@ function installToLocal() {
       copyFileSync(manifestFrom, tmp);
       renameSync(tmp, manifestTo);
     }
+    // Replace the whole workflow contract so removed actions and scripts cannot
+    // survive beside a freshly installed extension.
+    const workflowsFrom = join(distDir, "workflows");
+    if (existsSync(workflowsFrom)) {
+      const workflowsTo = join(installDir, "workflows");
+      const tmp = `${workflowsTo}.tmp-${process.pid}`;
+      rmSync(tmp, { recursive: true, force: true });
+      cpSync(workflowsFrom, tmp, { recursive: true });
+      rmSync(workflowsTo, { recursive: true, force: true });
+      renameSync(tmp, workflowsTo);
+    }
     // Remove any legacy `.dev-reload` sentinel from older installs so it can't
     // keep the (now opt-in) self-reloader armed on this machine.
     try {
@@ -315,7 +427,7 @@ const finalizePlugin = {
   setup(build) {
     build.onEnd(async (result) => {
       if (result.errors.length > 0) return;
-      await assembleDist();
+      await assembleDist(Object.keys(result.metafile?.inputs ?? {}));
       if (isInstall && isWatch) installToLocal();
     });
   }
@@ -401,6 +513,10 @@ const options = {
   format: "esm",
   platform: "node",
   target,
+  define: {
+    "process.env.RADIUS_SOURCE_REF": JSON.stringify(sourceRef),
+    "process.env.RADIUS_DELETE_REF": JSON.stringify(sourceRef)
+  },
   // yaml's Node entry is CommonJS and leaves a dynamic require("process") in
   // the ESM bundle. Its browser entry is equivalent pure ESM parser code.
   alias: { yaml: yamlBrowserEntry },
@@ -412,6 +528,7 @@ const options = {
   // regardless. Costs ~12 KB.
   keepNames: true,
   sourcemap: true,
+  metafile: true,
   // The SDK is resolved by the loader at runtime — never bundle it.
   external: ["@github/copilot-sdk", "@github/copilot-sdk/extension"],
   legalComments: "none",

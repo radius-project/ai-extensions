@@ -6,6 +6,7 @@ import {
 } from "../../operations.js";
 import { ProviderMutationRecoveryError } from "./provider-mutation-recovery.js";
 import {
+  deleteGitHubEnvironmentIdempotent,
   ensureGitHubEnvironment,
   GitHubEnvironmentEnsureCancelled,
   GitHubEnvironmentEnsureError,
@@ -103,6 +104,116 @@ describe("ensureGitHubEnvironment", () => {
         "/repos/octo/app/environments/Production%20West"
       ]
     ]);
+  });
+
+  it("honors a short Retry-After for a transient environment read", async () => {
+    let reads = 0;
+    const sleeps: number[] = [];
+    const ensured = await ensureGitHubEnvironment({
+      repo: "octo/app",
+      requestedName: "production",
+      readGitHubJson: async () => {
+        reads += 1;
+        return reads === 1 ?
+            readResult({
+              ok: false,
+              status: 429,
+              stderr: "Retry-After: 2"
+            })
+          : readResult({ json: { name: "production", id: 17 } });
+      },
+      runGh: async () => {
+        throw new Error("an existing environment must not be mutated");
+      },
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    expect(ensured).toMatchObject({
+      name: "production",
+      state: "reused",
+      providerId: "17"
+    });
+    expect(reads).toBe(2);
+    expect(sleeps).toEqual([2000]);
+  });
+
+  it("does not retry before Retry-After when it exceeds the read budget", async () => {
+    let reads = 0;
+    const sleeps: number[] = [];
+    await expect(
+      ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async () => {
+          reads += 1;
+          return readResult({
+            ok: false,
+            status: 429,
+            stderr: "Retry-After: 60"
+          });
+        },
+        runGh: async () => {
+          throw new Error("must not mutate");
+        },
+        sleep: async (milliseconds) => {
+          sleeps.push(milliseconds);
+        }
+      })
+    ).rejects.toMatchObject({ code: "github-environment-lookup-failed" });
+    expect(reads).toBe(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("honors an HTTP-date Retry-After without retrying early", async () => {
+    let reads = 0;
+    const now = Date.parse("2026-08-25T00:00:00.000Z");
+    await expect(
+      ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async () => {
+          reads += 1;
+          return readResult({
+            ok: false,
+            status: 429,
+            stderr: "Retry-After: Tue, 25 Aug 2026 00:01:00 GMT"
+          });
+        },
+        runGh: async () => {
+          throw new Error("must not mutate");
+        },
+        now: () => now,
+        sleep: async () => {
+          throw new Error("must not retry before Retry-After");
+        }
+      })
+    ).rejects.toMatchObject({ code: "github-environment-lookup-failed" });
+    expect(reads).toBe(1);
+  });
+
+  it("does not retry an authorization failure", async () => {
+    let reads = 0;
+    await expect(
+      ensureGitHubEnvironment({
+        repo: "octo/app",
+        requestedName: "production",
+        readGitHubJson: async () => {
+          reads += 1;
+          return readResult({
+            ok: false,
+            status: 403,
+            stderr: "Forbidden"
+          });
+        },
+        runGh: async () => {
+          throw new Error("must not mutate");
+        },
+        sleep: async () => {}
+      })
+    ).rejects.toMatchObject({ code: "github-environment-lookup-failed" });
+    expect(reads).toBe(1);
   });
 
   it("checks Stop after repository reads and before environment creation", async () => {
@@ -444,7 +555,7 @@ describe("ensureGitHubEnvironment", () => {
     expect(operation.providerRecovery.state).toBe("manual_required");
   });
 
-  it("fails closed on lookup errors that are not an explicit HTTP 404", async () => {
+  it("retries a transient lookup failure to the bound, then fails closed", async () => {
     const calls: string[][] = [];
 
     await expect(
@@ -461,14 +572,40 @@ describe("ensureGitHubEnvironment", () => {
         },
         runGh: async () => {
           throw new Error("lookup failure must not mutate");
-        }
+        },
+        sleep: async () => {}
       })
     ).rejects.toMatchObject({
       code: "github-environment-lookup-failed",
       message:
         'Could not resolve GitHub environment "production". HTTP 503: unavailable'
     });
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("retries the GitHub CLI standard connection diagnostic", async () => {
+    let reads = 0;
+    const ensured = await ensureGitHubEnvironment({
+      repo: "octo/app",
+      requestedName: "production",
+      readGitHubJson: async () => {
+        reads += 1;
+        return reads === 1 ?
+            readResult({
+              ok: false,
+              status: null,
+              stderr: "error connecting to api.github.com"
+            })
+          : readResult({ json: { name: "production", id: 17 } });
+      },
+      runGh: async () => {
+        throw new Error("an existing environment must not be mutated");
+      },
+      sleep: async () => {}
+    });
+
+    expect(ensured).toMatchObject({ state: "reused", providerId: "17" });
+    expect(reads).toBe(2);
   });
 
   it("does not treat an unqualified Not Found message as authoritative absence", async () => {
@@ -758,6 +895,209 @@ describe("ensureGitHubEnvironment", () => {
   );
 });
 
+describe("deleteGitHubEnvironmentIdempotent", () => {
+  function deletePorts(
+    gh: (args: string[]) => Promise<{
+      code: number | string;
+      stdout?: string;
+      stderr?: string;
+    }>
+  ) {
+    const calls: string[][] = [];
+    const invalidated: string[] = [];
+    return {
+      calls,
+      invalidated,
+      ports: {
+        runGh: (args: string[]) => {
+          calls.push(args);
+          return gh(args);
+        },
+        invalidateEnvListCache: (repo: string) => {
+          invalidated.push(repo);
+        }
+      }
+    };
+  }
+
+  // A gh fake that answers the DELETE and the follow-up environment listing
+  // separately, so the 404 absence check can be exercised deterministically.
+  function deleteThenList(
+    del: { code: number | string; stderr?: string },
+    list: { code: number | string; stdout?: string; stderr?: string }
+  ): (args: string[]) => Promise<{
+    code: number | string;
+    stdout?: string;
+    stderr?: string;
+  }> {
+    return async (args: string[]) => (args.includes("--paginate") ? list : del);
+  }
+
+  it("deletes a live environment and invalidates the env-list cache", async () => {
+    const { ports, calls, invalidated } = deletePorts(async () => ({
+      code: 0
+    }));
+
+    const outcome = await deleteGitHubEnvironmentIdempotent(
+      "octo/app",
+      "prod env",
+      ports
+    );
+
+    expect(outcome).toEqual({ outcome: "deleted" });
+    expect(calls).toEqual([
+      ["api", "--method", "DELETE", "/repos/octo/app/environments/prod%20env"]
+    ]);
+    expect(invalidated).toEqual(["octo/app"]);
+  });
+
+  it("treats a string '0' exit code as a successful delete", async () => {
+    const { ports, invalidated } = deletePorts(async () => ({ code: "0" }));
+
+    const outcome = await deleteGitHubEnvironmentIdempotent(
+      "octo/app",
+      "dev",
+      ports
+    );
+
+    expect(outcome).toEqual({ outcome: "deleted" });
+    expect(invalidated).toEqual(["octo/app"]);
+  });
+
+  it("treats an HTTP 404 as already-gone only once a readable listing confirms absence", async () => {
+    const { ports, calls, invalidated } = deletePorts(
+      deleteThenList(
+        { code: 1, stderr: "gh: HTTP 404 Not Found" },
+        { code: 0, stdout: "prod\nstaging\n" }
+      )
+    );
+
+    const outcome = await deleteGitHubEnvironmentIdempotent(
+      "octo/app",
+      "dev",
+      ports
+    );
+
+    expect(outcome).toEqual({ outcome: "not_found" });
+    expect(invalidated).toEqual(["octo/app"]);
+    // The absence was verified against a complete listing, not the bare 404.
+    expect(calls[1]).toEqual([
+      "api",
+      "--paginate",
+      "-H",
+      "Accept: application/vnd.github+json",
+      "/repos/octo/app/environments",
+      "--jq",
+      ".environments[].name"
+    ]);
+  });
+
+  it("treats a case-insensitive 'not found' message as already-gone when the listing is empty", async () => {
+    const { ports, invalidated } = deletePorts(
+      deleteThenList(
+        { code: 1, stderr: "environment Not Found" },
+        { code: 0, stdout: "" }
+      )
+    );
+
+    const outcome = await deleteGitHubEnvironmentIdempotent(
+      "octo/app",
+      "dev",
+      ports
+    );
+
+    expect(outcome).toEqual({ outcome: "not_found" });
+    expect(invalidated).toEqual(["octo/app"]);
+  });
+
+  it("does NOT treat a 404 as absence when the listing still shows the environment", async () => {
+    const { ports, invalidated } = deletePorts(
+      deleteThenList(
+        { code: 1, stderr: "gh: HTTP 404 Not Found" },
+        { code: 0, stdout: "prod\nDev\nstaging\n" }
+      )
+    );
+
+    const outcome = await deleteGitHubEnvironmentIdempotent(
+      "octo/app",
+      "dev",
+      ports
+    );
+
+    expect(outcome.outcome).toBe("failed");
+    expect(outcome.detail).toMatch(/permission problem rather than absence/);
+    // A permission-masked 404 must never invalidate the cache as if gone.
+    expect(invalidated).toEqual([]);
+  });
+
+  it("does NOT treat a 404 as absence when the listing is unreadable", async () => {
+    const { ports, invalidated } = deletePorts(
+      deleteThenList(
+        { code: 1, stderr: "gh: HTTP 404 Not Found" },
+        { code: 1, stderr: "HTTP 403: forbidden" }
+      )
+    );
+
+    const outcome = await deleteGitHubEnvironmentIdempotent(
+      "octo/app",
+      "dev",
+      ports
+    );
+
+    expect(outcome.outcome).toBe("failed");
+    expect(outcome.detail).toBe("HTTP 403: forbidden");
+    expect(invalidated).toEqual([]);
+  });
+
+  it("falls back to a default detail when a 404 listing is unreadable without stderr", async () => {
+    const { ports, invalidated } = deletePorts(
+      deleteThenList({ code: 1, stderr: "gh: HTTP 404 Not Found" }, { code: 1 })
+    );
+
+    const outcome = await deleteGitHubEnvironmentIdempotent(
+      "octo/app",
+      "dev",
+      ports
+    );
+
+    expect(outcome.outcome).toBe("failed");
+    expect(outcome.detail).toMatch(/may be masking a permission problem/);
+    expect(invalidated).toEqual([]);
+  });
+
+  it("reports a genuine failure with the trimmed stderr and never invalidates the cache", async () => {
+    const { ports, invalidated } = deletePorts(async () => ({
+      code: 1,
+      stderr: "  HTTP 500 boom  "
+    }));
+
+    const outcome = await deleteGitHubEnvironmentIdempotent(
+      "octo/app",
+      "dev",
+      ports
+    );
+
+    expect(outcome).toEqual({ outcome: "failed", detail: "HTTP 500 boom" });
+    expect(invalidated).toEqual([]);
+  });
+
+  it("falls back to a default message when a failure has no stderr", async () => {
+    const { ports, invalidated } = deletePorts(async () => ({ code: 1 }));
+
+    const outcome = await deleteGitHubEnvironmentIdempotent(
+      "octo/app",
+      "dev",
+      ports
+    );
+
+    expect(outcome).toEqual({
+      outcome: "failed",
+      detail: "Deleting the GitHub environment failed."
+    });
+    expect(invalidated).toEqual([]);
+  });
+});
+
 describe("selectedEnvironmentReader", () => {
   it("reads through the executor it was built from, not ambient gh", async () => {
     const seen: string[][] = [];
@@ -861,7 +1201,7 @@ describe("a retry after the provider refused the first attempt", () => {
       now: () => RETRY_AT,
       mutationRecovery: { operation, persist: async () => {} }
     });
-
+    expect(ensured.creationProof?.proven).toBe(false);
     expect(ensured.creationProof?.proven).toBe(false);
   });
 });

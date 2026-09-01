@@ -1,6 +1,6 @@
 ---
 name: radius-delete
-description: Delete a Radius application deployment (or remove a GitHub deploy environment) via the Radius canvas. Use when the user asks to delete, remove, or tear down a deployed Radius application, or to remove a deploy environment.
+description: Delete a Radius application deployment, or delete a deploy environment and clean up its cloud state (Radius environment, Azure federated credential, and GitHub environment), via the Radius canvas. Use when the user asks to delete, remove, or tear down a deployed Radius application or a deploy environment.
 ---
 
 # Radius — Delete a Deployment or Environment
@@ -8,12 +8,13 @@ description: Delete a Radius application deployment (or remove a GitHub deploy e
 Two distinct teardown flows are available from the Radius canvas:
 
 - **Delete a deployment** dispatches the committed `delete-application.yml` GitHub Actions workflow, which spins up an ephemeral k3d Radius control plane, connects to the target AKS cluster, restores persisted state, runs `rad app delete`, and persists the updated state again before tearing the control plane down. Deleting the deployment also deletes that application's resources (running their recipes' delete path against the target cluster and cloud).
-- **Delete an environment** removes the **GitHub deploy environment** itself (its stored variables and secrets) via the GitHub API. This does not run a Radius workflow and does not tear down the cloud-side OIDC trust (the Azure federated credential / AWS IAM role trust stays in place); it is guarded so it refuses while an application is still deployed to that environment.
+- **Delete an environment** is a tracked async operation that tears down the cloud state behind the environment, not just the GitHub record. It (1) dispatches the Azure-only `delete-environment` workflow to delete the Radius environment on the cluster **while the federated credential still exists** (the workflow authenticates with it), (2) removes the per-environment Azure federated credential only when immutable Radius provenance and immediate live revalidation prove that deletion is safe, and (3) deletes the **GitHub deploy environment** (its stored variables and secrets) via the GitHub API. The Microsoft Entra **app registration is left in place** because it can be shared; the completion acknowledgement links inline to the Azure Portal if it is no longer needed. The flow refuses to start while an application is still deployed, and only **Azure-backed** environments can be deleted today.
 
 ## When to use this skill
 
 - "Delete my app" / "Remove application X from env Y" / "Tear down the deployment"
 - "Delete the environment" / "Remove the dev environment"
+- "Retry the environment deletion"
 
 ## Prerequisites
 
@@ -29,7 +30,7 @@ Open the canvas hub and use the deployed-application view:
 
 1. Reuse the existing Radius canvas instanceId when one is open; otherwise use `radius-panel`: `open_canvas({ canvasId: "radius", instanceId: "<radius-instance>", input: { page: "environment", repo: "<owner/repo>" } })`
 2. Select the environment (and, for a deployment delete, the deployed application).
-3. Click **Delete Deployment** to tear down the app, or use the environment's delete control to remove the GitHub environment. Live status streams until success / failure / timeout.
+3. Click **Delete Deployment** to tear down the app, or use **Delete Env** to run the tracked environment cleanup. Live status streams until success / failure / timeout.
 
 The extension keeps the committed delete workflow files current before dispatching, so a run never executes a drifted copy.
 
@@ -45,13 +46,20 @@ The extension keeps the committed delete workflow files current before dispatchi
 
 ## What the environment-delete flow does
 
+Deleting an environment runs as a tracked operation through the same progress panel as environment creation. Only Azure-backed environments are supported; deleting an AWS (or any non-Azure) environment is refused up front with a clear message and nothing is torn down. Any AWS-related deletion code is unsupported framework scaffolding, not a compatibility contract, and may change or be removed when AWS support is designed.
+
 - Refuses to proceed while an application is still deployed to the environment (its cloud resources would be orphaned), and points you at the deployment-delete flow first.
-- When no deployment is active, deletes the GitHub deploy environment (its variables and secrets) via the GitHub API. No Radius control plane is created, no recipe deletes run, and the cloud-side OIDC trust is left in place.
+- **Stage 1 — Radius environment:** dispatches the Azure-only `delete-environment` workflow, which connects to the target AKS cluster and runs `rad env delete`. This runs first, while the federated credential still exists, because the workflow authenticates with it. If this cannot be confirmed (dispatch failed, run not found, timeout, or a non-guard failure), the whole deletion **stops fail-closed** and is reported as a retryable partial failure — the credential and GitHub environment a retry needs are left in place.
+- **Stage 2 — federated credential:** removes the per-environment Azure federated credential only after immutable tenant, application-object, credential-object, repository, subject-configuration, issuer, and audience evidence proves Radius created it for this consumer and immediate live revalidation still matches. Reused, shared, unproven, changed, or insufficiently scoped custom credentials are retained with guidance; a confirmed-missing credential is an idempotent success.
+- **Stage 3 — GitHub environment:** deletes the GitHub deploy environment (its variables and secrets) via the GitHub API.
+- **App registration:** left in place. Radius never deletes a Microsoft Entra app registration; it records an informational step and, after a concluded deletion, includes an inline Azure Portal link in the acknowledgement if the registration is no longer needed.
+
+An incomplete deletion exposes only **Retry deletion**. Retry reopens the same durable operation, preserves succeeded stages, resets unresolved stages, and resumes through the idempotent runner. Delete operations are not pausable and never expose the create flow's **Stop setup**, Continue setup, rollback, or exit controls. While deletion is in progress, **Delete Env** is disabled and the environment cannot be selected for deployment.
 
 ## After a successful delete
 
 - Tell the user it succeeded and include the workflow run URL (for a deployment delete).
-- Note that deleting a deployment removed the app's resources; deleting an environment removed the GitHub deploy environment (its variables and secrets), leaving the cloud-side OIDC trust intact.
+- Note that deleting a deployment removed the app's resources. For environment deletion, report the operation's actual steps: the Radius environment and GitHub deploy environment were removed, a proven-safe credential was removed or a retained credential was explained, and the Entra app registration was left in place with the acknowledgement's Azure Portal link.
 
 ## Common failure modes
 
@@ -61,6 +69,10 @@ The extension keeps the committed delete workflow files current before dispatchi
 - **`The target resource is in progress state: Updating` (409 Conflict) on delete**
   → A resource was stranded in a non-terminal state by a prior run whose control plane was torn down before its async operation finished. The persisted state restores it still `Updating`, and no operation completes it, so every delete 409s. Force the resource to a terminal state (or remove its record) on a running control plane, then persist state, before retrying the delete.
 
+- **Environment deletion stopped partway** → Use **Retry deletion** in the progress panel. Do not start a second deletion or look for **Stop setup**; the existing durable operation resumes only unresolved stages and keeps successful work.
+
 ## Related files
 
-- The delete workflow templates are canonical in `radius-project/radius` at `.github/extension/` — `delete-application.yml` (dispatcher), `delete-azure.yml` / `delete-aws.yml` (provider `workflow_call` workflows), and `actions/*` (shared composite actions: `setup-control-plane`, `restore-state`, `delete-resource`, `teardown`). These landed in radius-project/radius PR #12367 and are now on `main`, so the extension fetches them at the delete ref (`DELETE_RADIUS_REF`, which defaults to the shared `RADIUS_REF` = `@main` and is overridable via `RADIUS_DELETE_REF`); it commits the dispatcher + the Azure provider workflow into the user repo at `.github/workflows/`, and the composite actions are referenced in place from `radius-project/radius`.
+- The delete workflow templates are canonical in `radius-project/ai-extensions` at `.github/extension/` — `delete-application.yml` (dispatcher), `delete-azure.yml` / `delete-aws.yml` (provider `workflow_call` workflows), and `actions/*` (shared composite actions: `setup-control-plane`, `restore-state`, `delete-resource`, `teardown`). A released extension fetches application-delete templates at its baked source commit, reads environment-delete templates from the complete bundled copy of that same tree, and fills every first-party composite-action `uses:` with the full source commit SHA. It commits the dispatcher + the Azure provider workflow into the user repo at `.github/workflows/`; no generated action reference follows a mutable branch or channel tag.
+- Environment deletion orchestration lives in `packages/adapter-canvas/src/server/services/environment-deletion.ts`; operation retry/control policy lives in `packages/adapter-canvas/src/operations.ts` and `packages/adapter-canvas/src/server/routes/operations-control.ts`.
+- The implemented safety and sharing boundaries are documented in `docs/design/2026-08-environment-deletion-cloud-cleanup.md`.

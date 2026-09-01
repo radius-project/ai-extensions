@@ -76,7 +76,7 @@ actions and tools:
 | [`radius-app-graph`](./plugins/radius/skills/radius-app-graph/SKILL.md)                             | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.                                                                         |
 | [`radius-environment`](./plugins/radius/skills/radius-environment/SKILL.md)                         | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions.                                                                          |
 | [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md)                                   | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.                                                                         |
-| [`radius-delete`](./plugins/radius/skills/radius-delete/SKILL.md)                                   | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or remove a GitHub deploy environment.                                                   |
+| [`radius-delete`](./plugins/radius/skills/radius-delete/SKILL.md)                                   | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or delete a deploy environment and clean up its cloud state.                             |
 | [`radius-fix-canvas-installation`](./plugins/radius/skills/radius-fix-canvas-installation/SKILL.md) | Repair a missing Radius Canvas after install/update by copying the canvas files into the app's probed `extensions/` folder (temporary workaround for a GitHub Copilot app bug). |
 
 ## Architecture
@@ -126,7 +126,7 @@ guidelines and more, head over to the
 
 ## Releasing
 
-[Changesets](https://changesets.dev/) drives the release: add a changeset with your pull request, and every merge to `main` refreshes the rolling `edge` channel. When a maintainer runs the **Release** workflow, Changesets opens a release pull request; merging it validates and publishes the exact source commit, creates the canonical `radius@<version>` source tag and immutable `radius/v<version>` artifact tag, and moves the stable `latest` channel. Follow the [release runbook](./docs/eng/RELEASE_RUNBOOK.md) to cut one, or see [`RELEASING.md`](./docs/eng/RELEASING.md) for the full release flow.
+[Changesets](https://changesets.dev/) drives independent plugin versions and changelogs. Every merge to `main` refreshes each plugin's rolling `<plugin>@edge` channel. The **Release** workflow can prepare one plugin or every pending plugin; merging its scope-labelled PR validates the exact version diff, builds behind shared gates, publishes attested assets on zero-history `releases/<plugin>/v<version>` branches, and moves only that plugin's `<plugin>@latest` channel. GitHub immutable-release enforcement is an optional repository-variable switch. Follow the [release runbook](./docs/eng/RELEASE_RUNBOOK.md) to cut one, or see [`RELEASING.md`](./docs/eng/RELEASING.md) for the full lifecycle.
 
 ## Code of conduct
 

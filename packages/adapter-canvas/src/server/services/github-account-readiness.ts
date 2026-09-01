@@ -1,8 +1,11 @@
 import { randomBytes } from "node:crypto";
+import { stateRegistryForEnvironment } from "@radius-project/core";
+import { FORK_REPOSITORY_SETUP_GUIDANCE } from "../../repository-access-guidance.js";
 import {
-  remediationView,
-  stateRegistryForEnvironment
-} from "@radius-project/core";
+  BARE_GH_COMMAND_PRESENTATION,
+  presentedRemediationView,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
 import type {
   GitHubAccountCoordinator,
   GitHubAccountRestoration
@@ -63,6 +66,11 @@ export interface GitHubAccountReadinessPorts {
     repo: string,
     environment: string
   ): Promise<GitHubPackageAccessProbeResult>;
+}
+
+export interface GitHubAccountReadinessServiceOptions {
+  ports?: GitHubAccountReadinessPorts;
+  ghCommandPresentation?: GhCommandPresentation;
 }
 
 interface PackageTokenResponse {
@@ -240,7 +248,8 @@ function repairGuidance(
   login: string,
   needsWorkflow: boolean,
   needsPackages: boolean,
-  repositoryReady: boolean
+  repositoryReady: boolean,
+  ghCommandPresentation: GhCommandPresentation
 ): RepairGuidance {
   const requiredPermissions: string[] = [];
   const refreshScopes: string[] = [];
@@ -261,24 +270,32 @@ function repairGuidance(
     // out here. Hand-built copies drift from what the Copy/Run buttons offer,
     // and they miss registry-wide rules -- most recently the switch to one
     // command per line, because `&&` will not parse in Windows PowerShell 5.1.
-    const fix = remediationView("github-account-scopes", {
-      login,
-      ...(needsWorkflow ? { workflow: "true" } : {}),
-      ...(needsPackages ? { packages: "true" } : {})
-    });
+    const fix = presentedRemediationView(
+      "github-account-scopes",
+      {
+        login,
+        ...(needsWorkflow ? { workflow: "true" } : {}),
+        ...(needsPackages ? { packages: "true" } : {})
+      },
+      ghCommandPresentation
+    );
     return fix.runnable ?
         {
           repair: `The account @${login} needs ${permissions} to proceed. In the terminal, run:\n${fix.command}\n${fix.warning}`,
           remediation: { id: fix.id, params: { ...fix.params } }
         }
       : {
-          repair: `The account @${login} needs ${permissions} to proceed. Grant the missing scopes with GitHub CLI, or select an account that already has them.`,
+          repair: `The account @${login} needs ${permissions} to proceed. Grant the missing scopes with GitHub CLI, or select an account that already has them.${
+            ghCommandPresentation.installationNote ?
+              ` ${ghCommandPresentation.installationNote}`
+            : ""
+          }`,
           remediation: null
         };
   }
   if (!repositoryReady) {
     return {
-      repair: `Grant @${login} repository administrator access, or select an account that can administer this repository.`,
+      repair: `Grant @${login} repository administrator access or select an account that can administer this repository. ${FORK_REPOSITORY_SETUP_GUIDANCE}`,
       remediation: null
     };
   }
@@ -335,11 +352,14 @@ async function inspectRepository(
 
 export function createGitHubAccountReadinessService(
   coordinator: GitHubAccountCoordinator,
-  ports: GitHubAccountReadinessPorts = {
+  options: GitHubAccountReadinessServiceOptions = {}
+): GitHubAccountReadinessService {
+  const ports = options.ports || {
     probePackageAccess: (executor, repo, environment) =>
       probeGhcrPackageWriteAccess(executor, repo, environment)
-  }
-): GitHubAccountReadinessService {
+  };
+  const ghCommandPresentation =
+    options.ghCommandPresentation || BARE_GH_COMMAND_PRESENTATION;
   return {
     async check({ instanceId, repo, environment, login }) {
       try {
@@ -416,7 +436,8 @@ export function createGitHubAccountReadinessService(
               lease.selectedLogin,
               lease.value.needsWorkflow,
               lease.value.needsPackages,
-              lease.value.repositoryReady
+              lease.value.repositoryReady,
+              ghCommandPresentation
             )
           : {
               repair: lease.restoration.guidance,

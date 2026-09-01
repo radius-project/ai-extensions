@@ -1,0 +1,276 @@
+# Static delete-environment Azure provider, owned by radius-project/ai-extensions
+# (issue #303). It is a reusable (workflow_call) workflow invoked only by the
+# delete-environment.yml dispatcher with resource_type=environment; it is not
+# dispatched directly. It creates an ephemeral k3d cluster for the Radius control
+# plane, connects to the user's AKS cluster, restores persisted state, refuses to
+# continue when applications are still deployed to the environment, deletes the
+# environment (running any recipe deletes against the target cluster), then
+# persists the updated state again and tears the control plane down. The
+# provider-agnostic phases are shared composite actions in radius-project/ai-extensions;
+# only the Azure-specific steps and the ai-extensions-owned "no deployed
+# applications" guard live here.
+#
+# The guard step name below ("Guard - environment has no deployed applications")
+# is a load-bearing contract: the canvas extension matches on that exact step
+# name to distinguish an apps-still-deployed failure from any other delete
+# failure, so it must stay in sync with DELETE_ENV_GUARD_STEP_NAME in
+# packages/core/src/workflows/delete.ts.
+name: Radius - Delete Environment (Azure)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'GitHub Environment name'
+        type: string
+        required: true
+      resource_type:
+        description: 'What to delete: application or environment'
+        type: string
+        required: true
+      name:
+        description: 'Name of the application or environment to delete'
+        type: string
+        required: true
+
+permissions:
+  id-token: write
+  contents: write
+  packages: write
+
+env:
+  ENVIRONMENT: ${{ inputs.environment }}
+
+jobs:
+  delete:
+    name: Delete with Radius
+    runs-on: ubuntu-24.04
+    # Cap the job near the extension's own 30-minute poll deadline
+    # (server.ts monitorDeleteRun). GitHub's default job timeout is 360 minutes,
+    # so without this a run wedged on an AKS connect or `rollout status` step
+    # would keep running for hours after the extension has already reported it
+    # could not confirm the deletion — long enough for a stale run to land
+    # `rad env delete` underneath a user's retry.
+    timeout-minutes: 30
+    environment: ${{ inputs.environment }}
+    # OCI-backed Radius control-plane state, provisioned per-environment by the
+    # deploy tooling (canvas extension) as environment variables. Set at job
+    # level (not workflow level) so environment-scoped vars.* resolve, and so the
+    # shared restore-state (rad startup) and teardown (rad shutdown) actions —
+    # plus the delete commands — inherit them and can open the state archive.
+    # Without these, rad startup fails with "OCI archive repository is not
+    # configured; set RADIUS_STATE_REGISTRY or RADIUS_GRAPH_REGISTRY".
+    env:
+      RADIUS_STATE_BACKEND: ${{ vars.RADIUS_STATE_BACKEND }}
+      RADIUS_STATE_REGISTRY: ${{ vars.RADIUS_STATE_REGISTRY }}
+      RADIUS_STATE_ARCHIVE: ${{ vars.RADIUS_STATE_ARCHIVE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - name: Azure Login (OIDC)
+        if: ${{ vars.AZURE_CLIENT_ID != '' }}
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to GHCR for the state archive
+        # The OCI-backed Radius state archive authenticates to GHCR using the
+        # runner's Docker credential store (~/.docker/config.json). rad startup
+        # (restore-state) and rad shutdown (teardown) open that archive, so the
+        # runner must be logged in BEFORE those steps run -- otherwise the pull
+        # is anonymous and GHCR rejects the private radius-state package with a
+        # 401. docker login persists for the whole job, covering teardown too.
+        # GITHUB_TOKEN has packages: write (set at job level) for repo-linked packages.
+        # If the state archive lives under a different owner/org, replace the password with a PAT stored as a secret that can read/write that GHCR package.
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get target cluster kubeconfig
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "RADIUS_TARGET_KUBECONFIG=$HOME/.kube/target-cluster" >> "$GITHUB_ENV"
+
+      - name: Connect to AKS cluster
+        if: ${{ vars.AZURE_AKS_CLUSTER_NAME != '' }}
+        env:
+          # Pass environment-controlled values through the environment rather
+          # than interpolating them into the shell source, so a crafted value
+          # cannot execute commands in this OIDC + write job.
+          AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP }}
+          AZURE_AKS_CLUSTER_NAME: ${{ vars.AZURE_AKS_CLUSTER_NAME }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          az aks get-credentials \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$AZURE_AKS_CLUSTER_NAME" \
+            --subscription "$AZURE_SUBSCRIPTION_ID" \
+            --file "$RADIUS_TARGET_KUBECONFIG"
+
+      - name: Set up control plane
+        uses: radius-project/ai-extensions/.github/extension/actions/setup-control-plane@{{RADIUS_REF}}
+
+      - name: Project cloud OIDC tokens into Radius pods
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+        run: |
+          # Mint GitHub OIDC tokens and mount them where Radius expects them, so the
+          # recipe deletes triggered by the delete can authenticate to Azure exactly
+          # as the deploy workflow does. GitHub Actions is already a trusted OIDC
+          # issuer for Azure via the AAD federated credential.
+          if [ -n "$AZURE_CLIENT_ID" ]; then
+            echo "Projecting Azure OIDC token..."
+            AZ_TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r '.value')
+            # The secret data key becomes the mounted file name, so it must be
+            # 'azure-identity-token' -- the file Radius and the Terraform azurerm
+            # provider read from /var/run/secrets/azure/tokens/.
+            kubectl create secret generic azure-oidc-token -n radius-system \
+              --from-literal=azure-identity-token="$AZ_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
+
+            AZ_PATCH='[
+              {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"azure-oidc-token","secret":{"secretName":"azure-oidc-token"}}},
+              {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"azure-oidc-token","mountPath":"/var/run/secrets/azure/tokens","readOnly":true}},
+              {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"AZURE_FEDERATED_TOKEN_FILE","value":"/var/run/secrets/azure/tokens/azure-identity-token"}}
+            ]'
+            for deploy in applications-rp dynamic-rp bicep-de; do
+              kubectl patch deployment $deploy -n radius-system --type=json -p="$AZ_PATCH" 2>/dev/null || true
+            done
+          fi
+
+          for deploy in applications-rp dynamic-rp bicep-de ucp; do
+            kubectl rollout status deployment/$deploy -n radius-system --timeout=300s || true
+          done
+          echo "✅ Cloud OIDC tokens projected into Radius pods."
+
+      - name: Refresh external deployment target credentials
+        run: |
+          TARGET_KUBECONFIG="$RADIUS_TARGET_KUBECONFIG"
+
+          if [ ! -f "$TARGET_KUBECONFIG" ]; then
+            echo "No target kubeconfig found, resources are on the k3d control plane"
+            exit 0
+          fi
+
+          # Update the secret the chart mounted at install with the refreshed
+          # kubeconfig, then restart the recipe-executing pods so they re-read it.
+          kubectl create secret generic target-kubeconfig --namespace radius-system \
+            --from-file=kubeconfig="$TARGET_KUBECONFIG" --dry-run=client -o yaml | kubectl apply -f -
+          for deploy in applications-rp dynamic-rp bicep-de; do
+            kubectl rollout restart deployment/$deploy -n radius-system
+          done
+
+          echo "Waiting for rollouts..."
+          kubectl rollout status deployment/applications-rp -n radius-system --timeout=300s
+          kubectl rollout status deployment/dynamic-rp -n radius-system --timeout=300s
+          kubectl rollout status deployment/bicep-de -n radius-system --timeout=300s
+          echo "External deployment target configured."
+
+      - name: Restore Radius state
+        id: restore-state
+        uses: radius-project/ai-extensions/.github/extension/actions/restore-state@{{RADIUS_REF}}
+        with:
+          namespace: ${{ vars.KUBERNETES_NAMESPACE || 'default' }}
+
+      - name: Register cloud credentials with Radius
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          # Register the Azure identity so the recipe deletes can authenticate,
+          # reading the projected OIDC token at runtime.
+          if [ -n "$AZURE_CLIENT_ID" ]; then
+            echo "Registering Azure workload identity credential..."
+            rad credential register azure wi \
+              --client-id "$AZURE_CLIENT_ID" \
+              --tenant-id "$AZURE_TENANT_ID"
+          fi
+          echo "✅ Cloud credentials registered with Radius."
+
+      # ai-extensions-owned safety guard (issue #303), split into two steps so a
+      # listing failure cannot be mistaken for "no applications". This "List
+      # applications" step must FAIL CLOSED: if `rad application list` errors
+      # (auth, state restore, control-plane) or returns anything other than a
+      # JSON array, we exit non-zero here instead of treating it as an empty
+      # environment. This step is deliberately NOT the named guard step, so the
+      # canvas extension classifies a listing failure as a generic (retryable)
+      # delete failure rather than "applications still deployed".
+      - name: List applications in the environment
+        id: list_apps
+        if: ${{ inputs.resource_type == 'environment' }}
+        env:
+          # Pass the untrusted resource name through the environment rather than
+          # interpolating it into the shell source, so a crafted name cannot
+          # execute commands in this privileged (OIDC + write) job.
+          RESOURCE_NAME: ${{ inputs.name }}
+        run: |
+          set -euo pipefail
+          echo "Listing applications deployed to environment '${RESOURCE_NAME}'..."
+          if ! apps_json="$(rad application list --output json)"; then
+            echo "::error::Could not list applications in environment '${RESOURCE_NAME}'. Refusing to delete the environment so a live application is not orphaned; check Radius connectivity and retry."
+            exit 1
+          fi
+          if ! printf '%s' "$apps_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            echo "::error::'rad application list' did not return a JSON array for environment '${RESOURCE_NAME}'. Refusing to delete the environment; check Radius connectivity and retry."
+            exit 1
+          fi
+          app_count="$(printf '%s' "$apps_json" | jq 'length')"
+          app_names="$(printf '%s' "$apps_json" | jq -r '.[].name' | paste -sd ', ' -)"
+          # app_count is a plain integer, but an application name could in
+          # principle contain a newline; a bare `app_names=${app_names}` line
+          # would then split the output file and make the guard below read an
+          # empty APP_COUNT and delete a still-populated environment. Emit
+          # app_names through a randomly-delimited heredoc so any newline is
+          # preserved instead of corrupting $GITHUB_OUTPUT.
+          delimiter="ghadelim_$(openssl rand -hex 16 2>/dev/null || date +%s%N)"
+          {
+            echo "app_count=${app_count}"
+            echo "app_names<<${delimiter}"
+            echo "${app_names}"
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Found ${app_count} application(s) in environment '${RESOURCE_NAME}'."
+
+      # The restored state is per-environment, so any application listed above is
+      # deployed to the environment being deleted. Deleting the environment out
+      # from under a live application would orphan its resources, so refuse and
+      # tell the user to delete the application(s) first. Because this runs before
+      # "Delete Radius resource", exiting non-zero here leaves the environment
+      # untouched; the always()-run Teardown then persists the unchanged state.
+      # The step name is a contract matched by the canvas extension — keep it in
+      # sync with DELETE_ENV_GUARD_STEP_NAME in
+      # packages/core/src/workflows/delete.ts.
+      - name: Guard - environment has no deployed applications
+        if: ${{ inputs.resource_type == 'environment' }}
+        env:
+          # Untrusted values (the resource name and the app names discovered on
+          # the cluster) are passed through the environment and quoted, never
+          # interpolated into the shell source.
+          RESOURCE_NAME: ${{ inputs.name }}
+          APP_COUNT: ${{ steps.list_apps.outputs.app_count }}
+          APP_NAMES: ${{ steps.list_apps.outputs.app_names }}
+        run: |
+          set -euo pipefail
+          app_count="${APP_COUNT:-0}"
+          if [ "${app_count}" -gt 0 ]; then
+            echo "::error::Environment '${RESOURCE_NAME}' still has ${app_count} deployed application(s): ${APP_NAMES}. Delete the application(s) first, then delete the environment."
+            exit 1
+          fi
+          echo "✅ No applications are deployed to environment '${RESOURCE_NAME}'; safe to delete."
+
+      - name: Delete Radius resource
+        uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}
+        with:
+          resource-type: ${{ inputs.resource_type }}
+          name: ${{ inputs.name }}
+
+      - name: Teardown
+        if: always()
+        uses: radius-project/ai-extensions/.github/extension/actions/teardown@{{RADIUS_REF}}
+        with:
+          state-restored: ${{ steps.restore-state.outputs.state-restored }}

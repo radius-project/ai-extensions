@@ -257,6 +257,7 @@ export interface CanvasState {
   appFile?: string;
   existingEnvs?: string[];
   activeSubtab?: string;
+  ghCommandPresentation?: import("./gh-command-display.js").GhCommandPresentation;
   deployResult?: CanvasDeployResult;
   deployingRepo?: string;
   deployingBranch?: string;
@@ -272,6 +273,10 @@ export interface CanvasState {
     attemptId?: string;
   };
   deployStartedAt?: number;
+  // Monotonic per-invocation counter, advanced by `beginDeployAttempt`. Gives
+  // every deploy a distinct identity even when the attempt id is reused by a
+  // repair loop and no run was ever created.
+  deployGeneration?: number;
   deployFinishedAt?: number;
   deployLogs?: string[];
   deployLogBase?: number;

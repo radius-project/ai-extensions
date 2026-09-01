@@ -11,8 +11,12 @@
 import { setChildren } from "../dom.js";
 import { createCommandAction } from "../command-action.js";
 import type { CommandActionHandle } from "../command-action.js";
-import { remediationView } from "@radius-project/core/remediations";
 import type { RemediationView } from "@radius-project/core/remediations";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  presentedRemediationView,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
 import { beginEntry } from "../lifecycle.js";
 import { formatElapsed, stageGlyph } from "../progress-format.js";
 import {
@@ -57,6 +61,7 @@ export const PROGRESS_IDS = {
   stages: "env-progress-stages",
   steps: "env-progress-steps",
   details: "env-progress-details",
+  diagnostics: "env-progress-diagnostics",
   actions: "env-progress-actions",
   verifyBypass: "env-progress-verify-bypass",
   bottomButtons: "env-progress-bottom-buttons",
@@ -82,6 +87,7 @@ export const PROGRESS_IDS = {
   stateManualBlock: "env-progress-state-manual-block",
   commands: "env-progress-commands",
   commandButtons: "env-progress-command-buttons",
+  commandDescriptions: "env-progress-command-descriptions",
   commandNote: "env-progress-command-note",
   commandGuidance: "env-progress-command-guidance",
   commandStatus: "env-progress-command-status",
@@ -92,6 +98,25 @@ export const PROGRESS_IDS = {
 // panel template), so its id lives here for the browser to bind and tests to
 // locate it.
 export const VERIFY_BYPASS_BUTTON_ID = "env-progress-verify-bypass-button";
+
+export const DIAGNOSTIC_IDS = {
+  open: "env-progress-diagnostics-open",
+  modal: "env-diagnostics-modal",
+  title: "env-diagnostics-title",
+  includeIdentifiers: "env-diagnostics-include-identifiers",
+  preview: "env-diagnostics-preview",
+  repository: "env-diagnostics-repository",
+  branch: "env-diagnostics-branch",
+  environment: "env-diagnostics-environment",
+  githubLogin: "env-diagnostics-github-login",
+  reviewBlock: "env-diagnostics-review-block",
+  reviewedIdentifiers: "env-diagnostics-reviewed-identifiers",
+  announcement: "env-progress-diagnostics-status",
+  status: "env-diagnostics-status",
+  error: "env-diagnostics-error",
+  cancel: "env-diagnostics-cancel",
+  download: "env-diagnostics-download"
+} as const;
 
 export const ROLLBACK_IDS = {
   modal: "env-rollback-modal",
@@ -142,14 +167,15 @@ const COMMAND_BUTTON_CLASS = "rad-btn rad-btn--secondary";
 const COMMAND_REFUSED_MESSAGE = "Radius could not accept that request.";
 const COMMAND_UNREACHABLE_MESSAGE =
   "Radius could not reach the setup service. Try again.";
-const STOPPING_MESSAGE = "Stopping after the current step…";
+const STOPPING_MESSAGE = "Pausing after the current step…";
 const COMMAND_ACCEPTED_MESSAGE = "Radius accepted the request…";
 const ROLLBACK_UNAVAILABLE_MESSAGE =
-  "Radius could not open the rollback confirmation.";
+  "Radius could not open the delete confirmation.";
 const DEFAULT_FAILURE_TITLE = "Setup didn’t finish";
-const DEFAULT_ROLLBACK_TITLE = "Roll back resources created by this setup?";
-const DEFAULT_ROLLBACK_CONFIRM = "Roll back resources";
-const DEFAULT_ROLLBACK_CANCEL = "Keep resources";
+const DEFAULT_ROLLBACK_TITLE = "Delete this setup and its created resources?";
+const DEFAULT_ROLLBACK_CONFIRM = "Delete setup";
+const DEFAULT_ROLLBACK_CANCEL = "Keep setup";
+const DIAGNOSTIC_FILENAME = "radius-environment-operation-diagnostics.json";
 const CANCELLED_ACTIVITY_MESSAGE = "Environment setup cancelled.";
 // Commands that delete. Accepting one supersedes the failure the landing is
 // still reporting, so the banner comes down and the environment table is
@@ -157,6 +183,7 @@ const CANCELLED_ACTIVITY_MESSAGE = "Environment setup cancelled.";
 const CLEANING_COMMAND_KINDS: ReadonlySet<string> = new Set([
   "rollback",
   "retry_cleanup",
+  "retry_deletion",
   "exit_setup"
 ]);
 
@@ -164,11 +191,12 @@ const CLEANING_COMMAND_KINDS: ReadonlySet<string> = new Set([
 // are different promises, so none of them borrows another's wording.
 const COMMAND_STATUS_TEXT: Readonly<Record<string, string>> = {
   stop: STOPPING_MESSAGE,
-  rollback: "Rollback started. Removing the resources Radius created…",
+  rollback: "Setup deletion started. Removing the resources Radius created…",
   retry_cleanup:
-    "Rollback retry started. Removing the resources still present…",
+    "Deletion retry started. Removing the resources still present…",
   continue_setup: "Continuing setup…",
   retry_setup: "Retrying setup…",
+  retry_deletion: "Retrying deletion…",
   exit_setup: "Closing this setup and removing the resources Radius created…"
 };
 
@@ -349,14 +377,29 @@ export interface OperationInputPrompt {
   readonly requestedAt: string;
   readonly code: string;
   readonly checkpoint: unknown;
+  readonly message: string;
   readonly candidates: readonly AppPickerCandidate[];
   readonly defaultAppId: string;
+}
+
+interface DiagnosticContext {
+  readonly repository: string | null;
+  readonly branch: string | null;
+  readonly environment: string | null;
+  readonly githubLogin: string | null;
+  readonly omittedFieldCount: number;
+}
+
+interface DiagnosticContextPreview {
+  readonly identifiers: DiagnosticContext;
+  readonly fingerprint: string;
 }
 
 export type OperationTerminalPayload = Readonly<Record<string, unknown>>;
 
 export interface OperationRecord {
   readonly operationId: string;
+  readonly kind: string;
   readonly environment: string;
   readonly provider: string;
   readonly state: string;
@@ -430,6 +473,11 @@ export interface EnvironmentOperationsDeps {
   showError(message: string): void;
   reloadEnvironmentsTable(): void;
   resetSubmitButton?(): void;
+  // Terminal handler for a resumed delete operation. The page owns the delete
+  // acknowledgement UI (the confirm dialog it renders), so resume routes a
+  // delete op's terminal state here instead of the setup-oriented
+  // `applyTerminal`, keeping the start and rejoin paths consistent.
+  onDeleteTerminal?(op: OperationRecord): void;
   promptServiceManagementReference(): Promise<string>;
   promptAppSelection(request: AppPickerRequest): Promise<AppPickerChoice>;
   prefersReducedMotion?(): boolean;
@@ -438,6 +486,7 @@ export interface EnvironmentOperationsDeps {
 export interface EnvironmentOperationsOptions {
   readonly repo: string;
   readonly mutationNonce?: string;
+  readonly ghCommandPresentation?: GhCommandPresentation;
   readonly deps: EnvironmentOperationsDeps;
 }
 
@@ -470,15 +519,24 @@ function parseStageList(value: unknown): OperationStageOrStep[] {
   return list;
 }
 
-function parseFailure(value: unknown): OperationFailure | null {
+function parseFailure(
+  value: unknown,
+  ghCommandPresentation: GhCommandPresentation
+): OperationFailure | null {
   if (!isRecord(value)) return null;
   return {
     message: readString(value, "message"),
-    remediation: parseFailureRemediation(value["remediation"])
+    remediation: parseFailureRemediation(
+      value["remediation"],
+      ghCommandPresentation
+    )
   };
 }
 
-function parseFailureRemediation(value: unknown): RemediationView | null {
+function parseFailureRemediation(
+  value: unknown,
+  ghCommandPresentation: GhCommandPresentation
+): RemediationView | null {
   if (!isRecord(value)) return null;
   const id = readString(value, "id");
   const rawParams = value["params"];
@@ -491,7 +549,7 @@ function parseFailureRemediation(value: unknown): RemediationView | null {
   // A refused build still yields a view -- an unknown id and refused params both
   // come back unrunnable -- so `runnable` is the single gate. An unrunnable one
   // must fall back to the prose, never to an empty callout.
-  const view = remediationView(id, params);
+  const view = presentedRemediationView(id, params, ghCommandPresentation);
   return view.runnable ? view : null;
 }
 
@@ -673,6 +731,30 @@ function parseVerification(
   return { dispatchedAt: readNumber(value, "dispatchedAt") };
 }
 
+function parseDiagnosticContext(
+  value: unknown
+): DiagnosticContextPreview | null {
+  if (!isRecord(value)) return null;
+  const identifiers = readRecord(value, "contextualIdentifiers");
+  if (!identifiers) return null;
+  const fingerprint = readString(value, "contextFingerprint");
+  if (!/^[0-9a-f]{64}$/u.test(fingerprint)) return null;
+  const optional = (key: string): string | null => {
+    const value = readString(identifiers, key);
+    return value === "" ? null : value;
+  };
+  return {
+    identifiers: {
+      repository: optional("repository"),
+      branch: optional("branch"),
+      environment: optional("environment"),
+      githubLogin: optional("githubLogin"),
+      omittedFieldCount: readNumber(identifiers, "omittedFieldCount") ?? 0
+    },
+    fingerprint
+  };
+}
+
 function parseAppCandidates(value: unknown): AppPickerCandidate[] {
   if (!Array.isArray(value)) return [];
   const candidates: AppPickerCandidate[] = [];
@@ -702,6 +784,7 @@ function parseInputPrompt(value: unknown): OperationInputPrompt | null {
     requestedAt: readString(value, "requestedAt"),
     code,
     checkpoint: value["checkpoint"],
+    message: readString(value, "message"),
     candidates: parseAppCandidates(
       metadata ? metadata["candidates"] : undefined
     ),
@@ -714,13 +797,16 @@ function parseTerminalState(value: string): TerminalState | null {
 }
 
 function parseOperationRecord(
-  raw: Record<string, unknown>
+  raw: Record<string, unknown>,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): OperationRecord | null {
   const operationId = readString(raw, "operationId");
   if (operationId === "") return null;
   const endedAt = readString(raw, "endedAt");
+  const kind = readString(raw, "kind");
   return {
     operationId,
+    kind: kind === "" ? "create" : kind,
     environment: readString(raw, "environment"),
     provider: readString(raw, "provider"),
     state: readString(raw, "state"),
@@ -729,7 +815,7 @@ function parseOperationRecord(
     currentStage: readString(raw, "currentStage"),
     stages: parseStageList(raw["stages"]),
     steps: parseStageList(raw["steps"]),
-    failure: parseFailure(raw["failure"]),
+    failure: parseFailure(raw["failure"], ghCommandPresentation),
     cleanup: parseCleanup(raw["cleanup"]),
     actions: parseActions(raw["actions"]),
     guidance: parseGuidance(raw["guidance"]),
@@ -752,10 +838,19 @@ function parseOperationRecord(
  * identity across polls, resumes, and page navigation.
  */
 export function parseOperationResponse(
-  payload: unknown
+  payload: unknown,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): OperationRecord | null {
   const raw = readRecord(payload, "operation");
-  return raw ? parseOperationRecord(raw) : null;
+  return raw ? parseOperationRecord(raw, ghCommandPresentation) : null;
+}
+
+function visibleOperationActions(
+  operation: OperationRecord | null
+): readonly OperationAction[] {
+  if (operation === null) return [];
+  if (operation.kind !== "delete") return operation.actions;
+  return operation.actions.filter((action) => action.kind === "retry_deletion");
 }
 
 /**
@@ -955,7 +1050,8 @@ function isSuccessfulSetup(op: OperationRecord | null): boolean {
   return (
     op !== null &&
     (op.terminalState === "succeeded" ||
-      op.terminalState === "succeeded_with_warnings")
+      op.terminalState === "succeeded_with_warnings") &&
+    op.actions.length === 0
   );
 }
 
@@ -1007,6 +1103,25 @@ function operationUrl(operationId: string): string {
   return `${OPERATIONS_PATH}/${encodeURIComponent(operationId)}`;
 }
 
+function dismissUrl(operationId: string): string {
+  return `${operationUrl(operationId)}/dismiss`;
+}
+
+function diagnosticUrl(
+  operationId: string,
+  identifiers?: "preview" | "include",
+  contextFingerprint?: string
+): string {
+  const base = `${operationUrl(operationId)}/diagnostics`;
+  if (!identifiers) return base;
+  return (
+    `${base}?identifiers=${identifiers}` +
+    (contextFingerprint ?
+      `&contextFingerprint=${encodeURIComponent(contextFingerprint)}`
+    : "")
+  );
+}
+
 function resumeUrl(operationId: string, code: string): string {
   return `${operationUrl(operationId)}/resume/${encodeURIComponent(code)}`;
 }
@@ -1043,6 +1158,8 @@ export function initializeEnvironmentOperations(
   options: EnvironmentOperationsOptions
 ): EnvironmentOperationsController | null {
   const dom = context.dom;
+  const parseResponse = (payload: unknown): OperationRecord | null =>
+    parseOperationResponse(payload, options.ghCommandPresentation);
   const maybePanel = dom.byId(PROGRESS_IDS.panel);
   if (!maybePanel) return null;
   // Rebound to a variable whose declared type already excludes `null`: the
@@ -1060,12 +1177,18 @@ export function initializeEnvironmentOperations(
   let progressTimer: ScopeTimer | null = null;
   let elapsedTimer: ScopeTimer | null = null;
   let activeAbort: AbortHandle | null = null;
+  const stepsElement = dom.byId(PROGRESS_IDS.steps);
+  const detailsElement = dom.byId(PROGRESS_IDS.details);
+  let followStepTail = true;
+  let renderedOperationId = "";
   // Bumped at the start of every resumeProgress()/trackProgress() call. Async
   // work captures the value at its start and checks it before touching the
   // DOM or scheduling more work, so a response that outlives its session
   // (superseded by a newer track/resume call, or by teardown) is discarded
   // instead of overwriting state that belongs to a newer operation.
   let session = 0;
+  let displayedOperationId = "";
+  let dismissInFlight = false;
 
   function abortInFlight(): void {
     activeAbort?.abort();
@@ -1073,6 +1196,19 @@ export function initializeEnvironmentOperations(
   }
 
   scope.onTeardown(() => abortInFlight());
+
+  if (stepsElement) {
+    scope.on(stepsElement, "scroll", () => {
+      followStepTail = dom.isScrolledToEnd(stepsElement);
+    });
+    if (detailsElement) {
+      scope.on(detailsElement, "toggle", () => {
+        if (detailsElement.getAttribute("open") !== null && followStepTail) {
+          dom.scrollToEnd(stepsElement);
+        }
+      });
+    }
+  }
 
   function fetchTracked(
     url: string,
@@ -1189,11 +1325,35 @@ export function initializeEnvironmentOperations(
     }
 
     const cleanup = op.cleanup;
+    if (op.kind === "delete") {
+      messageEl.textContent =
+        op.failure && op.failure.message !== "" ?
+          op.failure.message
+        : "The deletion request failed.";
+      const titleEl = dom.byId(PROGRESS_IDS.failureTitle);
+      if (titleEl) {
+        titleEl.textContent =
+          op.headline?.title || "Deletion could not continue";
+      }
+      cleanupEl.textContent =
+        "Deletion stopped before all stages completed. Completed stages remain recorded and will not be repeated.";
+      retryEl.textContent =
+        op.actions.some((action) => action.kind === "retry_deletion") ?
+          "Retry deletion resumes from the unfinished stage."
+        : "";
+      setFailureList(
+        [],
+        dom.byId(PROGRESS_IDS.cleanupWarningsList),
+        dom.byId(PROGRESS_IDS.cleanupWarningsBlock)
+      );
+      card.style.display = "";
+      return;
+    }
     const cleanupStatus =
       cleanup.state === "running" ? "Cleanup is still running."
       : cleanup.state === "pending" ? "Cleanup has not started yet."
       : cleanup.rollbackBeforeCommit === false ?
-        "Cleanup stopped at the commit point, so reusable artifacts were left in place."
+        "Deletion stopped at the commit point, so reusable artifacts were left in place."
       : cleanup.state === "succeeded_with_warnings" ?
         "Cleanup finished with warnings."
       : cleanup.state === "succeeded" ? "Cleanup finished."
@@ -1333,6 +1493,377 @@ export function initializeEnvironmentOperations(
     if (banner) banner.style.display = "none";
   }
 
+  function createDialogFocusTrap(
+    dialogId: string,
+    selector: string,
+    close: () => void
+  ): { bind(): void; unbind(): void } {
+    let bound = false;
+    const keydown: DomEventListener = (event) => {
+      const dialog = dom.byId(dialogId);
+      if (!dialog) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = dom.all(dialog, selector);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = context.focus.active();
+      if (event.shiftKey === true && (active === first || active === null)) {
+        event.preventDefault();
+        last.focus();
+        return;
+      }
+      if (event.shiftKey !== true && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    return {
+      bind() {
+        if (bound) return;
+        dom.document.addEventListener("keydown", keydown);
+        bound = true;
+      },
+      unbind() {
+        if (!bound) return;
+        dom.document.removeEventListener("keydown", keydown);
+        bound = false;
+      }
+    };
+  }
+
+  // ---------------- Diagnostic snapshot review ----------------
+
+  let diagnosticOperationId = "";
+  let diagnosticReturnFocus: DomElement | null = null;
+  let diagnosticContextReady = false;
+  let diagnosticContextFingerprint = "";
+  let diagnosticPreviewGeneration = 0;
+  let diagnosticPreviewAbort: AbortHandle | null = null;
+  let diagnosticDownloadGeneration = 0;
+  let diagnosticDownloadAbort: AbortHandle | null = null;
+  let diagnosticDownloadBusy = false;
+
+  function setDiagnosticStatus(message: string): void {
+    const status = dom.byId(DIAGNOSTIC_IDS.status);
+    if (status) status.textContent = message;
+  }
+
+  function setDiagnosticAnnouncement(message: string): void {
+    const status = dom.byId(DIAGNOSTIC_IDS.announcement);
+    if (status && status.textContent !== message) status.textContent = message;
+  }
+
+  function setDiagnosticError(message: string): void {
+    const error = dom.byId(DIAGNOSTIC_IDS.error);
+    if (error) error.textContent = message;
+  }
+
+  function setDiagnosticDownload(url: string): void {
+    const download = dom.byId(DIAGNOSTIC_IDS.download);
+    if (!download) return;
+    if (url === "") {
+      download.removeAttribute("href");
+      download.setAttribute("aria-disabled", "true");
+      return;
+    }
+    download.setAttribute("href", url);
+    download.setAttribute("aria-disabled", "false");
+  }
+
+  const diagnosticFocusTrap = createDialogFocusTrap(
+    DIAGNOSTIC_IDS.modal,
+    "button:not([disabled]), input:not([disabled]), a[href]",
+    closeDiagnosticDialog
+  );
+
+  function abortDiagnosticPreview(): void {
+    diagnosticPreviewGeneration += 1;
+    diagnosticPreviewAbort?.abort();
+    diagnosticPreviewAbort = null;
+  }
+
+  function abortDiagnosticDownload(): void {
+    diagnosticDownloadGeneration += 1;
+    diagnosticDownloadAbort?.abort();
+    diagnosticDownloadAbort = null;
+    diagnosticDownloadBusy = false;
+  }
+
+  function dismissDiagnosticDialog(): void {
+    const dialog = dom.byId(DIAGNOSTIC_IDS.modal);
+    if (dialog) dialog.style.display = "none";
+    abortDiagnosticPreview();
+    abortDiagnosticDownload();
+    diagnosticFocusTrap.unbind();
+    diagnosticContextReady = false;
+    diagnosticContextFingerprint = "";
+  }
+
+  function closeDiagnosticDialog(): void {
+    dismissDiagnosticDialog();
+    const trigger = diagnosticReturnFocus;
+    diagnosticReturnFocus = null;
+    context.focus.focus(trigger);
+  }
+
+  function renderDiagnosticContext(identifiers: DiagnosticContext): void {
+    const values: ReadonlyArray<readonly [string, string | null]> = [
+      [DIAGNOSTIC_IDS.repository, identifiers.repository],
+      [DIAGNOSTIC_IDS.branch, identifiers.branch],
+      [DIAGNOSTIC_IDS.environment, identifiers.environment],
+      [DIAGNOSTIC_IDS.githubLogin, identifiers.githubLogin]
+    ];
+    for (const [id, value] of values) {
+      const element = dom.byId(id);
+      if (element) element.textContent = value ?? "Not available";
+    }
+    setDiagnosticStatus(
+      identifiers.omittedFieldCount === 0 ?
+        "Review the identifiers, then confirm that you reviewed them."
+      : `${identifiers.omittedFieldCount} contextual identifier${
+          identifiers.omittedFieldCount === 1 ? " is" : "s are"
+        } unavailable. Review the remaining values before downloading.`
+    );
+  }
+
+  function refreshDiagnosticDownload(): void {
+    const include = dom.inputById(DIAGNOSTIC_IDS.includeIdentifiers);
+    const reviewed = dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers);
+    if (diagnosticOperationId === "") {
+      setDiagnosticDownload("");
+      return;
+    }
+    if (include?.checked !== true) {
+      setDiagnosticDownload(diagnosticUrl(diagnosticOperationId));
+      return;
+    }
+    if (diagnosticDownloadBusy) {
+      setDiagnosticDownload("");
+      return;
+    }
+    setDiagnosticDownload(
+      diagnosticContextReady && reviewed?.checked === true ?
+        diagnosticUrl(
+          diagnosticOperationId,
+          "include",
+          diagnosticContextFingerprint
+        )
+      : ""
+    );
+  }
+
+  function loadDiagnosticContext(): void {
+    const preview = dom.byId(DIAGNOSTIC_IDS.preview);
+    const reviewed = dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers);
+    if (preview) preview.style.display = "";
+    if (reviewed) reviewed.checked = false;
+    diagnosticContextReady = false;
+    diagnosticContextFingerprint = "";
+    refreshDiagnosticDownload();
+    setDiagnosticError("");
+    setDiagnosticStatus("Loading contextual identifiers…");
+    abortDiagnosticPreview();
+    const generation = diagnosticPreviewGeneration;
+    const abort = context.net.createAbort();
+    diagnosticPreviewAbort = abort;
+    void context.net
+      .fetch(
+        diagnosticUrl(diagnosticOperationId, "preview"),
+        abort ?
+          { cache: "no-store", signal: abort.signal }
+        : { cache: "no-store" }
+      )
+      .then((response) => {
+        if (!response.ok) throw new Error("preview request failed");
+        return response.json();
+      })
+      .then((payload) => {
+        if (generation !== diagnosticPreviewGeneration) return;
+        const preview = parseDiagnosticContext(payload);
+        if (!preview) throw new Error("preview response was invalid");
+        diagnosticContextReady = true;
+        diagnosticContextFingerprint = preview.fingerprint;
+        renderDiagnosticContext(preview.identifiers);
+        refreshDiagnosticDownload();
+      })
+      .catch((error: unknown) => {
+        if (generation !== diagnosticPreviewGeneration) return;
+        context.logger.error(
+          "Radius could not preview diagnostic identifiers.",
+          error
+        );
+        setDiagnosticStatus("");
+        setDiagnosticError(
+          "Radius could not load the contextual identifiers. Download the support-safe snapshot or try again."
+        );
+      })
+      .finally(() => {
+        if (diagnosticPreviewAbort === abort) diagnosticPreviewAbort = null;
+      });
+  }
+
+  function handleDiagnosticIdentifierChoice(): void {
+    const include = dom.inputById(DIAGNOSTIC_IDS.includeIdentifiers);
+    const preview = dom.byId(DIAGNOSTIC_IDS.preview);
+    const reviewed = dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers);
+    if (include?.checked === true) {
+      abortDiagnosticDownload();
+      loadDiagnosticContext();
+      return;
+    }
+    abortDiagnosticPreview();
+    abortDiagnosticDownload();
+    diagnosticContextReady = false;
+    diagnosticContextFingerprint = "";
+    if (preview) preview.style.display = "none";
+    if (reviewed) reviewed.checked = false;
+    setDiagnosticStatus("");
+    setDiagnosticError("");
+    refreshDiagnosticDownload();
+  }
+
+  function openDiagnosticDialog(): void {
+    const dialog = dom.byId(DIAGNOSTIC_IDS.modal);
+    const trigger = dom.byId(DIAGNOSTIC_IDS.open);
+    if (!dialog || !trigger || diagnosticOperationId === "") return;
+    diagnosticReturnFocus = trigger;
+    const include = dom.inputById(DIAGNOSTIC_IDS.includeIdentifiers);
+    const reviewed = dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers);
+    const preview = dom.byId(DIAGNOSTIC_IDS.preview);
+    if (include) include.checked = false;
+    if (reviewed) reviewed.checked = false;
+    if (preview) preview.style.display = "none";
+    diagnosticContextReady = false;
+    diagnosticContextFingerprint = "";
+    setDiagnosticStatus("");
+    setDiagnosticError("");
+    setDiagnosticAnnouncement("");
+    refreshDiagnosticDownload();
+    dialog.style.display = "flex";
+    diagnosticFocusTrap.bind();
+    dom.byId(DIAGNOSTIC_IDS.title)?.focus();
+  }
+
+  function handleDiagnosticDownload(
+    download: DomElement,
+    event: Parameters<DomEventListener>[0]
+  ): void {
+    event.preventDefault();
+    if (diagnosticDownloadBusy) {
+      return;
+    }
+    const url = download.getAttribute("href");
+    if (url === null) {
+      setDiagnosticError(
+        "Review the contextual identifiers before downloading this snapshot."
+      );
+      dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers)?.focus();
+      return;
+    }
+    const include = dom.inputById(DIAGNOSTIC_IDS.includeIdentifiers);
+    const contextual = include?.checked === true;
+    abortDiagnosticDownload();
+    diagnosticDownloadBusy = true;
+    refreshDiagnosticDownload();
+    setDiagnosticError("");
+    setDiagnosticStatus(
+      contextual ?
+        "Confirming the reviewed identifiers…"
+      : "Preparing the diagnostic snapshot…"
+    );
+    const generation = diagnosticDownloadGeneration;
+    const abort = context.net.createAbort();
+    diagnosticDownloadAbort = abort;
+    void context.net
+      .fetch(
+        url,
+        abort ?
+          { cache: "no-store", signal: abort.signal }
+        : { cache: "no-store" }
+      )
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error(
+            contextual && response.status === 409 ?
+              "context-changed"
+            : "download-failed"
+          );
+        }
+        const text = await response.text();
+        if (generation !== diagnosticDownloadGeneration) return;
+        if (
+          !context.download.save(text, "application/json", DIAGNOSTIC_FILENAME)
+        ) {
+          throw new Error("download-unavailable");
+        }
+      })
+      .then(() => {
+        if (generation !== diagnosticDownloadGeneration) return;
+        setDiagnosticAnnouncement("Diagnostic snapshot download started.");
+        closeDiagnosticDialog();
+      })
+      .catch((error: unknown) => {
+        if (generation !== diagnosticDownloadGeneration) return;
+        const code = error instanceof Error ? error.message : "";
+        if (code === "context-changed") {
+          const reviewed = dom.inputById(DIAGNOSTIC_IDS.reviewedIdentifiers);
+          if (reviewed) reviewed.checked = false;
+          diagnosticContextReady = false;
+          diagnosticContextFingerprint = "";
+          loadDiagnosticContext();
+          setDiagnosticError(
+            "The contextual identifiers changed. Review the updated values before downloading."
+          );
+          return;
+        }
+        context.logger.error(
+          contextual ?
+            "Radius could not download contextual diagnostics."
+          : "Radius could not download support-safe diagnostics.",
+          error
+        );
+        setDiagnosticStatus("");
+        setDiagnosticError(
+          code === "download-unavailable" ?
+            `This host could not save the ${contextual ? "contextual" : "support-safe"} diagnostic snapshot.`
+          : `Radius could not download the ${contextual ? "contextual" : "support-safe"} diagnostic snapshot. Try again.`
+        );
+      })
+      .finally(() => {
+        if (generation !== diagnosticDownloadGeneration) return;
+        diagnosticDownloadAbort = null;
+        diagnosticDownloadBusy = false;
+        refreshDiagnosticDownload();
+      });
+  }
+
+  const diagnosticOpen = dom.byId(DIAGNOSTIC_IDS.open);
+  if (diagnosticOpen) scope.on(diagnosticOpen, "click", openDiagnosticDialog);
+  const diagnosticInclude = dom.byId(DIAGNOSTIC_IDS.includeIdentifiers);
+  if (diagnosticInclude)
+    scope.on(diagnosticInclude, "change", handleDiagnosticIdentifierChoice);
+  const diagnosticReviewed = dom.byId(DIAGNOSTIC_IDS.reviewedIdentifiers);
+  if (diagnosticReviewed)
+    scope.on(diagnosticReviewed, "change", refreshDiagnosticDownload);
+  const diagnosticCancel = dom.byId(DIAGNOSTIC_IDS.cancel);
+  if (diagnosticCancel)
+    scope.on(diagnosticCancel, "click", closeDiagnosticDialog);
+  const diagnosticDownload = dom.byId(DIAGNOSTIC_IDS.download);
+  if (diagnosticDownload)
+    scope.on(diagnosticDownload, "click", (event) =>
+      handleDiagnosticDownload(diagnosticDownload, event)
+    );
+  scope.onTeardown(() => {
+    dismissDiagnosticDialog();
+    diagnosticReturnFocus = null;
+  });
+
   // ---------------- Rollback confirmation ----------------
   //
   // Removing cloud resources cannot be undone, so the destructive command is
@@ -1345,7 +1876,6 @@ export function initializeEnvironmentOperations(
     readonly op: OperationRecord;
   } | null = null;
   let rollbackReturnFocus: DomElement | null = null;
-  let rollbackKeydownBound = false;
 
   function setRollbackList(
     items: readonly string[],
@@ -1355,51 +1885,16 @@ export function initializeEnvironmentOperations(
     setStateList(items, listId, blockId);
   }
 
-  function rollbackFocusable(dialog: DomElement): readonly DomElement[] {
-    return dom.all(dialog, "button:not([disabled])");
-  }
-
   // Focus stays inside the dialog while it is open. A Tab that escapes to the
   // page behind a modal leaves a keyboard user operating controls they cannot
   // see, which is the specific failure the trap exists to prevent.
-  const rollbackKeydown: DomEventListener = (event) => {
-    const dialog = dom.byId(ROLLBACK_IDS.modal);
-    if (!dialog) return;
-    if (event.key === "Escape") {
-      event.preventDefault();
-      closeRollbackDialog();
-      return;
-    }
-    if (event.key !== "Tab") return;
-    const focusable = rollbackFocusable(dialog);
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const active = context.focus.active();
-    if (event.shiftKey === true && (active === first || active === null)) {
-      event.preventDefault();
-      last.focus();
-      return;
-    }
-    if (event.shiftKey !== true && active === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  };
+  const rollbackFocusTrap = createDialogFocusTrap(
+    ROLLBACK_IDS.modal,
+    "button:not([disabled])",
+    closeRollbackDialog
+  );
 
-  function bindRollbackKeydown(): void {
-    if (rollbackKeydownBound) return;
-    dom.document.addEventListener("keydown", rollbackKeydown);
-    rollbackKeydownBound = true;
-  }
-
-  function unbindRollbackKeydown(): void {
-    if (!rollbackKeydownBound) return;
-    dom.document.removeEventListener("keydown", rollbackKeydown);
-    rollbackKeydownBound = false;
-  }
-
-  scope.onTeardown(unbindRollbackKeydown);
+  scope.onTeardown(rollbackFocusTrap.unbind);
 
   function openRollbackDialog(
     action: OperationAction,
@@ -1447,14 +1942,14 @@ export function initializeEnvironmentOperations(
       cancel.textContent = action.cancelLabel || DEFAULT_ROLLBACK_CANCEL;
     }
     dialog.style.display = "flex";
-    bindRollbackKeydown();
+    rollbackFocusTrap.bind();
     titleEl?.focus();
   }
 
   function dismissRollbackDialog(): void {
     const dialog = dom.byId(ROLLBACK_IDS.modal);
     if (dialog) dialog.style.display = "none";
-    unbindRollbackKeydown();
+    rollbackFocusTrap.unbind();
     rollbackPending = null;
   }
 
@@ -1492,7 +1987,7 @@ export function initializeEnvironmentOperations(
     void fetchTracked(operationUrl(operationId), { cache: "no-store" })
       .then((response) => (response.ok ? response.json() : null))
       .then((payload) => {
-        const op = parseOperationResponse(payload);
+        const op = parseResponse(payload);
         if (op) renderProgress(op);
       })
       .catch(() => {
@@ -1515,6 +2010,14 @@ export function initializeEnvironmentOperations(
       return;
     }
     sendCommand(action, op);
+  }
+
+  function applyOperationTerminal(op: OperationRecord): void {
+    if (op.kind === "delete" && deps.onDeleteTerminal) {
+      deps.onDeleteTerminal(op);
+      return;
+    }
+    applyTerminal(op);
   }
 
   function sendCommand(action: OperationAction, op: OperationRecord): void {
@@ -1542,7 +2045,7 @@ export function initializeEnvironmentOperations(
       .then((result) => {
         if (!commandIsActive()) return;
         setCommandBusy(false);
-        const updated = parseOperationResponse(result.payload);
+        const updated = parseResponse(result.payload);
         if (!result.ok) {
           setCommandStatus("");
           setCommandError(
@@ -1566,11 +2069,11 @@ export function initializeEnvironmentOperations(
         // result.
         if (updated && updated.terminalState !== null) {
           stopProgress();
-          applyTerminal(updated);
+          applyOperationTerminal(updated);
           return;
         }
         if (repo !== "") {
-          trackProgress(op.environment, op.provider, applyTerminal);
+          trackProgress(op.environment, op.provider, applyOperationTerminal);
           return;
         }
         pollOperation(op.operationId);
@@ -1622,6 +2125,16 @@ export function initializeEnvironmentOperations(
     element.className = COMMAND_TONE_CLASS[action.tone] ?? COMMAND_BUTTON_CLASS;
     element.textContent = action.label === "" ? "Continue" : action.label;
     element.disabled = commandInFlight || action.pending;
+    if (action.description !== "") {
+      element.setAttribute("title", action.description);
+      const descriptionId = `${element.id}-description`;
+      element.setAttribute("aria-describedby", descriptionId);
+      const description = dom.createElement("span");
+      description.id = descriptionId;
+      description.className = "env-progress__command-description";
+      description.textContent = action.description;
+      dom.byId(PROGRESS_IDS.commandDescriptions)?.appendChild(description);
+    }
     if (action.requiresConfirmation) {
       element.setAttribute("aria-haspopup", "dialog");
     }
@@ -1645,14 +2158,18 @@ export function initializeEnvironmentOperations(
     const dismissEl = dom.byId(PROGRESS_IDS.dismiss);
     if (bottomEl) bottomEl.replaceChildren();
     const acknowledged = isAcknowledgedOutcome(op);
+    const canExitCompletedDeletion =
+      op?.kind === "delete" && op.terminalState === "succeeded_with_warnings";
     if (dismissEl) {
-      dismissEl.textContent = acknowledged ? "OK" : "Dismiss";
-      dismissEl.style.display = acknowledged ? "" : "none";
+      dismissEl.textContent = canExitCompletedDeletion ? "Exit" : "OK";
+      dismissEl.style.display =
+        acknowledged || canExitCompletedDeletion ? "" : "none";
     }
+    const actions = visibleOperationActions(op);
     const bottomActions =
       op === null || acknowledged ?
         []
-      : op.actions.filter((action) => action.placement === "bottom");
+      : actions.filter((action) => action.placement === "bottom");
     if (bottomEl && op !== null) {
       for (const action of bottomActions) {
         bottomEl.appendChild(createCommandButton(action, op));
@@ -1660,7 +2177,9 @@ export function initializeEnvironmentOperations(
     }
     if (actionsEl) {
       actionsEl.style.display =
-        acknowledged || bottomActions.length > 0 ? "flex" : "none";
+        acknowledged || canExitCompletedDeletion || bottomActions.length > 0 ?
+          "flex"
+        : "none";
     }
   }
 
@@ -1668,8 +2187,10 @@ export function initializeEnvironmentOperations(
     const container = dom.byId(PROGRESS_IDS.commands);
     const buttons = dom.byId(PROGRESS_IDS.commandButtons);
     const note = dom.byId(PROGRESS_IDS.commandNote);
+    const descriptions = dom.byId(PROGRESS_IDS.commandDescriptions);
     if (!container || !buttons || !note) return;
-    const actions = op?.actions ?? [];
+    descriptions?.replaceChildren();
+    const actions = visibleOperationActions(op);
     const rowActions = actions.filter(
       (action) => action.placement !== "bottom"
     );
@@ -1724,12 +2245,8 @@ export function initializeEnvironmentOperations(
     for (const action of rowActions) {
       buttons.appendChild(createCommandButton(action, record));
     }
-    const descriptions = rowActions
-      .map((action) => action.description)
-      .filter((description) => description !== "");
     const transition = record.nextTransition?.message ?? "";
-    if (transition !== "") descriptions.unshift(transition);
-    note.textContent = descriptions.join(" ");
+    note.textContent = transition;
     if (rowActions.some((action) => action.kind === "stop" && action.pending)) {
       setCommandStatus(STOPPING_MESSAGE);
     }
@@ -1753,11 +2270,49 @@ export function initializeEnvironmentOperations(
     noteEl.style.display = message === "" ? "none" : "";
   }
 
+  function renderDiagnostics(op: OperationRecord | null): boolean {
+    const container = dom.byId(PROGRESS_IDS.diagnostics);
+    const open = dom.byId(DIAGNOSTIC_IDS.open);
+    if (!container || !open) return false;
+    const available =
+      op !== null &&
+      !isExitedSetup(op) &&
+      !isSuccessfulSetup(op) &&
+      (op.terminalState !== null ||
+        op.state === "input_required" ||
+        op.actions.some(
+          (action) => action.kind === "stop" && action.pending === true
+        ));
+    if (!available) {
+      if (diagnosticOperationId !== "") {
+        dismissDiagnosticDialog();
+        diagnosticReturnFocus = null;
+      }
+      setDiagnosticAnnouncement("");
+      diagnosticOperationId = "";
+      container.style.display = "none";
+      return false;
+    }
+    if (
+      diagnosticOperationId !== "" &&
+      diagnosticOperationId !== op.operationId
+    ) {
+      dismissDiagnosticDialog();
+      diagnosticReturnFocus = null;
+      setDiagnosticAnnouncement("");
+    }
+    diagnosticOperationId = op.operationId;
+    container.style.display = "flex";
+    return true;
+  }
+
   function renderProgress(op: OperationRecord | null): void {
+    const hasDiagnostics = renderDiagnostics(op);
     // An exited setup renders as nothing at all. The record survives for the
     // history, but the customer closed it, and a poll or a page reload that put
     // the panel back would undo the one thing Exit setup promised.
     if (op === null || isExitedSetup(op)) {
+      displayedOperationId = "";
       panel.style.display = "none";
       setPanelActive(false);
       renderFailureCard(null);
@@ -1765,6 +2320,11 @@ export function initializeEnvironmentOperations(
       renderCommands(null);
       renderHeadline(null);
       return;
+    }
+    displayedOperationId = op.operationId;
+    if (renderedOperationId !== op.operationId) {
+      renderedOperationId = op.operationId;
+      followStepTail = true;
     }
     panel.style.display = "";
     setPanelActive(op.terminalState === null);
@@ -1810,16 +2370,18 @@ export function initializeEnvironmentOperations(
 
     const stagesEl = dom.byId(PROGRESS_IDS.stages);
     if (stagesEl) setChildren(dom, stagesEl, op.stages.map(stageSpec));
-    const stepsEl = dom.byId(PROGRESS_IDS.steps);
-    if (stepsEl) setChildren(dom, stepsEl, op.steps.map(stepSpec));
+    if (stepsElement) {
+      setChildren(dom, stepsElement, op.steps.map(stepSpec));
+      if (followStepTail) dom.scrollToEnd(stepsElement);
+    }
 
     renderFailureCard(op);
     renderPartialState(op);
     renderCommands(op);
 
-    const detailsEl = dom.byId(PROGRESS_IDS.details);
-    if (detailsEl) {
-      detailsEl.style.display = op.steps.length > 0 ? "" : "none";
+    if (detailsElement) {
+      detailsElement.style.display =
+        op.steps.length > 0 || hasDiagnostics ? "" : "none";
     }
   }
 
@@ -1854,7 +2416,7 @@ export function initializeEnvironmentOperations(
     return fetchTracked(operationUrl(operationId))
       .then((response) => (response.ok ? response.json() : null))
       .then((payload) => {
-        const op = parseOperationResponse(payload);
+        const op = parseResponse(payload);
         if (!op) return false;
         renderProgress(op);
         focusPanel();
@@ -2201,7 +2763,10 @@ export function initializeEnvironmentOperations(
               isOperationInputExpired(error.operation)
             ) {
               stopProgress();
-              const expired = parseOperationRecord(error.operation);
+              const expired = parseOperationRecord(
+                error.operation,
+                options.ghCommandPresentation
+              );
               if (expired) onTerminal(expired);
               return;
             }
@@ -2219,7 +2784,7 @@ export function initializeEnvironmentOperations(
         .then((response) => response.json())
         .then((payload) => {
           if (!active()) return;
-          const op = parseOperationResponse(payload);
+          const op = parseResponse(payload);
           // The registry retains the latest terminal operation for this
           // repository. During the short gap before a new POST registers,
           // that record belongs to the previous environment and must not
@@ -2302,28 +2867,85 @@ export function initializeEnvironmentOperations(
     const mySession = session;
     setCommandBusy(false);
     void fetchTracked(operationsByRepoUrl(repo))
-      .then((response) => response.json())
+      .then((response) => {
+        // A failed request is not evidence that the repo has no operation. If a
+        // deletion is still in flight, hiding its panel on a transient 5xx would
+        // strand the user with no visible progress until the next mount. Treat a
+        // non-OK response like a network error and leave whatever is on screen.
+        if (!response.ok) throw new Error("resume request failed");
+        return response.json();
+      })
       .then((payload) => {
         if (!scope.active || mySession !== session) return;
-        const op = parseOperationResponse(payload);
-        if (!op) return;
+        // Only a well-formed envelope is authoritative. A malformed body is, like
+        // a failed request, no reason to tear down a possibly live panel.
+        if (!isRecord(payload)) return;
+        const op = parseResponse(payload);
+        // The server is the authority on what this repo should show. When it
+        // reports nothing — no operation, or one the user has dismissed — the
+        // panel must reflect that, even if a leftover render left it on screen.
+        // Returning early here is what let a dismissed delete reappear when the
+        // user navigated away and came back to a panel still marked visible.
+        if (!op) {
+          renderProgress(null);
+          return;
+        }
         // A closed record is rebuilt too: its stop, retry, and partial-state
         // controls come from the saved operation, so a reload after a failure
         // still offers the same actions.
         renderProgress(op);
         if (op.terminalState !== null) return;
-        trackProgress(op.environment, op.provider, applyTerminal);
+        trackProgress(op.environment, op.provider, applyOperationTerminal);
       })
       .catch(() => {
         /* nothing to resume */
       });
   }
 
+  // Dismissal is a durable command: the server records `dismissedAt` so a
+  // reload or navigation cannot bring a settled panel back. Both the panel's
+  // own dismiss button and the delete acknowledgement dialog route through here
+  // so acknowledging a deletion persists the same way clicking dismiss does.
+  function submitDismissal(operationId: string): void {
+    if (operationId === "" || dismissInFlight) return;
+    const dismissSession = session;
+    dismissInFlight = true;
+    void fetchTracked(dismissUrl(operationId), {
+      method: "POST",
+      headers: {
+        "X-Radius-Mutation-Nonce": options.mutationNonce || ""
+      }
+    })
+      .then((response) => {
+        dismissInFlight = false;
+        if (
+          !scope.active ||
+          session !== dismissSession ||
+          displayedOperationId !== operationId
+        ) {
+          return;
+        }
+        if (!response.ok) throw new Error("Operation dismissal failed.");
+        hideProgress();
+      })
+      .catch(() => {
+        dismissInFlight = false;
+        if (
+          !scope.active ||
+          session !== dismissSession ||
+          displayedOperationId !== operationId
+        ) {
+          return;
+        }
+        setCommandError(
+          "Radius could not save this dismissal. Try dismissing it again."
+        );
+      });
+  }
+
   const dismissEl = dom.byId(PROGRESS_IDS.dismiss);
   if (dismissEl) {
-    scope.on(dismissEl, "click", () => {
-      hideProgress();
-    });
+    scope.on(dismissEl, "click", () => submitDismissal(displayedOperationId));
   }
 
   return {

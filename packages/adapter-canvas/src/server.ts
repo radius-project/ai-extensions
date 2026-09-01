@@ -1,7 +1,7 @@
 // Canvas adapter — HTTP server host for the webview.
 //
-// Owns the local loopback server that backs each canvas instance: the 40-route
-// request handler (parse request -> call an @radius-project/core use-case or adapter
+// Owns the local loopback server that backs each canvas instance: the declared
+// route handler (parse request -> call an @radius-project/core use-case or adapter
 // helper -> serialize), the page router, and the idempotent server lifecycle
 // (stable per-instance port, reuse on re-open). The only product logic here is
 // glue; everything substantive is delegated to @radius-project/core or the sibling
@@ -31,6 +31,13 @@ import {
 import type { Remediation, RemediationView } from "@radius-project/core";
 import { buildGraphViaRad } from "@radius-project/adapter-shared";
 import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  presentedRemediationView,
+  presentRemediation
+} from "./gh-command-display.js";
+import { resolveGhCommandPresentation } from "./gh-command-resolution.js";
+import {
   sharedCredentials,
   cloudCredential,
   listCredentialProfiles,
@@ -46,6 +53,8 @@ import type {
   GraphProgressView,
   GraphView
 } from "./shared.js";
+
+const GH_COMMAND_PRESENTATION = resolveGhCommandPresentation();
 import {
   fetchFileFromRepo,
   github,
@@ -69,7 +78,8 @@ import {
   selectedGetBranchHeadSha,
   selectedCreateBranchRef,
   selectedCreatePullRequest,
-  selectedFetchFileFromRepo
+  selectedFetchFileFromRepo,
+  redactGhCredentials
 } from "./gh.js";
 import type {
   CliOptions,
@@ -78,6 +88,7 @@ import type {
 } from "./gh.js";
 import {
   buildAppDeleteArgs,
+  buildFederatedCredentialDeleteArgs,
   isAzResourceNotFound,
   parseServedReposFromSubjects,
   isUuid,
@@ -88,6 +99,11 @@ import {
 } from "./azure-oidc.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
 import { bootstrapGHCRStatePackage } from "./ghcr.js";
+import { resolveGeneratorVersion } from "./generator-version.js";
+import {
+  classifyProvider,
+  parseGitHubEnvironmentVariables
+} from "./provider-classification.js";
 import {
   appParams,
   resolveDeployParams,
@@ -112,6 +128,7 @@ import {
   DEFAULT_CANVAS_PAGE,
   DEPLOY_REPAIR_ATTEMPT_CAP
 } from "./runtime/hooks.js";
+import { observeWorkspaceModelingRun } from "./runtime/modeling-activity.js";
 import {
   buildVerifyWorkflowDispatchArgs,
   planCredentialVerification
@@ -124,6 +141,9 @@ import {
   toClientView,
   createOperation,
   buildStages,
+  buildDeleteStages,
+  OPERATION_KIND_DELETE,
+  matchDeleteOperationEnvironment,
   enterStage,
   setStageState,
   hasWarnings,
@@ -137,6 +157,7 @@ import {
   recordCreatedFederatedCredential,
   recordCreatedRoleAssignment,
   recordGitHubEnvironment,
+  recordGitHubEnvironmentVariable,
   promoteCreatedGitHubEnvironment,
   recordCommitState,
   recordCommittedWorkflowFile,
@@ -150,6 +171,8 @@ import {
   projectCleanupSummary,
   finish,
   finishSucceeded,
+  canDismissOperation,
+  dismissOperation,
   canResumeInput,
   requireInput,
   resumeAfterInput,
@@ -165,6 +188,7 @@ import {
   providerRecoveryManualGuidance,
   settleProviderMutation,
   unresolvedProviderMutations,
+  githubEnvironmentVariableRollbackTargets,
   workflowRollbackCommitState,
   workflowRollbackTargets,
   INPUT_REQUIRED_STATE,
@@ -192,7 +216,9 @@ import {
   generatePortalUrl,
   syncRepoWorkflows,
   DEPLOY_DISPATCHER_FILE,
-  DEPLOY_AZURE_FILE
+  DEPLOY_AZURE_FILE,
+  DELETE_ENV_DISPATCHER_FILE,
+  DELETE_ENV_AZURE_FILE
 } from "./infra.js";
 import type { WorkflowCommitFailure } from "./infra.js";
 import {
@@ -238,6 +264,11 @@ import { createDeploymentsRoutes } from "./server/routes/deployments.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
 import { checkSetupPullRequestMergeForOperation } from "./server/services/setup-pull-request.js";
+import {
+  cancelVerificationWorkflow,
+  requireVerificationWorkflowIdentity,
+  readVerificationWorkflowState
+} from "./server/services/verification-workflow-cancellation.js";
 import { honorStopBoundary } from "./server/services/operation-stop-boundary.js";
 import {
   CLEANUP_COMMANDS,
@@ -252,6 +283,10 @@ import {
   createSelectedWorkflowRollbackCommand
 } from "./server/services/workflow-rollback-ports.js";
 import type { WorkflowRollbackCommand } from "./server/services/workflow-rollback-ports.js";
+import {
+  rollbackGitHubEnvironmentVariables,
+  type GitHubVariableCommand
+} from "./server/services/github-environment-variable-rollback.js";
 import { createRepositoriesRoutes } from "./server/routes/repositories.js";
 import { createAzureDiscoveryRoutes } from "./server/routes/azure-discovery.js";
 import { createTemporaryKubeconfig } from "./server/temporary-kubeconfig.js";
@@ -288,6 +323,8 @@ import { createDeployRequestService } from "./server/services/deploy-request.js"
 import { createDeployMonitorService } from "./server/services/deploy-monitor.js";
 import { createDeployDispatchService } from "./server/services/deploy-dispatch.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
+import { shouldRetryWithKeyringCredential } from "./server/services/workflow-credential-fallback.js";
+import { verifyWorkflowFilesMatchSource } from "./server/services/delete-environment-workflow-verification.js";
 import {
   executeRecoverableMutation,
   ProviderMutationRecoveryError,
@@ -304,6 +341,8 @@ import {
   isNotFoundResponse
 } from "./server/services/branch-absence.js";
 import {
+  buildGitHubEnvironmentDeleteArgs,
+  deleteGitHubEnvironmentIdempotent as deleteGitHubEnvironmentPrimitive,
   parseEnvironmentProviderId,
   selectedEnvironmentReader
 } from "./server/services/github-environment.js";
@@ -338,6 +377,19 @@ import {
 } from "./server/services/recovered-cleanup-command.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
+import { runEnvironmentDeletion } from "./server/services/environment-deletion.js";
+import {
+  recordCredentialProvenance,
+  listCredentialProvenanceForClient,
+  removeCredentialProvenance,
+  clearEnvironmentCredentialProvenance,
+  withCredentialProvenanceLock
+} from "./credential-provenance.js";
+import { classifyCompletedDeleteEnvRun } from "./server/services/delete-env-run-classifier.js";
+import type {
+  RadiusEnvDeletionOutcome,
+  GitHubEnvDeletionOutcome
+} from "./server/services/environment-deletion.js";
 import { createDeploymentAbandonmentService } from "./server/services/deployment-abandonment.js";
 import { resolveEnvironmentDeployment } from "./server/services/deployment-resolver.js";
 import type { DeploymentRow } from "./server/services/deployment-resolver.js";
@@ -348,15 +400,11 @@ import {
   verificationAcquisitionExpiredCopy,
   verificationTrackingDeadline
 } from "./server/services/verification-retry.js";
-import {
-  resolveAcknowledgedVerificationRun,
-  runVerificationRetry as runSelectedVerificationRetry
-} from "./server/services/verification-retry-runner.js";
+import { runVerificationRetry as runSelectedVerificationRetry } from "./server/services/verification-retry-runner.js";
 import type { CanvasServerEntry } from "./server/types.js";
 
 export type { CanvasServerEntry } from "./server/types.js";
 export { resolveDeployStatus } from "./server/services/deployment-resolver.js";
-export { resolveAcknowledgedVerificationRun };
 
 interface CommandResult {
   code: string | number;
@@ -403,7 +451,7 @@ export async function persistMutationCheckpoint({
   if (operation?.providerRecovery?.state === "rollback_pending") {
     await fail(
       409,
-      "Radius reconciled the interrupted provider request and must roll back before making any further provider changes.",
+      "Radius reconciled the interrupted provider request and must delete the setup resources before making any further provider changes.",
       "provider-rollback-pending"
     );
     return false;
@@ -509,6 +557,7 @@ interface AppBicepHandoffInput {
   repo: string;
   branches: string[];
   page: string;
+  progressView?: GraphProgressView;
   // The instance's state, so the runtime can resolve each branch's model
   // against the same workspace context the route just rendered from, and so it
   // can deduplicate against the handoff it last performed for this panel.
@@ -695,7 +744,9 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     latest: (repo) => operations.latest(repo),
     latestAny: () => operations.latestAny(),
     get: (operationId) => operations.get(operationId),
-    toClientView
+    toClientView,
+    productVersion: resolveGeneratorVersion,
+    now: () => Date.now()
   },
   {
     isValidRepoSlug,
@@ -719,6 +770,8 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     requireInput,
     finish,
     isTerminalState,
+    canDismissOperation,
+    dismissOperation,
     persistOperations: () => operations.persist(),
     toClientView,
     scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
@@ -735,6 +788,35 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
 // the route module from `operations.ts`, which is independently tested; the
 // merge proof stays in its own service with a single GitHub port. What is
 // injected here is the genuine I/O the routes cannot decide alone.
+function requiredVerificationWorkflowContext(op: {
+  operationId: string;
+  repo?: unknown;
+  verification?: unknown;
+  context?: unknown;
+  [key: string]: unknown;
+}): {
+  identity: ReturnType<typeof requireVerificationWorkflowIdentity>;
+  login: string;
+} {
+  const identity = requireVerificationWorkflowIdentity(op);
+  const operationContext =
+    op.context && typeof op.context === "object" ? op.context : null;
+  const login =
+    (
+      operationContext &&
+      "githubLogin" in operationContext &&
+      typeof operationContext.githubLogin === "string"
+    ) ?
+      operationContext.githubLogin.trim()
+    : "";
+  if (!login) {
+    throw new Error(
+      "The interrupted setup does not record the GitHub account that started it."
+    );
+  }
+  return { identity, login };
+}
+
 const operationsControlRoutes = createOperationsControlRoutes({
   get: (operationId) => operations.get(operationId),
   acquireForRetry: (op) => operations.acquireForRetry(op),
@@ -749,13 +831,42 @@ const operationsControlRoutes = createOperationsControlRoutes({
       },
       errorMessage
     }),
+  inspectVerificationWorkflow: async (op) => {
+    const { identity, login } = requiredVerificationWorkflowContext(op);
+    const result = await githubAccountCoordinator.withSelectedAccount(
+      login,
+      { instanceId: "operations-control", operationId: op.operationId },
+      (executor) =>
+        readVerificationWorkflowState(executor, identity, {
+          run: (selected, args) => selected.run(args, { timeout: 30000 })
+        }),
+      30000
+    );
+    if (result.value !== "active" && result.value !== "inactive") {
+      throw new Error("GitHub returned an unsupported workflow state.");
+    }
+    return result.value;
+  },
+  cancelVerificationWorkflow: async (op) => {
+    const { identity, login } = requiredVerificationWorkflowContext(op);
+    const result = await githubAccountCoordinator.withSelectedAccount(
+      login,
+      { instanceId: "operations-control", operationId: op.operationId },
+      (executor) =>
+        cancelVerificationWorkflow(executor, identity, {
+          run: (selected, args) => selected.run(args, { timeout: 30000 })
+        }),
+      30000
+    );
+    return result.value;
+  },
   schedule: ({ kind, instanceId, operation, commandId }) => {
     const coordinator = resolveInstanceRunner(
       instanceId,
       operation.operationId
     );
     if (!coordinator) return false;
-    if (kind === "setup_continuation") {
+    if (kind === "setup_continuation" || kind === "deletion_retry") {
       coordinator.scheduleEnvironmentOperation(operation);
     } else {
       coordinator.scheduleCommandTask(kind, operation, commandId);
@@ -793,6 +904,7 @@ const repositoriesRoutes = createRepositoriesRoutes({
 // because all three are declared further down the module and would otherwise be
 // in the temporal dead zone when this object is built at import time.
 const deploymentsRoutes = createDeploymentsRoutes({
+  ghCommandPresentation: GH_COMMAND_PRESENTATION,
   isValidRepoSlug,
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   triggerDeployRepairHandoff,
@@ -897,6 +1009,7 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
       }
     },
     artifacts: {
+      withCredentialProvenanceLock,
       recordAzureApp: (operation, patch) => {
         recordAzureApp(operation, patch);
       },
@@ -905,6 +1018,17 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
       },
       recordCreatedFederatedCredential: (operation, entry) => {
         recordCreatedFederatedCredential(operation, entry);
+      },
+      recordFederatedCredentialProvenance: async (operation, entry) => {
+        const recorded = await recordCredentialProvenance({
+          ...entry,
+          operationId: String(operation.operationId || "")
+        });
+        if (!recorded) {
+          throw new Error(
+            `Invalid provenance for federated credential ${entry.name}.`
+          );
+        }
       },
       recordCreatedRoleAssignment: (operation, entry) => {
         recordCreatedRoleAssignment(operation, entry);
@@ -915,12 +1039,13 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
         selectedGitHubExecutorsByOperation.get(operationId),
       getGitHubIdentity,
       preflightRepoAdmin: (repo, executor) =>
-        preflightRepoAdmin(repo, executor),
+        preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
       preflightGhcrPackageWriteAccess: (executor) =>
         preflightGhcrPackageWriteAccess(
           getGhPackageCredentials,
           getGitHubIdentity,
-          executor
+          executor,
+          GH_COMMAND_PRESENTATION
         ),
       runGitHubJson: (apiPath, executor) =>
         runGitHubJsonRequest(apiPath, executor),
@@ -951,14 +1076,20 @@ const azureAutoSetupRoutes = createAzureAutoSetupRoutes(
   })
 );
 
-const githubAccountCoordinator = createGitHubAccountCoordinator({
-  createExecutor: (login) => createSelectedGhExecutor(login),
-  getActiveKeyringLogin,
-  switchKeyringAccount: switchGhKeyringAccount,
-  resetIdentityCache: resetGhIdentityCache
-});
+const githubAccountCoordinator = createGitHubAccountCoordinator(
+  {
+    createExecutor: (login) => createSelectedGhExecutor(login),
+    getActiveKeyringLogin,
+    switchKeyringAccount: switchGhKeyringAccount,
+    resetIdentityCache: resetGhIdentityCache
+  },
+  {
+    ghCommandPresentation: GH_COMMAND_PRESENTATION
+  }
+);
 const githubAccountReadiness = createGitHubAccountReadinessService(
-  githubAccountCoordinator
+  githubAccountCoordinator,
+  { ghCommandPresentation: GH_COMMAND_PRESENTATION }
 );
 const githubSelectionHandles = createGitHubSelectionHandleStore();
 const selectedGitHubExecutorsByOperation = new Map<
@@ -1002,7 +1133,8 @@ const identityProfilesRoutes = createIdentityProfilesRoutes({
       expiresAt: selection.expiresAt
     };
   },
-  preflightRepoAdmin,
+  preflightRepoAdmin: (repo) =>
+    preflightRepoAdmin(repo, undefined, GH_COMMAND_PRESENTATION),
   isValidRepoSlug,
   errorMessage
 });
@@ -1029,6 +1161,8 @@ const identityAuthRoutes = createIdentityAuthRoutes({
 // only seams it needs are that same session hook and the error formatter.
 const remediationRoutes = createRemediationRoutes(
   productionRemediationDependencies({
+    presentRemediation: (remediation) =>
+      presentRemediation(remediation, GH_COMMAND_PRESENTATION),
     runSessionPrompt: (prompt) =>
       invokeSessionPrompt(sessionPromptHandler, prompt),
     errorMessage
@@ -1076,28 +1210,21 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
 // route modules free of it. The pure helpers (`defaultBranchForState`,
 // `computeGraphDiff`, `record`, …) are injected rather than imported by the
 // workflows, matching how the sibling families inject `repoMatchesWorkspace`.
-// Observe on-disk modeling activity, but only when the modeling target is the
-// workspace itself. Local staging directories say nothing about a remote branch
-// or a different repository, so probing outside that match would let unrelated
-// activity extend a wait that should have expired.
-//
-// Shared by both graph route families on purpose: this is the gate that keeps a
-// wait honest, and two copies of it could drift apart.
-function observeWorkspaceModelingRun(
+const observeServerWorkspaceModelingRun = (
   state: CanvasState,
   repo: string,
   branches: string[]
-): Promise<number | null> {
-  if (
-    !repo ||
-    !state.workspaceRepo ||
-    state.workspaceRepo !== repo ||
-    !branches.some((branch) => branch === state.workspaceBranch)
-  ) {
-    return Promise.resolve(null);
-  }
-  return modelingRunLastActivityAtMs(state.workspacePath);
-}
+): Promise<number | null> =>
+  observeWorkspaceModelingRun(
+    repo,
+    branches,
+    {
+      repo: state.workspaceRepo ?? "",
+      branch: state.workspaceBranch ?? "",
+      path: state.workspacePath
+    },
+    modelingRunLastActivityAtMs
+  );
 
 const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
@@ -1140,7 +1267,7 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
     resolveRecipeOutputs(github, resources, recipes, provider),
   computeGraphDiff: (baseResources, headResources) =>
     computeGraphDiff(baseResources, headResources),
-  observeModelingRun: observeWorkspaceModelingRun,
+  observeModelingRun: observeServerWorkspaceModelingRun,
   record,
   optionalString,
   errorMessage,
@@ -1203,7 +1330,7 @@ const graphsPlanningRoutes = createGraphsPlanningRoutes({
   settleDeployStatuses,
   errorMessage,
   repoMatchesWorkspace,
-  observeModelingRun: observeWorkspaceModelingRun,
+  observeModelingRun: observeServerWorkspaceModelingRun,
   now: () => Date.now()
 });
 
@@ -1220,7 +1347,57 @@ const graphsPlanningWritesRoutes = createGraphsPlanningWritesRoutes({
 const ENV_LIST_TTL_MS = 15000;
 const VERIFY_WORKFLOW_FILE = "radius-verify-credentials.yml";
 
-// Composition root for the migrated `environments` family. Its remaining
+// Reads the environment's stored GitHub variables to determine its provider and
+// the app registration id the delete cleanup targets. Kept beside the
+// `environments` composition root because it is only used by that route's
+// delete flow. Throws on an API/permission failure so the route fails closed.
+async function discoverEnvironmentTarget(
+  repo: string,
+  environment: string
+): Promise<{
+  provider: string;
+  clientId: string;
+  tenantId: string;
+  repoId: number;
+}> {
+  const out = await runCommand(
+    "gh",
+    [
+      "api",
+      `/repos/${repo}/environments/${encodeURIComponent(
+        environment
+      )}/variables?per_page=100`,
+      "--jq",
+      '.variables[] | .name + "\\t" + (.value // "")'
+    ],
+    { timeout: 15000 }
+  );
+  const vars = parseGitHubEnvironmentVariables(out);
+  // Classify the provider by the presence of a canonical, exact-named
+  // configuration variable (see classifyProvider) rather than a regex over
+  // every variable name, and share that logic with the environment listing so
+  // the two paths never disagree about the same environment.
+  const provider = classifyProvider(vars);
+  let repoId = 0;
+  if (provider === "azure") {
+    const repoIdOutput = await runCommand(
+      "gh",
+      ["api", `/repos/${repo}`, "--jq", ".id"],
+      { timeout: 15000 }
+    );
+    repoId = Number(repoIdOutput.trim());
+    if (!Number.isFinite(repoId) || repoId <= 0) {
+      throw new Error("GitHub returned an invalid repository id.");
+    }
+  }
+  return {
+    provider,
+    clientId: vars.AZURE_CLIENT_ID || "",
+    tenantId: vars.AZURE_TENANT_ID || "",
+    repoId
+  };
+}
+
 // route, `POST /api/create-environment`, is large enough to own a separate
 // composition root below. Every seam is a narrow named function: the two subprocess
 // runners (`cliExec`, `runCommand`), the repo-file fetch and bicep param parse
@@ -1234,6 +1411,7 @@ const VERIFY_WORKFLOW_FILE = "radius-verify-credentials.yml";
 // reads no module-level mutable state.
 const environmentsRoutes = createEnvironmentsRoutes({
   errorMessage,
+  redactDiagnostic: (value) => redactGhCredentials(value),
   repoMatchesWorkspace,
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   runCommand: (command, args, options) => runCommand(command, args, options),
@@ -1244,8 +1422,33 @@ const environmentsRoutes = createEnvironmentsRoutes({
   resolveEnvDeployment: (repo, environment, appName) =>
     resolveEnvDeployment(repo, environment, appName),
   logError: (message) => console.error(message),
+  discoverEnvironmentTarget: (repo, environment) =>
+    discoverEnvironmentTarget(repo, environment),
+  activeDeleteOperation: (repo, environment) => {
+    return matchDeleteOperationEnvironment(
+      operations.running(repo),
+      environment
+    );
+  },
+  createOperation,
+  buildDeleteStages: (options) => buildDeleteStages(options),
+  startOperation: (op) => operations.start(op),
+  toClientView,
+  scheduleEnvironmentOperation: scheduleEnvironmentOperationForInstance,
   cliExec: (command, args, options, callback) => {
     cliExec(command, args, options, callback);
+  },
+  activeDeleteEnvironment: (repo) => {
+    const op = operations.latest(repo);
+    if (
+      op &&
+      op.kind === OPERATION_KIND_DELETE &&
+      !isTerminalState(op.state) &&
+      typeof op.environment === "string"
+    ) {
+      return op.environment;
+    }
+    return "";
   },
   envListCacheGet: (repo) => envListCache.get(repo),
   envListCacheSet: (repo, entry) => {
@@ -1318,6 +1521,7 @@ const environmentsRoutes = createEnvironmentsRoutes({
 // `randomUUID()` held by that instance's request coordinator, and this route is
 // reachable only through the internal loopback POST that carries it.
 const createEnvironmentRoutes = createCreateEnvironmentRoutes({
+  ghCommandPresentation: GH_COMMAND_PRESENTATION,
   isServerOwnedRequest: (instanceId, request) =>
     instanceRequestCoordinators.get(instanceId)?.isServerOwned(request) ??
     false,
@@ -1354,12 +1558,14 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   persistBestEffort,
   guardStopBoundary,
   runAzCommand: (args) => runCliCommand("az", args),
-  preflightRepoAdmin: (repo, executor) => preflightRepoAdmin(repo, executor),
+  preflightRepoAdmin: (repo, executor) =>
+    preflightRepoAdmin(repo, executor, GH_COMMAND_PRESENTATION),
   preflightGhcrPackageWriteAccess: (executor) =>
     preflightGhcrPackageWriteAccess(
       getGhPackageCredentials,
       getGitHubIdentity,
-      executor
+      executor,
+      GH_COMMAND_PRESENTATION
     ),
   readGitHubJson: (apiPath, executor) =>
     runGitHubJsonRequest(apiPath, executor),
@@ -1367,7 +1573,8 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
     bootstrapGHCRStatePackage({
       targetRepository: input.targetRepository,
       registry: input.registry,
-      credentials: input.credentials as GhcrPackageCredentials
+      credentials: input.credentials as GhcrPackageCredentials,
+      ghCommandPresentation: GH_COMMAND_PRESENTATION
     }),
   stateRegistryForEnvironment,
   getDefaultBranch: (repo, executor) =>
@@ -1406,6 +1613,9 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   },
   recordGitHubEnvironment: (operation, patch) => {
     recordGitHubEnvironment(operation, patch);
+  },
+  recordGitHubEnvironmentVariable: (operation, entry) => {
+    recordGitHubEnvironmentVariable(operation, entry);
   },
   promoteCreatedGitHubEnvironment: (operation, identity) =>
     promoteCreatedGitHubEnvironment(operation, identity),
@@ -1509,6 +1719,7 @@ const canvasServer = createCanvasServer(
     },
     onStarted: (instanceId, entry) => {
       shuttingDownInstances.delete(instanceId);
+      entry.state.ghCommandPresentation = GH_COMMAND_PRESENTATION;
       const coordinator = instanceRequestCoordinators.get(instanceId);
       if (coordinator) {
         entry.state.browserMutationNonce = coordinator.browserMutationNonce;
@@ -2157,7 +2368,8 @@ function triggerAppBicepHandoff(
   entry: { state: CanvasState } | undefined,
   repo: string,
   branches: string | string[],
-  page: string
+  page: string,
+  progressView: GraphProgressView = page === "graph-diff" ? "diff" : "graph"
 ): void {
   try {
     if (typeof appBicepHandoff !== "function") return;
@@ -2166,7 +2378,13 @@ function triggerAppBicepHandoff(
       (branch): branch is string => Boolean(branch)
     );
     Promise.resolve(
-      appBicepHandoff({ repo, branches: list, page, state: entry?.state })
+      appBicepHandoff({
+        repo,
+        branches: list,
+        page,
+        progressView,
+        state: entry?.state
+      })
     ).catch(() => {});
   } catch {
     /* never let a handoff failure break the response */
@@ -2346,6 +2564,13 @@ export function beginDeployAttempt(
   input: DeployAttemptInput
 ): void {
   state.deployStatus = "in_progress";
+  // Advances on every deploy invocation, including each redeploy inside a
+  // repair loop. Nothing else does: the loop reuses its attempt id, the run id
+  // is cleared here and stays empty when a deploy fails before dispatch, and
+  // `deployFinishedAt` is only written when a run concludes. Without this, two
+  // consecutive pre-dispatch failures in one loop are indistinguishable, and a
+  // notification dismissed for the first would hide the second.
+  state.deployGeneration = (state.deployGeneration || 0) + 1;
   state.deployError = null;
   state.deployErrorKind = null;
   state.deployErrorBranch = null;
@@ -2607,7 +2832,7 @@ const DELETE_WORKFLOW_FILE = "delete-application.yml";
 // silently disables all of it. It is exported so a test can pin it.
 //
 // Do not guess at this value: it must match
-// radius-project/radius .github/extension/actions/run-rad-commands/action.yml.
+// radius-project/ai-extensions .github/extension/actions/run-rad-commands/action.yml.
 export const DEPLOY_RAD_COMMANDS_STEP = "Run rad commands";
 
 // ── POST /api/deploy composition root ────────────────────────────────────────
@@ -2656,6 +2881,197 @@ function runGhWithStdinForDeploy(
   });
 }
 
+// Dispatch the just-committed delete-environment workflow and wait for its run
+// to finish. Tearing down the Radius environment needs cluster access, so it
+// runs on the ephemeral control plane the workflow spins up (authenticating with
+// the environment's still-present federated credential — hence this must run
+// before the credential is removed). Best-effort: a dispatch or run failure is
+// reported as a `failed` outcome the runner records as a warning, never a throw.
+async function deleteRadiusEnvironmentViaWorkflow(
+  repo: string,
+  environment: string,
+  onHeartbeat?: () => void | Promise<void>
+): Promise<RadiusEnvDeletionOutcome> {
+  const sync = await ensureWorkflowsCurrent(repo, environment, "", [
+    DELETE_ENV_DISPATCHER_FILE,
+    DELETE_ENV_AZURE_FILE
+  ]);
+  // Committing the workflows is best-effort and can silently no-op (a protected
+  // branch, or an exception `ensureWorkflowsCurrent` swallows), and the delete
+  // dispatcher `uses:` the reusable provider file that carries the "no deployed
+  // applications" safety guard. `gh workflow run` resolves BOTH files from the
+  // default branch, so before dispatching we read BOTH back from that branch and
+  // confirm they match the packaged source. Any file that is missing, stale, or
+  // unreadable stops the deletion here — a stale provider means a stale guard,
+  // and dispatching against it could tear down an environment that still has
+  // deployed applications. (The narrow `sync.failed` list only names files whose
+  // commit definitely failed; the read-back is the authoritative gate because it
+  // also catches a swallowed sync exception that reports no failure at all.)
+  let expectedDeleteWorkflows: Record<string, string>;
+  try {
+    expectedDeleteWorkflows = await generateDeleteWorkflow(environment);
+  } catch (error) {
+    return {
+      outcome: "failed",
+      detail: `Could not build the delete-environment workflow templates to verify them: ${errorMessage(
+        error
+      )}`
+    };
+  }
+  const workflowVerification = await verifyWorkflowFilesMatchSource(
+    [DELETE_ENV_DISPATCHER_FILE, DELETE_ENV_AZURE_FILE].map((file) => ({
+      file,
+      path: `.github/workflows/${file}`,
+      expected: expectedDeleteWorkflows[file] || ""
+    })),
+    {
+      defaultBranch: async () => (await getDefaultBranch(repo)) || "",
+      readFile: (path, branch) => fetchFileFromRepo(repo, path, branch),
+      errorMessage
+    }
+  );
+  if (!workflowVerification.ok) {
+    return {
+      outcome: "failed",
+      detail: `${workflowVerification.detail} Radius did not start the deletion of "${environment}" in ${repo}.`
+    };
+  }
+  const ghWorkflow = async (args: string[]): Promise<CommandResult> => {
+    const first = await runGhForDeploy(args);
+    if (first.code === 0) return first;
+    const env = process.env;
+    // Dispatching a workflow requires the `workflow` scope, which an injected
+    // GH_TOKEN often lacks. Retry with it stripped ONLY when that fallback is
+    // safe: the failure positively names the missing scope, and the dispatch did
+    // not time out. A timed-out (or otherwise killed) dispatch may already have
+    // been accepted by GitHub, so re-running it would start the destructive
+    // delete workflow a SECOND time; and the retry runs as whichever account the
+    // keyring holds, so it must never be entered on an unknown failure.
+    const retryAllowed = shouldRetryWithKeyringCredential({
+      stderr: first.stderr,
+      timedOut: first.timedOut === true,
+      hasInjectedToken: Boolean(
+        env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim()
+      )
+    });
+    if (!retryAllowed) return first;
+    const fallbackEnv = { ...env };
+    delete fallbackEnv.GH_TOKEN;
+    delete fallbackEnv.GITHUB_TOKEN;
+    const retry = await runGhForDeploy(args, { env: fallbackEnv });
+    return retry.code === 0 ? retry : first;
+  };
+  const justCreated = sync.created.some(
+    (p) => p.split("/").pop() === DELETE_ENV_DISPATCHER_FILE
+  );
+  const dispatchedAt = Date.now();
+  // A unique id echoed into the run's display name (via the dispatcher's
+  // `run-name:`) so the specific run this call started can be matched exactly —
+  // never a concurrent or manual deletion of a different environment.
+  const correlationId = `del-${dispatchedAt.toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+  const dispatchArgs = [
+    "workflow",
+    "run",
+    DELETE_ENV_DISPATCHER_FILE,
+    "-f",
+    "environment=" + environment,
+    "-f",
+    "correlation_id=" + correlationId,
+    "--repo",
+    repo
+  ];
+  let dispatch: CommandResult = { code: 1, stdout: "", stderr: "" };
+  const dispatchDelays = justCreated ? [0, 2000, 5000] : [0];
+  if (justCreated) await sleepMs(3000);
+  for (const delay of dispatchDelays) {
+    if (delay > 0) await sleepMs(delay);
+    dispatch = await ghWorkflow(dispatchArgs);
+    if (dispatch.code === 0) break;
+    if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
+  }
+  if (dispatch.code !== 0) {
+    return {
+      outcome: "failed",
+      detail:
+        (dispatch.stderr || "").trim() ||
+        `Failed to start ${DELETE_ENV_DISPATCHER_FILE} on ${repo}.`
+    };
+  }
+  // Resolve and monitor the dispatched run so credential removal only starts
+  // after the Radius environment is actually gone.
+  let runId: number | string | null = null;
+  for (const delay of [0, 2000, 4000]) {
+    if (delay > 0) await sleepMs(delay);
+    runId = await findWorkflowRun(
+      repo,
+      DELETE_ENV_DISPATCHER_FILE,
+      dispatchedAt,
+      null,
+      undefined,
+      undefined,
+      correlationId
+    );
+    if (runId) break;
+  }
+  if (!runId) {
+    return {
+      outcome: "failed",
+      detail:
+        "The delete-environment workflow was dispatched but its run could not be found to confirm completion."
+    };
+  }
+  const deadline = Date.now() + 30 * 60 * 1000;
+  let delayMs = 5000;
+  while (Date.now() < deadline) {
+    const detail = await getRunDetail(repo, runId);
+    if (detail && detail.status === "completed") {
+      const classified = classifyCompletedDeleteEnvRun(
+        detail.conclusion,
+        detail.steps || []
+      );
+      return classified;
+    }
+    if (onHeartbeat) {
+      try {
+        await onHeartbeat();
+      } catch {
+        // A heartbeat failure must never abort an in-flight deletion.
+      }
+    }
+    await sleepMs(Math.min(delayMs, 15000));
+    delayMs = Math.min(Math.ceil(delayMs * 1.5), 15000);
+  }
+  return {
+    outcome: "failed",
+    detail:
+      "The delete-environment workflow did not complete within 30 minutes."
+  };
+}
+
+// Delete the GitHub Environment. Idempotent: a 404 (already gone) is reported as
+// `not_found`, not a failure, so a re-run after a partial deletion converges.
+// The classification and cache-invalidation logic is the shared cleanup
+// primitive in `server/services/github-environment.ts`; this wrapper only binds
+// the server's `gh` runner and environment-list cache to it. Create-Environment
+// rollback binds the same primitive to its own ports.
+async function deleteGitHubEnvironmentIdempotent(
+  repo: string,
+  environment: string
+): Promise<GitHubEnvDeletionOutcome> {
+  return deleteGitHubEnvironmentPrimitive(repo, environment, {
+    runGh: (args) => runGhForDeploy(args),
+    invalidateEnvListCache: (target) => {
+      envListCache.invalidate(target);
+    }
+  });
+}
+
+function sleepMs(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 const deployPlannedGraphService = createPlannedGraphRecoveryService({
   prepareSourceRefResources: (entry, view, context) =>
     prepareSourceRefResources(entry, view, context),
@@ -2690,6 +3106,7 @@ const deployPlannedGraphService = createPlannedGraphRecoveryService({
 });
 
 const deployDispatchService = createDeployDispatchService({
+  ghCommandPresentation: GH_COMMAND_PRESENTATION,
   deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
   deployWorkflowFiles: [DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE],
   branchNotPushedKind: DEPLOY_BRANCH_NOT_PUSHED_KIND,
@@ -2806,6 +3223,7 @@ const deployRequestService = createDeployRequestService({
 });
 
 const deploymentAbandonmentService = createDeploymentAbandonmentService({
+  ghCommandPresentation: GH_COMMAND_PRESENTATION,
   isValidRepoSlug,
   readInstanceState: (instanceId) =>
     canvasServer.instances.get(instanceId)?.state,
@@ -2866,6 +3284,7 @@ export async function resolveCleanupGitHubContext({
   const needsGitHub = targets.some(
     (entry) =>
       entry.artifactType === "workflow_file" ||
+      entry.artifactType === "github_environment_variable" ||
       entry.artifactType === "github_environment"
   );
   let executor: SelectedGhExecutor | null = null;
@@ -3043,25 +3462,6 @@ function buildRoleAssignmentDeleteArgs({
     scope,
     "--output",
     "none"
-  ];
-}
-
-function buildFederatedCredentialDeleteArgs({
-  appId,
-  name
-}: {
-  appId: string;
-  name: string;
-}): string[] {
-  return [
-    "ad",
-    "app",
-    "federated-credential",
-    "delete",
-    "--id",
-    appId,
-    "--federated-credential-id",
-    name
   ];
 }
 
@@ -3522,7 +3922,7 @@ export async function cleanupAzureSetupArtifacts(
         {
           args: buildFederatedCredentialDeleteArgs({
             appId: cleanupAppId,
-            name: String(credential.name || "")
+            credentialId: String(credential.name || "")
           }),
           readArgs: [
             "ad",
@@ -3818,7 +4218,7 @@ export async function cleanupAzureSetupArtifacts(
       if (!(error instanceof CleanupJournalPersistenceError)) throw error;
       // The journal did not reach disk. Radius stops here rather than deleting
       // anything else it could not account for afterwards.
-      const detail = `Radius stopped this rollback because it could not save the record of what it was deleting: ${error.message}`;
+      const detail = `Radius stopped this deletion because it could not save the record of what it was deleting: ${error.message}`;
       warnings.push(detail);
       steps?.push(`⚠ ${detail}`);
       await pushResult(
@@ -3870,6 +4270,59 @@ function sanitizeFailureExtra(extra: Record<string, unknown> = {}) {
   delete safe.azError;
   delete safe.ghError;
   return safe;
+}
+
+export async function rollbackGitHubEnvironmentVariableArtifacts(
+  op: any,
+  {
+    attempt,
+    run,
+    persist,
+    only,
+    steps
+  }: {
+    attempt: number;
+    run: GitHubVariableCommand;
+    persist(): Promise<void>;
+    only?: Set<string> | null;
+    steps?: string[];
+  }
+): Promise<{
+  results: SetupCleanupResult[];
+  warnings: string[];
+  blocked: boolean;
+  attempted: boolean;
+}> {
+  const variables = githubEnvironmentVariableRollbackTargets(op, only ?? null);
+  if (variables.length === 0) {
+    return { results: [], warnings: [], blocked: false, attempted: false };
+  }
+  const outcome = await rollbackGitHubEnvironmentVariables({
+    attempt,
+    operation: op,
+    persist,
+    variables,
+    run
+  });
+  for (const entry of outcome.results) {
+    if (
+      entry.outcome === "deleted" ||
+      entry.outcome === "restored" ||
+      entry.outcome === "not_found"
+    ) {
+      recordCleanupDeletion(op, {
+        artifactType: "github_environment_variable",
+        identity: entry.identity ?? undefined
+      });
+    }
+  }
+  steps?.push(...outcome.steps);
+  return {
+    results: outcome.results,
+    warnings: outcome.warnings,
+    blocked: outcome.blocked,
+    attempted: true
+  };
 }
 
 /**
@@ -4005,7 +4458,7 @@ export async function cleanupGitHubEnvironmentArtifact(
   };
 
   if (artifact.state === "created_candidate") {
-    const detail = `GitHub environment "${target}" was left in place because a pre-create 404 followed by GitHub's idempotent PUT cannot prove this request created it. Review it manually and delete it yourself if this setup should be rolled back.`;
+    const detail = `Radius left GitHub environment "${target}" in place because a pre-create 404 followed by GitHub's idempotent PUT could not verify that this setup created it. To finish deleting the setup, review the GitHub environment and delete it manually if it belongs to this setup.`;
     warnings.push(detail);
     steps?.push(`⚠️ ${detail}`);
     recordOutcome("skipped", detail);
@@ -4031,7 +4484,7 @@ export async function cleanupGitHubEnvironmentArtifact(
   }
 
   const environmentPath = `/repos/${envRepo}/environments/${encodeURIComponent(envName)}`;
-  const deleteArgs = ["api", "--method", "DELETE", environmentPath];
+  const deleteArgs = buildGitHubEnvironmentDeleteArgs(envRepo, envName);
   let settled: CleanupDeletionOutcome;
   try {
     settled = await executeJournaledCleanupDeletion({
@@ -4197,6 +4650,7 @@ export async function finalizeSetupFailure(
     extra = {},
     steps,
     runAz,
+    runGitHubVariable,
     runDeleteEnvironment,
     readEnvironment
   }: {
@@ -4210,6 +4664,7 @@ export async function finalizeSetupFailure(
     extra?: Record<string, unknown>;
     steps?: string[];
     runAz?: ((args: string[]) => Promise<Partial<CommandResult>>) | null;
+    runGitHubVariable?: GitHubVariableCommand | null;
     runDeleteEnvironment?: ((args: string[]) => Promise<unknown>) | null;
     readEnvironment?: ((args: string[]) => Promise<CommandResult>) | null;
   }
@@ -4272,7 +4727,29 @@ export async function finalizeSetupFailure(
       let cleanupState: "not_needed" | "succeeded" | "succeeded_with_warnings" =
         "not_needed";
 
-      if (runAz) {
+      const variableCleanup = await rollbackGitHubEnvironmentVariableArtifacts(
+        op,
+        {
+          attempt,
+          run:
+            runGitHubVariable ??
+            (async () => ({
+              code: 1,
+              stdout: "",
+              stderr: "The selected GitHub account is unavailable."
+            })),
+          persist: () => operations.persist(),
+          steps
+        }
+      );
+      warnings.push(...variableCleanup.warnings);
+      results = [...results, ...variableCleanup.results];
+      if (variableCleanup.results.length > 0) {
+        cleanupState =
+          variableCleanup.blocked ? "succeeded_with_warnings" : "succeeded";
+      }
+
+      if (!variableCleanup.blocked && runAz) {
         const azureCleanup = await cleanupAzureSetupArtifacts(op, {
           runAz,
           steps,
@@ -4280,30 +4757,37 @@ export async function finalizeSetupFailure(
         });
         warnings.push(...azureCleanup.warnings);
         results = [...results, ...azureCleanup.results];
-        cleanupState = azureCleanup.state;
-      } else {
+        if (
+          azureCleanup.state === "succeeded_with_warnings" ||
+          (cleanupState === "not_needed" && azureCleanup.state === "succeeded")
+        ) {
+          cleanupState = azureCleanup.state;
+        }
+      } else if (!variableCleanup.blocked) {
         recordCleanupState(op, { attempts: attempt, state: "not_needed" });
       }
 
-      const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
-        attempt,
-        runDeleteEnvironment,
-        readEnvironment,
-        persistJournal: () => operations.persist(),
-        invalidateEnvironmentListing: (repo) => {
-          envListCache.invalidate(repo);
-        },
-        steps
-      });
-      warnings.push(...environmentCleanup.warnings);
-      results = [...results, ...environmentCleanup.results];
-      if (environmentCleanup.warnings.length > 0) {
-        cleanupState = "succeeded_with_warnings";
-      } else if (
-        environmentCleanup.results.length > 0 &&
-        cleanupState === "not_needed"
-      ) {
-        cleanupState = "succeeded";
+      if (!variableCleanup.blocked) {
+        const environmentCleanup = await cleanupGitHubEnvironmentArtifact(op, {
+          attempt,
+          runDeleteEnvironment,
+          readEnvironment,
+          persistJournal: () => operations.persist(),
+          invalidateEnvironmentListing: (repo) => {
+            envListCache.invalidate(repo);
+          },
+          steps
+        });
+        warnings.push(...environmentCleanup.warnings);
+        results = [...results, ...environmentCleanup.results];
+        if (environmentCleanup.warnings.length > 0) {
+          cleanupState = "succeeded_with_warnings";
+        } else if (
+          environmentCleanup.results.length > 0 &&
+          cleanupState === "not_needed"
+        ) {
+          cleanupState = "succeeded";
+        }
       }
 
       // Same reason as the rollback runner: this record is about to be terminal,
@@ -4371,7 +4855,8 @@ export async function finalizeSetupFailure(
 // true error. GitHub still enforces permissions server-side regardless.
 async function preflightRepoAdmin(
   repo: string,
-  executor?: SelectedGhExecutor
+  executor?: SelectedGhExecutor,
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): Promise<string> {
   let login = "";
   const runJson = (path: string) =>
@@ -4389,12 +4874,15 @@ async function preflightRepoAdmin(
   } else {
     return ""; // ambiguous/transient — don't block or mislead; let the real op surface the true error
   }
-  return explainRepoAccessForEnvSetup({
-    repo,
-    login,
-    readFailed,
-    permissions
-  });
+  return explainRepoAccessForEnvSetup(
+    {
+      repo,
+      login,
+      readFailed,
+      permissions
+    },
+    ghCommandPresentation
+  );
 }
 
 type GhcrPackageCredentialLoader = typeof getGhPackageCredentials;
@@ -4428,7 +4916,8 @@ type GhcrPackagePreflightResult =
 export async function preflightGhcrPackageWriteAccess(
   loadCredentials: GhcrPackageCredentialLoader = getGhPackageCredentials,
   loadIdentity: GhcrPackageIdentityLoader = getGitHubIdentity,
-  selectedExecutor?: SelectedGhExecutor
+  selectedExecutor?: SelectedGhExecutor,
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): Promise<GhcrPackagePreflightResult> {
   let packageCredentials: GhcrPackageCredentials;
   try {
@@ -4437,13 +4926,31 @@ export async function preflightGhcrPackageWriteAccess(
         selectedExecutor.packageCredentials()
       : await loadCredentials();
   } catch (e) {
+    const loginCommand = displayGhCommand(ghCommandPresentation, [
+      "auth",
+      "login",
+      "-h",
+      "github.com",
+      "-s",
+      "read:packages",
+      "-s",
+      "write:packages"
+    ]);
+    const guidance =
+      loginCommand ?
+        ` Run \`${loginCommand}\` in a terminal, then retry.${
+          ghCommandPresentation.installationNote ?
+            ` ${ghCommandPresentation.installationNote}`
+          : ""
+        }`
+      : ` ${ghCommandPresentation.installationNote}`;
     return {
       ok: false,
       status: 403,
       code: "ghcr-auth-failed",
       error: `Could not authenticate to GitHub Packages for this repository. ${errorMessage(
         e
-      )}`
+      )}${guidance}`
     };
   }
 
@@ -4517,7 +5024,8 @@ export async function preflightGhcrPackageWriteAccess(
     const scope = explainMissingPackagesScope(
       ghPkgLogin,
       packageCredentials.source,
-      ghPkgIdentity.accounts || []
+      ghPkgIdentity.accounts || [],
+      ghCommandPresentation
     );
     return {
       ok: false,
@@ -4544,7 +5052,8 @@ export async function preflightGhcrPackageWriteAccess(
 export function explainMissingPackagesScope(
   login: string,
   source: GhcrPackageCredentials["source"],
-  accounts: readonly GitHubIdentityAccount[]
+  accounts: readonly GitHubIdentityAccount[],
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): { message: string; remediation: RemediationView | null } {
   const missing = `The GitHub account @${login} is missing the "write:packages" scope required to create this repository's private Radius state package in GHCR.`;
   if (source === "injected-token") {
@@ -4560,13 +5069,17 @@ export function explainMissingPackagesScope(
         remediation: null
       };
     }
-    const login_ = remediationView("github-cli-login", { packages: "true" });
+    const login_ = presentedRemediationView(
+      "github-cli-login",
+      { packages: "true" },
+      ghCommandPresentation
+    );
     return {
       message:
         preamble +
         (login_.runnable ?
           "Run the command below to sign in a stored account that can publish packages, then retry."
-        : 'Run "gh auth login -h github.com -s read:packages -s write:packages" to sign in a stored account that can publish packages, then retry.'),
+        : `${ghCommandPresentation.installationNote} Then sign in a stored account that can publish packages and retry.`),
       remediation: login_.runnable ? login_ : null
     };
   }
@@ -4574,10 +5087,14 @@ export function explainMissingPackagesScope(
   // hand-written copy drifts from what the Copy/Run buttons offer and misses
   // registry-wide rules -- notably one command per line, because `&&` does not
   // parse in Windows PowerShell 5.1.
-  const fix = remediationView("github-account-scopes", {
-    login,
-    packages: "true"
-  });
+  const fix = presentedRemediationView(
+    "github-account-scopes",
+    {
+      login,
+      packages: "true"
+    },
+    ghCommandPresentation
+  );
   const grant =
     fix.runnable ?
       "Run the command below (or switch to an account that has it in the Create Environment dialog), then retry."
@@ -5241,6 +5758,66 @@ function createInstanceRequestCoordinator(
     }
     const op = operations.get(operationId);
     if (!op) return;
+    if (op.kind === "delete") {
+      await runEnvironmentDeletion(op, {
+        deleteRadiusEnvironment: (input, onHeartbeat) =>
+          deleteRadiusEnvironmentViaWorkflow(
+            input.repo,
+            input.environment,
+            onHeartbeat
+          ),
+        runAz: (args) => runCliCommand("az", args),
+        readAzureIdentity: async (clientId) => {
+          const tenant = await runCliCommand("az", [
+            "account",
+            "show",
+            "--query",
+            "tenantId",
+            "-o",
+            "tsv"
+          ]);
+          if (tenant.code !== 0 || !tenant.stdout.trim()) {
+            throw new Error(
+              tenant.stderr || "Could not resolve the active Entra tenant."
+            );
+          }
+          const application = await runCliCommand("az", [
+            "ad",
+            "app",
+            "show",
+            "--id",
+            clientId,
+            "--query",
+            "id",
+            "-o",
+            "tsv"
+          ]);
+          if (application.code !== 0 || !application.stdout.trim()) {
+            throw new Error(
+              application.stderr ||
+                "Could not resolve the App Registration object id."
+            );
+          }
+          return {
+            tenantId: tenant.stdout.trim(),
+            applicationObjectId: application.stdout.trim()
+          };
+        },
+        deleteGitHubEnvironment: (input) =>
+          deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
+        withCredentialProvenanceLock,
+        readCredentialProvenance: (clientId) =>
+          listCredentialProvenanceForClient(clientId),
+        removeCredentialProvenance: (clientId, credentialId) =>
+          removeCredentialProvenance(clientId, credentialId),
+        clearEnvironmentCredentialProvenance: (repoId, environment) =>
+          clearEnvironmentCredentialProvenance(repoId, environment),
+        persist: () => operations.persist(),
+        errorMessage,
+        log: (message) => console.error(message)
+      });
+      return;
+    }
     const request = op.request || op.resumeRequest || {};
     const selectedLogin =
       typeof op.context?.githubLogin === "string" ? op.context.githubLogin
@@ -5261,7 +5838,11 @@ function createInstanceRequestCoordinator(
           executorRegistered = true;
           return runEnvironmentOperationWorkflow(op, executor, {
             preflightRepoAdmin: (repo, selectedExecutor) =>
-              preflightRepoAdmin(repo, selectedExecutor),
+              preflightRepoAdmin(
+                repo,
+                selectedExecutor,
+                GH_COMMAND_PRESENTATION
+              ),
             guardStopBoundary: (operation, boundary) =>
               honorStopBoundary({
                 operation,
@@ -5273,7 +5854,8 @@ function createInstanceRequestCoordinator(
               preflightGhcrPackageWriteAccess(
                 getGhPackageCredentials,
                 getGitHubIdentity,
-                selectedExecutor
+                selectedExecutor,
+                GH_COMMAND_PRESENTATION
               ),
             readGitHubJson: (apiPath, selectedExecutor) =>
               runGitHubJsonRequest(apiPath, selectedExecutor),
@@ -5402,6 +5984,7 @@ function createInstanceRequestCoordinator(
       await environmentOperationTestRunner(operationId, commandId);
       return;
     }
+
     const operation = operations.get(operationId);
     if (!operation) return;
     await runSelectedVerificationRetry(operation, commandId, {
@@ -5440,6 +6023,28 @@ function createInstanceRequestCoordinator(
       errorMessage
     });
     return;
+  }
+
+  async function runRecoveredVerificationContinuation(
+    operationId: string,
+    commandId: string
+  ): Promise<void> {
+    if (environmentOperationTestRunner) {
+      await environmentOperationTestRunner(operationId, commandId);
+      return;
+    }
+    const operation = operations.get(operationId);
+    if (!operation) return;
+    await monitorVerificationAsSelectedAccount(operation, (executor) =>
+      resolveRecoveredVerificationRun(operation, executor)
+    );
+    setCommandState(
+      operation,
+      commandId,
+      "finished",
+      isTerminalState(operation.state) ? operation.state : "monitoring"
+    );
+    await saveOperation(operation);
   }
 
   /**
@@ -5538,6 +6143,56 @@ function createInstanceRequestCoordinator(
       }
     }
 
+    const variablePass = await rollbackGitHubEnvironmentVariableArtifacts(op, {
+      attempt,
+      run: async (args) => {
+        const result = await cleanupGitHub.rollbackCommand({ args });
+        return {
+          code: result.ok ? 0 : 1,
+          stdout: result.stdout,
+          stderr: result.stderr
+        };
+      },
+      persist,
+      only: new Set<string>(
+        selected
+          .filter(
+            (entry: { artifactType: string }) =>
+              entry.artifactType === "github_environment_variable"
+          )
+          .map((entry: { key: string }) => entry.key)
+      ),
+      steps
+    });
+    if (variablePass.attempted) {
+      warnings.push(...variablePass.warnings);
+      results = [...results, ...variablePass.results];
+      recordCleanupState(op, { state: "running", results: carriedResults() });
+      await persist();
+      if (variablePass.blocked) {
+        for (const step of steps) addLegacyStep(op, step);
+        recordCleanupState(op, {
+          attempts: attempt,
+          state: "succeeded_with_warnings",
+          results: carriedResults()
+        });
+        setCommandState(op, commandId, "finished", "blocked");
+        finish(op, "failed_partial", {
+          failure: {
+            code: "setup-variable-rollback-blocked",
+            stage: op.currentStage,
+            stepSeq: null,
+            message:
+              "Radius could not safely restore every GitHub environment variable, so it left the environment and credentials in place.",
+            classification: "user-fixable",
+            evidence: null
+          }
+        });
+        await persist();
+        return;
+      }
+    }
+
     // A GitHub environment can be one of the selected targets, and skipping it
     // here would report a clean removal while the environment survived.
     if (
@@ -5575,7 +6230,8 @@ function createInstanceRequestCoordinator(
         selected
           .filter(
             (entry: { artifactType: string }) =>
-              entry.artifactType !== "github_environment"
+              entry.artifactType !== "github_environment" &&
+              entry.artifactType !== "github_environment_variable"
           )
           .map((entry: { key: string }) => entry.key)
       ),
@@ -5738,7 +6394,7 @@ function createInstanceRequestCoordinator(
         if (plan.state === "start") {
           addLegacyStep(
             op,
-            "⏳ Rolling back the resources this interrupted attempt created."
+            "⏳ Deleting the resources this interrupted setup created."
           );
         }
         await saveOperation(op);
@@ -5962,6 +6618,20 @@ function createInstanceRequestCoordinator(
 
   function startRecoveredTasks(): void {
     for (const op of operations.all()) {
+      // Resume a delete operation that was mid-flight when the process
+      // restarted. The runner is resume-safe (each stage re-runs only while
+      // pending/running), so re-scheduling converges. Delete operations never
+      // enter input_required, so there is no prompt state to skip here.
+      if (
+        op.kind === "delete" &&
+        !op.endedAt &&
+        !serverOwnedTasks.has(op.operationId)
+      ) {
+        scheduleServerOwnedTask(op.operationId, () =>
+          runEnvironmentOperation(op.operationId)
+        );
+        continue;
+      }
       if (
         op.endedAt &&
         op.providerRecovery?.state === "rollback_pending" &&
@@ -6177,12 +6847,19 @@ function createInstanceRequestCoordinator(
   // control routes are composed once at module init and hand the accepted
   // command back to the instance that received the request.
   const scheduleCommandTask = (
-    kind: "verification_retry" | "cleanup_retry" | "rollback" | "exit_setup",
+    kind:
+      | "verification_monitor"
+      | "verification_retry"
+      | "cleanup_retry"
+      | "rollback"
+      | "exit_setup",
     op: { operationId: string },
     commandId: string
   ): void => {
     scheduleServerOwnedTask(op.operationId, () =>
-      kind === "verification_retry" ?
+      kind === "verification_monitor" ?
+        runRecoveredVerificationContinuation(op.operationId, commandId)
+      : kind === "verification_retry" ?
         runVerificationRetry(op.operationId, commandId)
       : runCleanupCommand(kind, op.operationId, commandId)
     );

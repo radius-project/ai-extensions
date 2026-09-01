@@ -856,6 +856,43 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     await harness.extension.shutdown("test");
   });
 
+  it("deduplicates missing-model delivery across canvas states without rediscovering the workspace on every poll", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["Dockerfile", "src/index.ts"]
+      }
+    });
+    const handoff = harness.capturedHostCallbacks.appBicepHandoff;
+    if (!handoff) throw new Error("runtime registered no app-model handoff");
+    const state = (canvasInstanceId: string) => ({
+      canvasInstanceId,
+      workspacePath: "/workspace",
+      workspaceRepo: "acme/widgets",
+      workspaceBranch: "main",
+      contextRepo: "acme/widgets",
+      contextBranch: "main"
+    });
+    const request = (canvasInstanceId: string) => ({
+      repo: "acme/widgets",
+      branches: ["main"],
+      page: "graph",
+      state: state(canvasInstanceId)
+    });
+
+    await handoff(request("closed-panel"));
+    await handoff(request("reopened-panel"));
+
+    expect(harness.session.send).toHaveBeenCalledTimes(1);
+    expect(
+      harness.deps.workspace.detectWorkspaceContext
+    ).not.toHaveBeenCalled();
+    expect(
+      harness.deps.appModel.modelingRunLastActivityAtMs
+    ).toHaveBeenCalled();
+
+    await harness.extension.shutdown("test");
+  });
+
   // The memo key includes the commit the record names, so a long session with
   // many regenerations would otherwise grow it without limit.
   it("keeps asking about new problems without growing the memo forever", async () => {
@@ -1011,6 +1048,13 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       }
     });
 
+    // The graph asks for a model: this repository is modelable. Asserted before
+    // the tool runs, because handing the skill over starts a run the handoff is
+    // then right to defer to.
+    const handedOff = await handOff(harness);
+    expect(handedOff).toContain("radius_generate_app");
+    expect(handedOff).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
+
     const generated = String(await generateApp(harness));
     const handoff = parseSkillHandoff(generated);
 
@@ -1046,10 +1090,49 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     // The manifest signal survives the re-read through listSourceTreeForBranch.
     expect(handoff.brief).toContain("`pnpm-workspace.yaml`");
 
-    // And the graph still asks for a model: this repository is modelable.
-    const handedOff = await handOff(harness);
+    await harness.extension.shutdown("test");
+  });
+
+  it("stops asking for a model the tool it just handed over is already generating", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "services/api/Dockerfile"]
+      }
+    });
+
+    // The graph render that finds no model comes first and legitimately asks.
+    expect(await handOff(harness)).toContain("radius_generate_app");
+
+    // Then the agent acts on it, which is the run the next render must defer to
+    // rather than ask for a second time. Panel state carries no dedupe key
+    // here, so silence can only come from the run being observed.
+    await generateApp(harness);
+
+    expect(await handOff(harness)).toBe("");
+
+    await harness.extension.shutdown("test");
+  });
+
+  it("keeps asking for a model on a branch nothing is generating", async () => {
+    const harness = await createRuntimeSdkHarness({
+      workspaceTreeByRepoBranch: {
+        "acme/widgets@main": ["src/index.ts", "services/api/Dockerfile"]
+      },
+      remoteTreeByRepoBranch: {
+        "acme/widgets@release": ["src/index.ts", "services/api/Dockerfile"]
+      }
+    });
+
+    await generateApp(harness);
+
+    // A run against the worktree's `main` says nothing about `release`.
+    const handedOff = await handOff(harness, {
+      repo: "acme/widgets",
+      branches: ["release"],
+      page: "graph"
+    });
+
     expect(handedOff).toContain("radius_generate_app");
-    expect(handedOff).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
 
     await harness.extension.shutdown("test");
   });
@@ -1127,6 +1210,10 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       harness.deps.workspace.fetchWorkspaceTree as ReturnType<typeof vi.fn>
     ).mockRejectedValue(new Error("permission denied"));
 
+    // Asked before the tool runs: handing the skill over starts a run the
+    // handoff is then right to defer to.
+    expect(await handOff(harness)).toContain("radius_generate_app");
+
     const generated = await generateApp(harness);
     expect(generated).not.toContain(UNSUPPORTED_NO_DOCKERFILE_MESSAGE);
     expect(parseSkillHandoff(generated)).not.toHaveProperty("brief");
@@ -1134,8 +1221,6 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
       "/workspace",
       undefined
     );
-
-    expect(await handOff(harness)).toContain("radius_generate_app");
 
     await harness.extension.shutdown("test");
   });

@@ -4,13 +4,14 @@
 // deep-linking, and resuming an in-flight operation belong to the page
 // controller that composes this module with the Environments pane, not here.
 
-import { remediationView } from "@radius-project/core/remediations";
 import { createCommandAction } from "../command-action.js";
 import type { CommandActionHandle } from "../command-action.js";
 import { escapeBrowserHtml } from "../html.js";
+import { requireSuccessfulJsonResponse, ServerResponseError } from "../http.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { isRecord, readArray, readBoolean, readString } from "../json.js";
 import { environmentStatusMarkup, providerLabel } from "./environments.js";
+import { tableErrorRowMarkup } from "./table-error.js";
 import type { BrowserTeardown } from "../lifecycle.js";
 import type {
   BrowserContext,
@@ -24,6 +25,13 @@ import type {
 } from "./environments.js";
 import type { RemediationView } from "@radius-project/core/remediations";
 import type { EnvironmentConfirmDialog } from "./confirm-dialog.js";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  presentedRemediationView,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
+import { githubCredentialSourceLabel } from "../../github-credential-source.js";
 
 export const CREDENTIALS_ENTRY_KEY = "environment-credentials";
 export const CREDENTIAL_PROFILES_PATH = "/api/credential-profiles";
@@ -32,6 +40,9 @@ export const CREDENTIAL_SAVE_PATH = "/api/save-credential-profile";
 export const GITHUB_IDENTITY_PATH = "/api/github-identity";
 export const VERIFY_AZURE_PATH = "/api/verify-azure-login";
 export const VERIFY_AWS_PATH = "/api/verify-aws-login";
+const CREDENTIAL_PROFILES_FAILURE = "Could not load credential profiles.";
+const CREDENTIAL_USAGE_FAILURE =
+  "Could not check which environments use this profile.";
 /**
  * Rebuild a remediation view from a server payload.
  *
@@ -40,11 +51,18 @@ export const VERIFY_AWS_PATH = "/api/verify-aws-login";
  * of its own. A remediation that does not resolve is dropped rather than shown
  * as an action that cannot run.
  */
-export function payloadRemediation(payload: unknown): RemediationView | null {
+export function payloadRemediation(
+  payload: unknown,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+): RemediationView | null {
   if (!isRecord(payload)) return null;
   const entry = payload["remediation"];
   if (!isRecord(entry)) return null;
-  const view = remediationView(entry["id"], entry["params"]);
+  const view = presentedRemediationView(
+    entry["id"],
+    entry["params"],
+    ghCommandPresentation
+  );
   return view.runnable ? view : null;
 }
 
@@ -112,6 +130,7 @@ export interface CredentialsPaneOptions {
   repo: string;
   /** Nonce for mutating requests; run-command hand-off is rejected without it. */
   mutationNonce: string;
+  ghCommandPresentation?: GhCommandPresentation;
   decisions: EnvironmentDecisionPort;
   confirmDialog?: EnvironmentConfirmDialog;
 }
@@ -217,7 +236,8 @@ function packagesCredentialLogin(identity: GitHubPackagesIdentity): string {
 }
 
 export function renderGitHubAccessView(
-  identity: GitHubPackagesIdentity
+  identity: GitHubPackagesIdentity,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): GitHubAccessView {
   // No account we can name, so there is no command we can offer. Both the
   // unreadable-identity case and an acting login the registry will not accept
@@ -225,7 +245,12 @@ export function renderGitHubAccessView(
   const noAccount: GitHubAccessView = {
     packagesVerified: false,
     statusText:
-      "Could not detect a GitHub CLI account. Sign in with gh auth login, then retry.",
+      ghCommandPresentation.kind === "unavailable" ?
+        ghCommandPresentation.installationNote
+      : `Could not detect a GitHub CLI account. Sign in with ${displayGhCommand(
+          ghCommandPresentation,
+          ["auth", "login"]
+        )}, then retry. ${ghCommandPresentation.installationNote}`.trim(),
     statusHtml: null,
     statusColor: "var(--rad-danger)",
     commandVisible: false,
@@ -237,10 +262,9 @@ export function renderGitHubAccessView(
   }
   const login = packagesCredentialLogin(identity);
   if (packagesCredentialCanWrite(identity)) {
-    const source =
-      identity.packagesCredentialSource === "injected-token" ?
-        "the Copilot session token"
-      : "the stored GitHub CLI credential";
+    const source = githubCredentialSourceLabel(
+      identity.packagesCredentialSource
+    );
     return {
       packagesVerified: true,
       statusText: "",
@@ -281,7 +305,11 @@ export function renderGitHubAccessView(
       commandVisible: alternative === null,
       remediation:
         alternative === null ?
-          remediationView("github-cli-login", { packages: "true" })
+          presentedRemediationView(
+            "github-cli-login",
+            { packages: "true" },
+            ghCommandPresentation
+          )
         : null,
       retryVisible: true
     };
@@ -294,7 +322,11 @@ export function renderGitHubAccessView(
   // Target the credential that actually publishes, not the acting account: the
   // acting account may already hold write:packages, in which case refreshing it
   // changes nothing and the publisher stays broken.
-  const remediation = remediationView("github-packages-scope", { login });
+  const remediation = presentedRemediationView(
+    "github-packages-scope",
+    { login },
+    ghCommandPresentation
+  );
   if (!remediation.runnable) {
     return noAccount;
   }
@@ -503,7 +535,10 @@ export function initializeCredentialsPane(
   };
 
   const applyGitHubAccessView = (identity: GitHubPackagesIdentity): void => {
-    const view = renderGitHubAccessView(identity);
+    const view = renderGitHubAccessView(
+      identity,
+      options.ghCommandPresentation
+    );
     credPackagesVerified = view.packagesVerified;
     credGhcrCommandRow.style.display = view.commandVisible ? "block" : "none";
     credGhcrRetry.style.display = view.retryVisible ? "" : "none";
@@ -568,10 +603,9 @@ export function initializeCredentialsPane(
         `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(options.repo)}`,
         tableAbort ? { signal: tableAbort.signal } : undefined
       )
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
+      .then((response) =>
+        requireSuccessfulJsonResponse(response, CREDENTIAL_PROFILES_FAILURE)
+      )
       .then(
         (payload) => {
           if (!active || request !== tableRequest) return;
@@ -587,8 +621,11 @@ export function initializeCredentialsPane(
           ) {
             return;
           }
-          credTableBody.innerHTML =
-            '<tr><td colspan="4" style="color:var(--rad-text-tertiary);">Could not load credential profiles.</td></tr>';
+          credTableBody.innerHTML = tableErrorRowMarkup(
+            error,
+            4,
+            CREDENTIAL_PROFILES_FAILURE
+          );
         }
       );
   };
@@ -701,16 +738,10 @@ export function initializeCredentialsPane(
     // action always has a repository to look usage up against.
     const usageRequest = context.net
       .fetch(`/api/list-environments?repo=${encodeURIComponent(options.repo)}`)
-      .then((response) => {
-        // The handler reports its own failures as HTTP 200 with an `error`
-        // field, so a non-OK status is not the only failure shape to catch.
-        if (!response.ok) throw new Error("list-environments request failed");
-        return response.json();
-      })
+      .then((response) =>
+        requireSuccessfulJsonResponse(response, CREDENTIAL_USAGE_FAILURE)
+      )
       .then((payload) => {
-        if (readString(payload, "error") !== "") {
-          throw new Error("list-environments reported an error");
-        }
         return {
           usage: readArray(payload, "environments")
             .filter(isRecord)
@@ -720,19 +751,25 @@ export function initializeCredentialsPane(
             )
             .map((environment) => readString(environment, "name"))
             .filter((environment) => environment !== ""),
-          checked: true
+          checked: true,
+          failure: ""
         };
       })
-      .catch(() => ({ usage: [] as string[], checked: false }));
-    void usageRequest.then(({ usage, checked }) => {
+      .catch((error: unknown) => ({
+        usage: [] as string[],
+        checked: false,
+        failure: error instanceof ServerResponseError ? error.message : ""
+      }));
+    void usageRequest.then(({ usage, checked, failure }) => {
       if (!active) return;
       setButtonState(button, false, "Delete Profile");
       options.confirmDialog?.show({
         title: "Delete credential profile?",
         message: `This deletes the credential profile "${name}". You will not be able to create new environments from it.${
-          checked ? "" : (
-            "\n\nCould not check which environments use this profile."
-          )
+          checked ? ""
+          : failure && failure !== CREDENTIAL_USAGE_FAILURE ?
+            `\n\n${CREDENTIAL_USAGE_FAILURE} ${failure}`
+          : `\n\n${CREDENTIAL_USAGE_FAILURE}`
         }`,
         usageLabel:
           usage.length === 1 ?
@@ -821,7 +858,10 @@ export function initializeCredentialsPane(
           btnVerifyAzure.textContent = "Verify Credentials";
           const error = readString(payload, "error");
           if (error !== "") {
-            verifyError(error, payloadRemediation(payload));
+            verifyError(
+              error,
+              payloadRemediation(payload, options.ghCommandPresentation)
+            );
             return;
           }
           const returnedTenantId = readString(payload, "tenantId");
@@ -875,7 +915,10 @@ export function initializeCredentialsPane(
           btnVerifyAws.textContent = "Verify Credentials";
           const error = readString(payload, "error");
           if (error !== "") {
-            verifyError(error, payloadRemediation(payload));
+            verifyError(
+              error,
+              payloadRemediation(payload, options.ghCommandPresentation)
+            );
             return;
           }
           const returnedAccountId = readString(payload, "accountId");
