@@ -71,7 +71,7 @@ jobs:
       RADIUS_TARGET_KUBECONFIG: ${{ vars.AZURE_AKS_CLUSTER_NAME != '' && format('{0}/.radius-target-kubeconfig', github.workspace) || '' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Azure Login (OIDC)
         if: ${{ vars.AZURE_CLIENT_ID != '' }}

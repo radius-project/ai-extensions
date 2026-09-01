@@ -46,12 +46,30 @@ const identity = {
   extension: "br:biceptypes.azurecr.io/radius:0.60"
 };
 const managedVersion = { version: identity.version, commit: identity.commit };
+const generatedRoot = "https://raw.githubusercontent.com/radius-project/radius";
 const fixtureIndex = JSON.parse(
   fs.readFileSync(path.join(fixtureRoot, "index.json"), "utf8")
 );
 const fixtureTypes = JSON.parse(
   fs.readFileSync(path.join(fixtureRoot, fixtureTypePath), "utf8")
 );
+const fixtureDefaults = fs.readFileSync(
+  path.join(fixtureRoot, "defaults.yaml"),
+  "utf8"
+);
+const fixtureRecipePack = fs.readFileSync(
+  path.join(fixtureRoot, "aks-recipepack.bicep"),
+  "utf8"
+);
+const fixturePostgreSqlRecipeDefinition = fs
+  .readFileSync(path.join(fixtureRoot, "postgresql-recipe.bicep"), "utf8")
+  .trimEnd();
+// Immutable snapshot of radius-project/resource-types-contrib main on 2026-08-30.
+const resourceTypesContribCommit = "d35ca390587661117a45a37bc2916f7aebf11428";
+const defaultsPath = "deploy/manifest/defaults.yaml";
+const recipePackPath = "recipe-packs/azure/aks-recipepack.bicep";
+const defaultsCachePath = "managed-recipes/defaults.json";
+const recipePackCachePath = `managed-recipes/azure/${resourceTypesContribCommit}/aks-recipepack.json`;
 
 assert.ok(fs.existsSync(script), `resolver script not found: ${script}`);
 
@@ -110,15 +128,43 @@ function cacheFile(
 function seedCache(cacheRoot: string, cacheCommit = commit): void {
   const indexPath = cacheFile(cacheRoot, "index.json", cacheCommit);
   const typesPath = cacheFile(cacheRoot, fixtureTypePath, cacheCommit);
+  const defaultsCache = cacheFile(cacheRoot, defaultsCachePath, cacheCommit);
+  const recipePackCache = cacheFile(
+    cacheRoot,
+    recipePackCachePath,
+    cacheCommit
+  );
   fs.mkdirSync(path.dirname(indexPath), { recursive: true });
   fs.mkdirSync(path.dirname(typesPath), { recursive: true });
+  fs.mkdirSync(path.dirname(defaultsCache), { recursive: true });
+  fs.mkdirSync(path.dirname(recipePackCache), { recursive: true });
   fs.copyFileSync(path.join(fixtureRoot, "index.json"), indexPath);
   fs.copyFileSync(path.join(fixtureRoot, fixtureTypePath), typesPath);
+  fs.writeFileSync(defaultsCache, JSON.stringify(fixtureDefaults));
+  fs.writeFileSync(recipePackCache, JSON.stringify(fixtureRecipePack));
 }
 
-function fixtureFetch(calls: string[]) {
+function fixtureFetch(
+  calls: string[],
+  {
+    defaults = fixtureDefaults,
+    recipePack = fixtureRecipePack
+  }: { defaults?: string; recipePack?: string } = {}
+) {
   return async (url: string) => {
     calls.push(url);
+    if (url.endsWith(`/${defaultsPath}`)) {
+      return new Response(defaults, {
+        status: 200,
+        headers: { "content-type": "text/plain" }
+      });
+    }
+    if (url.endsWith(`/${resourceTypesContribCommit}/${recipePackPath}`)) {
+      return new Response(recipePack, {
+        status: 200,
+        headers: { "content-type": "text/plain" }
+      });
+    }
     const value =
       url.endsWith("/index.json") ? fixtureIndex
       : url.endsWith(`/${fixtureTypePath.replaceAll(path.sep, "/")}`) ?
@@ -319,6 +365,32 @@ describe("resource selection and release identity", () => {
       )
     ).toThrow(
       /^Definition for resource type "Radius\.Core\/applications" was not found in the generated catalog for this Radius release\.$/u
+    );
+  });
+
+  it("preserves inline comments on Recipe boundaries", async () => {
+    const source = `resource recipes 'Radius.Core/recipePacks@2025-08-01-preview' = {
+  properties: {
+    recipes: {
+      'Radius.Data/postgreSqlDatabases': { // PostgreSQL default
+        kind: 'bicep'
+        source: 'example.azurecr.io/postgresql:1.0.0'
+      } // end PostgreSQL
+    }
+  }
+}`;
+
+    const contract = await resolver.resolveRadiusTypes(
+      ["Radius.Data/postgreSqlDatabases"],
+      {
+        ...managedIdentityOptions(),
+        cacheRoot: temporaryDirectory(),
+        fetchImpl: fixtureFetch([], { recipePack: source })
+      }
+    );
+
+    expect(contract.resources[0].recipe.definition).toContain(
+      "} // end PostgreSQL"
     );
   });
 });
@@ -610,6 +682,58 @@ describe("network and cache behavior", () => {
     );
     expect(contract.resources[0].apiVersion).toBe("2025-08-01-preview");
     expect(contract.resources[0].schema.properties.application).toBeUndefined();
+    expect(contract.resources[0].recipe).toEqual({
+      status: "available",
+      provenance: "managed-release-default",
+      recipePack: "azure",
+      repository: "radius-project/resource-types-contrib",
+      commit: resourceTypesContribCommit,
+      path: recipePackPath,
+      definition: fixturePostgreSqlRecipeDefinition
+    });
+  });
+
+  it("replaces a malformed managed Recipe defaults cache entry", async () => {
+    const cacheRoot = temporaryDirectory();
+    seedCache(cacheRoot);
+    fs.writeFileSync(cacheFile(cacheRoot, defaultsCachePath), "{}");
+    const calls: string[] = [];
+
+    const contract = await resolver.resolveRadiusTypes(
+      ["Radius.Data/postgreSqlDatabases"],
+      {
+        ...managedIdentityOptions(),
+        cacheRoot,
+        fetchImpl: fixtureFetch(calls)
+      }
+    );
+
+    expect(calls).toEqual([`${generatedRoot}/${commit}/${defaultsPath}`]);
+    expect(contract.resources[0].recipe.status).toBe("available");
+  });
+
+  it("replaces a malformed Azure Recipe-pack cache entry", async () => {
+    const cacheRoot = temporaryDirectory();
+    seedCache(cacheRoot);
+    fs.writeFileSync(
+      cacheFile(cacheRoot, recipePackCachePath),
+      JSON.stringify("not a Recipe pack")
+    );
+    const calls: string[] = [];
+
+    const contract = await resolver.resolveRadiusTypes(
+      ["Radius.Data/postgreSqlDatabases"],
+      {
+        ...managedIdentityOptions(),
+        cacheRoot,
+        fetchImpl: fixtureFetch(calls)
+      }
+    );
+
+    expect(calls).toEqual([
+      `https://raw.githubusercontent.com/radius-project/resource-types-contrib/${resourceTypesContribCommit}/${recipePackPath}`
+    ]);
+    expect(contract.resources[0].recipe.status).toBe("available");
   });
 
   it("retains the active and most recent previous commit caches", async () => {
@@ -831,12 +955,17 @@ describe("network and cache behavior", () => {
       ["Radius.Compute/containers", "Radius.Core/applications"],
       options
     );
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(4);
     expect(
       contract.resources.map((resource: { type: string }) => resource.type)
     ).toEqual(["Radius.Compute/containers", "Radius.Core/applications"]);
+    expect(
+      contract.resources.map(
+        (resource: { recipe: { status: string } }) => resource.recipe.status
+      )
+    ).toEqual(["available", "notFound"]);
     await resolver.resolveRadiusTypes(["Radius.Compute/containers"], options);
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(4);
   });
 
   it("returns selectors that resolve to the same API version only once", async () => {
@@ -857,7 +986,7 @@ describe("network and cache behavior", () => {
     expect(
       contract.resources.map((resource: { type: string }) => resource.type)
     ).toEqual(["Radius.Core/applications"]);
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(4);
   });
 
   it("returns every found definition alongside catalog misses", async () => {
@@ -886,8 +1015,187 @@ describe("network and cache behavior", () => {
           'Definition for resource type "Radius.Data/neo4jDatabases" was not found in the generated catalog for this Radius release.'
       }
     ]);
-    expect(calls).toHaveLength(2);
+    expect(contract.resources[1].recipe).toEqual({
+      status: "available",
+      provenance: "managed-release-default",
+      recipePack: "azure",
+      repository: "radius-project/resource-types-contrib",
+      commit: resourceTypesContribCommit,
+      path: recipePackPath,
+      definition: fixturePostgreSqlRecipeDefinition
+    });
+    expect(calls).toHaveLength(4);
   });
+
+  it("returns an all-missing batch without loading Recipe data", async () => {
+    const calls: string[] = [];
+    const contract = await resolver.resolveRadiusTypes(
+      ["Radius.Data/neo4jDatabases"],
+      {
+        ...managedIdentityOptions(),
+        cacheRoot: temporaryDirectory(),
+        fetchImpl: fixtureFetch(calls)
+      }
+    );
+
+    expect(contract.resources).toEqual([]);
+    expect(contract.notFound).toHaveLength(1);
+    expect(calls).toEqual([
+      `${generatedRoot}/${commit}/hack/bicep-types-radius/generated/index.json`
+    ]);
+  });
+
+  it("reports when a type has no exact entry in the managed Azure Recipe pack", async () => {
+    const calls: string[] = [];
+    const warnings: string[] = [];
+    const contract = await resolver.resolveRadiusTypes(
+      ["Radius.Data/postgreSqlDatabases"],
+      {
+        ...managedIdentityOptions(),
+        cacheRoot: temporaryDirectory(),
+        fetchImpl: fixtureFetch(calls, {
+          recipePack: fixtureRecipePack.replace(
+            "'Radius.Data/postgreSqlDatabases'",
+            "'Radius.Data/postgreSqlDatabase'"
+          )
+        }),
+        warn: (warning: string) => warnings.push(warning)
+      }
+    );
+
+    expect(contract.resources[0].recipe).toEqual({
+      status: "notFound",
+      provenance: "managed-release-default",
+      recipePack: "azure",
+      repository: "radius-project/resource-types-contrib",
+      commit: resourceTypesContribCommit,
+      path: recipePackPath,
+      message:
+        'The managed Azure Recipe pack does not contain a Recipe definition for "Radius.Data/postgreSqlDatabases".'
+    });
+    expect(contract.notFound).toEqual([]);
+    expect(calls).toHaveLength(4);
+    expect(warnings).toEqual([]);
+  });
+
+  it("keeps pack provenance when one Recipe definition is ambiguous", async () => {
+    const duplicatedRecipePack = fixtureRecipePack.replace(
+      "      'Radius.Data/sqlServerDatabases': {",
+      `${fixturePostgreSqlRecipeDefinition}
+      'Radius.Data/sqlServerDatabases': {`
+    );
+    const warnings: string[] = [];
+
+    const contract = await resolver.resolveRadiusTypes(
+      ["Radius.Data/postgreSqlDatabases", "Radius.Compute/containers"],
+      {
+        ...managedIdentityOptions(),
+        cacheRoot: temporaryDirectory(),
+        fetchImpl: fixtureFetch([], { recipePack: duplicatedRecipePack }),
+        warn: (warning: string) => warnings.push(warning)
+      }
+    );
+
+    expect(contract.resources[0].recipe).toEqual({
+      status: "unavailable",
+      provenance: "managed-release-default",
+      recipePack: "azure",
+      repository: "radius-project/resource-types-contrib",
+      commit: resourceTypesContribCommit,
+      path: recipePackPath,
+      message:
+        'The Azure Recipe pack contains multiple Recipe definitions for "Radius.Data/postgreSqlDatabases".'
+    });
+    expect(contract.resources[1].recipe.status).toBe("available");
+    expect(warnings).toEqual([
+      'Warning: could not resolve the managed Azure Recipe for Radius.Data/postgreSqlDatabases: The Azure Recipe pack contains multiple Recipe definitions for "Radius.Data/postgreSqlDatabases".'
+    ]);
+  });
+
+  it("uses the default warning sink for unavailable Recipe data", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    try {
+      await resolver.resolveRadiusTypes(["Radius.Data/postgreSqlDatabases"], {
+        ...managedIdentityOptions(),
+        cacheRoot: temporaryDirectory(),
+        fetchImpl: fixtureFetch([], {
+          recipePack: "not a Recipe pack"
+        })
+      });
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /could not resolve the managed Azure Recipe pack/u
+        )
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("uses the default warning sink for an ambiguous Recipe definition", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    try {
+      await resolver.resolveRadiusTypes(["Radius.Data/postgreSqlDatabases"], {
+        ...managedIdentityOptions(),
+        cacheRoot: temporaryDirectory(),
+        fetchImpl: fixtureFetch([], {
+          recipePack: fixtureRecipePack.replace(
+            "      'Radius.Data/sqlServerDatabases': {",
+            `${fixturePostgreSqlRecipeDefinition}
+      'Radius.Data/sqlServerDatabases': {`
+          )
+        })
+      });
+      expect(consoleError).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /could not resolve the managed Azure Recipe for Radius.Data\/postgreSqlDatabases/u
+        )
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it.each([
+    ["empty", " ", "The Azure Recipe pack must be non-empty text."],
+    [
+      "malformed",
+      "not a Recipe pack",
+      "The Azure Recipe pack does not contain the expected Recipe-pack structure."
+    ]
+  ])(
+    "keeps schema resolution successful when the Azure Recipe pack is %s",
+    async (_description, recipePack, expectedMessage) => {
+      const calls: string[] = [];
+      const warnings: string[] = [];
+      const contract = await resolver.resolveRadiusTypes(
+        ["Radius.Data/postgreSqlDatabases"],
+        {
+          ...managedIdentityOptions(),
+          cacheRoot: temporaryDirectory(),
+          fetchImpl: fixtureFetch(calls, { recipePack }),
+          warn: (warning: string) => warnings.push(warning)
+        }
+      );
+
+      expect(contract.resources).toHaveLength(1);
+      expect(contract.resources[0].recipe).toEqual({
+        status: "unavailable",
+        provenance: "managed-release-default",
+        recipePack: "azure",
+        message: expectedMessage
+      });
+      expect(contract.notFound).toEqual([]);
+      expect(calls).toHaveLength(4);
+      expect(warnings).toEqual([
+        `Warning: could not resolve the managed Azure Recipe pack: ${expectedMessage}`
+      ]);
+    }
+  );
 
   it("replaces malformed cache entries and tolerates concurrent writers", async () => {
     const corruptRoot = temporaryDirectory();
@@ -900,7 +1208,7 @@ describe("network and cache behavior", () => {
       cacheRoot: corruptRoot,
       fetchImpl: fixtureFetch(corruptCalls)
     });
-    expect(corruptCalls).toHaveLength(2);
+    expect(corruptCalls).toHaveLength(4);
 
     const concurrentRoot = temporaryDirectory();
     const concurrentCalls: string[] = [];
@@ -956,7 +1264,7 @@ describe("network and cache behavior", () => {
     const calls: string[] = [];
 
     const contract = await resolver.resolveRadiusTypes(
-      ["Radius.Core/applications"],
+      ["Radius.Data/postgreSqlDatabases"],
       {
         ...managedIdentityOptions(),
         cacheRoot: blockedCacheRoot,
@@ -965,10 +1273,15 @@ describe("network and cache behavior", () => {
       }
     );
 
-    expect(contract.resources[0].type).toBe("Radius.Core/applications");
-    expect(calls).toHaveLength(2);
-    expect(warnings).toHaveLength(2);
-    expect(warnings[0]).toMatch(/could not cache Radius definitions/u);
+    expect(contract.resources[0].recipe.status).toBe("available");
+    expect(calls).toHaveLength(4);
+    expect(warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/could not cache Radius definitions/u),
+        expect.stringMatching(/could not cache managed Radius Recipe source/u)
+      ])
+    );
+    expect(warnings).toHaveLength(4);
   });
 
   it("uses the default cache and warning boundary when no overrides are supplied", async () => {
@@ -1066,6 +1379,32 @@ describe("network and cache behavior", () => {
       )
     ).rejects.toThrow(/during generated resource contract/u);
   });
+
+  it("attributes a namespace fetch failure to the resource being loaded", async () => {
+    const splitIndex = structuredClone(fixtureIndex);
+    splitIndex.resources["Radius.Core/applications@2025-08-01-preview"].$ref =
+      "radius/radius.core/2025-08-01-preview/types.json#/32";
+    splitIndex.resources[
+      "Radius.Data/postgreSqlDatabases@2025-08-01-preview"
+    ].$ref = "radius/radius.data/2025-08-01-preview/types.json#/14";
+
+    await expect(
+      resolver.resolveRadiusTypes(
+        ["Radius.Core/applications", "Radius.Data/postgreSqlDatabases"],
+        {
+          ...managedIdentityOptions(),
+          cacheRoot: temporaryDirectory(),
+          fetchImpl: async (url: string) =>
+            url.endsWith("/index.json") ?
+              new Response(JSON.stringify(splitIndex), { status: 200 })
+            : new Response("missing", { status: 404 }),
+          sleep: async () => {}
+        }
+      )
+    ).rejects.toThrow(
+      /Could not resolve "Radius\.Core\/applications" during generated namespace definitions/u
+    );
+  });
 });
 
 describe("command boundary", () => {
@@ -1082,9 +1421,7 @@ describe("command boundary", () => {
       {
         ...identityOptions,
         cacheRoot,
-        fetchImpl: async () => {
-          throw new Error("network should not be used");
-        }
+        fetchImpl: fixtureFetch([])
       }
     );
 
@@ -1154,9 +1491,7 @@ describe("command boundary", () => {
           env: { ...process.env, RADIUS_RAD_BINARY: process.execPath },
           home,
           cacheRoot,
-          fetchImpl: async () => {
-            throw new Error("network should not be used");
-          }
+          fetchImpl: fixtureFetch([])
         }
       );
       expect(contract.extension).toBe(identity.extension);
@@ -1266,6 +1601,52 @@ describe("command boundary", () => {
     expect(stdout).toBe('{"contractVersion":1,"resources":[],"notFound":[]}\n');
     expect(stderr).toBe("");
     expect(configured).toBe(identity.extension);
+  });
+
+  it("routes nonfatal resolver warnings through command stderr", async () => {
+    let stdout = "";
+    let stderr = "";
+    const staging = stagingDirectory();
+    const resource = {
+      type: "Radius.Core/applications",
+      apiVersion: "2025-08-01-preview",
+      schema: { type: "object" },
+      recipe: {
+        status: "unavailable",
+        provenance: "managed-release-default",
+        recipePack: "azure",
+        message: "Recipe source unavailable."
+      }
+    };
+
+    const status = await resolver.main(
+      ["--staging", staging, "Radius.Core/applications"],
+      {
+        stdout: { write: (value: string) => (stdout += value) },
+        stderr: { write: (value: string) => (stderr += value) },
+        resolve: async (
+          _selectors: Array<{ type: string; apiVersion?: string }>,
+          options: { warn: (warning: string) => void }
+        ) => {
+          options.warn("Warning: Recipe source unavailable.");
+          return {
+            contractVersion: 1,
+            extension: identity.extension,
+            resources: [resource],
+            notFound: []
+          };
+        },
+        writeConfig: async () => {}
+      }
+    );
+
+    expect(status).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({
+      contractVersion: 1,
+      resources: [resource],
+      notFound: []
+    });
+    expect(stderr).toBe("Warning: Recipe source unavailable.\n");
   });
 
   it("prints and configures a successful partial contract", async () => {
@@ -1456,6 +1837,9 @@ describe("command boundary", () => {
         }
       ]
     });
+    expect(JSON.parse(result.stdout).resources[1].recipe.definition).toContain(
+      "'Radius.Data/postgreSqlDatabases': {"
+    );
     expect(result.stderr).toBe("");
     expect(
       JSON.parse(
@@ -1527,6 +1911,17 @@ describe("command boundary", () => {
     expect(
       contract.resources.every((resource: object) => "schema" in resource)
     ).toBe(true);
+    expect(contract.resources[0].recipe).toMatchObject({
+      status: "available",
+      provenance: "managed-release-default",
+      recipePack: "azure",
+      repository: "radius-project/resource-types-contrib",
+      commit: resourceTypesContribCommit,
+      path: recipePackPath
+    });
+    expect(contract.resources[0].recipe.definition).toContain(
+      "'Radius.Data/postgreSqlDatabases': {"
+    );
     expect(
       JSON.parse(
         fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
@@ -1553,7 +1948,6 @@ describe("staged Bicep configuration", () => {
       experimentalFeaturesEnabled: { extensibility: true },
       extensions: { radius: identity.extension }
     });
-
     const blankRoot = temporaryDirectory();
     const blankStaging = stagingDirectory(blankRoot);
     fs.writeFileSync(

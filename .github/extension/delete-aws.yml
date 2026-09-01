@@ -26,6 +26,11 @@ on:
         description: 'Name of the application or environment to delete'
         type: string
         required: true
+      force:
+        description: 'Force the delete even if resources are stuck in a non-terminal state (may orphan external resources)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   id-token: write
@@ -58,7 +63,7 @@ jobs:
       RADIUS_TARGET_KUBECONFIG: ${{ vars.AWS_EKS_CLUSTER_NAME != '' && format('{0}/.radius-target-kubeconfig', github.workspace) || '' }}
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Configure AWS Credentials (OIDC)
         if: ${{ vars.AWS_ROLE_ARN != '' }}
@@ -227,6 +232,7 @@ jobs:
         with:
           resource-type: ${{ inputs.resource_type }}
           name: ${{ inputs.name }}
+          force: ${{ inputs.force }}
 
       - name: Clean up unused routes Gateway infrastructure
         if: ${{ inputs.resource_type == 'application' }}

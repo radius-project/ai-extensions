@@ -414,21 +414,33 @@ install_missing_crds() {
     wait_for_crds
 }
 
-resource_owned() {
+resource_ownership_state() {
     local resource="$1"
     local namespace="${2:-}"
     local name="$3"
-    local value
+    local result
     declare -a namespace_args=()
     if [[ -n "${namespace}" ]]; then
         namespace_args=(-n "${namespace}")
     fi
-    value="$(
+    if result="$(
         kube get "${resource}" "${name}" "${namespace_args[@]}" \
             -o "jsonpath={.metadata.annotations.${OWNERSHIP_ANNOTATION//./\\.}}" \
-            2>/dev/null || true
-    )"
-    [[ "${value}" == "${OWNERSHIP_VALUE}" ]]
+            2>&1
+    )"; then
+        if [[ "${result}" == "${OWNERSHIP_VALUE}" ]]; then
+            printf 'owned\n'
+        else
+            printf 'unowned\n'
+        fi
+        return 0
+    fi
+    if grep -Eqi 'not found|notfound' <<<"${result}"; then
+        printf 'missing\n'
+        return 0
+    fi
+    printf '%s\n' "${result}" >&2
+    return 1
 }
 
 create_namespace_if_missing() {
@@ -1061,34 +1073,53 @@ shared_contour_consumers_exist() {
     return 1
 }
 
-delete_owned_resource() {
-    local resource="$1"
-    local namespace="${2:-}"
-    local name="$3"
+delete_resource_for_ownership_state() {
+    local state="$1"
+    local resource="$2"
+    local namespace="${3:-}"
+    local name="$4"
     declare -a namespace_args=()
     if [[ -n "${namespace}" ]]; then
         namespace_args=(-n "${namespace}")
     fi
-    if ! kube get "${resource}" "${name}" "${namespace_args[@]}" \
-        >/dev/null 2>&1; then
-        return 0
-    fi
-    if resource_owned "${resource}" "${namespace}" "${name}"; then
-        kube delete "${resource}" "${name}" "${namespace_args[@]}" \
-            --ignore-not-found --wait=true
-    else
-        echo "Preserving pre-existing ${resource} ${namespace:+${namespace}/}${name}."
-    fi
+    case "${state}" in
+        missing) ;;
+        owned)
+            kube delete "${resource}" "${name}" "${namespace_args[@]}" \
+                --ignore-not-found --wait=true
+            ;;
+        unowned)
+            echo "Preserving pre-existing ${resource} ${namespace:+${namespace}/}${name}."
+            ;;
+        *) fail "unexpected ${resource} ownership state '${state}'" ;;
+    esac
+}
+
+gateway_crd_ownership_states() {
+    local crd
+    local state
+    for crd in "${REQUIRED_CRDS[@]}"; do
+        state="$(
+            resource_ownership_state customresourcedefinition "" "${crd}"
+        )" || {
+            echo "::error::failed to inspect ownership of Gateway API CRD ${crd}; preserving Gateway infrastructure" >&2
+            return 1
+        }
+        printf '%s %s\n' "${crd}" "${state}"
+    done
 }
 
 delete_owned_crds() {
+    local states="$1"
     local crd
-    for crd in "${REQUIRED_CRDS[@]}"; do
-        if resource_owned customresourcedefinition "" "${crd}"; then
+    local state
+    while read -r crd state; do
+        [[ -n "${crd}" ]] || continue
+        if [[ "${state}" == "owned" ]]; then
             kube delete customresourcedefinition "${crd}" \
                 --ignore-not-found --wait=true
         fi
-    done
+    done <<<"${states}"
 }
 
 ensure_gateway() {
@@ -1132,6 +1163,9 @@ ensure_gateway() {
 
 cleanup_gateway() {
     local crd_state
+    local crd_ownership_states
+    local gateway_class_ownership_state
+    local gateway_ownership_state
     local release_state
 
     if ! uses_default_routes_recipe; then
@@ -1171,7 +1205,17 @@ cleanup_gateway() {
         return 0
     fi
 
-    delete_owned_resource gateway \
+    gateway_ownership_state="$(
+        resource_ownership_state gateway \
+            "${DEFAULT_GATEWAY_NAMESPACE}" "${DEFAULT_GATEWAY_NAME}"
+    )" || fail "failed to inspect ownership of Gateway ${DEFAULT_GATEWAY_NAMESPACE}/${DEFAULT_GATEWAY_NAME}; preserving Gateway infrastructure"
+    gateway_class_ownership_state="$(
+        resource_ownership_state gatewayclass "" "${DEFAULT_GATEWAY_CLASS}"
+    )" || fail "failed to inspect ownership of GatewayClass ${DEFAULT_GATEWAY_CLASS}; preserving Gateway infrastructure"
+    crd_ownership_states="$(gateway_crd_ownership_states)" ||
+        fail "failed to inspect Gateway API CRD ownership; preserving Gateway infrastructure"
+
+    delete_resource_for_ownership_state "${gateway_ownership_state}" gateway \
         "${DEFAULT_GATEWAY_NAMESPACE}" "${DEFAULT_GATEWAY_NAME}"
 
     if non_radius_gateway_objects_exist; then
@@ -1179,7 +1223,9 @@ cleanup_gateway() {
         return 0
     fi
 
-    delete_owned_resource gatewayclass "" "${DEFAULT_GATEWAY_CLASS}"
+    delete_resource_for_ownership_state \
+        "${gateway_class_ownership_state}" gatewayclass "" \
+        "${DEFAULT_GATEWAY_CLASS}"
     if [[ "${release_state}" == "owned" ]]; then
         helm_target uninstall "${CONTOUR_RELEASE}" \
             -n "${DEFAULT_GATEWAY_NAMESPACE}" --wait \
@@ -1190,7 +1236,7 @@ cleanup_gateway() {
         echo "Gateway API objects appeared during cleanup; retaining CRDs."
         return 0
     fi
-    delete_owned_crds
+    delete_owned_crds "${crd_ownership_states}"
     echo "Unused Radius-owned routes Gateway infrastructure removed."
 }
 

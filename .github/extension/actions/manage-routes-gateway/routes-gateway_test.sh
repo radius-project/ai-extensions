@@ -216,6 +216,13 @@ fi
     exit 93
 }
 
+if [[ -n "${OWNERSHIP_DISCOVERY_FAIL_RESOURCE}" &&
+    "$*" == *"jsonpath="* &&
+    "$*" == *"${OWNERSHIP_DISCOVERY_FAIL_RESOURCE}"* ]]; then
+    echo 'synthetic ownership discovery failure' >&2
+    exit 1
+fi
+
 resource="${2:-}"
 case "${resource}" in
     customresourcedefinition/*)
@@ -324,6 +331,7 @@ case "${resource}" in
                 fi
                 exit 0
             fi
+            echo 'Error from server (NotFound): gatewayclasses.gateway.networking.k8s.io "contour" not found' >&2
             exit 1
         fi
         if [[ "$*" == *"jsonpath="* ]]; then
@@ -364,6 +372,7 @@ case "${resource}" in
                 fi
                 exit 0
             fi
+            echo 'Error from server (NotFound): gateways.gateway.networking.k8s.io "radius" not found' >&2
             exit 1
         fi
         if [[ "$*" == *"-o json"* ]]; then
@@ -460,6 +469,7 @@ reset_case() {
     GATEWAYCLASS_CONTROLLER='projectcontour.io/gateway-controller'
     GATEWAY_STATE='present'
     GATEWAY_RESOURCES_OWNED='false'
+    OWNERSHIP_DISCOVERY_FAIL_RESOURCE=''
     GATEWAY_LISTENERS_VALID='true'
     BYO_STATE='complete'
     BYO_CLASS_CONTROLLER='example.io/controller'
@@ -506,6 +516,7 @@ reset_case() {
     export HELM_FAIL SERVICE_TYPE
     export ENDPOINTS_READY GATEWAYCLASS_STATE GATEWAYCLASS_CONTROLLER
     export GATEWAY_STATE GATEWAY_RESOURCES_OWNED GATEWAY_LISTENERS_VALID
+    export OWNERSHIP_DISCOVERY_FAIL_RESOURCE
     export BYO_STATE BYO_GATEWAY_JSON
     export BYO_CLASS_CONTROLLER SHARED_OBJECTS SHARED_OBJECT_RESOURCE
     export CLUSTER_JSON_OVERRIDE
@@ -1146,6 +1157,63 @@ export HELM_STATE HELM_OWNED CRDS_OWNED
 run_action cleanup
 assert_success "preserve pre-existing CRDs"
 assert_no_call "kubectl delete customresourcedefinition"
+
+# Ownership discovery distinguishes confirmed absence from lookup failures and
+# completes before any cleanup mutation.
+reset_case
+HELM_STATE='present'
+HELM_OWNED='true'
+CRDS_OWNED='true'
+GATEWAY_RESOURCES_OWNED='true'
+GATEWAY_STATE='missing'
+export HELM_STATE HELM_OWNED CRDS_OWNED GATEWAY_RESOURCES_OWNED GATEWAY_STATE
+run_action cleanup
+assert_success "confirmed missing Gateway"
+assert_no_call "kubectl delete gateway radius"
+assert_call "kubectl delete gatewayclass contour"
+assert_call "helm uninstall contour"
+
+reset_case
+HELM_STATE='present'
+HELM_OWNED='true'
+CRDS_OWNED='true'
+GATEWAY_RESOURCES_OWNED='true'
+OWNERSHIP_DISCOVERY_FAIL_RESOURCE='gateway radius'
+export HELM_STATE HELM_OWNED CRDS_OWNED GATEWAY_RESOURCES_OWNED
+export OWNERSHIP_DISCOVERY_FAIL_RESOURCE
+run_action cleanup
+assert_failure "Gateway ownership discovery failure"
+assert_output "failed to inspect ownership of Gateway radius-system/radius"
+assert_no_call "kubectl delete"
+assert_no_call "helm uninstall"
+
+reset_case
+HELM_STATE='present'
+HELM_OWNED='true'
+CRDS_OWNED='true'
+GATEWAY_RESOURCES_OWNED='true'
+OWNERSHIP_DISCOVERY_FAIL_RESOURCE='gatewayclass contour'
+export HELM_STATE HELM_OWNED CRDS_OWNED GATEWAY_RESOURCES_OWNED
+export OWNERSHIP_DISCOVERY_FAIL_RESOURCE
+run_action cleanup
+assert_failure "GatewayClass ownership discovery failure"
+assert_output "failed to inspect ownership of GatewayClass contour"
+assert_no_call "kubectl delete"
+assert_no_call "helm uninstall"
+
+reset_case
+HELM_STATE='present'
+HELM_OWNED='true'
+CRDS_OWNED='true'
+GATEWAY_RESOURCES_OWNED='true'
+OWNERSHIP_DISCOVERY_FAIL_RESOURCE='customresourcedefinition gateways.gateway.networking.k8s.io'
+export HELM_STATE HELM_OWNED CRDS_OWNED GATEWAY_RESOURCES_OWNED
+export OWNERSHIP_DISCOVERY_FAIL_RESOURCE
+run_action cleanup
+assert_failure "CRD ownership discovery failure"
+assert_output "failed to inspect ownership of Gateway API CRD gateways.gateway.networking.k8s.io"
+assert_no_call "kubectl delete"
+assert_no_call "helm uninstall"
 
 # BYO cleanup never mutates the cluster.
 reset_case
