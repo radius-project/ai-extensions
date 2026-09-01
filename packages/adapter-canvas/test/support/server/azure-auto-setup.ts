@@ -8,9 +8,6 @@ import type {
 } from "../../../src/server/routes/azure-auto-setup-types.js";
 import { successfulSelectedGhExecutor } from "./selected-gh.js";
 
-/** Joined-argv prefix of the `az account show` caller-identity projection. */
-export const CALLER_IDENTITY_COMMAND_PREFIX = "account show --query {type:";
-
 /**
  * How a fake `az` should answer the caller-identity projection.
  *

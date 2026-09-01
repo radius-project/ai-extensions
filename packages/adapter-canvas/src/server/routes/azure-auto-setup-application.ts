@@ -849,6 +849,7 @@ export async function resolveAzureAutoSetupApplication({
           return null;
         if (
           ownerAdd.code !== 0 &&
+          ownerAdd.code !== "0" &&
           !isAppOwnerAlreadyAssignedError(ownerAdd.stderr)
         ) {
           await rollbackCreatedAppAndFail(
@@ -866,7 +867,7 @@ export async function resolveAzureAutoSetupApplication({
         const ownerList = await runAz(
           buildAppOwnerListArgs({ appId: clientId })
         );
-        if (ownerList.code !== 0) {
+        if (ownerList.code !== 0 && ownerList.code !== "0") {
           await rollbackCreatedAppAndFail(
             "Failed to verify owners of the new App Registration: " +
               ownerList.stderr,

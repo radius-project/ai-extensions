@@ -15,11 +15,7 @@ import type {
   AzureAutoSetupFailureInput,
   AzureAutoSetupOperation
 } from "./azure-auto-setup-types.js";
-import {
-  CALLER_IDENTITY_COMMAND_PREFIX,
-  callerIdentityResult,
-  createAzureAutoSetupTestDependencies
-} from "../../../test/support/server/azure-auto-setup.js";
+import { createAzureAutoSetupTestDependencies } from "../../../test/support/server/azure-auto-setup.js";
 
 const SUBSCRIPTION = "22222222-2222-2222-2222-222222222222";
 const TENANT = "11111111-1111-1111-1111-111111111111";
@@ -197,9 +193,6 @@ function orchestrationHarness(
       }
       if (line.startsWith(`ad app show --id ${APP_ID} `)) {
         return { code: 0, stdout: "app-object", stderr: "" };
-      }
-      if (line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX)) {
-        return callerIdentityResult();
       }
       if (line.startsWith("ad signed-in-user show ")) {
         return { code: 0, stdout: USER_ID, stderr: "" };
@@ -925,9 +918,6 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         return { code: 0, stdout: "[]", stderr: "" };
       if (line.startsWith("ad app create "))
         return { code: 0, stdout: APP_ID, stderr: "" };
-      if (line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX)) {
-        return callerIdentityResult();
-      }
       if (line.startsWith("ad signed-in-user show "))
         return { code: 0, stdout: USER_ID, stderr: "" };
       if (line.startsWith(`ad app owner add --id ${APP_ID}`))
@@ -1118,9 +1108,6 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
             stderr: ""
           };
         }
-        if (line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX)) {
-          return callerIdentityResult();
-        }
         if (line.startsWith("ad signed-in-user show ")) {
           return { code: 0, stdout: USER_ID, stderr: "" };
         }
@@ -1184,9 +1171,6 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
             ]),
             stderr: ""
           };
-        }
-        if (line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX)) {
-          return callerIdentityResult();
         }
         if (line.startsWith("ad signed-in-user show ")) {
           return { code: 0, stdout: USER_ID, stderr: "" };
@@ -1266,9 +1250,6 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         if (line.startsWith("ad app list ")) {
           return { code: 0, stdout: "[]", stderr: "" };
         }
-        if (line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX)) {
-          return callerIdentityResult();
-        }
         if (line.startsWith("ad signed-in-user show ")) {
           return { code: 0, stdout: USER_ID, stderr: "" };
         }
@@ -1330,9 +1311,6 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       }
       if (command.startsWith(`ad app show --id ${APP_ID} `)) {
         return { code: 0, stdout: "app-object", stderr: "" };
-      }
-      if (command.startsWith(CALLER_IDENTITY_COMMAND_PREFIX)) {
-        return callerIdentityResult();
       }
       if (command.startsWith("ad signed-in-user show ")) {
         return { code: 0, stdout: USER_ID, stderr: "" };
@@ -1466,10 +1444,8 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       journal.filter((entry) => entry === "az:account show --output json")
     ).toHaveLength(1);
     expect(
-      journal.some((entry) =>
-        entry.startsWith(`az:${CALLER_IDENTITY_COMMAND_PREFIX}`)
-      )
-    ).toBe(false);
+      journal.filter((entry) => entry.startsWith("az:account show "))
+    ).toEqual(["az:account show --output json"]);
     expect(journal.at(-1)).not.toBe("checkpoint");
     expect(journal).toContain("stage:succeeded");
   });

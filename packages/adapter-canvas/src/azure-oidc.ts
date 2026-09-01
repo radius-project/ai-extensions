@@ -242,26 +242,6 @@ export type CallerIdentity =
   | { kind: "servicePrincipal"; appId: string }
   | { kind: "unsupported"; reason: string };
 
-/**
- * Build the argv for the `az account show` projection that reports the
- * authenticated principal's type and name.
- *
- * The type is read up front rather than inferred from a failed
- * `az ad signed-in-user show`: that command is Microsoft Graph `/me`, which
- * does not exist for a service principal, and matching its error text would
- * reclassify a genuine permission denial as "this must be a service principal".
- */
-export function buildCallerIdentityArgs(): string[] {
-  return [
-    "account",
-    "show",
-    "--query",
-    "{type:user.type,name:user.name}",
-    "-o",
-    "json"
-  ];
-}
-
 /** Build the argv reading the signed-in human user's Entra object id. */
 export function buildSignedInUserObjectIdArgs(): string[] {
   return ["ad", "signed-in-user", "show", "--query", "id", "-o", "tsv"];

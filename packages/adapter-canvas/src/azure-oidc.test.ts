@@ -10,7 +10,6 @@ import {
   buildAppOwnerListArgs,
   buildAppTagPatchArgs,
   buildAppTagShowArgs,
-  buildCallerIdentityArgs,
   buildRadiusAppProvenanceTags,
   buildServicePrincipalObjectIdArgs,
   buildSignedInUserObjectIdArgs,
@@ -156,17 +155,6 @@ describe("buildAppCreateArgs", () => {
 });
 
 describe("caller identity resolution", () => {
-  it("builds the argv that projects the authenticated principal's type and name", () => {
-    expect(buildCallerIdentityArgs()).toEqual([
-      "account",
-      "show",
-      "--query",
-      "{type:user.type,name:user.name}",
-      "-o",
-      "json"
-    ]);
-  });
-
   it("builds the argv reading a signed-in user's Graph object id", () => {
     expect(buildSignedInUserObjectIdArgs()).toEqual([
       "ad",

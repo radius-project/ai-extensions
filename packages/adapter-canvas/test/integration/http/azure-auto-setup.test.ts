@@ -14,7 +14,6 @@ import type {
 } from "../../../src/server/routes/azure-auto-setup-types.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import {
-  CALLER_IDENTITY_COMMAND_PREFIX,
   createAzureAutoSetupTestDependencies,
   type FakeCallerIdentity
 } from "../../support/server/azure-auto-setup.js";
@@ -457,9 +456,9 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
     expect(
       azCalls.filter((line) => line === "account show --output json")
     ).toHaveLength(1);
-    expect(
-      azCalls.some((line) => line.startsWith(CALLER_IDENTITY_COMMAND_PREFIX))
-    ).toBe(false);
+    expect(azCalls.filter((line) => line.startsWith("account show "))).toEqual([
+      "account show --output json"
+    ]);
     expect(unmatchedCalls).toEqual([]);
   });
 
