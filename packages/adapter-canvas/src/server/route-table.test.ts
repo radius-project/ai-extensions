@@ -109,6 +109,7 @@ const productionHandlers = {
     repoMatchesWorkspace: () => false
   }),
   ...createDeploymentsRoutes({
+    probeDeleteConflict: () => Promise.resolve({ state: "clear" as const }),
     isValidRepoSlug: () => true,
     readInstanceEntry: () => undefined,
     triggerDeployRepairHandoff: () => false,

@@ -6,13 +6,13 @@ This example records reasoning and acceptance checks for `dockersamples/todo-lis
 
 The requested profile runs the application with MySQL instead of its default SQLite path. The source supports that profile when `MYSQL_HOST` is present, so the SQLite default does not override the explicit selection.
 
-| Acceptance criterion          | Source/schema-backed decision                                                     |
-|-------------------------------|-----------------------------------------------------------------------------------|
-| MySQL backing service         | Emit the exact configured `Radius.Data/mySqlDatabases` type                       |
-| Source-built workload         | Use the complete Dockerfile context at an immutable source ref                    |
-| Native database contract      | Supply `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DB`               |
-| Developer-supplied credential | Set `MYSQL_PASSWORD` from the same `@secure()` password parameter via `env.value` |
-| Listener                      | Expose the source-configured port 3000                                            |
+| Acceptance criterion          | Source/schema-backed decision                                                                                |
+|-------------------------------|--------------------------------------------------------------------------------------------------------------|
+| MySQL backing service         | Emit the exact configured `Radius.Data/mySqlDatabases` type                                                  |
+| Source-built workload         | Use the complete Dockerfile context at an immutable source ref                                               |
+| Native database contract      | Supply `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DB`                                          |
+| Developer-supplied credential | Author `mysql-client-credentials` and bind its `password` key to native `MYSQL_PASSWORD` with `secretKeyRef` |
+| Listener                      | Expose the source-configured port 3000                                                                       |
 
 ## Source analysis
 
@@ -30,17 +30,54 @@ The requested profile runs the application with MySQL instead of its default SQL
 1. The explicit MySQL profile selects the optional source-supported MySQL path; do not fall back to SQLite merely because it is the application default.
 2. Resolve the MySQL type, API version, credential inputs, and `host` output against the exact target schema and Recipe.
 3. Map all four native variables. A generic connection does not invent these application-specific names.
-4. Pass the developer-supplied password to the schema's sensitive resource property from a `@secure()` parameter, and assign that same parameter directly to the workload's `MYSQL_PASSWORD` `env.value`. Radius encrypts and injects it, so no wrapper `Radius.Security/secrets` resource or `secretKeyRef` is needed.
+4. Pass the developer-supplied password to the schema's sensitive resource property from a `@secure()` parameter, and store that same parameter in an authored `Radius.Security/secrets` named `mysql-client-credentials`, distinct from the Recipe-owned `mysql-credentials` Kubernetes Secret. Bind its `password` key to the workload's native `MYSQL_PASSWORD` through `secretKeyRef` with `secretName: mysqlClientCredentials.name`. This preserves the source contract without reclassifying the input as Recipe-owned or requiring secret-backed connection projection.
 5. Referencing the image and Recipe-mapped MySQL host creates dependency ordering. Omit a generic connection unless the request explicitly requires Radius relationship metadata or the source consumes its exact projection.
 6. Pin `build.source` to the modeled commit, validate tag omission against the exact current Recipe, set `build.platforms: ['linux/amd64']` because the single unpinned stage cannot execute its arm64 `RUN` without emulation, and consume the build through verified `properties.imageReference`.
 7. Verify that the target Environment registers Recipes for every emitted extensible type.
 8. Match `containerPort` to the inspected process listener. The loopback-only Compose mapping is not external-client ingress evidence.
 
+## Credential wiring excerpt
+
+```bicep
+@secure()
+param mysqlPassword string
+
+resource mysqlClientCredentials 'Radius.Security/secrets@2025-08-01-preview' = {
+  name: 'mysql-client-credentials'
+  properties: {
+    environment: environment
+    application: app.id
+    data: {
+      password: {
+        value: mysqlPassword
+      }
+    }
+  }
+}
+
+containers: {
+  todo: {
+    env: {
+      MYSQL_PASSWORD: {
+        valueFrom: {
+          secretKeyRef: {
+            secretName: mysqlClientCredentials.name
+            key: 'password'
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+This excerpt shows only the developer-owned credential path. The same `mysqlPassword` parameter supplies the MySQL resource's schema-defined sensitive input in the complete model. The native `MYSQL_PASSWORD` binding remains explicit, and no authored-Secret connection migration is implied.
+
 ## Completion checks
 
 - The selected MySQL type and source-built workload are both emitted.
 - Every required native variable appears with exact spelling and format.
-- The workload password comes from the same `@secure()` parameter assigned to `env.value`; no password is hardcoded and no wrapper secret or `secretKeyRef` is authored.
+- The workload password remains an explicit `MYSQL_PASSWORD`, sourced by `secretKeyRef` from the distinct authored `mysql-client-credentials` Secret that holds the same `@secure()` parameter supplied to the backing resource; no optional Secret connection migration is performed.
 - The exact target Recipe maps every consumed output and is registered for every emitted type.
 - The source build uses the pinned commit and Recipe-validated tag/platform behavior, without unsupported package-manager or architecture assumptions.
 - The process listener, image entrypoint, and database name/version agree with the pinned source.

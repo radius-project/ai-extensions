@@ -445,6 +445,131 @@ describe("P0-C built Radius extension artifact", () => {
     }
   });
 
+  it("packages the managed-secret modeling contract in executable examples and platform rules", () => {
+    assertCurrentArtifact();
+    const readGuidance = (relativePath: string): string =>
+      readFileSync(join(DIST_SKILL, relativePath), "utf8");
+    const bicepBlocks = filesUnder(DIST_SKILL)
+      .filter((path) => path.endsWith(".md"))
+      .flatMap((path) => [
+        ...readFileSync(path, "utf8").matchAll(
+          /```bicep\r?\n([\s\S]*?)\r?\n```/gu
+        )
+      ])
+      .map((match) => match[1]);
+
+    const todoExample = readGuidance("references/todo-list-app-example.md");
+    const mysqlExample = bicepBlocks.find(
+      (block) =>
+        block.includes("resource mysqlCredentials 'Radius.Security/secrets") &&
+        block.includes("source: mysql.id") &&
+        block.includes("source: mysqlCredentials.id")
+    );
+    expect(mysqlExample).toBeDefined();
+    expect(mysqlExample).toMatch(/password:\s*\{\s*value:\s*password\s*\}/u);
+    expect(mysqlExample).toMatch(
+      /mysql:\s*\{\s*source:\s*mysql\.id\s*\}\s*mysqlSecret:\s*\{\s*source:\s*mysqlCredentials\.id/u
+    );
+    expect(todoExample).toMatch(
+      /MYSQL_PASSWORD:\s*\{\s*valueFrom:\s*\{\s*secretKeyRef:\s*\{\s*secretName:\s*mysqlClientCredentials\.name\s*key:\s*'password'/u
+    );
+    expect(todoExample).toContain(
+      "The same `mysqlPassword` parameter supplies the MySQL resource's schema-defined sensitive input"
+    );
+    expect(todoExample).toContain(
+      "no authored-Secret connection migration is implied"
+    );
+
+    const connectionGuidance = readGuidance(
+      "references/connection-conventions.md"
+    );
+    const structureGuidance = readGuidance(
+      "references/bicep-structure-rules.md"
+    );
+    const runtimeGuidance = readGuidance("references/runtime-contract.md");
+    const skillGuidance = readGuidance("SKILL.md");
+    const redisExample = bicepBlocks.find(
+      (block) =>
+        block.includes("redis:") && block.includes("source: redisCache.id")
+    );
+    expect(redisExample).toBeDefined();
+    expect(redisExample).not.toMatch(
+      /Radius\.Security\/secrets|properties\.secrets\.name/u
+    );
+    expect(connectionGuidance).toContain(
+      "If the Redis Recipe declares `url` in `result.secrets`, the connection injects secret-backed `CONNECTION_REDIS_URL`"
+    );
+    expect(connectionGuidance).toContain(
+      "If compatibility cannot be proven, preserve or use the existing schema-supported wiring"
+    );
+    expect(connectionGuidance).toContain(
+      "Do not automatically rewrite an existing working `app.bicep`"
+    );
+    expect(connectionGuidance).toContain(
+      "Azure Container Instances (ACI) behavior is unchanged"
+    );
+    expect(connectionGuidance).toContain(
+      "An explicit `env` entry wins when it has the same name as a generated connection variable"
+    );
+    expect(connectionGuidance).toContain(
+      "Set `disableDefaultEnvVars: true` on a connection only when all generated variables from that connection must be suppressed"
+    );
+    expect(skillGuidance).toContain(
+      "`postgresSecret` becomes `POSTGRESSECRET`"
+    );
+    expect(skillGuidance).toContain("`rad version --output json`");
+    expect(skillGuidance).toContain(
+      "`rad recipe show <name> --resource-type <type> --output json`"
+    );
+    expect(skillGuidance).toContain(
+      "These signals do not automatically prove secret-connection projection"
+    );
+    for (const guidance of [connectionGuidance, runtimeGuidance]) {
+      expect(guidance).toContain("`rad version --output json`");
+      expect(guidance).toContain(
+        "`rad recipe show <name> --resource-type <type> --output json`"
+      );
+      expect(guidance).toContain("known compatible control-plane version");
+    }
+    expect(readGuidance("references/secrets-handling.md")).toContain(
+      "`CONNECTION_MYSQLSECRET_PASSWORD`"
+    );
+    for (const guidance of [
+      connectionGuidance,
+      structureGuidance,
+      runtimeGuidance,
+      readGuidance("references/secrets-handling.md")
+    ]) {
+      expect(guidance).toContain("`@secure()`");
+      expect(guidance).toContain("`env.value`");
+      expect(guidance).toMatch(/explicit|legacy/u);
+      expect(guidance).toContain("fallback");
+      expect(guidance).toContain("generated Pod specification");
+    }
+    for (const guidance of [
+      connectionGuidance,
+      structureGuidance,
+      runtimeGuidance
+    ]) {
+      expect(guidance).toMatch(
+        /secretKeyRef[^\n]*<secret>\.name[^\n]*(?:native variable|compatibility fallback)/u
+      );
+    }
+
+    const literalCredentialAssignment =
+      /^\s*(?:[A-Za-z][A-Za-z0-9]*_)*(?:accessKey|apiKey|clientSecret|connectionString|password|secretKey|token)\s*:\s*(?:['"]|\{\s*value:\s*['"])/imu;
+    expect("MYSQL_PASSWORD: { value: 'unsafe-example' }").toMatch(
+      literalCredentialAssignment
+    );
+    expect("APP_PASSWORD_POLICY: { value: 'strict' }").not.toMatch(
+      literalCredentialAssignment
+    );
+    expect(bicepBlocks.length).toBeGreaterThan(0);
+    for (const block of bicepBlocks) {
+      expect(block).not.toMatch(literalCredentialAssignment);
+    }
+  });
+
   it("packages each page module exactly once", () => {
     assertCurrentArtifact();
     const bundle = readFileSync(ARTIFACT, "utf8");
