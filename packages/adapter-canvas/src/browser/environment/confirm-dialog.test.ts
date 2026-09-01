@@ -199,6 +199,45 @@ describe("createEnvironmentConfirmDialog", () => {
     expect(elements["env-confirm-usage-label"].textContent).toBe("");
   });
 
+  // A standalone caution, such as the forced-delete orphan warning, has no
+  // list behind it but must still be shown — only when it says so.
+  it("shows the caution block for a label that opts out of a list", () => {
+    const { dialog, elements } = openDialog();
+
+    dialog.show({
+      title: "Force delete this deployment?",
+      message: "It may still be updating.",
+      usageLabel: "Resources may be left behind.",
+      showUsageWithoutItems: true,
+      confirmLabel: "Force delete",
+      onConfirm: vi.fn()
+    });
+
+    expect(elements["env-confirm-usage"].style.display).toBe("");
+    expect(elements["env-confirm-usage-label"].textContent).toBe(
+      "Resources may be left behind."
+    );
+    expect(fakeText(elements["env-confirm-usage-list"])).toBe("");
+  });
+
+  // The credential-profile dialog always labels its usage list, even when the
+  // profile turned out to have no environments. That label heads a list, so it
+  // must stay hidden rather than render over nothing.
+  it("hides a list label whose list came back empty", () => {
+    const { dialog, elements } = openDialog();
+
+    dialog.show({
+      title: "Delete credential profile?",
+      message: "This deletes the profile.",
+      usageLabel: "These environments were created from it:",
+      usage: [],
+      confirmLabel: "Delete profile",
+      onConfirm: vi.fn()
+    });
+
+    expect(elements["env-confirm-usage"].style.display).toBe("none");
+  });
+
   it("does not leak one caller's presentation into the next dialog", () => {
     const { dialog, elements } = openDialog();
 

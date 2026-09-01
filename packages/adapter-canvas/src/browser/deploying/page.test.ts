@@ -29,6 +29,7 @@ import {
   ENVIRONMENTS_PATH,
   WORKTREE_SHA
 } from "../repositories.js";
+import { DELETE_CONFLICT_PATH, deleteConflictUrl } from "../force-delete.js";
 import {
   DELETE_DEPLOYMENT_PATH,
   DELETE_POLL_LIMIT,
@@ -46,7 +47,8 @@ import {
   deploymentStatusMarkup,
   initializeDeployingPage,
   opKey,
-  parseDeploymentRecords
+  parseDeploymentRecords,
+  workflowRunLink
 } from "./page.js";
 
 const HOSTILE = '<img src=x onerror="alert(1)">';
@@ -63,6 +65,7 @@ interface FixtureOptions {
   // withProgressModal says.
   withProgressModalElement?: boolean;
   withDeleteDialog?: boolean;
+  withForceConfirm?: boolean;
   appPayload?: unknown;
   envPayload?: unknown;
   branchPayload?: unknown;
@@ -78,6 +81,7 @@ function fixture(options: FixtureOptions = {}) {
     withProgressModal = true,
     withProgressModalElement = withProgressModal,
     withDeleteDialog = true,
+    withForceConfirm = true,
     appPayload = { applications: [{ name: "app" }] },
     envPayload = {
       environments: [{ name: "dev", provider: "azure", status: "success" }]
@@ -153,6 +157,15 @@ function fixture(options: FixtureOptions = {}) {
     elements.push(deleteModal, deleteBody, deleteApp, deleteEnv, deleteClose);
   }
 
+  // The lighter shared confirmation the page renders for the forced delete.
+  const confirmElements: Record<string, FakeElement> = {};
+  for (const id of CONFIRM_DIALOG_IDS) {
+    const element = createFakeElement(id);
+    if (id === "env-confirm-modal") element.style.display = "none";
+    confirmElements[id] = element;
+    if (withForceConfirm) elements.push(element);
+  }
+
   for (const element of elements) browser.document.add(element);
 
   browser.net.handle(
@@ -174,6 +187,7 @@ function fixture(options: FixtureOptions = {}) {
   );
 
   return {
+    confirm: confirmElements,
     browser,
     repo,
     branch,
@@ -220,6 +234,19 @@ function inlineMessage(inlineStatus: FakeElement): string {
   if (!body) return "";
   return body.innerHTML !== "" ? body.innerHTML : (body.textContent ?? "");
 }
+
+// The lighter shared confirmation's markup, rendered by this page for the
+// forced-delete question.
+const CONFIRM_DIALOG_IDS = [
+  "env-confirm-modal",
+  "env-confirm-title",
+  "env-confirm-message",
+  "env-confirm-usage",
+  "env-confirm-usage-label",
+  "env-confirm-usage-list",
+  "env-confirm-cancel",
+  "env-confirm-ok"
+] as const;
 
 function deployRowButton(app: string, environment: string, id = "row-del") {
   const button = createFakeInput(id);
@@ -830,6 +857,7 @@ describe("delete flow", () => {
     await flushPromises();
     expect(page.tableBody.innerHTML).toContain("Deleting");
     expect(JSON.parse(String(deleteCalled))).toEqual({
+      force: false,
       repo: "octo/app",
       environment: "dev",
       application: "app"
@@ -843,6 +871,358 @@ describe("delete flow", () => {
     page.browser.clock.tick(DELETE_POLL_MS);
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toContain("successfully deleted");
+  });
+
+  describe("delete workflow run link", () => {
+    it.each([
+      ["http://github.com/octo/app/actions/runs/7", "an insecure scheme"],
+      ["javascript:alert(1)", "a script URL"],
+      ["/octo/app/actions/runs/7", "a relative path"],
+      ["", "no run URL"]
+    ])("renders no link for %s (%s)", (runUrl) => {
+      expect(workflowRunLink(runUrl)).toBe("");
+    });
+
+    it("escapes the run URL it renders", () => {
+      const link = workflowRunLink('https://github.com/o/r"><b>');
+      expect(link).toContain("&quot;&gt;&lt;b&gt;");
+      expect(link).not.toContain('"><b>');
+      expect(link).toContain("View delete workflow run in GitHub");
+    });
+
+    it("links the dispatched run while deleting and after the delete finishes", async () => {
+      const { page, button } = await readyWithRow("app", "dev");
+      page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+        jsonResponse({
+          success: true,
+          forced: false,
+          runUrl: "https://github.com/octo/app/actions/runs/42"
+        })
+      );
+      button.dispatch("click");
+      confirmDeleteDialog(page.deleteBody, "app", "dev");
+      await flushPromises();
+      const started = inlineMessage(page.inlineStatus);
+      expect(started).toContain("has started");
+      expect(started).toContain(
+        'href="https://github.com/octo/app/actions/runs/42"'
+      );
+
+      page.browser.net.handle(
+        `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+        () => jsonResponse({ deployments: [] })
+      );
+      page.browser.clock.tick(DELETE_POLL_MS);
+      await flushPromises();
+      const done = inlineMessage(page.inlineStatus);
+      expect(done).toContain("successfully deleted");
+      expect(done).toContain(
+        'href="https://github.com/octo/app/actions/runs/42"'
+      );
+    });
+
+    it("keeps the started message unlinked when the server resolved no run", async () => {
+      const { page, button } = await readyWithRow("app", "dev");
+      page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+        jsonResponse({ success: true, runUrl: "" })
+      );
+      button.dispatch("click");
+      confirmDeleteDialog(page.deleteBody, "app", "dev");
+      await flushPromises();
+      const started = inlineMessage(page.inlineStatus);
+      expect(started).toContain("has started");
+      expect(started).not.toContain("<a ");
+    });
+  });
+
+  // The force escalation is offered only for a delete that already failed and
+  // that the server can prove is stuck, and only that path may force.
+  describe("force delete after a failed delete", () => {
+    async function readyWithFailedRow(app = "app", environment = "dev") {
+      const page = fixture({
+        deploymentsPayload: {
+          deployments: [{ app, environment, status: "delete-failed" }]
+        }
+      });
+      const button = deployRowButton(app, environment);
+      page.browser.document.addSelectorAll(".js-del-dep", [button]);
+      const teardown = init(page);
+      await flushPromises();
+      return { page, button, teardown };
+    }
+
+    function handleConflict(
+      page: Awaited<ReturnType<typeof readyWithFailedRow>>["page"],
+      payload: unknown
+    ): string[] {
+      const asked: string[] = [];
+      page.browser.net.handle(
+        deleteConflictUrl({
+          repo: page.repo,
+          environment: "dev",
+          application: "app"
+        }),
+        () => {
+          asked.push("probe");
+          return jsonResponse(payload);
+        }
+      );
+      return asked;
+    }
+
+    it("asks the lighter confirmation and forces the delete once the conflict is proven", async () => {
+      const { page, button } = await readyWithFailedRow();
+      const asked = handleConflict(page, {
+        conflict: true,
+        resourceState: "Updating",
+        forced: false,
+        detail: ""
+      });
+      let dispatched: unknown;
+      page.browser.net.handle(DELETE_DEPLOYMENT_PATH, (init) => {
+        dispatched = init?.body;
+        return jsonResponse({ ok: true });
+      });
+
+      button.dispatch("click");
+      await flushPromises();
+      expect(asked).toEqual(["probe"]);
+      // The three-step dialog stays shut: the forced question is asked by the
+      // same confirmation shape the rest of the product uses.
+      expect(page.deleteModal.style.display).not.toBe("flex");
+      expect(page.confirm["env-confirm-modal"].style.display).toBe("flex");
+      expect(page.confirm["env-confirm-title"].textContent).toBe(
+        "Force delete this deployment?"
+      );
+      expect(page.confirm["env-confirm-message"].textContent).toContain(
+        'still in the "Updating" state'
+      );
+      expect(page.confirm["env-confirm-usage"].style.display).not.toBe("none");
+      expect(page.confirm["env-confirm-usage-label"].textContent).toContain(
+        "orphaned external resources"
+      );
+      expect(page.confirm["env-confirm-ok"].textContent).toBe("Force delete");
+
+      page.confirm["env-confirm-ok"].dispatch("click");
+      await flushPromises();
+      expect(JSON.parse(String(dispatched))).toEqual({
+        force: true,
+        repo: "octo/app",
+        environment: "dev",
+        application: "app"
+      });
+      expect(inlineMessage(page.inlineStatus)).toContain("Force deleting");
+
+      page.browser.net.handle(
+        `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+        () => jsonResponse({ deployments: [] })
+      );
+      page.browser.clock.tick(DELETE_POLL_MS);
+      await flushPromises();
+      const done = inlineMessage(page.inlineStatus);
+      expect(done).toContain("successfully deleted");
+      expect(done).toContain("orphaned external resources");
+    });
+
+    // The probe is a server-side artifact download, so the click has to say
+    // something is happening and the second click must not start a second one.
+    it("marks the row busy while probing and ignores a second click", async () => {
+      const { page, button } = await readyWithFailedRow();
+      // A second row shares the delete selector, and only the probed row is
+      // busy — the rest of the table stays clickable.
+      const other = deployRowButton("other", "dev");
+      page.browser.document.addSelectorAll(".js-del-dep", [button, other]);
+      const probe = createDeferred<HttpResponse>();
+      let probes = 0;
+      page.browser.net.handle(
+        deleteConflictUrl({
+          repo: page.repo,
+          environment: "dev",
+          application: "app"
+        }),
+        () => {
+          probes++;
+          return probe.promise;
+        }
+      );
+
+      button.dispatch("click");
+      await flushPromises();
+      expect(button.getAttribute("disabled")).toBe("");
+      expect(button.getAttribute("aria-busy")).toBe("true");
+      expect(other.getAttribute("disabled")).toBe(null);
+
+      button.dispatch("click");
+      await flushPromises();
+      expect(probes).toBe(1);
+
+      probe.resolve(
+        jsonResponse({
+          conflict: true,
+          resourceState: "Updating",
+          forced: false,
+          detail: ""
+        })
+      );
+      await flushPromises();
+      expect(button.getAttribute("disabled")).toBe(null);
+      expect(button.getAttribute("aria-busy")).toBe(null);
+      expect(page.confirm["env-confirm-modal"].style.display).toBe("flex");
+    });
+
+    // A force that hit the same conflict is still forceable — that is the only
+    // way out — but the user is told the next stop is likely the provider.
+    it("says so when the delete it is escalating was already forced", async () => {
+      const { page, button } = await readyWithFailedRow();
+      handleConflict(page, {
+        conflict: true,
+        resourceState: "Updating",
+        forced: true,
+        detail: ""
+      });
+
+      button.dispatch("click");
+      await flushPromises();
+      expect(page.confirm["env-confirm-message"].textContent).toContain(
+        "previous delete was already forced"
+      );
+      expect(page.confirm["env-confirm-ok"].textContent).toBe("Force delete");
+    });
+
+    it("cancels without dispatching anything", async () => {
+      const { page, button } = await readyWithFailedRow();
+      handleConflict(page, {
+        conflict: true,
+        resourceState: "Updating",
+        forced: false,
+        detail: ""
+      });
+      let dispatched = false;
+      page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () => {
+        dispatched = true;
+        return jsonResponse({ ok: true });
+      });
+
+      button.dispatch("click");
+      await flushPromises();
+      page.confirm["env-confirm-cancel"].dispatch("click");
+      await flushPromises();
+      expect(dispatched).toBe(false);
+      expect(page.confirm["env-confirm-modal"].style.display).toBe("none");
+    });
+
+    // Fail closed: without the confirmation markup there is no way to ask the
+    // forced question, so the delete stays the ordinary unforced one.
+    it("never forces when the confirmation markup is absent", async () => {
+      const page = fixture({
+        withForceConfirm: false,
+        deploymentsPayload: {
+          deployments: [
+            { app: "app", environment: "dev", status: "delete-failed" }
+          ]
+        }
+      });
+      const button = deployRowButton("app", "dev");
+      page.browser.document.addSelectorAll(".js-del-dep", [button]);
+      init(page);
+      await flushPromises();
+      handleConflict(page, {
+        conflict: true,
+        resourceState: "Updating",
+        forced: false,
+        detail: ""
+      });
+      let dispatched: unknown;
+      page.browser.net.handle(DELETE_DEPLOYMENT_PATH, (init) => {
+        dispatched = init?.body;
+        return jsonResponse({ ok: true });
+      });
+
+      button.dispatch("click");
+      await flushPromises();
+      expect(fakeText(page.deleteBody)).toContain("confirm your intention");
+
+      confirmDeleteDialog(page.deleteBody, "app", "dev");
+      await flushPromises();
+      expect(JSON.parse(String(dispatched))).toMatchObject({ force: false });
+    });
+
+    it("keeps the ordinary confirmation when the probe finds no conflict", async () => {
+      const { page, button } = await readyWithFailedRow();
+      handleConflict(page, { conflict: false, detail: "artifact expired." });
+      let dispatched: unknown;
+      page.browser.net.handle(DELETE_DEPLOYMENT_PATH, (init) => {
+        dispatched = init?.body;
+        return jsonResponse({ ok: true });
+      });
+
+      button.dispatch("click");
+      await flushPromises();
+      expect(fakeText(page.deleteBody)).toContain("confirm your intention");
+
+      confirmDeleteDialog(page.deleteBody, "app", "dev");
+      await flushPromises();
+      expect(JSON.parse(String(dispatched))).toEqual({
+        force: false,
+        repo: "octo/app",
+        environment: "dev",
+        application: "app"
+      });
+    });
+
+    it("does not probe at all for a deployment whose delete has not failed", async () => {
+      const { page, button } = await readyWithRow("app", "dev");
+      button.dispatch("click");
+      await flushPromises();
+
+      expect(
+        page.browser.net.calls.some((call) =>
+          call.url.startsWith(DELETE_CONFLICT_PATH)
+        )
+      ).toBe(false);
+      expect(fakeText(page.deleteBody)).toContain("confirm your intention");
+    });
+
+    // Once a delete is in flight the row is optimistically "deleting", and the
+    // conflict that justified forcing is no longer the row's state.
+    it("does not probe again while the forced delete it started is in flight", async () => {
+      const { page, button } = await readyWithFailedRow();
+      const asked = handleConflict(page, {
+        conflict: true,
+        resourceState: "Updating",
+        forced: false,
+        detail: ""
+      });
+      page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+        jsonResponse({ ok: true })
+      );
+
+      button.dispatch("click");
+      await flushPromises();
+      page.confirm["env-confirm-ok"].dispatch("click");
+      await flushPromises();
+
+      button.dispatch("click");
+      await flushPromises();
+      expect(asked).toEqual(["probe"]);
+      expect(fakeText(page.deleteBody)).toContain("confirm your intention");
+    });
+
+    it("does not open the dialog when the page was torn down mid-probe", async () => {
+      const { page, button, teardown } = await readyWithFailedRow();
+      handleConflict(page, {
+        conflict: true,
+        resourceState: "Updating",
+        forced: false,
+        detail: ""
+      });
+
+      button.dispatch("click");
+      teardown();
+      await flushPromises();
+      expect(page.deleteModal.style.display).not.toBe("flex");
+      expect(page.confirm["env-confirm-modal"].style.display).toBe("none");
+    });
   });
 
   it("fails closed and never dispatches when the application identity is missing", async () => {
@@ -2640,6 +3020,58 @@ describe("optimistic deployment rows", () => {
 
     listing.resolve(jsonResponse({ deployments: [] }));
     await flushPromises();
+  });
+});
+
+// A forced delete dispatched on the Deployed graph page finishes here, and the
+// orphan caution the user confirmed has to survive that redirect.
+describe("resuming a redirected forced delete", () => {
+  it("polls the forced delete it was handed and repeats the caution", async () => {
+    const page = fixture({
+      search:
+        "?delete=forced&application=app&environment=dev&run=" +
+        encodeURIComponent("https://github.com/octo/app/actions/runs/42"),
+      deploymentsPayload: {
+        deployments: [{ app: "app", environment: "dev", status: "deleting" }]
+      }
+    });
+    init(page);
+    await flushPromises();
+
+    const started = inlineMessage(page.inlineStatus);
+    expect(started).toContain("Force deleting deployment");
+    expect(started).toContain(
+      'href="https://github.com/octo/app/actions/runs/42"'
+    );
+    expect(page.tableBody.innerHTML).toContain("Deleting");
+    // The deploy resume must not also claim this redirect as a pending deploy.
+    expect(
+      page.browser.net.calls.some((c) => c.url === DEPLOY_STATUS_PATH)
+    ).toBe(false);
+
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () => jsonResponse({ deployments: [] })
+    );
+    page.browser.clock.tick(DELETE_POLL_MS);
+    await flushPromises();
+    const done = inlineMessage(page.inlineStatus);
+    expect(done).toContain("successfully deleted");
+    expect(done).toContain("orphaned external resources");
+    expect(done).toContain(
+      'href="https://github.com/octo/app/actions/runs/42"'
+    );
+  });
+
+  it.each([
+    ["?application=app&environment=dev", "no forced marker"],
+    ["?delete=forced&environment=dev", "no application"],
+    ["?delete=forced&application=app", "no environment"]
+  ])("does not resume a forced delete for %s (%s)", async (search) => {
+    const page = fixture({ search });
+    init(page);
+    await flushPromises();
+    expect(inlineMessage(page.inlineStatus)).not.toContain("Force deleting");
   });
 });
 
