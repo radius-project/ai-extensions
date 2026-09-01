@@ -108,7 +108,7 @@ graph LR
 
 Nothing in the release pipeline is keyed to `radius`, so a second plugin is a directory, not a workflow change:
 
-1. Create `plugins/<name>/` with a `package.json`, `plugin.json`, and non-empty `README.md`. Both manifest names must equal the lowercase, ref-safe directory name; consecutive `.` or `-` separators are rejected.
+1. Create `plugins/<name>/` with a `package.json`, `plugin.json`, and non-empty `README.md`. The manifest targets [Agent Plugins](https://agent-plugins.org) 1.0.0, so it declares `$schema` and only the fields that closed schema permits - skills load from the fixed `skills/` directory rather than a manifest path. Both manifest names must equal the lowercase, ref-safe directory name; consecutive `.` or `-` separators are rejected.
 2. Give that `package.json` a `build` script that assembles `plugins/<name>/dist/` and a `test:artifact` script that smoke-tests the built output.
 3. Add its entry to `.github/plugin/marketplace.json` with `source.ref` of `<name>@edge`, then run `pnpm run version:sync`.
 

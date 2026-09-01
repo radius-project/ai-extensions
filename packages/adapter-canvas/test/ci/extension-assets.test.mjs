@@ -9,6 +9,7 @@ const REPO_ROOT = resolve(TEST_DIR, "../../../..");
 const EXTENSION_ROOT = join(REPO_ROOT, ".github", "extension");
 const INTERNAL_PREFIX =
   "radius-project/ai-extensions/.github/extension/actions/";
+const EXTENSION_ACTION_PATH = "/.github/extension/actions/";
 const FULL_SHA_REFERENCE = /^[^@\s]+@[0-9a-f]{40}$/;
 
 function filesUnder(directory) {
@@ -58,12 +59,55 @@ describe(".github/extension release assets", () => {
     expect(references.length).toBeGreaterThan(0);
     for (const reference of references) {
       if (reference.uses.startsWith("./")) continue;
+      if (reference.uses.includes(EXTENSION_ACTION_PATH)) {
+        expect(reference.uses, reference.path).toMatch(
+          /^radius-project\/ai-extensions\/\.github\/extension\/actions\//u
+        );
+      }
       if (reference.uses.startsWith(INTERNAL_PREFIX)) {
         expect(reference.uses).toMatch(/@\{\{RADIUS_REF\}\}$/u);
       } else {
         expect(reference.uses, reference.path).toMatch(FULL_SHA_REFERENCE);
       }
     }
+  });
+
+  // A `workflow_dispatch` boolean input arrives as the string "true"/"false"
+  // (including its declared default), so handing it straight to a reusable
+  // workflow's `type: boolean` input passes a string where a boolean is
+  // declared — on every run, not only the ones that set it. Each such value has
+  // to be coerced, e.g. `${{ inputs.force == 'true' }}`. See actions/runner#1483.
+  it("coerces every dispatch boolean it forwards to a reusable workflow", () => {
+    const workflows = filesUnder(EXTENSION_ROOT).filter((path) =>
+      /\.ya?ml$/u.test(path)
+    );
+    const uncoerced = [];
+    let forwarded = 0;
+    for (const path of workflows) {
+      const workflow = parseYaml(readFileSync(path, "utf8"));
+      const inputs = workflow?.on?.workflow_dispatch?.inputs ?? {};
+      const booleans = Object.entries(inputs)
+        .filter(([, spec]) => spec?.type === "boolean")
+        .map(([name]) => name);
+      if (booleans.length === 0) continue;
+      for (const job of Object.values(workflow?.jobs ?? {})) {
+        if (typeof job?.uses !== "string") continue;
+        for (const [input, value] of Object.entries(job.with ?? {})) {
+          if (typeof value !== "string") continue;
+          const named = booleans.find((name) =>
+            value.includes(`inputs.${name}`)
+          );
+          if (!named) continue;
+          forwarded++;
+          if (!value.includes(`inputs.${named} ==`)) {
+            uncoerced.push(`${path}: ${input}: ${value}`);
+          }
+        }
+      }
+    }
+
+    expect(forwarded).toBeGreaterThan(0);
+    expect(uncoerced).toEqual([]);
   });
 
   it.each([

@@ -4,7 +4,7 @@
 // success, and a config that is not in the lint script's explicit file list is
 // silently unlinted. Both failures look exactly like a passing repository, so
 // they are asserted here rather than trusted.
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -16,8 +16,6 @@ const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../.."
 );
-const SPEC_FILE = "create-environment.cloud.spec.ts";
-
 async function packageManifest(): Promise<{ scripts: Record<string, string> }> {
   return JSON.parse(
     await readFile(path.join(packageRoot, "package.json"), "utf8")
@@ -71,8 +69,11 @@ describe("the cloud Playwright config", () => {
 });
 
 describe("the cloud tier's file sets", () => {
-  it("names the journey so this config, and only this config, collects it", () => {
-    expect(SPEC_FILE.endsWith(".cloud.spec.ts")).toBe(true);
+  it("names every journey so this config, and only this config, collects it", async () => {
+    const files = await readdir(path.join(packageRoot, "test", "e2e-cloud"));
+    const specs = files.filter((file) => file.endsWith(".spec.ts"));
+    expect(specs.length).toBeGreaterThan(0);
+    expect(specs.every((file) => file.endsWith(".cloud.spec.ts"))).toBe(true);
   });
 
   it("keeps the journey out of the Vitest run that has no credentials", () => {

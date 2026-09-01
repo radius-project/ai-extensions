@@ -566,6 +566,13 @@ test("fails when a plain value reads a plain helper that does not sort before it
   assert.match(result.stderr, /web\.properties\.containers\.web\.env\./u);
   assert.match(result.stderr, /\$\(DB_PASSWORD\)/u);
   assert.match(result.stderr, /valueFrom\.secretKeyRef/u);
+  assert.match(result.stderr, /authored or reused Secret/u);
+  assert.match(result.stderr, /compatible Kubernetes Secret connection/u);
+  assert.match(
+    result.stderr,
+    /explicit schema-supported or legacy @secure\(\) env\.value fallback/u
+  );
+  assert.doesNotMatch(result.stderr, /has to stay a plain value/u);
 });
 
 test("accepts a plain helper whose key sorts before its consumer", () => {

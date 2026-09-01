@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { TERMINAL_STATES } from "../../../src/operations.js";
 import {
   classifyWorkflowPublication,
   cloudCanvasState,
@@ -12,6 +13,8 @@ import {
   readDirectoryPaths,
   readEnvironmentVariables,
   readOidcSubjectCustomization,
+  readOperationHttpResponse,
+  readOperationId,
   readOperationSnapshot,
   readRepositoryIdentity,
   readServicePrincipalObjectId,
@@ -19,7 +22,6 @@ import {
   REQUIRED_DEFAULT_BRANCH_WORKFLOWS,
   selectFallbackBranches,
   selectFallbackPullRequests,
-  TERMINAL_OPERATION_STATES,
   VERIFY_WORKFLOW_PATH
 } from "./create-environment-journey.js";
 
@@ -486,6 +488,23 @@ describe("findEnvironmentIdentityProblems", () => {
     ).toEqual([]);
   });
 
+  it("compares cluster and namespace values exactly", () => {
+    const variables = new Map(complete("app-1"));
+    variables.set("AZURE_AKS_CLUSTER_NAME", "AKS-ABC");
+    variables.set("KUBERNETES_NAMESPACE", "Default");
+
+    expect(
+      findEnvironmentIdentityProblems({
+        variables,
+        createdAppId: "app-1",
+        expected
+      })
+    ).toEqual([
+      'AZURE_AKS_CLUSTER_NAME is "AKS-ABC"; expected "aks-abc".',
+      'KUBERNETES_NAMESPACE is "Default"; expected "default".'
+    ]);
+  });
+
   it("names the bootstrap identity specifically when it reached the environment", () => {
     const problems = findEnvironmentIdentityProblems({
       variables: complete("bootstrap-1"),
@@ -562,37 +581,23 @@ describe("readServicePrincipalObjectId", () => {
 });
 
 describe("readRepositoryIdentity", () => {
-  it("reads the numeric ids and the default branch", () => {
+  it("reads the numeric repository and owner ids", () => {
     expect(
       readRepositoryIdentity({
         id: 222,
-        owner: { id: 111 },
-        default_branch: " main "
+        owner: { id: 111 }
       })
-    ).toEqual({ ownerId: 111, repoId: 222, defaultBranch: "main" });
+    ).toEqual({ ownerId: 111, repoId: 222 });
   });
 
   it.each([
-    ["the owner id is absent", { id: 222, default_branch: "main" }],
-    [
-      "the repository id is a string",
-      { id: "222", owner: { id: 111 }, default_branch: "main" }
-    ],
+    ["the owner id is absent", { id: 222 }],
+    ["the repository id is a string", { id: "222", owner: { id: 111 } }],
     ["the payload is not an object", null]
   ])("rejects a payload where %s", (_label, payload) => {
     expect(() => readRepositoryIdentity(payload)).toThrow(
       /numeric "owner.id" and "id"/
     );
-  });
-
-  it("rejects a payload with no default branch", () => {
-    expect(() =>
-      readRepositoryIdentity({
-        id: 222,
-        owner: { id: 111 },
-        default_branch: ""
-      })
-    ).toThrow(/usable "default_branch"/);
   });
 });
 
@@ -696,7 +701,7 @@ describe("selectFallbackPullRequests", () => {
 });
 
 describe("readOperationSnapshot", () => {
-  it.each(TERMINAL_OPERATION_STATES)("treats %s as terminal", (state) => {
+  it.each(TERMINAL_STATES)("treats %s as terminal", (state) => {
     expect(readOperationSnapshot({ operation: { state } }).terminal).toBe(true);
   });
 
@@ -738,6 +743,71 @@ describe("readOperationSnapshot", () => {
     expect(
       readOperationSnapshot({ operation: { state: "running", error: null } })
     ).toEqual({ state: "running", terminal: false, error: "" });
+  });
+});
+
+describe("readOperationHttpResponse", () => {
+  it("parses a successful operation response", () => {
+    expect(
+      readOperationHttpResponse({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        body: '{"operation":{"state":"running"}}'
+      })
+    ).toEqual({ operation: { state: "running" } });
+  });
+
+  it("reports a failed response with its HTTP status and body", () => {
+    expect(() =>
+      readOperationHttpResponse({
+        ok: false,
+        status: 503,
+        statusText: "Service Unavailable",
+        body: "setup worker unavailable"
+      })
+    ).toThrow(
+      "The operation status request failed with HTTP 503 Service Unavailable: setup worker unavailable"
+    );
+  });
+
+  it("reports an empty failed response body explicitly", () => {
+    expect(() =>
+      readOperationHttpResponse({
+        ok: false,
+        status: 500,
+        statusText: "",
+        body: " "
+      })
+    ).toThrow("HTTP 500: <empty body>");
+  });
+
+  it("identifies malformed JSON from a successful response", () => {
+    expect(() =>
+      readOperationHttpResponse({
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        body: "<html>not JSON</html>"
+      })
+    ).toThrow(
+      /operation status request returned output that is not valid JSON/
+    );
+  });
+});
+
+describe("readOperationId", () => {
+  it("reads and trims the create response's operation id", () => {
+    expect(readOperationId({ operationId: " op_123 " })).toBe("op_123");
+  });
+
+  it.each([
+    ["a non-object response", null],
+    ["a missing operation id", {}],
+    ["a non-string operation id", { operationId: 7 }],
+    ["a blank operation id", { operationId: " " }]
+  ])("rejects %s", (_label, payload) => {
+    expect(() => readOperationId(payload)).toThrow(/usable "operationId"/);
   });
 });
 
@@ -804,6 +874,15 @@ describe("readWorkflowDirectory", () => {
         "the workflow listing"
       )
     ).toThrow(/failed with exit code 4: gh: HTTP 500/);
+  });
+
+  it("does not treat generic not-found text as an absent directory", () => {
+    expect(() =>
+      readWorkflowDirectory(
+        { code: 1, stdout: "", stderr: "GraphQL: repository Not Found" },
+        "the workflow listing"
+      )
+    ).toThrow(/failed with exit code 1: GraphQL: repository Not Found/);
   });
 
   it("falls back to stdout when a failure wrote nothing to stderr", () => {
