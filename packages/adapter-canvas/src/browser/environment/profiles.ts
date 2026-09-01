@@ -731,11 +731,13 @@ export function initializeCredentialProfilesPanel(
       );
       const payload = await response.json();
       if (!scope.active || token !== profilesToken) return;
-      profiles = parseCredentialProfiles(payload).filter((profile) =>
-        deps.selectableProviders.includes(
-          profile.provider === "aws" ? "aws" : "azure"
-        )
-      );
+      profiles = parseCredentialProfiles(payload).filter((profile) => {
+        const provider = profile.provider;
+        return (
+          (provider === "azure" || provider === "aws") &&
+          deps.selectableProviders.includes(provider)
+        );
+      });
       renderProfileOptions();
       setProfileValue(
         preselectName === "" ? null : findProfile(profiles, preselectName)

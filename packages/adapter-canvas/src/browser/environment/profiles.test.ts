@@ -1017,11 +1017,16 @@ describe("credential profile combo menu", () => {
 });
 
 describe("loadProfiles", () => {
-  it("omits AWS profiles and refuses to preselect one", async () => {
+  it("omits disabled and unknown providers and refuses to preselect them", async () => {
     const page = renderProfilesPage();
     page.browser.net.handle(
       `${CREDENTIAL_PROFILES_ENDPOINT}?repo=${encodeURIComponent("octo/cat")}`,
-      () => profilesResponse([AZURE_PROFILE, AWS_PROFILE])
+      () =>
+        profilesResponse([
+          AZURE_PROFILE,
+          AWS_PROFILE,
+          { name: "future-prod", provider: "future-cloud" }
+        ])
     );
     const { deps, profileChanges, discoverCalls } = makeDeps({
       selectableProviders: ["azure"]
@@ -1038,6 +1043,11 @@ describe("loadProfiles", () => {
     expect(page.emptyEl.style.display).toBe("none");
     expect(page.optionsEl.children).toHaveLength(1);
     expect(page.optionsEl.children[0]?.textContent).toBe("azure-prod (Azure)");
+    expect(
+      page.optionsEl.children.some((child) =>
+        (child.textContent ?? "").includes("future-prod")
+      )
+    ).toBe(false);
     expect(profileChanges.at(-1)).toBeNull();
     expect(discoverCalls).toEqual([]);
     expect(page.statusEl.style.display).toBe("none");

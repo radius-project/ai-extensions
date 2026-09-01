@@ -26,6 +26,7 @@ import {
 import {
   initializeCredentialProfilesPanel,
   type CredentialProfile,
+  type CredentialProvider,
   type GithubReadiness
 } from "./profiles.js";
 import type { BrowserTeardown } from "../lifecycle.js";
@@ -44,7 +45,7 @@ interface EnvironmentPageState {
 }
 
 export interface EnvironmentPageOptions {
-  readonly selectableProviders?: readonly ("azure" | "aws")[];
+  readonly selectableProviders?: readonly CredentialProvider[];
 }
 
 function parsePageState(context: BrowserContext): EnvironmentPageState {
