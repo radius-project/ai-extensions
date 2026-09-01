@@ -76,21 +76,33 @@ export interface CloudFixture {
    * Waits until the GitHub Environment is gone.
    *
    * The mirror of `assertGitHubEnvironmentExists`, and the pair is the point:
-   * stage one proves the product creates the Environment, stage two proves it
-   * removes it. Absence on its own would prove nothing, so this refuses to
+   * stage one proves the product creates the Environment, the final stage proves
+   * it removes it. Absence on its own would prove nothing, so this refuses to
    * answer until presence was established first.
    */
   assertGitHubEnvironmentAbsent(): Promise<void>;
   /**
    * Waits until no app registration with the product's name remains.
    *
-   * Not called by the current journey because deletion deliberately retains the
-   * repository-scoped application, which can be shared by other environments.
+   * Product environment deletion intentionally retains the repository-scoped
+   * app registration because other environments or callers can share it. This
+   * guarded mirror is therefore a fixture-cleanup assertion, not proof of the
+   * product's environment-deletion contract.
    */
   assertAppRegistrationAbsent(): Promise<void>;
-  /** Waits until the app registration carries no credential for the subject. */
+  /**
+   * Waits until the app registration carries no credential for the subject.
+   *
+   * Unlike app-registration and role-assignment absence, this mirror validates
+   * product deletion of the environment-specific credential.
+   */
   assertFederatedCredentialAbsent(subject: string): Promise<void>;
-  /** Waits until no role assignment for the principal remains in scope. */
+  /**
+   * Waits until no role assignment for the principal remains in scope.
+   *
+   * Product environment deletion intentionally retains this shared assignment,
+   * so this guarded mirror is used only to verify fixture cleanup.
+   */
   assertRoleAssignmentAbsent(principalId: string): Promise<void>;
   /** Waits until Radius has rendered a ready workload on the target cluster. */
   assertApplicationWorkloadsPresent(

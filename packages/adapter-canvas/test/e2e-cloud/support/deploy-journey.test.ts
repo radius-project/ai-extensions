@@ -107,6 +107,7 @@ describe("readDeployStatusSnapshot", () => {
       terminal: true,
       succeeded: true,
       active: false,
+      logs: [],
       error: "",
       errorKind: "",
       runUrl: "https://github.com/acme/fixture/actions/runs/1"
@@ -123,6 +124,21 @@ describe("readDeployStatusSnapshot", () => {
     expect(snapshot.succeeded).toBe(false);
     expect(snapshot.error).toBe("bicep build failed");
     expect(snapshot.errorKind).toBe("compile");
+  });
+
+  it("carries the bounded deploy logs returned by the status route", () => {
+    const snapshot = readDeployStatusSnapshot({
+      status: "failed",
+      logs: ["Compiling app.bicep", "Deployment failed"]
+    });
+    expect(snapshot.logs).toEqual(["Compiling app.bicep", "Deployment failed"]);
+  });
+
+  it("treats absent or null deploy logs as an empty list", () => {
+    expect(readDeployStatusSnapshot({ status: "idle" }).logs).toEqual([]);
+    expect(
+      readDeployStatusSnapshot({ status: "idle", logs: null }).logs
+    ).toEqual([]);
   });
 
   it("reports an in-progress deploy as neither terminal nor successful", () => {
@@ -187,6 +203,18 @@ describe("readDeployStatusSnapshot", () => {
       ).toThrow(new RegExp(`non-string "${field}"`));
     }
   );
+
+  it("rejects a non-array logs field", () => {
+    expect(() =>
+      readDeployStatusSnapshot({ status: "failed", logs: "not-an-array" })
+    ).toThrow(/non-array "logs"/);
+  });
+
+  it("rejects a non-string log entry", () => {
+    expect(() =>
+      readDeployStatusSnapshot({ status: "failed", logs: ["valid", 42] })
+    ).toThrow(/non-string "logs" entry at index 1/);
+  });
 });
 
 describe("readApplicationNames", () => {
@@ -802,15 +830,15 @@ describe("findSurvivingArtifactProblems", () => {
     expect(problems[0]).toMatch(/can no longer exchange a GitHub token/);
   });
 
-  it("matches federated credential subjects without regard to case", () => {
-    expect(
-      findSurvivingArtifactProblems(
-        survivingInput({
-          federatedSubjects: ["REPO:ACME/FIXTURE:REF:REFS/HEADS/MAIN"],
-          expectedFederatedSubjects: ["repo:acme/fixture:ref:refs/heads/main"]
-        })
-      )
-    ).toEqual([]);
+  it("reports a case-mutated federated credential subject", () => {
+    const problems = findSurvivingArtifactProblems(
+      survivingInput({
+        federatedSubjects: ["REPO:ACME/FIXTURE:REF:REFS/HEADS/MAIN"],
+        expectedFederatedSubjects: ["repo:acme/fixture:ref:refs/heads/main"]
+      })
+    );
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toMatch(/can no longer exchange a GitHub token/);
   });
 
   it("reports every workload the delete failed to tear down", () => {
@@ -836,6 +864,7 @@ describe("describeDeployFailure", () => {
         terminal: true,
         succeeded: false,
         active: false,
+        logs: [],
         error: "deployment failed",
         errorKind: "deploy",
         runUrl: "https://example.invalid/run"
@@ -856,6 +885,7 @@ describe("describeDeployFailure", () => {
         terminal: true,
         succeeded: false,
         active: false,
+        logs: [],
         error: "",
         errorKind: "",
         runUrl: ""
@@ -874,6 +904,7 @@ describe("describeDeployFailure", () => {
         terminal: true,
         succeeded: false,
         active: false,
+        logs: [],
         error: "",
         errorKind: "",
         runUrl: ""

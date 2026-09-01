@@ -207,12 +207,11 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     fixture = undefined;
     if (!current) return;
     try {
-      // Stage two deletes the GitHub Environment and its per-environment
-      // federated credentials. The app registration and role assignment are
-      // deliberately retained because they can be shared, so the fixture
-      // reclaims them after proving the product-owned deletions. On a run that
-      // failed before stage two it also reclaims any remaining Environment or
-      // credential. `dispose()` then removes the fixture's own Azure resources.
+      // The final stage deletes the GitHub Environment and its per-environment
+      // credentials. Reclamation then removes the intentionally retained shared
+      // app registration and role assignment; after an interrupted run it also
+      // removes any environment state the product did not reach. `dispose()`
+      // removes the fixture's Azure resources by their directly recorded names.
       const reclaimed = await current.reclaimLeakedProductArtifacts();
       if (reclaimed.length > 0)
         console.info(
@@ -521,9 +520,10 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         })
         .toBe(true);
       const finished = await snapshot();
-      expect(finished.succeeded, describeDeployFailure(finished, [])).toBe(
-        true
-      );
+      expect(
+        finished.succeeded,
+        describeDeployFailure(finished, finished.logs)
+      ).toBe(true);
 
       const workloads = await cloud.assertApplicationWorkloadsPresent(
         deployedApplication,

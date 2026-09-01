@@ -95,6 +95,7 @@ export interface DeployStatusSnapshot {
   readonly terminal: boolean;
   readonly succeeded: boolean;
   readonly active: boolean;
+  readonly logs: readonly string[];
   readonly error: string;
   readonly errorKind: string;
   readonly runUrl: string;
@@ -122,6 +123,7 @@ export function readDeployStatusSnapshot(
     terminal: TERMINAL_DEPLOY_STATES.includes(trimmed),
     succeeded: trimmed === SUCCESSFUL_DEPLOY_STATE,
     active: record.active === true,
+    logs: optionalStringArray(record.logs, "logs"),
     error: optionalText(record.error, "error"),
     errorKind: optionalText(record.errorKind, "errorKind"),
     runUrl: optionalText(record.deployRunUrl, "deployRunUrl")
@@ -545,11 +547,9 @@ export function findSurvivingArtifactProblems(
         "so the environment's AZURE_CLIENT_ID now names an application that did not exist when it was written."
     );
 
-  const present = new Set(
-    input.federatedSubjects.map((subject) => subject.toLowerCase())
-  );
+  const present = new Set(input.federatedSubjects);
   for (const subject of input.expectedFederatedSubjects)
-    if (!present.has(subject.toLowerCase()))
+    if (!present.has(subject))
       problems.push(
         `Federated credential subject "${subject}" was removed by the delete; workflows in this environment ` +
           "can no longer exchange a GitHub token for an Azure one."
@@ -601,6 +601,22 @@ function optionalText(value: unknown, field: string): string {
       `The deploy status response carried a non-string "${field}".`
     );
   return value;
+}
+
+function optionalStringArray(value: unknown, field: string): readonly string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value))
+    throw new Error(
+      `The deploy status response carried a non-array "${field}".`
+    );
+  const strings: string[] = [];
+  for (const [index, entry] of value.entries())
+    if (typeof entry !== "string")
+      throw new Error(
+        `The deploy status response carried a non-string "${field}" entry at index ${index}.`
+      );
+    else strings.push(entry);
+  return strings;
 }
 
 function countOf(value: unknown): number {
