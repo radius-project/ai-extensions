@@ -893,28 +893,18 @@ export function initializeDiscoveryPanel(
         previousAccount.tenantId !== tenantId);
     discoveryAccounts[provider] = { subscriptionId, tenantId };
     accountDiscovered[provider] = true;
-    const pending =
-      pendingInfrastructure?.provider === provider ?
-        pendingInfrastructure.config
-      : null;
     const deploymentResourceGroup =
-      provider === "azure" && (!accountChanged || pending !== null) ?
-        (pending?.resourceGroup ??
-        context.dom.selectById("azure-rg-select")?.value ??
-        "")
+      provider === "azure" && !accountChanged ?
+        (context.dom.selectById("azure-rg-select")?.value ?? "")
       : "";
     const cluster =
-      provider === "azure" && (!accountChanged || pending !== null) ?
-        (pending?.cluster ?? selectedAzureClusterId())
-      : "";
-    const clusterIsKnown = azureClusters.some((item) => item.id === cluster);
+      provider === "azure" && !accountChanged ? selectedAzureClusterId() : "";
     const discoveredClusterResourceGroup =
       provider === "azure" ? findAzureClusterResourceGroup(cluster) : "";
     const clusterResourceGroup =
-      discoveredClusterResourceGroup !== "" || clusterIsKnown ?
-        discoveredClusterResourceGroup
-      : azureClusters.length > 0 ? deploymentResourceGroup
-      : "";
+      cluster === "" ? ""
+      : discoveredClusterResourceGroup !== "" ? discoveredClusterResourceGroup
+      : deploymentResourceGroup;
     const identity = [
       subscriptionId,
       tenantId,
@@ -995,9 +985,6 @@ export function initializeDiscoveryPanel(
         );
         selectOfferedValue(context, "azure-namespace-select", "default");
         wireAzureInfraFilter();
-        if (cluster === "" && selectedAzureClusterId() !== "") {
-          void rediscoverAzureNamespaces();
-        }
       } else {
         if (statusEl) statusEl.textContent = discoverStatusText(data, "aws");
         const awsClusters = sortDiscoveryOptions(
@@ -1039,9 +1026,8 @@ export function initializeDiscoveryPanel(
       applyPendingInfrastructure(provider);
       if (
         provider === "azure" &&
-        pending !== null &&
-        cluster !== "" &&
-        clusterResourceGroup === ""
+        cluster === "" &&
+        selectedAzureClusterId() !== ""
       ) {
         void rediscoverAzureNamespaces();
       }
@@ -1103,7 +1089,10 @@ export function initializeDiscoveryPanel(
         "azure-rg-select",
         config.resourceGroup ?? ""
       );
-      restoreAzureClusterValue(config.cluster ?? "", "");
+      const resourceGroup =
+        context.dom.selectById("azure-rg-select")?.value ?? "";
+      renderClustersForResourceGroup(resourceGroup, config.cluster ?? "");
+      restoreAzureClusterValue(config.cluster ?? "", resourceGroup);
       restoreInfrastructureValue(
         "azure-namespace-select",
         "azure-namespace-custom",

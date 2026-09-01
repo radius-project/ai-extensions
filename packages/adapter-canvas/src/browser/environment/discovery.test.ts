@@ -1069,6 +1069,7 @@ describe("discoverResources", () => {
       const body = JSON.parse(init?.body ?? "{}");
       if (requestCount === 1) {
         expect(body).not.toHaveProperty("resourceGroup");
+        expect(body).not.toHaveProperty("cluster");
         return discoverResponse(
           azurePayload({
             clusters: [{ id: "aks-2", name: "AKS Two", resourceGroup: "rg-2" }],
@@ -1149,8 +1150,10 @@ describe("discoverResources", () => {
 
   it("restores a saved azure selection once discovery has populated the lists", async () => {
     const page = renderDiscoveryPage();
+    const bodies: unknown[] = [];
     page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
       const body = JSON.parse(init?.body ?? "{}");
+      bodies.push(body);
       return discoverResponse(
         azurePayload({ namespaces: body.cluster ? ["default"] : [] })
       );
@@ -1171,6 +1174,10 @@ describe("discoverResources", () => {
     expect(page.selects["azure-rg-select"].value).toBe("rg-1");
     expect(page.selects["azure-cluster-select"].value).toBe("aks-1");
     expect(page.selects["azure-namespace-select"].value).toBe("default");
+    expect(bodies).toEqual([
+      { provider: "azure" },
+      { provider: "azure", resourceGroup: "rg-1", cluster: "aks-1" }
+    ]);
   });
 
   it("does not guess a resource group for a saved duplicate AKS name", async () => {
@@ -1216,17 +1223,24 @@ describe("discoverResources", () => {
     expect(browser.net.calls).toHaveLength(1);
   });
 
-  it("does not restore an Azure resource group the discovered list does not offer", async () => {
+  it("does not send or restore Azure targets the discovered lists do not offer", async () => {
     const page = renderDiscoveryPage();
-    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
-      discoverResponse(azurePayload())
-    );
+    const bodies: unknown[] = [];
+    page.browser.net.handle(DISCOVER_ENDPOINT, (init) => {
+      bodies.push(JSON.parse(init?.body ?? "{}"));
+      return discoverResponse(azurePayload());
+    });
     const handle = initializeDiscoveryPanel(page.browser.context);
-    handle?.setPendingInfraSelection({ resourceGroup: "rg-gone" }, "azure");
+    handle?.setPendingInfraSelection(
+      { resourceGroup: "rg-gone", cluster: "aks-gone" },
+      "azure"
+    );
 
     await handle?.discoverResources("azure", "", "");
 
+    expect(bodies).toEqual([{ provider: "azure" }]);
     expect(page.selects["azure-rg-select"].value).toBe("");
+    expect(page.selects["azure-cluster-select"].value).toBe("");
     expect(
       Array.from(page.selects["azure-rg-select"].options).map(
         (option) => option.value
