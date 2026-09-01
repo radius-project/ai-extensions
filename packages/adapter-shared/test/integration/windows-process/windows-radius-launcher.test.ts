@@ -1,7 +1,13 @@
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { spawn } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   RadProcessError,
@@ -214,16 +220,41 @@ describeWindows("Windows Radius process launcher", () => {
       "v1.0",
       "powershell.exe"
     );
-    const probe = [
-      "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class ConsoleProbe { [DllImport(\"kernel32.dll\")] public static extern IntPtr GetConsoleWindow(); }';",
-      "[Console]::Out.Write([ConsoleProbe]::GetConsoleWindow().ToInt64())"
-    ].join(" ");
-
-    const result = await spawnRad(
-      powershell,
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", probe],
-      { timeout: 10_000 }
+    const probeSource = join(cwd, "console-probe.cs");
+    const probeExecutable = join(cwd, "console-probe.exe");
+    writeFileSync(
+      probeSource,
+      [
+        "using System;",
+        "using System.Runtime.InteropServices;",
+        "using System.Text;",
+        "public static class ConsoleProbe {",
+        '  [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();',
+        '  [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int id);',
+        '  [DllImport("kernel32.dll", SetLastError = true)] static extern bool WriteFile(IntPtr handle, byte[] buffer, uint bytes, out uint written, IntPtr overlapped);',
+        "  public static int Main() {",
+        '    byte[] buffer = Encoding.ASCII.GetBytes(GetConsoleWindow() == IntPtr.Zero ? "0" : "1");',
+        "    uint written;",
+        "    return WriteFile(GetStdHandle(-11), buffer, (uint)buffer.Length, out written, IntPtr.Zero) ? 0 : Marshal.GetLastWin32Error();",
+        "  }",
+        "}"
+      ].join("\n")
     );
+    const powershellLiteral = (value: string) =>
+      `'${value.replaceAll("'", "''")}'`;
+    execFileSync(
+      powershell,
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `Add-Type -Path ${powershellLiteral(probeSource)} -OutputAssembly ${powershellLiteral(probeExecutable)} -OutputType ConsoleApplication`
+      ],
+      { windowsHide: true }
+    );
+
+    const result = await spawnRad(probeExecutable, [], { timeout: 10_000 });
 
     expect(result.stdout).toBe("0");
   });

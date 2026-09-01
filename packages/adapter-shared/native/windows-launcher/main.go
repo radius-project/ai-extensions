@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	createNoWindow                         = 0x08000000
+	detachedProcess                        = 0x00000008
 	createSuspended                        = 0x00000004
 	infinite                               = 0xffffffff
 	jobObjectExtendedLimitInformationClass = 9
@@ -137,13 +137,15 @@ func createChild(executable string, args []string) (syscall.ProcessInformation, 
 		StdErr:    syscall.Handle(os.Stderr.Fd()),
 	}
 	process := syscall.ProcessInformation{}
+	// Radius hangs without DETACHED_PROCESS on Windows ARM64. The launcher itself
+	// is a GUI-subsystem executable, so detaching the child creates no console.
 	err = syscall.CreateProcess(
 		applicationName,
 		command,
 		nil,
 		nil,
 		true,
-		createNoWindow|createSuspended,
+		detachedProcess|createSuspended,
 		nil,
 		nil,
 		&startup,

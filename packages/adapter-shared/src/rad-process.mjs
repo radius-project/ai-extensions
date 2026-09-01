@@ -136,7 +136,7 @@ export function killChildTree(child) {
  * spawn `radPath args`, capture stdout/stderr (capped at 32MB), and resolve
  * { stdout, stderr } on a zero exit or reject (with both streams attached) on a
  * non-zero exit, timeout, cancellation, or spawn error. On Windows, a detached
- * GUI-subsystem launcher creates rad with CREATE_NO_WINDOW inside a kill-on-close
+ * GUI-subsystem launcher creates rad as a detached child inside a kill-on-close
  * Job Object; on POSIX, rad leads a detached process group. Both arrangements
  * allow complete tree cleanup. `label` only names the command in timeout/exit
  * error messages; `env` is merged over process.env.
