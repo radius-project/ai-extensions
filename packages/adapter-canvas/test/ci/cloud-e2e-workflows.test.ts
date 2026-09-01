@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import cloudConfig from "../../playwright.cloud.config.js";
+import { redactCredentials } from "../../src/credential-redaction.js";
 import {
   ENVIRONMENT_NAME_PREFIX,
   RESOURCE_GROUP_PREFIX
@@ -256,6 +257,8 @@ describe("cloud-e2e.yml", () => {
       step.uses?.startsWith("actions/upload-artifact@")
     );
     expect(collect?.run).toContain('out="$RUNNER_TEMP/cloud-e2e-artifact"');
+    expect(collect?.run).toContain("redactCredentials");
+    expect(collect?.run).toContain("2>&1 | redact_azure");
     expect(stage?.if).toContain("always()");
     expect(stage?.run).toContain("packages/adapter-canvas/test-results/cloud");
     expect(stage?.run).toContain(
@@ -263,6 +266,14 @@ describe("cloud-e2e.yml", () => {
     );
     expect(upload?.if).toBe("always()");
     expect(upload?.with?.path).toBe("${{ runner.temp }}/cloud-e2e-artifact");
+  });
+
+  it("redacts credential-shaped Azure output before it can enter Playwright artifacts", () => {
+    const jwt =
+      "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJmaXh0dXJlIn0.fixture_signature";
+    expect(redactCredentials(`az failed: ${jwt}`)).toBe(
+      "az failed: [REDACTED]"
+    );
   });
 
   it("collects the fixture repository's own failing workflow logs", async () => {
@@ -387,6 +398,44 @@ describe("cloud-e2e-cleanup.yml", () => {
         candidate.run?.includes("-X DELETE")
     ))
       expect(step.run).toContain("MAX_AGE_HOURS hours ago");
+  });
+
+  it("deletes age-eligible service principals before applications", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge).find((step) =>
+      step.run?.includes("az ad sp delete")
+    );
+    const script = purge?.run ?? "";
+
+    expect(script).toContain("selectExpiredDirectoryObjects");
+    expect(script.indexOf("az ad sp delete")).toBeLessThan(
+      script.indexOf("az ad app delete")
+    );
+  });
+
+  it("closes old fallback pull requests before deleting their exact head refs", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge).find((step) =>
+      step.run?.includes("selectExpiredFallbackPullRequests")
+    );
+    const script = purge?.run ?? "";
+
+    expect(purge?.if).toBe("steps.pin.outputs.provisioned == 'true'");
+    expect(script).toContain("MAX_AGE_HOURS hours ago");
+    expect(script).toContain("git/matching-refs/heads/$FALLBACK_BRANCH_PREFIX");
+    expect(script.indexOf("-f state=closed")).toBeLessThan(
+      script.indexOf("-X DELETE")
+    );
+  });
+
+  it("selects stale environments through the fail-closed timestamp helper", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge).find((step) =>
+      step.run?.includes("selectExpiredEnvironments")
+    );
+
+    expect(purge?.run).toContain("expired-environments.json");
+    expect(purge?.run).not.toContain(".created_at < $cutoff");
   });
 
   it("gives AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY a real consumer", async () => {

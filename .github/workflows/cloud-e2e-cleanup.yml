@@ -8,9 +8,9 @@ name: Cloud E2E Cleanup
 #
 # SCOPE, and the boundary matters:
 #
-#   In scope   Leaked Entra applications older than six hours, stale GitHub
-#              Environments older than six hours, and resetting the fixture
-#              repository's default branch to the pinned baseline.
+#   In scope   Leaked Entra service principals and applications, stale GitHub
+#              Environments, fallback pull requests and branches older than six
+#              hours, and resetting the fixture default branch to the baseline.
 #
 #   NOT in     Resource groups. This is deliberate and is a cross-repository
 #   scope      dependency, recorded here so a future reader does not "fix" the
@@ -22,11 +22,6 @@ name: Cloud E2E Cleanup
 #              - precisely so that job is our safety net for free. Sweeping
 #              them here would duplicate a job we do not own and would put a
 #              second deleter on a shared subscription.
-#
-#   NOT in     `radius/setup-*` workflow fallback branches. They are selected
-#   scope      per run by environment name, so a stale one cannot be mistaken
-#              for a later run's, and deleting branches needs a broader grant
-#              than this workflow otherwise holds.
 #
 # Everything destructive here is named exactly, never matched by wildcard, and
 # never applied to something younger than the age threshold - so a purge can
@@ -160,13 +155,13 @@ jobs:
           repositories: ${{ steps.pin.outputs.name }}
           permission-contents: write
           permission-environments: write
+          permission-pull-requests: write
 
-      # Matched by exact display name - the one the product derives from the
-      # fixture repository - and never by prefix. An application younger than
-      # the threshold, or one whose creation time Graph did not return, is left
-      # alone: without a provable age this cannot distinguish leaked state from
-      # a run in progress, and the safe answer is to do nothing.
-      - name: Purge leaked Entra applications
+      # Both object types are matched by the exact display name the product
+      # derives from the fixture repository, never by prefix. Service principals
+      # go first because deleting an application can leave an orphaned principal
+      # that still fails the next clean-slate probe.
+      - name: Purge leaked Entra service principals and applications
         if: steps.pin.outputs.provisioned == 'true'
         env:
           APPLICATION_NAME: ${{ steps.pin.outputs.application-name }}
@@ -174,30 +169,67 @@ jobs:
         run: |
           set -euo pipefail
           cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
+          principals="$RUNNER_TEMP/service-principals.json"
           applications="$RUNNER_TEMP/applications.json"
+          expired_principals="$RUNNER_TEMP/expired-service-principals.json"
+          expired_applications="$RUNNER_TEMP/expired-applications.json"
+
+          # Graph returns service-principal creation time only when selected.
+          # Without it, fail-closed age selection would safely but permanently
+          # leave every orphaned principal behind.
+          az rest --method GET \
+            --url "https://graph.microsoft.com/v1.0/servicePrincipals?\$filter=displayName eq '$APPLICATION_NAME'&\$select=id,displayName,createdDateTime" \
+            --query value \
+            -o json >"$principals"
           az ad app list \
             --filter "displayName eq '$APPLICATION_NAME'" \
-            --query '[].{id:id,appId:appId,displayName:displayName,createdDateTime:createdDateTime}' \
+            --query '[].{id:id,displayName:displayName,createdDateTime:createdDateTime}' \
             -o json >"$applications"
 
-          skipped="$(jq -r --arg cutoff "$cutoff" \
-            '[.[] | select(.createdDateTime == null or .createdDateTime >= $cutoff)] | length' \
-            "$applications")"
-          if [[ "$skipped" != "0" ]]; then
-            echo "::notice::Left $skipped application(s) named $APPLICATION_NAME alone: newer than $cutoff, or Graph reported no creation time."
-          fi
+          node --input-type=module - \
+            "$principals" "$applications" "$cutoff" "$APPLICATION_NAME" \
+            "$expired_principals" "$expired_applications" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [principalsFile, applicationsFile, cutoff, displayName, expiredPrincipalsFile, expiredApplicationsFile] =
+            process.argv.slice(2);
+          const { selectExpiredDirectoryObjects } = await import(
+            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+          );
+          const [principals, applications] = await Promise.all(
+            [principalsFile, applicationsFile].map(async (file) =>
+              JSON.parse(await readFile(file, "utf8"))
+            )
+          );
+          await Promise.all([
+            writeFile(
+              expiredPrincipalsFile,
+              JSON.stringify(selectExpiredDirectoryObjects(principals, displayName, cutoff))
+            ),
+            writeFile(
+              expiredApplicationsFile,
+              JSON.stringify(selectExpiredDirectoryObjects(applications, displayName, cutoff))
+            )
+          ]);
+          NODE
 
-          purged=0
+          principals_purged=0
+          while read -r id; do
+            [[ -n "$id" ]] || continue
+            echo "Deleting leaked service principal $APPLICATION_NAME ($id), created before $cutoff."
+            az ad sp delete --id "$id"
+            principals_purged=$((principals_purged + 1))
+          done < <(jq -r '.[].id' "$expired_principals")
+
+          applications_purged=0
           while read -r id; do
             [[ -n "$id" ]] || continue
             echo "Deleting leaked application $APPLICATION_NAME ($id), created before $cutoff."
             az ad app delete --id "$id"
-            purged=$((purged + 1))
-          done < <(jq -r --arg cutoff "$cutoff" \
-            '.[] | select(.createdDateTime != null and .createdDateTime < $cutoff) | .id' \
-            "$applications")
+            applications_purged=$((applications_purged + 1))
+          done < <(jq -r '.[].id' "$expired_applications")
 
-          echo "- Entra applications purged: $purged" >>"$GITHUB_STEP_SUMMARY"
+          echo "- Entra service principals purged: $principals_purged" >>"$GITHUB_STEP_SUMMARY"
+          echo "- Entra applications purged: $applications_purged" >>"$GITHUB_STEP_SUMMARY"
 
       # Environments are per-run (`radtest-<uid>`), so unlike the application
       # there is more than one candidate. Still matched by the suite's own
@@ -214,7 +246,22 @@ jobs:
           set -euo pipefail
           cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
           environments="$RUNNER_TEMP/environments.json"
+          expired_environments="$RUNNER_TEMP/expired-environments.json"
           gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments" >"$environments"
+
+          node --input-type=module - \
+            "$environments" "$ENVIRONMENT_PREFIX" "$cutoff" "$expired_environments" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [environmentsFile, prefix, cutoff, outputFile] = process.argv.slice(2);
+          const { selectExpiredEnvironments } = await import(
+            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+          );
+          const environments = JSON.parse(await readFile(environmentsFile, "utf8"));
+          await writeFile(
+            outputFile,
+            JSON.stringify(selectExpiredEnvironments(environments, prefix, cutoff))
+          );
+          NODE
 
           purged=0
           while read -r name; do
@@ -222,11 +269,99 @@ jobs:
             echo "Deleting stale environment $name, created before $cutoff."
             gh api -X DELETE "repos/$FIXTURE_REPOSITORY/environments/$name"
             purged=$((purged + 1))
-          done < <(jq -r --arg cutoff "$cutoff" --arg prefix "$ENVIRONMENT_PREFIX" \
-            '.[]?.environments[]? | select(.name | startswith($prefix)) | select(.created_at < $cutoff) | .name' \
-            "$environments")
+          done < <(jq -r '.[]' "$expired_environments")
 
           echo "- GitHub Environments purged: $purged" >>"$GITHUB_STEP_SUMMARY"
+
+      # The workflow fallback leaves both an open pull request and a
+      # `radius/setup-*` head ref. Close old fallback pull requests before
+      # deleting old refs so cleanup never relies on GitHub changing PR state as
+      # a side effect. Branch age comes from the referenced commit, not from a
+      # missing field on the refs API.
+      - name: Purge stale workflow fallback pull requests and branches
+        if: steps.pin.outputs.provisioned == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
+          FALLBACK_BRANCH_PREFIX: radius/setup-
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
+          pulls="$RUNNER_TEMP/fallback-pulls.json"
+          refs="$RUNNER_TEMP/fallback-refs.json"
+          branches="$RUNNER_TEMP/fallback-branches.json"
+          expired_pulls="$RUNNER_TEMP/expired-fallback-pulls.json"
+          expired_branches="$RUNNER_TEMP/expired-fallback-branches.json"
+
+          gh api --paginate --slurp \
+            "repos/$FIXTURE_REPOSITORY/pulls?state=open&per_page=100" >"$pulls"
+          gh api --paginate --slurp \
+            "repos/$FIXTURE_REPOSITORY/git/matching-refs/heads/$FALLBACK_BRANCH_PREFIX" >"$refs"
+
+          printf '[]' >"$branches"
+          while IFS=$'\t' read -r ref sha; do
+            [[ -n "$ref" && -n "$sha" ]] || continue
+            # The fallback path always authors a fresh workflow commit before
+            # creating its ref, so commit time is the ref's conservative age
+            # proxy. A ref whose commit cannot be read remains undeleted.
+            if ! created_at="$(gh api "repos/$FIXTURE_REPOSITORY/git/commits/$sha" \
+              --jq '.committer.date // empty')"; then
+              echo "::warning::Could not establish the age of $ref; leaving it alone."
+              created_at=""
+            fi
+            jq --arg ref "$ref" --arg created_at "$created_at" \
+              '. += [{ref: $ref, created_at: $created_at}]' \
+              "$branches" >"$branches.next"
+            mv "$branches.next" "$branches"
+          done < <(jq -r '.[][]? | [.ref, .object.sha] | @tsv' "$refs")
+
+          node --input-type=module - \
+            "$pulls" "$branches" "$FALLBACK_BRANCH_PREFIX" "$cutoff" \
+            "$expired_pulls" "$expired_branches" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [pullsFile, branchesFile, prefix, cutoff, expiredPullsFile, expiredBranchesFile] =
+            process.argv.slice(2);
+          const { selectExpiredFallbackBranches, selectExpiredFallbackPullRequests } =
+            await import(
+              "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+            );
+          const [pulls, branches] = await Promise.all(
+            [pullsFile, branchesFile].map(async (file) =>
+              JSON.parse(await readFile(file, "utf8"))
+            )
+          );
+          await Promise.all([
+            writeFile(
+              expiredPullsFile,
+              JSON.stringify(selectExpiredFallbackPullRequests(pulls, prefix, cutoff))
+            ),
+            writeFile(
+              expiredBranchesFile,
+              JSON.stringify(selectExpiredFallbackBranches(branches, prefix, cutoff))
+            )
+          ]);
+          NODE
+
+          pulls_purged=0
+          while read -r number; do
+            [[ -n "$number" ]] || continue
+            echo "Closing stale workflow fallback pull request #$number."
+            gh api -X PATCH "repos/$FIXTURE_REPOSITORY/pulls/$number" \
+              -f state=closed >/dev/null
+            pulls_purged=$((pulls_purged + 1))
+          done < <(jq -r '.[].number' "$expired_pulls")
+
+          branches_purged=0
+          while read -r branch; do
+            [[ -n "$branch" ]] || continue
+            echo "Deleting stale workflow fallback branch $branch."
+            gh api -X DELETE "repos/$FIXTURE_REPOSITORY/git/refs/heads/$branch"
+            branches_purged=$((branches_purged + 1))
+          done < <(jq -r '.[]' "$expired_branches")
+
+          echo "- Workflow fallback pull requests closed: $pulls_purged" >>"$GITHUB_STEP_SUMMARY"
+          echo "- Workflow fallback branches purged: $branches_purged" >>"$GITHUB_STEP_SUMMARY"
 
       # The fixture repository is deliberately mutable: a run commits the
       # product's workflows to it. Resetting to the pinned baseline is what
