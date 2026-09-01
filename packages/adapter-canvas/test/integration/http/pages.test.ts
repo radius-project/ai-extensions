@@ -68,6 +68,9 @@ describe("canvas pages over real loopback HTTP", () => {
     expect(response.body).toContain(
       '<a href="?page=graph" data-page="graph" data-radius-graph-page="graph" class="rad-subtab rad-subtab--active"'
     );
+    expect(response.body).toContain(
+      'href="https://edge.docs.radapp.io/integrations/github-copilot-app/canvas-extension/"'
+    );
   });
 
   it.each([
@@ -162,6 +165,19 @@ describe("canvas pages over real loopback HTTP", () => {
         response.body.split(`\n${browserEntryMarker(entry)}\n`)
       ).toHaveLength(2);
     }
+  });
+
+  it("serves only discovered Azure infrastructure selectors with namespace creation guidance", async () => {
+    resetState({ contextRepo: "octo/app" });
+
+    const response = await get("/?page=environment");
+
+    expect(response.body).toContain(
+      "Select an existing Azure resource group and AKS cluster, then choose the Kubernetes namespace for this environment. To use a new namespace, enter its name and Radius will create it during environment setup."
+    );
+    expect(response.body).not.toContain('id="azure-rg-custom"');
+    expect(response.body).not.toContain('id="azure-cluster-custom"');
+    expect(response.body).toContain('id="azure-namespace-custom"');
   });
 
   // The diff page carries the worktree branch to the browser so each node can be

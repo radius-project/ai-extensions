@@ -396,6 +396,7 @@ export function environmentsPaneMarkup(
 
       <!-- Azure infra -->
       <div id="panel-azure">
+        <div class="rad-field__help">Select an existing Azure resource group and AKS cluster, then choose the Kubernetes namespace for this environment. To use a new namespace, enter its name and Radius will create it during environment setup.</div>
         <div style="display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin:8px 0;">
           <div id="azure-discover-status" style="font-size:12px; color:var(--rad-text-tertiary);">Select a credential profile to discover resources.</div>
           <button type="button" id="azure-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
@@ -404,12 +405,10 @@ export function environmentsPaneMarkup(
           <div class="rad-field">
             <label for="azure-rg-select">Resource Group</label>
             <select id="azure-rg-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-rg-custom" type="text" aria-label="Resource Group (custom)" placeholder="Enter resource group" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
             <label for="azure-cluster-select">Cluster</label>
             <select id="azure-cluster-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-cluster-custom" type="text" aria-label="Cluster (custom)" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
             <label for="azure-namespace-select">Namespace</label>

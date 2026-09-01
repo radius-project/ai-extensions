@@ -51,7 +51,7 @@ const LIVE = !!process.env.RUN_LIVE_WORKFLOW_TESTS;
 // changes, including the eventual removal of the duplicated tree.
 const RADIUS_PARITY_REF =
   process.env.RADIUS_PARITY_REF?.trim() ||
-  "745ce9cc0fa6391a7de73cf9eb894521b1cb3053";
+  "76eaaaccfc45f00f4c27f4ff560ee6a80d471414";
 
 const RADIUS_REPO = "radius-project/radius";
 const EXTENSION_DIR = ".github/extension";
@@ -79,7 +79,17 @@ const CONTENT_EXCEPTIONS = new Set<string>([
   // with the "refuse to delete an environment that still has deployed apps"
   // safety guard and a correlation_id input. It must exist, but its content
   // intentionally diverges from Radius' generic Azure/AWS dispatcher.
-  "delete-environment.yml"
+  "delete-environment.yml",
+  // The application-delete path carries an ai-extensions-owned `force` input
+  // (issue #283) so a deployment stranded by a resource stuck in a
+  // non-terminal provisioning state can be deleted with
+  // `rad app delete --preview --force`. Radius' dispatcher, providers and
+  // composite action have no such input, so these four must exist but their
+  // content intentionally diverges.
+  "delete-application.yml",
+  "delete-azure.yml",
+  "delete-aws.yml",
+  "actions/delete-resource/action.yml"
 ]);
 
 // Paths that exist only in ai-extensions and have no Radius counterpart.

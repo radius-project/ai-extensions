@@ -32,6 +32,8 @@ Open the canvas hub and use the deployed-application view:
 2. Select the environment (and, for a deployment delete, the deployed application).
 3. Click **Delete Deployment** to tear down the app, or use **Delete Env** to run the tracked environment cleanup. Live status streams until success / failure / timeout.
 
+If a previous delete of that application failed, the canvas first asks the server whether it failed with the stranded-resource conflict below. Only when the failed run's `rad-delete-result` artifact proves it does the button offer the **force delete** confirmation, which warns that forcing may orphan cloud resources and dispatches the workflow with `force: true`. The server does not trust that offer: before dispatching, it re-reads the artifact itself and refuses `force` unless the deployment is in the `delete-failed` state **and** the failure is still provably this conflict. A delete that failed for credential, network or workflow-configuration reasons cannot be forced, and neither can one whose artifact is missing, expired or unreadable. If the failed run was itself a forced delete, forcing stays available — it is the only escape — but the confirmation says the conflict survived one force already, so leftover provider resources are likely.
+
 The extension keeps the committed delete workflow files current before dispatching, so a run never executes a drifted copy.
 
 ## What the deployment-delete workflow does
@@ -41,7 +43,7 @@ The extension keeps the committed delete workflow files current before dispatchi
 3. Installs `k3d` + the `rad` CLI + Terraform and installs Radius on the ephemeral control plane wired to the target cluster (same setup as deploy).
 4. Projects GitHub OIDC tokens into the pods and registers the cloud identity with `rad credential register`, so recipe deletes can reach the target cluster and cloud.
 5. Authenticates to GHCR with the repository `GITHUB_TOKEN`, exports environment-scoped `RADIUS_STATE_BACKEND`, `RADIUS_STATE_REGISTRY`, and `RADIUS_STATE_ARCHIVE`, then runs `rad startup` to restore the control-plane databases and Terraform recipe-state Secrets persisted by the previous run — this is what tells the delete which environment, recipe packs, resources, and Terraform state exist. Unlike deploy, it does **not** recreate the environment, recipe pack, or registry credentials.
-6. Runs `rad app delete <name> --yes --preview` (`--preview` switches the CLI to the deployed-application API path) via the `delete-resource` composite action, which writes a `rad-delete-result` artifact (JSON: `outcome`, `exitCode`, `resourceType`, `name`, `output`).
+6. Runs `rad app delete <name> --yes --preview` (`--preview` switches the CLI to the deployed-application API path) via the `delete-resource` composite action, which writes a `rad-delete-result` artifact (JSON: `outcome`, `exitCode`, `resourceType`, `name`, `forced`, `output`). When the dispatch carries `force: true`, the action adds `--force` and records `forced: true`.
 7. `rad shutdown` (`if: always()`) persists the post-delete control-plane databases and Terraform recipe-state Secrets back to the state archive — the OCI-backed archive by default (pushed to the GHCR repository in `RADIUS_STATE_REGISTRY` under the `RADIUS_STATE_ARCHIVE` tag, default `radius-state`), or the `radius-state` git orphan branch when `RADIUS_STATE_BACKEND=git`. On failure, logs are uploaded as the `radius-logs` artifact; the k3d cluster is always deleted.
 
 ## What the environment-delete flow does
@@ -59,6 +61,7 @@ An incomplete deletion exposes only **Retry deletion**. Retry reopens the same d
 ## After a successful delete
 
 - Tell the user it succeeded and include the workflow run URL (for a deployment delete).
+- If the delete was forced, tell the user to verify in the cloud provider that no orphaned resources remain: resources in non-terminal states may leave external resources that require manual cleanup.
 - Note that deleting a deployment removed the app's resources. For environment deletion, report the operation's actual steps: the Radius environment and GitHub deploy environment were removed, a proven-safe credential was removed or a retained credential was explained, and the Entra app registration was left in place with the acknowledgement's Azure Portal link.
 
 ## Common failure modes
@@ -67,12 +70,13 @@ An incomplete deletion exposes only **Retry deletion**. Retry reopens the same d
   → Recreate or update the deploy environment so `RADIUS_STATE_BACKEND=oci`, package-only `RADIUS_STATE_REGISTRY`, and `RADIUS_STATE_ARCHIVE=radius-state` are present. Confirm the delete workflow logs in to `ghcr.io` before `rad startup`, has `packages: write`, and that the state package is private or internal.
 
 - **`The target resource is in progress state: Updating` (409 Conflict) on delete**
-  → A resource was stranded in a non-terminal state by a prior run whose control plane was torn down before its async operation finished. The persisted state restores it still `Updating`, and no operation completes it, so every delete 409s. Force the resource to a terminal state (or remove its record) on a running control plane, then persist state, before retrying the delete.
+  → A resource was stranded in a non-terminal state by a prior run whose control plane was torn down before its async operation finished. The persisted state restores it still `Updating`, and no operation completes it, so every ordinary delete 409s. Press **Retry Delete** and accept the **force delete** confirmation the canvas offers: it reruns the workflow as `rad app delete --preview --force`, which drops the stranded records instead of waiting for an operation that will never finish. Afterwards, tell the user to check the cloud provider for orphaned resources — forcing deletes resources in non-terminal states from Radius, but may leave their external resources behind for manual cleanup.
+  → The offer depends on the failed run's `rad-delete-result` artifact, which is retained for one day. If it has expired, the canvas cannot prove the failure and shows only the ordinary confirmation; run the delete once more to produce a fresh result, then force.
 
 - **Environment deletion stopped partway** → Use **Retry deletion** in the progress panel. Do not start a second deletion or look for **Stop setup**; the existing durable operation resumes only unresolved stages and keeps successful work.
 
 ## Related files
 
-- The delete workflow templates are canonical in `radius-project/ai-extensions` at `.github/extension/` — `delete-application.yml` (dispatcher), `delete-azure.yml` / `delete-aws.yml` (provider `workflow_call` workflows), and `actions/*` (shared composite actions: `setup-control-plane`, `restore-state`, `delete-resource`, `teardown`). A released extension fetches application-delete templates at its baked source commit, reads environment-delete templates from the complete bundled copy of that same tree, and fills every first-party composite-action `uses:` with the full source commit SHA. It commits the dispatcher + the Azure provider workflow into the user repo at `.github/workflows/`; no generated action reference follows a mutable branch or channel tag.
+- The delete workflow templates are canonical in `radius-project/ai-extensions` at `.github/extension/` — `delete-application.yml` and `delete-environment.yml` (dispatchers), `delete-azure.yml` / `delete-aws.yml` / `delete-environment-azure.yml` (provider `workflow_call` workflows), and `actions/*` (shared composite actions: `setup-control-plane`, `restore-state`, `delete-resource`, `teardown`). A released extension fetches every delete template at its baked source commit and fills every first-party composite-action `uses:` with that same full commit SHA. It commits the dispatchers and Azure provider workflows into the user repo at `.github/workflows/`; no generated action reference follows a mutable branch, channel tag, or local plugin asset.
 - Environment deletion orchestration lives in `packages/adapter-canvas/src/server/services/environment-deletion.ts`; operation retry/control policy lives in `packages/adapter-canvas/src/operations.ts` and `packages/adapter-canvas/src/server/routes/operations-control.ts`.
 - The implemented safety and sharing boundaries are documented in `docs/design/2026-08-environment-deletion-cloud-cleanup.md`.

@@ -8,6 +8,13 @@
 import { remediationView } from "@radius-project/core/remediations";
 import { createCommandAction } from "../command-action.js";
 import { createDeleteDeploymentDialog } from "../delete-dialog.js";
+import { createEnvironmentConfirmDialog } from "../environment/confirm-dialog.js";
+import {
+  DELETE_FAILED_STATUS,
+  FORCE_DELETE_ORPHAN_NOTICE,
+  forceDeletePrompt,
+  probeDeleteConflict
+} from "../force-delete.js";
 import { escapeBrowserHtml } from "../html.js";
 import { isRecord, readBoolean, readRecord, readString } from "../json.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
@@ -77,6 +84,15 @@ const RETRY_ROW =
   '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments. Retrying…</td></tr>';
 const LOAD_FAILURE_ROW =
   '<tr><td colspan="6" style="color:var(--rad-text-tertiary);">Could not load deployments.</td></tr>';
+
+// A deleting row carries no run URL of its own, so the inline status is the
+// only place the dispatched delete run is reachable from. Only an absolute
+// https URL is rendered: anything else could turn a server-supplied string
+// into a javascript: or relative navigation.
+export function workflowRunLink(runUrl: string): string {
+  if (runUrl.indexOf("https://") !== 0) return "";
+  return `<br><a href="${escapeBrowserHtml(runUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--rad-link);">View delete workflow run in GitHub ↗</a>`;
+}
 
 export interface DeployingPageOptions {
   repo: string;
@@ -672,23 +688,91 @@ export function initializeDeployingPage(
       });
   };
 
+  // The status the table is showing for this row, including an optimistic
+  // override, so the conflict probe only runs for a delete that has failed.
+  const rowStatus = (app: string, environment: string): string => {
+    const override = overrides.get(opKey(app, environment));
+    if (override) return override.status;
+    const record = lastRecords.find(
+      (row) => row.app === app && row.environment === environment
+    );
+    return record ? record.status : "";
+  };
+
+  // The probe makes the server list and download a workflow artifact, so the
+  // button can sit for seconds before the dialog opens. The row is marked busy
+  // for that whole wait: without it the click looks ignored, and a second click
+  // would start a second probe and open a second dialog behind the first.
+  const probing = new Set<string>();
+
+  const setDeleteBusy = (
+    app: string,
+    environment: string,
+    busy: boolean
+  ): void => {
+    for (const button of context.dom.all(context.dom.document, ".js-del-dep")) {
+      if (
+        button.getAttribute("data-app") !== app ||
+        button.getAttribute("data-env") !== environment
+      ) {
+        continue;
+      }
+      if (busy) {
+        button.setAttribute("disabled", "");
+        button.setAttribute("aria-busy", "true");
+      } else {
+        button.removeAttribute("disabled");
+        button.removeAttribute("aria-busy");
+      }
+    }
+  };
+
   const openDeleteModal = (app: string, environment: string): void => {
-    dialog?.open(app, environment);
+    if (!dialog) return;
+    if (rowStatus(app, environment) !== DELETE_FAILED_STATUS) {
+      dialog.open(app, environment);
+      return;
+    }
+    const key = opKey(app, environment);
+    if (probing.has(key)) return;
+    probing.add(key);
+    setDeleteBusy(app, environment, true);
+    void probeDeleteConflict(context, {
+      repo: options.repo,
+      environment,
+      application: app
+    }).then((result) => {
+      probing.delete(key);
+      setDeleteBusy(app, environment, false);
+      if (!entry.active) return;
+      // A delete that failed for any other reason is an ordinary delete again,
+      // and forcing is never offered without the server's proof.
+      if (!result.conflict || !forceConfirm) {
+        dialog.open(app, environment);
+        return;
+      }
+      forceConfirm.show({
+        ...forceDeletePrompt(
+          app,
+          environment,
+          result.resourceState,
+          result.forced
+        ),
+        onConfirm: () => runDelete(app, environment, true)
+      });
+    });
   };
 
   // Dispatch the delete, then let the row reflect "Deleting…" while the
   // workflow runs. Fails closed: a missing repository, application, or
   // environment identity never reaches the delete endpoint.
-  const runDelete = (app: string, environment: string): void => {
+  const runDelete = (app: string, environment: string, force = false): void => {
     if (!options.repo || app === "" || environment === "") return;
     const key = opKey(app, environment);
     overrides.set(key, { app, environment, status: "deleting" });
     void loadDeployments(true, true);
-    showInline(
-      "success",
-      `Deleting deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has started.`,
-      true
-    );
+    const started = `${force ? "Force deleting" : "Deleting"} deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has started.`;
+    showInline("success", started, true);
     void context.net
       .fetch(DELETE_DEPLOYMENT_PATH, {
         method: "POST",
@@ -696,7 +780,8 @@ export function initializeDeployingPage(
         body: JSON.stringify({
           repo: options.repo,
           environment,
-          application: app
+          application: app,
+          force
         })
       })
       .then((response) =>
@@ -714,7 +799,12 @@ export function initializeDeployingPage(
           );
           return;
         }
-        pollDeleteCompletion(app, environment, 0);
+        // The dispatched run is the only place the user can watch a delete,
+        // and the deleting row carries no run URL of its own, so surface the
+        // one the server just resolved.
+        const runUrl = workflowRunLink(readString(result.payload, "runUrl"));
+        if (runUrl) showInline("success", `${started}${runUrl}`, true);
+        pollDeleteCompletion(app, environment, 0, force, runUrl);
       })
       .catch(() => {
         if (!entry.active) return;
@@ -734,7 +824,9 @@ export function initializeDeployingPage(
   const pollDeleteCompletion = (
     app: string,
     environment: string,
-    tries: number
+    tries: number,
+    forced = false,
+    runLink = ""
   ): void => {
     if (tries > DELETE_POLL_LIMIT) {
       overrides.delete(opKey(app, environment));
@@ -758,7 +850,7 @@ export function initializeDeployingPage(
             readString(result.payload, "error") ||
             !hasDeploymentsArray(result.payload)
           ) {
-            pollDeleteCompletion(app, environment, tries + 1);
+            pollDeleteCompletion(app, environment, tries + 1, forced, runLink);
             return;
           }
           const deployments = parseDeploymentRecords(result.payload);
@@ -771,25 +863,35 @@ export function initializeDeployingPage(
             void loadDeployments(true, true);
             showInline(
               "success",
-              `Deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has been successfully deleted.`,
+              `Deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has been successfully deleted.` +
+                (forced ?
+                  ` ${escapeBrowserHtml(FORCE_DELETE_ORPHAN_NOTICE)}`
+                : "") +
+                runLink,
               true
             );
             return;
           }
           void loadDeployments(true, true);
-          pollDeleteCompletion(app, environment, tries + 1);
+          pollDeleteCompletion(app, environment, tries + 1, forced, runLink);
         })
         .catch(() => {
           if (!entry.active) return;
-          pollDeleteCompletion(app, environment, tries + 1);
+          pollDeleteCompletion(app, environment, tries + 1, forced, runLink);
         });
     });
   };
 
   const dialog = createDeleteDeploymentDialog(context, {
-    onConfirm: runDelete
+    onConfirm: (app, environment) => runDelete(app, environment)
   });
   if (dialog) entry.onTeardown(() => dialog.teardown());
+
+  // The lighter shared confirmation carries the forced-delete question, so it
+  // reads like every other confirm in the product rather than repeating the
+  // three-step flow the user already completed for the delete that failed.
+  const forceConfirm = createEnvironmentConfirmDialog(context);
+  if (forceConfirm) entry.onTeardown(() => forceConfirm.teardown());
 
   // Restores the deploy modal to its default "in progress" (spinner) layout;
   // the modal is mutated in place on failure, so this runs before each attempt.
@@ -958,6 +1060,33 @@ export function initializeDeployingPage(
     }
     deployBtn.disabled = false;
     refreshDeployBtn();
+  };
+
+  // A forced delete started on the Deployed graph page redirects here, and the
+  // warning that made the user confirm has to survive that navigation: without
+  // the flag this page polls an ordinary delete and its completion message
+  // never repeats the orphan caution the forced delete earned. The dispatched
+  // run is carried too, since the deleting row has no run URL of its own.
+  const resumeRedirectedDelete = (): boolean => {
+    if (queryValue(context.nav.search, "delete") !== "forced") return false;
+    const app = queryValue(context.nav.search, "application");
+    const environment = queryValue(context.nav.search, "environment");
+    if (app === "" || environment === "" || !options.repo) return false;
+
+    overrides.set(opKey(app, environment), {
+      app,
+      environment,
+      status: "deleting"
+    });
+    const runLink = workflowRunLink(queryValue(context.nav.search, "run"));
+    showInline(
+      "success",
+      `Force deleting deployment of application <strong>${escapeBrowserHtml(app)}</strong> in environment <strong>${escapeBrowserHtml(environment)}</strong> has started.${runLink}`,
+      true
+    );
+    void loadDeployments(true, true);
+    pollDeleteCompletion(app, environment, 0, true, runLink);
+    return true;
   };
 
   // Deploys started from the Planned or Deployed graph redirect here,
@@ -1294,7 +1423,9 @@ export function initializeDeployingPage(
   void loadApplications();
   void loadEnvironmentsDropdown();
   void loadBranches();
-  if (!resumeRedirectedDeployment()) void loadDeployments();
+  if (!resumeRedirectedDelete() && !resumeRedirectedDeployment()) {
+    void loadDeployments();
+  }
 
   return () => entry.teardown();
 }

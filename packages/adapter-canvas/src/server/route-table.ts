@@ -199,6 +199,7 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare("GET", "/api/list-environments", "exact", "none", "environments"),
   declare("GET", "/api/list-applications", "exact", "none", "deployments"),
   declare("GET", "/api/list-deployments", "exact", "none", "deployments"),
+  declare("GET", "/api/delete-conflict", "exact", "none", "deployments"),
   legacyPost("/api/delete-deployment", "exact", "json", "deployments"),
   declare("POST", "/api/abandon-deployment", "exact", "json", "deployments"),
   declare("GET", "/api/verify-status", "exact", "none", "environments"),

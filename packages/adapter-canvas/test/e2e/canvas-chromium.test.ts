@@ -1330,26 +1330,34 @@ test.describe("Radius Canvas in Chromium", () => {
       );
     const checksBeforeEdit = accountRequests().length;
     const environment = page.getByLabel("Environment name");
+    const currentTime = await page.evaluate<number>("Date.now()");
+    await page.clock.pauseAt(currentTime + 1_000);
 
-    await environment.fill("staging");
-    await environment.fill("production");
-    await expect(
-      page.getByRole("button", { name: "Create Environment" })
-    ).toBeDisabled();
+    try {
+      await environment.fill("staging");
+      await environment.fill("production");
+      await expect(
+        page.getByRole("button", { name: "Create Environment" })
+      ).toBeDisabled();
 
-    await page.clock.fastForward(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS - 1);
-    expect(accountRequests()).toHaveLength(checksBeforeEdit);
+      await page.clock.fastForward(GITHUB_ENVIRONMENT_RECHECK_DELAY_MS - 1);
+      expect(accountRequests()).toHaveLength(checksBeforeEdit);
 
-    await page.clock.fastForward(1);
-    await expect
-      .poll(() => accountRequests().length)
-      .toBe(checksBeforeEdit + 1);
+      await page.clock.fastForward(1);
+      await expect
+        .poll(() => accountRequests().length)
+        .toBe(checksBeforeEdit + 1);
 
-    expect(accountRequests().at(-1)?.body).toMatchObject({
-      environment: "production"
-    });
-    await expect(readiness).toContainText("Ready to configure deployments");
-    await expect(page.getByRole("button", { name: "Re-check" })).toBeEnabled();
+      expect(accountRequests().at(-1)?.body).toMatchObject({
+        environment: "production"
+      });
+      await expect(readiness).toContainText("Ready to configure deployments");
+      await expect(
+        page.getByRole("button", { name: "Re-check" })
+      ).toBeEnabled();
+    } finally {
+      await page.clock.resume();
+    }
     await expectNoWcagViolations(page);
   });
 
@@ -1432,17 +1440,23 @@ test.describe("Radius Canvas in Chromium", () => {
     const cluster = page.getByLabel("Cluster", { exact: true });
     const namespace = page.locator("#azure-namespace-select");
     await expect(resourceGroup).toContainText(selected.resourceGroup);
+    await expect(
+      resourceGroup.locator('option[value="__custom__"]')
+    ).toHaveCount(0);
     await resourceGroup.selectOption(selected.resourceGroup);
     await expect(cluster.locator("option")).toHaveText([
       "Select AKS cluster…",
-      selected.name,
-      "+ Enter custom..."
+      selected.name
     ]);
+    await expect(cluster.locator('option[value="__custom__"]')).toHaveCount(0);
     await expect(cluster).toHaveValue(selected.id);
     await expect(namespace).toBeDisabled();
     await expect(namespace).toContainText("selected-team");
     await expect(namespace).toBeEnabled();
     await expect(namespace).toHaveValue("default");
+    await expect(namespace.locator('option[value="__custom__"]')).toHaveCount(
+      1
+    );
     await namespace.selectOption("selected-team");
 
     await expect
@@ -1608,6 +1622,21 @@ test.describe("Radius Canvas in Chromium", () => {
       });
       throw new Error("The controlled setup failed safely.");
     });
+    const selected = {
+      id: "fixture-cluster",
+      name: "Fixture Cluster",
+      resourceGroup: "fixture-resource-group"
+    };
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      ...azureDiscoveryCommands({
+        subscriptionId: PROFILE_SUBSCRIPTION_ID,
+        clusters: [selected],
+        selected,
+        namespaces: ["default"]
+      })
+    );
+    await canvas.setScenario(scenario);
 
     await gotoCanvas(page, canvas, "environment");
     await openEnvironmentWizard(page);
@@ -1620,18 +1649,14 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(githubReadiness).toContainText(
       "Ready to configure deployments"
     );
-    await page
-      .getByLabel("Resource Group", { exact: true })
-      .selectOption("__custom__");
-    await page
-      .getByLabel("Resource Group (custom)")
-      .fill("fixture-resource-group");
-    await page
-      .getByLabel("Cluster", { exact: true })
-      .selectOption("__custom__");
-    await page
-      .getByLabel("Cluster (custom)", { exact: true })
-      .fill("fixture-cluster");
+    const resourceGroup = page.getByLabel("Resource Group", { exact: true });
+    const cluster = page.getByLabel("Cluster", { exact: true });
+    await expect(
+      resourceGroup.locator('option[value="__custom__"]')
+    ).toHaveCount(0);
+    await resourceGroup.selectOption(selected.resourceGroup);
+    await expect(cluster).toHaveValue(selected.id);
+    await expect(cluster.locator('option[value="__custom__"]')).toHaveCount(0);
 
     const operationResponse = page.waitForResponse(
       (response) =>
@@ -2699,6 +2724,71 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#deployed-delete-btn")).toHaveText(
       "Deploy Application"
     );
+  });
+
+  test("forces a delete only after the conflict probe proves the deployment is stuck @safety", async ({
+    page,
+    canvas
+  }) => {
+    const deletes: unknown[] = [];
+    let conflict = false;
+    await routeDeployedPage(page, () => "delete-failed");
+    await page.route("**/api/delete-conflict**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          conflict ?
+            { conflict: true, resourceState: "Updating", forced: false }
+          : { conflict: false }
+        )
+      });
+    });
+    await page.route("**/api/delete-deployment", async (route) => {
+      deletes.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ success: true, forced: conflict })
+      });
+    });
+    await gotoCanvas(page, canvas, "deployed");
+
+    // Without a proven conflict the ordinary confirmation stays in place, so a
+    // routine delete-failed row can never be escalated by accident.
+    await page.getByRole("button", { name: "Retry Delete" }).click();
+    await expect(
+      page.getByRole("button", { name: "I want to delete this deployment" })
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    conflict = true;
+    await page.getByRole("button", { name: "Retry Delete" }).click();
+    // The forced question uses the product's lighter confirmation: one
+    // decision, asked once the ordinary delete has already been answered.
+    const confirmModal = page.locator("#env-confirm-modal");
+    await expect(confirmModal).toContainText("Force delete this deployment?");
+    await expect(confirmModal).toContainText("may still be updating");
+    await expect(confirmModal).toContainText(
+      "may leave orphaned external resources that require manual cleanup"
+    );
+    await expect(page.getByRole("button", { name: "Cancel" })).toBeFocused();
+    await expectNoWcagViolations(page);
+
+    // Cancelling is the safe default and must never delete anything.
+    await page.keyboard.press("Escape");
+    await expect(confirmModal).toBeHidden();
+    expect(deletes).toHaveLength(0);
+
+    await page.getByRole("button", { name: "Retry Delete" }).click();
+    await page.getByRole("button", { name: "Force delete" }).click();
+
+    await expect.poll(() => deletes).toHaveLength(1);
+    expect(deletes[0]).toMatchObject({
+      environment: "fixture-environment",
+      application: "radius-app",
+      force: true
+    });
   });
 
   test("announces a finished deploy away from the deployments page and keeps it dismissed", async ({

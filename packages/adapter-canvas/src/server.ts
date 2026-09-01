@@ -243,6 +243,8 @@ import {
   buildDeployMessageMap,
   buildDeployStatusMap,
   createDeployStatusReader,
+  downloadWorkflowArtifact,
+  listWorkflowArtifacts,
   settleDeployStatuses
 } from "./deploy-artifacts.js";
 import { graphPage } from "./pages/graph-page.js";
@@ -261,6 +263,7 @@ import { createProductionCanvasServerDependencies } from "./server/dependencies.
 import { createServerRouteTable } from "./server/route-table.js";
 import { createLivenessSourceRoutes } from "./server/routes/liveness-source.js";
 import { createDeploymentsRoutes } from "./server/routes/deployments.js";
+import { probeDeleteConflict } from "./server/services/delete-conflict.js";
 import { createOperationsStatusRoutes } from "./server/routes/operations-status.js";
 import { createOperationsControlRoutes } from "./server/routes/operations-control.js";
 import { checkSetupPullRequestMergeForOperation } from "./server/services/setup-pull-request.js";
@@ -950,7 +953,13 @@ const deploymentsRoutes = createDeploymentsRoutes({
   },
   get abandonment() {
     return deploymentAbandonmentService;
-  }
+  },
+  probeDeleteConflict: (request) =>
+    probeDeleteConflict(request, {
+      resolveEnvDeployment,
+      listArtifacts: listWorkflowArtifacts,
+      downloadArtifact: downloadWorkflowArtifact
+    })
 });
 
 // Composition root for the `azure-discovery` routes. Four seams:
