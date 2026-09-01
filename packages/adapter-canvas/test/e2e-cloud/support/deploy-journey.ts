@@ -315,6 +315,32 @@ export function readKubernetesWorkloads(
   });
 }
 
+/** Narrows a generic `kubectl get ... -o json` listing to resource names. */
+export function readKubernetesResourceNames(payload: unknown): string[] {
+  const record = asRecord(payload);
+  if (!record) throw new Error("The kubectl listing was not a JSON object.");
+  const items = record.items;
+  if (!Array.isArray(items))
+    throw new Error('The kubectl listing carried no "items" array.');
+  return items.map((entry, index) => {
+    const item = asRecord(entry);
+    if (!item)
+      throw new Error(
+        `The kubectl listing carried a non-object entry at index ${index}.`
+      );
+    const metadata = asRecord(item.metadata);
+    const name = metadata?.name;
+    if (typeof name !== "string" || name.trim() === "")
+      throw new Error(
+        `The kubectl listing carried an entry at index ${index} with no usable "metadata.name".`
+      );
+    const kind = item.kind;
+    return typeof kind === "string" && kind.trim() !== "" ?
+        `${kind.trim()}/${name.trim()}`
+      : name.trim();
+  });
+}
+
 export interface DeleteEnvironmentResponse {
   readonly status: number;
   readonly payload: unknown;
@@ -452,6 +478,8 @@ export interface SurvivingArtifactsInput {
   /** The GitHub Environment stage one created. */
   readonly environmentName: string;
   readonly environmentExists: boolean;
+  /** The exact variables stage one observed after environment creation. */
+  readonly expectedVariables: ReadonlyMap<string, string>;
   /** Its variables, as GitHub reports them after the delete. */
   readonly variables: ReadonlyMap<string, string>;
   /** The `appId` observed before the delete, and the one observed after. */
@@ -486,14 +514,20 @@ export function findSurvivingArtifactProblems(
     );
   else
     for (const name of REQUIRED_ENVIRONMENT_VARIABLES) {
+      const expected = input.expectedVariables.get(name);
       const value = input.variables.get(name);
-      if (value === undefined)
+      if (expected === undefined)
+        problems.push(
+          `Stage one did not record environment variable ${name}, so its survival cannot be proved.`
+        );
+      else if (value === undefined)
         problems.push(
           `Environment variable ${name} was removed by the delete; the environment can no longer deploy.`
         );
-      else if (value.trim() === "")
+      else if (value !== expected)
         problems.push(
-          `Environment variable ${name} survived but is now empty; the environment can no longer deploy.`
+          `Environment variable ${name} changed across the delete; the surviving environment no longer matches ` +
+            "the configuration stage one proved."
         );
     }
 

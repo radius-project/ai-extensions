@@ -2073,6 +2073,14 @@ describe("createCloudFixture", () => {
       respond
     });
 
+    const resourceListing = (
+      respond: FakeCommandStub["respond"]
+    ): FakeCommandStub => ({
+      tool: "kubectl",
+      match: ["get", "deployments,pods"],
+      respond
+    });
+
     const workloadsJson = (
       ...names: readonly (readonly [string, number])[]
     ): string =>
@@ -2081,6 +2089,16 @@ describe("createCloudFixture", () => {
           metadata: { name, labels: { "radapp.io/application": APP } },
           spec: { replicas: 1 },
           status: { availableReplicas: available }
+        }))
+      });
+
+    const resourcesJson = (
+      ...resources: readonly (readonly [string, string])[]
+    ): string =>
+      JSON.stringify({
+        items: resources.map(([kind, name]) => ({
+          kind,
+          metadata: { name }
         }))
       });
 
@@ -2351,7 +2369,7 @@ describe("createCloudFixture", () => {
     it("accepts an emptied namespace as a completed delete", async () => {
       const { fixture } = await clusterHarness([
         credentials(),
-        listing({ stdout: JSON.stringify({ items: [] }) })
+        resourceListing({ stdout: JSON.stringify({ items: [] }) })
       ]);
 
       await expect(
@@ -2362,7 +2380,7 @@ describe("createCloudFixture", () => {
     it("accepts a removed namespace as the strongest form of absence", async () => {
       const { fixture } = await clusterHarness([
         credentials(),
-        listing({
+        resourceListing({
           code: 1,
           stderr: `Error from server (NotFound): namespaces "${NAMESPACE}" not found`
         })
@@ -2378,11 +2396,16 @@ describe("createCloudFixture", () => {
         credentials(),
         {
           tool: "kubectl",
-          match: ["get", "deployments"],
-          respond: { stdout: workloadsJson(["demo-frontend", 1]) },
+          match: ["get", "deployments,pods"],
+          respond: {
+            stdout: resourcesJson(
+              ["Deployment", "demo-frontend"],
+              ["Pod", "demo-frontend-abc"]
+            )
+          },
           times: 1
         },
-        listing({ stdout: JSON.stringify({ items: [] }) })
+        resourceListing({ stdout: JSON.stringify({ items: [] }) })
       ]);
 
       await fixture.assertApplicationWorkloadsAbsent(APP, NAMESPACE);
@@ -2394,8 +2417,11 @@ describe("createCloudFixture", () => {
       const { fixture } = await clusterHarness(
         [
           credentials(),
-          listing({
-            stdout: workloadsJson(["demo-frontend", 1], ["demo-backend", 1])
+          resourceListing({
+            stdout: resourcesJson(
+              ["Deployment", "demo-frontend"],
+              ["Pod", "demo-backend-abc"]
+            )
           })
         ],
         { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
@@ -2404,8 +2430,51 @@ describe("createCloudFixture", () => {
       await expect(
         fixture.assertApplicationWorkloadsAbsent(APP, NAMESPACE)
       ).rejects.toThrow(
-        /2 workload\(s\) remain: "demo-frontend", "demo-backend"/
+        /2 workload resource\(s\) remain: "Deployment\/demo-frontend", "Pod\/demo-backend-abc"/
       );
+    });
+
+    it("does not accept an orphaned application pod as workload absence", async () => {
+      const { fixture } = await clusterHarness(
+        [
+          credentials(),
+          resourceListing({
+            stdout: resourcesJson(["Pod", "demo-frontend-orphan"])
+          })
+        ],
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+
+      await expect(
+        fixture.assertApplicationWorkloadsAbsent(APP, NAMESPACE)
+      ).rejects.toThrow(/"Pod\/demo-frontend-orphan"/);
+    });
+
+    it("raises an absence probe failure instead of claiming the resources are gone", async () => {
+      const { fixture } = await clusterHarness([
+        credentials(),
+        resourceListing({
+          code: 1,
+          stderr: "Unable to connect to the server"
+        })
+      ]);
+
+      await expect(
+        fixture.assertApplicationWorkloadsAbsent(APP, NAMESPACE)
+      ).rejects.toThrow(
+        /kubectl get deployments,pods -n radius-demo failed with exit code 1/
+      );
+    });
+
+    it("refuses to read malformed resource JSON as workload absence", async () => {
+      const { fixture } = await clusterHarness([
+        credentials(),
+        resourceListing({ stdout: "not json" })
+      ]);
+
+      await expect(
+        fixture.assertApplicationWorkloadsAbsent(APP, NAMESPACE)
+      ).rejects.toThrow(/not valid JSON/);
     });
 
     it("reads workloads without waiting, reporting a missing namespace as none", async () => {
