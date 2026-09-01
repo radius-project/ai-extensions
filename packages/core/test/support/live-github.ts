@@ -1,7 +1,6 @@
-// Shared GitHub REST helpers for the opt-in `*.live.test.ts` suites
-// (workflow-yaml, oidc-environment-contract, extension-parity). They hit the
-// real GitHub API for radius-project/ai-extensions (internal) and
-// radius-project/radius, so they are only imported by live tests gated on
+// Shared GitHub REST helpers for the opt-in workflow YAML and OIDC environment
+// contract suites. They hit the real GitHub API for radius-project/ai-extensions
+// (internal), so they are only imported by live tests gated on
 // RUN_LIVE_WORKFLOW_TESTS. This is not production code and is excluded from
 // coverage in vitest.config.ts.
 

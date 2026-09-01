@@ -1511,6 +1511,90 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#azure-namespace-custom")).toBeVisible();
   });
 
+  test("turns Azure MFA discovery failure into a tenant-scoped login callout", async ({
+    page,
+    canvas
+  }) => {
+    const remediationRequests: unknown[] = [];
+    await page.route("**/api/run-remediation", async (route) => {
+      remediationRequests.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ success: true })
+      });
+    });
+    const scenario = defaultFakeCliScenario();
+    const resourceCommands = azureDiscoveryCommands({
+      subscriptionId: PROFILE_SUBSCRIPTION_ID,
+      clusters: [],
+      resourceGroups: []
+    });
+    const clusterList = resourceCommands.find(
+      (command) =>
+        command.tool === "az" &&
+        command.args?.[0] === "aks" &&
+        command.args[1] === "list"
+    );
+    if (!clusterList) {
+      throw new Error("discovery stubs no longer include the AKS list step");
+    }
+    clusterList.exitCode = 1;
+    clusterList.stdout = "";
+    clusterList.stderr =
+      "invalid_grant AADSTS50076 trace-id=not-useful Status_InteractionRequired";
+    scenario.commands.push(...resourceCommands);
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "environment");
+
+    await openEnvironmentWizard(page);
+
+    await expect(page.locator("#azure-discover-status")).toHaveText(
+      "Discovery failed: Azure CLI sign-in is required to discover resources. (AADSTS50076)"
+    );
+    const remediation = page.locator("#azure-discover-remediation");
+    await expect(remediation).toContainText("Sign in to Azure CLI");
+    await expect(remediation).toContainText(
+      `az login --use-device-code --tenant ${VALID_TENANT_ID}`
+    );
+    const runButton = remediation.getByRole("button", {
+      name: COMMAND_RUN_LABEL
+    });
+    await expect(runButton).toBeVisible();
+    await expect(page.locator("body")).not.toContainText("trace-id=not-useful");
+    await expectNoWcagViolations(page);
+
+    await runButton.focus();
+    await expect(runButton).toBeFocused();
+    await runButton.press("Enter");
+    await expect
+      .poll(() => remediationRequests)
+      .toEqual([
+        {
+          id: "azure-cli-login",
+          params: {
+            tenantId: VALID_TENANT_ID,
+            nextStep: "refresh-discovery"
+          },
+          confirmed: false
+        }
+      ]);
+    await expect(remediation.getByRole("status")).toContainText(
+      "Copilot was asked to run this command"
+    );
+
+    clusterList.exitCode = 0;
+    clusterList.stderr = "";
+    clusterList.stdout = "[]";
+    await canvas.setScenario(scenario);
+    await page.getByRole("button", { name: "Refresh" }).click();
+
+    await expect(page.locator("#azure-discover-status")).toHaveText(
+      "Found 0 cluster(s), 0 resource group(s)"
+    );
+    await expect(remediation).toBeEmpty();
+  });
+
   test("verifies Azure credentials through the fake az boundary and keeps secret-shaped stderr out of the page @safety", async ({
     page,
     canvas
@@ -1596,6 +1680,11 @@ test.describe("Radius Canvas in Chromium", () => {
   }) => {
     await gotoCanvas(page, canvas, "credentials");
     await page.getByRole("button", { name: "New Credential Profile" }).click();
+    const awsOption = page
+      .getByLabel("Provider")
+      .locator('option[value="aws"]');
+    await expect(awsOption).toBeDisabled();
+    await expect(awsOption).toHaveText("AWS (coming soon)");
     await page.getByRole("button", { name: "Verify Credentials" }).click();
 
     await expect(page.locator("#cred-verify-status")).toContainText(
@@ -1609,6 +1698,53 @@ test.describe("Radius Canvas in Chromium", () => {
           request.path === "/api/verify-azure-login"
       )
     ).toBe(false);
+  });
+
+  test("keeps unsupported credential profiles out of environment creation @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.route("**/api/credential-profiles**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          profiles: [
+            {
+              name: "fixture-aws",
+              provider: "aws",
+              status: "verified"
+            },
+            {
+              name: "fixture-future",
+              provider: "future-cloud",
+              status: "verified"
+            }
+          ]
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "credentials");
+    for (const name of ["fixture-aws", "fixture-future"]) {
+      const row = page.getByRole("row").filter({ hasText: name });
+      await expect(row).toBeVisible();
+      await expect(
+        row.getByRole("button", { name: "Create Env" })
+      ).toBeDisabled();
+      await expect(row.locator(".js-cred-createenv")).toHaveCount(0);
+    }
+
+    await gotoCanvas(page, canvas, "environment");
+    await page.getByRole("button", { name: "New Environment" }).click();
+    const profileButton = page.locator("#env-profile-button");
+    await profileButton.click();
+    await expect(profileButton).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("#env-profile-options")).toBeEmpty();
+    await expect(page.locator("#env-profile-empty")).toHaveText(
+      "No supported credential profiles yet."
+    );
+    await expect(page.locator("#env-step1-next")).toBeDisabled();
   });
 
   test("keeps server-owned setup durable across navigation and downloads redacted diagnostics by keyboard @safety", async ({

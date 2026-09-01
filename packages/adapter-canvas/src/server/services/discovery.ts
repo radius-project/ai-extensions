@@ -1,3 +1,8 @@
+import {
+  remediationView,
+  type RemediationView
+} from "@radius-project/core/remediations";
+
 export interface DiscoveryItem {
   id: string;
   name: string;
@@ -11,10 +16,12 @@ export interface DiscoveryResult {
   vpcs: DiscoveryItem[];
   subnets: DiscoveryItem[];
   errors?: Record<string, string>;
+  remediation?: RemediationView;
 }
 
 export interface DiscoveryRequest {
   subscriptionId?: string;
+  tenantId?: string;
   provider?: string;
   resourceGroup?: string;
   cluster?: string;
@@ -67,6 +74,52 @@ function optionalString(value: unknown): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+// Markers that on their own prove the Azure CLI session must be re-established
+// interactively. AADSTS530003 is deliberately absent: it means Conditional
+// Access blocked token issuance, which a device-code login may not resolve, so
+// its raw diagnostic stays more useful than a login prompt.
+const AZURE_INTERACTION_MARKER =
+  /\bAADSTS(?:50058|50072|50074|50076|50078|50079|50173|70043|700082)\b|\bStatus_InteractionRequired\b|\binteraction_required\b|Please run ['"]?az login['"]?|\bRefresh Token has expired\b/i;
+// `invalid_grant` is a generic OAuth category that also appears in failures a
+// login cannot fix, and can occur inside resource names, so it only classifies
+// alongside an explicit re-authentication signal.
+const AZURE_INVALID_GRANT = /\binvalid_grant\b/i;
+const AZURE_REAUTH_CONTEXT =
+  /re-?authenticat|\binteraction\b|multi-?factor|\bMFA\b|\bexpired\b|\brevoked\b|az login/i;
+const AZURE_LOGIN_REQUIRED_MESSAGE =
+  "Azure CLI sign-in is required to discover resources.";
+
+// Returns the marker that classified the failure so the concise message can
+// still name the underlying Azure code, or null when the raw detail is kept.
+function azureInteractionMarker(detail: string): string | null {
+  const match = AZURE_INTERACTION_MARKER.exec(detail);
+  if (match) return match[0];
+  if (AZURE_INVALID_GRANT.test(detail) && AZURE_REAUTH_CONTEXT.test(detail))
+    return "invalid_grant";
+  return null;
+}
+
+function recordAzureDiscoveryError(
+  result: DiscoveryResult,
+  facet: string,
+  error: unknown,
+  tenantId: unknown,
+  prefix: string = ""
+): void {
+  const detail = `${prefix}${errorMessage(error)}`;
+  result.errors = result.errors || {};
+  const marker = azureInteractionMarker(detail);
+  if (!marker) {
+    result.errors[facet] = detail.slice(0, 800);
+    return;
+  }
+  result.errors[facet] = `${AZURE_LOGIN_REQUIRED_MESSAGE} (${marker})`;
+  result.remediation = remediationView("azure-cli-login", {
+    tenantId,
+    nextStep: "refresh-discovery"
+  });
 }
 
 function discoveryItems(value: unknown): DiscoveryItem[] {
@@ -169,8 +222,7 @@ export async function discoverResources(
       result.clusters = discoveryItems(JSON.parse(aksJson));
     } catch (e) {
       result.clusters = [];
-      result.errors = result.errors || {};
-      result.errors.clusters = errorMessage(e).slice(0, 800);
+      recordAzureDiscoveryError(result, "clusters", e, data.tenantId);
     }
     try {
       const rgJson = await dependencies.runCli(
@@ -189,8 +241,7 @@ export async function discoverResources(
       result.resourceGroups = discoveryItems(JSON.parse(rgJson));
     } catch (e) {
       result.resourceGroups = [];
-      result.errors = result.errors || {};
-      result.errors.resourceGroups = errorMessage(e).slice(0, 800);
+      recordAzureDiscoveryError(result, "resourceGroups", e, data.tenantId);
     }
     if (resourceGroup && cluster) {
       const kubeconfig = dependencies.createTemporaryKubeconfig();
@@ -231,10 +282,12 @@ export async function discoverResources(
         result.namespaces = nsJson.replace(/"/g, "").split(" ").filter(Boolean);
       } catch (e) {
         result.namespaces = [];
-        result.errors = result.errors || {};
-        result.errors.namespaces = `${failedStep}: ${errorMessage(e)}`.slice(
-          0,
-          800
+        recordAzureDiscoveryError(
+          result,
+          "namespaces",
+          e,
+          data.tenantId,
+          `${failedStep}: `
         );
       } finally {
         kubeconfig.remove();

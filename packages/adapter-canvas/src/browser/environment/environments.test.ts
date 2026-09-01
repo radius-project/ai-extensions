@@ -6,12 +6,14 @@ import {
   ENVIRONMENT_POLL_MS,
   environmentRowsMarkup,
   environmentStatusMarkup,
+  findNamespaceConflict,
   initializeEnvironmentPane,
   isEnvironmentPaneController,
   parseEnvironmentRecords,
   providerLabel,
   safeEnvironmentEditUrl
 } from "./environments.js";
+import type { EnvironmentRecord } from "./environments.js";
 import {
   createDeferred,
   createFakeBrowser,
@@ -196,6 +198,59 @@ describe("environment records and markup", () => {
     expect(environmentStatusMarkup(status)).toBe(label);
   });
 
+  // The identity the conflict check compares on. If these are dropped in
+  // parsing, every listed environment looks accountless, the check can no
+  // longer tell two same-named clusters apart, and it refuses environments the
+  // server would admit.
+  it("parses the cluster identity each provider records", () => {
+    expect(
+      parseEnvironmentRecords({
+        environments: [
+          {
+            name: "azure-env",
+            provider: "azure",
+            config: {
+              cluster: "aks-1",
+              namespace: "payments",
+              subscriptionId: "sub-1"
+            }
+          },
+          {
+            name: "aws-env",
+            provider: "aws",
+            config: {
+              cluster: "eks-1",
+              namespace: "orders",
+              accountId: "111122223333",
+              region: "us-east-1"
+            }
+          }
+        ]
+      }).map((environment) => environment.config)
+    ).toEqual([
+      {
+        cluster: "aks-1",
+        namespace: "payments",
+        subscriptionId: "sub-1",
+        resourceGroup: "",
+        vpcId: "",
+        subnetIds: "",
+        accountId: "",
+        region: ""
+      },
+      {
+        cluster: "eks-1",
+        namespace: "orders",
+        accountId: "111122223333",
+        region: "us-east-1",
+        resourceGroup: "",
+        subscriptionId: "",
+        vpcId: "",
+        subnetIds: ""
+      }
+    ]);
+  });
+
   it("parses valid records and drops malformed or unnamed entries", () => {
     expect(
       parseEnvironmentRecords({
@@ -225,7 +280,10 @@ describe("environment records and markup", () => {
           cluster: "",
           namespace: "",
           vpcId: "",
-          subnetIds: ""
+          subnetIds: "",
+          subscriptionId: "",
+          accountId: "",
+          region: ""
         }
       }
     ]);
@@ -1454,5 +1512,223 @@ describe("environment pane teardown", () => {
     await flushPromises();
     expect(page.elements.tableBody.innerHTML).not.toContain("late");
     expect(rows.deploy.listenerCount()).toBe(0);
+  });
+});
+
+describe("namespace conflict detection", () => {
+  const baseConfig = { cluster: "aks-1", namespace: "payments" };
+  const listed = (
+    overrides: Partial<EnvironmentRecord> = {}
+  ): EnvironmentRecord => ({
+    name: "dev",
+    status: "verified",
+    provider: "azure",
+    credentialProfile: "azure-prod",
+    webUrl: "",
+    config: { cluster: "aks-1", namespace: "payments" },
+    ...overrides
+  });
+  const claim = {
+    provider: "azure",
+    cluster: "aks-1",
+    namespace: "payments"
+  };
+
+  it("reports the environment already bound to the cluster namespace", () => {
+    expect(findNamespaceConflict([listed()], claim)?.name).toBe("dev");
+  });
+
+  it("compares cluster and namespace ignoring case and padding", () => {
+    expect(
+      findNamespaceConflict([listed()], {
+        provider: "azure",
+        cluster: "  AKS-1 ",
+        namespace: "Payments "
+      })?.name
+    ).toBe("dev");
+  });
+
+  it.each([
+    ["a different cluster", { ...claim, cluster: "aks-2" }],
+    ["a different namespace", { ...claim, namespace: "orders" }]
+  ])("allows %s", (_label, distinctClaim) => {
+    expect(findNamespaceConflict([listed()], distinctClaim)).toBeNull();
+  });
+
+  it("does not report the environment being edited against itself", () => {
+    expect(
+      findNamespaceConflict([listed()], {
+        ...claim,
+        excludeEnvironment: "DEV"
+      })
+    ).toBeNull();
+  });
+
+  it("still reports another environment while editing", () => {
+    expect(
+      findNamespaceConflict([listed(), listed({ name: "staging" })], {
+        ...claim,
+        excludeEnvironment: "dev"
+      })?.name
+    ).toBe("staging");
+  });
+
+  it("ignores an environment on another provider's cluster", () => {
+    expect(
+      findNamespaceConflict([listed({ provider: "aws" })], claim)
+    ).toBeNull();
+  });
+
+  it("reports an environment whose provider was not recorded", () => {
+    expect(findNamespaceConflict([listed({ provider: "" })], claim)?.name).toBe(
+      "dev"
+    );
+  });
+
+  // An environment whose cluster the listing could not report proves nothing,
+  // so it must not block a legitimate create. An unreported namespace is a
+  // different case, covered below: it means the environment holds "default".
+  it.each([
+    ["no configuration", undefined],
+    ["no cluster", { namespace: "payments" }],
+    ["an unreported namespace on another cluster", { cluster: "aks-2" }],
+    ["empty values", { cluster: "", namespace: "" }]
+  ])("skips an environment with %s", (_label, config) => {
+    expect(findNamespaceConflict([listed({ config })], claim)).toBeNull();
+  });
+
+  // The listing omits a variable whose value is empty, so an environment
+  // holding the default namespace comes back reporting none. Comparing the raw
+  // strings would miss the collision and let the user submit into a server
+  // refusal instead of being told here. The admission rung maps the same way.
+  it.each([
+    ["the environment reports no namespace", { cluster: "aks-1" }, "default"],
+    [
+      "the request leaves the namespace unset",
+      { cluster: "aks-1", namespace: "default" },
+      ""
+    ],
+    ["neither side records one", { cluster: "aks-1" }, ""]
+  ])(
+    "reports a default-namespace collision when %s",
+    (_label, config, requested) => {
+      expect(
+        findNamespaceConflict([listed({ config })], {
+          ...claim,
+          namespace: requested
+        })?.name
+      ).toBe("dev");
+    }
+  );
+
+  it("cannot claim a namespace without a cluster", () => {
+    expect(
+      findNamespaceConflict([listed()], { ...claim, cluster: " " })
+    ).toBeNull();
+  });
+
+  it("finds no conflict in an empty listing", () => {
+    expect(findNamespaceConflict([], claim)).toBeNull();
+  });
+
+  // A cluster name is not a cluster. Refusing here would block a legitimate
+  // environment the server's admission rung would admit, and the client must
+  // never be stricter than the authority.
+  it("allows the same cluster name in another Azure subscription", () => {
+    expect(
+      findNamespaceConflict(
+        [listed({ config: { ...baseConfig, subscriptionId: "sub-1" } })],
+        { ...claim, subscriptionId: "sub-2" }
+      )
+    ).toBeNull();
+  });
+
+  it("reports a duplicate within the same Azure subscription", () => {
+    expect(
+      findNamespaceConflict(
+        [listed({ config: { ...baseConfig, subscriptionId: "sub-1" } })],
+        { ...claim, subscriptionId: "sub-1" }
+      )?.name
+    ).toBe("dev");
+  });
+
+  it.each([
+    ["account", { accountId: "4444" }],
+    ["region", { region: "eu-west-1" }]
+  ])("allows the same EKS cluster name in another %s", (_label, difference) => {
+    const config = {
+      cluster: "eks-1",
+      namespace: "payments",
+      accountId: "1111",
+      region: "us-east-1"
+    };
+    expect(
+      findNamespaceConflict([listed({ provider: "aws", config })], {
+        provider: "aws",
+        cluster: "eks-1",
+        namespace: "payments",
+        accountId: "1111",
+        region: "us-east-1",
+        ...difference
+      })
+    ).toBeNull();
+  });
+
+  // An environment listed before the identity was reported cannot be proven
+  // distinct, so it still conflicts rather than being waved through.
+  it("still conflicts when the listed environment records no account", () => {
+    expect(
+      findNamespaceConflict([listed()], { ...claim, subscriptionId: "sub-9" })
+        ?.name
+    ).toBe("dev");
+  });
+});
+
+describe("environment pane namespace state", () => {
+  it("exposes the listed environments and the environment being edited", async () => {
+    const page = renderPage();
+    page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({
+        environments: [
+          {
+            name: "dev",
+            status: "verified",
+            provider: "azure",
+            config: { cluster: "aks-1", namespace: "payments" }
+          }
+        ]
+      })
+    );
+    expect(page.controller.listedEnvironments()).toEqual([]);
+
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+
+    expect(page.controller.listedEnvironments()).toEqual([
+      {
+        name: "dev",
+        status: "verified",
+        provider: "azure",
+        credentialProfile: "",
+        webUrl: "",
+        config: {
+          cluster: "aks-1",
+          namespace: "payments",
+          resourceGroup: "",
+          vpcId: "",
+          subnetIds: "",
+          subscriptionId: "",
+          accountId: "",
+          region: ""
+        }
+      }
+    ]);
+    expect(page.controller.editingEnvironment()).toBe("");
+
+    page.controller.showEnvironmentForm({ name: "dev", editing: "dev" });
+    expect(page.controller.editingEnvironment()).toBe("dev");
+
+    page.controller.showEnvironmentLanding();
+    expect(page.controller.editingEnvironment()).toBe("");
   });
 });
