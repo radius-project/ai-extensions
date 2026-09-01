@@ -238,9 +238,10 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         label: "reclaim product-created artifacts",
         run: async () => {
           if (!productOperationStarted) return;
-          // Stage two deletes the GitHub Environment, so on a complete run this
-          // reclaims only the Entra identity artifacts that the product still
-          // leaks. If stage two failed, it also reclaims the Environment.
+          // The final stage deletes the GitHub Environment and its per-environment
+          // credentials. Reclamation then removes the intentionally retained shared
+          // app registration and role assignment; after an interrupted run it also
+          // removes any environment state the product did not reach.
           const reclaimed = await current.reclaimLeakedProductArtifacts();
           if (reclaimed.length > 0)
             console.info(
@@ -558,9 +559,10 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         })
         .toBe(true);
       const finished = await snapshot();
-      expect(finished.succeeded, describeDeployFailure(finished, [])).toBe(
-        true
-      );
+      expect(
+        finished.succeeded,
+        describeDeployFailure(finished, finished.logs)
+      ).toBe(true);
 
       const workloads = await cloud.assertApplicationWorkloadsPresent(
         deployedApplication,
