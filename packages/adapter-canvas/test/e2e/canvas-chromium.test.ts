@@ -1440,17 +1440,23 @@ test.describe("Radius Canvas in Chromium", () => {
     const cluster = page.getByLabel("Cluster", { exact: true });
     const namespace = page.locator("#azure-namespace-select");
     await expect(resourceGroup).toContainText(selected.resourceGroup);
+    await expect(
+      resourceGroup.locator('option[value="__custom__"]')
+    ).toHaveCount(0);
     await resourceGroup.selectOption(selected.resourceGroup);
     await expect(cluster.locator("option")).toHaveText([
       "Select AKS cluster…",
-      selected.name,
-      "+ Enter custom..."
+      selected.name
     ]);
+    await expect(cluster.locator('option[value="__custom__"]')).toHaveCount(0);
     await expect(cluster).toHaveValue(selected.id);
     await expect(namespace).toBeDisabled();
     await expect(namespace).toContainText("selected-team");
     await expect(namespace).toBeEnabled();
     await expect(namespace).toHaveValue("default");
+    await expect(namespace.locator('option[value="__custom__"]')).toHaveCount(
+      1
+    );
     await namespace.selectOption("selected-team");
 
     await expect
@@ -1672,6 +1678,21 @@ test.describe("Radius Canvas in Chromium", () => {
       });
       throw new Error("The controlled setup failed safely.");
     });
+    const selected = {
+      id: "fixture-cluster",
+      name: "Fixture Cluster",
+      resourceGroup: "fixture-resource-group"
+    };
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      ...azureDiscoveryCommands({
+        subscriptionId: PROFILE_SUBSCRIPTION_ID,
+        clusters: [selected],
+        selected,
+        namespaces: ["default"]
+      })
+    );
+    await canvas.setScenario(scenario);
 
     await gotoCanvas(page, canvas, "environment");
     await openEnvironmentWizard(page);
@@ -1684,18 +1705,14 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(githubReadiness).toContainText(
       "Ready to configure deployments"
     );
-    await page
-      .getByLabel("Resource Group", { exact: true })
-      .selectOption("__custom__");
-    await page
-      .getByLabel("Resource Group (custom)")
-      .fill("fixture-resource-group");
-    await page
-      .getByLabel("Cluster", { exact: true })
-      .selectOption("__custom__");
-    await page
-      .getByLabel("Cluster (custom)", { exact: true })
-      .fill("fixture-cluster");
+    const resourceGroup = page.getByLabel("Resource Group", { exact: true });
+    const cluster = page.getByLabel("Cluster", { exact: true });
+    await expect(
+      resourceGroup.locator('option[value="__custom__"]')
+    ).toHaveCount(0);
+    await resourceGroup.selectOption(selected.resourceGroup);
+    await expect(cluster).toHaveValue(selected.id);
+    await expect(cluster.locator('option[value="__custom__"]')).toHaveCount(0);
 
     const operationResponse = page.waitForResponse(
       (response) =>

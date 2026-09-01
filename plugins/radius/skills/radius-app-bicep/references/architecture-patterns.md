@@ -14,7 +14,7 @@ Request/response web applications (monolith or MVC).
 
 - **Signals**: HTTP framework (Express, Django, Rails, Flask, Spring MVC, ASP.NET); server-rendered or REST; usually one primary database.
 - **Typical components**: container + a relational or document database + optional cache.
-- **Radius types**: `Radius.Compute/containers` (+ `Radius.Compute/containerImages` for a complete source build) + `Radius.Data/*` + `Radius.Compute/routes` when external-client ingress is required. Credentials follow the data type's schema; a developer-supplied `@secure()` credential goes directly to container `env.value`, while `Radius.Security/secrets` is reserved for schema-required `secretName` inputs or genuine app secrets/config files.
+- **Radius types**: `Radius.Compute/containers` (+ `Radius.Compute/containerImages` for a complete source build) + `Radius.Data/*` + `Radius.Compute/routes` when external-client ingress is required. Credentials follow the data type's schema; preserve existing explicit secure input wiring unless migration is requested. A developer-owned credential consumed through a Secret connection uses an authored or reused `Radius.Security/secrets` connected through `<secret>.id`, while Recipe-generated credentials come from a connection to `<producer>.id`.
 
 ### Microservices
 
