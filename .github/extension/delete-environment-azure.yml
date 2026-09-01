@@ -38,6 +38,10 @@ permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: radius-routes-gateway-${{ github.repository }}
+  cancel-in-progress: false
+
 env:
   ENVIRONMENT: ${{ inputs.environment }}
 
