@@ -98,7 +98,7 @@ import {
   GITHUB_API_VERSION
 } from "./azure-oidc.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
-import { bootstrapGHCRStatePackage } from "./ghcr.js";
+import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
 import {
   classifyProvider,
@@ -380,6 +380,7 @@ import {
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { runEnvironmentDeletion } from "./server/services/environment-deletion.js";
+import { createStatePackageDeletion } from "./server/services/state-package-deletion.js";
 import {
   recordCredentialProvenance,
   listCredentialProvenanceForClient,
@@ -5755,6 +5756,12 @@ function createInstanceRequestCoordinator(
     const op = operations.get(operationId);
     if (!op) return;
     if (op.kind === "delete") {
+      const deleteStatePackage = createStatePackageDeletion({
+        stateRegistryForEnvironment,
+        getCredentials: getGhPackageCredentials,
+        deletePackage: deleteGHCRStatePackage,
+        ghCommandPresentation: GH_COMMAND_PRESENTATION
+      });
       await runEnvironmentDeletion(op, {
         deleteRadiusEnvironment: (input, onHeartbeat) =>
           deleteRadiusEnvironmentViaWorkflow(
@@ -5801,6 +5808,7 @@ function createInstanceRequestCoordinator(
         },
         deleteGitHubEnvironment: (input) =>
           deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
+        deleteStatePackage,
         withCredentialProvenanceLock,
         readCredentialProvenance: (clientId) =>
           listCredentialProvenanceForClient(clientId),
