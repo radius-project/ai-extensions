@@ -41,6 +41,7 @@ import {
 import {
   radiusApplicationSelector,
   readKubernetesWorkloads,
+  readKubernetesResourceNames,
   type KubernetesWorkload
 } from "./deploy-journey.js";
 
@@ -384,6 +385,35 @@ export async function createCloudFixture(
       );
     }
     return readKubernetesWorkloads(parseJsonObject(result, context));
+  };
+
+  const listApplicationResources = async (
+    application: string,
+    namespace: string
+  ): Promise<readonly string[] | "no-namespace"> => {
+    const kubeconfig = await clusterKubeconfig();
+    const context = `kubectl get deployments,pods -n ${namespace}`;
+    const result = await commands.runKubectl([
+      "--kubeconfig",
+      kubeconfig,
+      "get",
+      "deployments,pods",
+      "--namespace",
+      namespace,
+      "--selector",
+      radiusApplicationSelector(application),
+      "--output",
+      "json"
+    ]);
+    if (result.code !== 0) {
+      if (isMissingNamespace(result)) return "no-namespace";
+      throw new Error(
+        `${context} failed with exit code ${result.code}: ${(
+          result.stderr || result.stdout
+        ).trim()}`
+      );
+    }
+    return readKubernetesResourceNames(parseJsonObject(result, context));
   };
 
   /**
@@ -733,22 +763,25 @@ export async function createCloudFixture(
     },
 
     async assertApplicationWorkloadsAbsent(application, namespace) {
-      let lastSeen: readonly KubernetesWorkload[] = [];
+      let lastSeen: readonly string[] = [];
       await pollForValue({
         ports,
         timeoutMs: assertionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
         probe: async () => {
-          const workloads = await listWorkloads(application, namespace);
-          if (workloads === "no-namespace") return true;
-          lastSeen = workloads;
-          return workloads.length === 0 ? true : undefined;
+          const resources = await listApplicationResources(
+            application,
+            namespace
+          );
+          if (resources === "no-namespace") return true;
+          lastSeen = resources;
+          return resources.length === 0 ? true : undefined;
         },
         timeoutMessage: () =>
           `Timed out after ${assertionTimeoutMs}ms waiting for the delete to remove application ` +
           `"${application}" from namespace "${namespace}" on cluster ${clusterName}; ` +
-          `${lastSeen.length} workload(s) remain: ${lastSeen
-            .map((workload) => `"${workload.name}"`)
+          `${lastSeen.length} workload resource(s) remain: ${lastSeen
+            .map((resource) => `"${resource}"`)
             .join(", ")}.`
       });
     },

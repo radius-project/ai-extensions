@@ -19,6 +19,7 @@ import {
   readApplicationNames,
   readDeploymentRows,
   readDeployStatusSnapshot,
+  readKubernetesResourceNames,
   readKubernetesWorkloads,
   REQUIRED_DELETE_WORKFLOWS,
   REQUIRED_DEPLOY_WORKFLOWS,
@@ -48,6 +49,9 @@ function survivingInput(
   return {
     environmentName: "radtest-env",
     environmentExists: true,
+    expectedVariables: new Map(
+      REQUIRED_ENVIRONMENT_VARIABLES.map((name) => [name, `${name}-value`])
+    ),
     variables: new Map(
       REQUIRED_ENVIRONMENT_VARIABLES.map((name) => [name, `${name}-value`])
     ),
@@ -684,9 +688,7 @@ describe("findSurvivingArtifactProblems", () => {
   });
 
   it("reports a removed environment variable", () => {
-    const variables = new Map(
-      REQUIRED_ENVIRONMENT_VARIABLES.map((name) => [name, "value"])
-    );
+    const variables = new Map(survivingInput().variables);
     variables.delete("RADIUS_STATE_ARCHIVE");
     const problems = findSurvivingArtifactProblems(
       survivingInput({ variables })
@@ -697,15 +699,35 @@ describe("findSurvivingArtifactProblems", () => {
   });
 
   it("reports a variable that survived but was emptied", () => {
-    const variables = new Map(
-      REQUIRED_ENVIRONMENT_VARIABLES.map((name) => [name, "value"])
-    );
+    const variables = new Map(survivingInput().variables);
     variables.set("AZURE_CLIENT_ID", "   ");
     const problems = findSurvivingArtifactProblems(
       survivingInput({ variables })
     );
     expect(problems).toEqual([
-      "Environment variable AZURE_CLIENT_ID survived but is now empty; the environment can no longer deploy."
+      "Environment variable AZURE_CLIENT_ID changed across the delete; the surviving environment no longer matches " +
+        "the configuration stage one proved."
+    ]);
+  });
+
+  it("reports a variable whose non-empty value changed", () => {
+    const variables = new Map(survivingInput().variables);
+    variables.set("AZURE_AKS_CLUSTER_NAME", "different-cluster");
+    expect(
+      findSurvivingArtifactProblems(survivingInput({ variables }))
+    ).toEqual([
+      "Environment variable AZURE_AKS_CLUSTER_NAME changed across the delete; the surviving environment no longer " +
+        "matches the configuration stage one proved."
+    ]);
+  });
+
+  it("refuses to claim survival without a stage-one variable value", () => {
+    const expectedVariables = new Map(survivingInput().expectedVariables);
+    expectedVariables.delete("AZURE_LOCATION");
+    expect(
+      findSurvivingArtifactProblems(survivingInput({ expectedVariables }))
+    ).toEqual([
+      "Stage one did not record environment variable AZURE_LOCATION, so its survival cannot be proved."
     ]);
   });
 
@@ -716,6 +738,36 @@ describe("findSurvivingArtifactProblems", () => {
     expect(problems).toHaveLength(1);
     expect(problems[0]).toMatch(/no longer exists/);
     expect(problems[0]).toMatch(/must not touch the identity/);
+  });
+
+  describe("readKubernetesResourceNames", () => {
+    it("reads kind-qualified deployment and pod names", () => {
+      expect(
+        readKubernetesResourceNames({
+          items: [
+            { kind: "Deployment", metadata: { name: "frontend" } },
+            { kind: "Pod", metadata: { name: "frontend-abc" } }
+          ]
+        })
+      ).toEqual(["Deployment/frontend", "Pod/frontend-abc"]);
+    });
+
+    it("accepts a resource without a kind and trims its name", () => {
+      expect(
+        readKubernetesResourceNames({
+          items: [{ metadata: { name: " frontend " } }]
+        })
+      ).toEqual(["frontend"]);
+    });
+
+    it.each([
+      [[], "not a JSON object"],
+      [{}, 'no "items" array'],
+      [{ items: [null] }, "non-object entry at index 0"],
+      [{ items: [{ metadata: {} }] }, 'no usable "metadata.name"']
+    ])("rejects malformed resource listings", (payload, message) => {
+      expect(() => readKubernetesResourceNames(payload)).toThrow(message);
+    });
   });
 
   it("reports an Entra application replaced by a different one", () => {

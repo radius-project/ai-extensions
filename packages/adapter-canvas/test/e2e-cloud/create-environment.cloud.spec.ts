@@ -194,6 +194,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   let federatedSubjects: readonly string[] = [];
   let appRegistration: AppRegistrationRecord | undefined;
   let servicePrincipalId: string | undefined;
+  let createdVariables: ReadonlyMap<string, string> = new Map();
   let deployedApplication = "";
   let deployedNamespace = "";
 
@@ -414,6 +415,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
           "gh api the environment's variables"
         )
       );
+      createdVariables = variables;
       expect(
         findEnvironmentIdentityProblems({
           variables,
@@ -755,6 +757,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       const survivalProblems = findSurvivingArtifactProblems({
         environmentName: cloud.environmentName,
         environmentExists: true,
+        expectedVariables: createdVariables,
         variables,
         appIdBefore: appBefore.appId,
         appIdAfter: appAfter.appId,
