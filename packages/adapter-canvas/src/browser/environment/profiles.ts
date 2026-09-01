@@ -615,6 +615,9 @@ export function initializeCredentialProfilesPanel(
   };
 
   let profiles: CredentialProfile[] = [];
+  // Profiles the repository has but this build cannot offer. Tracked so the
+  // empty menu can say they were filtered out rather than claim none exist.
+  let unsupportedProfileCount = 0;
   let selectedProfile: CredentialProfile | null = null;
   let profilesToken = 0;
   let githubIdentity: GithubIdentity | null = null;
@@ -720,7 +723,13 @@ export function initializeCredentialProfilesPanel(
       });
       optionsEl.appendChild(optionButton);
     }
-    if (emptyEl) emptyEl.style.display = profiles.length > 0 ? "none" : "";
+    if (emptyEl) {
+      emptyEl.style.display = profiles.length > 0 ? "none" : "";
+      emptyEl.textContent =
+        unsupportedProfileCount > 0 ?
+          "No supported credential profiles yet."
+        : "No credential profiles yet.";
+    }
   };
 
   const loadProfiles = async (preselectName = ""): Promise<void> => {
@@ -731,13 +740,15 @@ export function initializeCredentialProfilesPanel(
       );
       const payload = await response.json();
       if (!scope.active || token !== profilesToken) return;
-      profiles = parseCredentialProfiles(payload).filter((profile) => {
+      const parsed = parseCredentialProfiles(payload);
+      profiles = parsed.filter((profile) => {
         const provider = profile.provider;
         return (
           (provider === "azure" || provider === "aws") &&
           deps.selectableProviders.includes(provider)
         );
       });
+      unsupportedProfileCount = parsed.length - profiles.length;
       renderProfileOptions();
       setProfileValue(
         preselectName === "" ? null : findProfile(profiles, preselectName)
@@ -745,6 +756,7 @@ export function initializeCredentialProfilesPanel(
     } catch {
       if (!scope.active || token !== profilesToken) return;
       profiles = [];
+      unsupportedProfileCount = 0;
       renderProfileOptions();
       setProfileValue(null);
     }

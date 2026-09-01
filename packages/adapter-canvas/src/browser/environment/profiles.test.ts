@@ -1082,6 +1082,45 @@ describe("loadProfiles", () => {
     expect(page.awsRefreshBtn.disabled).toBe(true);
   });
 
+  it("explains that existing profiles were filtered out when none are supported", async () => {
+    const page = renderProfilesPage();
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_ENDPOINT}?repo=${encodeURIComponent("octo/cat")}`,
+      () => profilesResponse([AWS_PROFILE])
+    );
+    const { deps } = makeDeps({ selectableProviders: ["azure"] });
+    const handle = initializeCredentialProfilesPanel(
+      page.browser.context,
+      deps
+    );
+
+    await handle?.loadProfiles();
+
+    expect(page.optionsEl.children).toHaveLength(0);
+    expect(page.emptyEl.style.display).toBe("");
+    expect(page.emptyEl.textContent).toBe(
+      "No supported credential profiles yet."
+    );
+  });
+
+  it("reports a genuinely empty repository without blaming provider support", async () => {
+    const page = renderProfilesPage();
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_ENDPOINT}?repo=${encodeURIComponent("octo/cat")}`,
+      () => profilesResponse([])
+    );
+    const { deps } = makeDeps({ selectableProviders: ["azure"] });
+    const handle = initializeCredentialProfilesPanel(
+      page.browser.context,
+      deps
+    );
+
+    await handle?.loadProfiles();
+
+    expect(page.emptyEl.style.display).toBe("");
+    expect(page.emptyEl.textContent).toBe("No credential profiles yet.");
+  });
+
   it("falls back to the placeholder when the preselected name is not found", async () => {
     const page = renderProfilesPage();
     page.browser.net.handle(
