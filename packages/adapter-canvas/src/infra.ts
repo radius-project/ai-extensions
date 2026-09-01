@@ -26,9 +26,6 @@ import {
 import { VERIFY_OPERATION_INPUT } from "./verification-run-identity.js";
 import type { DeployWorkflowOptions } from "@radius-project/core";
 import { parse as parseYaml } from "yaml";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
 import {
   fetchFileFromRepoResult,
   fetchFileFromRepo,
@@ -315,72 +312,6 @@ async function fetchRadiusTemplate(
   return content;
 }
 
-// Candidate directories to read a bundled static workflow template from, in
-// priority order. `import.meta.url` resolves to the compiled bundle
-// (plugins/radius/dist/extension.mjs or the installed copy) at runtime, whose
-// sibling `workflows/` directory is populated by build.mjs. When running from a
-// built bundle that sibling is the ONLY source of truth: the walk up to a
-// `.github/extension/` directory is deliberately skipped so a production install
-// can never read a `delete-environment.yml` that happens to sit in the user's
-// own repository checkout. In tests and source runs `import.meta.url` resolves
-// to this file under `src/`, so the walk locates the repository's own
-// `.github/extension/`.
-function bundledWorkflowDirs(): string[] {
-  const here = dirname(fileURLToPath(import.meta.url));
-  return computeBundledWorkflowDirs(here, existsSync(join(here, "workflows")));
-}
-
-// Pure, testable core of bundledWorkflowDirs: given the directory this module
-// runs from and whether its sibling `workflows/` directory exists, return the
-// candidate template directories in priority order.
-export function computeBundledWorkflowDirs(
-  here: string,
-  bundleWorkflowsPresent: boolean
-): string[] {
-  const dirs = [join(here, "workflows")];
-  // The presence of the sibling `workflows/` directory (populated by build.mjs
-  // beside the installed extension.mjs) is what tells us we are running from a
-  // built bundle — every install layout has it, but no path-segment name is
-  // reliable across them (`~/.copilot/extensions/radius/`,
-  // `~/.copilot/installed-plugins/.../radius-edge/`, and in-repo
-  // `plugins/radius/dist/` all differ). When it is present that sibling is the
-  // only source of truth, so skip the walk up to the in-repo `.github/extension/`
-  // templates. Source/test runs have no sibling `workflows/`, so they walk up.
-  if (!bundleWorkflowsPresent) {
-    let cursor = here;
-    for (let depth = 0; depth < 8; depth++) {
-      dirs.push(join(cursor, ".github", "extension"));
-      const parent = dirname(cursor);
-      if (parent === cursor) break;
-      cursor = parent;
-    }
-  }
-  return dirs;
-}
-
-/**
- * Read a static, ai-extensions-owned workflow template shipped inside the
- * plugin. Unlike fetchRadiusTemplate this never touches the network: the
- * environment-delete workflows (issue #303) are committed in this repo and
- * bundled beside the extension. A missing file is a hard error — there is no
- * fallback — so a packaging regression surfaces immediately.
- */
-export function readBundledWorkflowTemplate(fileName: string): string {
-  for (const dir of bundledWorkflowDirs()) {
-    const candidate = join(dir, fileName);
-    if (existsSync(candidate)) {
-      const body = readFileSync(candidate, "utf8");
-      if (!body || !body.trim()) {
-        throw new Error(`Bundled workflow template ${candidate} is empty.`);
-      }
-      return body;
-    }
-  }
-  throw new Error(
-    `Bundled workflow template "${fileName}" was not found beside the extension or in .github/extension.`
-  );
-}
-
 export async function generateVerifyWorkflow(
   env: string,
   provider: string,
@@ -565,26 +496,20 @@ export async function generateDeployWorkflow(
  * As with deploy, the AWS provider workflow is never committed and the
  * application dispatcher's `aws:` job is stripped.
  *
- * Two paths share this generator with different provenance:
- *
- *   - Application delete (`delete-application.yml` + the reusable
- *     `delete-azure.yml`) is fetched from radius-project/ai-extensions, which
- *     stays the single source of truth for that reviewed upstream workflow.
- *   - Environment delete (`delete-environment.yml` + its own reusable provider
- *     `delete-environment-azure.yml`) is authored as static YAML in this repo's
- *     `.github/extension/` and shipped inside the plugin (issue #303), so the
- *     ai-extensions-owned "no deployed applications" guard can be reviewed here.
- *     Those two files are read from the bundled plugin rather than fetched.
- *
- * The `{{RADIUS_REF}}` pinned into every provider workflow's composite actions
- * uses DELETE_RADIUS_REF regardless of where the template body came from.
+ * Application and environment delete templates are all fetched from
+ * radius-project/ai-extensions at DELETE_RADIUS_REF. This keeps one canonical
+ * source and prevents an installed plugin's local asset tree from being mixed
+ * with the source commit pinned into first-party composite-action references.
  */
 export async function generateDeleteWorkflow(
   env: string
 ): Promise<Record<string, string>> {
-  // Application-delete templates come from upstream; environment-delete
-  // templates are static local assets read from the bundled plugin.
-  const fetched = [DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE];
+  const fetched = [
+    DELETE_APP_DISPATCHER_FILE,
+    DELETE_AZURE_FILE,
+    DELETE_ENV_DISPATCHER_FILE,
+    DELETE_ENV_AZURE_FILE
+  ];
   const fetchedBodies = await Promise.all(
     fetched.map((f) => fetchRadiusTemplate(f, DELETE_RADIUS_REF))
   );
@@ -592,12 +517,6 @@ export async function generateDeleteWorkflow(
   fetched.forEach((f, i) => {
     templates[f] = fetchedBodies[i];
   });
-  templates[DELETE_ENV_DISPATCHER_FILE] = readBundledWorkflowTemplate(
-    DELETE_ENV_DISPATCHER_FILE
-  );
-  templates[DELETE_ENV_AZURE_FILE] = readBundledWorkflowTemplate(
-    DELETE_ENV_AZURE_FILE
-  );
   templates[DELETE_AWS_FILE] = templates[DELETE_AZURE_FILE];
   const generated = coreGenerateDeleteWorkflow(env, templates);
   delete generated[DELETE_AWS_FILE];
