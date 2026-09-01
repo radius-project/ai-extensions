@@ -2,19 +2,21 @@ import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
 import type {
   EnvironmentActiveDeployment,
+  EnvironmentRunStep,
   EnvironmentsDependencies,
   EnvironmentVerifyRun
 } from "./environments-types.js";
 import { classifyVerifyFailure } from "./verify-failure-classification.js";
 
 // The `environments` family, minus `POST /api/create-environment`, which is
-// large enough to live in its own `create-environment*.ts` seams. The four routes
-// here are the environment picker's read surface (`list-environments`,
-// `verify-status`), the deploy page's parameter probe (`app-params`), and the
-// one destructive route (`delete-environment`). They are migrated together
-// because they are the environment lifecycle the picker drives; nothing is
-// moved out of `server.ts`, every helper is injected, so this module spawns no
-// process, owns no cache, and reads no module-level mutable state.
+// large enough to live in its own `create-environment*.ts` seams. The five
+// routes here are the environment picker's read surface (`list-environments`,
+// `verify-status`), the deploy page's parameter probe (`app-params`), the
+// verify-failure override (`bypass-verification`), and the one destructive
+// route (`delete-environment`). They are migrated together because they are the
+// environment lifecycle the picker drives; nothing is moved out of `server.ts`,
+// every helper is injected, so this module spawns no process, owns no cache, and
+// reads no module-level mutable state.
 //
 // The dependency seam and supporting types live in `environments-types.ts`;
 // they are re-exported here so existing importers keep a single entry point.
@@ -30,7 +32,6 @@ export type {
   DeleteOperationRecord,
   DeleteStartResult
 } from "./environments-types.js";
-import type { EnvironmentRunStep } from "./environments-types.js";
 import { classifyProvider } from "../../provider-classification.js";
 
 const BROWSER_DIAGNOSTIC_MAX_LENGTH = 2000;
