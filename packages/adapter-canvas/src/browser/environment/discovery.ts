@@ -97,6 +97,14 @@ export interface EnvironmentInfrastructure {
   readonly namespace?: string;
   readonly vpcId?: string;
   readonly subnetIds?: string;
+  // The cloud account a cluster name is scoped to. A cluster name alone is not
+  // a cluster: the same name can exist in two Azure subscriptions or two AWS
+  // account/region pairs. Carried so the wizard's duplicate-namespace check
+  // compares the same identity the server's admission rung does, and cannot
+  // refuse an environment the server would admit.
+  readonly subscriptionId?: string;
+  readonly accountId?: string;
+  readonly region?: string;
 }
 
 export function abandonedOperationError(

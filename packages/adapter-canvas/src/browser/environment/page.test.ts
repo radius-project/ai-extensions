@@ -743,6 +743,79 @@ describe("initializeEnvironmentPage", () => {
     );
   });
 
+  // Radius binds one environment to one namespace, and nothing before the
+  // deploy workflow reports the duplicate, so the wizard has to refuse it while
+  // the namespace is still being chosen.
+  it("refuses a namespace another environment already holds on the cluster", async () => {
+    const page = fixture();
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [
+            {
+              name: "dev",
+              status: "verified",
+              provider: "azure",
+              config: { cluster: "aks-1", namespace: "default" }
+            }
+          ]
+        })
+    );
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "prod";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    pageInput(page, "azure-namespace-select").value = "default";
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+
+    expect(page.elements["deploy-status"].textContent).toBe(
+      'Namespace "default" on cluster "aks-1" already belongs to environment "dev". Radius allows one environment per namespace, so choose a different namespace or deploy to "dev".'
+    );
+    expect(
+      page.browser.net.calls.filter(
+        (call) => call.url === CREATE_ENVIRONMENT_OPERATION_PATH
+      )
+    ).toHaveLength(0);
+  });
+
+  it("creates when the namespace is only taken on another cluster", async () => {
+    const page = fixture();
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [
+            {
+              name: "dev",
+              status: "verified",
+              provider: "azure",
+              config: { cluster: "aks-2", namespace: "default" }
+            }
+          ]
+        })
+    );
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "prod";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    pageInput(page, "azure-namespace-select").value = "default";
+    page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, () =>
+      jsonResponse({ operationId: "op-1" }, true, 202)
+    );
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+
+    expect(
+      page.browser.net.calls.filter(
+        (call) => call.url === CREATE_ENVIRONMENT_OPERATION_PATH
+      )
+    ).toHaveLength(1);
+  });
+
   it.each([
     [
       "Azure",
@@ -809,6 +882,69 @@ describe("initializeEnvironmentPage", () => {
     }
   );
 
+  // A profile missing its identity makes the conflict check unable to tell two
+  // same-named clusters apart, so it reports a collision. That diagnosis is
+  // wrong and unactionable: changing the namespace will not fix a broken
+  // profile. The identity has to be validated first.
+  it("reports the broken profile, not a namespace collision, when identity is missing", async () => {
+    const brokenProfile = {
+      name: "azure-broken",
+      provider: "azure",
+      tenantId: "",
+      subscriptionId: ""
+    };
+    const page = fixture();
+    page.browser.nav.search = `?page=environment&new=1&profile=${brokenProfile.name}`;
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () => jsonResponse({ profiles: [brokenProfile] })
+    );
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      jsonResponse({
+        clusters: [{ id: "aks-1", name: "aks-1", resourceGroup: "cluster-rg" }],
+        resourceGroups: [{ id: "app-rg", name: "app-rg" }],
+        namespaces: ["default"]
+      })
+    );
+    // An environment on a same-named cluster in a subscription the broken
+    // profile cannot name.
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      () =>
+        jsonResponse({
+          environments: [
+            {
+              name: "dev",
+              status: "verified",
+              provider: "azure",
+              config: {
+                cluster: "aks-1",
+                namespace: "default",
+                subscriptionId: "sub-1"
+              }
+            }
+          ]
+        })
+    );
+    initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+    await flushPromises();
+    pageInput(page, "env-name-input").value = "prod";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    pageInput(page, "azure-namespace-select").value = "default";
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+
+    expect(page.elements["deploy-status"].textContent).toContain(
+      "The selected profile needs both a tenant ID and subscription ID."
+    );
+    expect(page.elements["deploy-status"].textContent).not.toContain(
+      "already belongs to environment"
+    );
+  });
+
   it("dispatches an Azure environment operation with preserved branch identity", async () => {
     const page = fixture();
     let createInit: HttpRequestInit | undefined;
@@ -871,6 +1007,112 @@ describe("initializeEnvironmentPage", () => {
       environment: "dev",
       namespace: "default"
     });
+  });
+
+  it("loads the environment listing when a deep link opens the form on the credentials subtab", async () => {
+    const page = fixture({
+      activeSubtab: "credentials",
+      search: "?page=credentials&new=1"
+    });
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      jsonResponse({ clusters: [], resourceGroups: [], namespaces: [] })
+    );
+
+    initializeEnvironmentPage(page.browser.context);
+    await flushPromises();
+
+    // Without the listing the namespace guard has nothing to compare against
+    // and would let a duplicate through.
+    expect(
+      page.browser.net.calls.some((call) =>
+        call.url.startsWith(ENVIRONMENT_LIST_PATH)
+      )
+    ).toBe(true);
+  });
+
+  // The reviewer's fail-open cases. In each one the wizard cannot prove the
+  // namespace is free, so it submits and the server's admission rung — which
+  // establishes the claims from GitHub and fails closed — is what refuses. The
+  // assertion is that the refusal reaches the user rather than being swallowed.
+  it.each([
+    [
+      "the listing failed with an error payload",
+      () =>
+        jsonResponse({
+          environments: [],
+          error: "gh: forbidden"
+        })
+    ],
+    [
+      "the listing is still in flight",
+      () => new Promise<HttpResponse>(() => {})
+    ],
+    [
+      "the listing is stale and does not name the holder",
+      () => jsonResponse({ environments: [] })
+    ]
+  ])("surfaces the server refusal when %s", async (_label, listingResponse) => {
+    const page = fixture();
+    page.browser.net.handle(
+      `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(page.repo)}`,
+      listingResponse
+    );
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "prod";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    pageInput(page, "azure-namespace-select").value = "default";
+    page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, () =>
+      jsonResponse(
+        {
+          error:
+            'Namespace "default" on cluster "aks-1" already belongs to environment "dev". Radius allows one environment per namespace, so choose a different namespace or deploy to "dev".',
+          code: "namespace-already-claimed"
+        },
+        false,
+        409
+      )
+    );
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+
+    // The client did not refuse — it could not — so the request went out and
+    // the server's verdict is what the user is shown.
+    expect(
+      page.browser.net.calls.filter(
+        (call) => call.url === CREATE_ENVIRONMENT_OPERATION_PATH
+      )
+    ).toHaveLength(1);
+    expect(page.elements["env-error-banner-text"].textContent).toContain(
+      "already belongs to environment"
+    );
+  });
+
+  it("surfaces the server refusal when the namespace claims cannot be established", async () => {
+    const page = fixture();
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "prod";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    page.browser.net.handle(CREATE_ENVIRONMENT_OPERATION_PATH, () =>
+      jsonResponse(
+        {
+          error:
+            "Radius created nothing because it could not confirm which namespaces octo/app's environments already use: gh: forbidden",
+          code: "namespace-claims-unavailable"
+        },
+        false,
+        409
+      )
+    );
+
+    page.elements["deploy-btn"].dispatch("click");
+    await flushPromises();
+
+    expect(page.elements["env-error-banner-text"].textContent).toContain(
+      "could not confirm which namespaces"
+    );
   });
 
   it("clears the create latch when the tracked operation becomes terminal", async () => {

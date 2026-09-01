@@ -390,13 +390,19 @@ const NAMESPACE_VARIABLES = [
 const AZURE_CONFIG_VARIABLES = {
   resourceGroup: ["AZURE_RESOURCE_GROUP"],
   cluster: ["AZURE_AKS_CLUSTER_NAME"],
-  namespace: NAMESPACE_VARIABLES
+  namespace: NAMESPACE_VARIABLES,
+  // The account the cluster name is scoped to. Reported so the wizard can tell
+  // two same-named clusters apart when it checks whether a namespace is already
+  // claimed, rather than refusing a legitimate environment on a name collision.
+  subscriptionId: ["AZURE_SUBSCRIPTION_ID"]
 } as const;
 const AWS_CONFIG_VARIABLES = {
   cluster: ["AWS_EKS_CLUSTER_NAME"],
   namespace: NAMESPACE_VARIABLES,
   vpcId: ["RADIUS_VPC_ID"],
-  subnetIds: ["RADIUS_SUBNET_IDS"]
+  subnetIds: ["RADIUS_SUBNET_IDS"],
+  accountId: ["AWS_ACCOUNT_ID"],
+  region: ["AWS_REGION"]
 } as const;
 
 // Overlays a synthetic "deleting" status onto the environment named by an
