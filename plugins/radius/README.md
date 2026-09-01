@@ -1,6 +1,6 @@
 # Radius Plugin
 
-Model, visualize, and deploy applications with [Radius](https://radapp.io) directly from the GitHub Copilot app. The plugin bundles six skills and Radius Canvas, which turn Copilot into a Radius application-modeling and deployment assistant.
+Model, visualize, and deploy applications with [Radius](https://radapp.io) directly from the GitHub Copilot app. The plugin bundles five skills and Radius Canvas, which turn Copilot into a Radius application-modeling and deployment assistant.
 
 Radius Canvas runs only in the [GitHub Copilot app](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-plugins), which is the only host that can display it, so the plugin is installed from the app.
 
@@ -13,10 +13,6 @@ install the `radius` plugin. See
 for details.
 
 Restart your Copilot session after installing so the skills and Radius Canvas become available.
-
-> **NOTE:** Due to a GitHub Copilot app bug, Radius Canvas may not appear after installing or updating the plugin, even though the skills load. If Radius Canvas is missing, run the bundled `radius-fix-canvas-installation` skill (ask Copilot to "fix Radius Canvas") and then reload extensions or restart the app. This is a temporary workaround that will be removed once the upstream bug is fixed.
-
-<!-- markdownlint-disable-next-line MD028 -->
 
 > **NOTE:** The canvas `extension.mjs` is a compiled build artifact that is not committed to `main`. CI rebuilds it on every merge, assembles the complete plugin into `plugins/radius/dist/`, and publishes that to a generated `releases/radius/edge` branch (also tagged `radius@edge`); the marketplace manifest pins the plugin `source` to that path and branch — so installing from the app delivers the skills and canvas without any manual build. The artifact also includes the complete Repo Radius workflow/action tree under `workflows/`, with remote template fetches and first-party action references pinned to the exact source commit that produced the plugin. See [`docs/design/2026-07-canvas-bundle-publishing.md`](../../docs/design/2026-07-canvas-bundle-publishing.md).
 
@@ -31,7 +27,6 @@ Restart your Copilot session after installing so the skills and Radius Canvas be
 | `radius-environment`             | Create and verify an AWS/Azure deploy environment and its OIDC trust.                                                                                                           |
 | `radius-deploy`                  | Deploy (or troubleshoot) an app via the generated GitHub Actions workflow.                                                                                                      |
 | `radius-delete`                  | Delete a deployed app via the generated GitHub Actions workflow, or delete a deploy environment and clean up its cloud state.                                                   |
-| `radius-fix-canvas-installation` | Repair a missing Radius Canvas after install/update by copying the canvas files into the app's probed `extensions/` folder (temporary workaround for a GitHub Copilot app bug). |
 
 ### Radius Canvas
 

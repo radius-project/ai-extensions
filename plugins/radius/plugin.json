@@ -1,4 +1,5 @@
 {
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "radius",
   "version": "0.0.0",
   "description": "Model, visualize, and deploy applications with Radius from the GitHub Copilot app and CLI.",
@@ -13,7 +14,5 @@
     "application-graph",
     "deploy",
     "canvas"
-  ],
-  "skills": "./skills/",
-  "extensions": "."
+  ]
 }
