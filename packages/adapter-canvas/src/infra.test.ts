@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
 
 interface RecordedCommit {
   path: string;
@@ -10,6 +11,7 @@ interface RecordedCommit {
 interface InfraMockState {
   committed: Record<string, Record<string, string>>;
   commits: RecordedCommit[];
+  fetches: Array<{ repo: string; path: string; ref: string }>;
   upstream: Record<string, string>;
   // When true, commitFileToRepo rejects (mirrors gh.ts, which throws on a failed
   // PUT — e.g. a protected branch) so tests can exercise the `failed` path.
@@ -50,11 +52,21 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
     h: {
       committed: {}, // branch -> { path -> committed body } (absent = file missing)
       commits: [], // recorded commitFileToRepo calls
+      fetches: [],
       failCommits: false, // when true, commitFileToRepo rejects
       upstream: { ...BASE_UPSTREAM }
     }
   };
 });
+
+for (const file of ["delete-environment.yml", "delete-environment-azure.yml"]) {
+  const body = readFileSync(
+    new URL(`../../../.github/extension/${file}`, import.meta.url),
+    "utf8"
+  );
+  BASE_UPSTREAM[file] = body;
+  h.upstream[file] = body;
+}
 
 let templateFetchTime = Date.now();
 
@@ -69,7 +81,8 @@ afterEach(() => {
 
 vi.mock("./gh.js", () => ({
   cliExec: () => {},
-  fetchFileFromRepoResult: async (_repo: string, path: string) => {
+  fetchFileFromRepoResult: async (repo: string, path: string, ref: string) => {
+    h.fetches.push({ repo, path, ref });
     const file = path.split("/").pop();
     const body = file ? h.upstream[file] : undefined;
     return body == null ?
@@ -103,7 +116,6 @@ const {
   generateDeployWorkflow,
   generateDeleteWorkflow,
   configureVerifyGhcrProbe,
-  computeBundledWorkflowDirs,
   configureVerifyOperationMarker
 } = await import("./infra.js");
 const { hasVerificationOperationMarker } =
@@ -436,6 +448,11 @@ ${BASE_UPSTREAM["verify-azure.yml"]}
 });
 
 describe("generateDeleteWorkflow", () => {
+  beforeEach(() => {
+    h.upstream = { ...BASE_UPSTREAM };
+    expireTemplateCache();
+  });
+
   it("emits both dispatchers plus the app and environment Azure providers, never AWS", async () => {
     const files = await generateDeleteWorkflow("dev");
     expect(Object.keys(files).sort()).toEqual([
@@ -458,13 +475,52 @@ describe("generateDeleteWorkflow", () => {
     expect(files["delete-environment.yml"]).not.toContain("delete-aws.yml");
   });
 
-  it("keeps the guard step in the static environment provider", async () => {
+  it("keeps the guard step in the environment provider", async () => {
     const files = await generateDeleteWorkflow("dev");
     expect(files["delete-environment-azure.yml"]).toContain(
       "Guard - environment has no deployed applications"
     );
     expect(files["delete-environment-azure.yml"]).not.toContain(
       "{{RADIUS_REF}}"
+    );
+  });
+
+  it("fetches every workflow template from ai-extensions at its pinned ref", async () => {
+    h.fetches = [];
+    expireTemplateCache();
+
+    await generateVerifyWorkflow("dev", "azure", "verify-source-ref");
+    await generateVerifyWorkflow("dev", "aws", "verify-source-ref");
+    await generateDeployWorkflow("dev", ".radius/app.bicep");
+    await generateDeleteWorkflow("dev");
+
+    expect(h.fetches).toEqual([
+      ...["verify-azure.yml", "verify-aws.yml"].map((file) => ({
+        repo: "radius-project/ai-extensions",
+        path: `.github/extension/${file}`,
+        ref: "verify-source-ref"
+      })),
+      ...[
+        "run-rad-commands.yml",
+        "run-rad-commands-azure.yml",
+        "delete-application.yml",
+        "delete-azure.yml",
+        "delete-environment.yml",
+        "delete-environment-azure.yml"
+      ].map((file) => ({
+        repo: "radius-project/ai-extensions",
+        path: `.github/extension/${file}`,
+        ref: "main"
+      }))
+    ]);
+  });
+
+  it("fails when an environment-delete template cannot be fetched from ai-extensions", async () => {
+    expireTemplateCache();
+    delete h.upstream["delete-environment-azure.yml"];
+
+    await expect(generateDeleteWorkflow("dev")).rejects.toThrow(
+      'Failed to fetch workflow template radius-project/ai-extensions/.github/extension/delete-environment-azure.yml at "main": no template delete-environment-azure.yml'
     );
   });
 
@@ -546,38 +602,6 @@ describe("generateDeleteWorkflow", () => {
     ];
     expect(provider).toContain("app_names<<${delimiter}");
     expect(provider).not.toContain('echo "app_names=${app_names}"');
-  });
-});
-
-describe("computeBundledWorkflowDirs", () => {
-  it("walks up to .github/extension when running from source (no sibling workflows dir)", () => {
-    const dirs = computeBundledWorkflowDirs(
-      "/repo/packages/adapter-canvas/src",
-      false
-    );
-    expect(dirs[0]).toBe("/repo/packages/adapter-canvas/src/workflows");
-    expect(dirs.some((d) => d.endsWith("/.github/extension"))).toBe(true);
-  });
-
-  it("uses only the sibling workflows dir when running from a built bundle", () => {
-    const dirs = computeBundledWorkflowDirs(
-      "/install/plugins/radius/dist",
-      true
-    );
-    expect(dirs).toEqual(["/install/plugins/radius/dist/workflows"]);
-    expect(dirs.some((d) => d.includes(".github"))).toBe(false);
-  });
-
-  it("skips the walk for installed layouts with no dist segment", () => {
-    // Real installs have no `dist` path segment (e.g.
-    // ~/.copilot/extensions/radius/ or .../radius-edge/), so keying off the
-    // sibling workflows dir is what makes the guard hold for them.
-    const dirs = computeBundledWorkflowDirs(
-      "/Users/me/.copilot/extensions/radius",
-      true
-    );
-    expect(dirs).toEqual(["/Users/me/.copilot/extensions/radius/workflows"]);
-    expect(dirs.some((d) => d.includes(".github"))).toBe(false);
   });
 });
 
