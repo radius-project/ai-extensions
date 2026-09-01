@@ -100,6 +100,7 @@ async function successfulSetup(
   caller: FakeCallerIdentity = { type: "user" }
 ) {
   const unmatchedCalls: string[] = [];
+  const azCalls: string[] = [];
   const ownerObjectId =
     caller.type === "servicePrincipal" ? SP_OBJECT_ID : OBJECT_ID;
   let credentialContents = "";
@@ -120,6 +121,7 @@ async function successfulSetup(
     args: string[]
   ): Promise<AzureAutoSetupCommandResult> => {
     const line = args.join(" ");
+    azCalls.push(line);
     if (line.startsWith("account set "))
       return { code: 0, stdout: "", stderr: "" };
     if (line === "account show --output json") {
@@ -178,9 +180,6 @@ async function successfulSetup(
       // tags. A plainly reused app carries none, so it classifies as
       // pre-existing and the success contract is unchanged.
       return { code: 0, stdout: "[]", stderr: "" };
-    }
-    if (line.startsWith(`ad app show --id ${APP_ID} --query id`)) {
-      return { code: 0, stdout: "app-object", stderr: "" };
     }
     if (line.includes("federated-credential list")) {
       return { code: 0, stdout: "[]", stderr: "" };
@@ -263,7 +262,7 @@ async function successfulSetup(
     sleep: async () => {}
   });
   start(dependencies, unmatchedCalls);
-  return { operation, running: await entry(), unmatchedCalls };
+  return { operation, running: await entry(), unmatchedCalls, azCalls };
 }
 
 describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () => {
@@ -361,7 +360,7 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
   });
 
   it("preserves the reused-client-id success contract", async () => {
-    const { running, unmatchedCalls } = await successfulSetup(false);
+    const { running, unmatchedCalls, azCalls } = await successfulSetup(false);
     const response = await fetch(`${running.baseUrl}/api/azure-auto-setup`, {
       method: "POST",
       headers: {
@@ -383,6 +382,11 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
       subscriptionId: SUBSCRIPTION
     });
     expect(payload.steps.join("\n")).not.toContain(ENTRA_APP_RETENTION_NOTICE);
+    expect(
+      azCalls.filter(
+        (line) => line === `ad app show --id ${APP_ID} --query id -o tsv`
+      )
+    ).toHaveLength(2);
     expect(unmatchedCalls).toEqual([]);
   });
 
