@@ -50,13 +50,16 @@ afterEach(async () => {
 });
 
 /** The listing calls the route makes for a single managed `dev` environment. */
-function listingScript(environments: string): CliScript {
+function listingScript(
+  environments: string,
+  variables = "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc"
+): CliScript {
   return {
     ["/repos/octo/app/actions/workflows/radius-verify-credentials.yml/runs?per_page=100"]:
       { stdout: "42\tcompleted\tsuccess" },
     ["/repos/octo/app/environments?per_page=100"]: { stdout: environments },
     ["/repos/octo/app/environments/dev/variables?per_page=100"]: {
-      stdout: "RADIUS_MANAGED\ttrue\nAZURE_CLIENT_ID\tabc"
+      stdout: variables
     },
     ["/repos/octo/app/deployments?environment=dev&per_page=10"]: {
       stdout: "100"
@@ -65,6 +68,13 @@ function listingScript(environments: string): CliScript {
       stdout: "https://github.com/octo/app/actions/runs/42"
     }
   };
+}
+
+function configs(body: unknown): Array<Record<string, string> | undefined> {
+  const environments = (
+    body as { environments?: Array<{ config?: Record<string, string> }> }
+  ).environments;
+  return (environments ?? []).map((environment) => environment.config);
 }
 
 interface ListResult {
@@ -350,6 +360,60 @@ describe("environment listing diagnostics", () => {
       error: `${"x".repeat(2000)}...`
     });
     expect(failed.rawBody).not.toContain("x".repeat(2001));
+  });
+});
+
+describe("environment listing configuration over HTTP", () => {
+  // The namespace reaches the Edit form as serialized `config.namespace` on
+  // this route's response, so the contract is asserted through the real
+  // loopback server rather than only at the handler.
+  const CLUSTER = "AZURE_AKS_CLUSTER_NAME\tprod-aks";
+
+  it("serializes the namespace from the variable deployments read", async () => {
+    const harness = await start(
+      listingScript(
+        "7\tdev",
+        `RADIUS_MANAGED\ttrue\n${CLUSTER}\nKUBERNETES_NAMESPACE\tpayments`
+      )
+    );
+
+    const result = await harness.list();
+
+    expect(result.status).toBe(200);
+    expect(configs(result.body)).toEqual([
+      { cluster: "prod-aks", namespace: "payments" }
+    ]);
+  });
+
+  it("serializes the namespace an environment predating the rename still carries", async () => {
+    const harness = await start(
+      listingScript(
+        "7\tdev",
+        `RADIUS_MANAGED\ttrue\n${CLUSTER}\nRADIUS_NAMESPACE\tlegacy-ns`
+      )
+    );
+
+    const result = await harness.list();
+
+    expect(configs(result.body)).toEqual([
+      { cluster: "prod-aks", namespace: "legacy-ns" }
+    ]);
+  });
+
+  // An existing but empty current variable is what the workflow resolves to
+  // "default" itself, so the response must not carry a superseded legacy value
+  // that Edit would show and save back.
+  it("serializes no namespace when the current variable exists but is empty", async () => {
+    const harness = await start(
+      listingScript(
+        "7\tdev",
+        `RADIUS_MANAGED\ttrue\n${CLUSTER}\nKUBERNETES_NAMESPACE\t\nRADIUS_NAMESPACE\tstale-ns`
+      )
+    );
+
+    const result = await harness.list();
+
+    expect(configs(result.body)).toEqual([{ cluster: "prod-aks" }]);
   });
 });
 

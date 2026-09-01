@@ -38,16 +38,16 @@ graph TD
 - **`packages/adapter-canvas` (`@radius-project/adapter-canvas`)** — the canvas adapter whose entry `src/extension.ts` calls `joinSession` / `createCanvas({ id: "radius" })`. Depends on core and shared via `workspace:*`.
 - **`packages/adapter-canvas/build.mjs`** — the esbuild step that bundles the adapter plus its `workspace:*` dependencies into one file, then assembles `plugins/radius/dist/`.
 - **`plugins/radius/`** — the tracked plugin source: `plugin.json`, `package.json`, `README.md`, and `skills/`.
-- **`plugins/radius/dist/`** — the generated, installable plugin: the tracked source above plus the built `extension.mjs`. Git-ignored on `main`.
+- **`plugins/radius/dist/`** — the generated, installable plugin: the tracked source above, the built `extension.mjs`, and a complete `workflows/` copy of `.github/extension/`. Git-ignored on `main`.
 - **`.github/plugin/marketplace.json`** — the marketplace manifest whose plugin `source` points installs at `plugins/radius/dist` on `radius@edge`.
 - **`.changeset/config.json`** — Changesets owns released versions. `privatePackages.version` includes private plugins; `privatePackages.tag` is disabled because the workflow creates one scoped source tag instead of running Changesets' all-package tag scan.
 - **`scripts/plugins.mjs`** — the plugin registry: discovers every directory under `plugins/` that has a `package.json` and a `plugin.json`, and builds every published ref name from it. The single source of the `releases/<plugin>/<channel>` and `<plugin>@<channel>` convention; `--json` feeds the workflow matrices and `--env` hands the names to a job.
 - **`scripts/version.mjs`** — derives every other version string from `plugins/<name>/package.json`, the version Changesets owns; `--check` fails CI on drift across all plugins, `--set --channel edge` retargets and restamps one plugin's generated edge catalog entry, `--compare` ranks two versions by semver precedence, and `--release-notes` reads that plugin's current Changesets changelog entry.
 - **`scripts/release-version.mjs`** — invokes Changesets with an argv array for one selected plugin (ignoring the others), then synchronizes all derived manifests. Both stable and snapshot versioning use this boundary.
 - **`scripts/release-plan.mjs`** — classifies a merged release PR from git facts: a plugin is released only when its package version changed from the first parent and the matching changelog heading was added in the same diff.
-- **`scripts/validate-plugin-dist.mjs`** — validates the generic artifact contract before attestation or push: matching names and versions, README, license, manifest-declared paths, path confinement, and no symlinks.
+- **`scripts/validate-plugin-dist.mjs`** — validates the generic artifact contract before attestation or push: matching names and versions, the exact source commit, complete workflow assets, README, license, manifest-declared paths, path confinement, and no symlinks.
 - **`scripts/awesome-copilot.mjs`** — builds the four files a maintainer opens as a manual pull request against [`github/awesome-copilot`](https://github.com/github/awesome-copilot), with `source.ref` and `source.sha` both set to the full 40-character artifact-branch commit SHA. The SBOM has no equivalent script: [`pnpm sbom`](https://pnpm.io/cli/sbom) emits it directly.
-- **`.github/workflows/build.yml`** — the reusable build: shared checks run once and upload a gate artifact; requested plugins build in an internal matrix and upload disjoint `plugin-dist-<plugin>` artifacts. Publishers require the gate plus their own artifact.
+- **`.github/workflows/build.yml`** — the reusable build: shared checks run once and upload a gate artifact; requested plugins resolve their checked-out full source SHA, bake it into generated workflow fetch/action references and package metadata, then upload disjoint `plugin-dist-<plugin>` artifacts. Publishers require the gate plus their own artifact.
 - **`.github/workflows/changesets.yml`** — non-blocking pull request feedback from the Changesets Action v2 `pr-status` and `pr-comment` sub-actions. The read-only status job inspects pull request files; a separate job owns the pull request write token and only publishes the generated comment.
 - **`.github/workflows/publish.yml`** — the rolling **edge** channel: on every push to `main`, publishes each plugin's `dist/` to its own `releases/<plugin>/edge` branch and `<plugin>@edge` tag.
 - **`.github/workflows/release.yml`** — the **stable** channel: a manual dispatch (optionally naming one plugin) runs `changesets/action` to open a scope-labelled release PR; merging it resolves the exact release plan from the version diff, validates each plugin, creates only its annotated `<plugin>@<version>` source tag, publishes zero-history install branches and release assets, verifies their downloaded bytes, then moves that plugin's rolling stable refs. Immutable-release enforcement is opt-in.
@@ -60,14 +60,15 @@ The repository is a [pnpm](https://pnpm.io/) workspace monorepo (`pnpm-workspace
 
 The plugin **source** lives at `plugins/radius/`; the **installable** plugin is assembled into `plugins/radius/dist/`, which is git-ignored:
 
-| Path                                | Origin          | Tracked? | Purpose                                                   |
-|-------------------------------------|-----------------|----------|-----------------------------------------------------------|
-| `plugins/radius/plugin.json`        | source          | yes      | Manifest: `skills: "./skills/"`, `extensions: "."`.       |
-| `plugins/radius/package.json`       | source          | yes      | Extension package: `type: module`, `main: extension.mjs`. |
-| `plugins/radius/skills/`            | source          | yes      | The six skill trees (`SKILL.md` plus `references/`).      |
-| `plugins/radius/README.md`          | source          | yes      | Plugin documentation.                                     |
-| `plugins/radius/dist/`              | built           | no       | The complete installable plugin; git-ignored.             |
-| `plugins/radius/dist/extension.mjs` | built (esbuild) | no       | The canvas bundle, plus its `.map`.                       |
+| Path                                | Origin          | Tracked? | Purpose                                                    |
+|-------------------------------------|-----------------|----------|------------------------------------------------------------|
+| `plugins/radius/plugin.json`        | source          | yes      | Manifest: `skills: "./skills/"`, `extensions: "."`.        |
+| `plugins/radius/package.json`       | source          | yes      | Extension package: `type: module`, `main: extension.mjs`.  |
+| `plugins/radius/skills/`            | source          | yes      | The six skill trees (`SKILL.md` plus `references/`).       |
+| `plugins/radius/README.md`          | source          | yes      | Plugin documentation.                                      |
+| `plugins/radius/dist/`              | built           | no       | The complete installable plugin; git-ignored.              |
+| `plugins/radius/dist/extension.mjs` | built (esbuild) | no       | The canvas bundle, plus its `.map`.                        |
+| `plugins/radius/dist/workflows/`    | copied          | no       | Complete `.github/extension/` templates, actions, scripts. |
 
 Because `plugin.json` declares `extensions: "."`, the canvas `extension.mjs` and its `package.json` sit at the **plugin root** — which, for an install, is `dist/`. The build copies the tracked source into `dist/` so those relative paths resolve.
 
@@ -83,7 +84,7 @@ Because `plugin.json` declares `extensions: "."`, the canvas `extension.mjs` and
 
 esbuild transpiles the TypeScript core and inlines the `workspace:*` dependencies, producing a single self-contained `extension.mjs` (~700 KB minified). This file is the reason a build step is unavoidable: the plugin cannot ship hand-authored source because the canvas imports the **TypeScript** core via `workspace:*`, which must be transpiled and inlined first.
 
-The script then uses esbuild's `copy` loader to place `plugin.json`, `package.json`, `README.md`, and `skills/` next to the bundle, and adds the repository `LICENSE`. Both the Node bundle and nested browser/resolver builds emit esbuild metafiles; their complete input union drives `THIRD-PARTY-NOTICES.txt`, including packages such as `yaml` that do not appear in the browser-only graph. The generic dist validator checks names, versions, declared paths, README, license, confinement, and symlinks before upload or publication.
+The script then uses esbuild's `copy` loader to place `plugin.json`, `package.json`, `README.md`, and `skills/` next to the bundle, adds the repository `LICENSE`, and copies the complete `.github/extension/` tree to `dist/workflows/`. It writes the full checked-out source SHA to `package.json#radiusSourceRef` and compiles that same value into the workflow generator: remote template fetches and every first-party composite-action `uses:` resolve the commit that produced the plugin, never `main`, `edge`, or `latest`. Both the Node bundle and nested browser/resolver builds emit esbuild metafiles; their complete input union drives `THIRD-PARTY-NOTICES.txt`, including packages such as `yaml` that do not appear in the browser-only graph. The generic dist validator checks names, versions, source SHA, workflow assets, declared paths, README, license, confinement, and symlinks before upload or publication.
 
 The whole of `dist/` is git-ignored so `main` never carries large generated files that would cause constant merge conflicts.
 
@@ -125,7 +126,7 @@ graph TD
     subgraph BuildWF["build.yml (reusable)"]
         Checks["shared checks once<br/>upload build-gate"]
         Resolve["plugin matrix<br/>scoped stable or edge version"]
-        Artifact["validate dist/<br/>native pnpm SBOM<br/>upload plugin-dist-plugin + plugin-sbom-plugin"]
+        Artifact["resolve full source SHA<br/>bundle .github/extension<br/>validate dist/ + native pnpm SBOM<br/>upload plugin-dist-plugin + plugin-sbom-plugin"]
     end
 
     Main -->|edge push SHA| Checks
@@ -152,13 +153,13 @@ graph TD
     MP -->|install from the app| Install["GitHub Copilot app<br/>installs complete plugin"]
 ```
 
-Each published branch is an **orphan**: it shares no history with `main` and contains nothing but `plugins/<plugin>/dist/` and the marketplace catalog. [`scripts/verified-git.mjs`](../../scripts/verified-git.mjs) uploads exactly those two paths and asks the Commits API for a commit with no parents, so nothing else can reach the published tree and there is no history to inherit. It refuses to go on if the response comes back with a parent; for reused versioned and `latest` branches, the same helper reads the commit through the GitHub API and requires `commit.parents` to be empty before trusting its contents. A branch with any parent history fails publication.
+Each published branch is an **orphan**: it shares no history with `main` and contains only `plugins/<plugin>/dist/`, `.github/extension/`, and the marketplace catalog. The root extension tree preserves the canonical repository layout on the self-contained artifact branch; `dist/workflows/` is its byte-identical plugin copy. Generated cross-repository `uses:` paths resolve that canonical path from the immutable source commit recorded by the plugin, not from the orphan commit. [`scripts/verified-git.mjs`](../../scripts/verified-git.mjs) uploads exactly those paths and asks the Commits API for a commit with no parents, so unrelated repository source cannot reach the published tree and there is no history to inherit. Reuse verification requires the two extension trees to have the same file paths and Git blob SHAs, requires `package.json#radiusSourceRef` to equal the source recorded by the commit message, and rejects a parented or unsigned commit. Read-only inspection accepts the fully legacy layout only so the first upgraded stable release can compare and replace an older `latest` branch; a partially migrated layout fails closed.
 
 Nothing is committed or tagged on the runner. A runner holds no signing key, so every commit and ref this pipeline publishes goes through the GitHub API as the repository automation App. GitHub signs the commits, while the Git tag-object API leaves an App-created annotated tag unsigned. The pipeline therefore writes lightweight tag refs only after GitHub verifies their target commit, and verifies that target again before reusing a tag. Existing signed annotated tags are accepted only when both the tag object and its target commit are verified. Reusing an install branch also re-checks its commit, so a branch left by older automation cannot keep publishing an unsigned commit. The cost is that a branch and its channel tag no longer move in one atomic push: the branch every install reads lands first, and a rerun reconciles a failure in between.
 
-The trade-off is deliberate: a clone of a published branch is the artifact and nothing else — no source, no node_modules, no history — and the `main` SHA it was built from lives in the commit message. Because the rolling refs are replaced wholesale each run, superseded bundles become unreferenced objects rather than permanent repository growth.
+The trade-off is deliberate: a clone of a published branch contains the plugin artifact, its workflow/action assets, and its catalog, but no monorepo source, node_modules, or history. The exact source SHA lives in both the commit message and built package metadata. Because rolling refs are replaced wholesale each run, superseded bundles become unreferenced objects rather than permanent repository growth.
 
-A release publishes the pinned branch and `releases/<plugin>/latest` from the same `dist/`; they differ only in the catalog's selected `source.ref`. Checks, deterministic tar/zip packaging, native pnpm SBOM generation, validation, and attestation finish before the first push. A retry reconstructs the expected orphan tree and reuses an existing versioned branch only when its tree ID and zero-parent invariant match. It reconciles the source tag and GitHub release, verifies downloaded asset bytes, then moves rolling refs. The `<plugin>/v<version>` artifact tag is pushed last as the completion marker.
+A release publishes the pinned branch and `releases/<plugin>/latest` from the same `dist/` and `.github/extension/`; they differ only in the catalog's selected `source.ref`. The deterministic tarball contains the complete bundled copy under the plugin's `workflows/` directory. Checks, deterministic tar/zip packaging, native pnpm SBOM generation, validation, and attestation finish before the first push. A retry reconstructs the expected orphan tree and reuses an existing versioned branch only when its tree ID, source pin, extension copies, and zero-parent invariant match. It reconciles the source tag and GitHub release, verifies downloaded asset bytes, then moves rolling refs. The `<plugin>/v<version>` artifact tag is pushed last as the completion marker.
 
 GitHub immutable releases are optional. By default, the release remains mutable and a retry reconciles assets with `gh release upload --clobber`. Setting repository variable `REQUIRE_IMMUTABLE_RELEASES=true` activates two fail-closed checks (before PR creation and before publication), requires Administration read on the GitHub App, and requires the published release response to report `immutable: true`. Both modes use draft-first publication; an immutable retry reuses the published native SBOM rather than regenerating pnpm's run-specific document.
 

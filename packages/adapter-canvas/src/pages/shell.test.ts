@@ -28,7 +28,9 @@ describe("pageShell", () => {
     expect(html).toContain(
       'title="https://github.com/radius-project/ai-extensions/issues/new?template=feedback-or-bug-report.yml"'
     );
-    expect(html).toContain('title="https://radapp.io"');
+    expect(html).toContain(
+      'title="https://edge.docs.radapp.io/integrations/github-copilot-app/canvas-extension/"'
+    );
   });
 
   it("renders larger top-navigation icons without a border or filled background", () => {
@@ -451,7 +453,9 @@ describe("pageShell document structure", () => {
     expect(html).toContain(
       'href="https://github.com/radius-project/ai-extensions/issues/new?template=feedback-or-bug-report.yml"'
     );
-    expect(html).toContain('href="https://radapp.io"');
+    expect(html).toContain(
+      'href="https://edge.docs.radapp.io/integrations/github-copilot-app/canvas-extension/"'
+    );
     expect(html).toContain('rel="noopener noreferrer"');
   });
 
