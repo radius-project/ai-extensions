@@ -1614,6 +1614,53 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toBe(false);
   });
 
+  test("keeps unsupported credential profiles out of environment creation @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.route("**/api/credential-profiles**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          profiles: [
+            {
+              name: "fixture-aws",
+              provider: "aws",
+              status: "verified"
+            },
+            {
+              name: "fixture-future",
+              provider: "future-cloud",
+              status: "verified"
+            }
+          ]
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "credentials");
+    for (const name of ["fixture-aws", "fixture-future"]) {
+      const row = page.getByRole("row").filter({ hasText: name });
+      await expect(row).toBeVisible();
+      await expect(
+        row.getByRole("button", { name: "Create Env" })
+      ).toBeDisabled();
+      await expect(row.locator(".js-cred-createenv")).toHaveCount(0);
+    }
+
+    await gotoCanvas(page, canvas, "environment");
+    await page.getByRole("button", { name: "New Environment" }).click();
+    const profileButton = page.locator("#env-profile-button");
+    await profileButton.click();
+    await expect(profileButton).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("#env-profile-options")).toBeEmpty();
+    await expect(page.locator("#env-profile-empty")).toHaveText(
+      "No supported credential profiles yet."
+    );
+    await expect(page.locator("#env-step1-next")).toBeDisabled();
+  });
+
   test("keeps server-owned setup durable across navigation and downloads redacted diagnostics by keyboard @safety", async ({
     page,
     canvas
