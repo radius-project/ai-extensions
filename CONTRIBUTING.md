@@ -128,7 +128,7 @@ write a user-facing summary. Commit the generated `.changeset/*.md` file with
 your PR. Do not hand-edit any version: Changesets bumps `plugins/radius/package.json`, and `plugin.json` and `marketplace.json` are derived from it by `pnpm run version:sync`, which CI verifies. See [`RELEASING.md`](./docs/eng/RELEASING.md) for the version/tag convention and
 release flow.
 
-Not every change ships something. A pull request without a changeset is never blocked - CI only leaves a reminder comment. If the omission is deliberate, either add an empty changeset with `pnpm changeset --empty` or label the pull request `pr/no-changeset`, which replaces the reminder with a note that it was waived.
+Not every change ships something. A pull request without a changeset is never blocked - CI only leaves a reminder comment. If the omission is deliberate, either add an empty changeset with `pnpm changeset --empty` or label the pull request `pr:no-changeset`, which replaces the reminder with a note that it was waived.
 
 ## Developer Certificate of Origin
 
