@@ -12,9 +12,9 @@
 // version commands preserve it.
 //
 // The catalog on main is the manifest end users add. Each plugin entry's source
-// ref selects that plugin's default channel: `<name>@edge` now, and
-// `<name>@latest` after its stable launch. Edge publishes retarget and restamp
-// their throwaway catalog copy so the generated edge branch remains
+// ref selects what a plain `marketplace add` installs: `<name>@edge` now, and a
+// released `<name>@<version>` after its stable launch. Edge publishes retarget
+// and restamp their throwaway catalog copy so the generated edge branch remains
 // independently installable after that switch.
 //
 // Plugins version and release independently, so every per-plugin command takes

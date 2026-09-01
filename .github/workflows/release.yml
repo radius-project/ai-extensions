@@ -17,11 +17,11 @@ name: Release
 #      The committed version and changelog identify the release even if newer
 #      changesets have already landed. The merge commit says which plugins were
 #      versioned, and each one is built, inventoried in an SPDX SBOM and attested
-#      before any public ref moves. The workflow creates that plugin's
-#      Changesets-format source tag, the versioned orphan branch follows, and
-#      the GitHub release is assembled as a DRAFT so every asset is attached
-#      before publication. The completion tag is pushed last. Repository-level
-#      immutable releases are optional until REQUIRE_IMMUTABLE_RELEASES=true.
+#      before any public ref moves. The versioned orphan branch is published
+#      first, the one release tag is placed on its commit, and the GitHub release
+#      is assembled from that tag as a DRAFT so every asset is attached before
+#      publication. Repository-level immutable releases are optional until
+#      REQUIRE_IMMUTABLE_RELEASES=true.
 #
 # Versioning is never automatic: only workflow_dispatch runs the Changesets
 # version action. Stable publication only accepts the merged
@@ -31,11 +31,19 @@ name: Release
 # name, and `scripts/plugins.mjs` is the only place those names are built, so
 # adding plugins/<name>/ needs no change here:
 #
-#   <plugin>@<version>              Changesets-format source tag
 #   releases/<plugin>/v<version>    versioned orphan artifact branch
-#   <plugin>/v<version>             completion tag pointing at that branch
-#   releases/<plugin>/latest        orphan artifact branch, force-moved to the
-#   + <plugin>@latest               newest stable release, with its tag
+#   <plugin>@<version>              the ONE tag a stable release publishes, in
+#                                   Changesets' format, on that branch's commit
+#
+# A stable release is identified by its version, so nothing here rolls forward:
+# there is no moving stable branch or tag, and no ref this workflow writes is
+# ever force-moved. The tag names the artifact rather than the source revision,
+# so checking it out or downloading the release's source archive yields the
+# installable plugin. The source that produced it is recorded in the orphan
+# commit message and in the build attestation. A release is complete only when
+# `verified-git.mjs verify-completion` can still prove the branch, the tag, the
+# published release and its exact asset set together, which is what makes a
+# failed run safe to re-run and what the prepare phase gates on.
 #
 # Every tag ref resolves to a commit GitHub signed and marked Verified.
 #
@@ -141,6 +149,7 @@ jobs:
       - name: Verify the previous release is complete
         env:
           SELECTED: ${{ steps.scope.outputs.selected }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "$GITHUB_REF" != "refs/heads/main" ]; then
@@ -148,10 +157,14 @@ jobs:
             exit 1
           fi
 
+          # The release tag now lands before the release is published, so its
+          # presence proves nothing on its own. Only the full artifact, tag,
+          # release and asset set together mean the last release finished.
           for plugin in $SELECTED; do
             version="$(node scripts/version.mjs --plugin "$plugin")"
             if node scripts/version.mjs --plugin "$plugin" --release-notes >/dev/null 2>&1 && \
-               ! git show-ref --verify --quiet "refs/tags/${plugin}/v${version}"; then
+               ! node scripts/verified-git.mjs verify-completion \
+                   --plugin "$plugin" --version "$version" >/dev/null 2>&1; then
               echo "::error::${plugin}@${version} has not finished publishing. Re-run its failed Release workflow before preparing another version."
               exit 1
             fi
@@ -303,29 +316,26 @@ jobs:
           released=()
           while IFS= read -r plugin; do
             version="$(node scripts/version.mjs --plugin "$plugin")"
-            canonical_tag="${plugin}@${version}"
-            artifact_tag="${plugin}/v${version}"
+            release_tag="${plugin}@${version}"
 
-            if git show-ref --verify --quiet "refs/tags/$artifact_tag"; then
-              # A marker only counts when it still proves the complete pinned
-              # artifact, source tag, release, and asset set.
-              node scripts/verified-git.mjs verify-completion \
-                --plugin "$plugin" --version "$version" --source "$source_sha" \
-                >/dev/null
-              echo "Artifact tag $artifact_tag already exists; nothing to publish for $plugin." >>"$GITHUB_STEP_SUMMARY"
-              continue
-            fi
+            if git show-ref --verify --quiet "refs/tags/$release_tag"; then
+              # The tag lands before the release is published, so its presence
+              # only means an earlier run got that far. The release is finished
+              # only if the artifact, tag, release and assets all still verify.
+              if node scripts/verified-git.mjs verify-completion \
+                   --plugin "$plugin" --version "$version" --source "$source_sha" \
+                   >/dev/null 2>&1; then
+                echo "$release_tag is already published; nothing to do for $plugin." >>"$GITHUB_STEP_SUMMARY"
+                continue
+              fi
 
-            if git show-ref --verify --quiet "refs/tags/$canonical_tag"; then
               # The provenance predicate records the workflow event SHA and does
               # not allow overriding it with a checkout ref. Recover only by
               # rerunning this release-PR event so the attested source stays
               # truthful even if main has moved since the merge.
-              tag_target="$(git rev-list -n 1 "$canonical_tag")"
-              if [ "$tag_target" != "$source_sha" ]; then
-                echo "::error::$canonical_tag points to $tag_target, not release PR #$RELEASE_PR merge $source_sha."
-                exit 1
-              fi
+              node scripts/verified-git.mjs verify-artifact \
+                --branch "releases/${plugin}/v${version}" --plugin "$plugin" \
+                --version "$version" --source "$source_sha" >/dev/null
             fi
 
             released+=("$plugin")
@@ -443,7 +453,7 @@ jobs:
           set -euo pipefail
           version="$(node scripts/version.mjs --plugin "${{ matrix.plugin }}")"
           node scripts/plugins.mjs --env "${{ matrix.plugin }}" \
-            --version "$version" --channel latest >>"$GITHUB_ENV"
+            --version "$version" >>"$GITHUB_ENV"
           echo "VERSION=$version" >>"$GITHUB_ENV"
 
       - name: Download plugin dist
@@ -526,30 +536,7 @@ jobs:
           subject-path: ${{ steps.package.outputs.tarball }}
           sbom-path: ${{ steps.sbom.outputs.path }}
 
-      # `changeset git-tag` scans every eligible workspace package. That is
-      # correct for an all-package release but unsafe in an independent matrix
-      # leg, where it could tag another plugin. Reproduce Changesets'
-      # `<package>@<version>` tag name for this plugin only.
-      - name: Tag the released source
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          set -euo pipefail
-          gh auth setup-git
-
-          if git ls-remote --exit-code --tags origin "refs/tags/$PLUGIN_SOURCE_TAG" >/dev/null 2>&1; then
-            # Reusing a tag this workflow did not sign would publish a release
-            # whose source marker nobody can attribute.
-            node scripts/verified-git.mjs verify-tag \
-              --name "$PLUGIN_SOURCE_TAG" --target "$SOURCE_SHA"
-          else
-            node scripts/verified-git.mjs tag \
-              --name "$PLUGIN_SOURCE_TAG" \
-              --target "$SOURCE_SHA"
-          fi
-
-      - name: Publish the install branches and the GitHub release
+      - name: Publish the install branch and the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -565,30 +552,22 @@ jobs:
 
           gh auth setup-git
 
-          # Each install branch is an ORPHAN carrying the built plugin, a
-          # canonical-path copy of the workflow assets, and a catalog that
-          # points at that same branch, so
-          # `marketplace add OWNER/REPO#<branch>` installs exactly what is
-          # published there. Naming the two paths explicitly is what keeps
-          # anything else out of the published tree, and the API refuses to
-          # return unless GitHub signed the commit and wrote it without parents.
-          # Moves no ref: the caller decides what to do with the commit.
-          build_orphan() {
-            branch="$1"
-            jq --arg name "$PLUGIN_NAME" --arg ref "$branch" \
-              '.plugins |= map(if .name == $name then .source.ref = $ref else . end)' \
-              "$catalog" >"$MANIFEST"
-            node scripts/verified-git.mjs commit \
-              --message "chore(release): ${PLUGIN_SOURCE_TAG} for ${SOURCE_SHA}" \
-              --path "$PLUGIN_DIST" --path "$MANIFEST" \
-              --path ".github/extension"
-          }
-
-          # Always construct the expected versioned orphan tree from this
-          # run's downloaded build. A retry may reuse an existing branch only
-          # when its bytes match this exact tree.
+          # The install branch is an ORPHAN carrying the built plugin, a
+          # canonical-path copy of the workflow assets, and a catalog that points
+          # at that same branch, so `marketplace add OWNER/REPO#<branch>`
+          # installs exactly what is published there. Naming the two paths
+          # explicitly is what keeps anything else out of the published tree, and
+          # the API refuses to return unless GitHub signed the commit and wrote
+          # it without parents. Moves no ref: a retry may reuse an existing
+          # branch only when its bytes match this exact tree.
           pinned="$PLUGIN_PINNED_BRANCH"
-          built="$(build_orphan "$pinned")"
+          jq --arg name "$PLUGIN_NAME" --arg ref "$pinned" \
+            '.plugins |= map(if .name == $name then .source.ref = $ref else . end)' \
+            "$catalog" >"$MANIFEST"
+          built="$(node scripts/verified-git.mjs commit \
+            --message "chore(release): ${PLUGIN_SOURCE_TAG} for ${SOURCE_SHA}" \
+            --path "$PLUGIN_DIST" --path "$MANIFEST" \
+            --path ".github/extension")"
           expected_pinned_commit="$(jq -r .commit <<<"$built")"
           expected_pinned_tree="$(jq -r .tree <<<"$built")"
 
@@ -604,6 +583,22 @@ jobs:
           if [ "$published_tree" != "$expected_pinned_tree" ]; then
             echo "::error::$pinned contains tree $published_tree, but this run rebuilt $expected_pinned_tree."
             exit 1
+          fi
+
+          # `changeset git-tag` scans every eligible workspace package. That is
+          # correct for an all-package release but unsafe in an independent
+          # matrix leg, where it could tag another plugin. Reproduce Changesets'
+          # `<package>@<version>` name for this plugin only, and place it on the
+          # artifact commit so the tag, and the release cut from it, resolve to
+          # the installable plugin rather than to monorepo source.
+          if git ls-remote --exit-code --tags origin "refs/tags/$PLUGIN_SOURCE_TAG" >/dev/null 2>&1; then
+            # Reusing a tag this workflow did not sign would publish a release
+            # nobody can attribute.
+            node scripts/verified-git.mjs verify-tag \
+              --name "$PLUGIN_SOURCE_TAG" --target "$pinned_commit"
+          else
+            node scripts/verified-git.mjs tag \
+              --name "$PLUGIN_SOURCE_TAG" --target "$pinned_commit"
           fi
 
           # github/awesome-copilot lists this plugin from its own repository and
@@ -625,53 +620,56 @@ jobs:
           find "$listing" -exec touch --date="@$epoch" {} +
           (cd "$listing" && find . -type f -print0 | sort -z | xargs -0 zip -Xq "$archive")
 
-          # The rolling stable refs only ever carry a stable release, and only
-          # ever move forwards: a prerelease is never `latest`, and a rerun of an
-          # older failed release must not undo a newer one that shipped since.
-          publish_latest=1
-          prerelease=()
+          # A published release has no "not Latest" bit of its own: GitHub stores
+          # `make_latest: false` as `prerelease: true`, which would relabel a
+          # stable version as a prerelease and leave the repository with no
+          # Latest release at all. `legacy` declines it without that by ranking
+          # on version and date, so the newest stable release becomes Latest and
+          # a rerun of an older one cannot take it back.
           if [ "$VERSION" != "${VERSION%%-*}" ]; then
-            echo "::notice::$VERSION is a prerelease; leaving the rolling stable refs alone."
-            publish_latest=0
-            prerelease=(--prerelease)
-          elif git ls-remote --exit-code --heads origin "refs/heads/$PLUGIN_CHANNEL_BRANCH" >/dev/null 2>&1; then
-            current_artifact="$(node scripts/verified-git.mjs inspect-artifact \
-              --branch "$PLUGIN_CHANNEL_BRANCH" --plugin "$PLUGIN_NAME")"
-            current="$(jq -r .version <<<"$current_artifact")"
-            if [ "$(node scripts/version.mjs --plugin "$PLUGIN_NAME" --compare "$current")" -lt 0 ]; then
-              echo "::notice::$PLUGIN_CHANNEL_BRANCH already publishes $current; leaving the rolling stable refs alone."
-              publish_latest=0
-            fi
+            echo "::notice::$VERSION is a prerelease; it will not become the Latest release."
+            is_prerelease=true
+            make_latest=false
+          else
+            is_prerelease=false
+            make_latest=legacy
           fi
 
           # Assemble the release as a DRAFT and attach every asset before
           # publication. This is the required ordering when immutable mode is
-          # enabled and remains the safest ordering in mutable mode.
+          # enabled and remains the safest ordering in mutable mode. A draft is
+          # never Latest, so that state is decided below instead.
           if ! gh release view "$PLUGIN_SOURCE_TAG" >/dev/null 2>&1; then
             gh release create "$PLUGIN_SOURCE_TAG" \
               --draft \
-              --latest=false \
               --title "$PLUGIN_SOURCE_TAG" \
               --notes-file "$notes" \
-              --target "$SOURCE_SHA" \
-              --verify-tag \
-              "${prerelease[@]}"
+              --target "$pinned_commit" \
+              --verify-tag
           fi
 
           release_state="$(gh release view "$PLUGIN_SOURCE_TAG" \
-            --json isDraft,isImmutable \
-            --jq '[.isDraft, .isImmutable] | @tsv')"
-          release_draft="${release_state%%$'\t'*}"
-          release_immutable="${release_state#*$'\t'}"
-          if [ "$release_draft" = "true" ]; then
-            gh release upload "$PLUGIN_SOURCE_TAG" "$TARBALL" "$SBOM" "$archive" --clobber
-            gh release edit "$PLUGIN_SOURCE_TAG" --draft=false
-          elif [ "$release_immutable" != "true" ]; then
-            # Mutable mode is intentionally supported for now. Reconcile assets
-            # on a retry, then verify the downloaded bytes below.
+            --json databaseId,isDraft,isImmutable \
+            --jq '[.databaseId, .isDraft, .isImmutable] | @tsv')"
+          IFS=$'\t' read -r release_id release_draft release_immutable \
+            <<<"$release_state"
+          if [ "$release_draft" = "true" ] || [ "$release_immutable" != "true" ]; then
+            # Mutable mode is intentionally supported for now, so a retry
+            # reconciles assets before the bytes are verified below.
             gh release upload "$PLUGIN_SOURCE_TAG" "$TARBALL" "$SBOM" "$archive" --clobber
           else
             echo "::notice::$PLUGIN_SOURCE_TAG is already published; its assets are immutable and were left unchanged."
+          fi
+
+          # Publication and the Latest decision are one call, so the release is
+          # never briefly visible with the wrong state. A retry reconciles the
+          # flags of an already published mutable release too.
+          if [ "$release_draft" = "true" ] || [ "$release_immutable" != "true" ]; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+              -F draft=false \
+              -F prerelease="$is_prerelease" \
+              -f make_latest="$make_latest" >/dev/null
           fi
 
           # Presence is not enough on a retry: download the published assets
@@ -696,7 +694,19 @@ jobs:
             fi
           done
 
-          immutable="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$PLUGIN_SOURCE_TAG" --jq '.immutable // false')"
+          # A stable version silently published as a prerelease still looks
+          # released here but never becomes Latest, so the completion marker is
+          # only written once the published state matches what was intended.
+          published_state="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$PLUGIN_SOURCE_TAG" \
+            --jq '[.draft, .prerelease, (.immutable // false)] | @tsv')"
+          IFS=$'\t' read -r published_draft published_prerelease immutable \
+            <<<"$published_state"
+          if [ "$published_draft" != "false" ] || \
+             [ "$published_prerelease" != "$is_prerelease" ]; then
+            echo "::error::$PLUGIN_SOURCE_TAG is published as draft=$published_draft prerelease=$published_prerelease, but this release expects draft=false prerelease=$is_prerelease."
+            exit 1
+          fi
+
           if [ "$REQUIRE_IMMUTABLE_RELEASES" = "true" ] && [ "$immutable" != "true" ]; then
             echo "::error::$PLUGIN_SOURCE_TAG was published without immutable release protection."
             exit 1
@@ -706,40 +716,17 @@ jobs:
             echo "::notice::$PLUGIN_SOURCE_TAG is mutable; set repository variable REQUIRE_IMMUTABLE_RELEASES=true to enforce immutability."
           fi
 
-          # Activate the rolling stable channel only after the GitHub release is
-          # published and the pinned branch exists. It always names the newest
-          # stable release of this plugin. Branch and tag can no longer move in
-          # one atomic push, so the branch every install reads lands first and a
-          # rerun reconciles a failure in between.
-          if [ "$publish_latest" = 1 ]; then
-            latest_commit="$(build_orphan "$PLUGIN_CHANNEL_BRANCH" | jq -r .commit)"
-            node scripts/verified-git.mjs ref \
-              --name "refs/heads/$PLUGIN_CHANNEL_BRANCH" \
-              --sha "$latest_commit" --force
-            node scripts/verified-git.mjs tag \
-              --name "$PLUGIN_CHANNEL_TAG" \
-              --target "$latest_commit" --force
-          fi
-
-          # This versioned tag is the completion marker and is deliberately
-          # pushed last. If anything above fails, a rerun reconciles the release.
-          node scripts/verified-git.mjs tag \
-            --name "$PLUGIN_ARTIFACT_TAG" \
-            --target "$pinned_commit"
+          # Nothing is pushed after this: the release is complete only if the
+          # artifact branch, its tag, the published release and its exact asset
+          # set all still verify together. A rerun reconciles anything missing.
           node scripts/verified-git.mjs verify-completion \
             --plugin "$PLUGIN_NAME" --version "$VERSION" --source "$SOURCE_SHA" \
             >/dev/null
 
           {
             echo "### ${PLUGIN_SOURCE_TAG}"
-            echo "- pinned install branch \`$pinned\`"
-            echo "- pinned artifact tag \`$PLUGIN_ARTIFACT_TAG\`"
-            if [ "$publish_latest" = 1 ]; then
-              echo "- stable install branch \`$PLUGIN_CHANNEL_BRANCH\` and tag \`$PLUGIN_CHANNEL_TAG\`"
-            else
-              echo "- \`$PLUGIN_CHANNEL_BRANCH\` and \`$PLUGIN_CHANNEL_TAG\` left unchanged"
-            fi
-            echo "- Changesets-format source tag \`$PLUGIN_SOURCE_TAG\`"
+            echo "- install branch \`$pinned\` at artifact commit \`$pinned_commit\`"
+            echo "- release tag \`$PLUGIN_SOURCE_TAG\` on that same commit"
             echo "- release \`$PLUGIN_SOURCE_TAG\` with the plugin tarball, its SPDX SBOM and \`$(basename "$archive")\`"
             echo "- awesome-copilot listing pinned to \`$pinned_commit\`"
           } >>"$GITHUB_STEP_SUMMARY"

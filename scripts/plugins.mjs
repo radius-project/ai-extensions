@@ -9,11 +9,15 @@
 // Naming convention, applied uniformly so a second plugin can never collide
 // with the first:
 //
-//   <plugin>@<version>            source tag (Changesets creates this one)
-//   <plugin>/v<version>           artifact tag on the orphan install commit
+//   releases/<plugin>/edge        rolling prerelease branch, refreshed on every
+//                                 push to main
+//   <plugin>@edge                 tag on that branch's commit
 //   releases/<plugin>/v<version>  versioned orphan branch for that version
-//   releases/<plugin>/<channel>   rolling install branch (edge, latest)
-//   <plugin>@<channel>            rolling tag on that branch
+//   <plugin>@<version>            the one tag a stable release publishes, in
+//                                 Changesets' format, on that branch's commit
+//
+// A published branch and its tag always name the same orphan commit, so either
+// ref installs exactly the same tree.
 //
 // Usage:
 //   node scripts/plugins.mjs                    print every plugin name
@@ -29,7 +33,9 @@ import { fileURLToPath } from "node:url";
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const PLUGINS_DIR = "plugins";
-const CHANNELS = ["edge", "latest"];
+// A stable release is identified by its version, so edge is the only channel
+// with a rolling branch and tag.
+const CHANNELS = ["edge"];
 const PLUGIN_NAME = /^[a-z0-9][a-z0-9.-]*[a-z0-9]$|^[a-z0-9]$/;
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
@@ -180,7 +186,6 @@ export function pluginRefs(plugin, { version, channel } = {}) {
       fail(`--version requires SemVer, got ${JSON.stringify(version)}`);
     }
     refs.PLUGIN_SOURCE_TAG = `${plugin.name}@${version}`;
-    refs.PLUGIN_ARTIFACT_TAG = `${plugin.name}/v${version}`;
     refs.PLUGIN_PINNED_BRANCH = `releases/${plugin.name}/v${version}`;
   }
   return refs;
