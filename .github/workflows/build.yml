@@ -279,8 +279,16 @@ jobs:
 
       # Every plugin-scoped name - directory, dist path, artifact - comes from
       # the registry, so no workflow hard-codes a plugin.
-      - name: Resolve the plugin
-        run: node scripts/plugins.mjs --env "${{ matrix.plugin }}" >>"$GITHUB_ENV"
+      - name: Resolve the plugin and source commit
+        run: |
+          set -euo pipefail
+          node scripts/plugins.mjs --env "${{ matrix.plugin }}" >>"$GITHUB_ENV"
+          source_ref="$(git rev-parse HEAD)"
+          if [[ ! "$source_ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The checked-out source ref is not a full commit SHA: $source_ref"
+            exit 1
+          fi
+          echo "RADIUS_SOURCE_REF=$source_ref" >>"$GITHUB_ENV"
 
       # edge:    Changesets owns versioning, so ask it what the next release
       #          will be instead of guessing from the manifest. --snapshot
@@ -348,6 +356,7 @@ jobs:
           node scripts/validate-plugin-dist.mjs
           --plugin "$PLUGIN_NAME"
           --version "${{ steps.version.outputs.version }}"
+          --source "$RADIUS_SOURCE_REF"
 
       # pnpm owns dependency, license and checksum discovery, so the inventory
       # is its native SPDX document rather than anything assembled here.

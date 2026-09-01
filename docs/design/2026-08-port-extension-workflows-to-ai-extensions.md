@@ -17,7 +17,7 @@ A complication surfaced during the port: the composite actions are **not self-co
 - **Workflow template** — a `.yml` file under `.github/extension/` (for example `run-rad-commands-azure.yml`, `verify-azure.yml`, `delete-azure.yml`) that the extension fetches and writes into a user repository's `.github/workflows/`.
 - **Composite action** — a reusable GitHub Actions action under `.github/extension/actions/<name>/action.yml` that the provider workflows reference via `uses:` and that holds the provider-agnostic deploy phases.
 - **Contrib catalog** — `deploy/manifest/defaults.yaml`: a Radius-owned file that pins the `resource-types-contrib` commits and recipe-pack refs Radius ships as defaults. Kept in sync and validated by Radius CI.
-- **`{{RADIUS_REF}}`** — a template placeholder the generator fills with the ref the provider workflows pin their composite-action `uses:` clauses to. Defaults to `RADIUS_REF` (`"main"`), see `packages/core/src/workflows/deploy.ts`.
+- **`{{RADIUS_REF}}`** — a template placeholder the generator fills with the immutable source commit the provider workflows pin their composite-action `uses:` clauses to. Source and live-test execution may default or override the ref, but every release build bakes in its checked-out full SHA.
 - **`GITHUB_ACTION_PATH`** — the runner-provided path to a running composite action's directory inside the checkout GitHub makes for a remote action.
 
 ## Objectives
@@ -154,7 +154,7 @@ The action's exported environment contract is unchanged: it still writes `RADIUS
 
 #### Core package — packages/core (if applicable)
 
-`packages/core/src/workflows/deploy.ts` — `RADIUS_WORKFLOW_REPO` is `radius-project/ai-extensions`; `RADIUS_WORKFLOW_DIR` (`.github/extension`) and `RADIUS_REF` (`main`) are unchanged. `delete.ts` and `verify.ts` error strings and comments reference `radius-project/ai-extensions`.
+`packages/core/src/workflows/deploy.ts` — `RADIUS_WORKFLOW_REPO` is `radius-project/ai-extensions` and `RADIUS_WORKFLOW_DIR` is `.github/extension`. `RADIUS_REF` reads the source-build value that `packages/adapter-canvas/build.mjs` replaces with the checked-out full commit SHA; delete and verify generation reuse that pin so template fetches and first-party action references cannot drift independently.
 
 #### Canvas adapter — packages/adapter-canvas (if applicable)
 
@@ -171,6 +171,7 @@ Skill docs (`radius-deploy`, `radius-environment`, `radius-delete` `SKILL.md`) u
 #### Build & packaging (if applicable)
 
 - `.github/extension/` — the full tree ported from radius and re-synced to the pinned parity commit (`radius/main@745ce9cc`; see the parity step in the Development plan), with `uses:` refs rewritten to `radius-project/ai-extensions` and executable bits preserved on the shell scripts.
+- `packages/adapter-canvas/build.mjs` — copies that complete tree into the plugin artifact under `workflows/`, records the source commit in package metadata, and compiles the same SHA into the workflow generator. Edge, latest, and versioned orphan branches also carry the byte-identical tree at root `.github/extension/`.
 - New `.github/extension/actions/load-contrib-catalog/install-yq.sh` — byte-for-byte the generic installer from radius `build/scripts/install-yq.sh` (verified by SHA-256).
 - `load-contrib-catalog/action.yml` — rewritten to fetch the catalog by ref and install `yq` from the co-located script (no repo-root walk-up).
 - A Changeset (`.changeset/port-extension-workflows-to-ai-extensions.md`, `"radius": minor`) records the move; `core`/`adapter` packages are ignored by the changeset config. It is a `minor` rather than a `patch` because the next drift sync rewrites the workflow files already committed into user repositories to point at the new source — a behavioral change to previously generated output, not just new output.
