@@ -57,10 +57,9 @@ function writePlugin(root, name, version = RELEASED) {
     scripts: { "test:artifact": "echo tested" }
   });
   writeJson(join(root, "plugins", name, "plugin.json"), {
+    $schema: "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
     name,
-    version,
-    skills: "./skills/",
-    extensions: "."
+    version
   });
   writeFileSync(join(root, "plugins", name, "README.md"), `${name}\n`);
 }
