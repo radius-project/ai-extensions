@@ -167,6 +167,17 @@ describe("canvas pages over real loopback HTTP", () => {
     }
   });
 
+  it("serves the Azure discovery remediation host", async () => {
+    resetState({ contextRepo: "octo/app" });
+
+    const response = await get("/?page=environment");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toContain(
+      '<div id="azure-discover-remediation" hidden></div>'
+    );
+  });
+
   it("serves only discovered Azure infrastructure selectors with namespace creation guidance", async () => {
     resetState({ contextRepo: "octo/app" });
 
