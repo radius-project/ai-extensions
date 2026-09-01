@@ -1588,6 +1588,9 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(
       page.getByLabel("Provider").locator('option[value="aws"]')
     ).toHaveAttribute("hidden", "");
+    await expect(
+      page.getByLabel("Provider").locator('option[value="aws"]')
+    ).toHaveText("AWS (coming soon)");
     await page.getByRole("button", { name: "Verify Credentials" }).click();
 
     await expect(page.locator("#cred-verify-status")).toContainText(

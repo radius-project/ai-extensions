@@ -266,7 +266,7 @@ describe("canvas pages over real loopback HTTP", () => {
     const response = await get("/?page=credentials");
 
     expect(response.body).toContain(
-      '<option value="aws" disabled hidden>AWS</option>'
+      '<option value="aws" disabled hidden>AWS (coming soon)</option>'
     );
     expect(response.body).toContain(
       '<div id="cred-panel-aws" class="rad-section" style="display:none;">'
