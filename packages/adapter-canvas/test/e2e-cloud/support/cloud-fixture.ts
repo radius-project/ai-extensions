@@ -122,6 +122,13 @@ const CLUSTER_NODE_SIZE = "Standard_B2s";
 const DEFAULT_ASSERTION_TIMEOUT_MS = 30_000;
 const DEFAULT_ASSERTION_POLL_INTERVAL_MS = 1_000;
 
+export function radiusPurgeCreationTime(value: Date): string {
+  const milliseconds = value.getTime();
+  if (!Number.isFinite(milliseconds))
+    throw new Error("The cloud fixture creation time must be a valid date.");
+  return String(Math.floor(milliseconds / 1_000));
+}
+
 interface UnwindStep {
   readonly describe: string;
   readonly run: () => Promise<void>;
@@ -174,7 +181,7 @@ export async function createCloudFixture(
         "--subscription",
         subscriptionId,
         "--tags",
-        `creationTime=${ports.now().toISOString()}`,
+        `creationTime=${radiusPurgeCreationTime(ports.now())}`,
         "radius-canvas-e2e=true",
         "--output",
         "none"

@@ -8,6 +8,7 @@ import {
   describeError,
   expectSuccess,
   isGitHubApiNotFound,
+  normalizeAzureCommandResult,
   normalizeCommandResult,
   parseJsonArray,
   type CloudCommandResult
@@ -46,6 +47,42 @@ describe("normalizeCommandResult", () => {
       code: 0,
       stdout: "",
       stderr: ""
+    });
+  });
+
+  describe("normalizeAzureCommandResult", () => {
+    it("redacts injected and token-shaped credentials from both streams", () => {
+      const opaque = "opaque-federated-token";
+      const jwt =
+        "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJmaXh0dXJlIn0.fixture_signature";
+
+      expect(
+        normalizeAzureCommandResult(
+          { code: 1 },
+          `accessToken=${opaque}`,
+          `failure: ${jwt}`,
+          { AZURE_FEDERATED_TOKEN: opaque }
+        )
+      ).toEqual({
+        code: 1,
+        stdout: "accessToken=[REDACTED]",
+        stderr: "failure: [REDACTED]"
+      });
+    });
+
+    it("preserves non-secret Azure output", () => {
+      expect(
+        normalizeAzureCommandResult(
+          null,
+          '{"subscriptionId":"00000000-0000-0000-0000-000000000001"}',
+          undefined,
+          {}
+        )
+      ).toEqual({
+        code: 0,
+        stdout: '{"subscriptionId":"00000000-0000-0000-0000-000000000001"}',
+        stderr: ""
+      });
     });
   });
 });

@@ -35,7 +35,7 @@ Then download the `cloud-e2e-diagnostics` artifact. It is uploaded on success as
 | `gh-branches.json`                 | Whether the fixture branch is dirty                             |
 | `gh-fixture-run-*.log`             | The **fixture repository's** failing workflow logs              |
 
-That last one matters more than it looks. The product commits a deploy workflow to the fixture repository and dispatches it. That workflow runs *there*, not here, so its failure is invisible in this job's own log.
+That last one matters more than it looks. The product commits a deploy workflow to the fixture repository and dispatches it. That workflow runs _there_, not here, so its failure is invisible in this job's own log.
 
 ## Product regression
 
@@ -44,7 +44,7 @@ The thing the tier exists to catch: the product built a request real Azure, Entr
 | Symptom                                                                        | Likely cause                                                                 | First thing to do                                                                                                  |
 |--------------------------------------------------------------------------------|------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------|
 | Graph rejects the application or federated credential the product created      | A request shape changed - a field name, an audience, a subject claim         | Open the trace, find the request, compare it to the Graph API reference                                            |
-| The deploy workflow exists as a pull request rather than on the default branch | The App token lost `workflows: write`, so the product took its fallback path | Check the `Create a GitHub App token` step; a missing permission fails there, a *narrowed installation* does not   |
+| The deploy workflow exists as a pull request rather than on the default branch | The App token lost `workflows: write`, so the product took its fallback path | Check the `Create a GitHub App token` step; a missing permission fails there, a _narrowed installation_ does not   |
 | Role assignment succeeds but the deployment is denied                          | Scope or role definition changed                                             | `az role assignment list --scope /subscriptions/<sub>/resourceGroups/radtest-canvas-<uid>`                         |
 | The environment exists but a variable is absent or wrong                       | The product's variable-writing path changed                                  | `gh api repos/<fixture>/environments/radtest-<uid>/variables`                                                      |
 | The environments page never shows the environment stage one created            | `/api/list-environments` stopped reporting it, so nothing can be deleted     | `gh api repos/<fixture>/environments` - if GitHub has it and the page does not, the regression is in the product   |
@@ -104,7 +104,7 @@ Two boundaries worth knowing before you go looking for a gap:
 
 ## When a run is cancelled
 
-Do not cancel a Cloud E2E run. Cancelling mid-flight strands a resource group, an AKS cluster, an Entra application, and a GitHub Environment, converting one slow run into a failure on the next one. The workflow is configured never to cancel itself for this reason. If a run must be stopped, run the cleanup workflow immediately afterwards.
+Do not cancel a Cloud E2E run. Cancelling mid-flight strands a resource group, an AKS cluster, an Entra application, and GitHub state, converting one slow run into a failure on the next one. The workflow is configured never to cancel itself for this reason. If a run must be stopped, dispatch the cleanup workflow after the six-hour age threshold has elapsed. An earlier dispatch records recent state but deliberately leaves it alone because cleanup cannot prove that a younger object is abandoned.
 
 ## It has never run
 
@@ -116,6 +116,6 @@ Do not cancel a Cloud E2E run. Cancelling mid-flight strands a resource group, a
 4. The dedicated Cloud E2E GitHub App must be created and installed on the fixture repository alone with `actions: read`, `administration: read`, `contents: write`, `environments: write`, `pull requests: write`, `variables: write`, and `workflows: write`. Store its client ID and private key on `radius-project/ai-extensions` as `CLOUD_E2E_BOT_CLIENT_ID` and `CLOUD_E2E_BOT_PRIVATE_KEY`; the encrypted private key is used only to mint a short-lived installation token for each job. Neither this repository nor `wellknown#134` provisions those two secrets.
 5. The fixture repository does not exist. `FIXTURE_BASELINE_SHA` in [`packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts`](../../packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts) is still forty zeros, and the `aiext_fixture_repository` tfvar is unset, so `AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY` is never published.
 
-While the fixture variable is unpublished, a dispatched run stops after checkout with a specific notice and the cleanup workflow no-ops on its provisioned check. If the variable is published before the source pin is updated, the run reaches `pnpm test:cloud` and the suite names the placeholder fields in its skip reason. Neither case passes hollowly. What is verified today is the workflows' safety and wiring contracts, asserted in [`packages/adapter-canvas/test/ci/cloud-e2e-workflows.test.ts`](../../packages/adapter-canvas/test/ci/cloud-e2e-workflows.test.ts), and the journey's own decision logic, asserted in the `test/e2e-cloud/support/*.test.ts` unit suites. Nothing verifies that a real run succeeds. **No stage - create or delete - has ever executed against real cloud.**
+While the fixture variable is unpublished, a dispatched run stops after checkout with a specific notice and the cleanup workflow no-ops on its provisioned check. If the variable is published before the source pin is updated, the `Verify the published fixture repository matches the pin` step fails before `pnpm test:cloud` runs. Neither case passes hollowly. What is verified today is the workflows' safety and wiring contracts, asserted in [`packages/adapter-canvas/test/ci/cloud-e2e-workflows.test.ts`](../../packages/adapter-canvas/test/ci/cloud-e2e-workflows.test.ts), and the journey's own decision logic, asserted in the `test/e2e-cloud/support/*.test.ts` unit suites. Nothing verifies that a real run succeeds. **No stage - create or delete - has ever executed against real cloud.**
 
 When the prerequisites land, the first run is the interesting one. Expect it to fail, expect the failure to be infrastructure rather than product, and read this page from the top.

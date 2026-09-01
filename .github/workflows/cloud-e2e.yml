@@ -257,14 +257,32 @@ jobs:
           out="$RUNNER_TEMP/cloud-e2e-artifact"
           mkdir -p "$out"
 
-          az version >"$out/az-version.json" 2>&1 || true
+          redact_azure() {
+            node --input-type=module -e '
+              import { redactCredentials } from "./packages/adapter-canvas/src/credential-redaction.ts";
+              let input = "";
+              for await (const chunk of process.stdin) input += chunk;
+              process.stdout.write(redactCredentials(input, [
+                process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+                process.env.ARM_ACCESS_TOKEN,
+                process.env.ARM_CLIENT_SECRET,
+                process.env.ARM_OIDC_TOKEN,
+                process.env.AZURE_ACCESS_TOKEN,
+                process.env.AZURE_CLIENT_SECRET,
+                process.env.AZURE_FEDERATED_TOKEN,
+                process.env.AZURE_PASSWORD
+              ]));
+            '
+          }
+
+          az version 2>&1 | redact_azure >"$out/az-version.json" || true
           az account show --query '{tenantId:tenantId,subscriptionId:id,type:user.type}' \
-            >"$out/az-account.json" 2>&1 || true
+            2>&1 | redact_azure >"$out/az-account.json" || true
           az group list --query "[?starts_with(name, '$RESOURCE_GROUP_PREFIX')].{name:name,location:location,tags:tags}" \
-            >"$out/az-leftover-resource-groups.json" 2>&1 || true
+            2>&1 | redact_azure >"$out/az-leftover-resource-groups.json" || true
           az ad app list --filter "startswith(displayName, 'radius-deploy-')" \
             --query '[].{appId:appId,displayName:displayName,createdDateTime:createdDateTime}' \
-            >"$out/az-leftover-applications.json" 2>&1 || true
+            2>&1 | redact_azure >"$out/az-leftover-applications.json" || true
 
           gh --version >"$out/gh-version.txt" 2>&1 || true
           if [[ -n "${FIXTURE_REPOSITORY:-}" ]]; then
