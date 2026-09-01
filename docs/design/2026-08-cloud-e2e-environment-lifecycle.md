@@ -18,7 +18,7 @@ No production code changes. The work is a mode switch in the test harness, a fix
 
 | Term                       | Definition                                                                                                                                                                                   |
 |----------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| App registration           | An Azure Entra identity. The extension creates one per environment so CI can authenticate to Azure.                                                                                          |
+| App registration           | An Azure Entra identity. The extension creates or reuses one per repository, with a federated credential for each environment that needs to authenticate to Azure.                           |
 | Federated credential (FIC) | A trust rule letting a specific GitHub Actions job exchange its OIDC token for an Azure token, with no stored secret.                                                                        |
 | Bootstrap identity         | The identity the test runner signs in as. It stands in for the signed-in developer the extension expects — not for anything the product creates.                                             |
 | Fixture repository         | A dedicated GitHub repository playing the role of the user's application repository during a run.                                                                                            |
@@ -99,12 +99,12 @@ Without the flag the suite skips rather than fails, so an ordinary `pnpm test` i
 
 [`CanvasHarness`](../../packages/adapter-canvas/test/e2e/support/canvas-harness.ts) already owns server lifecycle, temporary directories, credential isolation, `PATH` construction, and `fetch` interception. Going live is therefore not a new harness — it is a switch on the four seams that fake the outside world:
 
-| Seam               | Fake mode (today)                                       | Cloud mode (new)                          |
-|--------------------|---------------------------------------------------------|-------------------------------------------|
-| `PATH`             | Prepend a generated fake-CLI directory (`writeFakeCli`) | Use the real `gh`, `az`, `rad`, `kubectl` |
-| `GH_TOKEN`         | A placeholder string (`PLACEHOLDER_SECRET`)             | A GitHub App installation token           |
-| `globalThis.fetch` | `createHarnessFetch` stubs registry calls               | Pass through                              |
-| Workspace          | An empty temporary directory (`mkdtemp`)                | A clone of the fixture repository         |
+| Seam               | Fake mode (today)                                       | Cloud mode (new)                                          |
+|--------------------|---------------------------------------------------------|-----------------------------------------------------------|
+| `PATH`             | Prepend a generated fake-CLI directory (`writeFakeCli`) | Use the real `gh`, `az`, `rad`, `kubectl`                 |
+| `GH_TOKEN`         | A placeholder string (`PLACEHOLDER_SECRET`)             | Read from the environment (developer or GitHub App token) |
+| `globalThis.fetch` | `createHarnessFetch` stubs registry calls               | Pass through                                              |
+| Workspace          | An empty temporary directory (`mkdtemp`)                | A clone of the fixture repository                         |
 
 All four seams live in [`canvas-harness.ts`](../../packages/adapter-canvas/test/e2e/support/canvas-harness.ts).
 
