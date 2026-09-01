@@ -51,7 +51,10 @@ export function findDeleteEnvironmentSuccessProblems(
       `Deleting environment "${outcome.environmentName}" answered 202 but its body was not a JSON object: ` +
         `${JSON.stringify(outcome.payload)}`
     ];
-  if (typeof record.operationId !== "string" || record.operationId.trim() === "")
+  if (
+    typeof record.operationId !== "string" ||
+    record.operationId.trim() === ""
+  )
     return [
       `Deleting environment "${outcome.environmentName}" answered 202 but did not identify the delete operation: ` +
         `${JSON.stringify(outcome.payload)}`
