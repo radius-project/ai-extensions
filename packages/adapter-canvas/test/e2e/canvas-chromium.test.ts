@@ -2726,6 +2726,70 @@ test.describe("Radius Canvas in Chromium", () => {
     );
   });
 
+  test("forces a delete only after the conflict probe proves the deployment is stuck @safety", async ({
+    page,
+    canvas
+  }) => {
+    const deletes: unknown[] = [];
+    let conflict = false;
+    await routeDeployedPage(page, () => "delete-failed");
+    await page.route("**/api/delete-conflict**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          conflict ?
+            { conflict: true, resourceState: "Updating", forced: false }
+          : { conflict: false }
+        )
+      });
+    });
+    await page.route("**/api/delete-deployment", async (route) => {
+      deletes.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ success: true, forced: conflict })
+      });
+    });
+    await gotoCanvas(page, canvas, "deployed");
+
+    // Without a proven conflict the ordinary confirmation stays in place, so a
+    // routine delete-failed row can never be escalated by accident.
+    await page.getByRole("button", { name: "Retry Delete" }).click();
+    await expect(
+      page.getByRole("button", { name: "I want to delete this deployment" })
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    conflict = true;
+    await page.getByRole("button", { name: "Retry Delete" }).click();
+    const dialog = page.getByRole("dialog");
+    const intent = page.getByRole("button", {
+      name: "I want to force delete this deployment"
+    });
+    await expect(intent).toBeFocused();
+    await expect(dialog).toContainText("may still be updating");
+    await page.keyboard.press("Enter");
+    await expect(dialog).toContainText(
+      "may leave orphaned external resources that require manual cleanup"
+    );
+    await expectNoWcagViolations(page);
+    await page.keyboard.press("Enter");
+
+    const input = page.locator("#del-confirm-input");
+    await expect(input).toBeFocused();
+    await page.keyboard.type("radius-app/fixture-environment");
+    await page.keyboard.press("Enter");
+
+    await expect.poll(() => deletes).toHaveLength(1);
+    expect(deletes[0]).toMatchObject({
+      environment: "fixture-environment",
+      application: "radius-app",
+      force: true
+    });
+  });
+
   test("announces a finished deploy away from the deployments page and keeps it dismissed", async ({
     page,
     canvas
