@@ -245,6 +245,10 @@ jobs:
           commit-message: "chore(release): version ${{ steps.scope.outputs.label }}"
           pr-title: "chore(release): version ${{ steps.scope.outputs.label }}"
 
+  # Admission is deliberately about the pull request's IDENTITY only. Whether
+  # the merge is actually releasable is decided by its content below, so a
+  # release PR that someone pushed an extra commit to still reaches a job that
+  # can report on it rather than disappearing into a skipped run.
   release-state:
     name: Detect a stable release
     if: >-
@@ -254,8 +258,7 @@ jobs:
       github.event.pull_request.base.ref == 'main' &&
       github.event.pull_request.head.ref == 'changeset-release/main' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.type == 'Bot' &&
-      github.event.pull_request.commits == 1
+      github.event.pull_request.user.type == 'Bot'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -285,8 +288,19 @@ jobs:
           exec 3>>"$GITHUB_OUTPUT"
           echo "publish=false" >&3
 
-          released=()
+          # A merged release PR always versions at least one plugin, so an empty
+          # plan means the first-parent diff did not carry the whole pull
+          # request. A rebase merge of a multi-commit release PR does that: it
+          # leaves the version bump in the parent and strands the tip. Failing
+          # keeps the missed release visible instead of silently shipping
+          # nothing.
           plan="$(node scripts/release-plan.mjs --source "$source_sha")"
+          if [ "$(jq 'length' <<<"$plan")" -eq 0 ]; then
+            echo "::error::Release PR #$RELEASE_PR merged as $source_sha, but its first-parent diff versions no plugin. Squash-merge the release pull request so the version bump and its changelog entry land in a single commit on main."
+            exit 1
+          fi
+
+          released=()
           while IFS= read -r plugin; do
             version="$(node scripts/version.mjs --plugin "$plugin")"
             canonical_tag="${plugin}@${version}"
