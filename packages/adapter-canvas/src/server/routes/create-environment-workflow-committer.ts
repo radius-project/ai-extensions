@@ -730,11 +730,7 @@ export function createWorkflowFileCommitter(
                   `per_page=100&page=${page}`;
                 const commits = await ports.runGh(["api", commitsPath]);
                 if (commits.code !== 0 && commits.code !== "0") {
-                  throw new Error(
-                    commits.stderr ||
-                      commits.stdout ||
-                      "GitHub workflow commit history could not be read."
-                  );
+                  return unreadableHistory();
                 }
                 let parsed: unknown;
                 try {
