@@ -26,6 +26,10 @@ import type {
   SourceRefContext
 } from "../../shared.js";
 import type { GraphInstanceEntry, GraphPipeline } from "./graph-pipeline.js";
+import type {
+  ResolvedWorkspaceBranch,
+  WorkspaceBranchResolution
+} from "../../workspace.js";
 
 // The use-case layer behind the three `graphs-planning` write routes.
 //
@@ -85,14 +89,12 @@ export interface GraphWorkflowDependencies<
     repo: string,
     requestedBranch: string,
     followWorkspaceBranch: boolean | undefined
-  ): Promise<
-    | {
-        status: "resolved";
-        branch: string;
-        followsWorkspaceBranch?: boolean;
-      }
-    | { status: "unavailable"; error: string }
-  >;
+  ): Promise<WorkspaceBranchResolution>;
+  commitBranchResolution(
+    entry: TEntry,
+    repo: string,
+    resolution: ResolvedWorkspaceBranch
+  ): boolean;
   pipeline: GraphPipeline<TEntry>;
   triggerAppBicepHandoff(
     entry: TEntry | undefined,
@@ -599,6 +601,9 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           repo
         });
       }
+      if (!dependencies.commitBranchResolution(entry, repo, branchResolution)) {
+        return json(409, STALE_PAYLOAD);
+      }
       const branch = branchResolution.branch;
       const resolvedBranch =
         data.branch && data.branch !== branch ? branch : undefined;
@@ -873,6 +878,9 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           workspaceBranchUnavailable: true,
           repo
         });
+      }
+      if (!dependencies.commitBranchResolution(entry, repo, branchResolution)) {
+        return json(409, STALE_PAYLOAD);
       }
       const branch = branchResolution.branch;
       const resolvedBranch =

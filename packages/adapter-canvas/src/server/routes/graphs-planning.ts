@@ -22,6 +22,10 @@ import type { GraphProgressRecord, GraphProgressView } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
 import type { CanvasServerEntry } from "../types.js";
+import type {
+  ResolvedWorkspaceBranch,
+  WorkspaceBranchResolution
+} from "../../workspace.js";
 
 // The two read-only halves of the `graphs-planning` family: the progress log the
 // page polls, and the deployed-graph projection. They are migrated together
@@ -622,14 +626,12 @@ export interface GraphsPlanningStreamDependencies {
     repo: string,
     requestedBranch: string,
     followWorkspaceBranch: boolean | undefined
-  ): Promise<
-    | {
-        status: "resolved";
-        branch: string;
-        followsWorkspaceBranch?: boolean;
-      }
-    | { status: "unavailable"; error: string }
-  >;
+  ): Promise<WorkspaceBranchResolution>;
+  commitBranchResolution(
+    entry: CanvasServerEntry,
+    repo: string,
+    resolution: ResolvedWorkspaceBranch
+  ): boolean;
   defaultBranchForState(state: CanvasState | undefined): string;
   // Prepares the source-ref context for the entry and returns its token.
   prepareSourceRef(
@@ -738,6 +740,10 @@ export async function handleLoadGraphStream(
       workspaceBranchUnavailable: true,
       repo
     });
+    return;
+  }
+  if (!dependencies.commitBranchResolution(entry, repo, branchResolution)) {
+    sendDone({ stale: true });
     return;
   }
   const branch = branchResolution.branch;

@@ -6,6 +6,7 @@ import { UNSUPPORTED_NO_DOCKERFILE_MESSAGE } from "@radius-project/core";
 import { createRequestContext } from "../request-context.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { CanvasServerEntry } from "../types.js";
+import type { WorkspaceBranchResolution } from "../../workspace.js";
 import {
   createGraphsPlanningStreamRoutes,
   handleLoadGraphStream,
@@ -122,9 +123,8 @@ interface Options {
   token?: string;
   currentSourceRef?: boolean;
   paths?: string[];
-  branchResolution?:
-    | { status: "resolved"; branch: string }
-    | { status: "unavailable"; error: string };
+  branchResolution?: WorkspaceBranchResolution;
+  commitBranchResolution?: boolean;
 }
 
 interface Fakes {
@@ -152,9 +152,14 @@ function fakes(options: Options = {}): Fakes {
       Promise.resolve(
         options.branchResolution ?? {
           status: "resolved",
-          branch: requestedBranch || DEFAULT_BRANCH
+          branch: requestedBranch || DEFAULT_BRANCH,
+          followsWorkspaceBranch: false
         }
       ),
+    commitBranchResolution: (_entry, _repo, resolution) => {
+      calls.push(`commitBranchResolution(${resolution.branch})`);
+      return options.commitBranchResolution ?? true;
+    },
     defaultBranchForState: (state) => {
       calls.push(`defaultBranchForState(${JSON.stringify(state)})`);
       return DEFAULT_BRANCH;
@@ -352,6 +357,25 @@ describe("graphs-planning load-graph-stream route", () => {
     ).toBe(false);
   });
 
+  it("streams a stale result when canonical branch state changed during resolution", async () => {
+    const { deps, calls } = fakes({
+      commitBranchResolution: false
+    });
+
+    const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+
+    expect(frames(recording.stream)).toEqual([
+      { event: "done", data: { stale: true } }
+    ]);
+    expect(calls).toContain(`commitBranchResolution(${DEFAULT_BRANCH})`);
+    expect(calls.some((call) => call.startsWith("prepareSourceRef"))).toBe(
+      false
+    );
+    expect(calls.some((call) => call.startsWith("fetchBicepSelection"))).toBe(
+      false
+    );
+  });
+
   it("streams a repository-required done frame with no progress when repo is empty", async () => {
     const { deps, calls } = fakes();
     const recording = await run("/api/load-graph-stream", deps);
@@ -455,7 +479,12 @@ describe("graphs-planning load-graph-stream route", () => {
     const { deps } = fakes({
       branchResolution: {
         status: "resolved",
-        branch: "renamed-worktree"
+        branch: "renamed-worktree",
+        followsWorkspaceBranch: true,
+        workspaceSnapshot: {
+          workspaceBranch: "old-name",
+          contextBranch: "old-name"
+        }
       }
     });
 

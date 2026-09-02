@@ -23,6 +23,7 @@ import {
   prepareSourceRefResources,
   setSourceRefResources
 } from "../../source-refs.js";
+import type { WorkspaceBranchResolution } from "../../workspace.js";
 import { defaultBranchForState } from "../../workspace.js";
 import {
   GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
@@ -101,20 +102,8 @@ interface PipelineScript {
   modelingActivityAtMs?: number;
   observeModelingRun?: () => Promise<number | null>;
   branchResolution?:
-    | {
-        status: "resolved";
-        branch: string;
-        followsWorkspaceBranch?: boolean;
-      }
-    | { status: "unavailable"; error: string }
-    | (() => Promise<
-        | {
-            status: "resolved";
-            branch: string;
-            followsWorkspaceBranch?: boolean;
-          }
-        | { status: "unavailable"; error: string }
-      >);
+    WorkspaceBranchResolution | (() => Promise<WorkspaceBranchResolution>);
+  commitBranchResolution?: boolean;
   // Runs after the named stage, so a test can move the world on mid-request.
   afterSelect?: () => void;
   afterStage?: () => void;
@@ -145,6 +134,7 @@ interface Harness {
   };
   // Everything the workflows sent to the diagnostics sink instead of the canvas.
   loggedErrors: string[];
+  branchCommits: string[];
   workflows: GraphPlanningWorkflows;
   setEntryMissing(missing: boolean): void;
   advanceClock(ms: number): void;
@@ -196,6 +186,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
   const recipes: unknown[] = [];
   const plannedOutputs: unknown[] = [];
   const loggedErrors: string[] = [];
+  const branchCommits: string[] = [];
 
   function requireScripted<T>(
     table: Record<string, T>,
@@ -264,10 +255,15 @@ function start(script: Partial<PipelineScript> = {}): Harness {
           Promise.resolve(
             resolution ?? {
               status: "resolved",
-              branch: requestedBranch || defaultBranchForState(state)
+              branch: requestedBranch || defaultBranchForState(state),
+              followsWorkspaceBranch: false
             }
           )
         );
+    },
+    commitBranchResolution: (_entry, _repo, resolution) => {
+      branchCommits.push(resolution.branch);
+      return harnessScript.commitBranchResolution ?? true;
     },
     pipeline,
     triggerAppBicepHandoff: (
@@ -358,6 +354,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     plannedOutputs,
     modelingObservations,
     loggedErrors,
+    branchCommits,
     setEntryMissing(missing) {
       entryMissing = missing;
     },
@@ -418,6 +415,21 @@ describe("graph planning workflows", () => {
           repo: "octo/app"
         }
       });
+      expect(harness.order).toEqual([]);
+      expect(harness.handoffs).toEqual([]);
+    }
+  );
+
+  it.each(["loadGraph", "planGraph"] as const)(
+    "rejects a canonical branch commit superseded during resolution in %s",
+    async (workflow) => {
+      const harness = start({ commitBranchResolution: false });
+
+      const outcome = await harness.run(workflow, '{"repo":"octo/app"}');
+
+      expect(outcome.status).toBe(409);
+      expect(outcome.payload).toEqual({ stale: true });
+      expect(harness.branchCommits).toEqual(["main"]);
       expect(harness.order).toEqual([]);
       expect(harness.handoffs).toEqual([]);
     }
@@ -1202,7 +1214,8 @@ describe("graph planning workflows", () => {
           if (requestNumber === 1) await firstResolution;
           return {
             status: "resolved",
-            branch: requestNumber === 1 ? "old" : "new"
+            branch: requestNumber === 1 ? "old" : "new",
+            followsWorkspaceBranch: false
           };
         },
         selections: {
@@ -1229,6 +1242,7 @@ describe("graph planning workflows", () => {
       expect(harness.handoffs.map((handoff) => handoff.branches)).toEqual([
         "new"
       ]);
+      expect(harness.branchCommits).toEqual(["new"]);
     });
   });
 
@@ -1286,7 +1300,11 @@ describe("graph planning workflows", () => {
         branchResolution: {
           status: "resolved",
           branch: "new-name",
-          followsWorkspaceBranch: true
+          followsWorkspaceBranch: true,
+          workspaceSnapshot: {
+            workspaceBranch: "old-name",
+            contextBranch: "old-name"
+          }
         },
         selections: { "new-name": selectionOf({ content: null }) },
         branchPaths: { "new-name": ["Dockerfile"] },
@@ -2289,7 +2307,11 @@ describe("graph planning workflows", () => {
 
     it("returns a renamed workspace branch before the missing-model retry", async () => {
       const harness = start({
-        branchResolution: { status: "resolved", branch: "new-name" },
+        branchResolution: {
+          status: "resolved",
+          branch: "new-name",
+          followsWorkspaceBranch: false
+        },
         selections: { "new-name": selectionOf({ content: null }) }
       });
 
@@ -2316,7 +2338,11 @@ describe("graph planning workflows", () => {
 
     it("returns a renamed workspace branch before a planned-model retry", async () => {
       const harness = start({
-        branchResolution: { status: "resolved", branch: "new-name" },
+        branchResolution: {
+          status: "resolved",
+          branch: "new-name",
+          followsWorkspaceBranch: false
+        },
         selections: { "new-name": selectionOf({ content: null }) }
       });
 

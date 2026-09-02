@@ -113,6 +113,7 @@ import {
   extractAppName
 } from "./bicep.js";
 import {
+  commitWorkspaceBranchResolution,
   createWorkspaceGitHub,
   currentWorkspaceBranch,
   defaultBranchForState,
@@ -1196,6 +1197,8 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
       followWorkspaceBranch,
       currentWorkspaceBranch
     ),
+  commitBranchResolution: (entry, repo, resolution) =>
+    commitWorkspaceBranchResolution(entry.state, repo, resolution),
   defaultBranchForState,
   prepareSourceRef: (entry, context) =>
     prepareSourceRefResources(entry, "graph", context),
@@ -1266,6 +1269,8 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
       followWorkspaceBranch,
       currentWorkspaceBranch
     ),
+  commitBranchResolution: (entry, repo, resolution) =>
+    commitWorkspaceBranchResolution(entry.state, repo, resolution),
   pipeline: createGraphPipeline<CanvasServerEntry>({
     fetchBicepSelection: (entry, repo, branch) =>
       fetchBicepSelection(entry, repo, branch),

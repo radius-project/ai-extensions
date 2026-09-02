@@ -224,13 +224,24 @@ export async function detectWorkspaceContext(
   };
 }
 
-export type WorkspaceBranchResolution =
+export type ResolvedWorkspaceBranch =
   | {
       status: "resolved";
       branch: string;
-      followsWorkspaceBranch: boolean;
+      followsWorkspaceBranch: false;
     }
-  | { status: "unavailable"; error: string };
+  | {
+      status: "resolved";
+      branch: string;
+      followsWorkspaceBranch: true;
+      workspaceSnapshot: {
+        workspaceBranch: string | undefined;
+        contextBranch: string | undefined;
+      };
+    };
+
+export type WorkspaceBranchResolution =
+  ResolvedWorkspaceBranch | { status: "unavailable"; error: string };
 
 const WORKSPACE_BRANCH_UNAVAILABLE =
   "The workspace branch is unavailable. Reopen the Radius canvas after restoring the worktree branch.";
@@ -275,6 +286,10 @@ export async function resolveGraphBranchForRequest(
     };
   }
 
+  const workspaceSnapshot = {
+    workspaceBranch: state.workspaceBranch,
+    contextBranch: state.contextBranch
+  };
   let liveBranch: string;
   try {
     liveBranch = await readCurrentBranch(workspacePath);
@@ -291,13 +306,39 @@ export async function resolveGraphBranchForRequest(
     };
   }
 
-  const previousContextBranch = state.contextBranch;
+  return {
+    status: "resolved",
+    branch: liveBranch,
+    followsWorkspaceBranch: true,
+    workspaceSnapshot
+  };
+}
+
+export function commitWorkspaceBranchResolution(
+  state: CanvasState,
+  repo: string,
+  resolution: ResolvedWorkspaceBranch
+): boolean {
+  if (!resolution.followsWorkspaceBranch) return true;
+  const snapshot = resolution.workspaceSnapshot;
+  if (
+    state.contextBranchSource !== "workspace" ||
+    state.workspaceRepo !== repo ||
+    (state.workspaceBranch !== snapshot.workspaceBranch &&
+      state.workspaceBranch !== resolution.branch) ||
+    (state.contextBranch !== snapshot.contextBranch &&
+      state.contextBranch !== resolution.branch)
+  ) {
+    return false;
+  }
+
+  const previousContextBranch = snapshot.contextBranch;
   const graphRepo = state.graphTargetRepo || state.contextRepo;
   const graphFollowedWorkspace =
     state.graphFollowsWorkspaceBranch ??
     (graphRepo === repo && state.graphBranch === previousContextBranch);
   if (graphRepo === repo && graphFollowedWorkspace) {
-    state.graphBranch = liveBranch;
+    state.graphBranch = resolution.branch;
   }
   const plannedRepo =
     state.plannedRepo || state.graphTargetRepo || state.contextRepo;
@@ -305,15 +346,11 @@ export async function resolveGraphBranchForRequest(
     state.plannedFollowsWorkspaceBranch ??
     (plannedRepo === repo && state.plannedBranch === previousContextBranch);
   if (plannedRepo === repo && plannedFollowedWorkspace) {
-    state.plannedBranch = liveBranch;
+    state.plannedBranch = resolution.branch;
   }
-  state.workspaceBranch = liveBranch;
-  state.contextBranch = liveBranch;
-  return {
-    status: "resolved",
-    branch: liveBranch,
-    followsWorkspaceBranch: true
-  };
+  state.workspaceBranch = resolution.branch;
+  state.contextBranch = resolution.branch;
+  return true;
 }
 
 // Returns true when the given branch matches the workspace branch. Fail-closed:

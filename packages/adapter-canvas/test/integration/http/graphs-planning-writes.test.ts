@@ -17,6 +17,7 @@ import {
   setSourceRefResources
 } from "../../../src/source-refs.js";
 import {
+  commitWorkspaceBranchResolution,
   defaultBranchForState,
   resolveGraphBranchForRequest
 } from "../../../src/workspace.js";
@@ -127,6 +128,8 @@ function start(script: Partial<PipelineScript> = {}): Harness {
             followWorkspaceBranch,
             async () => active.liveWorkspaceBranch || ""
           ),
+        commitBranchResolution: (entry, repo, resolution) =>
+          commitWorkspaceBranchResolution(entry.state, repo, resolution),
         pipeline,
         triggerAppBicepHandoff: () => {},
         observeModelingRun: () => Promise.resolve(null),

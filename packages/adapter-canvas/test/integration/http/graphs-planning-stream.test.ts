@@ -12,6 +12,7 @@ import { GRAPH_MODELING_FAILURE_MESSAGE } from "../../../src/graph-progress-cont
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
+import type { WorkspaceBranchResolution } from "../../../src/workspace.js";
 
 let container: CanvasServerContainer | undefined;
 
@@ -29,13 +30,7 @@ interface Script {
   // promise before resolving. Lets a test prove progress frames reach the socket
   // WHILE the build is still in flight, not just once the stream has ended.
   buildGate?: Promise<void>;
-  branchResolution?:
-    | {
-        status: "resolved";
-        branch: string;
-        followsWorkspaceBranch?: boolean;
-      }
-    | { status: "unavailable"; error: string };
+  branchResolution?: WorkspaceBranchResolution;
 }
 
 interface Harness {
@@ -70,9 +65,11 @@ function start(): Harness {
               requestedBranch ||
               state.contextBranch ||
               state.workspaceBranch ||
-              "main"
+              "main",
+            followsWorkspaceBranch: false
           })
         }),
+      commitBranchResolution: () => true,
       defaultBranchForState: (current) =>
         current?.contextBranch || current?.workspaceBranch || "main",
       // The real source-ref token derivation and first-wins commit guard, run
@@ -292,7 +289,11 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
     harness.script.branchResolution = {
       status: "resolved",
       branch: "renamed-worktree",
-      followsWorkspaceBranch: true
+      followsWorkspaceBranch: true,
+      workspaceSnapshot: {
+        workspaceBranch: "old-name",
+        contextBranch: "old-name"
+      }
     };
     const entry = await container!.getOrCreate("panel-a");
 
