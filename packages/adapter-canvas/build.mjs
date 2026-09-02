@@ -16,7 +16,15 @@
 import * as esbuild from "esbuild";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname, basename, join, relative, resolve, sep } from "node:path";
+import {
+  dirname,
+  basename,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep
+} from "node:path";
 import {
   copyFileSync,
   cpSync,
@@ -572,21 +580,40 @@ const options = {
 
 // The output root is wiped on every build, so it must never be a directory that
 // also holds tracked source: a stale path constant would delete real work.
-function resetDistDir() {
-  // Guard against ever pointing the output at tracked source: the wipe below
-  // would delete it. Outside a checkout there is nothing tracked to protect.
-  let tracked;
-  try {
-    tracked = execFileSync("git", ["ls-files", "-z", "--", distDir], {
-      cwd: repoRoot,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    })
-      .split("\0")
-      .filter(Boolean);
-  } catch {
-    tracked = [];
+function trackedFilesUnderDist() {
+  // Git pathspecs are repository-relative. An absolute one can match nothing on
+  // some Git and platform combinations, which would silently disarm the guard.
+  const within = relative(repoRoot, distDir);
+  if (within === "" || within.startsWith("..") || isAbsolute(within)) {
+    throw new Error(
+      `Refusing to wipe ${distDir}: it must be a directory inside ${repoRoot}.`
+    );
   }
+  // `literal` keeps a path containing glob characters from being read as a
+  // pattern; `top` anchors it to the repository root rather than the cwd.
+  const pathspec = `:(top,literal)${within.split(sep).join("/")}`;
+  try {
+    execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd: repoRoot,
+      stdio: "ignore"
+    });
+  } catch {
+    // Outside a checkout there is no tracked source to protect.
+    return [];
+  }
+  // Deliberately not caught: inside a checkout, a failed query is unknown
+  // state, and treating it as "nothing tracked" is what makes a guard useless.
+  return execFileSync("git", ["ls-files", "-z", "--", pathspec], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  })
+    .split("\0")
+    .filter(Boolean);
+}
+
+function resetDistDir() {
+  const tracked = trackedFilesUnderDist();
   if (tracked.length > 0) {
     throw new Error(
       `Refusing to wipe ${distDir}: it contains ${tracked.length} tracked file(s), starting with ${tracked[0]}.`

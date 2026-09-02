@@ -337,11 +337,16 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
   }
 
   const files = tree.tree.filter((entry) => entry.type !== "tree");
+  // The plugin root carries the duplicated metadata and nothing else, so it is
+  // enumerated rather than opened up as a prefix.
+  const pinnedMetadata = new Set(
+    PLUGIN_METADATA.map((name) => `${plugin.dir}/${name}`)
+  );
   for (const entry of files) {
     const allowed =
       entry.path === MARKETPLACE ||
       entry.path.startsWith(`${plugin.publishDir}/`) ||
-      entry.path.startsWith(`${plugin.dir}/`) ||
+      pinnedMetadata.has(entry.path) ||
       entry.path.startsWith(`${EXTENSION_ROOT}/`);
     if (!allowed) fail(`${branch} contains an unexpected path: ${entry.path}`);
     if (entry.type !== "blob" || !REGULAR_MODES.has(entry.mode)) {

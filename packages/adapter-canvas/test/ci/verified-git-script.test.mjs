@@ -161,6 +161,7 @@ async function completionApi({
   includeBundledExtension = true,
   includePinnedMetadata = true,
   pinnedManifestBlob = MANIFEST_BLOB,
+  extraTreePaths = [],
   rootExtensionBlob = EXTENSION_BLOB,
   bundledExtensionBlob = rootExtensionBlob,
   releaseDraft = false,
@@ -294,7 +295,13 @@ async function completionApi({
                   sha: bundledExtensionBlob
                 }
               ]
-            : [])
+            : []),
+            ...extraTreePaths.map((path) => ({
+              path,
+              mode: "100644",
+              type: "blob",
+              sha: EXTENSION_BLOB
+            }))
           ]
         });
       }
@@ -1047,6 +1054,21 @@ describe("scripts/verified-git.mjs", () => {
         "a plugin manifest that disagrees with the shipped one",
         { pinnedManifestBlob: TARGET },
         "publishes a different plugin.json"
+      ],
+      [
+        "an unshipped file under the plugin root",
+        { extraTreePaths: ["plugins/radius/CHANGELOG.md"] },
+        "unexpected path: plugins/radius/CHANGELOG.md"
+      ],
+      [
+        "a nested tree under the plugin root",
+        { extraTreePaths: ["plugins/radius/skills/SKILL.md"] },
+        "unexpected path: plugins/radius/skills/SKILL.md"
+      ],
+      [
+        "a sibling plugin's metadata",
+        { extraTreePaths: ["plugins/other/plugin.json"] },
+        "unexpected path: plugins/other/plugin.json"
       ],
       [
         "the wrong catalog ref",
