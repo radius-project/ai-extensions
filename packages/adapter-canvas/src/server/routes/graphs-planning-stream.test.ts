@@ -122,6 +122,9 @@ interface Options {
   token?: string;
   currentSourceRef?: boolean;
   paths?: string[];
+  branchResolution?:
+    | { status: "resolved"; branch: string }
+    | { status: "unavailable"; error: string };
 }
 
 interface Fakes {
@@ -145,6 +148,13 @@ function fakes(options: Options = {}): Fakes {
       if (options.readThrows) throw options.readThrows;
       return entry;
     },
+    resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
+      Promise.resolve(
+        options.branchResolution ?? {
+          status: "resolved",
+          branch: requestedBranch || DEFAULT_BRANCH
+        }
+      ),
     defaultBranchForState: (state) => {
       calls.push(`defaultBranchForState(${JSON.stringify(state)})`);
       return DEFAULT_BRANCH;
@@ -314,6 +324,34 @@ describe("graphs-planning load-graph-stream route", () => {
     expect(recording.ended).toBe(true);
   });
 
+  it("streams an unavailable workspace branch without model lookup or handoff", async () => {
+    const { deps, calls } = fakes({
+      branchResolution: {
+        status: "unavailable",
+        error: "The workspace branch is unavailable."
+      }
+    });
+
+    const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+
+    expect(frames(recording.stream)).toEqual([
+      {
+        event: "done",
+        data: {
+          error: "The workspace branch is unavailable.",
+          workspaceBranchUnavailable: true,
+          repo: REPO
+        }
+      }
+    ]);
+    expect(calls.some((call) => call.startsWith("fetchBicepSelection"))).toBe(
+      false
+    );
+    expect(
+      calls.some((call) => call.startsWith("triggerAppBicepHandoff"))
+    ).toBe(false);
+  });
+
   it("streams a repository-required done frame with no progress when repo is empty", async () => {
     const { deps, calls } = fakes();
     const recording = await run("/api/load-graph-stream", deps);
@@ -411,6 +449,28 @@ describe("graphs-planning load-graph-stream route", () => {
     expect(commit).toContain('"normalized":true');
     // Workspace graph-json path is derived only because the selection is local.
     expect(calls).toContain(`workspaceGraphJsonPath(${BICEP_PATH})`);
+  });
+
+  it("reports a canonical workspace branch in the terminal frame", async () => {
+    const { deps } = fakes({
+      branchResolution: {
+        status: "resolved",
+        branch: "renamed-worktree"
+      }
+    });
+
+    const recording = await run(
+      `/api/load-graph-stream?repo=${REPO}&branch=old-name&followWorkspaceBranch=true`,
+      deps
+    );
+
+    expect(frames(recording.stream).at(-1)).toEqual({
+      event: "done",
+      data: {
+        reload: true,
+        resolvedBranch: "renamed-worktree"
+      }
+    });
   });
 
   it("uses the query branch over the state default when ?branch is present", async () => {

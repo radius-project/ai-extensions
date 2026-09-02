@@ -80,6 +80,19 @@ export interface GraphWorkflowDependencies<
   // cannot be used: it substitutes `{}` for a missing entry and so cannot
   // express the 503 these three workflows answer.
   readInstanceEntry(instanceId: string): TEntry | undefined;
+  resolveBranchForRequest(
+    entry: TEntry,
+    repo: string,
+    requestedBranch: string,
+    followWorkspaceBranch: boolean | undefined
+  ): Promise<
+    | {
+        status: "resolved";
+        branch: string;
+        followsWorkspaceBranch?: boolean;
+      }
+    | { status: "unavailable"; error: string }
+  >;
   pipeline: GraphPipeline<TEntry>;
   triggerAppBicepHandoff(
     entry: TEntry | undefined,
@@ -176,6 +189,18 @@ function bare(
   payload: Record<string, unknown>
 ): GraphWorkflowOutcome {
   return { kind: "bare", status, payload };
+}
+
+function withResolvedBranch(
+  outcome: GraphWorkflowOutcome,
+  resolvedBranch: string | undefined
+): GraphWorkflowOutcome {
+  return resolvedBranch ?
+      {
+        ...outcome,
+        payload: { ...outcome.payload, resolvedBranch }
+      }
+    : outcome;
 }
 
 const MISSING_ENTRY_OUTCOME = bare(503, MISSING_ENTRY_PAYLOAD);
@@ -551,13 +576,33 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       if (!entry) return MISSING_ENTRY_OUTCOME;
       const state = entry.state;
       activeState = state;
-      const branch = data.branch || dependencies.defaultBranchForState(state);
-      activeRepair = { entry, repo, branch };
-      // Claiming the generation *before* the empty-repo exit is observable: a
-      // request with no repo still invalidates an in-flight compile.
+      // Claim the request before resolving the live branch so arrival order,
+      // rather than subprocess completion order, owns supersession.
       const requestGeneration = (state.graphBuildGeneration =
         (state.graphBuildGeneration || 0) + 1);
       activeGeneration = requestGeneration;
+      const branchResolution = await dependencies.resolveBranchForRequest(
+        entry,
+        repo,
+        data.branch || "",
+        typeof data.followWorkspaceBranch === "boolean" ?
+          data.followWorkspaceBranch
+        : undefined
+      );
+      if (state.graphBuildGeneration !== requestGeneration) {
+        return json(409, STALE_PAYLOAD);
+      }
+      if (branchResolution.status === "unavailable") {
+        return json(409, {
+          error: branchResolution.error,
+          workspaceBranchUnavailable: true,
+          repo
+        });
+      }
+      const branch = branchResolution.branch;
+      const resolvedBranch =
+        data.branch && data.branch !== branch ? branch : undefined;
+      activeRepair = { entry, repo, branch };
       if (!repo) return json(200, { error: "Please select a repository." });
       const sourceRefContext = dependencies.prepareSourceRefResources(
         entry,
@@ -630,13 +675,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "running",
           "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
         );
-        return await appBicepHandoffOutcome(
+        const outcome = await appBicepHandoffOutcome(
           entry,
           repo,
           branch,
           "graph",
           (detail) => addEvent("creating_model", "failed", detail)
         );
+        return withResolvedBranch(outcome, resolvedBranch);
       }
 
       const graphJsonPath = pipeline.graphJsonPathFor(entry, selection);
@@ -672,7 +718,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           reload: false,
           resources: state.graphResources,
           fromWorkspace: selection.fromWorkspace,
-          cached: true
+          cached: true,
+          ...(resolvedBranch ? { resolvedBranch } : {})
         });
       }
 
@@ -723,6 +770,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         }
         state.graphTargetRepo = repo;
         state.graphBranch = branch;
+        state.graphFollowsWorkspaceBranch =
+          branchResolution.followsWorkspaceBranch === true;
         // Authoritative provenance: true only when the local workspace actually
         // supplied the app.bicep content (file is on disk).
         state.graphFromWorkspace = selection.fromWorkspace;
@@ -739,7 +788,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       return json(200, {
         reload: !data.refresh,
         resources,
-        fromWorkspace: selection.fromWorkspace
+        fromWorkspace: selection.fromWorkspace,
+        ...(resolvedBranch ? { resolvedBranch } : {})
       });
     };
     return await settleWorkflow(run, {
@@ -797,9 +847,6 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       if (!entry) return MISSING_ENTRY_OUTCOME;
       const state = entry.state;
       activeState = state;
-      const branch = data.branch || dependencies.defaultBranchForState(state);
-      activeRepair = { entry, repo, branch };
-      const provider = data.provider || "azure";
       const previousPlannedResources = state.plannedResources;
       const previousPlanSelection = {
         repo: state.plannedRepo,
@@ -809,6 +856,29 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       };
       const planGeneration = dependencies.beginPlannedGraphRequest(state);
       activeGeneration = planGeneration;
+      const branchResolution = await dependencies.resolveBranchForRequest(
+        entry,
+        repo,
+        data.branch || "",
+        typeof data.followWorkspaceBranch === "boolean" ?
+          data.followWorkspaceBranch
+        : undefined
+      );
+      if (!dependencies.isCurrentPlannedGraphRequest(state, planGeneration)) {
+        return json(409, STALE_PAYLOAD);
+      }
+      if (branchResolution.status === "unavailable") {
+        return json(409, {
+          error: branchResolution.error,
+          workspaceBranchUnavailable: true,
+          repo
+        });
+      }
+      const branch = branchResolution.branch;
+      const resolvedBranch =
+        data.branch && data.branch !== branch ? branch : undefined;
+      activeRepair = { entry, repo, branch };
+      const provider = data.provider || "azure";
       // Persist the selected environment so re-opening (or reloading) the
       // Planned tab re-selects it by default, matching the graph just shown.
       if (typeof data.environment === "string" && data.environment) {
@@ -875,7 +945,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           "running",
           "Copilot is creating .radius/app.bicep with the Radius app-bicep skill."
         );
-        return await appBicepHandoffOutcome(
+        const outcome = await appBicepHandoffOutcome(
           entry,
           repo,
           branch,
@@ -883,6 +953,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           (detail) => addEvent("creating_model", "failed", detail),
           isCurrentPlan
         );
+        return withResolvedBranch(outcome, resolvedBranch);
       }
       if (modelCreationIsRunning(progressHandle.record)) {
         addEvent(
@@ -930,7 +1001,11 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       if (canReusePlannedGraph) {
         pipeline.discardStagedArtifacts(staged);
         state.plannedResources = previousPlannedResources;
-        return json(200, { reload: false, refreshed: true });
+        return json(200, {
+          reload: false,
+          refreshed: true,
+          ...(resolvedBranch ? { resolvedBranch } : {})
+        });
       }
       addEvent(
         "building_graph",
@@ -1017,6 +1092,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         }
         state.plannedRepo = repo;
         state.plannedBranch = branch;
+        state.plannedFollowsWorkspaceBranch =
+          branchResolution.followsWorkspaceBranch === true;
         // Authoritative provenance: true only when the local workspace actually
         // supplied the app.bicep content (file is on disk).
         state.plannedFromWorkspace = selection.fromWorkspace;
@@ -1039,7 +1116,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         data.refresh === true && !resourcesChanged && !selectionChanged;
       return json(200, {
         reload: !refreshed,
-        ...(refreshed ? { refreshed: true } : {})
+        ...(refreshed ? { refreshed: true } : {}),
+        ...(resolvedBranch ? { resolvedBranch } : {})
       });
     };
     return await settleWorkflow(run, {

@@ -100,6 +100,21 @@ interface PipelineScript {
   // the page to keep waiting for the model.
   modelingActivityAtMs?: number;
   observeModelingRun?: () => Promise<number | null>;
+  branchResolution?:
+    | {
+        status: "resolved";
+        branch: string;
+        followsWorkspaceBranch?: boolean;
+      }
+    | { status: "unavailable"; error: string }
+    | (() => Promise<
+        | {
+            status: "resolved";
+            branch: string;
+            followsWorkspaceBranch?: boolean;
+          }
+        | { status: "unavailable"; error: string }
+      >);
   // Runs after the named stage, so a test can move the world on mid-request.
   afterSelect?: () => void;
   afterStage?: () => void;
@@ -243,6 +258,17 @@ function start(script: Partial<PipelineScript> = {}): Harness {
 
   const dependencies: GraphWorkflowDependencies = {
     readInstanceEntry: () => (entryMissing ? undefined : entry),
+    resolveBranchForRequest: (_entry, _repo, requestedBranch) => {
+      const resolution = harnessScript.branchResolution;
+      return typeof resolution === "function" ? resolution() : (
+          Promise.resolve(
+            resolution ?? {
+              status: "resolved",
+              branch: requestedBranch || defaultBranchForState(state)
+            }
+          )
+        );
+    },
     pipeline,
     triggerAppBicepHandoff: (
       handoffEntry,
@@ -371,6 +397,32 @@ function replaceProgressRecord(
 }
 
 describe("graph planning workflows", () => {
+  it.each(["loadGraph", "planGraph"] as const)(
+    "reports an unavailable workspace branch without model lookup or handoff in %s",
+    async (workflow) => {
+      const harness = start({
+        branchResolution: {
+          status: "unavailable",
+          error: "The workspace branch is unavailable."
+        }
+      });
+
+      const outcome = await harness.run(workflow, '{"repo":"octo/app"}');
+
+      expect(outcome).toEqual({
+        kind: "json",
+        status: 409,
+        payload: {
+          error: "The workspace branch is unavailable.",
+          workspaceBranchUnavailable: true,
+          repo: "octo/app"
+        }
+      });
+      expect(harness.order).toEqual([]);
+      expect(harness.handoffs).toEqual([]);
+    }
+  );
+
   describe("POST /api/load-graph", () => {
     it("answers 400 with the parse failure for a malformed body", async () => {
       const harness = start();
@@ -1136,6 +1188,48 @@ describe("graph planning workflows", () => {
       expect(JSON.stringify(outcome.payload)).toBe('{"stale":true}');
       expect(harness.state.graphTargetRepo).toBeUndefined();
     });
+
+    it("uses arrival order when branch resolution completes out of order", async () => {
+      let releaseFirst!: () => void;
+      const firstResolution = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let resolutionCount = 0;
+      const harness = start({
+        branchResolution: async () => {
+          resolutionCount++;
+          const requestNumber = resolutionCount;
+          if (requestNumber === 1) await firstResolution;
+          return {
+            status: "resolved",
+            branch: requestNumber === 1 ? "old" : "new"
+          };
+        },
+        selections: {
+          old: selectionOf({ content: null }),
+          new: selectionOf({ branch: "new" })
+        },
+        staged: { new: { dir: "", remote: false } },
+        compiled: { new: [] }
+      });
+
+      const first = harness.run("loadGraph", '{"repo":"octo/app"}');
+      await vi.waitFor(() =>
+        expect(harness.state.graphBuildGeneration).toBe(1)
+      );
+      const second = harness.run("loadGraph", '{"repo":"octo/app"}');
+      await vi.waitFor(() => expect(resolutionCount).toBe(2));
+      const secondOutcome = await second;
+      releaseFirst();
+      const firstOutcome = await first;
+
+      expect(secondOutcome.status).toBe(200);
+      expect(firstOutcome.payload).toEqual({ stale: true });
+      expect(harness.state.graphBuildGeneration).toBe(2);
+      expect(harness.handoffs.map((handoff) => handoff.branches)).toEqual([
+        "new"
+      ]);
+    });
   });
 
   describe("POST /api/plan-graph", () => {
@@ -1184,6 +1278,47 @@ describe("graph planning workflows", () => {
       expect(outcome.status).toBe(409);
       expect(outcome.payload).toEqual({ stale: true });
       expect(harness.handoffs).toEqual([]);
+    });
+
+    it("does not leak a canonical branch from a stale response into later requests", async () => {
+      let canonicalized!: Harness;
+      canonicalized = start({
+        branchResolution: {
+          status: "resolved",
+          branch: "new-name",
+          followsWorkspaceBranch: true
+        },
+        selections: { "new-name": selectionOf({ content: null }) },
+        branchPaths: { "new-name": ["Dockerfile"] },
+        afterListBranchPaths: () => {
+          beginPlannedGraphRequest(canonicalized.state);
+        }
+      });
+
+      const first = await canonicalized.run(
+        "planGraph",
+        '{"repo":"octo/app","branch":"old-name","followWorkspaceBranch":true}'
+      );
+
+      expect(first.payload).toEqual({
+        stale: true,
+        resolvedBranch: "new-name"
+      });
+
+      let later!: Harness;
+      later = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "", remote: false } },
+        compiled: { main: [] },
+        afterCompile: () => {
+          later.state.graphBuildGeneration =
+            (later.state.graphBuildGeneration || 0) + 1;
+        }
+      });
+
+      const second = await later.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(second.payload).toEqual({ stale: true });
     });
 
     it("does not hand off when superseded while inspecting a missing model's branch", async () => {
@@ -2135,6 +2270,7 @@ describe("graph planning workflows", () => {
       expect(harness.state.plannedRepo).toBeUndefined();
       expect(harness.state.plannedProvider).toBeUndefined();
       expect(harness.state.resolvedRecipes).toBeUndefined();
+      expect(harness.loggedErrors).toEqual([]);
     });
 
     it("surfaces a model-selection failure as 400 before any artifact is staged", async () => {
@@ -2149,7 +2285,56 @@ describe("graph planning workflows", () => {
       expect(harness.order).toEqual(["select:main"]);
       expect(harness.handoffs).toEqual([]);
       expect(harness.state.plannedRepo).toBeUndefined();
-      expect(harness.loggedErrors).toEqual([]);
+    });
+
+    it("returns a renamed workspace branch before the missing-model retry", async () => {
+      const harness = start({
+        branchResolution: { status: "resolved", branch: "new-name" },
+        selections: { "new-name": selectionOf({ content: null }) }
+      });
+
+      const outcome = await harness.run(
+        "loadGraph",
+        '{"repo":"octo/app","branch":"old-name","followWorkspaceBranch":true}'
+      );
+
+      expect(outcome.payload).toMatchObject({
+        needsAppBicep: true,
+        branch: "new-name",
+        resolvedBranch: "new-name"
+      });
+      expect(harness.handoffs).toEqual([
+        {
+          repo: "octo/app",
+          branches: "new-name",
+          page: "graph",
+          progressView: "graph",
+          hasEntry: true
+        }
+      ]);
+    });
+
+    it("returns a renamed workspace branch before a planned-model retry", async () => {
+      const harness = start({
+        branchResolution: { status: "resolved", branch: "new-name" },
+        selections: { "new-name": selectionOf({ content: null }) }
+      });
+
+      const outcome = await harness.run(
+        "planGraph",
+        '{"repo":"octo/app","branch":"old-name","followWorkspaceBranch":true}'
+      );
+
+      expect(outcome.payload).toMatchObject({
+        needsAppBicep: true,
+        branch: "new-name",
+        resolvedBranch: "new-name"
+      });
+      expect(harness.handoffs.at(-1)).toMatchObject({
+        repo: "octo/app",
+        branches: "new-name",
+        progressView: "planned"
+      });
     });
 
     it("surfaces a compilation failure as 400 after staging and commits no planned state", async () => {

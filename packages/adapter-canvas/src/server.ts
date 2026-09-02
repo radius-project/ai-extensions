@@ -114,10 +114,12 @@ import {
 } from "./bicep.js";
 import {
   createWorkspaceGitHub,
+  currentWorkspaceBranch,
   defaultBranchForState,
   resolveWorkspaceBicep,
   fetchWorkspaceFile,
   isWorkspaceSelection,
+  resolveGraphBranchForRequest,
   modelingRunLastActivityAtMs,
   resolveSessionId,
   toSafeRepoRelPath,
@@ -1181,6 +1183,19 @@ const remediationRoutes = createRemediationRoutes(
 
 const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  resolveBranchForRequest: (
+    entry,
+    repo,
+    requestedBranch,
+    followWorkspaceBranch
+  ) =>
+    resolveGraphBranchForRequest(
+      entry.state,
+      repo,
+      requestedBranch,
+      followWorkspaceBranch,
+      currentWorkspaceBranch
+    ),
   defaultBranchForState,
   prepareSourceRef: (entry, context) =>
     prepareSourceRefResources(entry, "graph", context),
@@ -1238,6 +1253,19 @@ const observeServerWorkspaceModelingRun = (
 
 const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  resolveBranchForRequest: (
+    entry,
+    repo,
+    requestedBranch,
+    followWorkspaceBranch
+  ) =>
+    resolveGraphBranchForRequest(
+      entry.state,
+      repo,
+      requestedBranch,
+      followWorkspaceBranch,
+      currentWorkspaceBranch
+    ),
   pipeline: createGraphPipeline<CanvasServerEntry>({
     fetchBicepSelection: (entry, repo, branch) =>
       fetchBicepSelection(entry, repo, branch),

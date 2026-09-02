@@ -37,6 +37,7 @@ interface FixtureOptions {
   withButton?: boolean;
   withGuidance?: boolean;
   stateBranch?: string;
+  followWorkspaceBranch?: boolean;
 }
 
 function fixture(options: FixtureOptions = {}) {
@@ -49,7 +50,8 @@ function fixture(options: FixtureOptions = {}) {
     withBranchSelect = true,
     withButton = true,
     withGuidance = true,
-    stateBranch = "feature"
+    stateBranch = "feature",
+    followWorkspaceBranch = false
   } = options;
   const browser = createFakeBrowser();
   const state = createFakeElement(GRAPH_PAGE_STATE_ID);
@@ -58,7 +60,8 @@ function fixture(options: FixtureOptions = {}) {
     branch: stateBranch,
     resources: loaded ? [{ id: "app/web" }] : [],
     loaded,
-    localSource: true
+    localSource: true,
+    followWorkspaceBranch
   });
   const app = createFakeSelect("graph-app");
   const branch = createFakeSelect("graph-branch");
@@ -577,6 +580,7 @@ describe("initializeGraphPage", () => {
         : jsonResponse({ needsAppBicep: true })
       );
     });
+
     initializeGraphPage(
       browser.context,
       globals({
@@ -617,6 +621,53 @@ describe("initializeGraphPage", () => {
     );
     expect(browser.clock.timeouts).toBe(1);
     expect(calls).toBe(3);
+  });
+
+  it("reloads an initial graph when the server resolves a renamed workspace branch", async () => {
+    const { browser } = fixture({
+      loaded: false,
+      branchValue: "old-name",
+      stateBranch: "old-name",
+      followWorkspaceBranch: true
+    });
+    const render = vi.fn();
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        resources: [{ id: "app/generated" }],
+        fromWorkspace: true,
+        resolvedBranch: "new-name"
+      })
+    );
+
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    expect(browser.nav.reloads).toBe(1);
+    expect(render).not.toHaveBeenCalled();
+  });
+
+  it("reloads a renamed workspace branch before scheduling a missing-model retry", async () => {
+    const { browser } = fixture({
+      loaded: false,
+      branchValue: "old-name",
+      stateBranch: "old-name",
+      followWorkspaceBranch: true
+    });
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        needsAppBicep: true,
+        resolvedBranch: "new-name"
+      })
+    );
+
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(browser.nav.reloads).toBe(1);
+    expect(browser.clock.timeouts).toBe(0);
   });
 
   it("presents an empty successful graph as loaded without a ready banner", async () => {
@@ -954,6 +1005,32 @@ describe("initializeGraphPage", () => {
     expect(render).toHaveBeenCalledTimes(1);
     expect(controller.update).toHaveBeenCalledWith([{ id: "app/refreshed" }]);
     expect(controller.destroy).not.toHaveBeenCalled();
+  });
+
+  it("reloads a preloaded graph when the workspace branch was renamed", async () => {
+    const { browser } = fixture({
+      loaded: true,
+      branchValue: "old-name",
+      stateBranch: "old-name",
+      followWorkspaceBranch: true
+    });
+    const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
+    const render = vi.fn(() => controller);
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        resources: [{ id: "app/refreshed" }],
+        resolvedBranch: "new-name"
+      })
+    );
+
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    expect(browser.nav.reloads).toBe(1);
+    expect(controller.update).not.toHaveBeenCalled();
   });
 
   it("destroys and recreates the controller when the graph cannot accept refreshed resources", async () => {

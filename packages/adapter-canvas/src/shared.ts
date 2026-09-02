@@ -223,6 +223,7 @@ export interface CanvasState {
   graphResources?: CanvasGraphResource[] | null;
   graphTargetRepo?: string;
   graphBranch?: string;
+  graphFollowsWorkspaceBranch?: boolean;
   graphFromWorkspace?: boolean;
   graphLoaded?: boolean;
   // Each graph page owns an independent record. Navigating to Planned or Diff
@@ -234,6 +235,7 @@ export interface CanvasState {
   plannedProvider?: string;
   plannedResources?: CanvasGraphResource[] | null;
   plannedBranch?: string;
+  plannedFollowsWorkspaceBranch?: boolean;
   plannedEnvironment?: string;
   plannedDefinitionHash?: string;
   plannedRequestGeneration?: number;
@@ -249,6 +251,7 @@ export interface CanvasState {
   branchShas?: Record<string, string>;
   contextRepo?: string;
   contextBranch?: string;
+  contextBranchSource?: "workspace" | "explicit";
   workspacePath?: string;
   workspaceRepo?: string;
   workspaceBranch?: string;

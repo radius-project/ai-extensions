@@ -213,10 +213,17 @@ export function createRadiusCanvas(
           (inputRepo === workspace.workspaceRepo ?
             workspace.workspaceBranch
           : "main");
+        entry.state.contextBranchSource =
+          !inputBranch && inputRepo === workspace.workspaceRepo ?
+            "workspace"
+          : "explicit";
       } else if (inputBranch) {
         // Omitting the repository selects the current context repository, but an
         // explicitly named branch still identifies the remote selection to use.
         entry.state.contextBranch = inputBranch;
+        entry.state.contextBranchSource = "explicit";
+      } else {
+        entry.state.contextBranchSource = "workspace";
       }
       if (
         !inputRepo &&

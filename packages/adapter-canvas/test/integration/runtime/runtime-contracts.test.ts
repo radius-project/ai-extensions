@@ -591,7 +591,8 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     const firstEntry = harness.servers.get("app-graph");
     expect(firstEntry?.state).toMatchObject({
       contextRepo: "acme/widgets",
-      contextBranch: "main"
+      contextBranch: "main",
+      contextBranchSource: "explicit"
     });
 
     await harness.host.open("app-graph", {
@@ -601,6 +602,10 @@ describe("P0-A Radius SDK routing and lifecycle", () => {
     expect(harness.servers.get("app-graph")).toBe(firstEntry);
     expect(harness.servers.size).toBe(1);
     expect(firstEntry?.page).toBe("planned");
+    expect(firstEntry?.state).toMatchObject({
+      contextBranch: "feature/runtime-tests",
+      contextBranchSource: "workspace"
+    });
 
     await harness.host.rehydrate("app-graph");
     expect(harness.servers.get("app-graph")).toBe(firstEntry);

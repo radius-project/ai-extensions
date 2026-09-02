@@ -29,6 +29,13 @@ interface Script {
   // promise before resolving. Lets a test prove progress frames reach the socket
   // WHILE the build is still in flight, not just once the stream has ended.
   buildGate?: Promise<void>;
+  branchResolution?:
+    | {
+        status: "resolved";
+        branch: string;
+        followsWorkspaceBranch?: boolean;
+      }
+    | { status: "unavailable"; error: string };
 }
 
 interface Harness {
@@ -55,6 +62,17 @@ function start(): Harness {
   const routes = createTestRouteTable(
     createGraphsPlanningStreamRoutes({
       readInstanceEntry: () => entryFor({ state } as CanvasServerEntry),
+      resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
+        Promise.resolve({
+          ...(script.branchResolution ?? {
+            status: "resolved" as const,
+            branch:
+              requestedBranch ||
+              state.contextBranch ||
+              state.workspaceBranch ||
+              "main"
+          })
+        }),
       defaultBranchForState: (current) =>
         current?.contextBranch || current?.workspaceBranch || "main",
       // The real source-ref token derivation and first-wins commit guard, run
@@ -267,6 +285,29 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
       { method: "POST" }
     );
     expect(posted.status).toBe(404);
+  });
+
+  it("streams the canonical workspace branch over the real socket", async () => {
+    const harness = start();
+    harness.script.branchResolution = {
+      status: "resolved",
+      branch: "renamed-worktree",
+      followsWorkspaceBranch: true
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/load-graph-stream?repo=octo%2Fapp&branch=old-name&followWorkspaceBranch=true`
+    );
+    const result = await readFrames(response);
+
+    expect(result.frames.at(-1)).toEqual({
+      event: "done",
+      data: {
+        reload: true,
+        resolvedBranch: "renamed-worktree"
+      }
+    });
   });
 
   it("flushes progress frames on the socket while the build is still in flight", async () => {

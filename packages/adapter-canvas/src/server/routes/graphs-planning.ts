@@ -617,6 +617,19 @@ export interface GraphsPlanningStreamDependencies {
   // request context's `state` snapshot cannot express it: it substitutes `{}`
   // for a missing entry.
   readInstanceEntry(instanceId: string): CanvasServerEntry | undefined;
+  resolveBranchForRequest(
+    entry: CanvasServerEntry,
+    repo: string,
+    requestedBranch: string,
+    followWorkspaceBranch: boolean | undefined
+  ): Promise<
+    | {
+        status: "resolved";
+        branch: string;
+        followsWorkspaceBranch?: boolean;
+      }
+    | { status: "unavailable"; error: string }
+  >;
   defaultBranchForState(state: CanvasState | undefined): string;
   // Prepares the source-ref context for the entry and returns its token.
   prepareSourceRef(
@@ -684,19 +697,21 @@ export async function handleLoadGraphStream(
 ): Promise<void> {
   const { response, url, instanceId } = context;
   const repo = url.searchParams.get("repo") || "";
+  const requestedBranch = url.searchParams.get("branch") || "";
   const entry = dependencies.readInstanceEntry(instanceId);
   if (!entry) {
     response.writeHead(503);
     response.end("Canvas server state is unavailable.");
     return;
   }
-  const branch =
-    url.searchParams.get("branch") ||
-    dependencies.defaultBranchForState(entry.state);
-  const sourceRefContext = dependencies.prepareSourceRef(entry, {
+  const branchResolution = await dependencies.resolveBranchForRequest(
+    entry,
     repo,
-    branch
-  });
+    requestedBranch,
+    url.searchParams.has("followWorkspaceBranch") ?
+      url.searchParams.get("followWorkspaceBranch") === "true"
+    : undefined
+  );
 
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
@@ -706,10 +721,32 @@ export async function handleLoadGraphStream(
   const sendProgress = (message: string): void => {
     response.write(`event: progress\ndata: ${JSON.stringify({ message })}\n\n`);
   };
-  const sendDone = (data: unknown): void => {
-    response.write(`event: done\ndata: ${JSON.stringify(data)}\n\n`);
+  let resolvedBranch: string | undefined;
+  const sendDone = (data: Record<string, unknown>): void => {
+    response.write(
+      `event: done\ndata: ${JSON.stringify({
+        ...data,
+        ...(resolvedBranch ? { resolvedBranch } : {})
+      })}\n\n`
+    );
     response.end();
   };
+
+  if (branchResolution.status === "unavailable") {
+    sendDone({
+      error: branchResolution.error,
+      workspaceBranchUnavailable: true,
+      repo
+    });
+    return;
+  }
+  const branch = branchResolution.branch;
+  resolvedBranch =
+    requestedBranch && requestedBranch !== branch ? branch : undefined;
+  const sourceRefContext = dependencies.prepareSourceRef(entry, {
+    repo,
+    branch
+  });
 
   if (!repo) {
     sendDone({ error: "Please select a repository." });
@@ -793,6 +830,8 @@ export async function handleLoadGraphStream(
     }
     entry.state.graphTargetRepo = repo;
     entry.state.graphBranch = branch;
+    entry.state.graphFollowsWorkspaceBranch =
+      branchResolution.followsWorkspaceBranch === true;
     // Authoritative provenance: true only when the local workspace actually
     // supplied the app.bicep content (file is on disk).
     entry.state.graphFromWorkspace = selection.fromWorkspace;

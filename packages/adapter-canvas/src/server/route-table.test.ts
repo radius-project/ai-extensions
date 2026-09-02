@@ -249,6 +249,8 @@ const productionHandlers = {
   }),
   ...createGraphsPlanningStreamRoutes({
     readInstanceEntry: () => undefined,
+    resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
+      Promise.resolve({ status: "resolved", branch: requestedBranch }),
     defaultBranchForState: () => "main",
     prepareSourceRef: () => ({ token: "" }),
     commitSourceRef: () => true,
@@ -280,6 +282,8 @@ const productionHandlers = {
   ...createGraphsPlanningWritesRoutes({
     workflows: createGraphPlanningWorkflows({
       readInstanceEntry: () => undefined,
+      resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
+        Promise.resolve({ status: "resolved", branch: requestedBranch }),
       pipeline: createGraphPipeline({
         fetchBicepSelection: () =>
           Promise.resolve({
