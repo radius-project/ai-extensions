@@ -256,7 +256,6 @@ const productionHandlers = {
         followsWorkspaceBranch: false
       }),
     commitBranchResolution: () => true,
-    defaultBranchForState: () => "main",
     prepareSourceRef: () => ({ token: "" }),
     commitSourceRef: () => true,
     isCurrentSourceRef: () => true,
@@ -324,7 +323,6 @@ const productionHandlers = {
       prepareSourceRefResources: () => ({ view: "graph", token: "" }),
       setSourceRefResources: () => false,
       isCurrentSourceRefToken: () => false,
-      defaultBranchForState: () => "main",
       canReuseModeledGraph: () => false,
       addGraphProgress: () => false,
       beginPlannedGraphRequest: () => 1,

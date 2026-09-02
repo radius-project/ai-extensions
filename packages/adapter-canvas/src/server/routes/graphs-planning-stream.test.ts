@@ -165,10 +165,6 @@ function fakes(options: Options = {}): Fakes {
       calls.push(`commitBranchResolution(${resolution.branch})`);
       return options.commitBranchResolution ?? true;
     },
-    defaultBranchForState: (state) => {
-      calls.push(`defaultBranchForState(${JSON.stringify(state)})`);
-      return DEFAULT_BRANCH;
-    },
     prepareSourceRef: (givenEntry, context) => {
       calls.push(`prepareSourceRef(${JSON.stringify(context)})`);
       expect(givenEntry).toBe(entry);
@@ -520,7 +516,7 @@ describe("graphs-planning load-graph-stream route", () => {
     });
 
     const recording = await run(
-      `/api/load-graph-stream?repo=${REPO}&branch=old-name&followWorkspaceBranch=true`,
+      `/api/load-graph-stream?repo=${REPO}&branch=old-name`,
       deps
     );
 
@@ -533,7 +529,7 @@ describe("graphs-planning load-graph-stream route", () => {
     });
   });
 
-  it("uses the query branch over the state default when ?branch is present", async () => {
+  it("uses the query branch when ?branch is present", async () => {
     const { deps, calls } = fakes();
     await run(
       `/api/load-graph-stream?repo=${REPO}&branch=${encodeURIComponent(
@@ -542,10 +538,6 @@ describe("graphs-planning load-graph-stream route", () => {
       deps
     );
     expect(calls).toContain(`fetchBicepSelection(${REPO}|${QUERY_BRANCH})`);
-    // The default-branch seam is not consulted when the query supplies a branch.
-    expect(calls.some((c) => c.startsWith("defaultBranchForState"))).toBe(
-      false
-    );
   });
 
   it("passes the empty graph-json path and skips workspace derivation for a remote selection", async () => {

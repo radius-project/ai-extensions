@@ -1184,22 +1184,16 @@ const remediationRoutes = createRemediationRoutes(
 
 const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  resolveBranchForRequest: (
-    entry,
-    repo,
-    requestedBranch,
-    followWorkspaceBranch
-  ) =>
+  resolveBranchForRequest: (entry, repo, requestedBranch) =>
     resolveGraphBranchForRequest(
       entry.state,
       repo,
       requestedBranch,
-      followWorkspaceBranch,
+      undefined,
       currentWorkspaceBranch
     ),
   commitBranchResolution: (entry, repo, resolution) =>
     commitWorkspaceBranchResolution(entry.state, repo, resolution),
-  defaultBranchForState,
   prepareSourceRef: (entry, context) =>
     prepareSourceRefResources(entry, "graph", context),
   commitSourceRef: (entry, resources, context, expectedToken) =>
@@ -1235,9 +1229,9 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
 //
 // `github` is bound into `resolveRadArtifactsDir`, `fetchRecipePack` and
 // `resolveRecipeOutputs` here rather than injected, which is what keeps the
-// route modules free of it. The pure helpers (`defaultBranchForState`,
-// `computeGraphDiff`, `record`, …) are injected rather than imported by the
-// workflows, matching how the sibling families inject `repoMatchesWorkspace`.
+// route modules free of it. The pure helpers (`computeGraphDiff`, `record`, …)
+// are injected rather than imported by the workflows, matching how the sibling
+// families inject `repoMatchesWorkspace`.
 const observeServerWorkspaceModelingRun = (
   state: CanvasState,
   repo: string,
@@ -1300,7 +1294,6 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   setSourceRefResources: (entry, view, resources, sourceRefInput, token) =>
     setSourceRefResources(entry, view, resources, sourceRefInput, token),
   isCurrentSourceRefToken,
-  defaultBranchForState,
   canReuseModeledGraph,
   addGraphProgress,
   beginPlannedGraphRequest,

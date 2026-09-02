@@ -75,8 +75,6 @@ function start(): Harness {
         });
       },
       commitBranchResolution: () => true,
-      defaultBranchForState: (current) =>
-        current?.contextBranch || current?.workspaceBranch || "main",
       // The real source-ref token derivation and first-wins commit guard, run
       // against the live state the handler mutates.
       prepareSourceRef: (entry, context) => {
@@ -303,7 +301,7 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
     const entry = await container!.getOrCreate("panel-a");
 
     const response = await fetch(
-      `${entry.baseUrl}/api/load-graph-stream?repo=octo%2Fapp&branch=old-name&followWorkspaceBranch=true`
+      `${entry.baseUrl}/api/load-graph-stream?repo=octo%2Fapp&branch=old-name`
     );
     const result = await readFrames(response);
 

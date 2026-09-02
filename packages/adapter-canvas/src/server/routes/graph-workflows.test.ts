@@ -305,7 +305,6 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     prepareSourceRefResources,
     setSourceRefResources,
     isCurrentSourceRefToken,
-    defaultBranchForState,
     canReuseModeledGraph,
     addGraphProgress,
     beginPlannedGraphRequest,
@@ -893,6 +892,7 @@ describe("graph planning workflows", () => {
         graphLoaded: true,
         graphTargetRepo: "octo/app",
         graphBranch: "main",
+        graphFollowsWorkspaceBranch: true,
         graphFromWorkspace: true,
         graphDefinitionHash: "hash-a",
         graphResources: [{ id: "cached" }] as CanvasGraphResource[]
@@ -912,6 +912,7 @@ describe("graph planning workflows", () => {
       });
       // Persisted provenance follows the response, so the next page render
       // cannot contradict what this request just reported.
+      expect(harness.state.graphFollowsWorkspaceBranch).toBe(false);
       expect(harness.state.graphFromWorkspace).toBe(false);
       // The compile is skipped entirely, which is the point of the cache.
       expect(harness.order).toEqual([
@@ -1465,6 +1466,7 @@ describe("graph planning workflows", () => {
       harness.state.plannedResources = [{ id: "res-a" }];
       harness.state.plannedRepo = "octo/app";
       harness.state.plannedBranch = "main";
+      harness.state.plannedFollowsWorkspaceBranch = true;
       harness.state.plannedProvider = "azure";
       harness.state.plannedEnvironment = "";
       harness.state.plannedDefinitionHash = "hash-a";
@@ -1479,6 +1481,7 @@ describe("graph planning workflows", () => {
         refreshed: true
       });
       expect(harness.handoffs).toHaveLength(1);
+      expect(harness.state.plannedFollowsWorkspaceBranch).toBe(false);
       expect(harness.order).toEqual(["select:main", "stage:main", "discard:"]);
       expect(harness.recipePackCalls).toEqual([]);
     });

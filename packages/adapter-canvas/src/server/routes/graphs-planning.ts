@@ -624,15 +624,13 @@ export interface GraphsPlanningStreamDependencies {
   resolveBranchForRequest(
     entry: CanvasServerEntry,
     repo: string,
-    requestedBranch: string,
-    followWorkspaceBranch: boolean | undefined
+    requestedBranch: string
   ): Promise<WorkspaceBranchResolution>;
   commitBranchResolution(
     entry: CanvasServerEntry,
     repo: string,
     resolution: ResolvedWorkspaceBranch
   ): boolean;
-  defaultBranchForState(state: CanvasState | undefined): string;
   // Prepares the source-ref context for the entry and returns its token.
   prepareSourceRef(
     entry: CanvasServerEntry,
@@ -731,10 +729,7 @@ export async function handleLoadGraphStream(
     branchResolution = await dependencies.resolveBranchForRequest(
       entry,
       repo,
-      requestedBranch,
-      url.searchParams.has("followWorkspaceBranch") ?
-        url.searchParams.get("followWorkspaceBranch") === "true"
-      : undefined
+      requestedBranch
     );
   } catch (error) {
     sendDone({ error: dependencies.errorMessage(error) });

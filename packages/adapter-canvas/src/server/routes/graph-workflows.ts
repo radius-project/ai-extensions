@@ -133,7 +133,6 @@ export interface GraphWorkflowDependencies<
     view: GraphView,
     token: unknown
   ): boolean;
-  defaultBranchForState(state: CanvasState | null | undefined): string;
   canReuseModeledGraph(
     state: CanvasState,
     repo: string,
@@ -718,14 +717,18 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         pipeline.discardStagedArtifacts(staged);
         // Keep persisted provenance in step with what this response reports, so
         // a later page render cannot disagree with the page it just answered.
+        state.graphFollowsWorkspaceBranch =
+          branchResolution.followsWorkspaceBranch;
         state.graphFromWorkspace = selection.fromWorkspace;
-        return json(200, {
-          reload: false,
-          resources: state.graphResources,
-          fromWorkspace: selection.fromWorkspace,
-          cached: true,
-          ...(resolvedBranch ? { resolvedBranch } : {})
-        });
+        return withResolvedBranch(
+          json(200, {
+            reload: false,
+            resources: state.graphResources,
+            fromWorkspace: selection.fromWorkspace,
+            cached: true
+          }),
+          resolvedBranch
+        );
       }
 
       addEvent(
@@ -790,12 +793,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "Rendered the application graph."
       );
       dependencies.clearGraphRepairAttempt(entry, "graph");
-      return json(200, {
-        reload: !data.refresh,
-        resources,
-        fromWorkspace: selection.fromWorkspace,
-        ...(resolvedBranch ? { resolvedBranch } : {})
-      });
+      return withResolvedBranch(
+        json(200, {
+          reload: !data.refresh,
+          resources,
+          fromWorkspace: selection.fromWorkspace
+        }),
+        resolvedBranch
+      );
     };
     return await settleWorkflow(run, {
       state: () => activeState,
@@ -1009,11 +1014,15 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       if (canReusePlannedGraph) {
         pipeline.discardStagedArtifacts(staged);
         state.plannedResources = previousPlannedResources;
-        return json(200, {
-          reload: false,
-          refreshed: true,
-          ...(resolvedBranch ? { resolvedBranch } : {})
-        });
+        state.plannedFollowsWorkspaceBranch =
+          branchResolution.followsWorkspaceBranch;
+        return withResolvedBranch(
+          json(200, {
+            reload: false,
+            refreshed: true
+          }),
+          resolvedBranch
+        );
       }
       addEvent(
         "building_graph",
@@ -1122,11 +1131,13 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         previousPlanSelection.environment !== state.plannedEnvironment;
       const refreshed =
         data.refresh === true && !resourcesChanged && !selectionChanged;
-      return json(200, {
-        reload: !refreshed,
-        ...(refreshed ? { refreshed: true } : {}),
-        ...(resolvedBranch ? { resolvedBranch } : {})
-      });
+      return withResolvedBranch(
+        json(200, {
+          reload: !refreshed,
+          ...(refreshed ? { refreshed: true } : {})
+        }),
+        resolvedBranch
+      );
     };
     return await settleWorkflow(run, {
       state: () => activeState,

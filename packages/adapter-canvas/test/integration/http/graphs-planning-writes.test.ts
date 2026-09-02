@@ -18,7 +18,6 @@ import {
 } from "../../../src/source-refs.js";
 import {
   commitWorkspaceBranchResolution,
-  defaultBranchForState,
   resolveGraphBranchForRequest
 } from "../../../src/workspace.js";
 import {
@@ -144,7 +143,6 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         prepareSourceRefResources,
         setSourceRefResources,
         isCurrentSourceRefToken,
-        defaultBranchForState,
         canReuseModeledGraph,
         addGraphProgress,
         beginPlannedGraphRequest,
