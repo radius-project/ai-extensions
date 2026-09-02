@@ -44,7 +44,7 @@ function versionFromManifest(text: string): string {
 export function generatorVersionCandidates(moduleDir: string): string[] {
   return [
     path.join(moduleDir, "package.json"),
-    path.resolve(moduleDir, "../../../plugins/radius/package.json")
+    path.resolve(moduleDir, "../../../extensions/radius/package.json")
   ];
 }
 

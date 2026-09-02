@@ -16,7 +16,7 @@ const root = path.resolve(
 );
 const script = path.join(
   root,
-  "plugins",
+  "extensions",
   "radius",
   "skills",
   "radius-app-bicep",

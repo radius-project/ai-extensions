@@ -11,7 +11,7 @@ const workspaceYaml = readFileSync(
   "utf8"
 );
 const pluginManifest = JSON.parse(
-  readFileSync(new URL("plugins/radius/package.json", repoRoot), "utf8")
+  readFileSync(new URL("extensions/radius/package.json", repoRoot), "utf8")
 ) as { dependencies?: Record<string, string> };
 const canvasManifest = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8")
