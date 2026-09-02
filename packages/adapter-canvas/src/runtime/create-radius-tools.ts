@@ -1,4 +1,4 @@
-// createRadiusTools — builds the 6 radius_* tools from RADIUS_TOOL_DECLARATIONS
+// createRadiusTools — builds the 7 radius_* tools from RADIUS_TOOL_DECLARATIONS
 // plus a RadiusExtensionDependencies dependency object. Same shape as
 // createRadiusCanvas: pure construction, no I/O until a handler is invoked.
 
@@ -7,7 +7,7 @@ import {
   ambiguousAppSourceBrief,
   unsupportedAppSourceReport
 } from "@radius-project/core";
-import { errorMessage } from "./util.js";
+import { errorMessage, optionalString } from "./util.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import {
   failedGraphDiffResult,
@@ -18,6 +18,10 @@ import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { ModelingActivity } from "./modeling-activity.js";
 import type { CanvasState } from "../shared.js";
 import type { DeployToolArgs } from "../deploy-tools.js";
+import {
+  appModelTargetKey,
+  clearAppModelAuthoringFailure
+} from "../app-model-authoring-failure.js";
 
 interface ToolArgs {
   [key: string]: unknown;
@@ -131,6 +135,63 @@ export function createRadiusTools(
         }
         if (targetsWorkspace) announceModelingRun(state);
         return deps.radiusAppBicepSkill(repoPath, brief);
+      }
+    },
+    {
+      ...declarationByName.get("radius_report_modeling_failure")!,
+      handler: async (args: ToolArgs) => {
+        const instanceId = optionalString(args.instanceId);
+        const repo = optionalString(args.repo);
+        const branch = optionalString(args.branch);
+        const attemptToken = optionalString(args.attemptToken);
+        const failure = optionalString(args.error);
+        if (!instanceId || !repo || !branch || !attemptToken || !failure) {
+          return {
+            recorded: false,
+            error:
+              "instanceId, repo, branch, attemptToken, and error are required"
+          };
+        }
+        if (failure.length > 4000) {
+          return {
+            recorded: false,
+            error: "error must not exceed 4000 characters"
+          };
+        }
+        const entry = deps.servers.get(instanceId);
+        const target = appModelTargetKey(repo, branch);
+        if (
+          !entry ||
+          entry.state.appModelAttemptTokens?.[target] !== attemptToken
+        ) {
+          return {
+            recorded: false,
+            error:
+              "The Canvas modeling attempt is no longer current; the failure was not recorded."
+          };
+        }
+        const content = await fetchBicepForBranch(repo, branch, entry.state);
+        if (content) {
+          clearAppModelAuthoringFailure(entry.state, repo, branch);
+          return {
+            recorded: false,
+            error:
+              "The application model now exists; the stale failure was not recorded."
+          };
+        }
+        if (entry.state.appModelAttemptTokens?.[target] !== attemptToken) {
+          return {
+            recorded: false,
+            error:
+              "A newer Canvas modeling attempt replaced this one; the stale failure was not recorded."
+          };
+        }
+        entry.state.appModelFailures ??= {};
+        entry.state.appModelFailures[target] = {
+          attemptToken,
+          error: failure
+        };
+        return { recorded: true };
       }
     },
     {

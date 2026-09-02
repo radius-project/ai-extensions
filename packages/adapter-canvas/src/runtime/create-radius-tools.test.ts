@@ -541,6 +541,126 @@ describe("RU-07b: radius_generate_app with several Dockerfiles", () => {
 });
 
 // RU-08: PR diff mapping/fetch failure/markdown.
+describe("TL-11: radius_report_modeling_failure", () => {
+  async function currentAttempt(
+    options?: Parameters<typeof createFakeDependencies>[0]
+  ) {
+    const harness = setup(options);
+    const entry = await harness.deps.getOrCreateServer("radius-panel", "graph");
+    Object.assign(entry.state, {
+      contextRepo: "acme/widgets",
+      contextBranch: "main",
+      workspaceRepo: "acme/widgets",
+      workspaceBranch: "main",
+      workspacePath: "/workspace",
+      appModelAttemptTokens: {
+        "acme/widgets::main": "attempt-1"
+      }
+    });
+    return { ...harness, entry };
+  }
+
+  const report = {
+    instanceId: "radius-panel",
+    repo: "acme/widgets",
+    branch: "main",
+    attemptToken: "attempt-1",
+    error: "The configured Recipe rejects the required credential shape."
+  };
+
+  it("records a permanent failure for the current missing-model attempt", async () => {
+    const { tools, entry } = await currentAttempt();
+
+    const result = await findTool(
+      tools,
+      "radius_report_modeling_failure"
+    ).handler(report);
+
+    expect(result).toEqual({ recorded: true });
+    expect(entry.state.appModelFailures?.["acme/widgets::main"]).toEqual({
+      attemptToken: "attempt-1",
+      error: report.error
+    });
+  });
+
+  it("rejects incomplete, oversized, and stale reports", async () => {
+    const { tools, entry } = await currentAttempt();
+    const tool = findTool(tools, "radius_report_modeling_failure");
+
+    await expect(tool.handler({})).resolves.toMatchObject({ recorded: false });
+    await expect(
+      tool.handler({ ...report, error: "x".repeat(4001) })
+    ).resolves.toMatchObject({ recorded: false });
+    await expect(
+      tool.handler({ ...report, attemptToken: "stale-attempt" })
+    ).resolves.toMatchObject({ recorded: false });
+    await expect(
+      tool.handler({ ...report, instanceId: "closed-panel" })
+    ).resolves.toMatchObject({ recorded: false });
+    expect(entry.state.appModelFailures).toBeUndefined();
+  });
+
+  it("propagates a model read failure instead of recording an unverified failure", async () => {
+    const { tools, deps, entry } = await currentAttempt();
+    vi.mocked(deps.workspace.fetchWorkspaceBicep).mockRejectedValue(
+      new Error("workspace unavailable")
+    );
+
+    await expect(
+      findTool(tools, "radius_report_modeling_failure").handler(report)
+    ).rejects.toThrow("workspace unavailable");
+    expect(entry.state.appModelFailures).toBeUndefined();
+  });
+
+  it("rejects a report superseded while the model recheck is in flight", async () => {
+    const { tools, deps, entry } = await currentAttempt();
+    let finishRead!: (content: string | null) => void;
+    vi.mocked(deps.workspace.fetchWorkspaceBicep).mockImplementation(
+      () =>
+        new Promise<string | null>((resolve) => {
+          finishRead = resolve;
+        })
+    );
+
+    const pending = findTool(tools, "radius_report_modeling_failure").handler(
+      report
+    );
+    await vi.waitFor(() =>
+      expect(deps.workspace.fetchWorkspaceBicep).toHaveBeenCalledOnce()
+    );
+    const tokens = entry.state.appModelAttemptTokens;
+    if (!tokens) throw new Error("expected current modeling attempt");
+    tokens["acme/widgets::main"] = "attempt-2";
+    finishRead(null);
+
+    await expect(pending).resolves.toMatchObject({ recorded: false });
+    expect(entry.state.appModelFailures).toBeUndefined();
+  });
+
+  it("rejects a stale failure when the application model now exists", async () => {
+    const { tools, entry } = await currentAttempt({
+      bicepByRepoBranch: {
+        "workspace:acme/widgets@main": "extension radius"
+      }
+    });
+    entry.state.appModelFailures = {
+      "acme/widgets::main": {
+        attemptToken: "attempt-1",
+        error: "older failure"
+      }
+    };
+
+    const result = await findTool(
+      tools,
+      "radius_report_modeling_failure"
+    ).handler(report);
+
+    expect(result).toMatchObject({ recorded: false });
+    expect(entry.state.appModelFailures).toEqual({});
+    expect(entry.state.appModelAttemptTokens).toEqual({});
+  });
+});
+
 describe("RU-08: radius_generate_pr_diff_markdown", () => {
   it("reports missing app.bicep on both branches without calling rad", async () => {
     const { tools, deps } = setup();

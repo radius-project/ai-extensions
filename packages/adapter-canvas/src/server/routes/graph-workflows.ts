@@ -30,6 +30,10 @@ import type {
   ResolvedWorkspaceBranch,
   WorkspaceBranchResolution
 } from "../../workspace.js";
+import {
+  appModelAuthoringFailure,
+  clearAppModelAuthoringFailure
+} from "../../app-model-authoring-failure.js";
 
 // The use-case layer behind the three `graphs-planning` write routes.
 //
@@ -526,6 +530,23 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
     reportRefusal: (detail: string) => void,
     isCurrent?: () => boolean
   ): Promise<GraphWorkflowOutcome> {
+    if (isCurrent && !isCurrent()) return json(409, STALE_PAYLOAD);
+    const authoringFailure = appModelAuthoringFailure(
+      entry.state,
+      repo,
+      branch
+    );
+    if (authoringFailure) {
+      const detail = `Application model generation stopped: ${authoringFailure.error} Fix the reported issue, then ask Copilot to generate the Radius application model again.`;
+      reportRefusal(detail);
+      return json(200, {
+        error: detail,
+        modelingFailed: true,
+        appModelAuthoringFailed: true,
+        repo,
+        branch
+      });
+    }
     const refusal = await branchRefusalReason(entry, repo, branch);
     if (isCurrent && !isCurrent()) return json(409, STALE_PAYLOAD);
     if (refusal) {
@@ -650,6 +671,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       const selection = await pipeline.selectAppBicep(entry, repo, branch);
       const content = selection.content;
       if (content) {
+        clearAppModelAuthoringFailure(state, repo, branch);
         if (modelCreationIsRunning(progressHandle.record)) {
           addEvent(
             "creating_model",
@@ -968,6 +990,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         );
         return withResolvedBranch(outcome, resolvedBranch);
       }
+      clearAppModelAuthoringFailure(state, repo, branch);
       if (modelCreationIsRunning(progressHandle.record)) {
         addEvent(
           "creating_model",

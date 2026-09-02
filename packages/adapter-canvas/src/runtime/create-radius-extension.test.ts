@@ -405,9 +405,15 @@ describe("RU-19: host-channel callback wiring (context/permission/session)", () 
     expect(session.send).toHaveBeenCalledOnce();
     const sent = (session.send as ReturnType<typeof vi.fn>).mock
       .calls[0][0] as { prompt: string; displayPrompt: string };
+    const attemptToken = state?.appModelAttemptTokens?.["acme/widgets::main"];
+    if (!attemptToken) throw new Error("expected current modeling attempt");
     // The agent half must carry the full instructions...
     expect(sent.prompt).toBe(
-      appBicepHandoffPrompt("acme/widgets", "graph", ["main"], "app-graph")
+      appBicepHandoffPrompt("acme/widgets", "graph", ["main"], "app-graph", {
+        attemptToken,
+        instanceId: "app-graph",
+        branch: "main"
+      })
     );
     // ...and the timeline half must be the short stand-in, not the reverse.
     expect(sent.displayPrompt).toBe(

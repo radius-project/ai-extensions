@@ -498,6 +498,36 @@ describe("graph planning workflows", () => {
       ]);
     });
 
+    it("surfaces a reported permanent authoring failure without requesting modeling again", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "The configured Recipe rejects the required credential shape."
+        }
+      };
+      harness.state.appModelAttemptTokens = {
+        "octo/app::main": "attempt-1"
+      };
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.payload).toEqual({
+        error:
+          "Application model generation stopped: The configured Recipe rejects the required credential shape. Fix the reported issue, then ask Copilot to generate the Radius application model again.",
+        modelingFailed: true,
+        appModelAuthoringFailed: true,
+        repo: "octo/app",
+        branch: "main"
+      });
+      expect(harness.handoffs).toEqual([]);
+      expect(messages(harness.state).at(-1)).toContain(
+        "Application model generation stopped"
+      );
+    });
+
     it("still hands off when the branch tree cannot be read", async () => {
       const harness = start({
         selections: { main: selectionOf({ content: null }) },
@@ -510,9 +540,20 @@ describe("graph planning workflows", () => {
 
     it("reports a rendered model so drift is still noticed after it exists", async () => {
       const harness = start({ selections: { main: selectionOf() } });
+      harness.state.appModelAttemptTokens = {
+        "octo/app::main": "attempt-1"
+      };
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "stale failure"
+        }
+      };
 
       await harness.run("loadGraph", '{"repo":"octo/app"}');
 
+      expect(harness.state.appModelAttemptTokens).toEqual({});
+      expect(harness.state.appModelFailures).toEqual({});
       expect(harness.handoffs).toEqual([
         {
           repo: "octo/app",
@@ -1359,9 +1400,20 @@ describe("graph planning workflows", () => {
 
     it("reports a rendered plan's model so drift is still noticed after it exists", async () => {
       const harness = start({ selections: { main: selectionOf() } });
+      harness.state.appModelAttemptTokens = {
+        "octo/app::main": "attempt-1"
+      };
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "stale failure"
+        }
+      };
 
       await harness.run("planGraph", '{"repo":"octo/app"}');
 
+      expect(harness.state.appModelAttemptTokens).toEqual({});
+      expect(harness.state.appModelFailures).toEqual({});
       expect(harness.handoffs).toEqual([
         {
           repo: "octo/app",

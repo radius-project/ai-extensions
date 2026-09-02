@@ -254,6 +254,36 @@ describe("graphs-planning writes real-loopback HIT", () => {
     });
   });
 
+  it("returns a terminal authoring failure instead of another app-bicep handoff", async () => {
+    const harness = start({
+      selections: { main: selectionOf("main", null) }
+    });
+    harness.state.appModelFailures = {
+      "octo/app::main": {
+        attemptToken: "attempt-1",
+        error: "The configured Recipe rejects the required credential shape."
+      }
+    };
+    harness.state.appModelAttemptTokens = {
+      "octo/app::main": "attempt-1"
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/load-graph",
+      '{"repo":"octo/app"}'
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      modelingFailed: true,
+      appModelAuthoringFailed: true,
+      repo: "octo/app",
+      branch: "main"
+    });
+  });
+
   it("loads the worktree model after an implicit workspace branch is renamed", async () => {
     const harness = start({
       liveWorkspaceBranch: "new-name",

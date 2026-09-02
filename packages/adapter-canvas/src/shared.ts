@@ -298,6 +298,15 @@ export interface CanvasState {
   // deduplicate both targets.
   appBicepHandoffKeys?: Record<string, string>;
   appBicepHandoffKey?: string;
+  appModelAttemptGeneration?: number;
+  appModelAttemptTokens?: Record<string, string>;
+  appModelFailures?: Record<
+    string,
+    {
+      attemptToken: string;
+      error: string;
+    }
+  >;
   graphRepairAttempts?: Partial<
     Record<
       GraphProgressView,

@@ -21,6 +21,7 @@ const ACTION_NAMES = ["get_graph_resources", "update_source_refs"];
 
 const TOOL_NAMES = [
   "radius_generate_app",
+  "radius_report_modeling_failure",
   "radius_generate_pr_diff_markdown",
   "radius_publish_custom_type_extension",
   "radius_publish_recipe",
@@ -1289,5 +1290,50 @@ describe("P0-A Dockerfile prerequisite through the assembled runtime", () => {
     } finally {
       await harness.extension.shutdown("test");
     }
+  });
+});
+
+describe("TL-11 permanent modeling failure through the assembled runtime", () => {
+  it("records a current attempt and rejects a stale report", async () => {
+    const harness = await createRuntimeSdkHarness();
+    const entry = await harness.deps.getOrCreateServer("radius-panel", "graph");
+    Object.assign(entry.state, {
+      contextRepo: "acme/widgets",
+      contextBranch: "main",
+      workspaceRepo: "acme/widgets",
+      workspaceBranch: "main",
+      workspacePath: "/workspace",
+      appModelAttemptTokens: {
+        "acme/widgets::main": "attempt-1"
+      }
+    });
+    const tool = harness.extension.tools.find(
+      (candidate) => candidate.name === "radius_report_modeling_failure"
+    );
+    if (!tool) throw new Error("radius_report_modeling_failure not registered");
+
+    await expect(
+      tool.handler({
+        instanceId: "radius-panel",
+        repo: "acme/widgets",
+        branch: "main",
+        attemptToken: "attempt-1",
+        error: "The configured Recipe rejects the required credential shape."
+      })
+    ).resolves.toEqual({ recorded: true });
+    await expect(
+      tool.handler({
+        instanceId: "radius-panel",
+        repo: "acme/widgets",
+        branch: "main",
+        attemptToken: "attempt-0",
+        error: "stale failure"
+      })
+    ).resolves.toMatchObject({ recorded: false });
+    expect(
+      entry.state.appModelFailures?.["acme/widgets::main"]?.error
+    ).toContain("configured Recipe");
+
+    await harness.extension.shutdown("test");
   });
 });
