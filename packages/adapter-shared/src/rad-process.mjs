@@ -43,9 +43,17 @@ export function resolveWindowsLauncherPath(
   const candidates = [
     join(moduleDirectory, "..", "native", "windows-launcher", "bin", filename)
   ];
+  // The bundled extension keeps the launchers in a `bin` directory beside it,
+  // but a bundled skill script sits a few directories below that, so finding
+  // them means walking up. The walk stops at the package root -- the nearest
+  // ancestor with a package.json -- so it can only ever match inside the
+  // installed extension. Walking past it would reach C:\bin, which standard
+  // users can create on a default Windows install, and would then run whatever
+  // was planted there with the extension's privileges.
   let ancestor = moduleDirectory;
   for (let depth = 0; depth < 8; depth += 1) {
     candidates.push(join(ancestor, "bin", filename));
+    if (existsSync(join(ancestor, "package.json"))) break;
     const parent = dirname(ancestor);
     if (parent === ancestor) break;
     ancestor = parent;
@@ -299,7 +307,6 @@ export function spawnRad(
         });
     }, timeout);
     signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted) abort();
 
     function finalize(code, signal) {
       if (settled) return;

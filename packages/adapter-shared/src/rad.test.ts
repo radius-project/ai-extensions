@@ -1688,6 +1688,26 @@ describe("radBinaryVersion", () => {
       radBinaryVersion(missing, { timeout: 2000 })
     ).resolves.toBeNull();
   });
+
+  it("reports why the version could not be read", async () => {
+    // downloadRad reads null as "stale" and re-fetches ~70MB, so a packaging
+    // failure such as a missing Windows launcher would otherwise cause a silent
+    // download on every single call.
+    const missing = path.join(
+      os.tmpdir(),
+      "definitely-not-rad",
+      `rad-${Date.now()}`
+    );
+    const messages: string[] = [];
+
+    await radBinaryVersion(missing, {
+      timeout: 2000,
+      log: (message: string) => messages.push(message)
+    });
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain(`Could not read the version of ${missing}`);
+  });
 });
 
 // These reconciliation tests write executable shebang scripts and spawn them as

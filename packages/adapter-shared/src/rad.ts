@@ -213,7 +213,6 @@ function awaitWithAbort<T>(
     const abort = (): void =>
       finish(() => reject(new RadProcessError(`${label} aborted`, "", "")));
     signal.addEventListener("abort", abort, { once: true });
-    if (signal.aborted) abort();
     work.then(
       (value) => finish(() => resolve(value)),
       (error: unknown) => finish(() => reject(error))
@@ -468,11 +467,18 @@ export function parseRadVersionOutput(stdout: string): string | null {
  * wedged rad can never stall binary resolution beyond `timeout`. (If bicep isn't
  * installed, rad returns fast with a "bicep not installed" note and still emits
  * `version`.) Never throws — a null result means "version unknown", which callers
- * treat as "leave the existing binary in place".
+ * treat as "leave the existing binary in place". Not every null is benign,
+ * though: a packaging failure such as a missing Windows launcher also lands
+ * here, and downloadRad reads null as "stale" and re-fetches ~70MB every call,
+ * so the reason is logged rather than discarded.
  */
 export function radBinaryVersion(
   radPath: string,
-  { timeout = 10000, signal }: { timeout?: number; signal?: AbortSignal } = {}
+  {
+    timeout = 10000,
+    signal,
+    log = () => {}
+  }: { timeout?: number; signal?: AbortSignal; log?: Logger } = {}
 ): Promise<string | null> {
   return spawnRad(radPath, ["version", "--cli", "--output", "json"], {
     env: managedBicepEnv(process.env),
@@ -481,7 +487,10 @@ export function radBinaryVersion(
     signal
   })
     .then(({ stdout }) => parseRadVersionOutput(stdout))
-    .catch(() => null);
+    .catch((error: unknown) => {
+      log(`Could not read the version of ${radPath}: ${errorMessage(error)}`);
+      return null;
+    });
 }
 
 // Parses the numeric major.minor.patch core out of a version string
@@ -729,7 +738,7 @@ async function downloadRad(
   // the target release — the signal that no (further) download is needed.
   const upToDate = async (): Promise<boolean> => {
     if (!isExecutableFile(dest)) return false;
-    const current = await radBinaryVersion(dest);
+    const current = await radBinaryVersion(dest, { log });
     return current != null && compareVersions(current, tag) >= 0;
   };
   if (await upToDate()) return dest;
@@ -815,7 +824,7 @@ async function reconcileWithLatest(
     return existing;
   }
 
-  const localVersion = await radBinaryVersion(existing);
+  const localVersion = await radBinaryVersion(existing, { log });
   if (!localVersion) {
     log(`Could not determine the version of ${existing}; using it as-is.`);
     return existing;
@@ -1306,7 +1315,6 @@ export async function runRadAppGraph(
         destroyStreams();
       };
       signal?.addEventListener("abort", abort, { once: true });
-      if (signal?.aborted) abort();
 
       function finalize(code: number | null, signal: NodeJS.Signals | null) {
         if (settled) return;

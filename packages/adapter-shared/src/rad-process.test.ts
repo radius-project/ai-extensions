@@ -85,10 +85,52 @@ describe("Windows Radius launcher selection", () => {
     const root = temporaryRoot("packaged-radius-launcher-");
     const nestedModule = join(root, "skills", "app", "scripts", "entry.mjs");
     mkdirSync(dirname(nestedModule), { recursive: true });
+    writeFileSync(join(root, "package.json"), "{}");
     const packaged = writeLauncher(join(root, "bin"), "x64");
 
     expect(
       resolveWindowsLauncherPath("x64", pathToFileURL(nestedModule).href)
+    ).toBe(packaged);
+  });
+
+  it("does not run a launcher planted above the package root", () => {
+    // An unbounded walk reaches C:\bin, which standard users can create on a
+    // default Windows install, so anyone could plant an executable there and
+    // have it run with the extension's privileges. The search stops at the
+    // package root, so a launcher outside the installed extension is invisible
+    // to it even though the directory layout otherwise matches.
+    const outside = temporaryRoot("outside-radius-launcher-");
+    const packageRoot = join(outside, "extension");
+    const nestedModule = join(
+      packageRoot,
+      "skills",
+      "app",
+      "scripts",
+      "entry.mjs"
+    );
+    mkdirSync(dirname(nestedModule), { recursive: true });
+    writeFileSync(join(packageRoot, "package.json"), "{}");
+    writeLauncher(join(outside, "bin"), "x64");
+
+    expect(() =>
+      resolveWindowsLauncherPath("x64", pathToFileURL(nestedModule).href)
+    ).toThrow(
+      'The packaged Windows Radius launcher "windows-radius-launcher-x64.exe" is missing.'
+    );
+  });
+
+  it("still finds a launcher that sits at the package root itself", () => {
+    // The bundled extension.mjs lives beside both package.json and bin, so the
+    // package root has to be searched before the walk stops there.
+    const root = temporaryRoot("root-radius-launcher-");
+    writeFileSync(join(root, "package.json"), "{}");
+    const packaged = writeLauncher(join(root, "bin"), "x64");
+
+    expect(
+      resolveWindowsLauncherPath(
+        "x64",
+        pathToFileURL(join(root, "extension.mjs")).href
+      )
     ).toBe(packaged);
   });
 

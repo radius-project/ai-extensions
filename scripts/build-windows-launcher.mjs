@@ -108,6 +108,10 @@ function isUpToDate(output, sourceTimestamp) {
 }
 
 function build(output, architecture) {
+  // The launchers are unsigned. Under WDAC/AppLocker an unsigned binary is
+  // denied outright, and a small Go executable that spawns a process and
+  // creates a Job Object is a common AV false positive. Authenticode signing is
+  // tracked in https://github.com/radius-project/ai-extensions/issues/699.
   try {
     execFileSync(
       "go",
