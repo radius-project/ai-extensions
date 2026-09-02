@@ -32,7 +32,9 @@ export type AutomaticBranchVerificationPolicy =
         | "verify-present"
         | "verify-unreadable"
         | "dispatcher-legacy-chain"
-        | "dispatcher-unreadable";
+        | "dispatcher-unreadable"
+        | "legacy-deploy-present"
+        | "legacy-deploy-unreadable";
     };
 
 type FetchFile = (
@@ -52,6 +54,7 @@ export function hasWorkflowRunTrigger(workflow: unknown): boolean {
 export function automaticBranchVerificationPolicy(input: {
   verify: WorkflowFileReadResult;
   dispatcher: WorkflowFileReadResult;
+  legacyDeploy: WorkflowFileReadResult;
 }): AutomaticBranchVerificationPolicy {
   const fileState = (
     result: WorkflowFileReadResult
@@ -60,10 +63,14 @@ export function automaticBranchVerificationPolicy(input: {
       return "present";
     return result.status === 404 ? "absent" : "unreadable";
   };
-  const verifyState = fileState(input.verify);
-  if (verifyState === "present") {
-    return { state: "disabled", reason: "verify-present" };
+  const legacyDeployState = fileState(input.legacyDeploy);
+  if (legacyDeployState === "present") {
+    return { state: "disabled", reason: "legacy-deploy-present" };
   }
+  if (legacyDeployState === "unreadable") {
+    return { state: "disabled", reason: "legacy-deploy-unreadable" };
+  }
+  const verifyState = fileState(input.verify);
   if (verifyState === "unreadable") {
     return { state: "disabled", reason: "verify-unreadable" };
   }
@@ -92,7 +99,26 @@ export function automaticBranchVerificationPolicy(input: {
       return { state: "disabled", reason: "dispatcher-unreadable" };
     }
   }
+  if (verifyState === "present") {
+    return { state: "disabled", reason: "verify-present" };
+  }
   return { state: "enabled" };
+}
+
+export function automaticBranchVerificationPolicyMessage(
+  policy: AutomaticBranchVerificationPolicy
+): string {
+  if (policy.state === "enabled" || policy.reason === "verify-present")
+    return "";
+  if (policy.reason === "verify-unreadable")
+    return "Radius could not safely read the default branch's credential verification workflow.";
+  if (policy.reason === "dispatcher-legacy-chain")
+    return "The default branch's deploy dispatcher can still auto-run after credential verification.";
+  if (policy.reason === "dispatcher-unreadable")
+    return "Radius could not safely inspect the default branch's deploy dispatcher for automatic triggers.";
+  if (policy.reason === "legacy-deploy-present")
+    return "The default branch still contains the legacy deploy workflow, which can auto-run after credential verification.";
+  return "Radius could not safely confirm that the default branch's legacy deploy workflow is absent.";
 }
 
 export async function planCredentialVerification({
@@ -103,6 +129,7 @@ export async function planCredentialVerification({
   verifyWorkflowPath = ".github/workflows/radius-verify-credentials.yml",
   dispatcherWorkflowPath = ".github/workflows/run-rad-commands.yml",
   automaticPushEnabled = false,
+  branchVerificationAllowed = true,
   fetchFile
 }: {
   targetRepo: string;
@@ -112,6 +139,7 @@ export async function planCredentialVerification({
   verifyWorkflowPath?: string;
   dispatcherWorkflowPath?: string;
   automaticPushEnabled?: boolean;
+  branchVerificationAllowed?: boolean;
   fetchFile: FetchFile;
 }): Promise<CredentialVerificationPlan> {
   if (!prState) {
@@ -170,9 +198,13 @@ export async function planCredentialVerification({
     skipReason = "the verify workflow is not on the default branch yet";
   } else if (dispatcherChains) {
     skipReason = `the deploy workflow on "${defaultBranch}" still auto-runs after verification; merge the pull request to remove that deployment trigger before retrying verification`;
+  } else if (!branchVerificationAllowed) {
+    skipReason =
+      "default-branch workflow safety could not be established for setup-branch verification";
   }
 
-  const shouldDispatch = verifyExists && !dispatcherChains;
+  const shouldDispatch =
+    branchVerificationAllowed && verifyExists && !dispatcherChains;
   return {
     shouldDispatch,
     trigger: shouldDispatch ? "workflow_dispatch" : "none",

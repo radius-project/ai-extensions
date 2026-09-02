@@ -57,6 +57,7 @@ import { runVerificationDispatch } from "../services/verification-dispatch.js";
 import { discoverAutomaticVerificationRun } from "../services/automatic-verification-run.js";
 import {
   automaticBranchVerificationPolicy,
+  automaticBranchVerificationPolicyMessage,
   describeVerificationDispatch,
   describePullRequestNextStep,
   describeMergeRequiredTerminal,
@@ -241,7 +242,8 @@ export interface CreateEnvironmentDependencies
   deleteLegacyDeployWorkflow(
     repo: string,
     executor?: SelectedGhExecutor,
-    beforeDelete?: () => Promise<boolean>
+    beforeDelete?: () => Promise<boolean>,
+    branch?: string
   ): Promise<boolean | "cancelled">;
   createPullRequestApi(
     repo: string,
@@ -264,6 +266,7 @@ export interface CreateEnvironmentDependencies
       branch: string
     ) => Promise<string | null | undefined>;
     automaticPushEnabled?: boolean;
+    branchVerificationAllowed?: boolean;
   }): Promise<CredentialVerificationPlanResult>;
   fetchFileFromRepo(
     repo: string,
@@ -820,24 +823,38 @@ export async function handleCreateEnvironment(
     // rather than removing them, because the workflow files may already be
     // visible to the repository.
     if (!(await stopBoundary("before-workflow-policy-read"))) return;
-    const [defaultVerify, defaultDispatcher] = await Promise.all([
-      dependencies.fetchFileFromRepoResult(
-        targetRepo,
-        ".github/workflows/radius-verify-credentials.yml",
-        defaultBranch,
-        selectedExecutor
-      ),
-      dependencies.fetchFileFromRepoResult(
-        targetRepo,
-        ".github/workflows/run-rad-commands.yml",
-        defaultBranch,
-        selectedExecutor
-      )
-    ]);
+    const [defaultVerify, defaultDispatcher, defaultLegacyDeploy] =
+      await Promise.all([
+        dependencies.fetchFileFromRepoResult(
+          targetRepo,
+          ".github/workflows/radius-verify-credentials.yml",
+          defaultBranch,
+          selectedExecutor
+        ),
+        dependencies.fetchFileFromRepoResult(
+          targetRepo,
+          ".github/workflows/run-rad-commands.yml",
+          defaultBranch,
+          selectedExecutor
+        ),
+        dependencies.fetchFileFromRepoResult(
+          targetRepo,
+          ".github/workflows/radius-deploy.yml",
+          defaultBranch,
+          selectedExecutor
+        )
+      ]);
     const automaticPolicy = automaticBranchVerificationPolicy({
       verify: defaultVerify,
-      dispatcher: defaultDispatcher
+      dispatcher: defaultDispatcher,
+      legacyDeploy: defaultLegacyDeploy
     });
+    const automaticPolicyMessage =
+      automaticBranchVerificationPolicyMessage(automaticPolicy);
+    if (credentialsComplete && automaticPolicyMessage)
+      steps.push(
+        `⚠️ Setup-branch credential verification is disabled: ${automaticPolicyMessage}`
+      );
     const setupPushOperationMarker =
       credentialsComplete && automaticPolicy.state === "enabled" ?
         operation.operationId
@@ -911,15 +928,30 @@ export async function handleCreateEnvironment(
         commitWorkflowFileSmart,
         recordCommittedWorkflowFile: (op, entry) =>
           dependencies.recordCommittedWorkflowFile(op, entry),
-        deleteLegacyDeployWorkflow: (repo) =>
-          unresolvedProviderMutations(operation).length > 0 ?
-            Promise.resolve(true)
-          : dependencies.deleteLegacyDeployWorkflow(
-              repo,
-              selectedExecutor,
-              () => stopBoundary("before-legacy-workflow-delete")
-            ),
-        usingPullRequestBranch: () => Boolean(committer.pullRequestState()),
+        deleteLegacyDeployWorkflow: async (repo, branch) => {
+          const legacyDelete =
+            unresolvedProviderMutations(operation).length > 0 ?
+              true
+            : await dependencies.deleteLegacyDeployWorkflow(
+                repo,
+                selectedExecutor,
+                () => stopBoundary("before-legacy-workflow-delete"),
+                branch
+              );
+          if (
+            automaticPolicy.state === "disabled" &&
+            (automaticPolicy.reason === "legacy-deploy-present" ||
+              automaticPolicy.reason === "legacy-deploy-unreadable") &&
+            legacyDelete !== true
+          ) {
+            throw new Error(
+              branch ?
+                `Radius could not remove the legacy deploy workflow from setup branch "${branch}", so it did not continue with verification.`
+              : "Radius could not remove the legacy deploy workflow from the default branch, so it did not continue with verification."
+            );
+          }
+          return legacyDelete;
+        },
         pullRequestBranch: prBranch,
         errorMessage: (error) => dependencies.errorMessage(error),
         pushStep: (message) => {
@@ -1167,6 +1199,9 @@ export async function handleCreateEnvironment(
       prState: prState || null,
       pullRequestUrl,
       automaticPushEnabled: Boolean(prState && setupPushOperationMarker),
+      branchVerificationAllowed:
+        automaticPolicy.state === "enabled" ||
+        automaticPolicy.reason === "verify-present",
       fetchFile: (repo, path, branch) =>
         dependencies.fetchFileFromRepo(repo, path, branch, selectedExecutor)
     });

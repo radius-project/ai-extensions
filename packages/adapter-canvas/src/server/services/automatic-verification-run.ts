@@ -5,7 +5,8 @@ import {
 import { verificationActionsUrl } from "./recovered-verification-run.js";
 import type { VerificationRunListResult } from "./recovered-verification-run.js";
 
-const DISCOVERY_DELAYS_MS = Object.freeze([0, 2000, 5000]);
+const DISCOVERY_ATTEMPTS = 25;
+const DISCOVERY_INTERVAL_MS = 5000;
 
 export interface AutomaticVerificationIdentity {
   repo: string;
@@ -36,7 +37,8 @@ export async function discoverAutomaticVerificationRun(input: {
       `Review ${actionsUrl}; Radius will not guess or dispatch another run.`
   });
 
-  for (let attempt = 0; attempt < DISCOVERY_DELAYS_MS.length; attempt += 1) {
+  for (let attempt = 0; attempt < DISCOVERY_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) await input.sleep(DISCOVERY_INTERVAL_MS);
     if (
       !(await input.stopBoundary(
         `before-automatic-verification-discovery:${attempt + 1}`
@@ -44,8 +46,6 @@ export async function discoverAutomaticVerificationRun(input: {
     ) {
       return { state: "cancelled" };
     }
-    const delay = DISCOVERY_DELAYS_MS[attempt];
-    if (delay > 0) await input.sleep(delay);
 
     const listed = await input.listRuns();
     if (listed.code !== 0 && listed.code !== "0") {

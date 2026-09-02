@@ -46,7 +46,7 @@ describe("automatic verification run discovery", () => {
       runId: "41",
       runUrl: "https://github.com/octo/app/actions/runs/41"
     });
-    expect(sleeps).toEqual([2000]);
+    expect(sleeps).toEqual([5000]);
   });
 
   it("never adopts a plausible run without the exact marker", async () => {
@@ -91,7 +91,7 @@ describe("automatic verification run discovery", () => {
       });
 
       expect(outcome).toMatchObject({ state: "discovered", runId: "41" });
-      expect(sleeps).toEqual([2000]);
+      expect(sleeps).toEqual([5000]);
     }
   );
 
@@ -160,8 +160,46 @@ describe("automatic verification run discovery", () => {
       sleep: async () => {}
     });
 
-    expect(listings).toBe(3);
+    expect(listings).toBe(25);
     expect(outcome).toMatchObject({ state: "manual_required" });
+  });
+
+  it("accepts an exact run on the final bounded attempt", async () => {
+    const responses = Array.from({ length: 24 }, () => result([]));
+    responses.push(result([run()]));
+    const sleeps: number[] = [];
+
+    const outcome = await discoverAutomaticVerificationRun({
+      identity,
+      listRuns: async () => responses.shift() ?? result([]),
+      stopBoundary: async () => true,
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    expect(outcome).toMatchObject({ state: "discovered", runId: "41" });
+    expect(sleeps).toHaveLength(24);
+    expect(sleeps.every((milliseconds) => milliseconds === 5000)).toBe(true);
+  });
+
+  it("cancels after waiting without starting another listing", async () => {
+    let listings = 0;
+    let stopped = false;
+    const outcome = await discoverAutomaticVerificationRun({
+      identity,
+      listRuns: async () => {
+        listings += 1;
+        return result([]);
+      },
+      stopBoundary: async () => !stopped,
+      sleep: async () => {
+        stopped = true;
+      }
+    });
+
+    expect(outcome).toEqual({ state: "cancelled" });
+    expect(listings).toBe(1);
   });
 
   it("cancels before listing another run", async () => {
