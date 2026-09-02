@@ -144,8 +144,7 @@ async function api({
 
 async function completionApi({
   artifactBranch = "releases/radius/v1.2.0",
-  artifactTarget = COMMIT,
-  sourceTarget = SOURCE,
+  releaseTagTarget = COMMIT,
   commitVerified = true,
   parents = [],
   commitSource = SOURCE,
@@ -192,13 +191,9 @@ async function completionApi({
           type: "commit",
           sha: COMMIT
         },
-        "/git/ref/tags/radius/v1.2.0": {
-          type: "commit",
-          sha: artifactTarget
-        },
         "/git/ref/tags/radius@1.2.0": {
           type: "commit",
-          sha: sourceTarget
+          sha: releaseTagTarget
         }
       };
       if (request.method === "GET" && refs[path]) {
@@ -207,15 +202,9 @@ async function completionApi({
           object: refs[path]
         });
       }
-      if (route === `GET /git/tags/${TAG}`) {
-        return send(200, {
-          object: { type: "commit", sha: artifactTarget },
-          verification: { verified: true, reason: "valid" }
-        });
-      }
       if (route === `GET /git/tags/${SOURCE_TAG}`) {
         return send(200, {
-          object: { type: "commit", sha: sourceTarget },
+          object: { type: "commit", sha: releaseTagTarget },
           verification: { verified: true, reason: "valid" }
         });
       }
@@ -892,7 +881,7 @@ describe("scripts/verified-git.mjs", () => {
       SOURCE
     ];
 
-    it("accepts a complete release whose marker targets its pinned artifact", async () => {
+    it("accepts a complete release whose only tag targets its pinned artifact", async () => {
       const root = repository();
       const { url } = await completionApi();
 
@@ -910,10 +899,22 @@ describe("scripts/verified-git.mjs", () => {
       });
     });
 
-    it("rejects a verified completion tag targeting the wrong commit", async () => {
+    // The prepare gate knows only the plugin and version, so it reads the
+    // source back out of the artifact instead of pinning one.
+    it("accepts a complete release without a pinned source", async () => {
+      const root = repository();
+      const { url } = await completionApi();
+
+      const result = await run(root, url, args.slice(0, -2));
+
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout).source).toBe(SOURCE);
+    });
+
+    it("rejects a release tag targeting a commit other than its artifact", async () => {
       const root = repository();
       const wrong = "9".repeat(40);
-      const { url } = await completionApi({ artifactTarget: wrong });
+      const { url } = await completionApi({ releaseTagTarget: wrong });
 
       const result = await run(root, url, args);
 
@@ -947,13 +948,8 @@ describe("scripts/verified-git.mjs", () => {
         "does not bundle an exact copy"
       ],
       [
-        "a source tag on the wrong commit",
-        { sourceTarget: TARGET },
-        `points at ${TARGET}, not ${SOURCE}`
-      ],
-      [
         "the wrong catalog ref",
-        { catalogRef: "radius@latest" },
+        { catalogRef: "releases/radius/latest" },
         "does not publish"
       ],
       [
@@ -1008,74 +1004,6 @@ describe("scripts/verified-git.mjs", () => {
         version: "1.2.0",
         source: SOURCE
       });
-    });
-
-    it("inspects a verified latest artifact before exposing its version", async () => {
-      const root = repository();
-      const branch = "releases/radius/latest";
-      const { url } = await completionApi({
-        artifactBranch: branch,
-        packageVersion: "2.0.0",
-        catalogVersion: "2.0.0"
-      });
-
-      const result = await run(root, url, [
-        "inspect-artifact",
-        "--branch",
-        branch,
-        "--plugin",
-        "radius"
-      ]);
-
-      expect(result.status).toBe(0);
-      expect(JSON.parse(result.stdout)).toEqual({
-        commit: COMMIT,
-        tree: TREE,
-        version: "2.0.0",
-        source: SOURCE
-      });
-    });
-
-    it("inspects a complete legacy latest artifact for forward migration", async () => {
-      const root = repository();
-      const branch = "releases/radius/latest";
-      const { url } = await completionApi({
-        artifactBranch: branch,
-        includePackageSource: false,
-        includeRootExtension: false,
-        includeBundledExtension: false
-      });
-
-      const result = await run(root, url, [
-        "inspect-artifact",
-        "--branch",
-        branch,
-        "--plugin",
-        "radius"
-      ]);
-
-      expect(result.status).toBe(0);
-      expect(JSON.parse(result.stdout).source).toBe(SOURCE);
-    });
-
-    it("rejects a partially migrated latest artifact", async () => {
-      const root = repository();
-      const branch = "releases/radius/latest";
-      const { url } = await completionApi({
-        artifactBranch: branch,
-        includeBundledExtension: false
-      });
-
-      const result = await run(root, url, [
-        "inspect-artifact",
-        "--branch",
-        branch,
-        "--plugin",
-        "radius"
-      ]);
-
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain("does not bundle an exact copy");
     });
   });
 });
