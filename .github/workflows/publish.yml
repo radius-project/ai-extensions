@@ -274,8 +274,10 @@ jobs:
           # refs pin the source commit recorded in the commit message.
           commit="$(node scripts/verified-git.mjs commit \
             --message "chore(release): publish ${PLUGIN_NAME}@${VERSION} for ${GITHUB_SHA}" \
-            --path "$PLUGIN_DIST" --path "$MANIFEST" \
-            --path ".github/extension" | jq -r .commit)"
+            --path "$PLUGIN_DIST=$PLUGIN_PUBLISH_DIR" \
+            --path "$PLUGIN_DIST/plugin.json=$PLUGIN_DIR/plugin.json" \
+            --path "$PLUGIN_DIST/README.md=$PLUGIN_DIR/README.md" \
+            --path "$MANIFEST" --path ".github/extension" | jq -r .commit)"
 
           # Both names resolve to that one verified commit. They can no longer
           # move in a single atomic push, so the branch every install reads

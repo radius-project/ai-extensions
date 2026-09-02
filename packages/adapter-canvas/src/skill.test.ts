@@ -23,7 +23,7 @@ const CANDIDATES = {
   installed: path.join(MODULE_DIR, "skills", "radius-app-bicep"),
   source: path.resolve(
     MODULE_DIR,
-    "../../../plugins/radius/skills/radius-app-bicep"
+    "../../../extensions/radius/skills/radius-app-bicep"
   ),
   repaired: path.join(
     HOME_DIR,
@@ -67,7 +67,7 @@ describe("radiusAppBicepSkill", () => {
   it("uses the complete source-checkout skill in the development runtime", () => {
     const expected = path.resolve(
       path.dirname(fileURLToPath(import.meta.url)),
-      "../../../plugins/radius/skills/radius-app-bicep"
+      "../../../extensions/radius/skills/radius-app-bicep"
     );
 
     expect(parseHandoff(radiusAppBicepSkill("/workspace")).skillBase).toBe(

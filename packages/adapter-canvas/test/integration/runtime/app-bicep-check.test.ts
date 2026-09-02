@@ -26,7 +26,7 @@ const root = path.resolve(
 );
 const checker = path.join(
   root,
-  "plugins",
+  "extensions",
   "radius",
   "skills",
   "radius-app-bicep",

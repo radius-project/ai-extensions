@@ -26,8 +26,10 @@ function writeJson(path, value) {
 
 function writePlugin(root, name) {
   const dir = join(root, "plugins", name);
+  const extension = join(root, "extensions", name);
   mkdirSync(dir, { recursive: true });
-  writeJson(join(dir, "package.json"), {
+  mkdirSync(extension, { recursive: true });
+  writeJson(join(extension, "package.json"), {
     name,
     version: "1.0.0",
     private: true,
@@ -55,7 +57,7 @@ function workspace() {
   writeJson(join(root, "package.json"), { name: "fixture", private: true });
   writeFileSync(
     join(root, "pnpm-workspace.yaml"),
-    "packages:\n  - plugins/*\n  - packages/*\n"
+    "packages:\n  - extensions/*\n  - packages/*\n"
   );
   // Mirrors production: the internal packages are permanently ignored in the
   // config file, which is what makes a CLI `--ignore` illegal.
@@ -166,13 +168,13 @@ describe("scripts/release-version.mjs", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(
       JSON.parse(
-        readFileSync(join(root, "plugins", "radius", "package.json"), "utf8")
+        readFileSync(join(root, "extensions", "radius", "package.json"), "utf8")
       ).version
     ).toBe("1.1.0");
     expect(
       JSON.parse(
         readFileSync(
-          join(root, "plugins", "radius-aws", "package.json"),
+          join(root, "extensions", "radius-aws", "package.json"),
           "utf8"
         )
       ).version

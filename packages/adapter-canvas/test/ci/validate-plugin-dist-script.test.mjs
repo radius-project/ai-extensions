@@ -9,7 +9,7 @@ import {
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
@@ -60,8 +60,11 @@ function repository({
   const root = mkdtempSync(join(tmpdir(), "radius-dist-"));
   temporaryRepositories.push(root);
   const plugin = join(root, "plugins", pluginName);
-  const dist = join(plugin, "dist");
+  const extension = join(root, "extensions", pluginName);
+  const dist = join(root, ".artifacts", pluginName);
   mkdirSync(join(root, "scripts"));
+  mkdirSync(plugin, { recursive: true });
+  mkdirSync(extension, { recursive: true });
   mkdirSync(join(dist, "skills"), { recursive: true });
   for (const [name, source] of SCRIPTS) {
     copyFileSync(source, join(root, "scripts", name));
@@ -69,7 +72,7 @@ function repository({
   writeFileSync(join(root, "schema-fetch.mjs"), SCHEMA_FETCH_PRELOAD);
   configureSchemaFetch(root);
 
-  writeJson(join(plugin, "package.json"), {
+  writeJson(join(extension, "package.json"), {
     name: pluginName,
     version: "1.2.0",
     scripts: { "test:artifact": "echo tested" }
@@ -97,6 +100,29 @@ function repository({
   writeFileSync(join(dist, "extension.mjs"), "export {};\n");
   mkdirSync(join(dist, "workflows"));
   return { root, dist };
+}
+
+// A plugin keyworded "canvas" additionally owes the canvas contract, so the
+// paths it names have to exist for the manifest to be accepted.
+function canvasDist(dist, { entryPoint = "extension.mjs" } = {}) {
+  mkdirSync(join(dist, "assets"), { recursive: true });
+  writeFileSync(join(dist, "assets", "preview.png"), "png\n");
+  const entry = join(dist, "extensions", entryPoint);
+  mkdirSync(dirname(entry), { recursive: true });
+  writeFileSync(entry, "export {};\n");
+}
+
+function canvasRepository(manifest = {}, options) {
+  const created = repository({
+    manifest: {
+      keywords: ["radius", "canvas"],
+      logo: "assets/preview.png",
+      extensions: "extensions",
+      ...manifest
+    }
+  });
+  canvasDist(created.dist, options);
+  return created;
 }
 
 function run(root, ...args) {
@@ -378,6 +404,90 @@ describe("scripts/validate-plugin-dist.mjs", () => {
     });
 
     expect(run(root)).toMatchObject({ status: 0, stdout: "radius@1.2.0" });
+  });
+
+  // github/awesome-copilot admits a canvas plugin on a top-level `logo` and an
+  // `extensions` directory name, neither of which Agent Plugins 1.0.0 defines.
+  describe("canvas contract", () => {
+    it.each([["extension.mjs"], ["radius/extension.mjs"]])(
+      "accepts a canvas plugin whose entry point is %s",
+      (entryPoint) => {
+        const { root } = canvasRepository({}, { entryPoint });
+
+        expect(run(root)).toMatchObject({ status: 0, stdout: "radius@1.2.0" });
+      }
+    );
+
+    it.each([
+      [
+        "a top-level logo",
+        { logo: "assets/preview.png" },
+        "declares unknown fields: logo"
+      ],
+      [
+        "an extensions directory name",
+        { extensions: "extensions" },
+        "plugin.json#extensions must be an object"
+      ]
+    ])(
+      "holds a plugin that is not a canvas to the closed schema for %s",
+      (_label, manifest, message) => {
+        const { root, dist } = repository({ manifest });
+        canvasDist(dist);
+
+        const result = run(root);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(message);
+      }
+    );
+
+    it.each([
+      [
+        "a logo the intake will not accept",
+        { logo: "assets/logo.png" },
+        undefined,
+        'plugin.json#logo must be "assets/preview.png"'
+      ],
+      [
+        "an extensions value the intake will not accept",
+        { extensions: "canvas" },
+        undefined,
+        'plugin.json#extensions must be "extensions"'
+      ],
+      [
+        "the spec's namespace object on a canvas plugin",
+        { extensions: { "com.github.copilot": {} } },
+        undefined,
+        'plugin.json#extensions must be "extensions"'
+      ],
+      [
+        "an entry point nested too deeply",
+        {},
+        { entryPoint: "radius/nested/extension.mjs" },
+        "must contain extension.mjs or <extension>/extension.mjs"
+      ]
+    ])("rejects %s", (_label, manifest, options, message) => {
+      const { root } = canvasRepository(manifest, options);
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(message);
+    });
+
+    it.each([
+      ["assets/preview.png", "plugin.json#logo does not exist"],
+      ["extensions", "plugin.json#extensions does not exist"]
+    ])("rejects a canvas plugin missing %s", (missing, message) => {
+      const { root, dist } = canvasRepository();
+      rmSync(join(dist, missing), { recursive: true, force: true });
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(message);
+    });
   });
 
   it("rejects non-object extension namespace data", () => {

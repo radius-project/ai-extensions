@@ -48,7 +48,10 @@ function skillBaseCandidates(
 ): readonly string[] {
   return [
     path.join(moduleDir, "skills", "radius-app-bicep"),
-    path.resolve(moduleDir, "../../../plugins/radius/skills/radius-app-bicep"),
+    path.resolve(
+      moduleDir,
+      "../../../extensions/radius/skills/radius-app-bicep"
+    ),
     path.join(
       homeDir,
       ".copilot",

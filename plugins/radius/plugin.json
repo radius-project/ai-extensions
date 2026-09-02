@@ -14,5 +14,7 @@
     "application-graph",
     "deploy",
     "canvas"
-  ]
+  ],
+  "extensions": "extensions",
+  "logo": "assets/preview.png"
 }

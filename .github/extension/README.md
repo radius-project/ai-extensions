@@ -8,7 +8,7 @@ They live here so the workflow contract has a canonical, reviewed home that any 
 
 ## Release provenance
 
-Every plugin build copies this complete tree into `plugins/<plugin>/dist/workflows/` and records the full 40-character source commit in the built package as `radiusSourceRef`. Edge and stable install branches also publish the same files at their repository-native `.github/extension/` paths so the artifact branch remains complete and auditable without source history.
+Every plugin build copies this complete tree into `.artifacts/<plugin>/workflows/` and records the full 40-character source commit in the built package as `radiusSourceRef`. Edge and stable install branches also publish the same files at their repository-native `.github/extension/` paths so the artifact branch remains complete and auditable without source history.
 
 The released extension fetches remote templates at its baked source commit and fills every first-party `{{RADIUS_REF}}` action reference with that same commit. GitHub therefore resolves `.github/extension/actions/` from the immutable source commit, not from the moving edge/latest branch or its orphan commit. Keep the placeholder in source templates; never replace it with `main`, `edge`, `latest`, or another mutable ref. Third-party actions use full commit SHAs directly.
 

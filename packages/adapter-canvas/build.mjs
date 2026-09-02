@@ -5,7 +5,7 @@
 // runtime-loadable artifact the Copilot canvas loader runs, and assembles the
 // complete installable plugin around it:
 //
-//   plugins/radius/dist/
+//   .artifacts/radius/
 //
 // marketplace.json points installs at that directory, so everything the plugin
 // needs (manifest, skills, canvas bundle) must be inside it.
@@ -16,11 +16,20 @@
 import * as esbuild from "esbuild";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { dirname, basename, join, resolve, sep } from "node:path";
+import {
+  dirname,
+  basename,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep
+} from "node:path";
 import {
   copyFileSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -55,27 +64,42 @@ const isWatch = process.argv.includes("--watch");
 const isInstall = process.argv.includes("--install");
 
 const pluginDir = join(repoRoot, "plugins", "radius");
-const distDir = join(pluginDir, "dist");
+const extensionDir = join(repoRoot, "extensions", "radius");
+// Assembled here, published as extensions/radius. It cannot be assembled in
+// place: the tracked source it is built from lives at the published path.
+const distDir = join(repoRoot, ".artifacts", "radius");
 const outfile = join(distDir, "extension.mjs");
 const radiusTypeResolver = join(
-  pluginDir,
+  extensionDir,
   "skills",
   "radius-app-bicep",
   "scripts",
   "show-radius-type.mjs"
 );
 
-// Tracked plugin sources that must sit beside the bundle for dist/ to be a
-// complete plugin. node_modules is a pnpm workspace symlink and never shipped.
-const pluginSources = ["plugin.json", "package.json", "README.md", "skills"];
+// Tracked source the assembled plugin is built from, keyed by the directory that
+// owns it: the manifest is plugin source, everything else is extension source.
+// node_modules is a pnpm workspace symlink and never shipped.
+const pluginSources = [
+  [pluginDir, "plugin.json"],
+  [pluginDir, "README.md"],
+  [extensionDir, "package.json"],
+  [extensionDir, "skills"],
+  [extensionDir, "assets"]
+];
 
 // CHANGELOG.md is written by `changeset version`, so it exists in a release
 // build but not in a plain local one.
-const optionalPluginSources = ["CHANGELOG.md"];
+const optionalPluginSources = [[extensionDir, "CHANGELOG.md"]];
 
 // esbuild refuses a file it has no loader for, so an unlisted extension added
 // to the plugin tree fails the build instead of silently not shipping.
-const pluginAssetLoaders = { ".json": "copy", ".md": "copy", ".mjs": "copy" };
+const pluginAssetLoaders = {
+  ".json": "copy",
+  ".md": "copy",
+  ".mjs": "copy",
+  ".png": "copy"
+};
 
 // CI stamps an edge version (e.g. 0.1.0-edge-0b33186) so a published
 // build is distinguishable from a release. A local build leaves the version in
@@ -183,30 +207,34 @@ function pluginAssetEntryPoint(from) {
 }
 
 async function assembleDist(bundleInputs) {
-  const entryPoints = [];
-  for (const entry of pluginSources) {
-    const from = join(pluginDir, entry);
+  const byRoot = new Map();
+  const stage = (root, entry, required) => {
+    const from = join(root, entry);
     if (!existsSync(from)) {
-      throw new Error(`Missing required plugin source: ${from}`);
+      if (required) throw new Error(`Missing required plugin source: ${from}`);
+      return;
     }
-    entryPoints.push(pluginAssetEntryPoint(from));
-  }
-  for (const entry of optionalPluginSources) {
-    const from = join(pluginDir, entry);
-    if (existsSync(from)) entryPoints.push(pluginAssetEntryPoint(from));
-  }
+    if (!byRoot.has(root)) byRoot.set(root, []);
+    byRoot.get(root).push(pluginAssetEntryPoint(from));
+  };
+  for (const [root, entry] of pluginSources) stage(root, entry, true);
+  for (const [root, entry] of optionalPluginSources) stage(root, entry, false);
 
   // The copy loader reproduces each file verbatim, so the same tool that emits
-  // the bundle also lays out the rest of dist/.
-  await esbuild.build({
-    entryPoints,
-    outbase: pluginDir,
-    outdir: distDir,
-    loader: pluginAssetLoaders,
-    logLevel: "silent"
-  });
+  // the bundle also lays out the rest of the assembled plugin. One pass per
+  // source root, because outbase is what maps a source path onto the output.
+  for (const [root, entryPoints] of byRoot) {
+    await esbuild.build({
+      entryPoints,
+      outbase: root,
+      outdir: distDir,
+      loader: pluginAssetLoaders,
+      logLevel: "silent"
+    });
+  }
   copyFileSync(join(repoRoot, "LICENSE"), join(distDir, "LICENSE"));
   copyExtensionAssets();
+  writeCanvasEntryPoint();
 
   const distPackage = join(distDir, "package.json");
   stripRepositoryScripts(distPackage);
@@ -272,6 +300,18 @@ function copyExtensionAssets() {
   });
 }
 
+// The canvas gates discover a canvas from `extensions/`, but the bundle stays
+// at the package root so its module-relative skill, version and credentials
+// lookups keep resolving beside it.
+function writeCanvasEntryPoint() {
+  const entryPoint = basename(outfile);
+  mkdirSync(join(distDir, "extensions"), { recursive: true });
+  writeFileSync(
+    join(distDir, "extensions", entryPoint),
+    `// AUTO-GENERATED by packages/adapter-canvas/build.mjs — do not edit by hand.\nexport * from "../${entryPoint}";\n`
+  );
+}
+
 function stampVersion(manifestPath, version) {
   if (!version) return;
   const raw = readFileSync(manifestPath, "utf8");
@@ -322,7 +362,7 @@ function resolveCatalogSpecifiers(manifestPath) {
 }
 
 // Where the extension is installed locally. Override with RADIUS_CANVAS_INSTALL_PATH.
-// The host loads this canvas as the "radius" extension (see plugins/radius/package.json),
+// The host loads this canvas as the "radius" extension (see extensions/radius/package.json),
 // so install into that directory — not a separate "radius-canvas" dir the host never loads.
 const installPath =
   process.env.RADIUS_CANVAS_INSTALL_PATH ||
@@ -539,7 +579,57 @@ const options = {
   plugins: [browserBundlePlugin, finalizePlugin]
 };
 
-rmSync(distDir, { recursive: true, force: true });
+// The output root is wiped on every build, so it must never be a directory that
+// also holds tracked source: a stale path constant would delete real work.
+function trackedFilesUnderDist() {
+  // Git pathspecs are repository-relative. An absolute one can match nothing on
+  // some Git and platform combinations, which would silently disarm the guard.
+  const within = relative(repoRoot, distDir);
+  if (within === "" || within.startsWith("..") || isAbsolute(within)) {
+    throw new Error(
+      `Refusing to wipe ${distDir}: it must be a directory inside ${repoRoot}.`
+    );
+  }
+  // `literal` keeps a path containing glob characters from being read as a
+  // pattern; `top` anchors it to the repository root rather than the cwd.
+  const pathspec = `:(top,literal)${within.split(sep).join("/")}`;
+  const gitMarker = join(repoRoot, ".git");
+  if (!lstatSync(gitMarker, { throwIfNoEntry: false })) return [];
+  try {
+    const inside = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    }).trim();
+    if (inside !== "true") {
+      throw new Error(`git reported ${JSON.stringify(inside)}`);
+    }
+  } catch (error) {
+    throw new Error(
+      `Refusing to wipe ${distDir}: unable to verify tracked files in ${repoRoot}.`,
+      { cause: error }
+    );
+  }
+  return execFileSync("git", ["ls-files", "-z", "--", pathspec], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  })
+    .split("\0")
+    .filter(Boolean);
+}
+
+function resetDistDir() {
+  const tracked = trackedFilesUnderDist();
+  if (tracked.length > 0) {
+    throw new Error(
+      `Refusing to wipe ${distDir}: it contains ${tracked.length} tracked file(s), starting with ${tracked[0]}.`
+    );
+  }
+  rmSync(distDir, { recursive: true, force: true });
+}
+
+resetDistDir();
 
 if (isWatch) {
   const ctx = await esbuild.context(options);
@@ -547,6 +637,8 @@ if (isWatch) {
   console.log("[canvas] watching for changes…");
 } else {
   await esbuild.build(options);
-  console.log("[canvas] built plugins/radius/dist");
+  console.log(
+    `[canvas] built ${relative(repoRoot, distDir).split(sep).join("/")}`
+  );
   if (isInstall) installToLocal();
 }

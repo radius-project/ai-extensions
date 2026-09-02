@@ -38,8 +38,13 @@ import { pluginRefs, repoRoot, requirePlugin } from "./plugins.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const REF = /^refs\/(?:heads|tags)\/[^\s~^:?*[\\]+$/;
+const PUBLISHED_PATH =
+  /^(?!\/)(?!.*\/\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))[^\s\\:*?"<>|]+(?<!\/)$/;
 const MARKETPLACE = ".github/plugin/marketplace.json";
 const EXTENSION_ROOT = ".github/extension";
+// Published both inside the install unit and at the plugin root, so a release
+// branch answers for the plugin without being unpacked.
+const PLUGIN_METADATA = ["plugin.json", "README.md"];
 const REGULAR_MODES = new Set(["100644", "100755"]);
 
 // Unwind instead of exiting in place: calling process.exit() while a socket is
@@ -155,7 +160,13 @@ function collect(paths) {
   if (paths.length === 0) fail("at least one --path is required");
   const files = [];
   const canonicalRoot = realpathSync(repoRoot);
-  for (const declared of paths) {
+  for (const entry of paths) {
+    // `<source>=<published>` publishes a tree under a different path, which is
+    // how an assembled artifact reaches the branch at the path its own source
+    // occupies here.
+    const separator = entry.indexOf("=");
+    const declared = separator === -1 ? entry : entry.slice(0, separator);
+    const published = separator === -1 ? undefined : entry.slice(separator + 1);
     if (isAbsolute(declared)) {
       fail(`--path must be repository-relative: ${declared}`);
     }
@@ -174,7 +185,14 @@ function collect(paths) {
     if (canonicalWithin.startsWith("..") || isAbsolute(canonicalWithin)) {
       fail(`--path resolves outside the repository: ${declared}`);
     }
-    collectFile(canonicalTarget, within.split(sep).join("/"), files);
+    let prefix = within.split(sep).join("/");
+    if (published !== undefined) {
+      if (!PUBLISHED_PATH.test(published)) {
+        fail(`--path publishes to an invalid path: ${published}`);
+      }
+      prefix = published;
+    }
+    collectFile(canonicalTarget, prefix, files);
   }
   if (files.length === 0) fail("the given paths contain no files");
   return files.sort((a, b) => (a.path < b.path ? -1 : 1));
@@ -319,14 +337,37 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
   }
 
   const files = tree.tree.filter((entry) => entry.type !== "tree");
+  // The plugin root carries the duplicated metadata and nothing else, so it is
+  // enumerated rather than opened up as a prefix.
+  const pinnedMetadata = new Set(
+    PLUGIN_METADATA.map((name) => `${plugin.dir}/${name}`)
+  );
   for (const entry of files) {
     const allowed =
       entry.path === MARKETPLACE ||
-      entry.path.startsWith(`${plugin.distDir}/`) ||
+      entry.path.startsWith(`${plugin.publishDir}/`) ||
+      pinnedMetadata.has(entry.path) ||
       entry.path.startsWith(`${EXTENSION_ROOT}/`);
     if (!allowed) fail(`${branch} contains an unexpected path: ${entry.path}`);
     if (entry.type !== "blob" || !REGULAR_MODES.has(entry.mode)) {
       fail(`${branch} contains a non-regular file: ${entry.path}`);
+    }
+  }
+
+  // The branch carries the plugin metadata twice, so a reader must not be able
+  // to find two different answers to the same question.
+  for (const name of PLUGIN_METADATA) {
+    const pinned = files.find(
+      (entry) => entry.path === `${plugin.dir}/${name}`
+    );
+    if (!pinned) fail(`${branch} does not contain ${plugin.dir}/${name}`);
+    const shipped = files.find(
+      (entry) => entry.path === `${plugin.publishDir}/${name}`
+    );
+    if (!shipped || shipped.sha !== pinned.sha) {
+      fail(
+        `${branch} publishes a different ${name} at ${plugin.dir} and ${plugin.publishDir}`
+      );
     }
   }
 
@@ -335,7 +376,7 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
       .filter((entry) => entry.path.startsWith(`${EXTENSION_ROOT}/`))
       .map((entry) => [entry.path.slice(EXTENSION_ROOT.length + 1), entry.sha])
   );
-  const bundledRoot = `${plugin.distDir}/workflows`;
+  const bundledRoot = `${plugin.publishDir}/workflows`;
   const bundledAssets = new Map(
     files
       .filter((entry) => entry.path.startsWith(`${bundledRoot}/`))
@@ -353,7 +394,7 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
     );
   }
 
-  const packagePath = `${plugin.distDir}/package.json`;
+  const packagePath = `${plugin.publishDir}/package.json`;
   const packageJson = await readJsonBlob(
     files.find((entry) => entry.path === packagePath),
     packagePath
@@ -397,10 +438,10 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
   if (
     catalogEntry?.version !== actualVersion ||
     catalogEntry?.source?.ref !== branch ||
-    catalogEntry?.source?.path !== plugin.distDir
+    catalogEntry?.source?.path !== plugin.publishDir
   ) {
     fail(
-      `${MARKETPLACE} does not publish ${plugin.name}@${actualVersion} from ${plugin.distDir} at ${branch}`
+      `${MARKETPLACE} does not publish ${plugin.name}@${actualVersion} from ${plugin.publishDir} at ${branch}`
     );
   }
 

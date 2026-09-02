@@ -136,6 +136,6 @@ A deploy started from the canvas Deploy button hands its failure to you automati
 
 ## Related files
 
-- `plugins/radius/dist/extension.mjs` — deploy workflow template generation (`generateDeployWorkflow`) and repo commit of the dispatcher + provider workflows to `.github/workflows/`.
-- `plugins/radius/dist/extension.mjs` — deploy dispatch + run polling (uses `gh workflow run run-rad-commands.yml` and `gh run list`).
+- `extension.mjs` — deploy workflow template generation (`generateDeployWorkflow`) and repo commit of the dispatcher + provider workflows to `.github/workflows/`.
+- `extension.mjs` — deploy dispatch + run polling (uses `gh workflow run run-rad-commands.yml` and `gh run list`).
 - The deploy workflow templates are canonical in `radius-project/ai-extensions` at `.github/extension/` — `run-rad-commands.yml` (dispatcher), `run-rad-commands-{azure,aws}.yml` (provider `workflow_call` workflows), and `actions/*` (shared composite actions including `setup-control-plane`, `restore-state`, Gateway lifecycle management, `run-rad-commands`, and `teardown`). The extension fetches templates at the full source commit recorded in its built `package.json`, commits the dispatcher + provider workflows into the user repo at `.github/workflows/`, and fills every first-party composite-action `uses:` with that same immutable commit SHA. It never generates `@main`, `@edge`, or `@latest` references.

@@ -6,6 +6,12 @@
 // has a README and a `test:artifact` script. Adding such a directory is enough
 // for the release workflows to pick it up.
 //
+// Source is split the way github/awesome-copilot splits it: `plugins/<name>/`
+// carries the Agent Plugins manifest, `extensions/<name>/` carries the canvas
+// extension. The build assembles both into `.artifacts/<name>/`, which is
+// git-ignored and reaches users only as `extensions/<name>/` on a release
+// branch — so the build never writes into a tracked source tree.
+//
 // Naming convention, applied uniformly so a second plugin can never collide
 // with the first:
 //
@@ -33,6 +39,8 @@ import { fileURLToPath } from "node:url";
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const PLUGINS_DIR = "plugins";
+const EXTENSIONS_DIR = "extensions";
+const ARTIFACTS_DIR = ".artifacts";
 // A stable release is identified by its version, so edge is the only channel
 // with a rolling branch and tag.
 const CHANNELS = ["edge"];
@@ -50,10 +58,16 @@ function describe(name) {
   return {
     name,
     dir,
-    distDir: `${dir}/dist`,
-    packageFile: `${dir}/package.json`,
+    extensionDir: `${EXTENSIONS_DIR}/${name}`,
+    // Where the build assembles the plugin, and the path that same tree is
+    // published under. They differ because the source it is assembled from is
+    // tracked at the published path.
+    distDir: `${ARTIFACTS_DIR}/${name}`,
+    publishDir: `${EXTENSIONS_DIR}/${name}`,
+    packageFile: `${EXTENSIONS_DIR}/${name}/package.json`,
     manifestFile: `${dir}/plugin.json`,
-    changelogFile: `${dir}/CHANGELOG.md`,
+    // Changesets writes the changelog beside the package it versions.
+    changelogFile: `${EXTENSIONS_DIR}/${name}/CHANGELOG.md`,
     readmeFile: `${dir}/README.md`
   };
 }
@@ -73,7 +87,9 @@ export function listPlugins() {
     const hasManifest = existsSync(join(repoRoot, plugin.manifestFile));
     if (!hasPackage && !hasManifest) continue;
     if (!hasPackage || !hasManifest) {
-      fail(`${plugin.dir} must contain both package.json and plugin.json`);
+      fail(
+        `a plugin needs both ${plugin.manifestFile} and ${plugin.packageFile}`
+      );
     }
     if (!existsSync(join(repoRoot, plugin.readmeFile))) {
       fail(`${plugin.dir} must contain README.md`);
@@ -167,7 +183,9 @@ export function pluginRefs(plugin, { version, channel } = {}) {
   const refs = {
     PLUGIN_NAME: plugin.name,
     PLUGIN_DIR: plugin.dir,
+    PLUGIN_EXTENSION_DIR: plugin.extensionDir,
     PLUGIN_DIST: plugin.distDir,
+    PLUGIN_PUBLISH_DIR: plugin.publishDir,
     PLUGIN_ARTIFACT: `plugin-dist-${plugin.name}`,
     PLUGIN_SBOM_ARTIFACT: `plugin-sbom-${plugin.name}`,
     PLUGIN_TARBALL: `${plugin.name}-plugin.tar.gz`,
