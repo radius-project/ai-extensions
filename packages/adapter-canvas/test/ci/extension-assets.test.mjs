@@ -139,4 +139,26 @@ describe(".github/extension release assets", () => {
       expect(commitScript).toContain('--path "$MANIFEST"');
     }
   );
+
+  it("re-baselines edge when a reachable source is no longer in main history", () => {
+    const workflow = parseYaml(
+      readFileSync(
+        join(REPO_ROOT, ".github", "workflows", "publish.yml"),
+        "utf8"
+      )
+    );
+    const publishScript = runScripts(workflow).find((script) =>
+      script.includes("Published edge source")
+    );
+
+    expect(publishScript).toContain(
+      'git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"'
+    );
+    expect(publishScript).toContain(
+      '! git merge-base --is-ancestor "$current_source" refs/remotes/origin/main'
+    );
+    expect(publishScript).toContain(
+      'if [ "$GITHUB_SHA" != "$(git rev-parse refs/remotes/origin/main)" ]; then'
+    );
+  });
 });
