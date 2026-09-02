@@ -1,31 +1,57 @@
+// Builds the Windows GUI-subsystem launcher that every managed rad invocation
+// runs through on Windows.
+//
+// The executables are build output, not source: they are produced from
+// native/windows-launcher/main.go, ignored by git, and assembled into
+// plugins/<plugin>/dist by packages/adapter-canvas/build.mjs. Because the plugin
+// ships both Windows architectures regardless of the host that built it, both
+// are always cross-compiled here.
+//
+// Go emits a reproducible executable for a given toolchain and source, so the
+// flags below stay deterministic: no VCS stamp, no absolute paths, no build ID.
+
 import { execFileSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDirectory, "..");
-const sourceDirectory = join(
+
+export const windowsLauncherSourceDirectory = join(
   repoRoot,
   "packages",
   "adapter-shared",
   "native",
   "windows-launcher"
 );
-const outputDirectory = join(sourceDirectory, "bin");
-const check = process.argv.includes("--check");
-const architectures = [
+export const windowsLauncherBinDirectory = join(
+  windowsLauncherSourceDirectory,
+  "bin"
+);
+
+// Every input whose change must invalidate an already built executable.
+const sourceFiles = ["main.go", "go.mod"];
+
+export const windowsLauncherArchitectures = [
   { go: "amd64", node: "x64", machine: 0x8664 },
   { go: "arm64", node: "arm64", machine: 0xaa64 }
 ];
 
+export function windowsLauncherFilename(architecture) {
+  return `windows-radius-launcher-${architecture.node}.exe`;
+}
+
+export function windowsLauncherPath(architecture) {
+  return join(
+    windowsLauncherBinDirectory,
+    windowsLauncherFilename(architecture)
+  );
+}
+
+// A launcher that is not a Windows GUI-subsystem PE for the expected machine
+// would reintroduce the console window this mechanism exists to remove, so the
+// build refuses to hand one on.
 function assertWindowsGuiExecutable(path, machine) {
   const executable = readFileSync(path);
   if (executable.toString("ascii", 0, 2) !== "MZ") {
@@ -49,58 +75,82 @@ function assertWindowsGuiExecutable(path, machine) {
   }
 }
 
-function build(output, architecture) {
-  execFileSync(
-    "go",
-    [
-      "build",
-      "-buildvcs=false",
-      "-trimpath",
-      "-ldflags=-buildid= -H=windowsgui -s -w",
-      "-o",
-      output,
-      "."
-    ],
-    {
-      cwd: sourceDirectory,
-      env: {
-        ...process.env,
-        CGO_ENABLED: "0",
-        GOARCH: architecture.go,
-        GOOS: "windows"
-      },
-      stdio: "inherit"
-    }
+function newestSourceTimestamp() {
+  return Math.max(
+    ...sourceFiles.map(
+      (file) => statSync(join(windowsLauncherSourceDirectory, file)).mtimeMs
+    )
   );
+}
+
+function isUpToDate(output, sourceTimestamp) {
+  if (!existsSync(output)) return false;
+  return statSync(output).mtimeMs >= sourceTimestamp;
+}
+
+function build(output, architecture) {
+  try {
+    execFileSync(
+      "go",
+      [
+        "build",
+        "-buildvcs=false",
+        "-trimpath",
+        "-ldflags=-buildid= -H=windowsgui -s -w",
+        "-o",
+        output,
+        "."
+      ],
+      {
+        cwd: windowsLauncherSourceDirectory,
+        env: {
+          ...process.env,
+          CGO_ENABLED: "0",
+          GOARCH: architecture.go,
+          GOOS: "windows"
+        },
+        stdio: "inherit"
+      }
+    );
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new Error(
+        "Building the Windows Radius launcher requires the Go toolchain on PATH. " +
+          `Install the version recorded in ${join(windowsLauncherSourceDirectory, "go.mod")} and rebuild.`,
+        { cause: error }
+      );
+    }
+    throw error;
+  }
   assertWindowsGuiExecutable(output, architecture.machine);
 }
 
-if (check) {
-  const temporaryDirectory = mkdtempSync(
-    join(tmpdir(), "windows-radius-launcher-")
-  );
-  try {
-    for (const architecture of architectures) {
-      const name = `windows-radius-launcher-${architecture.node}.exe`;
-      const expected = join(outputDirectory, name);
-      if (!existsSync(expected)) {
-        throw new Error(`Missing committed launcher: ${expected}`);
-      }
-      const rebuilt = join(temporaryDirectory, name);
-      build(rebuilt, architecture);
-      if (!readFileSync(expected).equals(readFileSync(rebuilt))) {
-        throw new Error(
-          `${name} is stale. Run "pnpm run build:windows-launcher" with the pinned Go version.`
-        );
-      }
+/**
+ * Produces both Windows launchers, skipping an architecture whose executable is
+ * already newer than every build input unless `force` is set.
+ *
+ * @param {{ force?: boolean }} [options]
+ * @returns {string[]} the absolute path of each launcher, built or reused.
+ */
+export function ensureWindowsLaunchers({ force = false } = {}) {
+  const sourceTimestamp = newestSourceTimestamp();
+  mkdirSync(windowsLauncherBinDirectory, { recursive: true });
+  return windowsLauncherArchitectures.map((architecture) => {
+    const output = windowsLauncherPath(architecture);
+    if (force || !isUpToDate(output, sourceTimestamp)) {
+      build(output, architecture);
     }
-  } finally {
-    rmSync(temporaryDirectory, { recursive: true, force: true });
-  }
-} else {
-  mkdirSync(outputDirectory, { recursive: true });
-  for (const architecture of architectures) {
-    const name = `windows-radius-launcher-${architecture.node}.exe`;
-    build(join(outputDirectory, name), architecture);
-  }
+    return output;
+  });
+}
+
+const invokedDirectly =
+  process.argv[1] &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  // An explicit build rebuilds by default: it is the command a developer runs
+  // after changing the Go source or switching toolchains. `--if-needed` is for
+  // callers that only require the executables to exist and be current.
+  ensureWindowsLaunchers({ force: !process.argv.includes("--if-needed") });
 }

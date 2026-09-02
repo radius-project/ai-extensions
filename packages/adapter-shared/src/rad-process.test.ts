@@ -1,7 +1,7 @@
-import { copyFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   radSpawnCommand,
@@ -10,8 +10,24 @@ import {
   windowsLauncherFilename
 } from "./rad-process.mjs";
 
-const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const temporaryDirectories: string[] = [];
+
+function temporaryRoot(prefix: string): string {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  temporaryDirectories.push(root);
+  return root;
+}
+
+// The launchers are compiled build output rather than committed files, so
+// resolution is proven against synthetic trees. That keeps these tests running
+// on every platform and without a Go toolchain; the real executables are
+// exercised by the Windows process integration suite.
+function writeLauncher(directory: string, architecture: string): string {
+  mkdirSync(directory, { recursive: true });
+  const launcher = join(directory, windowsLauncherFilename(architecture));
+  writeFileSync(launcher, "MZ");
+  return launcher;
+}
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
@@ -34,11 +50,22 @@ describe("Windows Radius launcher selection", () => {
   });
 
   it.each(["x64", "arm64"])(
-    "resolves the committed %s launcher from the source module",
+    "resolves the built %s launcher beside the source module",
     (architecture) => {
-      expect(resolveWindowsLauncherPath(architecture)).toBe(
+      const root = temporaryRoot("source-radius-launcher-");
+      const moduleFile = join(root, "src", "rad-process.mjs");
+      mkdirSync(dirname(moduleFile), { recursive: true });
+      writeLauncher(
+        join(root, "native", "windows-launcher", "bin"),
+        architecture
+      );
+
+      expect(
+        resolveWindowsLauncherPath(architecture, pathToFileURL(moduleFile).href)
+      ).toBe(
         join(
-          sourceDirectory,
+          root,
+          "src",
           "..",
           "native",
           "windows-launcher",
@@ -50,15 +77,10 @@ describe("Windows Radius launcher selection", () => {
   );
 
   it("resolves a packaged launcher from an ancestor bin directory", () => {
-    const root = mkdtempSync(join(tmpdir(), "packaged-radius-launcher-"));
-    temporaryDirectories.push(root);
+    const root = temporaryRoot("packaged-radius-launcher-");
     const nestedModule = join(root, "skills", "app", "scripts", "entry.mjs");
-    const packagedBin = join(root, "bin");
     mkdirSync(dirname(nestedModule), { recursive: true });
-    mkdirSync(packagedBin);
-    const source = resolveWindowsLauncherPath("x64");
-    const packaged = join(packagedBin, windowsLauncherFilename("x64"));
-    copyFileSync(source, packaged);
+    const packaged = writeLauncher(join(root, "bin"), "x64");
 
     expect(
       resolveWindowsLauncherPath("x64", pathToFileURL(nestedModule).href)
@@ -66,8 +88,7 @@ describe("Windows Radius launcher selection", () => {
   });
 
   it("fails explicitly when no source or packaged launcher exists", () => {
-    const root = mkdtempSync(join(tmpdir(), "missing-radius-launcher-"));
-    temporaryDirectories.push(root);
+    const root = temporaryRoot("missing-radius-launcher-");
     const moduleUrl = pathToFileURL(join(root, "entry.mjs")).href;
 
     expect(() => resolveWindowsLauncherPath("x64", moduleUrl)).toThrow(
@@ -85,12 +106,17 @@ describe("Windows Radius launcher selection", () => {
   });
 
   it("routes Windows execution through the architecture-matched launcher", () => {
+    const root = temporaryRoot("routed-radius-launcher-");
+    const moduleFile = join(root, "entry.mjs");
+    const packaged = writeLauncher(join(root, "bin"), "arm64");
+
     const command = radSpawnCommand("C:\\managed\\rad.exe", ["version"], {
       platform: "win32",
-      architecture: "arm64"
+      architecture: "arm64",
+      moduleUrl: pathToFileURL(moduleFile).href
     });
 
-    expect(command.executable).toBe(resolveWindowsLauncherPath("arm64"));
+    expect(command.executable).toBe(packaged);
     expect(command.args).toEqual([
       String(process.pid),
       "C:\\managed\\rad.exe",

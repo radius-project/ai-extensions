@@ -128,8 +128,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify Windows launcher binaries
-        run: pnpm run build:windows-launcher:check
+      - name: Build the Windows launchers
+        run: pnpm run build:windows-launcher
 
       - name: Run Windows process integration tests
         run: pnpm run test:integration:windows-process
@@ -283,6 +283,15 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
+
+      # The plugin ships both Windows launchers regardless of the build host, and
+      # they are compiled from source rather than committed, so the dist build
+      # cross-compiles them here.
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: packages/adapter-shared/native/windows-launcher/go.mod
+          cache: false
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

@@ -35,6 +35,14 @@ const DIST = join(REPO_ROOT, "plugins", "radius", "dist");
 const ARTIFACT = join(DIST, "extension.mjs");
 const SOURCE_MAP = `${ARTIFACT}.map`;
 const SOURCE_CHANGELOG = join(REPO_ROOT, "plugins", "radius", "CHANGELOG.md");
+const WINDOWS_LAUNCHER_BIN = join(
+  REPO_ROOT,
+  "packages",
+  "adapter-shared",
+  "native",
+  "windows-launcher",
+  "bin"
+);
 const SOURCE_SKILL = join(
   REPO_ROOT,
   "plugins",
@@ -142,6 +150,15 @@ function prepareBuildWorkspace(
   }
   copyFileSync(join(REPO_ROOT, "LICENSE"), join(workspaceRoot, "LICENSE"));
 
+  // build.mjs compiles the Windows launchers through this script rather than
+  // reading committed binaries, so the sandbox workspace has to carry it.
+  const workspaceScripts = join(workspaceRoot, "scripts");
+  mkdirSync(workspaceScripts, { recursive: true });
+  copyFileSync(
+    join(REPO_ROOT, "scripts", "build-windows-launcher.mjs"),
+    join(workspaceScripts, "build-windows-launcher.mjs")
+  );
+
   const sourcePlugin = join(REPO_ROOT, "plugins", "radius");
   const workspacePlugin = join(workspaceRoot, "plugins", "radius");
   mkdirSync(workspacePlugin, { recursive: true });
@@ -186,7 +203,11 @@ function assertCurrentArtifact(): void {
     ...filesUnder(join(REPO_ROOT, "packages", "adapter-shared", "src")).filter(
       (path) => !path.endsWith(".test.ts")
     ),
-    ...filesUnder(join(REPO_ROOT, "packages", "adapter-shared", "native")),
+    // The Windows launchers under native/**/bin are build output produced by
+    // this same build, not inputs to it, so only the Go sources count.
+    ...filesUnder(
+      join(REPO_ROOT, "packages", "adapter-shared", "native")
+    ).filter((path) => !path.startsWith(WINDOWS_LAUNCHER_BIN)),
     ...filesUnder(join(REPO_ROOT, "packages", "core", "src")).filter(
       (path) => !path.endsWith(".test.ts")
     ),

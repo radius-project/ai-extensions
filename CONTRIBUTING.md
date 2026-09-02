@@ -25,6 +25,11 @@ fixes, features) as long as they follow a few guidelines:
 
 - [Node.js](https://nodejs.org/) 24 (the active major is recorded in [`.node-version`](./.node-version))
 - [pnpm](https://pnpm.io/) `>= 9` (this repo uses `pnpm@9.15.9`)
+- [Go](https://go.dev/) (the version recorded in
+  [`packages/adapter-shared/native/windows-launcher/go.mod`](./packages/adapter-shared/native/windows-launcher/go.mod)),
+  needed to build the plugin. `pnpm build` cross-compiles the Windows Radius
+  launchers from source on every host, because the plugin ships them for both
+  Windows architectures and they are not committed to the repository.
 
 ## Repository layout
 

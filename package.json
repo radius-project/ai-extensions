@@ -12,7 +12,6 @@
     "watch": "pnpm --filter @radius-project/adapter-canvas run watch",
     "build:canvas": "pnpm --filter @radius-project/adapter-canvas run build",
     "build:windows-launcher": "node scripts/build-windows-launcher.mjs",
-    "build:windows-launcher:check": "node scripts/build-windows-launcher.mjs --check",
     "watch:canvas": "pnpm --filter @radius-project/adapter-canvas run watch",
     "build:install": "pnpm --filter @radius-project/adapter-canvas run build:install",
     "watch:dev": "pnpm --filter @radius-project/adapter-canvas run watch:dev",

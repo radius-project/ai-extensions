@@ -30,6 +30,7 @@ import {
   writeFileSync
 } from "node:fs";
 import { homedir } from "node:os";
+import { ensureWindowsLaunchers } from "../../scripts/build-windows-launcher.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "../..");
@@ -63,14 +64,6 @@ const radiusTypeResolver = join(
   "radius-app-bicep",
   "scripts",
   "show-radius-type.mjs"
-);
-const windowsLauncherBin = join(
-  repoRoot,
-  "packages",
-  "adapter-shared",
-  "native",
-  "windows-launcher",
-  "bin"
 );
 
 // Tracked plugin sources that must sit beside the bundle for dist/ to be a
@@ -227,17 +220,18 @@ async function assembleDist(bundleInputs) {
     logLevel: "silent"
   });
   copyFileSync(join(repoRoot, "LICENSE"), join(distDir, "LICENSE"));
-  const requiredLaunchers = [
-    "windows-radius-launcher-x64.exe",
-    "windows-radius-launcher-arm64.exe"
-  ];
-  for (const launcher of requiredLaunchers) {
-    const launcherPath = join(windowsLauncherBin, launcher);
-    if (!existsSync(launcherPath)) {
-      throw new Error(`Missing required Windows Radius launcher: ${launcherPath}`);
+  // The launchers are build output rather than committed binaries, so dist is
+  // assembled from a fresh compile. Copying the two required files by name keeps
+  // any other artifact left in the build directory out of the plugin.
+  const launchers = ensureWindowsLaunchers();
+  const distBin = join(distDir, "bin");
+  mkdirSync(distBin, { recursive: true });
+  for (const launcher of launchers) {
+    if (!existsSync(launcher)) {
+      throw new Error(`Missing required Windows Radius launcher: ${launcher}`);
     }
+    copyFileSync(launcher, join(distBin, basename(launcher)));
   }
-  cpSync(windowsLauncherBin, join(distDir, "bin"), { recursive: true });
   copyExtensionAssets();
 
   const distPackage = join(distDir, "package.json");
