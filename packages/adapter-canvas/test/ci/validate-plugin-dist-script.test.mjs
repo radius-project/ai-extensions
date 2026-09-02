@@ -464,7 +464,11 @@ describe("scripts/validate-plugin-dist.mjs", () => {
     });
 
     it.each([
-      ["top-level logo", { logo: undefined }, 'plugin.json#logo must be "assets/preview.png"'],
+      [
+        "top-level logo",
+        { logo: undefined },
+        'plugin.json#logo must be "assets/preview.png"'
+      ],
       [
         "extensions directory declaration",
         { extensions: undefined },
