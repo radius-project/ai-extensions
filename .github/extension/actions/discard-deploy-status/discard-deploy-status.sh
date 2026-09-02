@@ -19,16 +19,22 @@
 # `(prod, billing/east)`, `(prod-billing, east)` and `(Prod, Billing-East)` all
 # derive `radius-deploy-status-prod-billing-east`. The name is therefore only
 # used as a cheap server-side filter; before anything is deleted, each candidate
-# is downloaded and its `deploy-state.txt` -- which records the raw, unsanitized
-# `application=` and `environment=` the producer was given -- must match this
-# request exactly. This mirrors the canvas reader, which likewise confirms an
-# artifact's identity from its payload rather than from its derived name.
-# Another application in the same environment, or the same application in
-# another environment, is left untouched even when it shares the name. Live
-# progress slots (`<name>-live-<run-id>-slot-<n>`) are deliberately not removed:
-# a repo-wide read excludes them because their sequences are only comparable
-# within one run, so they cannot resurrect the deleted graph, and they carry a
-# one-day retention.
+# is downloaded and the `application=` and `environment=` its `deploy-state.txt`
+# records must denote the pair being deleted.
+#
+# Those two segments are compared through the shared sanitizer, which is exactly
+# how the canvas reader's confirmArtifactIdentity decides an artifact belongs to
+# a deployment. Matching the reader is the point of the whole action: anything
+# it would still render for this pair has to go, or the Deployed graph stays
+# stale -- so `(Prod, Billing-East)` is this deployment even though the recorded
+# text differs. Comparing each segment on its own is what stops that from
+# over-reaching: `(prod-billing, east)` collides on the name but on neither
+# segment, so it survives untouched.
+#
+# Live progress slots (`<name>-live-<run-id>-slot-<n>`) are deliberately not
+# removed: a repo-wide read excludes them because their sequences are only
+# comparable within one run, so they cannot resurrect the deleted graph, and
+# they carry a one-day retention.
 #
 # Best-effort by design. The application is already deleted by the time this
 # runs, so a listing or delete failure warns and exits 0 rather than failing an
@@ -116,10 +122,12 @@ if [[ "${helper_status}" -ne 0 ]]; then
     exit 0
 fi
 
-if ! declare -F radius_deploy_artifact_name >/dev/null; then
-    warn "the shared radius_deploy_artifact_name helper is unavailable; nothing to remove."
-    exit 0
-fi
+for helper_function in radius_deploy_artifact_name radius_deploy_identity_segment; do
+    if ! declare -F "${helper_function}" >/dev/null; then
+        warn "the shared ${helper_function} helper is unavailable; nothing to remove."
+        exit 0
+    fi
+done
 
 # Already sanitized to [a-z0-9._-] by the shared derivation, so it is safe to
 # interpolate into both a log line and a REST query.
@@ -178,8 +186,20 @@ artifact_describes_target() {
         return 1
     fi
 
-    [[ "${recorded_application}" == "${APPLICATION}" &&
-        "${recorded_environment}" == "${ENVIRONMENT}" ]]
+    # Compared per segment through the shared sanitizer, which is what the
+    # canvas reader's confirmArtifactIdentity does. Matching the reader's notion
+    # of identity is the whole point: anything it would still render for this
+    # pair has to go, so an artifact recorded as "Prod"/"Billing-East" is the
+    # deleted deployment even though the raw text differs. Sanitizing each
+    # segment separately is what keeps that from over-reaching -- the pair
+    # (prod-billing, east) collides on the artifact *name* but not on either
+    # segment, so it survives.
+    local want_application want_environment
+    want_application="$(radius_deploy_identity_segment "${APPLICATION}")"
+    want_environment="$(radius_deploy_identity_segment "${ENVIRONMENT}")"
+
+    [[ "$(radius_deploy_identity_segment "${recorded_application}")" == "${want_application}" ]] || return 1
+    [[ "$(radius_deploy_identity_segment "${recorded_environment}")" == "${want_environment}" ]]
 }
 
 # `name=` is an exact-match filter, so paging is bounded by how many runs

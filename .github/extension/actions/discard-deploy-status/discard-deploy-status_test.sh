@@ -239,7 +239,9 @@ pass "scopes the deletion to one application in one environment"
 # ---------------------------------------------------------------------------
 # Names collide: the sanitizer maps several distinct pairs onto one artifact
 # name, so the name alone cannot authorize a delete. Identity is confirmed from
-# the payload, and a colliding artifact belonging to another pair survives.
+# the payload, per segment, against the same notion of identity the canvas
+# reader uses -- so a case variant of this pair goes (the reader would still
+# render it) while a genuinely different pair that merely collides stays.
 # ---------------------------------------------------------------------------
 colliding_name="$(radius_deploy_artifact_name "prod" "billing-east")"
 assert_equals "$(radius_deploy_artifact_name "prod-billing" "east")" "${colliding_name}" \
@@ -257,10 +259,30 @@ output="$(
 calls="$(gh_calls)"
 assert_contains "${output}" "__exit__0" "a collision does not fail the delete workflow"
 assert_contains "${calls}" "--method DELETE repos/acme/shop/actions/artifacts/21" "deletes the artifact that records this pair"
-assert_not_contains "${calls}" "--method DELETE repos/acme/shop/actions/artifacts/22" "keeps a colliding artifact belonging to another pair"
-assert_not_contains "${calls}" "--method DELETE repos/acme/shop/actions/artifacts/23" "keeps a colliding artifact whose raw names differ only by case"
-assert_equals "$(delete_call_count)" "1" "deletes only the confirmed artifact"
+assert_not_contains "${calls}" "--method DELETE repos/acme/shop/actions/artifacts/22" "keeps a colliding artifact belonging to a genuinely different pair"
+assert_contains "${calls}" "--method DELETE repos/acme/shop/actions/artifacts/23" "deletes a case variant of this pair, which the reader would still render"
+assert_equals "$(delete_call_count)" "2" "deletes only the artifacts that describe this deployment"
 pass "never deletes another application's artifact that collides on the same name"
+
+# ---------------------------------------------------------------------------
+# Identity is matched the way the canvas reader matches it: per segment, after
+# sanitization. Anything it would still render for this pair has to go, or the
+# Deployed graph stays stale -- which is the bug this action exists to fix.
+# ---------------------------------------------------------------------------
+reset_artifact_identities
+register_artifact_identity 51 "Billing East" "PROD"
+register_artifact_identity 52 "billing/east" "prod"
+register_artifact_identity 53 "billing-west" "prod"
+output="$(
+    ENVIRONMENT=prod APPLICATION=billing-east GITHUB_REPOSITORY=acme/shop \
+        GH_LIST_OUTPUT=$'51\n52\n53\n' \
+        run_script
+)"
+calls="$(gh_calls)"
+assert_contains "${calls}" "--method DELETE repos/acme/shop/actions/artifacts/51" "deletes an artifact whose raw names differ by case and separator"
+assert_contains "${calls}" "--method DELETE repos/acme/shop/actions/artifacts/52" "deletes an artifact whose raw name sanitizes to this application"
+assert_not_contains "${calls}" "--method DELETE repos/acme/shop/actions/artifacts/53" "keeps a different application in the same environment"
+pass "matches identity the way the canvas reader does"
 
 # ---------------------------------------------------------------------------
 # Fails closed on an unconfirmable artifact: an unreadable payload is left in
@@ -454,8 +476,24 @@ assert_equals "$(wc -l <"${GH_CALL_LOG}" | tr -d ' ')" "0" \
     "helper without the function: makes no API call"
 pass "makes no API call when the shared helper does not define the derivation"
 
+# The helper defines the derivation but not the identity comparison. Without it
+# the script cannot tell which artifacts describe this pair, so it must not
+# delete on the strength of the name alone.
+printf '#!/bin/bash\nradius_deploy_artifact_name() { printf "radius-deploy-status-prod-billing"; }\n' \
+    >"${ISOLATED_ROOT}/deploy-progress/progress.sh"
+output="$(
+    run_isolated
+    echo "__exit__${RUN_EXIT}"
+)"
+assert_contains "${output}" "__exit__0" "helper without the segment sanitizer: exits 0"
+assert_contains "${output}" "radius_deploy_identity_segment helper is unavailable" \
+    "helper without the segment sanitizer: names the missing helper"
+assert_equals "$(wc -l <"${GH_CALL_LOG}" | tr -d ' ')" "0" \
+    "helper without the segment sanitizer: makes no API call"
+pass "makes no API call when the shared helper cannot compare identities"
+
 # The derivation exists but yields an empty name.
-printf '#!/bin/bash\nradius_deploy_artifact_name() { printf "%%s" ""; }\n' \
+printf '#!/bin/bash\nradius_deploy_artifact_name() { printf "%%s" ""; }\nradius_deploy_identity_segment() { :; }\n' \
     >"${ISOLATED_ROOT}/deploy-progress/progress.sh"
 output="$(
     run_isolated
@@ -469,7 +507,7 @@ assert_equals "$(wc -l <"${GH_CALL_LOG}" | tr -d ' ')" "0" \
 pass "makes no API call when the derivation yields an empty name"
 
 # The derivation itself fails.
-printf '#!/bin/bash\nradius_deploy_artifact_name() { return 1; }\n' \
+printf '#!/bin/bash\nradius_deploy_artifact_name() { return 1; }\nradius_deploy_identity_segment() { :; }\n' \
     >"${ISOLATED_ROOT}/deploy-progress/progress.sh"
 output="$(
     run_isolated
@@ -485,7 +523,7 @@ pass "makes no API call when the derivation fails"
 # Injected control characters in the workflow inputs cannot forge a log line.
 # The inputs only reach the log on these fail-closed paths; the derivation
 # sanitizes them everywhere else.
-printf '#!/bin/bash\nradius_deploy_artifact_name() { printf "%%s" ""; }\n' \
+printf '#!/bin/bash\nradius_deploy_artifact_name() { printf "%%s" ""; }\nradius_deploy_identity_segment() { :; }\n' \
     >"${ISOLATED_ROOT}/deploy-progress/progress.sh"
 output="$(
     : >"${GH_CALL_LOG}"
