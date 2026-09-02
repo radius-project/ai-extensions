@@ -310,8 +310,8 @@ export function createAppModelHandoff(
       }
 
       const attemptToken =
-        state && targets.length === 1 ?
-          `${key}::${(state.appModelAttemptGeneration ?? 0) + 1}`
+        state && state.canvasInstanceId && targets.length === 1 ?
+          `${state.canvasInstanceId}::attempt-${(state.appModelAttemptGeneration ?? 0) + 1}`
         : undefined;
       if (state && attemptToken) {
         state.appModelAttemptGeneration =
