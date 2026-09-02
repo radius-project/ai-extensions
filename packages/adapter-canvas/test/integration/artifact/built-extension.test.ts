@@ -33,6 +33,7 @@ const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
 const DIST = join(REPO_ROOT, ".artifacts", "radius");
 const ARTIFACT = join(DIST, "extension.mjs");
+const COMPATIBILITY_ARTIFACT = join(DIST, "extensions", "extension.mjs");
 const SOURCE_MAP = `${ARTIFACT}.map`;
 const SOURCE_CHANGELOG = join(
   REPO_ROOT,
@@ -61,6 +62,11 @@ const DIST_CODE_REFERENCE = join(
   DIST,
   "skills",
   "radius-app-graph",
+  "references",
+  "source-code-references.md"
+);
+const BICEP_CODE_REFERENCE = join(
+  SOURCE_SKILL,
   "references",
   "source-code-references.md"
 );
@@ -219,10 +225,14 @@ function assertCurrentArtifact(): void {
 
 describe("P0-C built Radius extension artifact", () => {
   let smoke: ArtifactSmokeResult;
+  let compatibilitySmoke: ArtifactSmokeResult;
 
   beforeAll(async () => {
     assertCurrentArtifact();
-    smoke = await runArtifactSmoke(ARTIFACT);
+    [smoke, compatibilitySmoke] = await Promise.all([
+      runArtifactSmoke(ARTIFACT),
+      runArtifactSmoke(COMPATIBILITY_ARTIFACT, 20_000, DIST)
+    ]);
   }, 30_000);
 
   it("registers the retained SDK surface exactly once and shuts down cleanly", () => {
@@ -245,6 +255,11 @@ describe("P0-C built Radius extension artifact", () => {
         )
       ])
     );
+  });
+
+  it("registers the same SDK surface through the Awesome Copilot entry point", () => {
+    expect(compatibilitySmoke.registration).toEqual(EXPECTED_REGISTRATION);
+    expect(compatibilitySmoke.closeCount).toBe(1);
   });
 
   it("keeps the SDK external and packages production modules and skill assets only", () => {
@@ -310,7 +325,13 @@ describe("P0-C built Radius extension artifact", () => {
         .filter((name) => name.endsWith(".mjs"))
         .sort()
     ).toEqual(["extension.mjs"]);
-    expect(existsSync(join(DIST, "extensions"))).toBe(false);
+    const compatibilityEntry = join(DIST, "extensions", "extension.mjs");
+    const reExport = readFileSync(compatibilityEntry, "utf8").match(
+      /export \* from "([^"]+)";/u
+    )?.[1];
+    expect(resolve(dirname(compatibilityEntry), reExport as string)).toBe(
+      ARTIFACT
+    );
     const packagedPaths = [
       "package.json",
       "plugin.json",
@@ -318,6 +339,7 @@ describe("P0-C built Radius extension artifact", () => {
       "LICENSE",
       "THIRD-PARTY-NOTICES.txt",
       "assets/preview.png",
+      "extensions/extension.mjs",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-bicep/scripts/show-radius-type.mjs",
@@ -423,9 +445,16 @@ describe("P0-C built Radius extension artifact", () => {
     const builtPlugin = JSON.parse(
       readFileSync(join(DIST, "plugin.json"), "utf8")
     ) as Record<string, unknown>;
-    expect({ ...builtPlugin, version: sourcePlugin.version }).toEqual(
-      sourcePlugin
-    );
+    const sourceExtensions = sourcePlugin.extensions as Record<
+      string,
+      Record<string, unknown>
+    >;
+    const expectedPlugin = structuredClone(sourcePlugin);
+    expectedPlugin.version = builtPlugin.version;
+    expectedPlugin.logo = sourceExtensions["com.github.copilot"].logo;
+    expectedPlugin.extensions = "extensions";
+    expect(builtPlugin).toEqual(expectedPlugin);
+    expect(sourcePlugin).not.toHaveProperty("logo");
     // plugin.json is the manifest the host reads, so a published build must not
     // advertise a different version from the package it ships.
     expect(builtPlugin.version).toBe(builtPackage.version);
@@ -454,6 +483,7 @@ describe("P0-C built Radius extension artifact", () => {
     expect(relativeFilesUnder(DIST_SKILL)).toEqual(
       relativeFilesUnder(SOURCE_SKILL)
     );
+    expectMatchingFile(SOURCE_CODE_REFERENCE, BICEP_CODE_REFERENCE);
     expectMatchingFile(SOURCE_CODE_REFERENCE, DIST_CODE_REFERENCE);
     const notices = readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8");
     for (const marker of [
@@ -892,9 +922,9 @@ describe("P0-C built Radius extension artifact", () => {
       expectedPath: "show-radius-type.mjs"
     },
     {
-      asset: "app-graph source reference",
+      asset: "source-reference guide",
       missingAsset: [
-        "radius-app-graph",
+        "radius-app-bicep",
         "references",
         "source-code-references.md"
       ],
@@ -972,6 +1002,44 @@ describe("P0-C built Radius extension artifact", () => {
       expect(result.status).not.toBe(0);
       expect(result.stderr).toContain("unable to verify tracked files");
       expect(readFileSync(sentinel, "utf8")).toBe("keep\n");
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["the Copilot namespace is missing", {}],
+    [
+      "the preview path is wrong",
+      { "com.github.copilot": { logo: "assets/logo.png" } }
+    ]
+  ])("rejects source canvas metadata when %s", (_condition, extensions) => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "radius-canvas-invalid-metadata-")
+    );
+    try {
+      const buildDirectory = prepareBuildWorkspace(workspaceRoot);
+      const manifestPath = join(
+        workspaceRoot,
+        "plugins",
+        "radius",
+        "plugin.json"
+      );
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      manifest.extensions = extensions;
+      writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+      const result = spawnSync(process.execPath, ["build.mjs"], {
+        cwd: buildDirectory,
+        encoding: "utf8",
+        env: { ...process.env, RADIUS_SOURCE_REF: SOURCE_REF }
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(
+        'must declare extensions.com.github.copilot.logo as "assets/preview.png"'
+      );
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
     }
