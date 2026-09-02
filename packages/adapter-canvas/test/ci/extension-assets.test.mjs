@@ -129,6 +129,19 @@ describe(".github/extension release assets", () => {
 
       expect(commitScript).toContain('--path ".github/extension"');
       expect(validationScript).toContain(`--source "${source}"`);
+
+      // Every release branch has the same shape, whichever plugin it carries:
+      // the install unit, the plugin metadata beside it, and the catalog.
+      expect(commitScript).toContain(
+        '--path "$PLUGIN_DIST=$PLUGIN_PUBLISH_DIR"'
+      );
+      expect(commitScript).toContain(
+        '--path "$PLUGIN_DIST/plugin.json=$PLUGIN_DIR/plugin.json"'
+      );
+      expect(commitScript).toContain(
+        '--path "$PLUGIN_DIST/README.md=$PLUGIN_DIR/README.md"'
+      );
+      expect(commitScript).toContain('--path "$MANIFEST"');
     }
   );
 });

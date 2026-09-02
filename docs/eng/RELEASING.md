@@ -148,11 +148,11 @@ Complete edge workflow runs are queued FIFO with `queue: max`, including the bui
 
 Each released plugin produces its own complete set:
 
-| Artifact                              | Created by    | Mutable?                     | Purpose                                                                                           |
-|---------------------------------------|---------------|------------------------------|---------------------------------------------------------------------------------------------------|
-| `releases/<plugin>/v<version>` branch | `release.yml` | no by workflow               | The install target: the assembled plugin, root workflow assets, and catalog in one orphan commit. |
-| `<plugin>@<version>` tag              | `release.yml` | no by workflow               | The one tag a stable release publishes, on that branch's verified artifact commit.                |
-| GitHub release                        | `release.yml` | yes by default; configurable | Cut from that tag; body is the Changesets `CHANGELOG.md` entry, plus the two assets below.        |
+| Artifact                              | Created by    | Mutable?                     | Purpose                                                                                                                            |
+|---------------------------------------|---------------|------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| `releases/<plugin>/v<version>` branch | `release.yml` | no by workflow               | The install target: the assembled plugin, its manifest at the plugin root, root workflow assets, and catalog in one orphan commit. |
+| `<plugin>@<version>` tag              | `release.yml` | no by workflow               | The one tag a stable release publishes, on that branch's verified artifact commit.                                                 |
+| GitHub release                        | `release.yml` | yes by default; configurable | Cut from that tag; body is the Changesets `CHANGELOG.md` entry, plus the two assets below.                                         |
 
 | Release asset               | Built by                  | Contents                                                       |
 |-----------------------------|---------------------------|----------------------------------------------------------------|

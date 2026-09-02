@@ -566,8 +566,10 @@ jobs:
             "$catalog" >"$MANIFEST"
           built="$(node scripts/verified-git.mjs commit \
             --message "chore(release): ${PLUGIN_SOURCE_TAG} for ${SOURCE_SHA}" \
-            --path "$PLUGIN_DIST=$PLUGIN_PUBLISH_DIR" --path "$MANIFEST" \
-            --path ".github/extension")"
+            --path "$PLUGIN_DIST=$PLUGIN_PUBLISH_DIR" \
+            --path "$PLUGIN_DIST/plugin.json=$PLUGIN_DIR/plugin.json" \
+            --path "$PLUGIN_DIST/README.md=$PLUGIN_DIR/README.md" \
+            --path "$MANIFEST" --path ".github/extension")"
           expected_pinned_commit="$(jq -r .commit <<<"$built")"
           expected_pinned_tree="$(jq -r .tree <<<"$built")"
 

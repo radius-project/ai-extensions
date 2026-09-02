@@ -42,6 +42,9 @@ const PUBLISHED_PATH =
   /^(?!\/)(?!.*\/\/)(?!.*(?:^|\/)\.\.(?:\/|$))[^\s\\:*?"<>|]+(?<!\/)$/;
 const MARKETPLACE = ".github/plugin/marketplace.json";
 const EXTENSION_ROOT = ".github/extension";
+// Published both inside the install unit and at the plugin root, so a release
+// branch answers for the plugin without being unpacked.
+const PLUGIN_METADATA = ["plugin.json", "README.md"];
 const REGULAR_MODES = new Set(["100644", "100755"]);
 
 // Unwind instead of exiting in place: calling process.exit() while a socket is
@@ -338,10 +341,28 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
     const allowed =
       entry.path === MARKETPLACE ||
       entry.path.startsWith(`${plugin.publishDir}/`) ||
+      entry.path.startsWith(`${plugin.dir}/`) ||
       entry.path.startsWith(`${EXTENSION_ROOT}/`);
     if (!allowed) fail(`${branch} contains an unexpected path: ${entry.path}`);
     if (entry.type !== "blob" || !REGULAR_MODES.has(entry.mode)) {
       fail(`${branch} contains a non-regular file: ${entry.path}`);
+    }
+  }
+
+  // The branch carries the plugin metadata twice, so a reader must not be able
+  // to find two different answers to the same question.
+  for (const name of PLUGIN_METADATA) {
+    const pinned = files.find(
+      (entry) => entry.path === `${plugin.dir}/${name}`
+    );
+    if (!pinned) fail(`${branch} does not contain ${plugin.dir}/${name}`);
+    const shipped = files.find(
+      (entry) => entry.path === `${plugin.publishDir}/${name}`
+    );
+    if (!shipped || shipped.sha !== pinned.sha) {
+      fail(
+        `${branch} publishes a different ${name} at ${plugin.dir} and ${plugin.publishDir}`
+      );
     }
   }
 

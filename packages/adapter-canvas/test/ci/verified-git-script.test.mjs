@@ -27,6 +27,8 @@ const SOURCE = "f".repeat(40);
 const PACKAGE_BLOB = "1".repeat(40);
 const MARKETPLACE_BLOB = "2".repeat(40);
 const EXTENSION_BLOB = "3".repeat(40);
+const MANIFEST_BLOB = "4".repeat(40);
+const README_BLOB = "5".repeat(40);
 // File modes and symlinks are not reproducible on Windows.
 const WINDOWS = process.platform === "win32";
 
@@ -157,6 +159,8 @@ async function completionApi({
   catalogPath = "extensions/radius",
   includeRootExtension = true,
   includeBundledExtension = true,
+  includePinnedMetadata = true,
+  pinnedManifestBlob = MANIFEST_BLOB,
   rootExtensionBlob = EXTENSION_BLOB,
   bundledExtensionBlob = rootExtensionBlob,
   releaseDraft = false,
@@ -242,6 +246,34 @@ async function completionApi({
               mode: "100644",
               type: "blob",
               sha: "3".repeat(40)
+            },
+            ...(includePinnedMetadata ?
+              [
+                {
+                  path: "plugins/radius/plugin.json",
+                  mode: "100644",
+                  type: "blob",
+                  sha: pinnedManifestBlob
+                },
+                {
+                  path: "plugins/radius/README.md",
+                  mode: "100644",
+                  type: "blob",
+                  sha: README_BLOB
+                }
+              ]
+            : []),
+            {
+              path: "extensions/radius/plugin.json",
+              mode: "100644",
+              type: "blob",
+              sha: MANIFEST_BLOB
+            },
+            {
+              path: "extensions/radius/README.md",
+              mode: "100644",
+              type: "blob",
+              sha: README_BLOB
             },
             ...(includeRootExtension ?
               [
@@ -1005,6 +1037,16 @@ describe("scripts/verified-git.mjs", () => {
         "divergent bundled extension assets",
         { bundledExtensionBlob: TARGET },
         "does not bundle an exact copy"
+      ],
+      [
+        "no plugin metadata beside the install unit",
+        { includePinnedMetadata: false },
+        "does not contain plugins/radius/plugin.json"
+      ],
+      [
+        "a plugin manifest that disagrees with the shipped one",
+        { pinnedManifestBlob: TARGET },
+        "publishes a different plugin.json"
       ],
       [
         "the wrong catalog ref",
