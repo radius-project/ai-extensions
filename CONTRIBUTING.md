@@ -36,6 +36,10 @@ This is a [pnpm](https://pnpm.io/) workspace monorepo. Packages live under the
 | `packages/core/`           | `@radius-project/core`           | Shared, UI-agnostic core: app graph, modeling, compute platforms, workflows.    |
 | `packages/adapter-shared/` | `@radius-project/adapter-shared` | Helpers shared across adapters (e.g. building the app graph via `rad`).         |
 | `packages/adapter-canvas/` | `@radius-project/adapter-canvas` | Copilot canvas adapter: SDK wiring + loopback HTTP host that backs the webview. |
+| `plugins/<name>/`          | —                                | Plugin manifest and catalog readme. A directory here is what makes a plugin.    |
+| `extensions/<name>/`       | `<name>`                         | Canvas extension source: package, skills, and gallery assets.                   |
+
+A plugin is shippable once `plugins/<name>/plugin.json` and `extensions/<name>/package.json` agree on the same ref-safe name and `plugins/<name>/README.md` exists; [`scripts/plugins.mjs`](./scripts/plugins.mjs) discovers it from there and derives every branch, tag, and artifact name. `pnpm build` assembles both source roots into the git-ignored `.artifacts/<name>/`, which is the tree a release publishes. That output cannot be assembled in place, because `extensions/<name>/` means source here and the assembled plugin on a release branch — see [`docs/architecture/plugin-packaging-and-publishing.md`](./docs/architecture/plugin-packaging-and-publishing.md).
 
 The `adapter-` directory prefix is deliberate: it marks a package as an adapter at a glance and is what the core boundary lint rule in [`eslint.config.mjs`](./eslint.config.mjs) matches on to reject relative imports that escape into an adapter. The npm names stay unprefixed, so a directory name and its npm name differ by that prefix.
 
@@ -73,6 +77,8 @@ Other useful scripts:
 
 ```bash
 pnpm watch           # rebuild the canvas bundle on change
+pnpm build:install   # assemble, then copy into the local extension directory
+pnpm watch:dev       # rebuild and reinstall on change
 pnpm typecheck       # typecheck core + shared + canvas
 ```
 
