@@ -32,13 +32,9 @@ const SUPPORTED_SCHEMA_KEYWORDS = new Set([
   "items"
 ]);
 const DNS_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
-// github/awesome-copilot admits a canvas plugin on these exact literals, which
-// Agent Plugins 1.0.0 does not define: a top-level `logo` and an `extensions`
-// naming a directory rather than the spec's client-namespace object. They are
-// checked here so the deviation is an enforced contract rather than a hole.
 const CANVAS_KEYWORD = "canvas";
+const CANVAS_NAMESPACE = "com.github.copilot";
 const CANVAS_LOGO = "assets/preview.png";
-const CANVAS_EXTENSIONS = "extensions";
 const CANVAS_ENTRY_POINT = "extension.mjs";
 
 class Failure extends Error {}
@@ -229,43 +225,20 @@ function isCanvasPlugin(manifest) {
   );
 }
 
-// Either the flat entry point or one nested a single level under it, matching
-// what the canvas gates accept.
-function hasCanvasEntryPoint(directory) {
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if (entry.isFile() && entry.name === CANVAS_ENTRY_POINT) return true;
-    if (
-      entry.isDirectory() &&
-      statSync(resolve(directory, entry.name, CANVAS_ENTRY_POINT), {
-        throwIfNoEntry: false
-      })?.isFile()
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function requireCanvasContract(dist, manifest) {
-  if (manifest.logo !== CANVAS_LOGO) {
+  const client = manifest.extensions?.[CANVAS_NAMESPACE];
+  if (!isJsonObject(client) || client.logo !== CANVAS_LOGO) {
     fail(
-      `plugin.json#logo must be ${JSON.stringify(CANVAS_LOGO)} for a plugin keyworded "${CANVAS_KEYWORD}"`
+      `plugin.json#extensions[${JSON.stringify(CANVAS_NAMESPACE)}].logo must be ${JSON.stringify(CANVAS_LOGO)} for a plugin keyworded "${CANVAS_KEYWORD}"`
     );
   }
-  requirePath(dist, manifest.logo, "plugin.json#logo", "file");
-
-  if (manifest.extensions !== CANVAS_EXTENSIONS) {
-    fail(
-      `plugin.json#extensions must be ${JSON.stringify(CANVAS_EXTENSIONS)} for a plugin keyworded "${CANVAS_KEYWORD}"`
-    );
-  }
-  requirePath(dist, manifest.extensions, "plugin.json#extensions", "directory");
-
-  if (!hasCanvasEntryPoint(resolve(dist, manifest.extensions))) {
-    fail(
-      `${manifest.extensions} must contain ${CANVAS_ENTRY_POINT} or <extension>/${CANVAS_ENTRY_POINT}`
-    );
-  }
+  requirePath(
+    dist,
+    client.logo,
+    `plugin.json#extensions[${JSON.stringify(CANVAS_NAMESPACE)}].logo`,
+    "file"
+  );
+  requirePath(dist, CANVAS_ENTRY_POINT, "canvas entry point", "file");
 }
 
 function requirePath(root, declared, label, type) {
@@ -329,16 +302,8 @@ async function main() {
       `Agent Plugins schema uses an unsupported keyword: ${unsupportedSchemaKeyword}`
     );
   }
-  // A canvas plugin's two client fields are withheld from the closed schema and
-  // checked against the canvas contract instead; everything else still has to
-  // satisfy Agent Plugins 1.0.0 exactly.
   const canvas = isJsonObject(manifest) && isCanvasPlugin(manifest);
-  const portable = canvas ? { ...manifest } : manifest;
-  if (canvas) {
-    delete portable.logo;
-    if (typeof manifest.extensions === "string") delete portable.extensions;
-  }
-  const manifestError = validateSchema(portable, manifestSchema, "plugin.json");
+  const manifestError = validateSchema(manifest, manifestSchema, "plugin.json");
   if (manifestError !== undefined) fail(manifestError);
   if (canvas) requireCanvasContract(dist, manifest);
 

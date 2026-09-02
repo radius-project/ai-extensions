@@ -12,7 +12,7 @@ graph TD
     end
 
     subgraph PluginSrc["plugins/radius (source, tracked)"]
-        Manifest["plugin.json<br/>(Agent Plugins 1.0.0 + canvas contract)"]
+        Manifest["plugin.json<br/>(Agent Plugins 1.0.0 + canvas metadata)"]
         Readme["README.md"]
     end
 
@@ -26,14 +26,12 @@ graph TD
     subgraph Dist[".artifacts/radius (generated, git-ignored)"]
         DistAll["plugin.json + package.json<br/>README.md + skills/ + assets/"]
         Bundle["extension.mjs (+ .map)"]
-        Ext["extensions/extension.mjs<br/>(generated re-export)"]
     end
 
     Core -->|workspace:* import| Canvas
     Shared -->|workspace:* import| Canvas
     Canvas -->|entry point| Build
     Build -->|emits bundle| Bundle
-    Bundle -->|re-exported by| Ext
     Manifest --> DistAll
     Readme --> DistAll
     Pkg --> DistAll
@@ -51,14 +49,14 @@ graph TD
 - **`packages/adapter-canvas/build.mjs`** — the esbuild step that bundles the adapter plus its `workspace:*` dependencies into one file, then assembles `.artifacts/radius/`.
 - **`plugins/radius/`** — the tracked plugin source and the discovery anchor: `plugin.json` and `README.md`.
 - **`extensions/radius/`** — the tracked canvas extension source: `package.json`, `skills/`, the `assets/` tree the canvas contract requires, and the `CHANGELOG.md` Changesets writes beside the package it versions.
-- **`.artifacts/radius/`** — the generated, installable plugin: both tracked source trees above, the built `extension.mjs`, an `extensions/` entry point that re-exports it for canvas discovery, and a complete `workflows/` copy of `.github/extension/`. Git-ignored, wiped and rebuilt on every build, and never present on a published branch under this name.
+- **`.artifacts/radius/`** — the generated, installable plugin: both tracked source trees above, the root `extension.mjs`, and a complete `workflows/` copy of `.github/extension/`. Git-ignored, wiped and rebuilt on every build, and never present on a published branch under this name.
 - **`.github/plugin/marketplace.json`** — the marketplace manifest whose plugin `source` points installs at `extensions/radius` on `radius@edge`.
 - **`.changeset/config.json`** — Changesets owns released versions. `privatePackages.version` includes private plugins; `privatePackages.tag` is disabled because the workflow creates one scoped tag on the artifact commit instead of running Changesets' all-package source tag scan.
 - **`scripts/plugins.mjs`** — the plugin registry: discovers every directory under `plugins/` that pairs a `plugins/<name>/plugin.json` with an `extensions/<name>/package.json`, and builds every published ref name from it. It is also the one place that names the split, exposing `dir`, `extensionDir`, `distDir` (the local `.artifacts/<name>` build output), `publishDir` (the published `extensions/<name>`), `packageFile`, `manifestFile`, `changelogFile`, and `readmeFile`. The single source of the `releases/<plugin>/<channel>`, `<plugin>@edge`, and `<plugin>@<version>` convention; `--json` feeds the workflow matrices and `--env` hands the names — including `PLUGIN_DIST`, `PLUGIN_EXTENSION_DIR`, and `PLUGIN_PUBLISH_DIR` — to a job.
 - **`scripts/version.mjs`** — derives every other version string from `extensions/<name>/package.json`, the version Changesets owns; `--check` fails CI on drift across all plugins, `--set --channel edge` retargets and restamps one plugin's generated edge catalog entry, `--compare` ranks two versions by semver precedence, and `--release-notes` reads that plugin's current Changesets changelog entry. The catalog on `main` is deliberately not derived: only `plugins/<name>/plugin.json` is.
 - **`scripts/release-version.mjs`** — invokes Changesets with an argv array for one selected plugin (ignoring the others), then synchronizes all derived manifests. Both stable and snapshot versioning use this boundary.
 - **`scripts/release-plan.mjs`** — classifies a merged release PR from git facts: a plugin is released only when its package version changed from the first parent and the matching changelog heading was added in the same diff.
-- **`scripts/validate-plugin-dist.mjs`** — validates the generic artifact contract before attestation or push: matching names and versions, the exact source commit, complete workflow assets, README, license, manifest-declared paths, path confinement, and no symlinks. For a plugin keyworded `canvas` it also enforces the two non-spec manifest fields `github/awesome-copilot` requires, and the `assets/` and `extensions/` paths they name.
+- **`scripts/validate-plugin-dist.mjs`** — validates the generic artifact contract before attestation or push: matching names and versions, the exact source commit, complete workflow assets, README, license, manifest-declared paths, path confinement, and no symlinks. For a plugin keyworded `canvas` it also requires the gallery preview and a root `extension.mjs`.
 - **`.github/workflows/build.yml`** — the reusable build: shared checks run once and upload a gate artifact; requested plugins resolve their checked-out full source SHA, bake it into generated workflow fetch/action references and package metadata, then upload disjoint `plugin-dist-<plugin>` artifacts. Publishers require the gate plus their own artifact.
 - **`.github/workflows/changesets.yml`** — non-blocking pull request feedback from the Changesets Action v2 `pr-status` and `pr-comment` sub-actions. The read-only status job inspects pull request files; a separate job owns the pull request write token and only publishes the generated comment.
 - **`.github/workflows/publish.yml`** — the rolling **edge** channel: on every push to `main`, publishes each plugin's assembled tree to its own `releases/<plugin>/edge` branch and `<plugin>@edge` tag.
@@ -86,7 +84,7 @@ Plugin **source** is split in two, the way [`github/awesome-copilot`](https://gi
 
 The asymmetry is deliberate: on `main`, `extensions/radius/` is canvas **source**; on a release branch the same path is the **assembled install unit**. That is why the build cannot assemble in place, and why `.artifacts/` exists at all.
 
-The manifest targets the [Agent Plugins](https://agent-plugins.org) 1.0.0 schema, which is **closed**: the only permitted fields are `$schema`, `name`, `version`, `description`, `author`, `homepage`, `repository`, `license`, `keywords`, and `extensions`. Components load from fixed locations rather than manifest paths, so skills are discovered from `skills/` without being declared, and `extensions` — if present at all — is an object keyed by a reverse-domain client namespace, never a path. The canvas `extension.mjs` and its `package.json` sit at the **plugin root**, which for an install is the assembled tree; the build copies both tracked source trees into it so those relative paths resolve.
+The manifest targets the [Agent Plugins](https://agent-plugins.org) 1.0.0 schema, which is **closed**: the only permitted fields are `$schema`, `name`, `version`, `description`, `author`, `homepage`, `repository`, `license`, `keywords`, and `extensions`. Components load from fixed locations rather than manifest paths, so skills are discovered from `skills/` without being declared, and `extensions` is an object keyed by a reverse-domain client namespace, never a path. Radius follows [Awesome Copilot's canvas convention](https://github.com/github/awesome-copilot/blob/main/CONTRIBUTING.md#adding-canvas-extensions) by declaring `extensions.com.github.copilot.logo` as `assets/preview.png`. The canvas `extension.mjs` and its `package.json` sit at the **plugin root**, which for an install is the assembled tree; the build copies both tracked source trees into it so those relative paths resolve.
 
 ### 2. The build: bundling the workspace, then assembling `.artifacts/`
 

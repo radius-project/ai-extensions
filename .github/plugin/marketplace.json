@@ -18,8 +18,13 @@
         "ref": "radius@edge"
       },
       "description": "Model, visualize, and deploy applications with Radius from the GitHub Copilot app and CLI.",
+      "author": {
+        "name": "Radius",
+        "url": "https://github.com/radius-project"
+      },
       "version": "0.0.0",
       "repository": "https://github.com/radius-project/ai-extensions",
+      "homepage": "https://radapp.io",
       "license": "Apache-2.0",
       "keywords": [
         "radius",
