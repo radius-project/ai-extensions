@@ -227,10 +227,15 @@ async function assembleDist(bundleInputs) {
     logLevel: "silent"
   });
   copyFileSync(join(repoRoot, "LICENSE"), join(distDir, "LICENSE"));
-  if (!existsSync(windowsLauncherBin)) {
-    throw new Error(
-      `Missing required Windows Radius launcher assets: ${windowsLauncherBin}`
-    );
+  const requiredLaunchers = [
+    "windows-radius-launcher-x64.exe",
+    "windows-radius-launcher-arm64.exe"
+  ];
+  for (const launcher of requiredLaunchers) {
+    const launcherPath = join(windowsLauncherBin, launcher);
+    if (!existsSync(launcherPath)) {
+      throw new Error(`Missing required Windows Radius launcher: ${launcherPath}`);
+    }
   }
   cpSync(windowsLauncherBin, join(distDir, "bin"), { recursive: true });
   copyExtensionAssets();
