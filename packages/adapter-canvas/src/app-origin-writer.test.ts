@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { parseAppOrigin, serializeAppOrigin } from "@radius-project/core";
+import {
+  evaluateAppModelFreshness,
+  parseAppOrigin,
+  serializeAppOrigin
+} from "@radius-project/core";
 import { hashAppBicep } from "./app-bicep-hash.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
 
@@ -13,6 +17,12 @@ import { resolveGeneratorVersion } from "./generator-version.js";
 // packages/core/src/modeling/app-origin.ts reads back. These tests are the
 // contract between the two copies: if they drift, the canvas would report every
 // freshly generated model as hand-edited.
+//
+// They also pin the other half of that contract, which is the version. The
+// writer records only what it is handed, so the value the canvas resolves for
+// itself has to survive the round trip through --skill-version unchanged; a
+// writer that worked the version out on its own instead is what reported models
+// as permanently stale in #694.
 
 const script = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -21,13 +31,6 @@ const script = path.resolve(
 
 const MODEL =
   "resource app 'Radius.Core/applications@2025-08-01-preview' = {}\n";
-
-// The version the script should discover on its own: the manifest of the plugin
-// the script ships inside, addressed the same way the script addresses it.
-function pluginManifestVersion(): string {
-  const manifest = path.resolve(path.dirname(script), "../../../package.json");
-  return JSON.parse(fs.readFileSync(manifest, "utf8")).version as string;
-}
 
 const temporaryDirectories = new Set<string>();
 
@@ -80,8 +83,27 @@ function checkout(model = MODEL, withCommit = true): Checkout {
   };
 }
 
-function run(args: string[], cwd: string) {
-  return spawnSync(process.execPath, [script, ...args], {
+// A second installed copy of the plugin: the same script, at the same place
+// inside the same directory layout, under a manifest naming a different
+// version. This is the shape of the machine in #694, where the canvas ran one
+// copy and the agent launched the other.
+function duplicatePlugin(version: string): string {
+  const root = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), "radius-plugin-"))
+  );
+  temporaryDirectories.add(root);
+  const scripts = path.join(root, "skills", "radius-app-bicep", "scripts");
+  fs.mkdirSync(scripts, { recursive: true });
+  fs.writeFileSync(
+    path.join(root, "package.json"),
+    JSON.stringify({ name: "radius", version })
+  );
+  fs.copyFileSync(script, path.join(scripts, "write-app-origin.mjs"));
+  return root;
+}
+
+function run(args: string[], cwd: string, entry = script) {
+  return spawnSync(process.execPath, [entry, ...args], {
     cwd,
     encoding: "utf8"
   });
@@ -167,10 +189,13 @@ describe("write-app-origin", () => {
     expect(Date.parse(generatedAt ?? "")).toBeGreaterThanOrEqual(before);
   });
 
-  // SKILL.md can be loaded directly as a plugin skill, in which case nothing
-  // substitutes <loaded-skill-version> and the placeholder arrives literally.
-  // Recording it would make every later check see a version that can never
-  // match, so the script resolves the version itself instead.
+  // The writer records the version it is HANDED and never works one out. A
+  // version discovered from this script's own location is a real version, just
+  // not necessarily the running one: two copies of the plugin can be installed
+  // with identical layouts and different versions, and a guess then disagrees
+  // with the canvas permanently. Blank is a designed value — the reader skips
+  // the generator check for it — so it is the honest thing to record when
+  // nobody told us (#694).
   it.each([
     ["no version is passed", [] as string[]],
     ["the flag is given no value", ["--skill-version"]],
@@ -178,7 +203,7 @@ describe("write-app-origin", () => {
       "the prompt placeholder was never substituted",
       ["--skill-version", "<loaded-skill-version>"]
     ]
-  ])("falls back to the plugin manifest version when %s", (_label, args) => {
+  ])("records no version at all when %s", (_label, args) => {
     const repo = checkout();
 
     const result = run([repo.appPath, ...args], repo.root);
@@ -186,19 +211,114 @@ describe("write-app-origin", () => {
     expect(result.status).toBe(0);
     expect(
       parseAppOrigin(fs.readFileSync(repo.originPath, "utf8"))?.skillVersion
-    ).toBe(pluginManifestVersion());
+    ).toBe("");
   });
 
-  // The writer and the reader must agree on what "this generator" is called, or
-  // every freshly generated model reports itself as generator-changed.
-  it("records the same version the extension resolves for itself", () => {
+  // Recording blank is correct but must not be silent: the likeliest cause is a
+  // caller that should have passed a version, and an unexplained blank switches
+  // the generator comparison off for this model with nothing to show for it.
+  it("warns that it left the generator version unknown", () => {
     const repo = checkout();
 
-    run([repo.appPath], repo.root);
+    const result = run([repo.appPath], repo.root);
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toMatch(/no --skill-version was supplied/u);
+  });
+
+  // The warning is advisory. A version that WAS supplied is recorded without
+  // complaint, so a correct run stays quiet.
+  it("says nothing when a version was supplied", () => {
+    const repo = checkout();
+
+    const result = run([repo.appPath, "--skill-version", "0.1.0"], repo.root);
+
+    expect(result.stderr).toBe("");
+  });
+
+  // A blank version is not a broken record. It has to stay readable, or the
+  // model would report as unverified on every graph open, which is worse than
+  // losing the generator comparison for it.
+  it("still writes a record the core parser accepts when no version is passed", () => {
+    const repo = checkout();
+
+    run(
+      [repo.appPath, "--generated-at", "2026-08-11T05:32:32.000Z"],
+      repo.root
+    );
+
+    expect(parseAppOrigin(fs.readFileSync(repo.originPath, "utf8"))).toEqual({
+      generatedAt: "2026-08-11T05:32:32.000Z",
+      sourceCommit: repo.commit,
+      skillVersion: "",
+      appBicepHash: hashAppBicep(MODEL)
+    });
+  });
+
+  // The scenario the writer must not reproduce: the script runs from one
+  // installed copy of the plugin while the canvas runs another. Copying the
+  // script into a plugin layout whose manifest names a different version proves
+  // the script no longer adopts the version sitting next to it.
+  it("ignores the manifest of whichever plugin copy it is launched from", () => {
+    const repo = checkout();
+    const scripts = path.join(
+      duplicatePlugin("9.9.9-other-copy"),
+      "skills",
+      "radius-app-bicep",
+      "scripts"
+    );
+
+    const result = run(
+      [repo.appPath, "--skill-version", "0.0.0"],
+      repo.root,
+      path.join(scripts, "write-app-origin.mjs")
+    );
+
+    expect(result.status).toBe(0);
+    expect(
+      parseAppOrigin(fs.readFileSync(repo.originPath, "utf8"))?.skillVersion
+    ).toBe("0.0.0");
+  });
+
+  // Same duplicated-install layout, but with nothing handed to the writer. The
+  // old fallback stamped 9.9.9-other-copy here, which the canvas then compared
+  // against its own version forever.
+  it("records nothing rather than the launching copy's version", () => {
+    const repo = checkout();
+    const scripts = path.join(
+      duplicatePlugin("9.9.9-other-copy"),
+      "skills",
+      "radius-app-bicep",
+      "scripts"
+    );
+
+    run([repo.appPath], repo.root, path.join(scripts, "write-app-origin.mjs"));
 
     expect(
       parseAppOrigin(fs.readFileSync(repo.originPath, "utf8"))?.skillVersion
-    ).toBe(resolveGeneratorVersion());
+    ).toBe("");
+  });
+
+  // The end-to-end shape of the contract: the canvas resolves one version, hands
+  // it to the writer, and later compares the record against the same value. As
+  // long as that one value makes the round trip, a freshly generated model reads
+  // as current — which is what the duplicated install broke.
+  it("reports a model as up to date when the canvas's own version made the round trip", () => {
+    const repo = checkout();
+    const installed = resolveGeneratorVersion();
+
+    run([repo.appPath, "--skill-version", installed], repo.root);
+
+    const result = evaluateAppModelFreshness({
+      model: MODEL,
+      originText: fs.readFileSync(repo.originPath, "utf8"),
+      headCommit: repo.commit,
+      generatorVersion: installed,
+      hashAppBicep
+    });
+
+    expect(result.status).toBe("up-to-date");
+    expect(result.stale).toBe(false);
   });
 
   it("refuses to write a record for a model it cannot read", () => {

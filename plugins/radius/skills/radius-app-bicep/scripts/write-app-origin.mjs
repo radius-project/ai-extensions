@@ -25,7 +25,6 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 function fail(message) {
   console.error(message);
@@ -80,34 +79,46 @@ function headCommit(cwd) {
 
 const PLACEHOLDER = "<loaded-skill-version>";
 
-// The skill prompt normally substitutes the running bundle's version into
-// --skill-version. But SKILL.md is also loadable directly as a plugin skill, in
-// which case the placeholder arrives unsubstituted. Recording that literal
-// would make every later freshness check see a version that can never match and
-// report the model as generator-changed forever. So treat the placeholder as
-// absent and read the version from the plugin manifest instead.
+// The version is RECEIVED, never worked out here, and that is the whole point.
 //
-// The manifest is addressed exactly, not searched for by walking up: this script
-// always sits at <plugin>/skills/radius-app-bicep/scripts/, and an open-ended
-// walk could climb out of the plugin entirely and adopt an unrelated
-// package.json's version.
-function manifestVersion() {
-  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-  const manifest = path.resolve(scriptDir, "../../../package.json");
-  try {
-    const version = JSON.parse(readFileSync(manifest, "utf8"))?.version;
-    return typeof version === "string" ? version.trim() : "";
-  } catch {
-    return "";
-  }
-}
-
+// `skillVersion` exists so the canvas can later ask "did the generator change
+// since this model was made?", which is only a meaningful question if the value
+// recorded here is the same value the canvas resolves for itself. The canvas
+// reads the package manifest sitting beside the bundle it loaded, and passes the
+// result to the agent through the radius_generate_app handoff, which is what
+// substitutes --skill-version. So the flag carries the one authoritative answer,
+// and this script's job is to write it down unchanged.
+//
+// This script used to fall back to the manifest three directories above itself
+// when the flag was absent. That reads a real version — just not necessarily the
+// running one. Two copies of the plugin can be installed at once (an
+// extensions-directory copy and an installed-plugins copy), the two directory
+// layouts are identical, and the agent can easily load SKILL.md from one while
+// the canvas runs the other. The fallback then stamped copy B's version into a
+// record the canvas compared against copy A's, the model was reported as
+// generator-changed on every graph open, and regenerating reproduced the same
+// mismatched pair — an endless, expensive no-op (#694).
+//
+// So an absent or unsubstituted flag records "" instead. Blank is a designed
+// value here, not a failure: the reader treats an empty skillVersion as "not
+// known" and skips the generator-drift check entirely, exactly as it does when
+// the canvas cannot resolve its own version. Recording nothing costs the drift
+// check for that one model; recording a guess costs the user a regeneration loop
+// they cannot escape or diagnose. Refusing to write the record at all would be
+// worse still: the model would then read as unverified on every graph open.
 const requested = flag("skill-version");
-// An unresolvable version is a missing fact, not a failure. Recording it empty
-// lets the reader skip the generator-drift check; refusing to write it would make
-// the model read as unverified and prompt the user on every single graph open.
-const skillVersion =
-  requested && requested !== PLACEHOLDER ? requested : manifestVersion();
+const skillVersion = requested === PLACEHOLDER ? "" : requested;
+if (!skillVersion) {
+  // Not a failure, so the record is still written and the run still succeeds.
+  // But a blank version silently switches the generator-drift check off for
+  // this model, and the likeliest cause is a caller that should have passed a
+  // version and did not — an older SKILL.md, or a hand-run command. Saying so
+  // on stderr keeps "we deliberately recorded unknown" from being
+  // indistinguishable from "nobody told us and nobody noticed".
+  console.error(
+    "warning: no --skill-version was supplied, so the origin record leaves the generator version unknown and later freshness checks will skip the generator comparison for this model."
+  );
+}
 
 const app = path.resolve(positional() || ".radius/app.bicep");
 let model = "";
