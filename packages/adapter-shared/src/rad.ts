@@ -1234,8 +1234,13 @@ export async function runRadAppGraph(
       } | null = null;
       const abort = (): void => {
         if (settled) return;
-        complete();
+        // Stop watching, but leave the pipes readable until the tree is gone.
+        // Destroying them first truncates the captured output and stops
+        // draining a process that is still running, so a noisy command can
+        // block on backpressure instead of terminating. spawnRad does the same.
+        stopWatching();
         void terminateChildTree(child).then(() => {
+          destroyStreams();
           reject(new RadProcessError("rad app graph aborted", stdout, stderr));
         });
       };
@@ -1248,11 +1253,9 @@ export async function runRadAppGraph(
 
       const timer = setTimeout(() => {
         if (settled) return;
-        settled = true;
-        if (graceTimer) clearTimeout(graceTimer);
-        if (artifactTimer) clearInterval(artifactTimer);
-        signal?.removeEventListener("abort", abort);
+        stopWatching();
         void terminateChildTree(child).then(() => {
+          destroyStreams();
           reject(
             new RadProcessError(
               `rad app graph timed out after ${timeout}ms`,
@@ -1263,13 +1266,15 @@ export async function runRadAppGraph(
         });
       }, timeout);
 
-      const complete = (): void => {
-        if (settled) return;
+      const stopWatching = (): void => {
         settled = true;
         clearTimeout(timer);
         if (graceTimer) clearTimeout(graceTimer);
         if (artifactTimer) clearInterval(artifactTimer);
         signal?.removeEventListener("abort", abort);
+      };
+
+      const destroyStreams = (): void => {
         try {
           child.stdout?.destroy();
         } catch {
@@ -1280,6 +1285,14 @@ export async function runRadAppGraph(
         } catch {
           /* best-effort */
         }
+      };
+
+      // Settlement paths that run after the child has already exited have
+      // nothing left to drain, so they release the pipes immediately.
+      const complete = (): void => {
+        if (settled) return;
+        stopWatching();
+        destroyStreams();
       };
       signal?.addEventListener("abort", abort, { once: true });
       if (signal?.aborted) abort();

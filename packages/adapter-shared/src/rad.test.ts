@@ -734,6 +734,18 @@ describePosixBuildFailure(
 );
 
 describe("runRadAppGraph artifact completion", () => {
+  // `kill(pid, 0)` is the portable liveness probe: it performs the permission
+  // and existence checks without delivering a signal, so a live process throws
+  // nothing and a reaped one throws ESRCH.
+  function isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   let binDir: string;
   let bin: string;
   let prevNodeOptions: string | undefined;
@@ -755,7 +767,7 @@ describe("runRadAppGraph artifact completion", () => {
         'if (process.argv[1]?.endsWith("app")) {',
         '  fs.writeFileSync("app-graph.json", "{");',
         '  if (process.env.FAKE_RAD_SCENARIO === "hang") {',
-        '    process.stdout.write("waiting");',
+        '    process.stdout.write("waiting:" + process.pid);',
         "    setInterval(() => {}, 60000);",
         "    return;",
         "  }",
@@ -881,13 +893,28 @@ describe("runRadAppGraph artifact completion", () => {
     });
     setTimeout(() => controller.abort(), 500);
 
+    // The output the process wrote before cancellation must survive: the abort
+    // path holds the pipes open until the tree is gone rather than destroying
+    // them up front, which would truncate whatever Node had not drained yet.
     await expect(graph).rejects.toMatchObject({
-      message: "rad app graph failed: waiting",
+      message: expect.stringContaining("rad app graph failed: waiting"),
       cause: expect.objectContaining({
         message: "rad app graph aborted",
-        stdout: "waiting"
+        stdout: expect.stringMatching(/^waiting:\d+$/)
       })
     });
+
+    // Cancellation must also mean the tree is actually gone by the time the
+    // caller is told, not merely that termination was requested.
+    let reported = "";
+    try {
+      await graph;
+    } catch (error) {
+      reported = (error as { cause?: { stdout?: string } }).cause?.stdout ?? "";
+    }
+    const pid = Number(reported.split(":")[1]);
+    expect(Number.isInteger(pid)).toBe(true);
+    expect(isProcessAlive(pid)).toBe(false);
   }, 10000);
 });
 
