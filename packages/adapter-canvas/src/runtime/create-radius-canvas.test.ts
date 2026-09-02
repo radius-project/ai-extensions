@@ -374,6 +374,29 @@ describe("RU-14: workspace repo/branch resolution on open()", () => {
     expect(state.contextBranchSource).toBe("explicit");
   });
 
+  it("preserves explicit branch intent when reopening another page without context input", async () => {
+    const { canvas, deps } = setup({
+      workspaceContext: {
+        workspacePath: "/ws",
+        repo: "acme/widgets",
+        branch: "feature/x"
+      }
+    });
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "acme/widgets",
+        branch: "release"
+      })
+    );
+
+    await canvas.open(ctx("radius-panel", { page: "planned" }));
+
+    const state = deps.servers.get("radius-panel")!.state;
+    expect(state.contextBranch).toBe("release");
+    expect(state.contextBranchSource).toBe("explicit");
+  });
+
   it("falls back to the given branch (or main) for a different repo", async () => {
     const { canvas, deps } = setup({
       workspaceContext: {

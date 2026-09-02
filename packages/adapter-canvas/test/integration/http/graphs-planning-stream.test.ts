@@ -30,6 +30,7 @@ interface Script {
   // promise before resolving. Lets a test prove progress frames reach the socket
   // WHILE the build is still in flight, not just once the stream has ended.
   buildGate?: Promise<void>;
+  branchResolutionThrows?: Error;
   branchResolution?: WorkspaceBranchResolution;
 }
 
@@ -57,8 +58,11 @@ function start(): Harness {
   const routes = createTestRouteTable(
     createGraphsPlanningStreamRoutes({
       readInstanceEntry: () => entryFor({ state } as CanvasServerEntry),
-      resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
-        Promise.resolve({
+      resolveBranchForRequest: (_entry, _repo, requestedBranch) => {
+        if (script.branchResolutionThrows) {
+          return Promise.reject(script.branchResolutionThrows);
+        }
+        return Promise.resolve({
           ...(script.branchResolution ?? {
             status: "resolved" as const,
             branch:
@@ -68,7 +72,8 @@ function start(): Harness {
               "main",
             followsWorkspaceBranch: false
           })
-        }),
+        });
+      },
       commitBranchResolution: () => true,
       defaultBranchForState: (current) =>
         current?.contextBranch || current?.workspaceBranch || "main",
@@ -308,6 +313,59 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
         reload: true,
         resolvedBranch: "renamed-worktree"
       }
+    });
+  });
+
+  it("streams branch resolution failures over the real socket", async () => {
+    const harness = start();
+    harness.script.branchResolutionThrows = new Error("branch probe crashed");
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/load-graph-stream?repo=octo%2Fapp`
+    );
+    const result = await readFrames(response);
+
+    expect(response.status).toBe(200);
+    expect(result.frames).toEqual([
+      {
+        event: "done",
+        data: { error: "branch probe crashed" }
+      }
+    ]);
+  });
+
+  it("does not replace source state when the repository is missing", async () => {
+    const harness = start();
+    harness.state.graphResources = [
+      { id: "existing", name: "existing", type: "Radius.Compute/containers" }
+    ];
+    harness.state.sourceRefContexts = {
+      graph: {
+        view: "graph",
+        repo: "octo/app",
+        branch: "main",
+        token: "graph|octo/app|main"
+      }
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/load-graph-stream`);
+    const result = await readFrames(response);
+
+    expect(result.frames).toEqual([
+      {
+        event: "done",
+        data: { error: "Please select a repository." }
+      }
+    ]);
+    expect(harness.state.graphResources).toEqual([
+      { id: "existing", name: "existing", type: "Radius.Compute/containers" }
+    ]);
+    expect(harness.state.sourceRefContexts.graph).toMatchObject({
+      repo: "octo/app",
+      branch: "main",
+      token: "graph|octo/app|main"
     });
   });
 

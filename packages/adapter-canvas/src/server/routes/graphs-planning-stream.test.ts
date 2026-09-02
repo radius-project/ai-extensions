@@ -115,6 +115,7 @@ function entryWith(state: CanvasState): CanvasServerEntry {
 interface Options {
   missingEntry?: boolean;
   readThrows?: unknown;
+  branchResolutionThrows?: unknown;
   state?: CanvasState;
   selection?: LoadGraphStreamBicepSelection;
   fetchThrows?: unknown;
@@ -148,14 +149,18 @@ function fakes(options: Options = {}): Fakes {
       if (options.readThrows) throw options.readThrows;
       return entry;
     },
-    resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
-      Promise.resolve(
+    resolveBranchForRequest: (_entry, _repo, requestedBranch) => {
+      if (options.branchResolutionThrows) {
+        return Promise.reject(options.branchResolutionThrows);
+      }
+      return Promise.resolve(
         options.branchResolution ?? {
           status: "resolved",
           branch: requestedBranch || DEFAULT_BRANCH,
           followsWorkspaceBranch: false
         }
-      ),
+      );
+    },
     commitBranchResolution: (_entry, _repo, resolution) => {
       calls.push(`commitBranchResolution(${resolution.branch})`);
       return options.commitBranchResolution ?? true;
@@ -357,6 +362,26 @@ describe("graphs-planning load-graph-stream route", () => {
     ).toBe(false);
   });
 
+  it("streams a terminal error when branch resolution rejects", async () => {
+    const { deps, calls } = fakes({
+      branchResolutionThrows: new Error("branch probe crashed")
+    });
+
+    const recording = await run(`/api/load-graph-stream?repo=${REPO}`, deps);
+
+    expect(frames(recording.stream)).toEqual([
+      {
+        event: "done",
+        data: { error: "formatted:branch probe crashed" }
+      }
+    ]);
+    expect(recording.status).toBe(200);
+    expect(recording.ended).toBe(true);
+    expect(calls.some((call) => call.startsWith("prepareSourceRef"))).toBe(
+      false
+    );
+  });
+
   it("streams a stale result when canonical branch state changed during resolution", async () => {
     const { deps, calls } = fakes({
       commitBranchResolution: false
@@ -384,6 +409,12 @@ describe("graphs-planning load-graph-stream route", () => {
     expect(frames(recording.stream)).toEqual([
       { event: "done", data: { error: "Please select a repository." } }
     ]);
+    expect(
+      calls.some((call) => call.startsWith("commitBranchResolution"))
+    ).toBe(false);
+    expect(calls.some((call) => call.startsWith("prepareSourceRef"))).toBe(
+      false
+    );
     expect(calls.some((c) => c.startsWith("fetchBicepSelection"))).toBe(false);
     expect(recording.ended).toBe(true);
   });

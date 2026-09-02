@@ -200,6 +200,13 @@ export function createRadiusCanvas(
         : page === "planned" ? "planned"
         : page === "graph" ? "graph"
         : entry.state.activeGraphView;
+      const previousExplicitContext =
+        entry.state.contextBranchSource === "explicit" ?
+          {
+            repo: entry.state.contextRepo,
+            branch: entry.state.contextBranch
+          }
+        : undefined;
       const workspace = await workspaceState();
       Object.assign(entry.state, workspace);
       const inputRepo = optionalString(input.repo);
@@ -221,6 +228,10 @@ export function createRadiusCanvas(
         // Omitting the repository selects the current context repository, but an
         // explicitly named branch still identifies the remote selection to use.
         entry.state.contextBranch = inputBranch;
+        entry.state.contextBranchSource = "explicit";
+      } else if (previousExplicitContext) {
+        entry.state.contextRepo = previousExplicitContext.repo;
+        entry.state.contextBranch = previousExplicitContext.branch;
         entry.state.contextBranchSource = "explicit";
       } else {
         entry.state.contextBranchSource = "workspace";

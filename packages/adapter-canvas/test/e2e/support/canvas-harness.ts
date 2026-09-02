@@ -287,6 +287,8 @@ export interface HarnessWorkspacePlan {
   readonly path: string;
   /** Fake mode scaffolds an empty `.radius`; a clone already carries one. */
   readonly createRadiusDirectory: boolean;
+  /** Fake mode needs a disposable Git repository; cloud mode uses its clone. */
+  readonly initializeGitRepository: boolean;
 }
 
 /**
@@ -342,13 +344,18 @@ export function resolveHarnessWorkspace(input: {
       throw new Error(
         `Cloud mode refuses to run against the checkout under test; workspacePath "${workspacePath}" overlaps "${repositoryRoot}". Clone the fixture repository to a disposable directory instead.`
       );
-    return { path: workspacePath, createRadiusDirectory: false };
+    return {
+      path: workspacePath,
+      createRadiusDirectory: false,
+      initializeGitRepository: false
+    };
   }
   if (input.workspacePath)
     throw new Error("workspacePath is only supported in cloud mode.");
   return {
     path: path.join(input.rootDir, "workspace"),
-    createRadiusDirectory: true
+    createRadiusDirectory: true,
+    initializeGitRepository: true
   };
 }
 
@@ -1306,7 +1313,7 @@ export class CanvasHarness {
         await fs.mkdir(path.join(workspacePath, ".radius"), {
           recursive: true
         });
-      if (workspace.createRadiusDirectory) {
+      if (workspace.initializeGitRepository) {
         await fs.writeFile(path.join(workspacePath, ".gitkeep"), "", "utf8");
         execFileSync("git", ["init", "--initial-branch", WORKTREE_BRANCH], {
           cwd: workspacePath,

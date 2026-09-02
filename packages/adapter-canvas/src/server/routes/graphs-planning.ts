@@ -706,14 +706,6 @@ export async function handleLoadGraphStream(
     response.end("Canvas server state is unavailable.");
     return;
   }
-  const branchResolution = await dependencies.resolveBranchForRequest(
-    entry,
-    repo,
-    requestedBranch,
-    url.searchParams.has("followWorkspaceBranch") ?
-      url.searchParams.get("followWorkspaceBranch") === "true"
-    : undefined
-  );
 
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
@@ -734,12 +726,30 @@ export async function handleLoadGraphStream(
     response.end();
   };
 
+  let branchResolution: WorkspaceBranchResolution;
+  try {
+    branchResolution = await dependencies.resolveBranchForRequest(
+      entry,
+      repo,
+      requestedBranch,
+      url.searchParams.has("followWorkspaceBranch") ?
+        url.searchParams.get("followWorkspaceBranch") === "true"
+      : undefined
+    );
+  } catch (error) {
+    sendDone({ error: dependencies.errorMessage(error) });
+    return;
+  }
   if (branchResolution.status === "unavailable") {
     sendDone({
       error: branchResolution.error,
       workspaceBranchUnavailable: true,
       repo
     });
+    return;
+  }
+  if (!repo) {
+    sendDone({ error: "Please select a repository." });
     return;
   }
   if (!dependencies.commitBranchResolution(entry, repo, branchResolution)) {
@@ -753,11 +763,6 @@ export async function handleLoadGraphStream(
     repo,
     branch
   });
-
-  if (!repo) {
-    sendDone({ error: "Please select a repository." });
-    return;
-  }
 
   try {
     sendProgress(`Checking ${repo} for existing app.bicep...`);
