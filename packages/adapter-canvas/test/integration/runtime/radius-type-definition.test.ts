@@ -265,7 +265,7 @@ describe("resource selection and release identity", () => {
       "br:biceptypes.azurecr.io/radius:0.61"
     );
     expect(() => resolver.deriveExtensionReference("latest")).toThrow(
-      /Unsupported Radius version/u
+      /Unsupported Radius version.*Do not replace or modify the configured Radius CLI.*stop modeling/u
     );
     expect(() => resolver.deriveExtensionReference("edge")).toThrow(
       /Unsupported Radius version/u
