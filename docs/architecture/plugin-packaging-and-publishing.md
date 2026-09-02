@@ -26,7 +26,7 @@ graph TD
     subgraph Dist[".artifacts/radius (generated, git-ignored)"]
         DistAll["plugin.json + package.json<br/>README.md + skills/ + assets/"]
         Bundle["extension.mjs (+ .map)"]
-        Compat["extensions/extension.mjs<br/>(external-intake re-export)"]
+        Compat["extensions/radius/<br/>extension.mjs + package.json"]
     end
 
     Core -->|workspace:* import| Canvas
@@ -52,7 +52,7 @@ graph TD
 - **`packages/adapter-canvas/build.mjs`** — the esbuild step that bundles the adapter plus its `workspace:*` dependencies into one file, then assembles `.artifacts/radius/`.
 - **`plugins/radius/`** — the tracked plugin source and the discovery anchor: `plugin.json` and `README.md`.
 - **`extensions/radius/`** — the tracked canvas extension source: `package.json`, `skills/`, the `assets/` tree the canvas contract requires, and the `CHANGELOG.md` Changesets writes beside the package it versions.
-- **`.artifacts/radius/`** — the generated, installable plugin: both tracked source trees above, the root `extension.mjs`, an `extensions/extension.mjs` compatibility re-export for external canvas intake, and a complete `workflows/` copy of `.github/extension/`. Git-ignored, wiped and rebuilt on every build, and published verbatim at both accepted roots rather than under this local name.
+- **`.artifacts/radius/`** — the generated, installable plugin: both tracked source trees above, the root `extension.mjs`, an `extensions/radius/` Canvas package containing its re-export and matching `package.json`, and a complete `workflows/` copy of `.github/extension/`. Git-ignored, wiped and rebuilt on every build, and published verbatim at both accepted roots rather than under this local name.
 - **`.github/plugin/marketplace.json`** — the marketplace manifest whose plugin `source` points installs at `extensions/radius` on `radius@edge`.
 - **`.changeset/config.json`** — Changesets owns released versions. `privatePackages.version` includes private plugins; `privatePackages.tag` is disabled because the workflow creates one scoped tag on the artifact commit instead of running Changesets' all-package source tag scan.
 - **`scripts/plugins.mjs`** — the plugin registry: discovers every directory under `plugins/` that pairs a `plugins/<name>/plugin.json` with an `extensions/<name>/package.json`, and builds every published ref name from it. It is also the one place that names the split, exposing `dir`, `extensionDir`, `distDir` (the local `.artifacts/<name>` build output), `publishDir` (the published `extensions/<name>`), `packageFile`, `manifestFile`, `changelogFile`, and `readmeFile`. The single source of the `releases/<plugin>/<channel>`, `<plugin>@edge`, and `<plugin>@<version>` convention; `--json` feeds the workflow matrices and `--env` hands the names — including `PLUGIN_DIST`, `PLUGIN_EXTENSION_DIR`, and `PLUGIN_PUBLISH_DIR` — to a job.
@@ -87,7 +87,7 @@ Plugin **source** is split in two, the way [`github/awesome-copilot`](https://gi
 
 The asymmetry is deliberate: on `main`, `extensions/radius/` is canvas **source**; on a release branch the same path is the **assembled install unit**. That is why the build cannot assemble in place, and why `.artifacts/` exists at all.
 
-The source manifest targets the [Agent Plugins](https://agent-plugins.org) 1.0.0 schema, which is **closed**: the only permitted fields are `$schema`, `name`, `version`, `description`, `author`, `homepage`, `repository`, `license`, `keywords`, and `extensions`. Components load from fixed locations rather than manifest paths, so skills are discovered from `skills/` without being declared, and source `extensions` is an object keyed by a reverse-domain client namespace. Radius follows [Awesome Copilot's canvas convention](https://github.com/github/awesome-copilot/blob/main/.github/skills/create-canvas-extension/SKILL.md) by declaring `extensions.com.github.copilot.logo` as `assets/preview.png`. During assembly, the build materializes the legacy served manifest required by [external-plugin intake](https://github.com/github/awesome-copilot/blob/main/CONTRIBUTING.md#adding-external-plugins): top-level `logo` is `assets/preview.png` and top-level `extensions` is the string `extensions`. The external spec-compliance check reports those legacy fields as non-blocking warnings, while canvas structure and installation use them. The root `extension.mjs` remains the runtime entry point, and `extensions/extension.mjs` re-exports it for intake discovery.
+The plugin manifest hardcodes the external Canvas contract consumed by [Awesome Copilot intake](https://github.com/github/awesome-copilot/blob/main/CONTRIBUTING.md#adding-external-plugins): top-level `logo` is `assets/preview.png` and top-level `extensions` is the string `extensions`. The build copies those fixed values without transforming them; only the release version changes. The Agent Plugins 1.0.0 schema does not define the legacy top-level logo or string-valued extensions field, so external spec compliance reports non-blocking warnings while Canvas structure and installation use them. The root `extension.mjs` remains the compiled runtime entry point, and the nested `extensions/radius/extension.mjs` re-exports it from a package carrying matching metadata.
 
 ### 2. The build: bundling the workspace, then assembling `.artifacts/`
 
@@ -199,7 +199,7 @@ The catalog exposes one plugin identity, `radius`. Its `source.ref` on `main` se
 
 To pin a specific release instead of tracking edge, add the marketplace at that release's ref — `marketplace add radius-project/ai-extensions#releases/radius/v<version>` or `#radius@<version>`, which name the same orphan commit — whose catalog points `source.ref` at itself.
 
-The repository marketplace installs the git-tracked files at `extensions/radius` from the published ref. Awesome Copilot issue intake reviews the byte-identical `plugins/radius` root. Either path yields a self-contained plugin with `plugin.json`, `package.json`, `assets/preview.png`, root `extension.mjs`, `extensions/extension.mjs`, and all five skills.
+The repository marketplace installs the git-tracked files at `extensions/radius` from the published ref. Awesome Copilot issue intake reviews the byte-identical `plugins/radius` root. Either path yields a self-contained plugin with `plugin.json`, `package.json`, `assets/preview.png`, root `extension.mjs`, `extensions/radius/{extension.mjs,package.json}`, and all five skills.
 
 ## Notable details
 

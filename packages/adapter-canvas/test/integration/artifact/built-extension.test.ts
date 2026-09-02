@@ -33,7 +33,12 @@ const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
 const DIST = join(REPO_ROOT, ".artifacts", "radius");
 const ARTIFACT = join(DIST, "extension.mjs");
-const COMPATIBILITY_ARTIFACT = join(DIST, "extensions", "extension.mjs");
+const COMPATIBILITY_ARTIFACT = join(
+  DIST,
+  "extensions",
+  "radius",
+  "extension.mjs"
+);
 const SOURCE_MAP = `${ARTIFACT}.map`;
 const SOURCE_CHANGELOG = join(
   REPO_ROOT,
@@ -314,7 +319,12 @@ describe("P0-C built Radius extension artifact", () => {
         .filter((name) => name.endsWith(".mjs"))
         .sort()
     ).toEqual(["extension.mjs"]);
-    const compatibilityEntry = join(DIST, "extensions", "extension.mjs");
+    const compatibilityEntry = join(
+      DIST,
+      "extensions",
+      "radius",
+      "extension.mjs"
+    );
     const reExport = readFileSync(compatibilityEntry, "utf8").match(
       /export \* from "([^"]+)";/u
     )?.[1];
@@ -328,7 +338,8 @@ describe("P0-C built Radius extension artifact", () => {
       "LICENSE",
       "THIRD-PARTY-NOTICES.txt",
       "assets/preview.png",
-      "extensions/extension.mjs",
+      "extensions/radius/extension.mjs",
+      "extensions/radius/package.json",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-bicep/references/source-code-references.md",
@@ -427,6 +438,11 @@ describe("P0-C built Radius extension artifact", () => {
     }
     expect(builtPackage.version).toEqual(expect.any(String));
     expect(builtPackage).toEqual(expectedPackage);
+    expect(
+      JSON.parse(
+        readFileSync(join(DIST, "extensions", "radius", "package.json"), "utf8")
+      )
+    ).toEqual(builtPackage);
 
     const sourcePlugin = JSON.parse(
       readFileSync(join(REPO_ROOT, "plugins", "radius", "plugin.json"), "utf8")
@@ -434,16 +450,9 @@ describe("P0-C built Radius extension artifact", () => {
     const builtPlugin = JSON.parse(
       readFileSync(join(DIST, "plugin.json"), "utf8")
     ) as Record<string, unknown>;
-    const sourceExtensions = sourcePlugin.extensions as Record<
-      string,
-      Record<string, unknown>
-    >;
     const expectedPlugin = structuredClone(sourcePlugin);
     expectedPlugin.version = builtPlugin.version;
-    expectedPlugin.logo = sourceExtensions["com.github.copilot"].logo;
-    expectedPlugin.extensions = "extensions";
     expect(builtPlugin).toEqual(expectedPlugin);
-    expect(sourcePlugin).not.toHaveProperty("logo");
     // plugin.json is the manifest the host reads, so a published build must not
     // advertise a different version from the package it ships.
     expect(builtPlugin.version).toBe(builtPackage.version);
@@ -990,44 +999,6 @@ describe("P0-C built Radius extension artifact", () => {
       expect(result.status).not.toBe(0);
       expect(result.stderr).toContain("unable to verify tracked files");
       expect(readFileSync(sentinel, "utf8")).toBe("keep\n");
-    } finally {
-      rmSync(workspaceRoot, { recursive: true, force: true });
-    }
-  });
-
-  it.each([
-    ["the Copilot namespace is missing", {}],
-    [
-      "the preview path is wrong",
-      { "com.github.copilot": { logo: "assets/logo.png" } }
-    ]
-  ])("rejects source canvas metadata when %s", (_condition, extensions) => {
-    const workspaceRoot = mkdtempSync(
-      join(tmpdir(), "radius-canvas-invalid-metadata-")
-    );
-    try {
-      const buildDirectory = prepareBuildWorkspace(workspaceRoot);
-      const manifestPath = join(
-        workspaceRoot,
-        "plugins",
-        "radius",
-        "plugin.json"
-      );
-      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-      manifest.extensions = extensions;
-      writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-
-      const result = spawnSync(process.execPath, ["build.mjs"], {
-        cwd: buildDirectory,
-        encoding: "utf8",
-        env: { ...process.env, RADIUS_SOURCE_REF: SOURCE_REF }
-      });
-
-      expect(result.error).toBeUndefined();
-      expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain(
-        'must declare extensions.com.github.copilot.logo as "assets/preview.png"'
-      );
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
     }

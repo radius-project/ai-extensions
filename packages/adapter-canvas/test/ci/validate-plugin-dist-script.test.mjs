@@ -105,8 +105,15 @@ function repository({
 function canvasDist(dist) {
   mkdirSync(join(dist, "assets"), { recursive: true });
   writeFileSync(join(dist, "assets", "preview.png"), "png\n");
-  mkdirSync(join(dist, "extensions"));
-  writeFileSync(join(dist, "extensions", "extension.mjs"), "export {};\n");
+  mkdirSync(join(dist, "extensions", "radius"), { recursive: true });
+  writeFileSync(
+    join(dist, "extensions", "radius", "extension.mjs"),
+    "export {};\n"
+  );
+  copyFileSync(
+    join(dist, "package.json"),
+    join(dist, "extensions", "radius", "package.json")
+  );
 }
 
 function canvasRepository(manifest = {}) {
@@ -487,8 +494,12 @@ describe("scripts/validate-plugin-dist.mjs", () => {
       ["assets/preview.png", "plugin.json#logo does not exist"],
       ["extension.mjs", "canvas entry point does not exist"],
       [
-        "extensions/extension.mjs",
+        "extensions/radius/extension.mjs",
         "Awesome Copilot canvas entry point does not exist"
+      ],
+      [
+        "extensions/radius/package.json",
+        "Awesome Copilot canvas package does not exist"
       ]
     ])("rejects a canvas plugin missing %s", (missing, message) => {
       const { root, dist } = canvasRepository();
@@ -498,6 +509,21 @@ describe("scripts/validate-plugin-dist.mjs", () => {
 
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(message);
+    });
+
+    it("rejects Canvas package metadata that differs from the plugin root", () => {
+      const { root, dist } = canvasRepository();
+      writeFileSync(
+        join(dist, "extensions", "radius", "package.json"),
+        '{"name":"other","version":"1.2.0"}\n'
+      );
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "Awesome Copilot canvas package must match package.json"
+      );
     });
   });
 
