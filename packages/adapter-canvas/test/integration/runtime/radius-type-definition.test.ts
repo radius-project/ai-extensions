@@ -41,11 +41,11 @@ const resolver = await import(pathToFileURL(script).href);
 const temporaryDirectories = new Set<string>();
 const commit = "0123456789abcdef0123456789abcdef01234567";
 const identity = {
-  version: "v0.60.0",
+  release: "0.60.0",
   commit,
   extension: "br:biceptypes.azurecr.io/radius:0.60"
 };
-const managedVersion = { version: identity.version, commit: identity.commit };
+const managedVersion = { release: identity.release, commit: identity.commit };
 const generatedRoot = "https://raw.githubusercontent.com/radius-project/radius";
 const fixtureIndex = JSON.parse(
   fs.readFileSync(path.join(fixtureRoot, "index.json"), "utf8")
@@ -254,21 +254,27 @@ describe("resource selection and release identity", () => {
     );
   });
 
-  it("derives the release-channel extension from parseable versions", () => {
+  it("derives the extension channel from supported Radius releases", () => {
     expect(resolver.deriveExtensionReference("0.60.0")).toBe(
       "br:biceptypes.azurecr.io/radius:0.60"
     );
+    expect(resolver.deriveExtensionReference("v0.60.0-rc3")).toBe(
+      "br:biceptypes.azurecr.io/radius:0.60.0-rc3"
+    );
     expect(resolver.deriveExtensionReference("v0.61.0-rc.1")).toBe(
-      "br:biceptypes.azurecr.io/radius:0.61"
+      "br:biceptypes.azurecr.io/radius:0.61.0-rc.1"
     );
     expect(resolver.deriveExtensionReference("0.61.0+build.7")).toBe(
       "br:biceptypes.azurecr.io/radius:0.61"
     );
-    expect(() => resolver.deriveExtensionReference("latest")).toThrow(
-      /Unsupported Radius version/u
+    expect(resolver.deriveExtensionReference("edge")).toBe(
+      "br:biceptypes.azurecr.io/radius:latest"
     );
-    expect(() => resolver.deriveExtensionReference("edge")).toThrow(
-      /Unsupported Radius version/u
+    expect(() => resolver.deriveExtensionReference("latest")).toThrow(
+      /Unsupported Radius release/u
+    );
+    expect(resolver.deriveExtensionReference("pr-12885")).toBe(
+      "br:biceptypes.azurecr.io/radius:latest"
     );
   });
 
@@ -276,7 +282,7 @@ describe("resource selection and release identity", () => {
     expect(
       resolver.parseRadiusIdentity(
         JSON.stringify({
-          version: "v0.60.0",
+          release: "0.60.0",
           commit
         })
       )
@@ -284,15 +290,28 @@ describe("resource selection and release identity", () => {
     expect(
       resolver.parseRadiusIdentity(
         JSON.stringify({
-          version: "v0.61.0-rc.1",
+          release: "0.60.0-rc3",
           commit
         })
       ).extension
-    ).toBe("br:biceptypes.azurecr.io/radius:0.61");
+    ).toBe("br:biceptypes.azurecr.io/radius:0.60.0-rc3");
+    expect(
+      resolver.parseRadiusIdentity(JSON.stringify({ release: "edge", commit }))
+        .extension
+    ).toBe("br:biceptypes.azurecr.io/radius:latest");
+    expect(
+      resolver.parseRadiusIdentity(
+        JSON.stringify({
+          release: "pr-12885",
+          version: "04599d9",
+          commit
+        })
+      ).extension
+    ).toBe("br:biceptypes.azurecr.io/radius:latest");
     expect(() =>
       resolver.parseRadiusIdentity(
         JSON.stringify({
-          version: "v0.60.0",
+          release: "0.60.0",
           commit: commit.slice(0, 12)
         })
       )
@@ -303,13 +322,13 @@ describe("resource selection and release identity", () => {
     for (const [output, expected] of [
       ["not-json", /invalid version JSON/u],
       ["[]", /must be an object/u],
-      [JSON.stringify({ commit }), /missing "version"/u],
-      [JSON.stringify({ version: "v0.60.0" }), /missing "commit"/u]
+      [JSON.stringify({ commit }), /missing "release"/u],
+      [JSON.stringify({ release: "0.60.0" }), /missing "commit"/u]
     ] as const) {
       expect(() => resolver.parseRadiusIdentity(output)).toThrow(expected);
     }
     expect(() => resolver.deriveExtensionReference(undefined)).toThrow(
-      /Unsupported Radius version/u
+      /Unsupported Radius release/u
     );
   });
 
@@ -786,7 +805,7 @@ describe("network and cache behavior", () => {
     });
     await resolver.resolveRadiusTypes(["Radius.Core/applications"], {
       ...managedIdentityOptions({
-        radiusIdentity: { version: identity.version, commit: previousCommit }
+        radiusIdentity: { release: identity.release, commit: previousCommit }
       }),
       cacheRoot,
       fetchImpl: offline
