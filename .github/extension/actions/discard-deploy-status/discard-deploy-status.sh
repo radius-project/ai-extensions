@@ -31,7 +31,30 @@
 # exits before contacting the API, because an unscoped request here would delete
 # artifacts belonging to other applications.
 
-set -uo pipefail
+set -euo pipefail
+
+# Strip control characters from everything printed, because warnings carry text
+# from outside this script: workflow inputs (the environment and application
+# names) and GitHub API error bodies. A newline in any of those would otherwise
+# start a new log line and let the caller inject a workflow command such as
+# `::error::` or `::add-mask::`. Sanitizing inside `warn` rather than at each
+# call site means no future warning can forget to do it.
+warn() {
+    printf '::warning::Deployed graph cleanup: %s\n' \
+        "$(printf '%s' "$*" | LC_ALL=C tr -d '[:cntrl:]')"
+}
+
+# `-e` stops at the first unhandled failure so an accidental regression cannot be
+# silently stepped over, but this action must still never fail an otherwise
+# successful delete (see the header). This trap reconciles the two: an unexpected
+# failure is reported and ends the cleanup, and the step still succeeds.
+report_unexpected_failure() {
+    local status="$1" line="$2"
+    warn "unexpected failure at line ${line} (exit ${status}); no further artifacts were removed."
+    exit 0
+}
+
+trap 'report_unexpected_failure "$?" "${LINENO}"' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
@@ -39,17 +62,6 @@ readonly SCRIPT_DIR
 readonly ENVIRONMENT="${ENVIRONMENT:-}"
 readonly APPLICATION="${APPLICATION:-}"
 readonly REPOSITORY="${GITHUB_REPOSITORY:-}"
-
-warn() {
-    echo "::warning::Deployed graph cleanup: $*"
-}
-
-# Strip control characters from anything that came from outside this script: a
-# newline in an error body could otherwise start a new log line and inject a
-# GitHub Actions workflow command.
-sanitize_for_log() {
-    tr -d '[:cntrl:]'
-}
 
 if [[ -z "${ENVIRONMENT//[[:space:]]/}" || -z "${APPLICATION//[[:space:]]/}" ]]; then
     warn "no environment or application name supplied; nothing to remove."
@@ -67,10 +79,25 @@ fi
 # filter is treated by the REST API as "no filter" and lists the repository's
 # entire artifact history, so a script that carried on with an unset name would
 # delete every artifact in the repository rather than this application's.
+readonly HELPER="${SCRIPT_DIR}/../deploy-progress/progress.sh"
+
+if [[ ! -r "${HELPER}" ]]; then
+    warn "cannot read ${HELPER}; nothing to remove."
+    exit 0
+fi
+
+# `source` is a special builtin, so under `set -e` bash exits the moment it
+# fails -- even from an `if !` guard, which suppresses `-e` for ordinary
+# commands. Disabling `-e` across just this call is what keeps a broken helper
+# on the fail-closed path instead of aborting the step.
+set +e
 # Resolved at run time from the action directory, so shellcheck cannot follow it.
 # shellcheck source=/dev/null disable=SC1091
-if ! source "${SCRIPT_DIR}/../deploy-progress/progress.sh"; then
-    warn "could not load ${SCRIPT_DIR}/../deploy-progress/progress.sh; nothing to remove."
+source "${HELPER}"
+helper_status=$?
+set -e
+if [[ "${helper_status}" -ne 0 ]]; then
+    warn "could not load ${HELPER} (exit ${helper_status}); nothing to remove."
     exit 0
 fi
 
@@ -105,7 +132,7 @@ if ! ARTIFACT_IDS="$(gh api --paginate --method GET \
     -F per_page=100 \
     --jq '.artifacts[] | select(.expired == false) | .id' \
     2>"${ERROR_FILE}")"; then
-    warn "could not list '${ARTIFACT_NAME}' artifacts: $(sanitize_for_log <"${ERROR_FILE}")"
+    warn "could not list '${ARTIFACT_NAME}' artifacts: $(cat "${ERROR_FILE}")"
     exit 0
 fi
 
@@ -121,7 +148,7 @@ while IFS= read -r artifact_id; do
         deleted=$((deleted + 1))
     else
         failed=$((failed + 1))
-        warn "could not delete artifact ${artifact_id}: $(sanitize_for_log <"${ERROR_FILE}")"
+        warn "could not delete artifact ${artifact_id}: $(cat "${ERROR_FILE}")"
     fi
 done <<<"${ARTIFACT_IDS}"
 

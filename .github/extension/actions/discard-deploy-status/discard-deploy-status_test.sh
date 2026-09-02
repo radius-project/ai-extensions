@@ -292,12 +292,12 @@ output="$(
     run_isolated
     echo "__exit__${RUN_EXIT}"
 )"
-assert_contains "${output}" "__exit__0" "missing helper file: exits 0"
-assert_contains "${output}" "::warning::Deployed graph cleanup:" "missing helper file: warns"
-assert_contains "${output}" "nothing to remove." "missing helper file: removes nothing"
+assert_contains "${output}" "__exit__0" "unreadable helper file: exits 0"
+assert_contains "${output}" "::warning::Deployed graph cleanup:" "unreadable helper file: warns"
+assert_contains "${output}" "nothing to remove." "unreadable helper file: removes nothing"
 assert_equals "$(wc -l <"${GH_CALL_LOG}" | tr -d ' ')" "0" \
-    "missing helper file: makes no API call"
-pass "makes no API call when the shared helper file is missing"
+    "unreadable helper file: makes no API call"
+pass "makes no API call when the shared helper file is unreadable"
 
 # The helper file loads but does not define the derivation.
 printf '#!/bin/bash\n# no radius_deploy_artifact_name here\n' \
@@ -340,6 +340,52 @@ assert_contains "${output}" "could not derive the artifact name" \
 assert_equals "$(wc -l <"${GH_CALL_LOG}" | tr -d ' ')" "0" \
     "failing derivation: makes no API call"
 pass "makes no API call when the derivation fails"
+
+# Injected control characters in the workflow inputs cannot forge a log line.
+# The inputs only reach the log on these fail-closed paths; the derivation
+# sanitizes them everywhere else.
+printf '#!/bin/bash\nradius_deploy_artifact_name() { printf "%%s" ""; }\n' \
+    >"${ISOLATED_ROOT}/deploy-progress/progress.sh"
+output="$(
+    : >"${GH_CALL_LOG}"
+    RUN_EXIT=0
+    ENVIRONMENT="prod" \
+        APPLICATION="$(printf 'billing\n::error::forged')" \
+        GITHUB_REPOSITORY="octo/repo" \
+        PATH="${STUB_BIN}:${PATH}" \
+        bash "${ISOLATED_ROOT}/action/discard-deploy-status.sh" 2>&1 || RUN_EXIT=$?
+    echo "__exit__${RUN_EXIT}"
+)"
+assert_contains "${output}" "__exit__0" "input log injection: exits 0"
+assert_not_contains "${output}" "
+::error::forged" "input log injection: does not start a forged log line"
+assert_contains "${output}" "billing::error::forged" \
+    "input log injection: keeps the text on the warning line"
+pass "strips control characters from workflow inputs in warnings"
+
+# An unhandled failure is reported rather than stepped over, and still does not
+# fail the delete: `set -e` stops the script and the ERR trap exits 0.
+cat >"${STUB_BIN}/mktemp" <<'STUB'
+#!/bin/bash
+exit 1
+STUB
+chmod +x "${STUB_BIN}/mktemp"
+output="$(
+    : >"${GH_CALL_LOG}"
+    RUN_EXIT=0
+    ENVIRONMENT="prod" APPLICATION="billing" \
+        GITHUB_REPOSITORY="octo/repo" \
+        PATH="${STUB_BIN}:${PATH}" \
+        bash "${TARGET}" 2>&1 || RUN_EXIT=$?
+    echo "__exit__${RUN_EXIT}"
+)"
+rm -f "${STUB_BIN}/mktemp"
+assert_contains "${output}" "__exit__0" "unhandled failure: still exits 0"
+assert_contains "${output}" "unexpected failure at line" \
+    "unhandled failure: reports where it stopped"
+assert_equals "$(wc -l <"${GH_CALL_LOG}" | tr -d ' ')" "0" \
+    "unhandled failure: makes no API call"
+pass "reports an unhandled failure without failing the delete"
 
 # ---------------------------------------------------------------------------
 # action.yml wiring the script cannot exercise.
