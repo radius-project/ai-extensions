@@ -47,7 +47,20 @@ describeWindows("Windows Radius process launcher", () => {
   });
 
   afterEach(() => {
-    rmSync(cwd, { recursive: true, force: true });
+    // Windows keeps a directory locked while any process still has it as its
+    // working directory, so a launcher that has signalled exit can briefly hold
+    // this temporary directory open. Retry, then leave it for the operating
+    // system rather than failing an otherwise successful assertion.
+    try {
+      rmSync(cwd, {
+        recursive: true,
+        force: true,
+        maxRetries: 20,
+        retryDelay: 50
+      });
+    } catch {
+      // The operating system reclaims its own temporary directory.
+    }
   });
 
   it("preserves arguments, cwd, environment, stdout, and stderr", async () => {
