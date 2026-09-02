@@ -91,6 +91,7 @@ interface Script {
   namespaceClaimants?: Record<string, Record<string, string>>;
   namespaceClaimsFailure?: string;
   noPinnedNamespaceAccount?: boolean;
+  legacyDeleteResult?: boolean | "cancelled";
 }
 
 interface Harness {
@@ -785,9 +786,15 @@ function start(script: Script = {}): Harness {
       committedFiles.push(committed);
       recordCommittedWorkflowFile(target, committed);
     },
-    deleteLegacyDeployWorkflow: async () => {
+    deleteLegacyDeployWorkflow: async (
+      _repo,
+      _executor,
+      _beforeDelete,
+      branch
+    ) => {
       journal.push("deleteLegacyDeployWorkflow");
-      return true;
+      journal.push(`legacyDeployDeleteBranch:${branch || "default"}`);
+      return script.legacyDeleteResult ?? true;
     },
     createPullRequestApi: async () => {
       if (!script.pullRequest)
@@ -2717,6 +2724,82 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(
       harness.ghCalls.some((call) => call.startsWith("workflow run "))
     ).toBe(false);
+    expect(harness.steps).toContain(
+      "⚠️ Setup-branch credential verification is disabled: The default branch's deploy dispatcher can still auto-run after credential verification."
+    );
+  });
+
+  it("does not start setup-branch verification while a legacy deploy workflow exists", async () => {
+    const harness = start({
+      ...protectedScript,
+      files: {
+        ".github/workflows/radius-verify-credentials.yml":
+          MARKED_VERIFY_WORKFLOW,
+        ".github/workflows/radius-deploy.yml":
+          "on:\n  workflow_run:\n    workflows: [Radius - Verify Credentials]\njobs:\n"
+      }
+    });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(await response.json()).toMatchObject({
+      actionRequired: true,
+      verifyRunUrl: ""
+    });
+    expect(harness.journal).not.toContain("setupPushOperationMarker:op-http");
+    expect(harness.journal).toContain(
+      "legacyDeployDeleteBranch:radius/setup-dev-workflows-op-http"
+    );
+    expect(harness.steps).toContain(
+      "⚠️ Setup-branch credential verification is disabled: The default branch still contains the legacy deploy workflow, which can auto-run after credential verification."
+    );
+  });
+
+  it("fails closed when a legacy deploy workflow cannot be checked or removed", async () => {
+    const harness = start({
+      ...protectedScript,
+      fileReadResults: {
+        ".github/workflows/radius-verify-credentials.yml": {
+          content: null,
+          error: "connection reset",
+          status: null
+        },
+        ".github/workflows/radius-deploy.yml": {
+          content: null,
+          error: "HTTP 403: Forbidden",
+          status: 403
+        }
+      },
+      legacyDeleteResult: false
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(String(body.error)).toContain(
+      "could not remove the legacy deploy workflow"
+    );
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+  });
+
+  it("fails closed when legacy deploy removal fails on the default branch", async () => {
+    const harness = start({
+      files: {
+        ".github/workflows/radius-deploy.yml":
+          "on:\n  workflow_run:\n    workflows: [Radius - Verify Credentials]\njobs:\n"
+      },
+      legacyDeleteResult: false
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(String(body.error)).toContain(
+      "could not remove the legacy deploy workflow from the default branch"
+    );
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
   });
 
   it("persists pull-request provenance before honoring Stop", async () => {
@@ -2796,12 +2879,15 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     ).toBe(false);
   });
 
-  it("skips deleting the legacy deploy workflow while commits go through a pull request", async () => {
+  it("deletes the legacy deploy workflow on the pull request branch", async () => {
     const harness = start(protectedScript);
 
     await post({ repo: "octo/app" });
 
-    expect(harness.journal).not.toContain("deleteLegacyDeployWorkflow");
+    expect(harness.journal).toContain("deleteLegacyDeployWorkflow");
+    expect(harness.journal).toContain(
+      "legacyDeployDeleteBranch:radius/setup-dev-workflows-op-http"
+    );
     expect(
       harness.committedFiles.every((file) => file.mode === "pull_request")
     ).toBe(true);
@@ -2930,6 +3016,9 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(
       harness.ghCalls.some((call) => call.startsWith("workflow run "))
     ).toBe(false);
+    expect(harness.steps).toContain(
+      "⚠️ Setup-branch credential verification is disabled: Radius could not safely inspect the default branch's deploy dispatcher for automatic triggers."
+    );
   });
 
   // Merging is not what unblocks this run: verification was skipped because the

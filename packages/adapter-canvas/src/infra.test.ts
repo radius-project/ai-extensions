@@ -749,6 +749,53 @@ describe("syncRepoWorkflows", () => {
     expect(h.commits).toEqual([]);
   });
 
+  it.each(["azure", "aws"])(
+    "keeps an exact %s setup-branch verify workflow in sync",
+    async (provider) => {
+      h.committed.main = {
+        [VERIFY_PATH]: await generateVerifyWorkflow(
+          "dev",
+          provider,
+          undefined,
+          {
+            setupPushOperationMarker: "op_123"
+          }
+        )
+      };
+
+      const res = await syncRepoWorkflows("acme/app", [
+        { name: "dev", provider }
+      ]);
+
+      expect(res.updated).toEqual([]);
+      expect(h.commits).toEqual([]);
+    }
+  );
+
+  it("rewrites a modified setup-branch verify workflow", async () => {
+    const setupWorkflow = await generateVerifyWorkflow(
+      "dev",
+      "azure",
+      undefined,
+      { setupPushOperationMarker: "op_123" }
+    );
+    const modifiedWorkflow = setupWorkflow.replace(
+      "paths:\n      - '.github/workflows/radius-verify-credentials.yml'",
+      "paths:\n      - '.github/workflows/**'"
+    );
+    expect(modifiedWorkflow).not.toBe(setupWorkflow);
+    h.committed.main = { [VERIFY_PATH]: modifiedWorkflow };
+
+    const res = await syncRepoWorkflows("acme/app", [
+      { name: "dev", provider: "azure" }
+    ]);
+
+    expect(res.updated).toEqual([VERIFY_PATH]);
+    expect(h.commits[0].content).toBe(
+      await generateVerifyWorkflow("dev", "azure")
+    );
+  });
+
   it("preserves the committed provider when rewriting the shared verify file", async () => {
     // Drifted AWS verify file in a repo that has both an azure and aws env:
     // it must be rewritten from the AWS template, not the azure one.

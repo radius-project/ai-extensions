@@ -989,17 +989,8 @@ export async function selectedFetchFileFromRepo(
   path: string,
   branch = "main"
 ): Promise<string | null> {
-  const result = await executor.run(
-    [
-      "api",
-      `/repos/${repo}/contents/${path}?ref=${branch}`,
-      "--jq",
-      ".content"
-    ],
-    { timeout: 15000 }
-  );
-  if (result.code !== 0 || !result.stdout.trim()) return null;
-  return Buffer.from(result.stdout.trim(), "base64").toString("utf8");
+  return (await selectedFetchFileFromRepoResult(executor, repo, path, branch))
+    .content;
 }
 
 export async function selectedFetchFileFromRepoResult(

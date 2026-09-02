@@ -1687,8 +1687,7 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   recordCommittedWorkflowFile: (operation, entry) => {
     recordCommittedWorkflowFile(operation, entry);
   },
-  deleteLegacyDeployWorkflow: (repo, executor, beforeDelete) =>
-    deleteLegacyDeployWorkflow(repo, executor, beforeDelete),
+  deleteLegacyDeployWorkflow,
   createPullRequestApi: (repo, head, base, title, body, executor) =>
     executor ?
       selectedCreatePullRequest(executor, repo, head, base, title, body)
@@ -5231,14 +5230,20 @@ async function resolveEnvDeployment(
 async function deleteLegacyDeployWorkflow(
   targetRepo: string,
   executor?: SelectedGhExecutor,
-  beforeDelete?: () => Promise<boolean>
+  beforeDelete?: () => Promise<boolean>,
+  branch?: string
 ): Promise<boolean | "cancelled"> {
   const path = ".github/workflows/" + LEGACY_DEPLOY_WORKFLOW_FILE;
+  const contentPath =
+    "/repos/" +
+    targetRepo +
+    "/contents/" +
+    path +
+    (branch ? "?ref=" + encodeURIComponent(branch) : "");
   if (executor) {
-    const lookup = await executor.run(
-      ["api", "/repos/" + targetRepo + "/contents/" + path, "--jq", ".sha"],
-      { timeout: 30000 }
-    );
+    const lookup = await executor.run(["api", contentPath, "--jq", ".sha"], {
+      timeout: 30000
+    });
     const sha = lookup.code === 0 ? lookup.stdout.trim() : "";
     if (!sha) return false;
     if (beforeDelete && !(await beforeDelete())) return "cancelled";
@@ -5254,16 +5259,17 @@ async function deleteLegacyDeployWorkflow(
         "-f",
         "message=Remove legacy Radius deploy workflow (replaced by run-rad-commands.yml)",
         "-f",
-        "sha=" + sha
+        "sha=" + sha,
+        ...(branch ? ["-f", "branch=" + branch] : [])
       ],
       { timeout: 30000 }
     );
     return removed.code === 0 || removed.code === "0";
   }
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     cliExec(
       "gh",
-      ["api", "/repos/" + targetRepo + "/contents/" + path, "--jq", ".sha"],
+      ["api", contentPath, "--jq", ".sha"],
       { timeout: 30000 },
       (err, stdout) => {
         const sha = err ? "" : (stdout || "").trim();
@@ -5271,21 +5277,28 @@ async function deleteLegacyDeployWorkflow(
           resolve(false);
           return;
         }
-        cliExec(
-          "gh",
-          [
-            "api",
-            "--method",
-            "DELETE",
-            "/repos/" + targetRepo + "/contents/" + path,
-            "-f",
-            "message=Remove legacy Radius deploy workflow (replaced by run-rad-commands.yml)",
-            "-f",
-            "sha=" + sha
-          ],
-          { timeout: 30000 },
-          (deleteErr) => resolve(!deleteErr)
-        );
+        void (async () => {
+          if (beforeDelete && !(await beforeDelete())) {
+            resolve("cancelled");
+            return;
+          }
+          cliExec(
+            "gh",
+            [
+              "api",
+              "--method",
+              "DELETE",
+              "/repos/" + targetRepo + "/contents/" + path,
+              "-f",
+              "message=Remove legacy Radius deploy workflow (replaced by run-rad-commands.yml)",
+              "-f",
+              "sha=" + sha,
+              ...(branch ? ["-f", "branch=" + branch] : [])
+            ],
+            { timeout: 30000 },
+            (deleteErr) => resolve(!deleteErr)
+          );
+        })().catch(reject);
       }
     );
   });

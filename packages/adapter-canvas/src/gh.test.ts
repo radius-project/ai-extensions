@@ -1551,12 +1551,9 @@ describe.sequential("selected GitHub executor", () => {
     const executor = await gh.createSelectedGhExecutor("tokuser");
     childProcess.execFile.mockClear();
 
-    await gh.selectedFetchFileFromRepo(
-      executor,
-      "octo/app",
-      "app.bicep",
-      "main"
-    );
+    await expect(
+      gh.selectedFetchFileFromRepo(executor, "octo/app", "app.bicep", "main")
+    ).resolves.toBe("main");
     await expect(
       gh.selectedFetchFileFromRepoResult(
         executor,

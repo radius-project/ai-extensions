@@ -321,6 +321,7 @@ function publisherRecorder(script: PublisherScript = {}) {
     setupPushOperationMarker: string | undefined;
   }> = [];
   const journal: string[] = [];
+  const legacyDeleteBranches: Array<string | undefined> = [];
   let gateCalls = 0;
 
   const ports: WorkflowPublisherPorts = {
@@ -359,11 +360,11 @@ function publisherRecorder(script: PublisherScript = {}) {
     recordCommittedWorkflowFile: (_operation, entry) => {
       committed.push(entry);
     },
-    deleteLegacyDeployWorkflow: async () => {
+    deleteLegacyDeployWorkflow: async (_repo, branch) => {
       journal.push("deleteLegacyDeployWorkflow");
+      legacyDeleteBranches.push(branch);
       return script.legacyDeleteCancelled ? "cancelled" : true;
     },
-    usingPullRequestBranch: () => script.viaPr ?? false,
     pullRequestBranch: () =>
       script.viaPr ? "radius/setup-dev-workflows" : null,
     errorMessage: (error) =>
@@ -394,6 +395,7 @@ function publisherRecorder(script: PublisherScript = {}) {
     commitCalls,
     verifyGenerationCalls,
     journal,
+    legacyDeleteBranches,
     gateCount: () => gateCalls
   };
 }
@@ -619,14 +621,15 @@ describe("publishWorkflowFiles", () => {
     }
   );
 
-  it("removes the legacy deploy workflow only when not committing through a pull request", async () => {
+  it("removes the legacy deploy workflow on the branch receiving the workflows", async () => {
     const direct = publisherRecorder();
     await publishWorkflowFiles(direct.ports, direct.target);
     expect(direct.journal).toContain("deleteLegacyDeployWorkflow");
+    expect(direct.legacyDeleteBranches).toEqual([undefined]);
 
     const viaPr = publisherRecorder({ viaPr: true });
     await publishWorkflowFiles(viaPr.ports, viaPr.target);
-    expect(viaPr.journal).not.toContain("deleteLegacyDeployWorkflow");
+    expect(viaPr.legacyDeleteBranches).toEqual(["radius/setup-dev-workflows"]);
   });
 
   it("reports an empty gh error when the verify refusal carried no stderr", async () => {

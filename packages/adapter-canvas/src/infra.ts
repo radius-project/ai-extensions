@@ -53,6 +53,7 @@ interface SyncWorkflowOptions {
 interface WorkflowCandidate {
   content: string;
   provider: string | null;
+  environment: string | null;
 }
 
 // A workflow file the sync tried to commit but couldn't (e.g. the branch is
@@ -378,6 +379,13 @@ export async function generateVerifyWorkflow(
 
 function githubExpressionString(value: string): string {
   return `'${value.replaceAll("'", "''")}'`;
+}
+
+function setupPushOperationMarker(workflow: string): string | null {
+  const match = workflow.match(
+    /^run-name: Radius verify .+ \[\$\{\{ inputs\.radius_operation \|\| '((?:''|[^'])+)' \}\}\]$/mu
+  );
+  return match ? match[1].replaceAll("''", "'") : null;
 }
 
 export function configureVerifyOperationMarker(
@@ -744,11 +752,16 @@ export async function syncRepoWorkflows(
   // the acceptable (upstream-matching) contents, one candidate per environment.
   // Branch-independent, so it's built once and reused across every branch.
   const byPath = new Map<string, WorkflowCandidate[]>();
-  const add = (path: string, content: string, provider: string | null) => {
+  const add = (
+    path: string,
+    content: string,
+    provider: string | null,
+    environment: string | null = null
+  ) => {
     if (typeof content !== "string" || !content) return;
     if (onlySet && !onlySet.has(path.split("/").pop())) return;
     const list = byPath.get(path) || [];
-    list.push({ content, provider });
+    list.push({ content, provider, environment });
     byPath.set(path, list);
   };
   const wf = (name: string) => `.github/workflows/${name}`;
@@ -769,7 +782,8 @@ export async function syncRepoWorkflows(
         add(
           VERIFY_WORKFLOW_PATH,
           await generateVerifyWorkflow(env.name, provider),
-          provider
+          provider,
+          env.name
         );
       } catch (e) {
         log(
@@ -869,6 +883,33 @@ export async function syncRepoWorkflows(
       // In sync if the committed copy matches any environment's generated
       // content — the only per-env difference is the cosmetic dispatch default.
       if (candidates.some((c) => c.content === committed)) continue;
+      const setupMarker =
+        path === VERIFY_WORKFLOW_PATH ?
+          setupPushOperationMarker(committed)
+        : null;
+      if (setupMarker) {
+        let setupVariantMatches = false;
+        for (const candidate of candidates) {
+          if (!candidate.provider || !candidate.environment) continue;
+          try {
+            const setupVariant = await generateVerifyWorkflow(
+              candidate.environment,
+              candidate.provider,
+              RADIUS_REF,
+              { setupPushOperationMarker: setupMarker }
+            );
+            if (setupVariant === committed) {
+              setupVariantMatches = true;
+              break;
+            }
+          } catch (e) {
+            log(
+              `skipped setup verify variant for "${candidate.environment}" (${candidate.provider}): ${errorMessage(e)}`
+            );
+          }
+        }
+        if (setupVariantMatches) continue;
+      }
 
       // Drift detected. Prefer a replacement whose provider matches the
       // committed file so the shared verify file keeps its current provider;

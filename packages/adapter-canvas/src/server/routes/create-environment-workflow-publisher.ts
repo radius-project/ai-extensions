@@ -305,8 +305,10 @@ export interface WorkflowPublisherPorts {
       previousBlobKnown: boolean;
     }
   ): void;
-  deleteLegacyDeployWorkflow(repo: string): Promise<boolean | "cancelled">;
-  usingPullRequestBranch(): boolean;
+  deleteLegacyDeployWorkflow(
+    repo: string,
+    branch?: string
+  ): Promise<boolean | "cancelled">;
   pullRequestBranch(): string | null;
   errorMessage(error: unknown): string;
   pushStep(message: string): void;
@@ -434,19 +436,20 @@ export async function publishWorkflowFiles(
     );
     if (!(await ports.gate())) return { outcome: "cancelled" };
   }
-  // Best-effort: remove the legacy monolithic deploy workflow so it does not
-  // double-trigger alongside the new dispatcher. Skipped in PR-fallback mode
-  // since we can't push to the default branch.
-  if (!ports.usingPullRequestBranch()) {
-    try {
-      const legacyDelete = await ports.deleteLegacyDeployWorkflow(targetRepo);
-      if (legacyDelete === "cancelled") return { outcome: "cancelled" };
-    } catch (error) {
-      if (!(await ports.gate())) return { outcome: "cancelled" };
-      throw error;
-    }
+  // Remove the legacy monolithic deploy workflow so it cannot double-trigger
+  // alongside the new dispatcher. On protected repositories the deletion is
+  // committed to the setup branch and lands with the rest of the workflow PR.
+  try {
+    const legacyDelete = await ports.deleteLegacyDeployWorkflow(
+      targetRepo,
+      ports.pullRequestBranch() || undefined
+    );
+    if (legacyDelete === "cancelled") return { outcome: "cancelled" };
+  } catch (error) {
     if (!(await ports.gate())) return { outcome: "cancelled" };
+    throw error;
   }
+  if (!(await ports.gate())) return { outcome: "cancelled" };
   ports.pushStep("✅ Deploy workflows committed.");
 
   // Step 4b: Commit the application-delete workflows (dispatcher + Azure
