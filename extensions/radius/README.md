@@ -11,4 +11,4 @@ The Radius canvas extension for the GitHub Copilot app. It ships inside the [`ra
 
 ## Assets
 
-- `assets/preview.png` — gallery preview image required by the Awesome Copilot extensions catalog.
+- `assets/preview.png` — primary gallery image required by the [Awesome Copilot canvas-extension guide](https://github.com/github/awesome-copilot/blob/main/CONTRIBUTING.md#adding-canvas-extensions).
