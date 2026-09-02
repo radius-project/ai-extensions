@@ -15,8 +15,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:integration:windows-process": "vitest run test/integration/windows-process",
-    "lint": "eslint \"src/**/*.ts\" vitest.config.ts"
-  },
+    "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" vitest.config.ts"
+  }
   "dependencies": {
     "@radius-project/core": "workspace:*"
   },
