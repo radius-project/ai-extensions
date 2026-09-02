@@ -105,15 +105,16 @@ function repository({
 function canvasDist(dist) {
   mkdirSync(join(dist, "assets"), { recursive: true });
   writeFileSync(join(dist, "assets", "preview.png"), "png\n");
+  mkdirSync(join(dist, "extensions"));
+  writeFileSync(join(dist, "extensions", "extension.mjs"), "export {};\n");
 }
 
 function canvasRepository(manifest = {}) {
   const created = repository({
     manifest: {
       keywords: ["radius", "canvas"],
-      extensions: {
-        "com.github.copilot": { logo: "assets/preview.png" }
-      },
+      logo: "assets/preview.png",
+      extensions: "extensions",
       ...manifest
     }
   });
@@ -403,21 +404,8 @@ describe("scripts/validate-plugin-dist.mjs", () => {
   });
 
   describe("canvas contract", () => {
-    it("accepts a canvas plugin whose entry point is at the plugin root", () => {
+    it("accepts the external canvas artifact contract", () => {
       const { root } = canvasRepository();
-
-      expect(run(root)).toMatchObject({ status: 0, stdout: "radius@1.2.0" });
-    });
-
-    it("accepts schema-compliant client metadata with a root entry point", () => {
-      const { root } = canvasRepository({
-        extensions: {
-          "com.github.copilot": {
-            logo: "assets/preview.png",
-            theme: "radius"
-          }
-        }
-      });
 
       expect(run(root)).toMatchObject({ status: 0, stdout: "radius@1.2.0" });
     });
@@ -449,17 +437,22 @@ describe("scripts/validate-plugin-dist.mjs", () => {
     it.each([
       [
         "a logo the gallery will not accept",
-        {
-          extensions: {
-            "com.github.copilot": { logo: "assets/logo.png" }
-          }
-        },
-        'plugin.json#extensions["com.github.copilot"].logo must be "assets/preview.png"'
+        { logo: "assets/logo.png" },
+        'plugin.json#logo must be "assets/preview.png"'
       ],
       [
-        "a path-valued extensions field",
-        { extensions: "extensions" },
-        "plugin.json#extensions must be an object"
+        "source composition metadata",
+        {
+          extensions: {
+            "com.github.copilot": { logo: "assets/preview.png" }
+          }
+        },
+        'published canvas plugin.json#extensions must be "extensions"'
+      ],
+      [
+        "the wrong extensions directory",
+        { extensions: "canvas" },
+        'published canvas plugin.json#extensions must be "extensions"'
       ]
     ])("rejects %s", (_label, manifest, message) => {
       const { root } = canvasRepository(manifest);
@@ -471,25 +464,32 @@ describe("scripts/validate-plugin-dist.mjs", () => {
     });
 
     it.each([
-      ["the Copilot namespace", { extensions: {} }],
-      ["the namespaced logo", { extensions: { "com.github.copilot": {} } }]
-    ])("rejects a canvas missing %s", (_label, manifest) => {
+      [
+        "top-level logo",
+        { logo: undefined },
+        'plugin.json#logo must be "assets/preview.png"'
+      ],
+      [
+        "extensions directory declaration",
+        { extensions: undefined },
+        'published canvas plugin.json#extensions must be "extensions"'
+      ]
+    ])("rejects a canvas missing its %s", (_label, manifest, message) => {
       const { root } = canvasRepository(manifest);
 
       const result = run(root);
 
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain(
-        'plugin.json#extensions["com.github.copilot"].logo must be "assets/preview.png"'
-      );
+      expect(result.stderr).toContain(message);
     });
 
     it.each([
+      ["assets/preview.png", "plugin.json#logo does not exist"],
+      ["extension.mjs", "canvas entry point does not exist"],
       [
-        "assets/preview.png",
-        'plugin.json#extensions["com.github.copilot"].logo does not exist'
-      ],
-      ["extension.mjs", "canvas entry point does not exist"]
+        "extensions/extension.mjs",
+        "Awesome Copilot canvas entry point does not exist"
+      ]
     ])("rejects a canvas plugin missing %s", (missing, message) => {
       const { root, dist } = canvasRepository();
       rmSync(join(dist, missing), { recursive: true, force: true });
@@ -498,18 +498,6 @@ describe("scripts/validate-plugin-dist.mjs", () => {
 
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(message);
-    });
-
-    it("rejects a canvas whose entry point exists only in a nested directory", () => {
-      const { root, dist } = canvasRepository();
-      rmSync(join(dist, "extension.mjs"));
-      mkdirSync(join(dist, "extensions"));
-      writeFileSync(join(dist, "extensions", "extension.mjs"), "export {};\n");
-
-      const result = run(root);
-
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain("canvas entry point does not exist");
     });
   });
 
