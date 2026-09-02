@@ -311,6 +311,27 @@ describe("radiusNormalizeIconSource", () => {
     expect(decodeURIComponent(out.src)).toContain('fill="currentColor"');
   });
 
+  it("recognizes currentColor paint attributes case-insensitively", () => {
+    expect(
+      radiusNormalizeIconSource(
+        '<svg viewBox="0 0 8 8"><path stroke="currentcolor" /></svg>'
+      ).monochrome
+    ).toBe(true);
+    expect(
+      radiusNormalizeIconSource(
+        '<svg viewBox="0 0 8 8" color="CURRENTCOLOR"></svg>'
+      ).monochrome
+    ).toBe(true);
+  });
+
+  it("ignores currentColor outside paint attributes", () => {
+    expect(
+      radiusNormalizeIconSource(
+        '<svg viewBox="0 0 8 8"><!-- currentColor --><title>currentColor</title></svg>'
+      ).monochrome
+    ).toBe(false);
+  });
+
   it("does not mark multi-color svg markup, urls or data uris as monochrome", () => {
     expect(
       radiusNormalizeIconSource('<svg viewBox="0 0 8 8" fill="#326ce5"></svg>')

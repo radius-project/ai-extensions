@@ -417,9 +417,11 @@ const NO_ICON: ResolvedIcon = { src: "", monochrome: false };
 // Normalizes an icon supplied by a type/recipe pack into a usable image source
 // for the node card. Packs may express an icon as a ready data URI, an http(s)
 // URL, or a raw <svg> markup string; anything unrecognized returns '' so the
-// caller falls back to the built-in glyph map. Only raw <svg> markup that paints
-// in `currentColor` is reported as monochrome — a pre-encoded data URI or a
-// remote URL is opaque here and may well be full-colour PNG artwork.
+// caller falls back to the built-in glyph map. Only raw <svg> markup that uses
+// `currentColor` in a paint attribute is reported as monochrome — a pre-encoded
+// data URI or a remote URL is opaque here and may well be full-colour artwork.
+// This is an all-or-nothing opt-in: packs using currentColor for only one accent
+// should supply an opaque source instead, because a CSS mask flattens all ink.
 export function radiusNormalizeIconSource(icon: unknown): ResolvedIcon {
   if (!icon || typeof icon !== "string") return NO_ICON;
   let s = icon.trim();
@@ -432,7 +434,10 @@ export function radiusNormalizeIconSource(icon: unknown): ResolvedIcon {
     return { src: s, monochrome: false };
   }
   if (s.indexOf("<svg") === 0) {
-    const monochrome = s.indexOf("currentColor") !== -1;
+    const monochrome =
+      /(?:^|[\s<])(?:fill|stroke|color)\s*=\s*["']\s*currentcolor\s*["']/i.test(
+        s
+      );
     if (s.indexOf("width=") === -1) {
       s = s.replace("<svg ", '<svg width="64" height="64" ');
     }

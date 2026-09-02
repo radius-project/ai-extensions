@@ -116,6 +116,8 @@ export function createNodeComponent(
     // the canvas theme token, so it stays legible in light and dark. Multi-color
     // artwork (built-in glyphs, pack PNGs, remote URLs) keeps the <img> so its
     // colours are not flattened.
+    const themedIconMask =
+      data.icon && data.iconMonochrome ? browserCssMaskUrl(data.icon) : "";
     const icon =
       data.icon ?
         data.iconMonochrome ?
@@ -123,8 +125,8 @@ export function createNodeComponent(
             className: "rad-node__icon rad-node__icon--themed",
             "aria-hidden": "true",
             style: {
-              WebkitMaskImage: browserCssMaskUrl(data.icon),
-              maskImage: browserCssMaskUrl(data.icon)
+              WebkitMaskImage: themedIconMask,
+              maskImage: themedIconMask
             }
           })
         : h("img", { className: "rad-node__icon", src: data.icon, alt: "" })
