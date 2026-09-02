@@ -9,7 +9,7 @@ import { resolveGeneratorVersion } from "./generator-version.js";
 const REQUIRED_SKILL_FILES = [
   "SKILL.md",
   path.join("scripts", "validate-bicep.mjs"),
-  path.join("..", "radius-app-graph", "references", "source-code-references.md")
+  path.join("references", "source-code-references.md")
 ];
 const SKILL_INSTRUCTION =
   "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.";

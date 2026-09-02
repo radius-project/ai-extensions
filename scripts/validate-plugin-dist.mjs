@@ -33,9 +33,9 @@ const SUPPORTED_SCHEMA_KEYWORDS = new Set([
 ]);
 const DNS_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 const CANVAS_KEYWORD = "canvas";
-const CANVAS_NAMESPACE = "com.github.copilot";
 const CANVAS_LOGO = "assets/preview.png";
 const CANVAS_ENTRY_POINT = "extension.mjs";
+const CANVAS_COMPATIBILITY_ENTRY_POINT = "extensions/extension.mjs";
 
 class Failure extends Error {}
 
@@ -226,19 +226,22 @@ function isCanvasPlugin(manifest) {
 }
 
 function requireCanvasContract(dist, manifest) {
-  const client = manifest.extensions?.[CANVAS_NAMESPACE];
-  if (!isJsonObject(client) || client.logo !== CANVAS_LOGO) {
+  if (manifest.logo !== CANVAS_LOGO) {
     fail(
-      `plugin.json#extensions[${JSON.stringify(CANVAS_NAMESPACE)}].logo must be ${JSON.stringify(CANVAS_LOGO)} for a plugin keyworded "${CANVAS_KEYWORD}"`
+      `plugin.json#logo must be ${JSON.stringify(CANVAS_LOGO)} for a plugin keyworded "${CANVAS_KEYWORD}"`
     );
   }
+  if (manifest.extensions !== "extensions") {
+    fail('published canvas plugin.json#extensions must be "extensions"');
+  }
+  requirePath(dist, manifest.logo, "plugin.json#logo", "file");
+  requirePath(dist, CANVAS_ENTRY_POINT, "canvas entry point", "file");
   requirePath(
     dist,
-    client.logo,
-    `plugin.json#extensions[${JSON.stringify(CANVAS_NAMESPACE)}].logo`,
+    CANVAS_COMPATIBILITY_ENTRY_POINT,
+    "Awesome Copilot canvas entry point",
     "file"
   );
-  requirePath(dist, CANVAS_ENTRY_POINT, "canvas entry point", "file");
 }
 
 function requirePath(root, declared, label, type) {
@@ -303,7 +306,12 @@ async function main() {
     );
   }
   const canvas = isJsonObject(manifest) && isCanvasPlugin(manifest);
-  const manifestError = validateSchema(manifest, manifestSchema, "plugin.json");
+  const portable = canvas ? { ...manifest } : manifest;
+  if (canvas) {
+    delete portable.logo;
+    delete portable.extensions;
+  }
+  const manifestError = validateSchema(portable, manifestSchema, "plugin.json");
   if (manifestError !== undefined) fail(manifestError);
   if (canvas) requireCanvasContract(dist, manifest);
 
