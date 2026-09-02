@@ -33,7 +33,9 @@ function namesMatch(left: string, right: string): boolean {
  * Safe to call before the delete run finishes: if the delete fails, the
  * artifact still exists and the next read repopulates the view.
  *
- * Returns whether anything was discarded.
+ * Returns whether the state described the deployment being deleted, not whether
+ * any field actually changed: clearing is idempotent, so a repeated call for
+ * the same identity still returns true with nothing left to clear.
  */
 export function discardDeployedApplicationState(
   state: CanvasState,

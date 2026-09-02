@@ -26,14 +26,15 @@
 # Best-effort by design. The application is already deleted by the time this
 # runs, so a listing or delete failure warns and exits 0 rather than failing an
 # otherwise successful delete; the stale artifact then expires on its own.
+# Best-effort never means best-guess, though: every path that cannot establish
+# the exact artifact name -- a missing helper, an underivable or empty name --
+# exits before contacting the API, because an unscoped request here would delete
+# artifacts belonging to other applications.
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
-# Resolved at run time from the action directory, so shellcheck cannot follow it.
-# shellcheck source=/dev/null disable=SC1091
-source "${SCRIPT_DIR}/../deploy-progress/progress.sh"
 
 readonly ENVIRONMENT="${ENVIRONMENT:-}"
 readonly APPLICATION="${APPLICATION:-}"
@@ -60,10 +61,36 @@ if [[ -z "${REPOSITORY//[[:space:]]/}" ]]; then
     exit 0
 fi
 
+# Load the shared derivation only after the identity checks, so a missing
+# helper is reported against a request that would otherwise have deleted
+# something. Every failure below exits before any API call: an empty `name=`
+# filter is treated by the REST API as "no filter" and lists the repository's
+# entire artifact history, so a script that carried on with an unset name would
+# delete every artifact in the repository rather than this application's.
+# Resolved at run time from the action directory, so shellcheck cannot follow it.
+# shellcheck source=/dev/null disable=SC1091
+if ! source "${SCRIPT_DIR}/../deploy-progress/progress.sh"; then
+    warn "could not load ${SCRIPT_DIR}/../deploy-progress/progress.sh; nothing to remove."
+    exit 0
+fi
+
+if ! declare -F radius_deploy_artifact_name >/dev/null; then
+    warn "the shared radius_deploy_artifact_name helper is unavailable; nothing to remove."
+    exit 0
+fi
+
 # Already sanitized to [a-z0-9._-] by the shared derivation, so it is safe to
 # interpolate into both a log line and a REST query.
-ARTIFACT_NAME="$(radius_deploy_artifact_name "${ENVIRONMENT}" "${APPLICATION}")"
+if ! ARTIFACT_NAME="$(radius_deploy_artifact_name "${ENVIRONMENT}" "${APPLICATION}")"; then
+    warn "could not derive the artifact name for '${ENVIRONMENT}/${APPLICATION}'; nothing to remove."
+    exit 0
+fi
 readonly ARTIFACT_NAME
+
+if [[ -z "${ARTIFACT_NAME//[[:space:]]/}" ]]; then
+    warn "derived an empty artifact name for '${ENVIRONMENT}/${APPLICATION}'; nothing to remove."
+    exit 0
+fi
 
 ERROR_FILE="$(mktemp)"
 readonly ERROR_FILE

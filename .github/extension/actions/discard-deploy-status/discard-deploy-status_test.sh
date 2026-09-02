@@ -269,6 +269,79 @@ done
 pass "makes no API call when the environment, application or repository is missing"
 
 # ---------------------------------------------------------------------------
+# Fails closed when the shared derivation is unavailable. An empty `name=` is
+# treated by the REST API as "no filter" and lists the repository's entire
+# artifact history, so a run that cannot derive its exact name must make no API
+# call at all rather than delete another application's artifacts.
+# ---------------------------------------------------------------------------
+readonly ISOLATED_ROOT="${TEST_ROOT}/isolated"
+mkdir -p "${ISOLATED_ROOT}/action" "${ISOLATED_ROOT}/deploy-progress"
+cp "${TARGET}" "${ISOLATED_ROOT}/action/discard-deploy-status.sh"
+
+run_isolated() {
+    : >"${GH_CALL_LOG}"
+    RUN_EXIT=0
+    ENVIRONMENT="prod" APPLICATION="billing" \
+        GITHUB_REPOSITORY="octo/repo" \
+        PATH="${STUB_BIN}:${PATH}" \
+        bash "${ISOLATED_ROOT}/action/discard-deploy-status.sh" 2>&1 || RUN_EXIT=$?
+}
+
+# The helper file does not exist at all: `source` fails.
+output="$(
+    run_isolated
+    echo "__exit__${RUN_EXIT}"
+)"
+assert_contains "${output}" "__exit__0" "missing helper file: exits 0"
+assert_contains "${output}" "::warning::Deployed graph cleanup:" "missing helper file: warns"
+assert_contains "${output}" "nothing to remove." "missing helper file: removes nothing"
+assert_equals "$(wc -l <"${GH_CALL_LOG}" | tr -d ' ')" "0" \
+    "missing helper file: makes no API call"
+pass "makes no API call when the shared helper file is missing"
+
+# The helper file loads but does not define the derivation.
+printf '#!/bin/bash\n# no radius_deploy_artifact_name here\n' \
+    >"${ISOLATED_ROOT}/deploy-progress/progress.sh"
+output="$(
+    run_isolated
+    echo "__exit__${RUN_EXIT}"
+)"
+assert_contains "${output}" "__exit__0" "helper without the function: exits 0"
+assert_contains "${output}" "radius_deploy_artifact_name helper is unavailable" \
+    "helper without the function: names the missing helper"
+assert_equals "$(wc -l <"${GH_CALL_LOG}" | tr -d ' ')" "0" \
+    "helper without the function: makes no API call"
+pass "makes no API call when the shared helper does not define the derivation"
+
+# The derivation exists but yields an empty name.
+printf '#!/bin/bash\nradius_deploy_artifact_name() { printf "%%s" ""; }\n' \
+    >"${ISOLATED_ROOT}/deploy-progress/progress.sh"
+output="$(
+    run_isolated
+    echo "__exit__${RUN_EXIT}"
+)"
+assert_contains "${output}" "__exit__0" "empty derived name: exits 0"
+assert_contains "${output}" "derived an empty artifact name" \
+    "empty derived name: says the name was empty"
+assert_equals "$(wc -l <"${GH_CALL_LOG}" | tr -d ' ')" "0" \
+    "empty derived name: makes no API call"
+pass "makes no API call when the derivation yields an empty name"
+
+# The derivation itself fails.
+printf '#!/bin/bash\nradius_deploy_artifact_name() { return 1; }\n' \
+    >"${ISOLATED_ROOT}/deploy-progress/progress.sh"
+output="$(
+    run_isolated
+    echo "__exit__${RUN_EXIT}"
+)"
+assert_contains "${output}" "__exit__0" "failing derivation: exits 0"
+assert_contains "${output}" "could not derive the artifact name" \
+    "failing derivation: says the name could not be derived"
+assert_equals "$(wc -l <"${GH_CALL_LOG}" | tr -d ' ')" "0" \
+    "failing derivation: makes no API call"
+pass "makes no API call when the derivation fails"
+
+# ---------------------------------------------------------------------------
 # action.yml wiring the script cannot exercise.
 # ---------------------------------------------------------------------------
 action_text="$(cat "${ACTION_FILE}")"

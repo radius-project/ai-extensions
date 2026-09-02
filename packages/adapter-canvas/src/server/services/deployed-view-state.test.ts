@@ -129,8 +129,9 @@ describe("discardDeployedApplicationState", () => {
     const target = { environment: "prod", application: "billing" };
 
     expect(discardDeployedApplicationState(state, target)).toBe(true);
-    // The second call no longer identifies a session deployment to discard,
-    // because the first one cleared its status; the graph stays cleared.
+    // The identity fields are not cleared, so the second call still recognizes
+    // this state as describing the deleted deployment and still returns true --
+    // the return value reports a matching identity, not a state transition.
     expect(discardDeployedApplicationState(state, target)).toBe(true);
     expect(state.deployedGraph).toBeNull();
   });
