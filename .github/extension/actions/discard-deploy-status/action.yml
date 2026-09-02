@@ -7,8 +7,12 @@
 # instead of waiting out the artifact's retention window.
 #
 # Scoped to one application: the artifact name is derived with the same shared
-# helper the producer and the canvas reader use, and only artifacts matching
-# that exact name are removed.
+# helper the producer and the canvas reader use, but the name is only a listing
+# filter. Distinct pairs can collide on one derived name, so each candidate is
+# downloaded and the application and environment recorded in its own
+# deploy-state.txt must denote this pair -- compared the way the canvas reader's
+# confirmArtifactIdentity compares them -- before it is removed. A candidate
+# whose identity cannot be read is left to expire.
 name: Radius - Discard deploy status
 description: Remove the deploy-status artifacts describing a deleted application's last deployment.
 
