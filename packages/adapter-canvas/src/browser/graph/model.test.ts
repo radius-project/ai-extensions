@@ -332,6 +332,10 @@ describe("radiusNormalizeIconSource", () => {
     ).toBe(false);
   });
 
+  it("does not classify an incomplete svg start tag as monochrome", () => {
+    expect(radiusNormalizeIconSource("<svg").monochrome).toBe(false);
+  });
+
   it("recognizes paint attributes when another attribute contains a greater-than sign", () => {
     expect(
       radiusNormalizeIconSource(
