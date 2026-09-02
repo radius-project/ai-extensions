@@ -29,6 +29,7 @@ import {
   copyFileSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -592,17 +593,23 @@ function trackedFilesUnderDist() {
   // `literal` keeps a path containing glob characters from being read as a
   // pattern; `top` anchors it to the repository root rather than the cwd.
   const pathspec = `:(top,literal)${within.split(sep).join("/")}`;
+  const gitMarker = join(repoRoot, ".git");
+  if (!lstatSync(gitMarker, { throwIfNoEntry: false })) return [];
   try {
-    execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
+    const inside = execFileSync("git", ["rev-parse", "--is-inside-work-tree"], {
       cwd: repoRoot,
-      stdio: "ignore"
-    });
-  } catch {
-    // Outside a checkout there is no tracked source to protect.
-    return [];
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    }).trim();
+    if (inside !== "true") {
+      throw new Error(`git reported ${JSON.stringify(inside)}`);
+    }
+  } catch (error) {
+    throw new Error(
+      `Refusing to wipe ${distDir}: unable to verify tracked files in ${repoRoot}.`,
+      { cause: error }
+    );
   }
-  // Deliberately not caught: inside a checkout, a failed query is unknown
-  // state, and treating it as "nothing tracked" is what makes a guard useless.
   return execFileSync("git", ["ls-files", "-z", "--", pathspec], {
     cwd: repoRoot,
     encoding: "utf8",

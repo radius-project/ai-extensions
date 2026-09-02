@@ -946,6 +946,45 @@ describe("P0-C built Radius extension artifact", () => {
     }
   );
 
+  it.each([
+    ["Git is unavailable", true],
+    ["checkout metadata is invalid", false]
+  ])("preserves build output when %s", (_condition, hideGit) => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "radius-canvas-unverified-checkout-")
+    );
+    const sentinel = join(workspaceRoot, ".artifacts", "radius", "keep.txt");
+    try {
+      const buildDirectory = prepareBuildWorkspace(workspaceRoot);
+      mkdirSync(join(workspaceRoot, ".git"));
+      mkdirSync(dirname(sentinel), { recursive: true });
+      writeFileSync(sentinel, "keep\n");
+      const environment =
+        hideGit ?
+          Object.fromEntries(
+            Object.entries(process.env).filter(
+              ([name]) => name.toUpperCase() !== "PATH"
+            )
+          )
+        : { ...process.env };
+      if (hideGit) environment.PATH = join(workspaceRoot, "missing-bin");
+
+      const result = spawnSync(process.execPath, ["build.mjs"], {
+        cwd: buildDirectory,
+        encoding: "utf8",
+        env: { ...environment, RADIUS_SOURCE_REF: SOURCE_REF }
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("unable to verify tracked files");
+      expect(readFileSync(sentinel, "utf8")).toBe("keep\n");
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a mutable source ref before building", () => {
     const workspaceRoot = mkdtempSync(
       join(tmpdir(), "radius-canvas-mutable-source-")

@@ -39,7 +39,7 @@ import { pluginRefs, repoRoot, requirePlugin } from "./plugins.mjs";
 const SHA = /^[0-9a-f]{40}$/;
 const REF = /^refs\/(?:heads|tags)\/[^\s~^:?*[\\]+$/;
 const PUBLISHED_PATH =
-  /^(?!\/)(?!.*\/\/)(?!.*(?:^|\/)\.\.(?:\/|$))[^\s\\:*?"<>|]+(?<!\/)$/;
+  /^(?!\/)(?!.*\/\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))[^\s\\:*?"<>|]+(?<!\/)$/;
 const MARKETPLACE = ".github/plugin/marketplace.json";
 const EXTENSION_ROOT = ".github/extension";
 // Published both inside the install unit and at the plugin root, so a release

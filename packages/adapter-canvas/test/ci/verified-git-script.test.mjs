@@ -561,6 +561,9 @@ describe("scripts/verified-git.mjs", () => {
 
   it.each([
     ["dist=/etc/passwd", "an absolute destination"],
+    ["dist=.", "a dot destination"],
+    ["dist=./extensions", "a leading dot segment"],
+    ["dist=extensions/./radius", "an embedded dot segment"],
     ["dist=../escape", "a parent traversal"],
     ["dist=nested/../../escape", "an embedded parent traversal"],
     ["dist=", "an empty destination"],
