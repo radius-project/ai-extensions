@@ -327,9 +327,17 @@ describe("radiusNormalizeIconSource", () => {
   it("ignores currentColor outside paint attributes", () => {
     expect(
       radiusNormalizeIconSource(
-        '<svg viewBox="0 0 8 8"><!-- currentColor --><title>currentColor</title></svg>'
+        '<svg viewBox="0 0 8 8"><!-- fill="currentColor" --><title>stroke="currentColor"</title></svg>'
       ).monochrome
     ).toBe(false);
+  });
+
+  it("recognizes paint attributes when another attribute contains a greater-than sign", () => {
+    expect(
+      radiusNormalizeIconSource(
+        '<svg viewBox="0 0 8 8"><path aria-label="a > b" fill="currentColor" /></svg>'
+      ).monochrome
+    ).toBe(true);
   });
 
   it("does not mark multi-color svg markup, urls or data uris as monochrome", () => {

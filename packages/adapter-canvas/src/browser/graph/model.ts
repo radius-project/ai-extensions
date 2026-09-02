@@ -414,6 +414,16 @@ export interface ResolvedIcon {
 
 const NO_ICON: ResolvedIcon = { src: "", monochrome: false };
 
+function svgUsesCurrentColor(svg: string): boolean {
+  // Inspect only actual start tags. The tag matcher respects quoted `>` values
+  // and excludes comments, declarations, processing instructions, and closing
+  // tags so attribute-like text in metadata cannot opt an icon into flattening.
+  const startTags = svg.match(/<(?![!?/])(?:[^>"']|"[^"]*"|'[^']*')+>/g) || [];
+  return startTags.some((tag) =>
+    /(?:^|\s)(?:fill|stroke|color)\s*=\s*["']\s*currentcolor\s*["']/i.test(tag)
+  );
+}
+
 // Normalizes an icon supplied by a type/recipe pack into a usable image source
 // for the node card. Packs may express an icon as a ready data URI, an http(s)
 // URL, or a raw <svg> markup string; anything unrecognized returns '' so the
@@ -434,10 +444,7 @@ export function radiusNormalizeIconSource(icon: unknown): ResolvedIcon {
     return { src: s, monochrome: false };
   }
   if (s.indexOf("<svg") === 0) {
-    const monochrome =
-      /(?:^|[\s<])(?:fill|stroke|color)\s*=\s*["']\s*currentcolor\s*["']/i.test(
-        s
-      );
+    const monochrome = svgUsesCurrentColor(s);
     if (s.indexOf("width=") === -1) {
       s = s.replace("<svg ", '<svg width="64" height="64" ');
     }
