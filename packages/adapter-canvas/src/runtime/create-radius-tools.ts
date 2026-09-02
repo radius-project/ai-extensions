@@ -140,11 +140,11 @@ export function createRadiusTools(
     {
       ...declarationByName.get("radius_report_modeling_failure")!,
       handler: async (args: ToolArgs) => {
-        const instanceId = optionalString(args.instanceId);
-        const repo = optionalString(args.repo);
-        const branch = optionalString(args.branch);
-        const attemptToken = optionalString(args.attemptToken);
-        const failure = optionalString(args.error);
+        const instanceId = optionalString(args.instanceId).trim();
+        const repo = optionalString(args.repo).trim();
+        const branch = optionalString(args.branch).trim();
+        const attemptToken = optionalString(args.attemptToken).trim();
+        const failure = optionalString(args.error).trim();
         if (!instanceId || !repo || !branch || !attemptToken || !failure) {
           return {
             recorded: false,
