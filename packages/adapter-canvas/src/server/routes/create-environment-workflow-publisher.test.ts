@@ -668,6 +668,12 @@ describe("publishWorkflowFiles", () => {
     expect(recorder.steps).toContain(
       "⚠️ Could not commit delete workflow radius-delete.yml: HTTP 404"
     );
+    expect(recorder.steps).toContain(
+      "⚠️ Delete workflow checks completed with warnings."
+    );
+    expect(recorder.steps).not.toContain(
+      "✅ Delete workflows already up to date."
+    );
     // A refused delete commit is not recorded, but its completed write attempt
     // still consumes a gate before any later mutation can begin.
     expect(recorder.committed).toHaveLength(2);

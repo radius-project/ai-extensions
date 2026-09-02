@@ -994,6 +994,9 @@ describe("syncRepoWorkflows", () => {
     );
 
     expect(res.created).toEqual([]);
+    expect(res.registrationPending).toEqual([
+      ".github/workflows/delete-application.yml"
+    ]);
     expect(h.commits).toEqual([]);
   });
 });

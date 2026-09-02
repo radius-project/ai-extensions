@@ -2256,7 +2256,14 @@ async function ensureWorkflowsCurrent(
         `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`
       );
     }
-    return { created: r.created || [], failed: r.failed || [] };
+    return {
+      // Downstream dispatchers use this list only to decide whether GitHub may
+      // still be registering a workflow, including one created concurrently.
+      created: [
+        ...new Set([...(r.created || []), ...(r.registrationPending || [])])
+      ],
+      failed: r.failed || []
+    };
   } catch (e) {
     console.error(`[radius workflow-presync] ${repo}: ${errorMessage(e)}`);
     return { created: [], failed: [] };

@@ -457,6 +457,7 @@ export async function publishWorkflowFiles(
   ports.pushStep("Checking delete workflows...");
   try {
     let deleteChanges = 0;
+    let deleteFailures = 0;
     const deleteWorkflows = await ports.generateDeleteWorkflow(envName);
     for (const [fileName, content] of Object.entries(deleteWorkflows)) {
       const delContent = Buffer.from(content).toString("base64");
@@ -473,6 +474,7 @@ export async function publishWorkflowFiles(
       if (delCommit.cancelled) return { outcome: "cancelled" };
 
       if (!delCommit.ok) {
+        deleteFailures += 1;
         ports.pushStep(
           "⚠️ Could not commit delete workflow " +
             fileName +
@@ -489,7 +491,9 @@ export async function publishWorkflowFiles(
       }
       if (!(await ports.gate())) return { outcome: "cancelled" };
     }
-    if (deleteChanges > 0) {
+    if (deleteFailures > 0) {
+      ports.pushStep("⚠️ Delete workflow checks completed with warnings.");
+    } else if (deleteChanges > 0) {
       ports.pushStep("✅ Delete workflows committed.");
     } else {
       ports.pushStep("✅ Delete workflows already up to date.");

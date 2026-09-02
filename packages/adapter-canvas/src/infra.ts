@@ -72,6 +72,10 @@ export interface SyncWorkflowResult {
   // caller can tell whether it just created a workflow and therefore needs to
   // wait for GitHub to register it before dispatching.
   created: string[];
+  // Paths that appeared between the initial read and the commit helper's
+  // confirmation read. Radius did not author them, but callers must still allow
+  // GitHub time to register them before dispatching.
+  registrationPending?: string[];
   // Per-branch commit failures (create or update) so a caller can surface a
   // specific "couldn't commit to <branch>" message instead of a generic hint.
   failed: WorkflowCommitFailure[];
@@ -750,6 +754,7 @@ export async function syncRepoWorkflows(
 
   const updated = new Set<string>();
   const created = new Set<string>();
+  const registrationPending = new Set<string>();
   const failed: WorkflowCommitFailure[] = [];
   // Cache branch-existence lookups so authoring missing files doesn't re-query
   // the same branch for every candidate path. A branch that isn't on the remote
@@ -806,6 +811,8 @@ export async function syncRepoWorkflows(
           if (changed) {
             created.add(path);
             log(`created ${path} on "${branch}"`);
+          } else {
+            registrationPending.add(path);
           }
         } catch (e) {
           failed.push({ path, branch });
@@ -855,6 +862,9 @@ export async function syncRepoWorkflows(
   return {
     updated: [...updated],
     created: [...created],
+    ...(registrationPending.size ?
+      { registrationPending: [...registrationPending] }
+    : {}),
     failed,
     branches,
     skipped: false
