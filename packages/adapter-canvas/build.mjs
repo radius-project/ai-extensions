@@ -374,6 +374,19 @@ function installToLocal() {
 
     const installDir = dirname(installPath);
     mkdirSync(installDir, { recursive: true });
+    // Replace the launchers before extension.mjs. All local sessions share one
+    // installed extension, so a Radius command running in another session holds
+    // its launcher open and Windows refuses to remove it. Failing here leaves
+    // the previous bundle and its matching launchers installed, which a later
+    // rebuild can retry; failing after extension.mjs was swapped would pair a
+    // new bundle with stale launchers.
+    const binFrom = join(distDir, "bin");
+    const binTo = join(installDir, "bin");
+    const binTmp = `${binTo}.tmp-${process.pid}`;
+    rmSync(binTmp, { recursive: true, force: true });
+    cpSync(binFrom, binTmp, { recursive: true });
+    rmSync(binTo, { recursive: true, force: true });
+    renameSync(binTmp, binTo);
     // Write atomically: copy to a temp file in the same dir, then rename over the
     // target. rename() is atomic on the same filesystem, so a watcher never
     // observes a half-written file (which would import as a truncated module and
@@ -391,13 +404,6 @@ function installToLocal() {
     const noticesTmp = `${noticesTo}.tmp-${process.pid}`;
     copyFileSync(noticesFrom, noticesTmp);
     renameSync(noticesTmp, noticesTo);
-    const binFrom = join(distDir, "bin");
-    const binTo = join(installDir, "bin");
-    const binTmp = `${binTo}.tmp-${process.pid}`;
-    rmSync(binTmp, { recursive: true, force: true });
-    cpSync(binFrom, binTmp, { recursive: true });
-    rmSync(binTo, { recursive: true, force: true });
-    renameSync(binTmp, binTo);
     // Copy the whole skills tree rather than naming files one at a time, so a
     // skill, reference, or script added later is installed without touching
     // this list. SKILL.md and its references are the instructions the agent

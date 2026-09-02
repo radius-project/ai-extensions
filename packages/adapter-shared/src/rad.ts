@@ -40,11 +40,12 @@ import {
   managedBicepEnv as processManagedBicepEnv,
   RadProcessError,
   spawnRad,
-  spawnRadChild
+  spawnRadChild,
+  terminateChildTree
 } from "./rad-process.mjs";
 import type { ProcessResult, SpawnRadOptions } from "./rad-process.mjs";
 
-export { killChildTree, RadProcessError, spawnRad };
+export { killChildTree, RadProcessError, spawnRad, terminateChildTree };
 export type { ProcessResult, SpawnRadOptions };
 
 // --- Shared named types -----------------------------------------------------
@@ -1234,8 +1235,9 @@ export async function runRadAppGraph(
       const abort = (): void => {
         if (settled) return;
         complete();
-        killChildTree(child);
-        reject(new RadProcessError("rad app graph aborted", stdout, stderr));
+        void terminateChildTree(child).then(() => {
+          reject(new RadProcessError("rad app graph aborted", stdout, stderr));
+        });
       };
       child.stdout?.on("data", (c: Buffer) => {
         if (stdout.length < MAX) stdout += c.toString();
@@ -1250,14 +1252,15 @@ export async function runRadAppGraph(
         if (graceTimer) clearTimeout(graceTimer);
         if (artifactTimer) clearInterval(artifactTimer);
         signal?.removeEventListener("abort", abort);
-        killChildTree(child);
-        reject(
-          new RadProcessError(
-            `rad app graph timed out after ${timeout}ms`,
-            stdout,
-            stderr
-          )
-        );
+        void terminateChildTree(child).then(() => {
+          reject(
+            new RadProcessError(
+              `rad app graph timed out after ${timeout}ms`,
+              stdout,
+              stderr
+            )
+          );
+        });
       }, timeout);
 
       const complete = (): void => {

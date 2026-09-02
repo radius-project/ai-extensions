@@ -32,6 +32,13 @@ export class RadProcessError extends Error {
 
 export function killChildTree(child: ChildProcess | null | undefined): void;
 
+export const TERMINATION_WAIT_MS: number;
+
+export function terminateChildTree(
+  child: ChildProcess | null | undefined,
+  waitMs?: number
+): Promise<void>;
+
 export function windowsLauncherFilename(architecture: string): string;
 
 export function resolveWindowsLauncherPath(

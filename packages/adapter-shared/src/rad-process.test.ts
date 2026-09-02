@@ -1,4 +1,6 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -7,6 +9,8 @@ import {
   radSpawnCommand,
   resolveWindowsLauncherPath,
   spawnRad,
+  TERMINATION_WAIT_MS,
+  terminateChildTree,
   windowsLauncherFilename
 } from "./rad-process.mjs";
 
@@ -160,5 +164,52 @@ describe("spawnRad cancellation", () => {
       stdout: "started",
       stderr: ""
     });
+  });
+});
+
+describe("Radius child tree termination completion", () => {
+  it("resolves only once the child has actually exited", async () => {
+    const child = spawn(process.execPath, [
+      "-e",
+      "setInterval(() => {}, 60000)"
+    ]);
+    await new Promise((resolve) => child.once("spawn", resolve));
+
+    await terminateChildTree(child);
+
+    // Cancellation that returned while this was still null would let the caller
+    // start the next command, or delete the working directory the tree still
+    // holds open, before the tree was gone.
+    expect(child.exitCode === null && child.signalCode === null).toBe(false);
+  });
+
+  it("resolves immediately for a child that already exited", async () => {
+    const child = spawn(process.execPath, ["-e", ""]);
+    await new Promise((resolve) => child.once("exit", resolve));
+
+    const started = Date.now();
+    await terminateChildTree(child);
+
+    expect(Date.now() - started).toBeLessThan(TERMINATION_WAIT_MS);
+  });
+
+  it("gives up on a child that never exits rather than stranding the caller", async () => {
+    // A process that survives termination must not hold cancellation open, so
+    // the wait is bounded. The stub never emits "exit".
+    const child = Object.assign(new EventEmitter(), {
+      pid: 0x7fffffff,
+      exitCode: null,
+      signalCode: null,
+      kill: () => true
+    });
+
+    const started = Date.now();
+    await terminateChildTree(child as never, 40);
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(30);
+  });
+
+  it("tolerates a child that was never created", async () => {
+    await expect(terminateChildTree(null)).resolves.toBeUndefined();
   });
 });

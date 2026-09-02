@@ -210,11 +210,20 @@ export async function runArtifactSmoke(
         )
       ]);
     }
-    rmSync(root, {
-      recursive: true,
-      force: true,
-      maxRetries: 5,
-      retryDelay: 100
-    });
+    // Windows keeps a directory locked while any process still has it open, so a
+    // rad tree that the extension started under this root can outlive the
+    // subprocess by a moment. Retry, then leave the directory to the operating
+    // system: this is teardown of a temporary directory, not an assertion, and
+    // failing here would report a passing smoke run as broken.
+    try {
+      rmSync(root, {
+        recursive: true,
+        force: true,
+        maxRetries: 20,
+        retryDelay: 100
+      });
+    } catch {
+      // The operating system reclaims its own temporary directory.
+    }
   }
 }

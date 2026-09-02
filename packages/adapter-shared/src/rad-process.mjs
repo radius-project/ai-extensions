@@ -146,6 +146,40 @@ export function killChildTree(child) {
   }
 }
 
+// How long a cancellation waits for a terminated tree to actually disappear.
+// Long enough for a job-object teardown on a loaded machine, short enough that
+// an unkillable process cannot hang the caller.
+export const TERMINATION_WAIT_MS = 5000;
+
+// killChildTree only *starts* termination, so a caller told "cancelled" could
+// otherwise begin the next command or delete the working directory while rad and
+// bicep are still running -- and on Windows a live process holds its working
+// directory open, so that deletion fails. Waiting for the child to exit makes
+// cancellation mean the tree is gone. The wait is bounded: a process that cannot
+// be killed must not strand the caller either.
+export function terminateChildTree(child, waitMs = TERMINATION_WAIT_MS) {
+  killChildTree(child);
+  return new Promise((resolve) => {
+    const alreadyExited =
+      !child ||
+      child.pid == null ||
+      child.exitCode !== null ||
+      child.signalCode !== null;
+    if (alreadyExited) {
+      resolve();
+      return;
+    }
+    let timer = null;
+    const done = () => {
+      if (timer) clearTimeout(timer);
+      child.removeListener("exit", done);
+      resolve();
+    };
+    timer = setTimeout(done, waitMs);
+    child.once("exit", done);
+  });
+}
+
 /**
  * spawnRad - the process-handling core every managed-rad invocation needs:
  * spawn `radPath args`, capture stdout/stderr (capped at 32MB), and resolve
@@ -184,8 +218,9 @@ export function spawnRad(
       if (settled) return;
       settled = true;
       cleanup();
-      killChildTree(child);
-      reject(new RadProcessError(`${label} aborted`, stdout, stderr));
+      void terminateChildTree(child).then(() => {
+        reject(new RadProcessError(`${label} aborted`, stdout, stderr));
+      });
     };
     child.stdout?.on("data", (chunk) => {
       if (stdout.length < maxOutput) stdout += chunk.toString();
@@ -198,14 +233,15 @@ export function spawnRad(
       if (settled) return;
       settled = true;
       cleanup();
-      killChildTree(child);
-      reject(
-        new RadProcessError(
-          `${label} timed out after ${timeout}ms`,
-          stdout,
-          stderr
-        )
-      );
+      void terminateChildTree(child).then(() => {
+        reject(
+          new RadProcessError(
+            `${label} timed out after ${timeout}ms`,
+            stdout,
+            stderr
+          )
+        );
+      });
     }, timeout);
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();

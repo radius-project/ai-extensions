@@ -11,7 +11,13 @@
 // flags below stay deterministic: no VCS stamp, no absolute paths, no build ID.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,8 +36,19 @@ export const windowsLauncherBinDirectory = join(
   "bin"
 );
 
-// Every input whose change must invalidate an already built executable.
-const sourceFiles = ["main.go", "go.mod"];
+// Every input whose change must invalidate an already built executable. The Go
+// package is globbed rather than listed so a second source file cannot silently
+// ship a stale executable, and the module files are named because a dependency
+// or toolchain change alters the output just as much as the source does.
+function sourceInputs() {
+  const goFiles = readdirSync(windowsLauncherSourceDirectory)
+    .filter((entry) => entry.endsWith(".go"))
+    .map((entry) => join(windowsLauncherSourceDirectory, entry));
+  const moduleFiles = ["go.mod", "go.sum"]
+    .map((entry) => join(windowsLauncherSourceDirectory, entry))
+    .filter((path) => existsSync(path));
+  return [...goFiles, ...moduleFiles];
+}
 
 export const windowsLauncherArchitectures = [
   { go: "amd64", node: "x64", machine: 0x8664 },
@@ -76,11 +93,13 @@ function assertWindowsGuiExecutable(path, machine) {
 }
 
 function newestSourceTimestamp() {
-  return Math.max(
-    ...sourceFiles.map(
-      (file) => statSync(join(windowsLauncherSourceDirectory, file)).mtimeMs
-    )
-  );
+  const inputs = sourceInputs();
+  if (inputs.length === 0) {
+    throw new Error(
+      `No Go sources found in ${windowsLauncherSourceDirectory}; the Windows launcher cannot be built.`
+    );
+  }
+  return Math.max(...inputs.map((path) => statSync(path).mtimeMs));
 }
 
 function isUpToDate(output, sourceTimestamp) {

@@ -24,7 +24,8 @@ fixes, features) as long as they follow a few guidelines:
 ## Prerequisites
 
 - [Node.js](https://nodejs.org/) 24 (the active major is recorded in [`.node-version`](./.node-version))
-- [pnpm](https://pnpm.io/) `>= 9` (this repo uses `pnpm@9.15.9`)
+- [pnpm](https://pnpm.io/) — the exact version is pinned by `packageManager` in
+  [`package.json`](./package.json) and installed automatically by Corepack
 - [Go](https://go.dev/) (the version recorded in
   [`packages/adapter-shared/native/windows-launcher/go.mod`](./packages/adapter-shared/native/windows-launcher/go.mod)),
   needed to build the plugin. `pnpm build` cross-compiles the Windows Radius
