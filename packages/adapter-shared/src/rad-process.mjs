@@ -106,28 +106,43 @@ export class RadProcessError extends Error {
   }
 }
 
-// Terminates rad and any bicep child it spawned. On Windows, the PID belongs to
-// the GUI launcher; terminating it closes its kill-on-close Job Object. `taskkill
-// /t` is retained as a second tree-cleanup layer. On POSIX, rad is a detached
-// process-group leader, so signalling the group stops rad and its children.
+// Terminates rad and any bicep child it spawned. On Windows the PID belongs to
+// the GUI launcher, and `taskkill /t` walks the tree; letting the launcher exit
+// on its own is what lets Node drain the output it already wrote, so signalling
+// the child directly here would tear the pipes down first and truncate captured
+// output. On POSIX, rad is a detached process-group leader, so signalling the
+// group stops rad and its children. A direct signal is the fallback for both,
+// reached only when the tree layer cannot run at all, because a stranded process
+// tree is worse than a lost tail of output. taskkill reports an unusable binary
+// asynchronously, so that path is a listener rather than a catch.
 // Best-effort -- any failure is swallowed.
 export function killChildTree(child) {
   if (!child || child.pid == null) return;
-  try {
-    if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
-        stdio: "ignore",
-        windowsHide: true
-      });
-    } else {
-      process.kill(-child.pid, "SIGKILL");
-    }
-  } catch {
+  const killDirectly = () => {
     try {
       child.kill("SIGKILL");
     } catch {
       // Best-effort cleanup.
     }
+  };
+  try {
+    if (process.platform === "win32") {
+      const killer = spawn(
+        "taskkill",
+        ["/pid", String(child.pid), "/t", "/f"],
+        {
+          stdio: "ignore",
+          windowsHide: true
+        }
+      );
+      // An "error" event with no listener throws out of emit, which the caller
+      // cannot contain, so this both prevents that and supplies the fallback.
+      killer.on("error", killDirectly);
+    } else {
+      process.kill(-child.pid, "SIGKILL");
+    }
+  } catch {
+    killDirectly();
   }
 }
 

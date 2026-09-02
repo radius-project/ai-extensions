@@ -182,6 +182,14 @@ func createHeadlessConsole() (*pseudoConsole, error) {
 	output := os.NewFile(uintptr(outputRead), "pseudoconsole-output")
 	drained := make(chan struct{})
 	go func() {
+		// Discarding this stream is deliberate rather than a dropped feature.
+		// The child's standard handles are the launcher's own inherited pipes
+		// (see createChild), so ordinary stdout and stderr reach the caller
+		// directly and never pass through here. What a pseudoconsole emits is a
+		// VT rendering of the console screen buffer -- cursor positioning,
+		// resize and repaint sequences, and any direct CONOUT$ writes -- which
+		// would corrupt captured output if it were merged into either stream.
+		// The copy must still run: a full output pipe blocks the child.
 		_, _ = io.Copy(io.Discard, output)
 		close(drained)
 	}()
