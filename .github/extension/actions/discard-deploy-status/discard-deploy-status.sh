@@ -14,14 +14,21 @@
 # environment and the application name, is the only actor that can name the
 # artifact for exactly that pair.
 #
-# Scope is exact by construction: only artifacts whose name equals the one this
-# (environment, application) pair produces are removed, using the same
-# derivation the producer and the canvas reader use. Another application in the
-# same environment, or the same application in another environment, produces a
-# different name and is left untouched. Live progress slots
-# (`<name>-live-<run-id>-slot-<n>`) are deliberately not removed: a repo-wide
-# read excludes them because their sequences are only comparable within one run,
-# so they cannot resurrect the deleted graph, and they carry a one-day retention.
+# Scope is exact by identity, not by name. The artifact name is a sanitized,
+# truncated derivation of the pair, so distinct pairs can collide on one name --
+# `(prod, billing/east)`, `(prod-billing, east)` and `(Prod, Billing-East)` all
+# derive `radius-deploy-status-prod-billing-east`. The name is therefore only
+# used as a cheap server-side filter; before anything is deleted, each candidate
+# is downloaded and its `deploy-state.txt` -- which records the raw, unsanitized
+# `application=` and `environment=` the producer was given -- must match this
+# request exactly. This mirrors the canvas reader, which likewise confirms an
+# artifact's identity from its payload rather than from its derived name.
+# Another application in the same environment, or the same application in
+# another environment, is left untouched even when it shares the name. Live
+# progress slots (`<name>-live-<run-id>-slot-<n>`) are deliberately not removed:
+# a repo-wide read excludes them because their sequences are only comparable
+# within one run, so they cannot resurrect the deleted graph, and they carry a
+# one-day retention.
 #
 # Best-effort by design. The application is already deleted by the time this
 # runs, so a listing or delete failure warns and exits 0 rather than failing an
@@ -29,7 +36,10 @@
 # Best-effort never means best-guess, though: every path that cannot establish
 # the exact artifact name -- a missing helper, an underivable or empty name --
 # exits before contacting the API, because an unscoped request here would delete
-# artifacts belonging to other applications.
+# artifacts belonging to other applications. For the same reason a candidate
+# whose identity cannot be confirmed is skipped rather than deleted: leaving a
+# stale artifact to expire is recoverable, deleting another application's
+# deployed graph is not.
 
 set -euo pipefail
 
@@ -62,6 +72,11 @@ readonly SCRIPT_DIR
 readonly ENVIRONMENT="${ENVIRONMENT:-}"
 readonly APPLICATION="${APPLICATION:-}"
 readonly REPOSITORY="${GITHUB_REPOSITORY:-}"
+
+# Every artifact carries this file, in which the producer recorded the raw
+# environment and application it was given. It is the only trustworthy statement
+# of which deployment an artifact describes.
+readonly STATE_FILE="deploy-state.txt"
 
 if [[ -z "${ENVIRONMENT//[[:space:]]/}" || -z "${APPLICATION//[[:space:]]/}" ]]; then
     warn "no environment or application name supplied; nothing to remove."
@@ -121,7 +136,51 @@ fi
 
 ERROR_FILE="$(mktemp)"
 readonly ERROR_FILE
-trap 'rm -f "${ERROR_FILE}"' EXIT
+WORK_DIR="$(mktemp -d)"
+readonly WORK_DIR
+trap 'rm -rf "${ERROR_FILE}" "${WORK_DIR}"' EXIT
+
+# Reads one `key=value` line from a downloaded `deploy-state.txt`. The producer
+# writes the value raw and unquoted as the rest of the line, so everything after
+# the first `=` is the value; only the first occurrence is honoured so a value
+# containing a newline cannot introduce a second, forged field.
+state_field() {
+    local key="$1" state="$2"
+    printf '%s' "${state}" | sed -n "s/^${key}=//p" | head -n 1
+}
+
+# Confirms that an artifact really describes the pair being deleted, by reading
+# the identity the producer recorded inside it rather than trusting the name it
+# was filtered by. Returns non-zero for a mismatch and for every case where the
+# identity cannot be established, so an unreadable artifact is kept rather than
+# deleted on the strength of a name that other pairs can also derive.
+artifact_describes_target() {
+    local artifact_id="$1"
+    local zip_file="${WORK_DIR}/${artifact_id}.zip" state=""
+
+    if ! gh api "repos/${REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+        >"${zip_file}" 2>"${ERROR_FILE}"; then
+        warn "could not download artifact ${artifact_id} to confirm what it describes, so it was left in place: $(cat "${ERROR_FILE}")"
+        return 1
+    fi
+
+    if ! state="$(unzip -p "${zip_file}" "${STATE_FILE}" 2>"${ERROR_FILE}")"; then
+        warn "artifact ${artifact_id} has no readable ${STATE_FILE}, so what it describes could not be confirmed and it was left in place."
+        return 1
+    fi
+
+    local recorded_application recorded_environment
+    recorded_application="$(state_field application "${state}")"
+    recorded_environment="$(state_field environment "${state}")"
+
+    if [[ -z "${recorded_application}" || -z "${recorded_environment}" ]]; then
+        warn "artifact ${artifact_id} does not record which application and environment it describes, so it was left in place."
+        return 1
+    fi
+
+    [[ "${recorded_application}" == "${APPLICATION}" &&
+        "${recorded_environment}" == "${ENVIRONMENT}" ]]
+}
 
 # `name=` is an exact-match filter, so paging is bounded by how many runs
 # published under this one name rather than by the repository's entire artifact
@@ -138,10 +197,15 @@ fi
 
 deleted=0
 failed=0
+skipped=0
 while IFS= read -r artifact_id; do
     # Defensive: only ever interpolate a bare artifact id into the request path,
     # whatever the listing returned.
     [[ "${artifact_id}" =~ ^[0-9]+$ ]] || continue
+    if ! artifact_describes_target "${artifact_id}"; then
+        skipped=$((skipped + 1))
+        continue
+    fi
     if gh api --method DELETE \
         "repos/${REPOSITORY}/actions/artifacts/${artifact_id}" \
         --silent 2>"${ERROR_FILE}"; then
@@ -153,11 +217,15 @@ while IFS= read -r artifact_id; do
 done <<<"${ARTIFACT_IDS}"
 
 if [[ "${failed}" -gt 0 ]]; then
-    warn "removed ${deleted} of $((deleted + failed)) '${ARTIFACT_NAME}' artifacts; the Deployed graph may keep showing this application until the rest expire."
+    warn "removed ${deleted} of $((deleted + failed)) '${ARTIFACT_NAME}' artifacts belonging to this application; the Deployed graph may keep showing it until the rest expire."
     exit 0
 fi
 
 if [[ "${deleted}" -eq 0 ]]; then
+    if [[ "${skipped}" -gt 0 ]]; then
+        warn "none of the ${skipped} '${ARTIFACT_NAME}' artifact(s) could be confirmed as belonging to this application, so none were removed."
+        exit 0
+    fi
     echo "No '${ARTIFACT_NAME}' artifacts to remove."
     exit 0
 fi

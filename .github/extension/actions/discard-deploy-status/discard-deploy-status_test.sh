@@ -28,7 +28,51 @@ trap 'rm -rf "${TEST_ROOT}"' EXIT
 readonly STUB_BIN="${TEST_ROOT}/bin"
 GH_CALL_LOG="${TEST_ROOT}/gh-calls.log"
 export GH_CALL_LOG
-mkdir -p "${STUB_BIN}"
+GH_ZIP_DIR="${TEST_ROOT}/zips"
+export GH_ZIP_DIR
+mkdir -p "${STUB_BIN}" "${GH_ZIP_DIR}"
+
+# Writes the artifact payload the script downloads to confirm what an artifact
+# describes. `deploy-state.txt` is reproduced exactly as the producer writes it,
+# including the raw, unsanitized names.
+write_artifact_zip() {
+    local zip_path="$1" application="$2" environment="$3"
+    python3 - "${zip_path}" "${application}" "${environment}" <<'PY'
+import sys, zipfile
+
+zip_path, application, environment = sys.argv[1:4]
+state = (
+    "state=success\nexitCode=0\n"
+    f"application={application}\nenvironment={environment}\n"
+    "updatedAt=2024-01-01T00:00:00Z\nsha=abc123\n"
+)
+with zipfile.ZipFile(zip_path, "w") as archive:
+    archive.writestr("deploy-state.txt", state)
+    archive.writestr("deploy-graph.json", '{"resources":[]}')
+PY
+}
+
+# Declares which pair a given artifact id claims to belong to. Ids left
+# unregistered are served as belonging to the pair under deletion, so a test
+# only has to speak up when it wants a mismatch.
+register_artifact_identity() {
+    write_artifact_zip "${GH_ZIP_DIR}/$1.zip" "$2" "$3"
+}
+
+# An artifact with no `deploy-state.txt`, as uploaded before the producer
+# recorded an identity.
+register_artifact_without_state() {
+    python3 - "${GH_ZIP_DIR}/$1.zip" <<'PY'
+import sys, zipfile
+
+with zipfile.ZipFile(sys.argv[1], "w") as archive:
+    archive.writestr("deploy-graph.json", '{"resources":[]}')
+PY
+}
+
+reset_artifact_identities() {
+    rm -f "${GH_ZIP_DIR}"/*.zip
+}
 
 fail() {
     echo "FAIL: $*" >&2
@@ -69,6 +113,39 @@ assert_equals() {
 cat >"${STUB_BIN}/gh" <<'STUB'
 #!/bin/bash
 printf '%s\n' "$*" >>"${GH_CALL_LOG}"
+for arg in "$@"; do
+    case "${arg}" in
+    */actions/artifacts/*/zip)
+        artifact_id="${arg%/zip}"
+        artifact_id="${artifact_id##*/}"
+        case " ${GH_ZIP_FAIL_IDS:-} " in
+        *" ${artifact_id} "*)
+            printf 'HTTP 410: Artifact has expired\n' >&2
+            exit 1
+            ;;
+        esac
+        prepared="${GH_ZIP_DIR}/${artifact_id}.zip"
+        if [ ! -f "${prepared}" ]; then
+            # Unregistered ids belong to the pair being deleted. Regenerated on
+            # every call so a previous case's pair cannot leak into this one.
+            prepared="${GH_ZIP_DIR}/auto-${artifact_id}.zip"
+            python3 - "${prepared}" "${APPLICATION}" "${ENVIRONMENT}" <<'PY'
+import sys, zipfile
+
+zip_path, application, environment = sys.argv[1:4]
+with zipfile.ZipFile(zip_path, "w") as archive:
+    archive.writestr(
+        "deploy-state.txt",
+        f"state=success\nexitCode=0\napplication={application}\n"
+        f"environment={environment}\nupdatedAt=now\nsha=abc123\n",
+    )
+PY
+        fi
+        cat "${prepared}"
+        exit 0
+        ;;
+    esac
+done
 for arg in "$@"; do
     if [ "${arg}" = "DELETE" ]; then
         artifact_id=""
@@ -158,6 +235,70 @@ calls="$(gh_calls)"
 assert_not_contains "${calls}" "${other_app}" "never lists another application's artifacts"
 assert_not_contains "${calls}" "${other_env}" "never lists another environment's artifacts"
 pass "scopes the deletion to one application in one environment"
+
+# ---------------------------------------------------------------------------
+# Names collide: the sanitizer maps several distinct pairs onto one artifact
+# name, so the name alone cannot authorize a delete. Identity is confirmed from
+# the payload, and a colliding artifact belonging to another pair survives.
+# ---------------------------------------------------------------------------
+colliding_name="$(radius_deploy_artifact_name "prod" "billing-east")"
+assert_equals "$(radius_deploy_artifact_name "prod-billing" "east")" "${colliding_name}" \
+    "distinct pairs really do collide on one artifact name"
+reset_artifact_identities
+register_artifact_identity 21 "billing-east" "prod"
+register_artifact_identity 22 "east" "prod-billing"
+register_artifact_identity 23 "Billing-East" "Prod"
+output="$(
+    ENVIRONMENT=prod APPLICATION=billing-east GITHUB_REPOSITORY=acme/shop \
+        GH_LIST_OUTPUT=$'21\n22\n23\n' \
+        run_script
+    echo "__exit__${RUN_EXIT}"
+)"
+calls="$(gh_calls)"
+assert_contains "${output}" "__exit__0" "a collision does not fail the delete workflow"
+assert_contains "${calls}" "--method DELETE repos/acme/shop/actions/artifacts/21" "deletes the artifact that records this pair"
+assert_not_contains "${calls}" "--method DELETE repos/acme/shop/actions/artifacts/22" "keeps a colliding artifact belonging to another pair"
+assert_not_contains "${calls}" "--method DELETE repos/acme/shop/actions/artifacts/23" "keeps a colliding artifact whose raw names differ only by case"
+assert_equals "$(delete_call_count)" "1" "deletes only the confirmed artifact"
+pass "never deletes another application's artifact that collides on the same name"
+
+# ---------------------------------------------------------------------------
+# Fails closed on an unconfirmable artifact: an unreadable payload is left in
+# place to expire rather than deleted on the strength of a colliding name.
+# ---------------------------------------------------------------------------
+reset_artifact_identities
+register_artifact_without_state 31
+output="$(
+    ENVIRONMENT=prod APPLICATION=billing GITHUB_REPOSITORY=acme/shop \
+        GH_LIST_OUTPUT=$'31\n' \
+        run_script
+    echo "__exit__${RUN_EXIT}"
+)"
+assert_contains "${output}" "__exit__0" "an unconfirmable artifact does not fail the delete workflow"
+assert_equals "$(delete_call_count)" "0" "does not delete an artifact that records no identity"
+assert_contains "${output}" "::warning::Deployed graph cleanup: artifact 31 has no readable deploy-state.txt" "warns that the artifact was left in place"
+assert_contains "${output}" "none of the 1 '${expected_name}' artifact(s) could be confirmed" "reports that nothing was removed"
+pass "leaves an artifact in place when its payload records no identity"
+
+# ---------------------------------------------------------------------------
+# The same applies when the payload cannot be fetched at all.
+# ---------------------------------------------------------------------------
+reset_artifact_identities
+output="$(
+    ENVIRONMENT=prod APPLICATION=billing GITHUB_REPOSITORY=acme/shop \
+        GH_LIST_OUTPUT=$'41\n42\n' GH_ZIP_FAIL_IDS='41' \
+        run_script
+    echo "__exit__${RUN_EXIT}"
+)"
+calls="$(gh_calls)"
+assert_contains "${output}" "__exit__0" "a download failure does not fail the delete workflow"
+assert_not_contains "${calls}" "--method DELETE repos/acme/shop/actions/artifacts/41" "keeps the artifact it could not download"
+assert_contains "${calls}" "--method DELETE repos/acme/shop/actions/artifacts/42" "still removes the artifact it could confirm"
+assert_contains "${output}" "could not download artifact 41" "warns about the download failure"
+assert_contains "${output}" "HTTP 410: Artifact has expired" "surfaces the API error text"
+pass "leaves an artifact in place when its payload cannot be downloaded"
+
+reset_artifact_identities
 
 # ---------------------------------------------------------------------------
 # Messy names go through the shared sanitizer, so the script asks for the same

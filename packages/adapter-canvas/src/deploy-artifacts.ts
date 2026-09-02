@@ -909,6 +909,13 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     }
 
     let sawMalformed = false;
+    // A candidate that could not be read proves nothing about whether this
+    // deployment still exists, so it must not be reported as an absence: the
+    // reader retires its cached graph on a repo-wide "missing", and doing that
+    // for a transient download failure would blank a perfectly valid Deployed
+    // view. Tracked separately from `sawMalformed`, which describes an artifact
+    // that *was* read and turned out to be unusable.
+    let sawUnreadable = false;
     let exactMatch: ReadResult | null = null;
     let envOnlyMatch: ReadResult | null = null;
     for (const artifact of candidates) {
@@ -921,9 +928,13 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
         } catch (e) {
           if (errorCode(e) === "GH_ARTIFACT_AUTH") return empty("auth", e);
           // A single unreadable artifact should not hide an older readable one.
+          sawUnreadable = true;
           continue;
         }
-        if (!files) continue;
+        if (!files) {
+          sawUnreadable = true;
+          continue;
+        }
         const progress = parseDeployProgressArtifact(
           files[DEPLOY_STATUS_FILES.progress]
         );
@@ -992,7 +1003,15 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     }
     if (exactMatch) return exactMatch;
     if (envOnlyMatch) return envOnlyMatch;
-    return empty(sawMalformed ? "malformed" : "missing");
+    // "missing" is reserved for a confirmed absence: GitHub listed this
+    // deployment's artifacts and none of them describe it. Candidates that
+    // could not be downloaded are reported as an error instead, so a transient
+    // failure never looks like a deletion.
+    return empty(
+      sawMalformed ? "malformed"
+      : sawUnreadable ? "error"
+      : "missing"
+    );
   }
 
   // read - fetch (cached, single-flight) and enforce monotonic sequencing.

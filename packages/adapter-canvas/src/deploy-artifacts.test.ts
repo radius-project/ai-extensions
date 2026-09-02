@@ -1307,6 +1307,62 @@ describe("createDeployStatusReader", () => {
     });
   });
 
+  it("keeps the last good snapshot when the artifact is temporarily unreadable", async () => {
+    // A candidate that fails to download proves nothing about whether the
+    // deployment still exists. Only a listing that genuinely has nothing for it
+    // is a deletion; a transient download failure must not blank a valid graph.
+    let downloadFails = false;
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      ttlMs: 0,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist")
+      ],
+      downloadArtifact: async () => {
+        if (downloadFails) throw new Error("network reset");
+        return okFiles();
+      }
+    });
+
+    expect((await reader.graph()).graph).toEqual({
+      resources: [{ name: "frontend" }]
+    });
+
+    downloadFails = true;
+    // Reported as an error rather than an absence, so the cache survives.
+    expect(await reader.status()).toBe("error");
+    expect((await reader.graph()).graph).toEqual({
+      resources: [{ name: "frontend" }]
+    });
+
+    downloadFails = false;
+    expect((await reader.graph()).graph).toEqual({
+      resources: [{ name: "frontend" }]
+    });
+  });
+
+  it("keeps the last good snapshot when the artifact download returns nothing", async () => {
+    let downloadEmpty = false;
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      ttlMs: 0,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist")
+      ],
+      downloadArtifact: async () => (downloadEmpty ? null : okFiles())
+    });
+
+    expect((await reader.graph()).graph).toEqual({
+      resources: [{ name: "frontend" }]
+    });
+
+    downloadEmpty = true;
+    expect(await reader.status()).toBe("error");
+    expect((await reader.graph()).graph).toEqual({
+      resources: [{ name: "frontend" }]
+    });
+  });
+
   it("downloads an immutable artifact ID only once across polls", async () => {
     let downloads = 0;
     const reader = createDeployStatusReader({
