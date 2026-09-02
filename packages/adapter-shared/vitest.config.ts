@@ -6,7 +6,7 @@ export default defineConfig({
       "src/**/*.test.ts",
       "test/integration/windows-process/**/*.test.ts"
     ],
-    fileParallelism: false,
+    fileParallelism: process.platform === "win32" ? false : true,
     environment: "node"
   }
 });
