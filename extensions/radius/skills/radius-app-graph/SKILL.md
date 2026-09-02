@@ -66,7 +66,7 @@ invoke_canvas_action({
 })
 ```
 
-If `ready` is `false`, the graph hasn't built yet — wait and retry. The response includes the exact graph context (`repo`, branch fields, `view`, and `contextToken`) plus resources (each with `name`, `type`, `id`). Keep the returned `contextToken`; it prevents references discovered for one repo, branch, or graph view from being applied to another.
+If `ready` is `false`, end the current turn without waiting or retrying, and do not infer that the model is missing. The canvas will either finish building the existing model or queue the model-authoring handoff. Inspect missing references only in a later turn after the graph is ready. A ready response includes the exact graph context (`repo`, branch fields, `view`, and `contextToken`) plus resources (each with `name`, `type`, `id`). Keep the returned `contextToken`; it prevents references discovered for one repo, branch, or graph view from being applied to another.
 
 1. If the action returns any resources, run the `radius-app-bicep` skill as a repair of the existing model. That skill owns categorization, source discovery, line selection, validation, and atomic publication of the repaired `app.bicep`.
 2. Rebuild the graph and call `get_graph_resources` again. Completion requires an empty missing-resource list from the rebuilt `app.bicep`.
