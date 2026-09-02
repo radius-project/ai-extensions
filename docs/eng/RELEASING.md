@@ -51,7 +51,7 @@ Each plugin package owns a `build` script that assembles its own `plugins/<name>
 
 Per-plugin commands take `--plugin <name>`. It may be omitted only while the repo ships exactly one plugin; the moment a second appears, every caller must say which one it means rather than silently acting on the wrong one.
 
-The catalog on `main` is the manifest end users add, so each plugin entry carries its own released version. During the preview period an entry's `source.ref` is `<plugin>@edge`. The edge publish retargets and restamps its generated catalog copy in a workspace that never reaches `main`. After a plugin's first stable release, changing its `source.ref` to that release's `<plugin>@<version>` makes stable the default for that plugin alone; because no stable ref moves, that field names the current stable version and is re-pointed when a newer one ships.
+The catalog on `main` is the manifest end users add, and a release never rewrites it: both `version` and `source.ref` there are hand-managed, and every publish stamps its own generated copy instead. During the preview period an entry's `source.ref` is `<plugin>@edge`, which the edge publish restamps in a workspace that never reaches `main`. After a plugin's first stable release, changing its `source.ref` to that release's `<plugin>@<version>` makes stable the default for that plugin alone; because no stable ref moves, that field names the current stable version and is re-pointed when a newer one ships.
 
 ## Day-to-day: add a changeset
 
@@ -131,6 +131,8 @@ Because Changesets owns the version, an edge build cannot claim to be a release:
 
 `plugins/<plugin>/dist/` is a complete, self-contained plugin: `plugin.json`, `package.json`, `README.md`, all of `skills/`, the compiled `extension.mjs` (plus its source map), and `workflows/`, a complete copy of `.github/extension/` including reusable workflows, composite actions, scripts, and their checked-in bundles. The plugin's own `build` script assembles it. `package.json#radiusSourceRef` and the compiled generator both carry the full source commit, so an installed extension never follows a mutable ref when fetching a template or generating a first-party action reference.
 
+A release does **not** touch `.github/plugin/marketplace.json`. Changesets owns `plugins/<plugin>/package.json`, `scripts/version.mjs` derives `plugins/<plugin>/plugin.json` from it, and each publish stamps the version and its own install ref into the throwaway catalog copy it ships — so the entry on `main` never has to be kept in step with a release.
+
 Because the branch is an orphan, it carries **no monorepo source and no history** - a clone of `releases/<plugin>/edge` contains only the artifact, its workflow/action assets, and the catalog. The complete workflow tree appears twice: `plugins/<plugin>/dist/workflows/` ships inside the installable plugin and stable tarball, while root `.github/extension/` preserves the same assets at their canonical repository paths on the self-contained branch. Generated `radius-project/ai-extensions/.github/extension/actions/...@<source-sha>` references resolve from the immutable source commit, not the orphan branch commit. Verification requires the two artifact copies to have identical paths and blob SHAs. The commit message and built package independently record the full source SHA.
 
 The plugin source in [`.github/plugin/marketplace.json`](../../.github/plugin/marketplace.json) pins `path: plugins/<plugin>/dist`. Each entry follows its `<plugin>@edge` tag while that plugin is in preview; changing its ref to a released `<plugin>@<version>` makes stable the default later, for that plugin alone. Generated edge and stable catalogs point their own copies at the corresponding artifact ref. Each install therefore resolves matching skills and canvas files from one generated artifact commit. This is why the build output can stay git-ignored on `main`.
@@ -143,17 +145,16 @@ Complete edge workflow runs are queued FIFO with `queue: max`, including the bui
 
 Each released plugin produces its own complete set:
 
-| Artifact                              | Created by    | Mutable?                     | Purpose                                                                                      |
-|---------------------------------------|---------------|------------------------------|----------------------------------------------------------------------------------------------|
-| `releases/<plugin>/v<version>` branch | `release.yml` | no by workflow               | The install target: dist, root workflow assets, and catalog in one orphan commit.            |
-| `<plugin>@<version>` tag              | `release.yml` | no by workflow               | The one tag a stable release publishes, on that branch's verified artifact commit.           |
-| GitHub release                        | `release.yml` | yes by default; configurable | Cut from that tag; body is the Changesets `CHANGELOG.md` entry, plus the three assets below. |
+| Artifact                              | Created by    | Mutable?                     | Purpose                                                                                    |
+|---------------------------------------|---------------|------------------------------|--------------------------------------------------------------------------------------------|
+| `releases/<plugin>/v<version>` branch | `release.yml` | no by workflow               | The install target: dist, root workflow assets, and catalog in one orphan commit.          |
+| `<plugin>@<version>` tag              | `release.yml` | no by workflow               | The one tag a stable release publishes, on that branch's verified artifact commit.         |
+| GitHub release                        | `release.yml` | yes by default; configurable | Cut from that tag; body is the Changesets `CHANGELOG.md` entry, plus the two assets below. |
 
-| Release asset                  | Built by                      | Contents                                                           |
-|--------------------------------|-------------------------------|--------------------------------------------------------------------|
-| `<plugin>-plugin.tar.gz`       | `release.yml`                 | The installable dist, including all bundled workflow assets.       |
-| `<plugin>-plugin.spdx.json`    | `build.yml` (`pnpm sbom`)     | SPDX 2.3 SBOM of the workspace dependency graph, attested.         |
-| `<plugin>-awesome-copilot.zip` | `scripts/awesome-copilot.mjs` | The four files for a manual `github/awesome-copilot` pull request. |
+| Release asset               | Built by                  | Contents                                                     |
+|-----------------------------|---------------------------|--------------------------------------------------------------|
+| `<plugin>-plugin.tar.gz`    | `release.yml`             | The installable dist, including all bundled workflow assets. |
+| `<plugin>-plugin.spdx.json` | `build.yml` (`pnpm sbom`) | SPDX 2.3 SBOM of the workspace dependency graph, attested.   |
 
 The SPDX document is written directly by [`pnpm sbom`](https://pnpm.io/cli/sbom) using `--filter <plugin>`, so pnpm supplies the selected plugin root plus its dependency, license, download, and checksum data without a repository normalization pass. The plugin declares its build adapter as a workspace `devDependency`, ensuring browser libraries inlined by esbuild appear in that native dependency graph.
 
@@ -164,21 +165,6 @@ Everything local that can fail - checks, manifest-driven dist validation, build,
 The versioned branch and its tag name the same orphan commit, so `marketplace add radius-project/ai-extensions#releases/radius/v0.1.0` and `#radius@0.1.0` install exactly the same tree, and neither redirects to edge. Its catalog points `source.ref` at that branch.
 
 > Each catalog entry follows its own `<plugin>@edge` during preview and switches to a released `<plugin>@<version>` after that plugin's first stable release; add an explicit generated marketplace branch to pin edge or one exact version independently of that default.
-
-### Listing a plugin on github/awesome-copilot
-
-[`github/awesome-copilot`](https://github.com/github/awesome-copilot) lists plugins hosted elsewhere in its own `plugins/external.json` and in the marketplace catalog it serves. Both files carry the *same* entry object, so every release builds them and ships them as `<plugin>-awesome-copilot.zip`:
-
-```text
-.github/plugin/marketplace.json   { "plugins": [ <entry> ] }
-plugins/external.json             [ <entry> ]
-plugins/<plugin>/plugin.json      the released manifest, for the reviewer
-plugins/<plugin>/README.md        the released README, for the reviewer
-```
-
-Every field is derived from `.github/plugin/marketplace.json` and the released `plugins/<plugin>/dist/plugin.json`, so a rename or keyword change cannot ship a stale listing. `source.ref` **and** `source.sha` are both the full 40-character SHA of the `releases/<plugin>/v<version>` artifact commit - never a tag or branch name, which could be repointed after awesome-copilot's review; their validation accepts a full commit SHA in either field and rejects an abbreviated one.
-
-The **first** listing must go through their [external plugin issue form](https://github.com/github/awesome-copilot/blob/main/CONTRIBUTING.md#adding-external-plugins), not a pull request. Once the plugin is listed, a version bump is a normal pull request that edits `plugins/external.json`: unzip the asset over a fork of `main` and splice each entry into the corresponding file.
 
 ### Why a stable release publishes one tag
 

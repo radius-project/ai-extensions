@@ -51,9 +51,6 @@ name: Release
 #
 #   <plugin>-plugin.tar.gz          the installable plugin tree
 #   <plugin>-plugin.spdx.json       SPDX 2.3 SBOM from `pnpm sbom`
-#   <plugin>-awesome-copilot.zip    the files for a manual PR against
-#                                   github/awesome-copilot, pinned to the
-#                                   artifact branch commit SHA
 #
 # Assets are attached to a draft before publication. This works for mutable
 # releases now and is ready for GitHub immutable releases when the repository
@@ -560,9 +557,12 @@ jobs:
           # the API refuses to return unless GitHub signed the commit and wrote
           # it without parents. Moves no ref: a retry may reuse an existing
           # branch only when its bytes match this exact tree.
+          # A release leaves the catalog on main alone, so the entry it ships is
+          # stamped here: the version it publishes and the branch it publishes
+          # from.
           pinned="$PLUGIN_PINNED_BRANCH"
-          jq --arg name "$PLUGIN_NAME" --arg ref "$pinned" \
-            '.plugins |= map(if .name == $name then .source.ref = $ref else . end)' \
+          jq --arg name "$PLUGIN_NAME" --arg ref "$pinned" --arg version "$VERSION" \
+            '.plugins |= map(if .name == $name then (.source.ref = $ref | .version = $version) else . end)' \
             "$catalog" >"$MANIFEST"
           built="$(node scripts/verified-git.mjs commit \
             --message "chore(release): ${PLUGIN_SOURCE_TAG} for ${SOURCE_SHA}" \
@@ -601,25 +601,6 @@ jobs:
               --name "$PLUGIN_SOURCE_TAG" --target "$pinned_commit"
           fi
 
-          # github/awesome-copilot lists this plugin from its own repository and
-          # re-reviews whatever the locator resolves to, so the listing names the
-          # artifact commit rather than a tag or branch that could be repointed
-          # afterwards. The generator writes both `source.ref` and `source.sha`
-          # as this full 40-character SHA.
-          listing="$RUNNER_TEMP/awesome-copilot"
-          archive="$RUNNER_TEMP/$PLUGIN_AWESOME_COPILOT"
-          rm -rf "$listing" "$archive"
-          node scripts/awesome-copilot.mjs \
-            --out "$listing" \
-            --sha "$pinned_commit" \
-            --plugin "$PLUGIN_NAME" \
-            --marketplace "$catalog" \
-            --plugin-json "$PLUGIN_DIST/plugin.json" \
-            --readme "$PLUGIN_DIST/README.md"
-          epoch="$(git show -s --format=%ct "$SOURCE_SHA")"
-          find "$listing" -exec touch --date="@$epoch" {} +
-          (cd "$listing" && find . -type f -print0 | sort -z | xargs -0 zip -Xq "$archive")
-
           # A published release has no "not Latest" bit of its own: GitHub stores
           # `make_latest: false` as `prerelease: true`, which would relabel a
           # stable version as a prerelease and leave the repository with no
@@ -656,7 +637,7 @@ jobs:
           if [ "$release_draft" = "true" ] || [ "$release_immutable" != "true" ]; then
             # Mutable mode is intentionally supported for now, so a retry
             # reconciles assets before the bytes are verified below.
-            gh release upload "$PLUGIN_SOURCE_TAG" "$TARBALL" "$SBOM" "$archive" --clobber
+            gh release upload "$PLUGIN_SOURCE_TAG" "$TARBALL" "$SBOM" --clobber
           else
             echo "::notice::$PLUGIN_SOURCE_TAG is already published; its assets are immutable and were left unchanged."
           fi
@@ -679,7 +660,7 @@ jobs:
           mkdir -p "$published"
           gh release download "$PLUGIN_SOURCE_TAG" --dir "$published"
 
-          expected=("$TARBALL" "$SBOM" "$archive")
+          expected=("$TARBALL" "$SBOM")
           expected_names="$(printf '%s\n' "${expected[@]}" | xargs -n1 basename | sort)"
           published_names="$(find "$published" -maxdepth 1 -type f -printf '%f\n' | sort)"
           if [ "$published_names" != "$expected_names" ]; then
@@ -727,6 +708,5 @@ jobs:
             echo "### ${PLUGIN_SOURCE_TAG}"
             echo "- install branch \`$pinned\` at artifact commit \`$pinned_commit\`"
             echo "- release tag \`$PLUGIN_SOURCE_TAG\` on that same commit"
-            echo "- release \`$PLUGIN_SOURCE_TAG\` with the plugin tarball, its SPDX SBOM and \`$(basename "$archive")\`"
-            echo "- awesome-copilot listing pinned to \`$pinned_commit\`"
+            echo "- release \`$PLUGIN_SOURCE_TAG\` with the plugin tarball and its SPDX SBOM"
           } >>"$GITHUB_STEP_SUMMARY"

@@ -42,11 +42,10 @@ graph TD
 - **`.github/plugin/marketplace.json`** — the marketplace manifest whose plugin `source` points installs at `plugins/radius/dist` on `radius@edge`.
 - **`.changeset/config.json`** — Changesets owns released versions. `privatePackages.version` includes private plugins; `privatePackages.tag` is disabled because the workflow creates one scoped tag on the artifact commit instead of running Changesets' all-package source tag scan.
 - **`scripts/plugins.mjs`** — the plugin registry: discovers every directory under `plugins/` that has a `package.json` and a `plugin.json`, and builds every published ref name from it. The single source of the `releases/<plugin>/<channel>`, `<plugin>@edge`, and `<plugin>@<version>` convention; `--json` feeds the workflow matrices and `--env` hands the names to a job.
-- **`scripts/version.mjs`** — derives every other version string from `plugins/<name>/package.json`, the version Changesets owns; `--check` fails CI on drift across all plugins, `--set --channel edge` retargets and restamps one plugin's generated edge catalog entry, `--compare` ranks two versions by semver precedence, and `--release-notes` reads that plugin's current Changesets changelog entry.
+- **`scripts/version.mjs`** — derives every other version string from `plugins/<name>/package.json`, the version Changesets owns; `--check` fails CI on drift across all plugins, `--set --channel edge` retargets and restamps one plugin's generated edge catalog entry, `--compare` ranks two versions by semver precedence, and `--release-notes` reads that plugin's current Changesets changelog entry. The catalog on `main` is deliberately not derived: only `plugins/<name>/plugin.json` is.
 - **`scripts/release-version.mjs`** — invokes Changesets with an argv array for one selected plugin (ignoring the others), then synchronizes all derived manifests. Both stable and snapshot versioning use this boundary.
 - **`scripts/release-plan.mjs`** — classifies a merged release PR from git facts: a plugin is released only when its package version changed from the first parent and the matching changelog heading was added in the same diff.
 - **`scripts/validate-plugin-dist.mjs`** — validates the generic artifact contract before attestation or push: matching names and versions, the exact source commit, complete workflow assets, README, license, manifest-declared paths, path confinement, and no symlinks.
-- **`scripts/awesome-copilot.mjs`** — builds the four files a maintainer opens as a manual pull request against [`github/awesome-copilot`](https://github.com/github/awesome-copilot), with `source.ref` and `source.sha` both set to the full 40-character artifact-branch commit SHA. The SBOM has no equivalent script: [`pnpm sbom`](https://pnpm.io/cli/sbom) emits it directly.
 - **`.github/workflows/build.yml`** — the reusable build: shared checks run once and upload a gate artifact; requested plugins resolve their checked-out full source SHA, bake it into generated workflow fetch/action references and package metadata, then upload disjoint `plugin-dist-<plugin>` artifacts. Publishers require the gate plus their own artifact.
 - **`.github/workflows/changesets.yml`** — non-blocking pull request feedback from the Changesets Action v2 `pr-status` and `pr-comment` sub-actions. The read-only status job inspects pull request files; a separate job owns the pull request write token and only publishes the generated comment.
 - **`.github/workflows/publish.yml`** — the rolling **edge** channel: on every push to `main`, publishes each plugin's `dist/` to its own `releases/<plugin>/edge` branch and `<plugin>@edge` tag.
@@ -165,19 +164,6 @@ The SBOM is native [`pnpm sbom`](https://pnpm.io/cli/sbom) output filtered to th
 
 `build.yml` generates it beside the bundle and uploads it as its own artifact, so both channels inventory the same build. Placement is load-bearing rather than incidental: pnpm records the workspace's current version as the SBOM's root package, and for edge that version exists only in the build workspace, stamped there by the snapshot step. Generating the document in a publishing job would inventory the unstamped version and describe something other than the artifact it accompanies. It stays out of the dist artifact because that tree is published verbatim as the install branch, and the SBOM describes the release rather than forming part of what gets installed. Stable uploads it as a release asset; edge has no release to attach it to, so it is recorded as an SBOM attestation over the published files and retrieved with `gh attestation verify`.
 
-### 3a. The awesome-copilot listing asset
-
-[`github/awesome-copilot`](https://github.com/github/awesome-copilot) lists plugins hosted elsewhere in `plugins/external.json` and in the marketplace catalog it serves, both carrying the same entry object. `scripts/awesome-copilot.mjs` derives that entry from this repository's catalog and the selected released manifest, and ships `<plugin>-awesome-copilot.zip` holding exactly four files:
-
-| Path in the zip                   | Content                                  |
-|-----------------------------------|------------------------------------------|
-| `.github/plugin/marketplace.json` | `{ "plugins": [ <entry> ] }`             |
-| `plugins/external.json`           | `[ <entry> ]`                            |
-| `plugins/<plugin>/plugin.json`    | The released manifest, for the reviewer. |
-| `plugins/<plugin>/README.md`      | The released README, for the reviewer.   |
-
-The entry's `source.ref` **and** `source.sha` are both the full 40-character SHA of the `releases/<plugin>/v<version>` artifact commit. A tag or branch could be repointed after review; their validator accepts a full SHA and rejects an abbreviated one. The release process assumes the repository is public when the listing is submitted.
-
 ### 4. The install: resolving the complete artifact
 
 `.github/plugin/marketplace.json` pins the plugin `source` to the object form:
@@ -201,7 +187,7 @@ The installer copies the git-tracked files at `plugins/radius/dist` from the pub
 
 - **Skills and canvas stay in lockstep.** Both come from the same `main` commit tree that the build job checked out, so a PR that updates a skill and a PR that updates canvas code both land on the published branch together. There is no way for the shipped skills to lag the shipped bundle.
 - **Published branches are generated — never hand-edit them.** `releases/<plugin>/edge` is force-recreated on every merge; `releases/<plugin>/v<version>` is created once and never moved. `main` remains the single source of truth.
-- **Plugin versions are derived everywhere.** Changesets writes each plugin package version; `scripts/version.mjs` derives its manifest and catalog entry. The shared marketplace `metadata.version` is independently managed and is never rewritten by one plugin's release.
+- **Plugin versions are derived everywhere.** Changesets writes each plugin package version and `scripts/version.mjs` derives its manifest. The catalog on `main` is left alone by a release; each publish stamps the version into the throwaway catalog copy it ships. The shared marketplace `metadata.version` is independently managed and is never rewritten by one plugin's release.
 - **Release branches are orphaned and retryable.** Every edge and versioned branch points to a GitHub-signed zero-parent commit. Versioned branches and their release tags are never force-pushed; mutable releases reconcile assets, while enforced immutable releases compare protected assets.
 - **Every published bundle is attested and inventoried.** [`actions/attest`](https://github.com/actions/attest) records provenance for every edge-tree file. Stable provenance names the deterministic tarball as its subject, and a standard SBOM attestation binds that subject to native pnpm SPDX output. Attestation runs before the first push.
 - **The publish gates on the same checks as CI.** `version:check`, `typecheck`, `lint`, `format:check` and `test` all run in `build.yml` before the bundle is assembled, so a broken build never publishes; on failure, the published refs keep pointing at the last good artifact.
