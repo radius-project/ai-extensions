@@ -98,7 +98,7 @@ import {
   GITHUB_API_VERSION
 } from "./azure-oidc.js";
 import type { GitHubJsonResponse } from "./azure-oidc.js";
-import { bootstrapGHCRStatePackage } from "./ghcr.js";
+import { bootstrapGHCRStatePackage, deleteGHCRStatePackage } from "./ghcr.js";
 import { resolveGeneratorVersion } from "./generator-version.js";
 import {
   classifyProvider,
@@ -314,6 +314,7 @@ import {
   type GraphRepairRequest
 } from "./graph-model-repair.js";
 import { createCreateEnvironmentRoutes } from "./server/routes/create-environment.js";
+import { createSelectedNamespaceClaimsPorts } from "./server/routes/create-environment-namespace-claims.js";
 import { validateBrowserMutationRequest } from "./server/browser-mutation.js";
 import { createGitHubAccountCoordinator } from "./server/services/github-account-coordinator.js";
 import {
@@ -380,6 +381,7 @@ import {
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
 import { runEnvironmentDeletion } from "./server/services/environment-deletion.js";
+import { createStatePackageDeletion } from "./server/services/state-package-deletion.js";
 import {
   recordCredentialProvenance,
   listCredentialProvenanceForClient,
@@ -1521,6 +1523,17 @@ const environmentsRoutes = createEnvironmentsRoutes({
   stageVerify: STAGE_VERIFY
 });
 
+// Reads what the repository's environments already claim, for the create
+// route's namespace rung. The read runs as the GitHub account pinned to that
+// operation, the same account every other step of the setup uses, so a customer
+// who passed readiness with the selected account is never refused because the
+// ambient `gh` account cannot see the repository. No pinned account means the
+// claims cannot be established, and the rung fails closed on null.
+const namespaceClaimsFor = (operationId: string) => {
+  const executor = selectedGitHubExecutorsByOperation.get(operationId);
+  return executor ? createSelectedNamespaceClaimsPorts(executor) : null;
+};
+
 // Composition root for `POST /api/create-environment`. The route's four seams
 // live in `create-environment*.ts`; everything they touch is injected here, so
 // the module spawns no process directly, imports no `node:fs`, and reads no
@@ -1557,6 +1570,7 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   errorMessage,
   stageAuthorizeIdentity: STAGE_AUTHORIZE_IDENTITY,
   stageConfigureEnvironment: STAGE_CONFIGURE_ENVIRONMENT,
+  namespaceClaimsFor,
   addLegacyStep: (operation, text) => {
     addLegacyStep(operation, text);
   },
@@ -5755,6 +5769,12 @@ function createInstanceRequestCoordinator(
     const op = operations.get(operationId);
     if (!op) return;
     if (op.kind === "delete") {
+      const deleteStatePackage = createStatePackageDeletion({
+        stateRegistryForEnvironment,
+        getCredentials: getGhPackageCredentials,
+        deletePackage: deleteGHCRStatePackage,
+        ghCommandPresentation: GH_COMMAND_PRESENTATION
+      });
       await runEnvironmentDeletion(op, {
         deleteRadiusEnvironment: (input, onHeartbeat) =>
           deleteRadiusEnvironmentViaWorkflow(
@@ -5801,6 +5821,7 @@ function createInstanceRequestCoordinator(
         },
         deleteGitHubEnvironment: (input) =>
           deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
+        deleteStatePackage,
         withCredentialProvenanceLock,
         readCredentialProvenance: (clientId) =>
           listCredentialProvenanceForClient(clientId),

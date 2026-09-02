@@ -362,6 +362,18 @@ describe("environmentsPaneMarkup — stop, continue and rollback", () => {
     expect(html).toContain('id="env-progress-failure-title"');
   });
 
+  describe("environmentsPaneMarkup — discovery remediation", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+
+    it("provides a stable host beside Azure discovery status and refresh", () => {
+      expect(html).toContain('id="azure-discover-status"');
+      expect(html).toContain('id="azure-refresh-btn"');
+      expect(html).toContain(
+        '<div id="azure-discover-remediation" hidden></div>'
+      );
+    });
+  });
+
   it("renders a guidance list for a path Radius cannot offer", () => {
     expect(html).toContain(
       '<ul id="env-progress-command-guidance" class="env-progress__command-guidance" style="display:none;"></ul>'
@@ -420,5 +432,39 @@ describe("environmentsPaneMarkup — stop, continue and rollback", () => {
   it("describes deletion-eligible resources in customer terms", () => {
     expect(html).toContain("Created by Radius and available to delete");
     expect(html).not.toContain("Retained for a retry");
+  });
+});
+
+describe("namespace constraint guidance", () => {
+  // The one-environment-per-namespace rule is invisible until a deployment
+  // fails, so the form states it beside both namespace pickers.
+  it.each(["azure-namespace-help", "aws-namespace-help"])(
+    "explains the namespace constraint in %s",
+    (id) => {
+      const html = environmentsPaneMarkup(baseOptions);
+      const help =
+        new RegExp(
+          `<div class="rad-field__help" id="${id}">([^<]*)</div>`
+        ).exec(html)?.[1] ?? "";
+      expect(help).toBe(
+        "A namespace backs one environment. Pick one that no other environment on this cluster uses."
+      );
+    }
+  );
+
+  // The constraint has to reach a screen reader on the control it constrains,
+  // not just sit next to it visually.
+  it.each([
+    ["azure-namespace-select", "azure-namespace-help"],
+    ["azure-namespace-custom", "azure-namespace-help"],
+    ["aws-namespace-select", "aws-namespace-help"],
+    ["aws-namespace-custom", "aws-namespace-help"]
+  ])("describes %s by the constraint text", (control, help) => {
+    const html = environmentsPaneMarkup(baseOptions);
+    const tag =
+      new RegExp(`<(?:select|input) id="${control}"[^>]*>`).exec(html)?.[0] ??
+      "";
+    expect(tag, `${control} should be rendered`).not.toBe("");
+    expect(tag).toContain(`aria-describedby="${help}"`);
   });
 });

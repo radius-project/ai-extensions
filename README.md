@@ -70,13 +70,13 @@ The repository also ships a set of agentic skills under
 to drive a part of the Radius workflow, and pairs with the matching canvas
 actions and tools:
 
-| Skill                                                                                               | What it does                                                                                                                                                                    |
-|-----------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| [`radius-app-bicep`](./plugins/radius/skills/radius-app-bicep/SKILL.md)                             | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies.                                                      |
-| [`radius-app-graph`](./plugins/radius/skills/radius-app-graph/SKILL.md)                             | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.                                                                         |
-| [`radius-environment`](./plugins/radius/skills/radius-environment/SKILL.md)                         | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions.                                                                          |
-| [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md)                                   | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.                                                                         |
-| [`radius-delete`](./plugins/radius/skills/radius-delete/SKILL.md)                                   | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or delete a deploy environment and clean up its cloud state.                             |
+| Skill                                                                       | What it does                                                                                                                                        |
+|-----------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
+| [`radius-app-bicep`](./plugins/radius/skills/radius-app-bicep/SKILL.md)     | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies.                          |
+| [`radius-app-graph`](./plugins/radius/skills/radius-app-graph/SKILL.md)     | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.                                             |
+| [`radius-environment`](./plugins/radius/skills/radius-environment/SKILL.md) | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions.                                              |
+| [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md)           | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.                                             |
+| [`radius-delete`](./plugins/radius/skills/radius-delete/SKILL.md)           | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or delete a deploy environment and clean up its cloud state. |
 
 ## Architecture
 
@@ -125,7 +125,7 @@ guidelines and more, head over to the
 
 ## Releasing
 
-[Changesets](https://changesets.dev/) drives independent plugin versions and changelogs. Every merge to `main` refreshes each plugin's rolling `<plugin>@edge` channel. The **Release** workflow can prepare one plugin or every pending plugin; merging its scope-labelled PR validates the exact version diff, builds behind shared gates, publishes attested assets on zero-history `releases/<plugin>/v<version>` branches, and moves only that plugin's `<plugin>@latest` channel. GitHub immutable-release enforcement is an optional repository-variable switch. Follow the [release runbook](./docs/eng/RELEASE_RUNBOOK.md) to cut one, or see [`RELEASING.md`](./docs/eng/RELEASING.md) for the full lifecycle.
+[Changesets](https://changesets.dev/) drives independent plugin versions and changelogs. Every merge to `main` refreshes each plugin's rolling `<plugin>@edge` channel. The **Release** workflow can prepare one plugin or every pending plugin; merging its scope-labelled PR validates the exact version diff, builds behind shared gates, and publishes attested assets on a zero-history `releases/<plugin>/v<version>` branch tagged `<plugin>@<version>` — the one tag a stable release writes, and the tag its GitHub release is cut from. GitHub immutable-release enforcement is an optional repository-variable switch. Follow the [release runbook](./docs/eng/RELEASE_RUNBOOK.md) to cut one, or see [`RELEASING.md`](./docs/eng/RELEASING.md) for the full lifecycle.
 
 ## Code of conduct
 

@@ -7,14 +7,18 @@
 // file belong to the environments/deploying page and credentials modules, not
 // here, and are intentionally not reproduced.
 
+import { remediationView } from "@radius-project/core/remediations";
 import {
   discoverStatusText,
   formatServesReposLabel,
   isUuid
 } from "../../azure-oidc.js";
+import { remediationReference } from "../../remediation-reference.js";
+import { createCommandAction } from "../command-action.js";
 import { beginEntry } from "../lifecycle.js";
 import { isRecord, readArray, readString, readStringArray } from "../json.js";
 import type { DiscoveryData } from "../../azure-oidc.js";
+import type { CommandActionHandle } from "../command-action.js";
 import type {
   BrowserContext,
   DomElement,
@@ -91,12 +95,27 @@ export interface DiscoveryPanelHandle {
   teardown(): void;
 }
 
+export interface DiscoveryPanelOptions {
+  readonly mutationNonce: string;
+}
+
+const MISSING_MUTATION_NONCE_REASON =
+  "Reload the Radius canvas before asking Copilot to run this command.";
+
 export interface EnvironmentInfrastructure {
   readonly resourceGroup?: string;
   readonly cluster?: string;
   readonly namespace?: string;
   readonly vpcId?: string;
   readonly subnetIds?: string;
+  // The cloud account a cluster name is scoped to. A cluster name alone is not
+  // a cluster: the same name can exist in two Azure subscriptions or two AWS
+  // account/region pairs. Carried so the wizard's duplicate-namespace check
+  // compares the same identity the server's admission rung does, and cannot
+  // refuse an environment the server would admit.
+  readonly subscriptionId?: string;
+  readonly accountId?: string;
+  readonly region?: string;
 }
 
 export function abandonedOperationError(
@@ -571,7 +590,8 @@ export function showAppPicker(
 }
 
 export function initializeDiscoveryPanel(
-  context: BrowserContext
+  context: BrowserContext,
+  options: DiscoveryPanelOptions = { mutationNonce: "" }
 ): DiscoveryPanelHandle | null {
   const scope = beginEntry(context, DISCOVERY_PANEL_ENTRY_KEY);
   if (!scope) return null;
@@ -601,6 +621,34 @@ export function initializeDiscoveryPanel(
     aws: { subscriptionId: "", tenantId: "" }
   };
   const accountDiscovered = { azure: false, aws: false };
+  const remediationHost = context.dom.byId("azure-discover-remediation");
+  let remediationAction: CommandActionHandle | null = null;
+  const renderAzureRemediation = (payload: unknown): void => {
+    remediationAction?.dispose();
+    remediationAction = null;
+    if (!remediationHost) return;
+    remediationHost.replaceChildren();
+    remediationHost.hidden = true;
+    if (!isRecord(payload)) return;
+    const reference = remediationReference(payload["remediation"]);
+    if (!reference) return;
+    const remediation = remediationView(reference.id, reference.params);
+    const guardedRemediation =
+      remediation.runnable && options.mutationNonce.trim() === "" ?
+        {
+          ...remediation,
+          runnable: false,
+          unsupportedReason: MISSING_MUTATION_NONCE_REASON
+        }
+      : remediation;
+    remediationHost.hidden = false;
+    remediationAction = createCommandAction(context, {
+      host: remediationHost,
+      remediation: guardedRemediation,
+      mutationNonce: options.mutationNonce,
+      idPrefix: "azure-discover-login"
+    });
+  };
   // A pending selection belongs to the provider whose form asked for it.
   // Azure and AWS discovery can be outstanding at the same time, so the
   // provider is recorded alongside the config and only a matching response is
@@ -950,6 +998,7 @@ export function initializeDiscoveryPanel(
       provider === "azure" ? "azure-discover-status" : "aws-discover-status"
     );
     if (statusEl) statusEl.textContent = "Discovering resources…";
+    if (provider === "azure") renderAzureRemediation(null);
     const payload: Record<string, string> = { provider };
     if (subscriptionId !== "") payload.subscriptionId = subscriptionId;
     if (tenantId !== "") payload.tenantId = tenantId;
@@ -967,6 +1016,7 @@ export function initializeDiscoveryPanel(
       if (isStale()) return;
       const data = toDiscoveryData(raw);
       if (provider === "azure") {
+        renderAzureRemediation(raw);
         if (statusEl) statusEl.textContent = discoverStatusText(data, "azure");
         azureClusters = sortDiscoveryOptions(
           parseDiscoveryOptions(readArray(raw, "clusters"))
@@ -1058,6 +1108,7 @@ export function initializeDiscoveryPanel(
       if (statusEl)
         statusEl.textContent = `Discovery error: ${errorMessageOf(error)}`;
       if (provider === "azure") {
+        renderAzureRemediation(null);
         renderSelect(
           context,
           "azure-namespace-select",
@@ -1191,6 +1242,9 @@ export function initializeDiscoveryPanel(
           };
     },
     teardown() {
+      remediationAction?.dispose();
+      remediationAction = null;
+      if (remediationHost) remediationHost.hidden = true;
       scope.teardown();
     }
   };

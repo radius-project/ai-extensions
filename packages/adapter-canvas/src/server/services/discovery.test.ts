@@ -446,4 +446,168 @@ describe("discovery service (SU-08)", () => {
       namespaces: "az aks get-credentials failed: credentials exploded"
     });
   });
+
+  it.each([
+    {
+      detail: "trace and correlation details AADSTS50076 secret-tail",
+      marker: "AADSTS50076",
+      failedCommand: "aks",
+      facet: "clusters"
+    },
+    {
+      detail: "AADSTS50079 secret-tail",
+      marker: "AADSTS50079",
+      failedCommand: "group",
+      facet: "resourceGroups"
+    },
+    {
+      detail: "AADSTS50173: Refresh Token has expired secret-tail",
+      marker: "AADSTS50173",
+      failedCommand: "group",
+      facet: "resourceGroups"
+    },
+    {
+      detail: "AADSTS70043 sign-in frequency secret-tail",
+      marker: "AADSTS70043",
+      failedCommand: "aks",
+      facet: "clusters"
+    },
+    {
+      detail: "AADSTS700082 refresh token inactive secret-tail",
+      marker: "AADSTS700082",
+      failedCommand: "aks",
+      facet: "clusters"
+    },
+    {
+      detail: "error: interaction_required secret-tail",
+      marker: "interaction_required",
+      failedCommand: "group",
+      facet: "resourceGroups"
+    },
+    {
+      detail: "ERROR: Please run 'az login' to setup account secret-tail",
+      marker: "Please run 'az login'",
+      failedCommand: "aks",
+      facet: "clusters"
+    },
+    {
+      detail: "invalid_grant: the session expired secret-tail",
+      marker: "invalid_grant",
+      failedCommand: "group",
+      facet: "resourceGroups"
+    }
+  ])(
+    "classifies $marker from Azure $facet discovery without exposing the raw diagnostic",
+    async ({ detail, marker, failedCommand, facet }) => {
+      const dependencies: DiscoveryDependencies = {
+        isUuid,
+        ...temporaryKubeconfig,
+        async runCli(_command, args) {
+          if (args[0] === failedCommand) {
+            throw new Error(detail);
+          }
+          return "[]";
+        }
+      };
+
+      const result = await discoverResources(
+        {
+          provider: "azure",
+          tenantId: "11111111-2222-3333-4444-555555555555"
+        },
+        dependencies
+      );
+
+      expect(result.errors?.[facet]).toBe(
+        `Azure CLI sign-in is required to discover resources. (${marker})`
+      );
+      expect(result.errors?.[facet]).not.toContain("secret-tail");
+      expect(result.remediation).toMatchObject({
+        id: "azure-cli-login",
+        params: {
+          tenantId: "11111111-2222-3333-4444-555555555555",
+          nextStep: "refresh-discovery"
+        },
+        command:
+          "az login --use-device-code --tenant 11111111-2222-3333-4444-555555555555",
+        runnable: true,
+        followUp:
+          "After the login finishes, return to the Radius canvas and refresh resource discovery."
+      });
+    }
+  );
+
+  it.each([
+    {
+      scenario: "a bare invalid_grant without a re-authentication signal",
+      detail: "AADSTS900432: invalid_grant for the requested audience"
+    },
+    {
+      scenario: "a resource group whose name contains invalid_grant",
+      detail: "ResourceGroupNotFound: resource group 'invalid_grant' not found"
+    },
+    {
+      scenario: "a Conditional Access denial a device-code login cannot fix",
+      detail: "AADSTS530003: your device is required to be managed"
+    },
+    {
+      scenario: "an expired client secret",
+      detail: "AADSTS7000222: invalid_client, the client secret has expired"
+    }
+  ])(
+    "keeps the raw diagnostic and offers no login remediation for $scenario",
+    async ({ detail }) => {
+      const dependencies: DiscoveryDependencies = {
+        isUuid,
+        ...temporaryKubeconfig,
+        async runCli(_command, args) {
+          if (args[0] === "aks") throw new Error(detail);
+          return "[]";
+        }
+      };
+
+      const result = await discoverResources(
+        {
+          provider: "azure",
+          tenantId: "11111111-2222-3333-4444-555555555555"
+        },
+        dependencies
+      );
+
+      expect(result.errors?.clusters).toBe(detail);
+      expect(result.remediation).toBeUndefined();
+    }
+  );
+
+  it("classifies an interaction-required credential failure and drops an invalid tenant", async () => {
+    const dependencies: DiscoveryDependencies = {
+      isUuid,
+      ...temporaryKubeconfig,
+      async runCli(_command, args) {
+        if (args[0] === "aks" && args[1] === "get-credentials") {
+          throw new Error("Status_InteractionRequired");
+        }
+        return "[]";
+      }
+    };
+
+    const result = await discoverResources(
+      {
+        provider: "azure",
+        tenantId: "$(whoami)",
+        resourceGroup: "rg-valid",
+        cluster: "aks-valid"
+      },
+      dependencies
+    );
+
+    expect(result.errors).toEqual({
+      namespaces:
+        "Azure CLI sign-in is required to discover resources. (Status_InteractionRequired)"
+    });
+    expect(result.remediation?.params).toEqual({
+      nextStep: "refresh-discovery"
+    });
+    expect(result.remediation?.command).toBe("az login --use-device-code");
+  });
 });
