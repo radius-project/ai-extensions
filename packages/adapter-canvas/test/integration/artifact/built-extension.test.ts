@@ -310,14 +310,7 @@ describe("P0-C built Radius extension artifact", () => {
         .filter((name) => name.endsWith(".mjs"))
         .sort()
     ).toEqual(["extension.mjs"]);
-    // The canvas gates discover the entry point under `extensions/`, and it
-    // loads the one bundle at the package root rather than copying it.
-    const entryPoint = join(DIST, "extensions", "extension.mjs");
-    const reExport = readFileSync(entryPoint, "utf8").match(
-      /export \* from "([^"]+)";/u
-    )?.[1];
-    expect(reExport).toBeTypeOf("string");
-    expect(resolve(dirname(entryPoint), reExport as string)).toBe(ARTIFACT);
+    expect(existsSync(join(DIST, "extensions"))).toBe(false);
     const packagedPaths = [
       "package.json",
       "plugin.json",
@@ -325,7 +318,6 @@ describe("P0-C built Radius extension artifact", () => {
       "LICENSE",
       "THIRD-PARTY-NOTICES.txt",
       "assets/preview.png",
-      "extensions/extension.mjs",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-bicep/scripts/show-radius-type.mjs",
