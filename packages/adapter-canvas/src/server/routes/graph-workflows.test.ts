@@ -23,6 +23,7 @@ import {
   prepareSourceRefResources,
   setSourceRefResources
 } from "../../source-refs.js";
+import type { WorkspaceBranchResolution } from "../../workspace.js";
 import { defaultBranchForState } from "../../workspace.js";
 import {
   GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
@@ -100,6 +101,9 @@ interface PipelineScript {
   // the page to keep waiting for the model.
   modelingActivityAtMs?: number;
   observeModelingRun?: () => Promise<number | null>;
+  branchResolution?:
+    WorkspaceBranchResolution | (() => Promise<WorkspaceBranchResolution>);
+  commitBranchResolution?: boolean;
   // Runs after the named stage, so a test can move the world on mid-request.
   afterSelect?: () => void;
   afterStage?: () => void;
@@ -130,6 +134,7 @@ interface Harness {
   };
   // Everything the workflows sent to the diagnostics sink instead of the canvas.
   loggedErrors: string[];
+  branchCommits: string[];
   workflows: GraphPlanningWorkflows;
   setEntryMissing(missing: boolean): void;
   advanceClock(ms: number): void;
@@ -181,6 +186,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
   const recipes: unknown[] = [];
   const plannedOutputs: unknown[] = [];
   const loggedErrors: string[] = [];
+  const branchCommits: string[] = [];
 
   function requireScripted<T>(
     table: Record<string, T>,
@@ -243,6 +249,22 @@ function start(script: Partial<PipelineScript> = {}): Harness {
 
   const dependencies: GraphWorkflowDependencies = {
     readInstanceEntry: () => (entryMissing ? undefined : entry),
+    resolveBranchForRequest: (_entry, _repo, requestedBranch) => {
+      const resolution = harnessScript.branchResolution;
+      return typeof resolution === "function" ? resolution() : (
+          Promise.resolve(
+            resolution ?? {
+              status: "resolved",
+              branch: requestedBranch || defaultBranchForState(state),
+              followsWorkspaceBranch: false
+            }
+          )
+        );
+    },
+    commitBranchResolution: (_entry, _repo, resolution) => {
+      branchCommits.push(resolution.branch);
+      return harnessScript.commitBranchResolution ?? true;
+    },
     pipeline,
     triggerAppBicepHandoff: (
       handoffEntry,
@@ -283,7 +305,6 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     prepareSourceRefResources,
     setSourceRefResources,
     isCurrentSourceRefToken,
-    defaultBranchForState,
     canReuseModeledGraph,
     addGraphProgress,
     beginPlannedGraphRequest,
@@ -332,6 +353,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     plannedOutputs,
     modelingObservations,
     loggedErrors,
+    branchCommits,
     setEntryMissing(missing) {
       entryMissing = missing;
     },
@@ -371,6 +393,47 @@ function replaceProgressRecord(
 }
 
 describe("graph planning workflows", () => {
+  it.each(["loadGraph", "planGraph"] as const)(
+    "reports an unavailable workspace branch without model lookup or handoff in %s",
+    async (workflow) => {
+      const harness = start({
+        branchResolution: {
+          status: "unavailable",
+          error: "The workspace branch is unavailable."
+        }
+      });
+
+      const outcome = await harness.run(workflow, '{"repo":"octo/app"}');
+
+      expect(outcome).toEqual({
+        kind: "json",
+        status: 409,
+        payload: {
+          error: "The workspace branch is unavailable.",
+          workspaceBranchUnavailable: true,
+          repo: "octo/app"
+        }
+      });
+      expect(harness.order).toEqual([]);
+      expect(harness.handoffs).toEqual([]);
+    }
+  );
+
+  it.each(["loadGraph", "planGraph"] as const)(
+    "rejects a canonical branch commit superseded during resolution in %s",
+    async (workflow) => {
+      const harness = start({ commitBranchResolution: false });
+
+      const outcome = await harness.run(workflow, '{"repo":"octo/app"}');
+
+      expect(outcome.status).toBe(409);
+      expect(outcome.payload).toEqual({ stale: true });
+      expect(harness.branchCommits).toEqual(["main"]);
+      expect(harness.order).toEqual([]);
+      expect(harness.handoffs).toEqual([]);
+    }
+  );
+
   describe("POST /api/load-graph", () => {
     it("answers 400 with the parse failure for a malformed body", async () => {
       const harness = start();
@@ -406,6 +469,23 @@ describe("graph planning workflows", () => {
       expect(harness.order).toEqual([]);
     });
 
+    it("fails closed when repository and branch fields are not strings", async () => {
+      const harness = start();
+
+      const outcome = await harness.run(
+        "loadGraph",
+        '{"repo":{"owner":"octo"},"branch":{"name":"feature"}}'
+      );
+
+      expect(outcome.status).toBe(200);
+      expect(outcome.payload).toEqual({
+        error: "Please select a repository."
+      });
+      expect(harness.branchCommits).toEqual(["main"]);
+      expect(harness.order).toEqual([]);
+      expect(harness.handoffs).toEqual([]);
+    });
+
     it("hands off to the app-bicep skill when the branch has no app.bicep", async () => {
       const harness = start({
         selections: { main: selectionOf({ content: null }) }
@@ -435,6 +515,62 @@ describe("graph planning workflows", () => {
       ]);
     });
 
+    it("surfaces a reported permanent authoring failure without requesting modeling again", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "The configured Recipe rejects the required credential shape."
+        }
+      };
+      harness.state.appModelAttemptTokens = {
+        "octo/app::main": "attempt-1"
+      };
+
+      const outcome = await harness.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(outcome.payload).toEqual({
+        error:
+          "Application model generation stopped: The configured Recipe rejects the required credential shape. Fix the reported issue, then refresh the Radius Canvas to try modeling again.",
+        modelingFailed: true,
+        appModelAuthoringFailed: true,
+        repo: "octo/app",
+        branch: "main"
+      });
+      expect(harness.handoffs).toEqual([]);
+      expect(messages(harness.state).at(-1)).toContain(
+        "Application model generation stopped"
+      );
+    });
+
+    it("clears a permanent authoring failure and requests a new attempt on explicit refresh", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "The configured Recipe rejects the required credential shape."
+        }
+      };
+      harness.state.appModelAttemptTokens = {
+        "octo/app::main": "attempt-1"
+      };
+
+      const outcome = await harness.run(
+        "loadGraph",
+        '{"repo":"octo/app","restartWait":true}'
+      );
+
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(outcome.payload.modelingFailed).toBeUndefined();
+      expect(harness.state.appModelFailures).toEqual({});
+      expect(harness.state.appModelAttemptTokens).toEqual({});
+      expect(harness.handoffs).toHaveLength(1);
+    });
+
     it("still hands off when the branch tree cannot be read", async () => {
       const harness = start({
         selections: { main: selectionOf({ content: null }) },
@@ -447,9 +583,20 @@ describe("graph planning workflows", () => {
 
     it("reports a rendered model so drift is still noticed after it exists", async () => {
       const harness = start({ selections: { main: selectionOf() } });
+      harness.state.appModelAttemptTokens = {
+        "octo/app::main": "attempt-1"
+      };
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "stale failure"
+        }
+      };
 
       await harness.run("loadGraph", '{"repo":"octo/app"}');
 
+      expect(harness.state.appModelAttemptTokens).toEqual({});
+      expect(harness.state.appModelFailures).toEqual({});
       expect(harness.handoffs).toEqual([
         {
           repo: "octo/app",
@@ -829,6 +976,7 @@ describe("graph planning workflows", () => {
         graphLoaded: true,
         graphTargetRepo: "octo/app",
         graphBranch: "main",
+        graphFollowsWorkspaceBranch: true,
         graphFromWorkspace: true,
         graphDefinitionHash: "hash-a",
         graphResources: [{ id: "cached" }] as CanvasGraphResource[]
@@ -848,6 +996,7 @@ describe("graph planning workflows", () => {
       });
       // Persisted provenance follows the response, so the next page render
       // cannot contradict what this request just reported.
+      expect(harness.state.graphFollowsWorkspaceBranch).toBe(false);
       expect(harness.state.graphFromWorkspace).toBe(false);
       // The compile is skipped entirely, which is the point of the cache.
       expect(harness.order).toEqual([
@@ -1136,6 +1285,50 @@ describe("graph planning workflows", () => {
       expect(JSON.stringify(outcome.payload)).toBe('{"stale":true}');
       expect(harness.state.graphTargetRepo).toBeUndefined();
     });
+
+    it("uses arrival order when branch resolution completes out of order", async () => {
+      let releaseFirst!: () => void;
+      const firstResolution = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let resolutionCount = 0;
+      const harness = start({
+        branchResolution: async () => {
+          resolutionCount++;
+          const requestNumber = resolutionCount;
+          if (requestNumber === 1) await firstResolution;
+          return {
+            status: "resolved",
+            branch: requestNumber === 1 ? "old" : "new",
+            followsWorkspaceBranch: false
+          };
+        },
+        selections: {
+          old: selectionOf({ content: null }),
+          new: selectionOf({ branch: "new" })
+        },
+        staged: { new: { dir: "", remote: false } },
+        compiled: { new: [] }
+      });
+
+      const first = harness.run("loadGraph", '{"repo":"octo/app"}');
+      await vi.waitFor(() =>
+        expect(harness.state.graphBuildGeneration).toBe(1)
+      );
+      const second = harness.run("loadGraph", '{"repo":"octo/app"}');
+      await vi.waitFor(() => expect(resolutionCount).toBe(2));
+      const secondOutcome = await second;
+      releaseFirst();
+      const firstOutcome = await first;
+
+      expect(secondOutcome.status).toBe(200);
+      expect(firstOutcome.payload).toEqual({ stale: true });
+      expect(harness.state.graphBuildGeneration).toBe(2);
+      expect(harness.handoffs.map((handoff) => handoff.branches)).toEqual([
+        "new"
+      ]);
+      expect(harness.branchCommits).toEqual(["new"]);
+    });
   });
 
   describe("POST /api/plan-graph", () => {
@@ -1170,6 +1363,54 @@ describe("graph planning workflows", () => {
       expect(harness.handoffs[0]?.page).toBe("graph");
     });
 
+    it("defaults non-string branch and provider fields before model selection", async () => {
+      const harness = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "", remote: false } },
+        compiled: { main: [{ id: "res-a" } as CanvasGraphResource] }
+      });
+      harness.recipes.push({
+        resourceType: "Radius.Data/redisCaches",
+        concreteResources: [{ type: "Microsoft.Cache/redis" }]
+      });
+      harness.plannedOutputs.push({ id: "res-a" });
+
+      const outcome = await harness.run(
+        "planGraph",
+        '{"repo":"octo/app","branch":{"name":"feature"},"provider":{"name":"aws"}}'
+      );
+
+      expect(outcome.status).toBe(200);
+      expect(harness.state.plannedProvider).toBe("azure");
+      expect(harness.state.plannedBranch).toBe("main");
+      expect(harness.recipePackCalls).toEqual(["azure"]);
+      expect(harness.branchCommits).toEqual(["main"]);
+    });
+
+    it("clears a permanent authoring failure before an explicit planned refresh", async () => {
+      const harness = start({
+        selections: { main: selectionOf({ content: null }) }
+      });
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "Recipe conflict"
+        }
+      };
+      harness.state.appModelAttemptTokens = {
+        "octo/app::main": "attempt-1"
+      };
+
+      const outcome = await harness.run(
+        "planGraph",
+        '{"repo":"octo/app","restartWait":true}'
+      );
+
+      expect(outcome.payload).toMatchObject({ needsAppBicep: true });
+      expect(harness.state.appModelFailures).toEqual({});
+      expect(harness.handoffs).toHaveLength(1);
+    });
+
     it("does not hand off a missing model after a newer plan supersedes it", async () => {
       let harness!: Harness;
       harness = start({
@@ -1184,6 +1425,51 @@ describe("graph planning workflows", () => {
       expect(outcome.status).toBe(409);
       expect(outcome.payload).toEqual({ stale: true });
       expect(harness.handoffs).toEqual([]);
+    });
+
+    it("does not leak a canonical branch from a stale response into later requests", async () => {
+      let canonicalized!: Harness;
+      canonicalized = start({
+        branchResolution: {
+          status: "resolved",
+          branch: "new-name",
+          followsWorkspaceBranch: true,
+          workspaceSnapshot: {
+            workspaceBranch: "old-name",
+            contextBranch: "old-name"
+          }
+        },
+        selections: { "new-name": selectionOf({ content: null }) },
+        branchPaths: { "new-name": ["Dockerfile"] },
+        afterListBranchPaths: () => {
+          beginPlannedGraphRequest(canonicalized.state);
+        }
+      });
+
+      const first = await canonicalized.run(
+        "planGraph",
+        '{"repo":"octo/app","branch":"old-name","followWorkspaceBranch":true}'
+      );
+
+      expect(first.payload).toEqual({
+        stale: true,
+        resolvedBranch: "new-name"
+      });
+
+      let later!: Harness;
+      later = start({
+        selections: { main: selectionOf() },
+        staged: { main: { dir: "", remote: false } },
+        compiled: { main: [] },
+        afterCompile: () => {
+          later.state.graphBuildGeneration =
+            (later.state.graphBuildGeneration || 0) + 1;
+        }
+      });
+
+      const second = await later.run("loadGraph", '{"repo":"octo/app"}');
+
+      expect(second.payload).toEqual({ stale: true });
     });
 
     it("does not hand off when superseded while inspecting a missing model's branch", async () => {
@@ -1205,9 +1491,20 @@ describe("graph planning workflows", () => {
 
     it("reports a rendered plan's model so drift is still noticed after it exists", async () => {
       const harness = start({ selections: { main: selectionOf() } });
+      harness.state.appModelAttemptTokens = {
+        "octo/app::main": "attempt-1"
+      };
+      harness.state.appModelFailures = {
+        "octo/app::main": {
+          attemptToken: "attempt-1",
+          error: "stale failure"
+        }
+      };
 
       await harness.run("planGraph", '{"repo":"octo/app"}');
 
+      expect(harness.state.appModelAttemptTokens).toEqual({});
+      expect(harness.state.appModelFailures).toEqual({});
       expect(harness.handoffs).toEqual([
         {
           repo: "octo/app",
@@ -1312,6 +1609,7 @@ describe("graph planning workflows", () => {
       harness.state.plannedResources = [{ id: "res-a" }];
       harness.state.plannedRepo = "octo/app";
       harness.state.plannedBranch = "main";
+      harness.state.plannedFollowsWorkspaceBranch = true;
       harness.state.plannedProvider = "azure";
       harness.state.plannedEnvironment = "";
       harness.state.plannedDefinitionHash = "hash-a";
@@ -1326,6 +1624,7 @@ describe("graph planning workflows", () => {
         refreshed: true
       });
       expect(harness.handoffs).toHaveLength(1);
+      expect(harness.state.plannedFollowsWorkspaceBranch).toBe(false);
       expect(harness.order).toEqual(["select:main", "stage:main", "discard:"]);
       expect(harness.recipePackCalls).toEqual([]);
     });
@@ -2135,6 +2434,7 @@ describe("graph planning workflows", () => {
       expect(harness.state.plannedRepo).toBeUndefined();
       expect(harness.state.plannedProvider).toBeUndefined();
       expect(harness.state.resolvedRecipes).toBeUndefined();
+      expect(harness.loggedErrors).toEqual([]);
     });
 
     it("surfaces a model-selection failure as 400 before any artifact is staged", async () => {
@@ -2149,7 +2449,64 @@ describe("graph planning workflows", () => {
       expect(harness.order).toEqual(["select:main"]);
       expect(harness.handoffs).toEqual([]);
       expect(harness.state.plannedRepo).toBeUndefined();
-      expect(harness.loggedErrors).toEqual([]);
+    });
+
+    it("returns a renamed workspace branch before the missing-model retry", async () => {
+      const harness = start({
+        branchResolution: {
+          status: "resolved",
+          branch: "new-name",
+          followsWorkspaceBranch: false
+        },
+        selections: { "new-name": selectionOf({ content: null }) }
+      });
+
+      const outcome = await harness.run(
+        "loadGraph",
+        '{"repo":"octo/app","branch":"old-name","followWorkspaceBranch":true}'
+      );
+
+      expect(outcome.payload).toMatchObject({
+        needsAppBicep: true,
+        branch: "new-name",
+        resolvedBranch: "new-name"
+      });
+      expect(harness.handoffs).toEqual([
+        {
+          repo: "octo/app",
+          branches: "new-name",
+          page: "graph",
+          progressView: "graph",
+          hasEntry: true
+        }
+      ]);
+    });
+
+    it("returns a renamed workspace branch before a planned-model retry", async () => {
+      const harness = start({
+        branchResolution: {
+          status: "resolved",
+          branch: "new-name",
+          followsWorkspaceBranch: false
+        },
+        selections: { "new-name": selectionOf({ content: null }) }
+      });
+
+      const outcome = await harness.run(
+        "planGraph",
+        '{"repo":"octo/app","branch":"old-name","followWorkspaceBranch":true}'
+      );
+
+      expect(outcome.payload).toMatchObject({
+        needsAppBicep: true,
+        branch: "new-name",
+        resolvedBranch: "new-name"
+      });
+      expect(harness.handoffs.at(-1)).toMatchObject({
+        repo: "octo/app",
+        branches: "new-name",
+        progressView: "planned"
+      });
     });
 
     it("surfaces a compilation failure as 400 after staging and commits no planned state", async () => {

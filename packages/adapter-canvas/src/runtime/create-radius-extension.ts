@@ -497,7 +497,7 @@ export function createRadiusExtension(
 
   return {
     canvases: [createRadiusCanvas(deps, canvasInstances)],
-    tools: createRadiusTools(deps, modelingActivity),
+    tools: createRadiusTools(deps, modelingActivity, missingModelHandoffs),
     hooks: {
       // Nothing here inspects the application model any more. Opening a graph
       // page used to be denied until .radius/app.bicep existed, but every graph

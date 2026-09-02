@@ -16,7 +16,10 @@ import {
   prepareSourceRefResources,
   setSourceRefResources
 } from "../../../src/source-refs.js";
-import { defaultBranchForState } from "../../../src/workspace.js";
+import {
+  commitWorkspaceBranchResolution,
+  resolveGraphBranchForRequest
+} from "../../../src/workspace.js";
 import {
   addGraphProgress,
   beginPlannedGraphRequest,
@@ -43,6 +46,7 @@ interface PipelineScript {
   compileThrows?: unknown;
   branchPaths?: string[];
   afterCompile?: () => void;
+  liveWorkspaceBranch?: string;
 }
 
 interface Harness {
@@ -110,6 +114,21 @@ function start(script: Partial<PipelineScript> = {}): Harness {
       // stack from the socket down to the state machine.
       workflows: createGraphPlanningWorkflows({
         readInstanceEntry: () => (entryMissing ? undefined : { state }),
+        resolveBranchForRequest: (
+          entry,
+          repo,
+          requestedBranch,
+          followWorkspaceBranch
+        ) =>
+          resolveGraphBranchForRequest(
+            entry.state,
+            repo,
+            requestedBranch,
+            followWorkspaceBranch,
+            async () => active.liveWorkspaceBranch || ""
+          ),
+        commitBranchResolution: (entry, repo, resolution) =>
+          commitWorkspaceBranchResolution(entry.state, repo, resolution),
         pipeline,
         triggerAppBicepHandoff: () => {},
         observeModelingRun: () => Promise.resolve(null),
@@ -124,7 +143,6 @@ function start(script: Partial<PipelineScript> = {}): Harness {
         prepareSourceRefResources,
         setSourceRefResources,
         isCurrentSourceRefToken,
-        defaultBranchForState,
         canReuseModeledGraph,
         addGraphProgress,
         beginPlannedGraphRequest,
@@ -234,6 +252,233 @@ describe("graphs-planning writes real-loopback HIT", () => {
       repo: "octo/app",
       branch: "main"
     });
+  });
+
+  it("returns a terminal authoring failure instead of another app-bicep handoff", async () => {
+    const harness = start({
+      selections: { main: selectionOf("main", null) }
+    });
+    harness.state.appModelFailures = {
+      "octo/app::main": {
+        attemptToken: "attempt-1",
+        error: "The configured Recipe rejects the required credential shape."
+      }
+    };
+    harness.state.appModelAttemptTokens = {
+      "octo/app::main": "attempt-1"
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/load-graph",
+      '{"repo":"octo/app"}'
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      modelingFailed: true,
+      appModelAuthoringFailed: true,
+      repo: "octo/app",
+      branch: "main"
+    });
+  });
+
+  it("restarts modeling after an explicit refresh clears a terminal authoring failure", async () => {
+    const harness = start({
+      selections: { main: selectionOf("main", null) }
+    });
+    harness.state.appModelFailures = {
+      "octo/app::main": {
+        attemptToken: "attempt-1",
+        error: "The configured Recipe rejects the required credential shape."
+      }
+    };
+    harness.state.appModelAttemptTokens = {
+      "octo/app::main": "attempt-1"
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/load-graph",
+      '{"repo":"octo/app","restartWait":true}'
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ needsAppBicep: true });
+    expect(harness.state.appModelFailures).toEqual({});
+  });
+
+  it("loads the worktree model after an implicit workspace branch is renamed", async () => {
+    const harness = start({
+      liveWorkspaceBranch: "new-name",
+      selections: {
+        "new-name": {
+          content: "resource app = {}",
+          fromWorkspace: true,
+          branch: "new-name",
+          bicepPath: ".radius/app.bicep"
+        }
+      },
+      compiled: {
+        "new-name": [{ id: "res-a", name: "api" } as CanvasGraphResource]
+      }
+    });
+    Object.assign(harness.state, {
+      workspacePath: "C:\\worktrees\\app",
+      workspaceRepo: "octo/app",
+      workspaceBranch: "old-name",
+      contextRepo: "octo/app",
+      contextBranch: "old-name",
+      contextBranchSource: "workspace",
+      graphTargetRepo: "octo/app",
+      graphBranch: "old-name",
+      graphFollowsWorkspaceBranch: true,
+      plannedRepo: "octo/app",
+      plannedBranch: "old-name",
+      plannedFollowsWorkspaceBranch: true
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/load-graph",
+      '{"repo":"octo/app","branch":"old-name","followWorkspaceBranch":true}'
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      resources: [{ id: "res-a", name: "api" }],
+      fromWorkspace: true,
+      resolvedBranch: "new-name"
+    });
+    expect(harness.state.workspaceBranch).toBe("new-name");
+    expect(harness.state.contextBranch).toBe("new-name");
+    expect(harness.state.graphBranch).toBe("new-name");
+    expect(harness.state.plannedBranch).toBe("new-name");
+  });
+
+  it("keeps renamed workspace provenance after a missing-model response", async () => {
+    const harness = start({
+      liveWorkspaceBranch: "new-name",
+      selections: {
+        "new-name": {
+          content: null,
+          fromWorkspace: true,
+          branch: "new-name",
+          bicepPath: ".radius/app.bicep"
+        }
+      }
+    });
+    Object.assign(harness.state, {
+      workspacePath: "C:\\worktrees\\app",
+      workspaceRepo: "octo/app",
+      workspaceBranch: "old-name",
+      contextRepo: "octo/app",
+      contextBranch: "old-name",
+      contextBranchSource: "workspace",
+      graphTargetRepo: "octo/app",
+      graphBranch: "old-name",
+      graphFollowsWorkspaceBranch: true,
+      plannedRepo: "octo/app",
+      plannedBranch: "old-name",
+      plannedFollowsWorkspaceBranch: true
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/load-graph",
+      '{"repo":"octo/app","branch":"old-name","followWorkspaceBranch":true}'
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      needsAppBicep: true,
+      branch: "new-name",
+      resolvedBranch: "new-name"
+    });
+    expect(harness.state.contextBranch).toBe("new-name");
+    expect(harness.state.graphBranch).toBe("new-name");
+    expect(harness.state.plannedBranch).toBe("new-name");
+    expect(harness.state.graphFollowsWorkspaceBranch).toBe(true);
+    expect(harness.state.plannedFollowsWorkspaceBranch).toBe(true);
+
+    const startedAt =
+      harness.state.graphProgressRecords?.graph?.graphProgressStartedAtMs;
+    harness.advanceClock(5_000);
+    const retry = await post(
+      entry.baseUrl,
+      "/api/load-graph",
+      '{"repo":"octo/app","branch":"new-name","followWorkspaceBranch":true,"restartWait":true}'
+    );
+
+    expect(retry.status).toBe(200);
+    expect(
+      harness.state.graphProgressRecords?.graph?.graphProgressStartedAtMs
+    ).toBe(startedAt);
+  });
+
+  it("does not hand off generation when the live workspace branch is unavailable", async () => {
+    const harness = start();
+    Object.assign(harness.state, {
+      workspacePath: "C:\\worktrees\\app",
+      workspaceRepo: "octo/app",
+      workspaceBranch: "old-name",
+      contextRepo: "octo/app",
+      contextBranch: "old-name",
+      contextBranchSource: "workspace"
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/load-graph",
+      '{"repo":"octo/app","branch":"old-name","followWorkspaceBranch":true}'
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error:
+        "The workspace branch is unavailable. Reopen the Radius canvas after restoring the worktree branch.",
+      workspaceBranchUnavailable: true,
+      repo: "octo/app"
+    });
+  });
+
+  it("keeps an explicit branch of the workspace repository remote", async () => {
+    const harness = start({
+      selections: {
+        release: selectionOf("release", "resource app = {}")
+      },
+      compiled: {
+        release: [{ id: "res-a", name: "api" } as CanvasGraphResource]
+      }
+    });
+    Object.assign(harness.state, {
+      workspacePath: "C:\\worktrees\\app",
+      workspaceRepo: "octo/app",
+      workspaceBranch: "new-name",
+      contextRepo: "octo/app",
+      contextBranch: "release",
+      contextBranchSource: "explicit"
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/load-graph",
+      '{"repo":"octo/app","branch":"release","followWorkspaceBranch":false}'
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      resources: [{ id: "res-a", name: "api" }],
+      fromWorkspace: false
+    });
+    expect(harness.state.contextBranch).toBe("release");
+    expect(harness.state.graphBranch).toBe("release");
   });
 
   it("answers 503 with no Content-Type when the instance entry is gone", async () => {

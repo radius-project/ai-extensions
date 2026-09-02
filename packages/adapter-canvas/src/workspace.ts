@@ -224,6 +224,135 @@ export async function detectWorkspaceContext(
   };
 }
 
+export type ResolvedWorkspaceBranch =
+  | {
+      status: "resolved";
+      branch: string;
+      followsWorkspaceBranch: false;
+    }
+  | {
+      status: "resolved";
+      branch: string;
+      followsWorkspaceBranch: true;
+      workspaceSnapshot: {
+        workspaceBranch: string | undefined;
+        contextBranch: string | undefined;
+      };
+    };
+
+export type WorkspaceBranchResolution =
+  ResolvedWorkspaceBranch | { status: "unavailable"; error: string };
+
+const WORKSPACE_BRANCH_UNAVAILABLE =
+  "The workspace branch is unavailable. Reopen the Radius canvas after restoring the worktree branch.";
+const WORKSPACE_BRANCH_READ_FAILED =
+  "Radius could not read the current workspace branch. Retry after confirming the worktree is available.";
+
+export async function currentWorkspaceBranch(
+  workspacePath: string
+): Promise<string> {
+  if (!workspacePath) return "";
+  const result = await runGitResult(workspacePath, [
+    "rev-parse",
+    "--abbrev-ref",
+    "HEAD"
+  ]);
+  if (!result.ok) throw new Error(WORKSPACE_BRANCH_READ_FAILED);
+  return result.stdout;
+}
+
+export async function resolveGraphBranchForRequest(
+  state: CanvasState,
+  repo: string,
+  requestedBranch: string,
+  followWorkspaceBranch: boolean | undefined,
+  readCurrentBranch: (workspacePath: string) => Promise<string>
+): Promise<WorkspaceBranchResolution> {
+  const selectedBranch = requestedBranch || defaultBranchForState(state);
+  const workspacePath = state.workspacePath || "";
+  const followsWorkspace =
+    state.contextBranchSource === "workspace" &&
+    !!workspacePath &&
+    !!state.workspaceRepo &&
+    repo === state.workspaceRepo &&
+    (followWorkspaceBranch === true ||
+      (followWorkspaceBranch === undefined &&
+        (!requestedBranch || requestedBranch === state.contextBranch)));
+  if (!followsWorkspace) {
+    return {
+      status: "resolved",
+      branch: selectedBranch,
+      followsWorkspaceBranch: false
+    };
+  }
+
+  const workspaceSnapshot = {
+    workspaceBranch: state.workspaceBranch,
+    contextBranch: state.contextBranch
+  };
+  let liveBranch: string;
+  try {
+    liveBranch = await readCurrentBranch(workspacePath);
+  } catch {
+    return {
+      status: "unavailable",
+      error: WORKSPACE_BRANCH_READ_FAILED
+    };
+  }
+  if (!liveBranch || liveBranch === "HEAD") {
+    return {
+      status: "unavailable",
+      error: WORKSPACE_BRANCH_UNAVAILABLE
+    };
+  }
+
+  return {
+    status: "resolved",
+    branch: liveBranch,
+    followsWorkspaceBranch: true,
+    workspaceSnapshot
+  };
+}
+
+export function commitWorkspaceBranchResolution(
+  state: CanvasState,
+  repo: string,
+  resolution: ResolvedWorkspaceBranch
+): boolean {
+  if (!resolution.followsWorkspaceBranch) return true;
+  const snapshot = resolution.workspaceSnapshot;
+  if (
+    state.contextBranchSource !== "workspace" ||
+    state.workspaceRepo !== repo ||
+    (state.workspaceBranch !== snapshot.workspaceBranch &&
+      state.workspaceBranch !== resolution.branch) ||
+    (state.contextBranch !== snapshot.contextBranch &&
+      state.contextBranch !== resolution.branch)
+  ) {
+    return false;
+  }
+
+  const previousContextBranch = snapshot.contextBranch;
+  const graphRepo = state.graphTargetRepo || state.contextRepo;
+  const graphFollowedWorkspace =
+    state.graphFollowsWorkspaceBranch ??
+    (graphRepo === repo && state.graphBranch === previousContextBranch);
+  if (graphRepo === repo && graphFollowedWorkspace) {
+    state.graphBranch = resolution.branch;
+  }
+  const plannedRepo =
+    state.plannedRepo || state.graphTargetRepo || state.contextRepo;
+  const plannedFollowedWorkspace =
+    state.plannedFollowsWorkspaceBranch ??
+    (plannedRepo === repo && state.plannedBranch === previousContextBranch);
+  if (plannedRepo === repo && plannedFollowedWorkspace) {
+    state.plannedBranch = resolution.branch;
+  }
+  state.workspaceBranch = resolution.branch;
+  state.contextBranch = resolution.branch;
+  return true;
+}
+
 // Returns true when the given branch matches the workspace branch. Fail-closed:
 // BOTH the workspace branch and the queried branch must be set and strictly
 // equal. An empty/unspecified branch never matches — a graph whose branch could

@@ -44,6 +44,7 @@ interface GraphPageState {
   resources: GraphResource[];
   loaded: boolean;
   localSource: boolean;
+  followWorkspaceBranch: boolean;
 }
 
 function parseState(context: BrowserContext): GraphPageState {
@@ -53,7 +54,8 @@ function parseState(context: BrowserContext): GraphPageState {
     branch: readString(state, "branch") || "main",
     resources: parseGraphResources(readArray(state, "resources")),
     loaded: readBoolean(state, "loaded"),
-    localSource: readBoolean(state, "localSource")
+    localSource: readBoolean(state, "localSource"),
+    followWorkspaceBranch: readBoolean(state, "followWorkspaceBranch")
   };
 }
 
@@ -114,6 +116,7 @@ export function initializeGraphPage(
   // for a server-rendered graph, because that page immediately re-requests the
   // graph and the refresh decides the real state.
   let modelState: "pending" | "ready" | "failed" = "pending";
+  let followWorkspaceBranch = page.followWorkspaceBranch;
 
   // Keep the primary button in step with the compile state. The server renders
   // the button without a mode and loadModeledEnvState assigns "plan" later, so
@@ -333,6 +336,7 @@ export function initializeGraphPage(
         body: JSON.stringify({
           repo: page.repo,
           branch,
+          followWorkspaceBranch,
           restartWait: options.continuing !== true
         }),
         signal: requestAbort?.signal
@@ -340,6 +344,11 @@ export function initializeGraphPage(
       .then((response) => response.json())
       .then((payload) => {
         if (requestGeneration !== generation) return;
+        const resolvedBranch = readString(payload, "resolvedBranch");
+        if (resolvedBranch && resolvedBranch !== branch) {
+          context.nav.reload();
+          return;
+        }
         if (isRecord(payload) && Array.isArray(payload.resources)) {
           modelState = "ready";
           syncPrimaryButton();
@@ -415,6 +424,7 @@ export function initializeGraphPage(
   if (branchSelect) {
     entry.on(branchSelect, "change", () => {
       branchSelectionGeneration++;
+      followWorkspaceBranch = false;
       stopRequest();
       modelState = "pending";
       syncPrimaryButton();
@@ -453,6 +463,7 @@ export function initializeGraphPage(
           body: JSON.stringify({
             repo: page.repo,
             branch: page.branch,
+            followWorkspaceBranch,
             refresh: true,
             restartWait: options.continuing !== true
           }),
@@ -461,6 +472,11 @@ export function initializeGraphPage(
         .then((response) => response.json())
         .then((payload) => {
           if (refreshGeneration !== generation) return;
+          const resolvedBranch = readString(payload, "resolvedBranch");
+          if (resolvedBranch && resolvedBranch !== page.branch) {
+            context.nav.reload();
+            return;
+          }
           if (isRecord(payload) && Array.isArray(payload.resources)) {
             modelState = "ready";
             syncPrimaryButton();

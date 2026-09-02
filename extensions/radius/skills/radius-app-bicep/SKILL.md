@@ -141,7 +141,7 @@ Use this rather than deleting the directory yourself, so a run is always discard
 Do not retry on your own. Say which kind of failure it looks like and let the user decide:
 
 - **Looks transient** — a network error fetching a schema, a registry timeout, an interrupted download. Offer to run modeling again.
-- **Looks permanent** — no Dockerfile, a required backing service with no Radius type that cannot be provisioned on Azure, no source that resolves to a runnable profile. Report it and do not offer a retry, because the same run would fail the same way.
+- **Looks permanent** — no Dockerfile, a required backing service with no Radius type that cannot be provisioned on Azure, no source that resolves to a runnable profile. Report it and do not offer a retry, because the same run would fail the same way. If the Canvas handoff that started this run supplied `radius_report_modeling_failure` arguments, call that tool once with the supplied instance, repository, branch, and attempt token plus an actionable failure summary; this lets the waiting graph stop requesting the same impossible model. Never call it for a transient failure, cancellation, user-declined action, or a run that wrote `app.bicep`.
 
 ## Origin record (`app.origin.json`)
 
