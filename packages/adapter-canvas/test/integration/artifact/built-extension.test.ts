@@ -692,6 +692,24 @@ describe("P0-C built Radius extension artifact", () => {
     }
   });
 
+  it("packages fail-closed guidance for unsupported developer rad builds", () => {
+    assertCurrentArtifact();
+    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
+
+    expect(skillGuidance).toContain(
+      "stop the modeling run, discard its staging directory, and report the exact error"
+    );
+    expect(skillGuidance).toContain(
+      "never download, install, upgrade, downgrade, copy, move, rename, back up, delete, or replace a `rad` binary"
+    );
+    expect(skillGuidance).toContain(
+      "never change or unset `RADIUS_RAD_BINARY` or `RADIUS_RAD_SKIP_VERSION_CHECK`"
+    );
+    expect(skillGuidance).toContain(
+      "never search `PATH`, `.rad/bin`, or another location for a released fallback"
+    );
+  });
+
   it("packages each page module exactly once", () => {
     assertCurrentArtifact();
     const bundle = readFileSync(ARTIFACT, "utf8");
