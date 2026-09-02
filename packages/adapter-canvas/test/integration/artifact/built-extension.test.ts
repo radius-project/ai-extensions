@@ -50,23 +50,12 @@ const SOURCE_SKILL = join(
 );
 const DIST_SKILL = join(DIST, "skills", "radius-app-bicep");
 const SOURCE_CODE_REFERENCE = join(
-  REPO_ROOT,
-  "extensions",
-  "radius",
-  "skills",
-  "radius-app-graph",
+  SOURCE_SKILL,
   "references",
   "source-code-references.md"
 );
 const DIST_CODE_REFERENCE = join(
-  DIST,
-  "skills",
-  "radius-app-graph",
-  "references",
-  "source-code-references.md"
-);
-const BICEP_CODE_REFERENCE = join(
-  SOURCE_SKILL,
+  DIST_SKILL,
   "references",
   "source-code-references.md"
 );
@@ -342,9 +331,9 @@ describe("P0-C built Radius extension artifact", () => {
       "extensions/extension.mjs",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
+      "skills/radius-app-bicep/references/source-code-references.md",
       "skills/radius-app-bicep/scripts/show-radius-type.mjs",
-      "skills/radius-app-bicep/scripts/validate-bicep.mjs",
-      "skills/radius-app-graph/references/source-code-references.md"
+      "skills/radius-app-bicep/scripts/validate-bicep.mjs"
     ];
     if (existsSync(SOURCE_CHANGELOG)) packagedPaths.push("CHANGELOG.md");
     for (const packagedPath of packagedPaths) {
@@ -483,7 +472,6 @@ describe("P0-C built Radius extension artifact", () => {
     expect(relativeFilesUnder(DIST_SKILL)).toEqual(
       relativeFilesUnder(SOURCE_SKILL)
     );
-    expectMatchingFile(SOURCE_CODE_REFERENCE, BICEP_CODE_REFERENCE);
     expectMatchingFile(SOURCE_CODE_REFERENCE, DIST_CODE_REFERENCE);
     const notices = readFileSync(join(DIST, "THIRD-PARTY-NOTICES.txt"), "utf8");
     for (const marker of [
