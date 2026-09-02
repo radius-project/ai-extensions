@@ -384,7 +384,10 @@ import {
 } from "./server/services/recovered-cleanup-command.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
-import { runEnvironmentDeletion } from "./server/services/environment-deletion.js";
+import {
+  runEnvironmentDeletion,
+  statePackageDeletionFailureMessage
+} from "./server/services/environment-deletion.js";
 import { createStatePackageDeletion } from "./server/services/state-package-deletion.js";
 import {
   recordCredentialProvenance,
@@ -5868,6 +5871,18 @@ function createInstanceRequestCoordinator(
         deleteGitHubEnvironment: (input) =>
           deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
         deleteStatePackage,
+        reportStatePackageDeletionFailure: async (input) => {
+          const result = await invokeSessionPrompt(
+            sessionPromptHandler,
+            statePackageDeletionFailureMessage(input)
+          );
+          if (result.status >= 400) {
+            throw new Error(
+              result.error ||
+                "Could not report the GHCR package deletion failure to Copilot chat."
+            );
+          }
+        },
         withCredentialProvenanceLock,
         readCredentialProvenance: (clientId) =>
           listCredentialProvenanceForClient(clientId),
