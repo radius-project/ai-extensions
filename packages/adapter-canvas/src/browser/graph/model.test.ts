@@ -357,6 +357,7 @@ describe("radiusNormalizeIconSource", () => {
       src: "",
       monochrome: false
     });
+    expect(Object.isFrozen(radiusNormalizeIconSource(null))).toBe(true);
     expect(radiusNormalizeIconSource("  ")).toEqual({
       src: "",
       monochrome: false

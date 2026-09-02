@@ -412,7 +412,7 @@ export interface ResolvedIcon {
   readonly monochrome: boolean;
 }
 
-const NO_ICON: ResolvedIcon = { src: "", monochrome: false };
+const NO_ICON: ResolvedIcon = Object.freeze({ src: "", monochrome: false });
 
 function svgUsesCurrentColor(svg: string): boolean {
   // Inspect only actual start tags. The tag matcher respects quoted `>` values
