@@ -22,7 +22,7 @@ vi.mock("node:child_process", () => ({
   }
 }));
 
-const { killChildTree } = await import("./rad-process.mjs");
+const { killChildTree, terminateChildTree } = await import("./rad-process.mjs");
 
 // A pid that no live process can hold: Windows pids are small multiples of four
 // and Linux caps pid_max far below the signed 32-bit maximum.
@@ -170,5 +170,75 @@ describe("Radius child tree termination", () => {
     } finally {
       process.kill = originalKill;
     }
+  });
+});
+
+describe("Radius child tree termination targeting", () => {
+  // child.pid keeps its value after the process is reaped, and killChildTree
+  // signals that raw id -- a process group on POSIX -- instead of going through
+  // the handle, so it never gets Node's own post-exit guard. Signalling a reaped
+  // id would reach whatever the OS has since assigned it.
+  it.each<[NodeJS.Platform, string]>([
+    ["win32", "taskkill"],
+    ["linux", "the process group"]
+  ])("does not signal %s for a child that already exited", async (platform) => {
+    usePlatform(platform);
+    const groups: number[] = [];
+    const originalKill = process.kill;
+    process.kill = ((pid: number) => {
+      groups.push(pid);
+      return true;
+    }) as typeof process.kill;
+    const signals: string[] = [];
+
+    try {
+      await terminateChildTree(
+        {
+          ...fakeChild(UNUSED_PID, signals),
+          exitCode: 0,
+          signalCode: null
+        } as never,
+        40
+      );
+    } finally {
+      process.kill = originalKill;
+    }
+
+    expect(spawnCalls).toHaveLength(0);
+    expect(groups).toEqual([]);
+    expect(signals).toEqual([]);
+  });
+
+  it("does not signal a child that was already killed by a signal", async () => {
+    usePlatform("win32");
+    const signals: string[] = [];
+
+    await terminateChildTree(
+      {
+        ...fakeChild(UNUSED_PID, signals),
+        exitCode: null,
+        signalCode: "SIGKILL"
+      } as never,
+      40
+    );
+
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("still terminates a child that is running", async () => {
+    usePlatform("win32");
+    const signals: string[] = [];
+    const child = Object.assign(new EventEmitter(), {
+      ...fakeChild(UNUSED_PID, signals),
+      exitCode: null,
+      signalCode: null
+    });
+
+    const done = terminateChildTree(child as never, 200);
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0].command).toBe("taskkill");
+    child.emit("exit", null, "SIGKILL");
+
+    await expect(done).resolves.toBeUndefined();
   });
 });

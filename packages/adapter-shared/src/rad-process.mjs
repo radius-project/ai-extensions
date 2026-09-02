@@ -157,8 +157,15 @@ export const TERMINATION_WAIT_MS = 5000;
 // directory open, so that deletion fails. Waiting for the child to exit makes
 // cancellation mean the tree is gone. The wait is bounded: a process that cannot
 // be killed must not strand the caller either.
+//
+// Liveness is checked before anything is signalled. `child.pid` keeps its value
+// after the process is reaped, and killChildTree targets that raw id -- a
+// process group on POSIX -- rather than going through the handle, so it does not
+// get Node's own post-exit guard. Signalling a reaped id risks hitting whatever
+// the OS has since assigned it. (The artifact-completion path in runRadAppGraph
+// deliberately does call killChildTree after exit, because the exited parent's
+// id is the only handle it has on a descendant that is still holding a pipe.)
 export function terminateChildTree(child, waitMs = TERMINATION_WAIT_MS) {
-  killChildTree(child);
   return new Promise((resolve) => {
     const alreadyExited =
       !child ||
@@ -177,6 +184,8 @@ export function terminateChildTree(child, waitMs = TERMINATION_WAIT_MS) {
     };
     timer = setTimeout(done, waitMs);
     child.once("exit", done);
+    // Listener first: the exit can land as soon as the tree is signalled.
+    killChildTree(child);
   });
 }
 
