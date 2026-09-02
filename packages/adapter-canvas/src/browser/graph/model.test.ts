@@ -16,6 +16,8 @@ import {
   radiusIsManagedClusterType,
   radiusNormalizeIcon,
   radiusResolveIcon,
+  radiusNormalizeIconSource,
+  radiusResolveIconSource,
   radiusResolvedOutputRank,
   radiusSelectResolvedResource,
   srcLineFromRef,
@@ -297,6 +299,62 @@ describe("radiusNormalizeIcon", () => {
 
   it("returns empty for anything else", () => {
     expect(radiusNormalizeIcon("just-a-name")).toBe("");
+  });
+});
+
+describe("radiusNormalizeIconSource", () => {
+  it("marks raw svg markup that paints in currentColor as monochrome", () => {
+    const out = radiusNormalizeIconSource(
+      '<svg viewBox="0 0 8 8"><rect fill="currentColor" /></svg>'
+    );
+    expect(out.monochrome).toBe(true);
+    expect(decodeURIComponent(out.src)).toContain('fill="currentColor"');
+  });
+
+  it("does not mark multi-color svg markup, urls or data uris as monochrome", () => {
+    expect(
+      radiusNormalizeIconSource('<svg viewBox="0 0 8 8" fill="#326ce5"></svg>')
+        .monochrome
+    ).toBe(false);
+    expect(
+      radiusNormalizeIconSource("data:image/png;base64,AAAA").monochrome
+    ).toBe(false);
+    expect(radiusNormalizeIconSource("https://x/i.svg").monochrome).toBe(false);
+    expect(radiusNormalizeIconSource("just-a-name")).toEqual({
+      src: "",
+      monochrome: false
+    });
+    expect(radiusNormalizeIconSource(null)).toEqual({
+      src: "",
+      monochrome: false
+    });
+    expect(radiusNormalizeIconSource("  ")).toEqual({
+      src: "",
+      monochrome: false
+    });
+  });
+});
+
+describe("radiusResolveIconSource", () => {
+  it("never marks a built-in fallback glyph as monochrome", () => {
+    const glyph = radiusResolveIconSource({ type: "redis/cache" });
+    expect(glyph).toEqual({
+      src: radiusGetIconSvg("redis/cache"),
+      monochrome: false
+    });
+    expect(radiusResolveIconSource(null)).toEqual({
+      src: "",
+      monochrome: false
+    });
+  });
+
+  it("carries a pack icon's monochrome flag through", () => {
+    expect(
+      radiusResolveIconSource({
+        icon: '<svg viewBox="0 0 8 8"><rect fill="currentColor" /></svg>',
+        type: "redis/cache"
+      }).monochrome
+    ).toBe(true);
   });
 });
 
