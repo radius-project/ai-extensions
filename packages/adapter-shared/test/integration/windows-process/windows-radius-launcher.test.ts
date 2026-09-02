@@ -212,7 +212,7 @@ describeWindows("Windows Radius process launcher", () => {
     await waitUntil(() => !isProcessAlive(descendantPID));
   });
 
-  it("creates no console window for a console-subsystem target", async () => {
+  it("creates no visible console window for a target or its descendant", async () => {
     const powershell = join(
       process.env.SystemRoot ?? "C:\\Windows",
       "System32",
@@ -222,40 +222,184 @@ describeWindows("Windows Radius process launcher", () => {
     );
     const probeSource = join(cwd, "console-probe.cs");
     const probeExecutable = join(cwd, "console-probe.exe");
+    const observerSource = join(cwd, "window-observer.cs");
+    const observerExecutable = join(cwd, "window-observer.exe");
+    const observerReady = join(cwd, "observer.ready");
+    const observerStop = join(cwd, "observer.stop");
+    const observerResult = join(cwd, "observer.txt");
+    const observerCheckpoint = join(cwd, "observer.checkpoint");
+    const windowMarker = `radius-launcher-${process.pid}-${Date.now()}`;
     writeFileSync(
       probeSource,
       [
         "using System;",
+        "using System.Diagnostics;",
+        "using System.Reflection;",
         "using System.Runtime.InteropServices;",
         "using System.Text;",
         "public static class ConsoleProbe {",
         '  [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();',
         '  [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int id);',
         '  [DllImport("kernel32.dll", SetLastError = true)] static extern bool WriteFile(IntPtr handle, byte[] buffer, uint bytes, out uint written, IntPtr overlapped);',
-        "  public static int Main() {",
-        '    byte[] buffer = Encoding.ASCII.GetBytes(GetConsoleWindow() == IntPtr.Zero ? "0" : "1");',
+        '  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr handle);',
+        '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool SetConsoleTitle(string title);',
+        '  [DllImport("user32.dll")] static extern void NotifyWinEvent(uint eventType, IntPtr window, int objectId, int childId);',
+        "  static int WriteVisibility() {",
+        '    byte[] buffer = Encoding.ASCII.GetBytes(IsWindowVisible(GetConsoleWindow()) ? "1" : "0");',
         "    uint written;",
         "    return WriteFile(GetStdHandle(-11), buffer, (uint)buffer.Length, out written, IntPtr.Zero) ? 0 : Marshal.GetLastWin32Error();",
+        "  }",
+        "  public static int Main(string[] args) {",
+        "    const uint checkpoint = 0x800D;",
+        "    SetConsoleTitle(args[0]);",
+        "    int result = WriteVisibility();",
+        "    if (result != 0 || args.Length > 1) return result;",
+        '    Process child = Process.Start(new ProcessStartInfo(Assembly.GetExecutingAssembly().Location, args[0] + " descendant") { UseShellExecute = false });',
+        "    child.WaitForExit();",
+        "    NotifyWinEvent(checkpoint, GetConsoleWindow(), 42, 0);",
+        "    return child.ExitCode;",
+        "  }",
+        "}"
+      ].join("\n")
+    );
+    writeFileSync(
+      observerSource,
+      [
+        "using System;",
+        "using System.Collections.Generic;",
+        "using System.Diagnostics;",
+        "using System.IO;",
+        "using System.Runtime.InteropServices;",
+        "using System.Text;",
+        "using System.Threading;",
+        "public static class WindowObserver {",
+        "  delegate void WinEventDelegate(IntPtr hook, uint eventType, IntPtr window, int objectId, int childId, uint eventThread, uint eventTime);",
+        "  struct Point { public int X; public int Y; }",
+        "  struct Message { public IntPtr Window; public uint Id; public UIntPtr WParam; public IntPtr LParam; public uint Time; public Point Location; public uint Private; }",
+        '  [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr module, WinEventDelegate callback, uint processId, uint threadId, uint flags);',
+        '  [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr hook);',
+        '  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);',
+        '  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);',
+        '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder className, int maximum);',
+        '  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder title, int maximum);',
+        '  [DllImport("user32.dll")] static extern bool PeekMessage(out Message message, IntPtr window, uint minimum, uint maximum, uint remove);',
+        '  [DllImport("user32.dll")] static extern bool TranslateMessage(ref Message message);',
+        '  [DllImport("user32.dll")] static extern IntPtr DispatchMessage(ref Message message);',
+        "  static string Describe(IntPtr window) {",
+        "    uint processId;",
+        "    GetWindowThreadProcessId(window, out processId);",
+        '    string processName = "unknown";',
+        "    try { processName = Process.GetProcessById((int)processId).ProcessName; } catch { }",
+        "    StringBuilder className = new StringBuilder(256);",
+        "    GetClassName(window, className, className.Capacity);",
+        '    return processName + ":" + className;',
+        "  }",
+        "  static string WindowTitle(IntPtr window) {",
+        "    StringBuilder title = new StringBuilder(512);",
+        "    GetWindowText(window, title, title.Capacity);",
+        "    return title.ToString();",
+        "  }",
+        "  static bool IsConsoleHost(IntPtr window) {",
+        "    string description = Describe(window);",
+        '    return description.StartsWith("WindowsTerminal:", StringComparison.OrdinalIgnoreCase)',
+        '      || description.StartsWith("OpenConsole:", StringComparison.OrdinalIgnoreCase)',
+        '      || description.StartsWith("conhost:", StringComparison.OrdinalIgnoreCase)',
+        '      || description.EndsWith(":ConsoleWindowClass", StringComparison.OrdinalIgnoreCase)',
+        '      || description.EndsWith(":CASCADIA_HOSTING_WINDOW_CLASS", StringComparison.OrdinalIgnoreCase);',
+        "  }",
+        "  public static int Main(string[] args) {",
+        "    const uint foreground = 3;",
+        "    const uint objectCreate = 0x8000;",
+        "    const uint objectShow = 0x8002;",
+        "    const uint objectNameChange = 0x800C;",
+        "    const uint checkpoint = 0x800D;",
+        "    HashSet<string> findings = new HashSet<string>(StringComparer.OrdinalIgnoreCase);",
+        "    WinEventDelegate callback = delegate(IntPtr hook, uint eventType, IntPtr window, int objectId, int childId, uint eventThread, uint eventTime) {",
+        "      if (window == IntPtr.Zero) return;",
+        '      if (eventType == checkpoint && objectId == 42 && childId == 0) { File.WriteAllText(args[3], "checkpoint"); return; }',
+        "      if (objectId != 0 || childId != 0) return;",
+        "      if (eventType != foreground && eventType != objectCreate && eventType != objectShow && eventType != objectNameChange) return;",
+        "      if (eventType != foreground && !IsWindowVisible(window)) return;",
+        "      string title = WindowTitle(window);",
+        '      if (IsConsoleHost(window) && title.IndexOf(args[4], StringComparison.OrdinalIgnoreCase) >= 0) findings.Add(Describe(window) + ":" + title);',
+        "    };",
+        "    IntPtr objectHook = SetWinEventHook(objectCreate, checkpoint, IntPtr.Zero, callback, 0, 0, 0);",
+        "    IntPtr foregroundHook = SetWinEventHook(foreground, foreground, IntPtr.Zero, callback, 0, 0, 0);",
+        "    if (objectHook == IntPtr.Zero || foregroundHook == IntPtr.Zero) return Marshal.GetLastWin32Error();",
+        '    File.WriteAllText(args[0], "ready");',
+        "    try {",
+        "      Message message;",
+        "      while (!File.Exists(args[1])) {",
+        "        while (PeekMessage(out message, IntPtr.Zero, 0, 0, 1)) {",
+        "          TranslateMessage(ref message);",
+        "          DispatchMessage(ref message);",
+        "        }",
+        "        Thread.Sleep(1);",
+        "      }",
+        "    } finally {",
+        "      UnhookWinEvent(objectHook);",
+        "      UnhookWinEvent(foregroundHook);",
+        "    }",
+        "    File.WriteAllLines(args[2], findings);",
+        "    GC.KeepAlive(callback);",
+        "    return 0;",
         "  }",
         "}"
       ].join("\n")
     );
     const powershellLiteral = (value: string) =>
       `'${value.replaceAll("'", "''")}'`;
-    execFileSync(
-      powershell,
+    for (const [source, executable] of [
+      [probeSource, probeExecutable],
+      [observerSource, observerExecutable]
+    ]) {
+      execFileSync(
+        powershell,
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `Add-Type -Path ${powershellLiteral(source)} -OutputAssembly ${powershellLiteral(executable)} -OutputType ConsoleApplication`
+        ],
+        { windowsHide: true }
+      );
+    }
+
+    const observer = spawn(
+      observerExecutable,
       [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        `Add-Type -Path ${powershellLiteral(probeSource)} -OutputAssembly ${powershellLiteral(probeExecutable)} -OutputType ConsoleApplication`
+        observerReady,
+        observerStop,
+        observerResult,
+        observerCheckpoint,
+        windowMarker
       ],
-      { windowsHide: true }
+      { stdio: "ignore", windowsHide: true }
     );
+    const observerDone = new Promise<void>((resolve, reject) => {
+      observer.once("error", reject);
+      observer.once("close", (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`Window observer exited with code ${code}.`));
+      });
+    });
+    const result = await (async () => {
+      try {
+        await waitUntil(() => existsSync(observerReady));
+        const probeResult = await spawnRad(probeExecutable, [windowMarker], {
+          cwd,
+          timeout: 10_000
+        });
+        await waitUntil(() => existsSync(observerCheckpoint));
+        return probeResult;
+      } finally {
+        writeFileSync(observerStop, "stop");
+        await observerDone;
+      }
+    })();
 
-    const result = await spawnRad(probeExecutable, [], { timeout: 10_000 });
-
-    expect(result.stdout).toBe("0");
-  });
+    expect(result.stdout).toBe("00");
+    expect(readFileSync(observerResult, "utf8")).toBe("");
+  }, 15_000);
 });

@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -10,11 +12,12 @@ import (
 )
 
 const (
-	detachedProcess                        = 0x00000008
 	createSuspended                        = 0x00000004
+	extendedStartupInfoPresent             = 0x00080000
 	infinite                               = 0xffffffff
 	jobObjectExtendedLimitInformationClass = 9
 	jobObjectLimitKillOnJobClose           = 0x00002000
+	procThreadAttributePseudoConsole       = 0x00020016
 	startfUseStdHandles                    = 0x00000100
 	synchronize                            = 0x00100000
 	waitObject0                            = 0
@@ -50,16 +53,35 @@ type jobObjectExtendedLimitInformation struct {
 	peakJobMemoryUsed     uintptr
 }
 
+type startupInfoEx struct {
+	startupInfo   syscall.StartupInfo
+	attributeList uintptr
+}
+
+type pseudoConsole struct {
+	handle      uintptr
+	inputRead   syscall.Handle
+	inputWrite  syscall.Handle
+	outputWrite syscall.Handle
+	outputRead  *os.File
+	drained     chan struct{}
+}
+
 var (
 	kernel32                 = syscall.NewLazyDLL("kernel32.dll")
 	assignProcessToJobObject = kernel32.NewProc("AssignProcessToJobObject")
 	closeHandle              = kernel32.NewProc("CloseHandle")
+	closePseudoConsole       = kernel32.NewProc("ClosePseudoConsole")
 	createJobObject          = kernel32.NewProc("CreateJobObjectW")
+	createPseudoConsole      = kernel32.NewProc("CreatePseudoConsole")
+	deleteAttributeList      = kernel32.NewProc("DeleteProcThreadAttributeList")
 	getExitCodeProcess       = kernel32.NewProc("GetExitCodeProcess")
+	initializeAttributeList  = kernel32.NewProc("InitializeProcThreadAttributeList")
 	openProcess              = kernel32.NewProc("OpenProcess")
 	resumeThread             = kernel32.NewProc("ResumeThread")
 	setInformationJobObject  = kernel32.NewProc("SetInformationJobObject")
 	terminateProcess         = kernel32.NewProc("TerminateProcess")
+	updateAttribute          = kernel32.NewProc("UpdateProcThreadAttribute")
 	waitForMultipleObjects   = kernel32.NewProc("WaitForMultipleObjects")
 )
 
@@ -119,42 +141,156 @@ func commandLine(executable string, args []string) string {
 	return strings.Join(escaped, " ")
 }
 
-func createChild(executable string, args []string) (syscall.ProcessInformation, error) {
+func createHeadlessConsole() (*pseudoConsole, error) {
+	// ConPTY supplies the console semantics Radius and its descendants require
+	// without asking Windows Terminal or conhost to display a window.
+	if err := createPseudoConsole.Find(); err != nil {
+		return nil, fmt.Errorf("CreatePseudoConsole is unavailable: %w", err)
+	}
+	var inputRead syscall.Handle
+	var inputWrite syscall.Handle
+	if err := syscall.CreatePipe(&inputRead, &inputWrite, nil, 0); err != nil {
+		return nil, fmt.Errorf("CreatePipe(pseudoconsole input): %w", err)
+	}
+
+	var outputRead syscall.Handle
+	var outputWrite syscall.Handle
+	if err := syscall.CreatePipe(&outputRead, &outputWrite, nil, 0); err != nil {
+		closeWindowsHandle(inputRead)
+		closeWindowsHandle(inputWrite)
+		return nil, fmt.Errorf("CreatePipe(pseudoconsole output): %w", err)
+	}
+
+	var handle uintptr
+	// COORD is passed by value, with X in the low word and Y in the high word.
+	size := uintptr(uint32(80) | uint32(25)<<16)
+	result, _, _ := createPseudoConsole.Call(
+		size,
+		uintptr(inputRead),
+		uintptr(outputWrite),
+		0,
+		uintptr(unsafe.Pointer(&handle)),
+	)
+	if result != 0 {
+		closeWindowsHandle(inputRead)
+		closeWindowsHandle(inputWrite)
+		closeWindowsHandle(outputRead)
+		closeWindowsHandle(outputWrite)
+		return nil, fmt.Errorf("CreatePseudoConsole failed with HRESULT 0x%08x", uint32(result))
+	}
+
+	output := os.NewFile(uintptr(outputRead), "pseudoconsole-output")
+	drained := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, output)
+		close(drained)
+	}()
+	return &pseudoConsole{
+		handle:      handle,
+		inputRead:   inputRead,
+		inputWrite:  inputWrite,
+		outputWrite: outputWrite,
+		outputRead:  output,
+		drained:     drained,
+	}, nil
+}
+
+func (console *pseudoConsole) close() {
+	if console == nil {
+		return
+	}
+	closePseudoConsole.Call(console.handle)
+	closeWindowsHandle(console.inputRead)
+	closeWindowsHandle(console.inputWrite)
+	closeWindowsHandle(console.outputWrite)
+	_ = console.outputRead.Close()
+	<-console.drained
+}
+
+func pseudoConsoleAttributeList(handle uintptr) ([]byte, uintptr, error) {
+	var size uintptr
+	initializeAttributeList.Call(0, 1, 0, uintptr(unsafe.Pointer(&size)))
+	if size == 0 {
+		return nil, 0, fmt.Errorf("InitializeProcThreadAttributeList did not report a size")
+	}
+
+	buffer := make([]byte, size)
+	list := uintptr(unsafe.Pointer(&buffer[0]))
+	ok, _, callError := initializeAttributeList.Call(
+		list,
+		1,
+		0,
+		uintptr(unsafe.Pointer(&size)),
+	)
+	if ok == 0 {
+		return nil, 0, lastError("InitializeProcThreadAttributeList", callError)
+	}
+	ok, _, callError = updateAttribute.Call(
+		list,
+		0,
+		procThreadAttributePseudoConsole,
+		handle,
+		unsafe.Sizeof(handle),
+		0,
+		0,
+	)
+	if ok == 0 {
+		deleteAttributeList.Call(list)
+		return nil, 0, lastError("UpdateProcThreadAttribute(pseudoconsole)", callError)
+	}
+	return buffer, list, nil
+}
+
+func createChild(executable string, args []string) (syscall.ProcessInformation, *pseudoConsole, error) {
 	applicationName, err := syscall.UTF16PtrFromString(executable)
 	if err != nil {
-		return syscall.ProcessInformation{}, fmt.Errorf("invalid executable path: %w", err)
+		return syscall.ProcessInformation{}, nil, fmt.Errorf("invalid executable path: %w", err)
 	}
 	command, err := syscall.UTF16PtrFromString(commandLine(executable, args))
 	if err != nil {
-		return syscall.ProcessInformation{}, fmt.Errorf("invalid command line: %w", err)
+		return syscall.ProcessInformation{}, nil, fmt.Errorf("invalid command line: %w", err)
 	}
 
-	startup := syscall.StartupInfo{
-		Cb:        uint32(unsafe.Sizeof(syscall.StartupInfo{})),
-		Flags:     startfUseStdHandles,
-		StdInput:  syscall.Handle(os.Stdin.Fd()),
-		StdOutput: syscall.Handle(os.Stdout.Fd()),
-		StdErr:    syscall.Handle(os.Stderr.Fd()),
+	console, err := createHeadlessConsole()
+	if err != nil {
+		return syscall.ProcessInformation{}, nil, err
+	}
+	attributeBuffer, attributeList, err := pseudoConsoleAttributeList(console.handle)
+	if err != nil {
+		console.close()
+		return syscall.ProcessInformation{}, nil, err
+	}
+	defer deleteAttributeList.Call(attributeList)
+
+	startup := startupInfoEx{
+		startupInfo: syscall.StartupInfo{
+			Cb:        uint32(unsafe.Sizeof(startupInfoEx{})),
+			Flags:     startfUseStdHandles,
+			StdInput:  syscall.Handle(os.Stdin.Fd()),
+			StdOutput: syscall.Handle(os.Stdout.Fd()),
+			StdErr:    syscall.Handle(os.Stderr.Fd()),
+		},
+		attributeList: attributeList,
 	}
 	process := syscall.ProcessInformation{}
-	// Radius hangs without DETACHED_PROCESS on Windows ARM64. The launcher itself
-	// is a GUI-subsystem executable, so detaching the child creates no console.
 	err = syscall.CreateProcess(
 		applicationName,
 		command,
 		nil,
 		nil,
 		true,
-		detachedProcess|createSuspended,
+		extendedStartupInfoPresent|createSuspended,
 		nil,
 		nil,
-		&startup,
+		&startup.startupInfo,
 		&process,
 	)
+	runtime.KeepAlive(attributeBuffer)
 	if err != nil {
-		return syscall.ProcessInformation{}, fmt.Errorf("CreateProcessW(%q): %w", executable, err)
+		console.close()
+		return syscall.ProcessInformation{}, nil, fmt.Errorf("CreateProcessW(%q): %w", executable, err)
 	}
-	return process, nil
+	return process, console, nil
 }
 
 func run(args []string) int {
@@ -176,12 +312,14 @@ func run(args []string) int {
 	if err != nil {
 		return fail("%v", err)
 	}
-	defer closeWindowsHandle(job)
 
-	child, err := createChild(args[1], args[2:])
+	child, console, err := createChild(args[1], args[2:])
 	if err != nil {
+		closeWindowsHandle(job)
 		return fail("%v", err)
 	}
+	defer console.close()
+	defer closeWindowsHandle(job)
 	defer closeWindowsHandle(child.Process)
 	defer closeWindowsHandle(child.Thread)
 
