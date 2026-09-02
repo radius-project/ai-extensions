@@ -140,7 +140,6 @@ describe("scripts/plugins.mjs", () => {
       PLUGIN_SBOM_ARTIFACT: "plugin-sbom-radius-aws",
       PLUGIN_TARBALL: "radius-aws-plugin.tar.gz",
       PLUGIN_SBOM: "radius-aws-plugin.spdx.json",
-      PLUGIN_AWESOME_COPILOT: "radius-aws-awesome-copilot.zip",
       PLUGIN_CHANNEL_BRANCH: "releases/radius-aws/edge",
       PLUGIN_CHANNEL_TAG: "radius-aws@edge",
       PLUGIN_SOURCE_TAG: "radius-aws@2.1.0",
@@ -152,17 +151,12 @@ describe("scripts/plugins.mjs", () => {
     const root = writeRepository({ radius: "radius" });
     const assets = (version) => {
       const result = env(root, "--env", "radius", "--version", version);
-      return [
-        result.PLUGIN_TARBALL,
-        result.PLUGIN_SBOM,
-        result.PLUGIN_AWESOME_COPILOT
-      ];
+      return [result.PLUGIN_TARBALL, result.PLUGIN_SBOM];
     };
 
     expect(assets("1.2.0")).toEqual([
       "radius-plugin.tar.gz",
-      "radius-plugin.spdx.json",
-      "radius-awesome-copilot.zip"
+      "radius-plugin.spdx.json"
     ]);
     expect(assets("9.0.0")).toEqual(assets("1.2.0"));
   });
@@ -177,8 +171,7 @@ describe("scripts/plugins.mjs", () => {
       "PLUGIN_ARTIFACT",
       "PLUGIN_SBOM_ARTIFACT",
       "PLUGIN_TARBALL",
-      "PLUGIN_SBOM",
-      "PLUGIN_AWESOME_COPILOT"
+      "PLUGIN_SBOM"
     ]);
     expect(env(root, "--env", "radius", "--channel", "edge")).toMatchObject({
       PLUGIN_CHANNEL_BRANCH: "releases/radius/edge",

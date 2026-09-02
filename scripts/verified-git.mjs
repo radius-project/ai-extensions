@@ -452,11 +452,7 @@ async function verifyCompletion(args) {
   if (!release || release.draft !== false) {
     fail(`${refs.PLUGIN_SOURCE_TAG} does not have a published GitHub release`);
   }
-  const expectedAssets = [
-    refs.PLUGIN_TARBALL,
-    refs.PLUGIN_SBOM,
-    refs.PLUGIN_AWESOME_COPILOT
-  ].sort();
+  const expectedAssets = [refs.PLUGIN_TARBALL, refs.PLUGIN_SBOM].sort();
   const actualAssets = (release.assets ?? []).map((asset) => asset.name).sort();
   if (JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {
     fail(`${refs.PLUGIN_SOURCE_TAG} does not have exactly the expected assets`);

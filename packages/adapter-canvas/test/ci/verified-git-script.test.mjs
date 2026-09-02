@@ -160,11 +160,7 @@ async function completionApi({
   rootExtensionBlob = EXTENSION_BLOB,
   bundledExtensionBlob = rootExtensionBlob,
   releaseDraft = false,
-  releaseAssets = [
-    "radius-plugin.tar.gz",
-    "radius-plugin.spdx.json",
-    "radius-awesome-copilot.zip"
-  ]
+  releaseAssets = ["radius-plugin.tar.gz", "radius-plugin.spdx.json"]
 } = {}) {
   const calls = [];
   const publishedVersion = commitVersion ?? packageVersion;
@@ -965,7 +961,6 @@ describe("scripts/verified-git.mjs", () => {
           releaseAssets: [
             "radius-plugin.tar.gz",
             "radius-plugin.spdx.json",
-            "radius-awesome-copilot.zip",
             "unexpected.txt"
           ]
         },

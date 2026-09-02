@@ -51,7 +51,7 @@ git ls-remote origin "refs/tags/radius@<version>" \
   "refs/heads/releases/radius/v<version>"
 ```
 
-A stable release publishes exactly one tag, `radius@<version>`, and it points at the artifact commit that `releases/radius/v<version>` holds. Each released plugin gets its own release carrying three static asset names: `<plugin>-plugin.tar.gz`, `<plugin>-plugin.spdx.json`, and `<plugin>-awesome-copilot.zip`. CI downloads and compares all three, then requires the branch, tag, published release, and asset set to verify together before it reports success. Every install branch is also checked to be a zero-parent orphan commit that GitHub signed. Then install or update the plugin from the marketplace and confirm it reports the new version.
+A stable release publishes exactly one tag, `radius@<version>`, and it points at the artifact commit that `releases/radius/v<version>` holds. Each released plugin gets its own release carrying two static asset names: `<plugin>-plugin.tar.gz` and `<plugin>-plugin.spdx.json`. CI downloads and compares both, then requires the branch, tag, published release, and asset set to verify together before it reports success. Every install branch is also checked to be a zero-parent orphan commit that GitHub signed. Then install or update the plugin from the marketplace and confirm it reports the new version.
 
 Every commit targeted by a release tag should report `verified: true`, attributed to the release GitHub App. The generated tags are lightweight refs, so verification belongs to their target commit. Confirm it from the command line with:
 
@@ -59,15 +59,6 @@ Every commit targeted by a release tag should report `verified: true`, attribute
 gh api "repos/{owner}/{repo}/commits/$(git rev-parse "refs/tags/radius@<version>")" \
   --jq .commit.verification
 ```
-
-## Refresh the awesome-copilot listing
-
-Optional, and only after the release has shipped. Download `<plugin>-awesome-copilot.zip` from the release; it contains the `.github/plugin/marketplace.json` and `plugins/external.json` entries already pinned to this release's artifact commit SHA, plus the released `plugins/<plugin>/plugin.json` and `README.md` for the reviewer.
-
-The release package assumes this repository is public when the listing is submitted to `github/awesome-copilot`.
-
-- **Not listed yet?** Open [github/awesome-copilot](https://github.com/github/awesome-copilot)'s **external plugin issue form** and copy the fields out of the entry. Public contributors may not open a pull request for a first listing.
-- **Already listed?** Fork `main`, splice the entry from each file into the corresponding file, and open a pull request. Their automation re-runs the quality gates against the pinned SHA.
 
 ## If something fails
 

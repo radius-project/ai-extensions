@@ -171,8 +171,7 @@ export function pluginRefs(plugin, { version, channel } = {}) {
     PLUGIN_ARTIFACT: `plugin-dist-${plugin.name}`,
     PLUGIN_SBOM_ARTIFACT: `plugin-sbom-${plugin.name}`,
     PLUGIN_TARBALL: `${plugin.name}-plugin.tar.gz`,
-    PLUGIN_SBOM: `${plugin.name}-plugin.spdx.json`,
-    PLUGIN_AWESOME_COPILOT: `${plugin.name}-awesome-copilot.zip`
+    PLUGIN_SBOM: `${plugin.name}-plugin.spdx.json`
   };
   if (channel !== undefined && channel !== "") {
     if (!CHANNELS.includes(channel)) {
