@@ -36,6 +36,7 @@ import {
   type SpawnRadOptions,
   type BicepCompileConfig
 } from "./rad.js";
+import { radSpawnOptions } from "./rad-process.mjs";
 
 const RAD = `rad${process.platform === "win32" ? ".exe" : ""}`;
 const BICEP = `bicep${process.platform === "win32" ? ".exe" : ""}`;
@@ -123,6 +124,27 @@ describe("managed rad platform paths", () => {
     expect(() => releaseAsset("linux", "ia32")).toThrow("Unsupported platform");
     expect(() => releaseAsset("win32", "arm")).toThrow("Unsupported platform");
   });
+});
+
+describe("managed rad process options", () => {
+  it("keeps Windows processes in the caller job with hidden windows and piped output", () => {
+    expect(radSpawnOptions("win32")).toEqual({
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      detached: false
+    });
+  });
+
+  it.each<NodeJS.Platform>(["darwin", "linux"])(
+    "keeps a detached process group on %s for tree cancellation",
+    (platform) => {
+      expect(radSpawnOptions(platform)).toEqual({
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+        detached: true
+      });
+    }
+  );
 });
 
 describe("managed Bicep", () => {
