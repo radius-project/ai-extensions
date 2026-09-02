@@ -217,13 +217,28 @@ describe("write-app-origin", () => {
   // Recording blank is correct but must not be silent: the likeliest cause is a
   // caller that should have passed a version, and an unexplained blank switches
   // the generator comparison off for this model with nothing to show for it.
-  it("warns that it left the generator version unknown", () => {
+  // The two causes need different fixes, so the warning names which one it was
+  // rather than claiming no flag was supplied when one was.
+  it("warns that no version value reached it", () => {
     const repo = checkout();
 
     const result = run([repo.appPath], repo.root);
 
     expect(result.status).toBe(0);
-    expect(result.stderr).toMatch(/no --skill-version was supplied/u);
+    expect(result.stderr).toMatch(/no --skill-version value was supplied/u);
+  });
+
+  it("names the placeholder as the cause when the prompt never substituted it", () => {
+    const repo = checkout();
+
+    const result = run(
+      [repo.appPath, "--skill-version", "<loaded-skill-version>"],
+      repo.root
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("<loaded-skill-version>");
+    expect(result.stderr).not.toMatch(/no --skill-version value was supplied/u);
   });
 
   // The warning is advisory. A version that WAS supplied is recorded without

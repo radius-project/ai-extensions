@@ -107,16 +107,21 @@ const PLACEHOLDER = "<loaded-skill-version>";
 // they cannot escape or diagnose. Refusing to write the record at all would be
 // worse still: the model would then read as unverified on every graph open.
 const requested = flag("skill-version");
-const skillVersion = requested === PLACEHOLDER ? "" : requested;
+const placeholderPassed = requested === PLACEHOLDER;
+const skillVersion = placeholderPassed ? "" : requested;
 if (!skillVersion) {
   // Not a failure, so the record is still written and the run still succeeds.
   // But a blank version silently switches the generator-drift check off for
-  // this model, and the likeliest cause is a caller that should have passed a
-  // version and did not — an older SKILL.md, or a hand-run command. Saying so
-  // on stderr keeps "we deliberately recorded unknown" from being
-  // indistinguishable from "nobody told us and nobody noticed".
+  // this model, so say which of the two causes produced it. They need
+  // different fixes: an unsubstituted placeholder means the caller passed the
+  // prompt's literal text instead of a version, while a missing flag usually
+  // means an older SKILL.md or a hand-run command that never passed one.
+  const consequence =
+    "the origin record leaves the generator version unknown, so later freshness checks will skip the generator comparison for this model.";
   console.error(
-    "warning: no --skill-version was supplied, so the origin record leaves the generator version unknown and later freshness checks will skip the generator comparison for this model."
+    placeholderPassed ?
+      `warning: --skill-version was given the literal ${PLACEHOLDER}, which is the prompt's placeholder rather than a version, so ${consequence}`
+    : `warning: no --skill-version value was supplied, so ${consequence}`
   );
 }
 
