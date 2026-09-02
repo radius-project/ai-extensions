@@ -45,7 +45,9 @@ The skill writes an **origin record**, `.radius/app.origin.json`, next to the ap
 
 `appBicepHash` is a SHA-256 of the app model text, ignoring line endings and trailing spaces so a different checkout of the same file does not look like an edit. Fingerprinting the file again later and comparing it to this value answers two questions. First, whether someone edited the app model after it was generated. Second, whether the file on disk is the one that passed the checker, since the record is only written once it does. That is how we know it compiles without compiling it again.
 
-`skillVersion` is the version of the Radius plugin that produced the app model, read from the plugin's own `package.json` when it runs. A local build reads `0.0.0`, and CI gives a published build a version like `0.1.0-edge-0b33186`. Comparing it against the installed version is how we spot an app model an older skill generated.
+`skillVersion` is the version of the Radius plugin that produced the app model. It is **handed to the writer** by the canvas, through the `radius_generate_app` handoff, rather than worked out by the writer itself. A local build reads `0.0.0`, and CI gives a published build a version like `0.1.0-edge-0b33186`. Comparing it against the installed version is how we spot an app model an older skill generated.
+
+That the value is handed over rather than discovered is load-bearing, not incidental. The comparison reads the package manifest sitting beside the bundle the canvas actually loaded, so a writer that read a manifest of its own — relative to wherever the script happens to live — would be answering a different question. Two copies of the plugin can be installed at once, with identical directory layouts and different versions, and then the two halves of the check disagree permanently: the app model is reported stale on every graph open, and regenerating writes the same mismatched pair again ([#694](https://github.com/radius-project/ai-extensions/issues/694)). One value, resolved once, passed along.
 
 The file is JSON because only code reads and writes it, so `JSON.parse` is enough and there is no need to depend on a YAML parser. The keys are always written in the same order and format, so regenerating an unchanged app model does not show up as a diff.
 
@@ -70,6 +72,18 @@ A manual edit is checked against the others rather than on its own, because on i
 It is not what keeps a broken app model out of the view either. `rad app graph` compiles the app model to build the graph, so a manual edit that breaks the Bicep fails the build and puts the compiler's own error on the graph surface, which tells the user more than a warning from us would.
 
 `evaluateAppModelFreshness` in `packages/core/src/modeling/app-origin.ts` does the deciding and nothing else. It is handed the app model text, the origin record, and the answers above, and returns one of those results. Anything it cannot be told is skipped rather than counted as a failure.
+
+### Why there is no separate "unreconcilable version" outcome
+
+Passing the version along removes the cause, but it cannot repair records already on disk, and it cannot stop someone passing a wrong version by hand. It is tempting to add a distinct outcome for a mismatch that regenerating has already failed to clear, and to stop asking in that case.
+
+We do not, for two reasons.
+
+The loop is already bounded. Every regeneration request goes through `shouldRequestRefresh`, whose key is the branch, the classification, and the evidence — the recorded commit and version — and *not* the time the record was written. A regeneration that reproduces the same mismatched pair therefore produces the same key, and the request is suppressed. Within one extension process the user is asked exactly once, which is the behaviour we want anyway.
+
+And the mismatch now heals itself. A regeneration run by a writer that records the version it was handed replaces the disputed value with the one the canvas resolves for itself, so the second graph open agrees. The case that survives is a *stale duplicate copy* whose own writer still guesses; that one is bounded by the memo above, and the honest fix is to remove the duplicate.
+
+Detecting the repeat would mean proving that a record came from a generation this canvas asked for. Wall-clock time cannot prove it. A record stamped after the canvas started may have been written by another session, pulled in from a colleague's branch, or produced by a machine whose clock runs ahead — and treating any of those as proof would suppress a regeneration that a genuine generator upgrade needs, while telling the user their installation is broken when it is not. Suppressing a real refresh on a guess is a worse failure than asking once too often, so the check stays out until there is a signal that actually establishes causation.
 
 ### What happens when an app model is stale
 
@@ -126,12 +140,13 @@ That command only works on the branch the workspace has checked out. On any othe
 
 ### Error handling
 
-| If we cannot                                               | What happens                                          |
-|------------------------------------------------------------|-------------------------------------------------------|
-| Read the app model                                         | Treated as if there is none, and the skill writes one |
-| Read or parse the origin record                            | Treated as if it was never recorded                   |
-| Work out the source commit, or the installed skill version | That check is skipped                                 |
-| Tell whether the app model is committed                    | Treated as not recoverable, so the agent asks first   |
+| If we cannot                                               | What happens                                                                                            |
+|------------------------------------------------------------|---------------------------------------------------------------------------------------------------------|
+| Read the app model                                         | Treated as if there is none, and the skill writes one                                                   |
+| Read or parse the origin record                            | Treated as if it was never recorded                                                                     |
+| Work out the source commit, or the installed skill version | That check is skipped                                                                                   |
+| Tell whether the app model is committed                    | Treated as not recoverable, so the agent asks first                                                     |
+| Tell the writer which version it is recording              | An empty version is recorded with a warning on stderr, so the skill check is skipped for that app model |
 
 The rule is the same in each case: a failed read never causes us to overwrite an app model. Regenerating replaces the user's file, so it should follow evidence.
 
@@ -160,3 +175,5 @@ A graph is only ever held back once. If the app model is not regenerated, becaus
 - **Compile the app model every time a graph opens.** This tells us whether the app model is valid, but says nothing about whether it matches the current source, and adds a compile to every open. The origin record answers both questions.
 - **Treat the app model as ours and always overwrite it.** The simplest rule, and it removes the need to ask the user anything. Rejected because people do edit these files, for custom types and recipe packs and tuned settings, and losing that work silently is worse than an occasional prompt.
 - **Only regenerate when the installed skill is newer.** Rejected because comparing versions like `0.1.0-edge-0b33186` is easy to get wrong, and a downgrade is also a reason to distrust the app model.
+- **Stop treating a version mismatch as a reason to regenerate when the source commit and the fingerprint both still match.** This would have made the duplicate-install problem disappear, since in that case the app model really is current and only its label is disputed. Rejected because it deletes goal 2 to work around an installation fault. A new generator can produce different output from unchanged source — that is the entire reason a generator version is recorded — so an app model whose source has not moved is exactly the case where a genuine upgrade still needs to regenerate.
+- **Detect the repeat by comparing the record's timestamp against when the canvas started**, and stop asking when a record written during this session still disagrees. Rejected because wall-clock time does not establish what it would need to establish. A record stamped after the canvas started may have come from another session, from a colleague's branch that was pulled in, or from a machine whose clock runs ahead, and treating any of those as proof would suppress the regeneration a genuine upgrade needs while blaming an installation that is fine. See [Why there is no separate "unreconcilable version" outcome](#why-there-is-no-separate-unreconcilable-version-outcome).
