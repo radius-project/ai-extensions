@@ -39,6 +39,13 @@ export function terminateChildTree(
   waitMs?: number
 ): Promise<void>;
 
+export const DRAIN_WAIT_MS: number;
+
+export function drainChildStreams(
+  child: ChildProcess | null | undefined,
+  waitMs?: number
+): Promise<void>;
+
 export function windowsLauncherFilename(architecture: string): string;
 
 export function resolveWindowsLauncherPath(

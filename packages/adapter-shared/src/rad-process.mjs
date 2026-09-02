@@ -189,6 +189,48 @@ export function terminateChildTree(child, waitMs = TERMINATION_WAIT_MS) {
   });
 }
 
+// How long a cancelled command waits for the stdio pipes to finish flushing
+// once the tree is gone. The success path prefers `close` over `exit` because
+// that is when stdout and stderr are complete; cancellation wants the same
+// output but cannot wait as long, since a descendant that inherited a pipe can
+// hold it open after the process it belonged to is dead.
+export const DRAIN_WAIT_MS = 250;
+
+function releaseChildStreams(child) {
+  for (const stream of [child?.stdout, child?.stderr]) {
+    try {
+      stream?.destroy();
+    } catch {
+      // Best-effort cleanup.
+    }
+  }
+}
+
+// Cancellation and timeout stop the promise from ever reaching finalize(), so
+// without this the stdio pipes and their listeners are never released. Releasing
+// them at the point of cancellation instead would truncate whatever Node had not
+// drained yet, so the release waits -- briefly, and bounded -- for the flush.
+export function drainChildStreams(child, waitMs = DRAIN_WAIT_MS) {
+  return new Promise((resolve) => {
+    const flushed = (stream) =>
+      !stream || stream.readableEnded === true || stream.destroyed === true;
+    if (!child || (flushed(child.stdout) && flushed(child.stderr))) {
+      releaseChildStreams(child);
+      resolve();
+      return;
+    }
+    let timer = null;
+    const done = () => {
+      if (timer) clearTimeout(timer);
+      child.removeListener("close", done);
+      releaseChildStreams(child);
+      resolve();
+    };
+    timer = setTimeout(done, waitMs);
+    child.once("close", done);
+  });
+}
+
 /**
  * spawnRad - the process-handling core every managed-rad invocation needs:
  * spawn `radPath args`, capture stdout/stderr (capped at 32MB), and resolve
@@ -227,9 +269,11 @@ export function spawnRad(
       if (settled) return;
       settled = true;
       cleanup();
-      void terminateChildTree(child).then(() => {
-        reject(new RadProcessError(`${label} aborted`, stdout, stderr));
-      });
+      void terminateChildTree(child)
+        .then(() => drainChildStreams(child))
+        .then(() => {
+          reject(new RadProcessError(`${label} aborted`, stdout, stderr));
+        });
     };
     child.stdout?.on("data", (chunk) => {
       if (stdout.length < maxOutput) stdout += chunk.toString();
@@ -242,15 +286,17 @@ export function spawnRad(
       if (settled) return;
       settled = true;
       cleanup();
-      void terminateChildTree(child).then(() => {
-        reject(
-          new RadProcessError(
-            `${label} timed out after ${timeout}ms`,
-            stdout,
-            stderr
-          )
-        );
-      });
+      void terminateChildTree(child)
+        .then(() => drainChildStreams(child))
+        .then(() => {
+          reject(
+            new RadProcessError(
+              `${label} timed out after ${timeout}ms`,
+              stdout,
+              stderr
+            )
+          );
+        });
     }, timeout);
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();

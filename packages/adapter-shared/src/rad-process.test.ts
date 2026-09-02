@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  drainChildStreams,
   radSpawnCommand,
   resolveWindowsLauncherPath,
   spawnRad,
@@ -211,5 +212,62 @@ describe("Radius child tree termination completion", () => {
 
   it("tolerates a child that was never created", async () => {
     await expect(terminateChildTree(null)).resolves.toBeUndefined();
+  });
+});
+
+describe("Radius child stdio release", () => {
+  it("releases the pipes once a cancelled command has drained them", async () => {
+    const child = spawn(process.execPath, [
+      "-e",
+      'process.stdout.write("captured");'
+    ]);
+    let seen = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      seen += chunk.toString();
+    });
+
+    await drainChildStreams(child);
+
+    // Cancellation never reaches finalize(), so without this the pipes and
+    // their listeners stay attached for the lifetime of the process.
+    expect(child.stdout?.destroyed).toBe(true);
+    expect(child.stderr?.destroyed).toBe(true);
+    expect(seen).toBe("captured");
+  });
+
+  it("waits for the flush instead of cutting output short", async () => {
+    // `close` is what says stdout and stderr are complete. A child whose output
+    // is still in flight must not have its pipes destroyed before then.
+    const child = spawn(process.execPath, [
+      "-e",
+      'setTimeout(() => process.stdout.write("late"), 120);'
+    ]);
+    let seen = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      seen += chunk.toString();
+    });
+
+    await drainChildStreams(child, 4000);
+
+    expect(seen).toBe("late");
+  });
+
+  it("gives up on a pipe that never closes rather than stranding the caller", async () => {
+    // A descendant can inherit a pipe and hold it open after the process it
+    // belonged to is gone, so the drain is bounded like the termination wait.
+    const child = Object.assign(new EventEmitter(), {
+      stdout: { readableEnded: false, destroyed: false, destroy: () => {} },
+      stderr: { readableEnded: false, destroyed: false, destroy: () => {} },
+      removeListener: () => {}
+    });
+
+    const started = Date.now();
+    await drainChildStreams(child as never, 40);
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(30);
+  });
+
+  it("tolerates a child that was never created", async () => {
+    await expect(drainChildStreams(null)).resolves.toBeUndefined();
   });
 });

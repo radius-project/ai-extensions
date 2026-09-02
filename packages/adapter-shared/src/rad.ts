@@ -36,6 +36,7 @@ import {
   filterGraphVisualizationResources
 } from "@radius-project/core";
 import {
+  drainChildStreams,
   killChildTree,
   managedBicepEnv as processManagedBicepEnv,
   RadProcessError,
@@ -45,7 +46,13 @@ import {
 } from "./rad-process.mjs";
 import type { ProcessResult, SpawnRadOptions } from "./rad-process.mjs";
 
-export { killChildTree, RadProcessError, spawnRad, terminateChildTree };
+export {
+  drainChildStreams,
+  killChildTree,
+  RadProcessError,
+  spawnRad,
+  terminateChildTree
+};
 export type { ProcessResult, SpawnRadOptions };
 
 // --- Shared named types -----------------------------------------------------
@@ -1239,10 +1246,13 @@ export async function runRadAppGraph(
         // draining a process that is still running, so a noisy command can
         // block on backpressure instead of terminating. spawnRad does the same.
         stopWatching();
-        void terminateChildTree(child).then(() => {
-          destroyStreams();
-          reject(new RadProcessError("rad app graph aborted", stdout, stderr));
-        });
+        void terminateChildTree(child)
+          .then(() => drainChildStreams(child))
+          .then(() => {
+            reject(
+              new RadProcessError("rad app graph aborted", stdout, stderr)
+            );
+          });
       };
       child.stdout?.on("data", (c: Buffer) => {
         if (stdout.length < MAX) stdout += c.toString();
@@ -1254,16 +1264,17 @@ export async function runRadAppGraph(
       const timer = setTimeout(() => {
         if (settled) return;
         stopWatching();
-        void terminateChildTree(child).then(() => {
-          destroyStreams();
-          reject(
-            new RadProcessError(
-              `rad app graph timed out after ${timeout}ms`,
-              stdout,
-              stderr
-            )
-          );
-        });
+        void terminateChildTree(child)
+          .then(() => drainChildStreams(child))
+          .then(() => {
+            reject(
+              new RadProcessError(
+                `rad app graph timed out after ${timeout}ms`,
+                stdout,
+                stderr
+              )
+            );
+          });
       }, timeout);
 
       const stopWatching = (): void => {
