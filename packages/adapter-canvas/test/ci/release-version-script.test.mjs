@@ -180,13 +180,21 @@ describe("scripts/release-version.mjs", () => {
     expect(existsSync(join(root, ".changeset", "radius.md"))).toBe(false);
     expect(existsSync(join(root, ".changeset", "radius-aws.md"))).toBe(true);
 
+    expect(
+      JSON.parse(
+        readFileSync(join(root, "plugins", "radius", "plugin.json"), "utf8")
+      ).version
+    ).toBe("1.1.0");
+
+    // Versioning leaves the catalog on main alone; each publish stamps the
+    // throwaway copy it ships.
     const marketplace = JSON.parse(
       readFileSync(join(root, ".github", "plugin", "marketplace.json"), "utf8")
     );
     expect(
       marketplace.plugins.map(({ name, version }) => [name, version])
     ).toEqual([
-      ["radius", "1.1.0"],
+      ["radius", "1.0.0"],
       ["radius-aws", "1.0.0"]
     ]);
     expect(marketplace.metadata.version).toBe("1.0.0");

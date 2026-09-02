@@ -212,7 +212,7 @@ describe("credential profile parsing and markup", () => {
     );
   });
 
-  it("renders escaped rows with row action markup", () => {
+  it("renders escaped AWS rows without an environment creation action", () => {
     const hostile = '<img src=x onerror="alert(1)">';
     const markup = credentialRowsMarkup([
       {
@@ -232,11 +232,51 @@ describe("credential profile parsing and markup", () => {
     // profile's values at creation, so editing one could never update the
     // environments already created from it.
     expect(markup).not.toContain("js-cred-edit");
-    expect(markup).toContain("js-cred-createenv");
+    expect(markup).not.toContain("js-cred-createenv");
+    expect(markup).toContain(
+      'disabled title="AWS environments are not yet supported"'
+    );
     expect(markup).toContain("js-cred-delete");
     expect(markup).toContain("AWS");
     expect(markup).toContain("<td>Verified</td>");
     expect(markup).not.toContain("rad-dot");
+  });
+
+  it("keeps environment creation enabled for Azure profiles", () => {
+    const markup = credentialRowsMarkup([
+      {
+        name: "acme-azure",
+        provider: "azure",
+        status: "verified",
+        tenantId: "",
+        subscriptionId: "",
+        accountId: "",
+        region: "",
+        roleArn: ""
+      }
+    ]);
+    expect(markup).toContain("js-cred-createenv");
+    expect(markup).not.toContain("AWS environments are not yet supported");
+  });
+
+  it("disables environment creation for unknown credential providers", () => {
+    const markup = credentialRowsMarkup([
+      {
+        name: "future-profile",
+        provider: "future-cloud",
+        status: "verified",
+        tenantId: "",
+        subscriptionId: "",
+        accountId: "",
+        region: "",
+        roleArn: ""
+      }
+    ]);
+    expect(markup).not.toContain("js-cred-createenv");
+    expect(markup).toContain(
+      'disabled title="This credential provider is not supported"'
+    );
+    expect(markup).toContain("future-cloud");
   });
 });
 

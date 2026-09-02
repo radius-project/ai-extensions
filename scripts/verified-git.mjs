@@ -23,10 +23,10 @@
 //         Fails unless the tag resolves to the expected GitHub-Verified commit.
 //   node scripts/verified-git.mjs verify-artifact --branch <branch>
 //         --plugin <name> --version <version> --source <sha>
-//   node scripts/verified-git.mjs inspect-artifact --branch <branch>
-//         --plugin <name>
 //   node scripts/verified-git.mjs verify-completion --plugin <name>
-//         --version <version> --source <sha>
+//         --version <version> [--source <sha>]
+//         Fails unless the versioned orphan branch, the one release tag on its
+//         commit, and the published release with its exact assets all exist.
 //
 // Writes require a GitHub App installation token with contents write; verifies
 // require a token with contents read.
@@ -300,13 +300,7 @@ async function readJsonBlob(entry, label) {
   }
 }
 
-async function verifyArtifactState({
-  plugin,
-  version,
-  source,
-  branch,
-  requireCurrentLayout = false
-}) {
+async function verifyArtifactState({ plugin, version, source, branch }) {
   const ref = await readRef(`refs/heads/${branch}`, true);
   if (!ref) fail(`refs/heads/${branch} does not exist`);
   if (ref.object?.type !== "commit") {
@@ -347,13 +341,12 @@ async function verifyArtifactState({
       .filter((entry) => entry.path.startsWith(`${bundledRoot}/`))
       .map((entry) => [entry.path.slice(bundledRoot.length + 1), entry.sha])
   );
-  if (requireCurrentLayout && rootAssets.size === 0) {
+  if (rootAssets.size === 0) {
     fail(`${branch} does not contain ${EXTENSION_ROOT}`);
   }
   if (
-    rootAssets.size > 0 &&
-    (rootAssets.size !== bundledAssets.size ||
-      [...rootAssets].some(([path, sha]) => bundledAssets.get(path) !== sha))
+    rootAssets.size !== bundledAssets.size ||
+    [...rootAssets].some(([path, sha]) => bundledAssets.get(path) !== sha)
   ) {
     fail(
       `${branch} does not bundle an exact copy of ${EXTENSION_ROOT} in ${bundledRoot}`
@@ -383,10 +376,7 @@ async function verifyArtifactState({
       commit.message.slice(messagePrefix.length)
     : undefined;
   requireSha(actualSource, `${branch} recorded source`);
-  if (
-    (requireCurrentLayout || packageJson.radiusSourceRef !== undefined) &&
-    packageJson.radiusSourceRef !== actualSource
-  ) {
+  if (packageJson.radiusSourceRef !== actualSource) {
     fail(
       `${packagePath} pins ${String(packageJson.radiusSourceRef)}, not recorded source ${actualSource}`
     );
@@ -429,38 +419,29 @@ async function verifyArtifact(args) {
   const branch = required(option(args, "--branch"), "--branch");
   console.log(
     JSON.stringify(
-      await verifyArtifactState({
-        plugin,
-        version,
-        source,
-        branch,
-        requireCurrentLayout: true
-      })
+      await verifyArtifactState({ plugin, version, source, branch })
     )
   );
-}
-
-async function inspectArtifact(args) {
-  const plugin = requirePlugin(option(args, "--plugin"));
-  const branch = required(option(args, "--branch"), "--branch");
-  console.log(JSON.stringify(await verifyArtifactState({ plugin, branch })));
 }
 
 async function verifyCompletion(args) {
   const plugin = requirePlugin(option(args, "--plugin"));
   const version = required(option(args, "--version"), "--version");
-  const source = requireSha(option(args, "--source"), "--source");
+  // A caller that already knows the source pins it; the release-completeness
+  // gate only knows the plugin and version, and reads the source back out of
+  // the artifact commit instead.
+  const pinned = option(args, "--source");
+  const source =
+    pinned === undefined ? undefined : requireSha(pinned, "--source");
   const refs = pluginRefs(plugin, { version });
   const artifact = await verifyArtifactState({
     plugin,
     version,
     source,
-    branch: refs.PLUGIN_PINNED_BRANCH,
-    requireCurrentLayout: true
+    branch: refs.PLUGIN_PINNED_BRANCH
   });
 
-  await verifyTagTarget(refs.PLUGIN_ARTIFACT_TAG, artifact.commit);
-  await verifyTagTarget(refs.PLUGIN_SOURCE_TAG, source);
+  await verifyTagTarget(refs.PLUGIN_SOURCE_TAG, artifact.commit);
 
   const release = await api(
     "GET",
@@ -471,11 +452,7 @@ async function verifyCompletion(args) {
   if (!release || release.draft !== false) {
     fail(`${refs.PLUGIN_SOURCE_TAG} does not have a published GitHub release`);
   }
-  const expectedAssets = [
-    refs.PLUGIN_TARBALL,
-    refs.PLUGIN_SBOM,
-    refs.PLUGIN_AWESOME_COPILOT
-  ].sort();
+  const expectedAssets = [refs.PLUGIN_TARBALL, refs.PLUGIN_SBOM].sort();
   const actualAssets = (release.assets ?? []).map((asset) => asset.name).sort();
   if (JSON.stringify(actualAssets) !== JSON.stringify(expectedAssets)) {
     fail(`${refs.PLUGIN_SOURCE_TAG} does not have exactly the expected assets`);
@@ -502,9 +479,6 @@ try {
       break;
     case "verify-artifact":
       await verifyArtifact(args);
-      break;
-    case "inspect-artifact":
-      await inspectArtifact(args);
       break;
     case "verify-completion":
       await verifyCompletion(args);
