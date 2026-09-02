@@ -47,7 +47,7 @@ Keep the search bounded (don't fetch the whole repo): a few dozen candidate file
 ### File-name patterns by category
 
 | Category       | Filename or path cues (basename unless the cue contains `/`, at any dir depth)                                                             |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+|----------------|--------------------------------------------------------------------------------------------------------------------------------------------|
 | mysql          | `db`,`database`,`persistence`,`connection`,`datastore`,`mysql`; `config/database`; `models/{index,db}`; `prisma/schema.prisma`; `knexfile` |
 | postgres       | `db`,`database`,`persistence`,`connection`,`datastore`,`postgres`,`pg`; `config/database`; `prisma/schema.prisma`; `knexfile`              |
 | redis          | `redis`,`cache`,`session`; `config/{redis,cache}`                                                                                          |
@@ -67,7 +67,7 @@ Source extensions considered for content scans: `.js .ts .mjs .cjs .jsx .tsx .py
 ### Initialization/content patterns by category
 
 | Category  | First-match line cues (case-insensitive)                                              |
-| --------- | ------------------------------------------------------------------------------------- |
+|-----------|---------------------------------------------------------------------------------------|
 | mysql     | `createConnection`, `createPool`, `mysql.connect`, `new MySQL`, `mysql2`              |
 | postgres  | `new Pool`, `pg.connect`, `new Client`, `createClient`, `psycopg`, `sqlalchemy`       |
 | redis     | `createClient`, `new Redis`, `Redis(`, `redis.connect`, `ioredis`                     |

@@ -55,7 +55,7 @@ platform**, **adding a canvas action/tool**, and **adding a new UI adapter**.
 
 ### Agentic skills
 
-Agentic skills live in [`plugins/radius/skills/`](./plugins/radius/skills), one directory
+Agentic skills live in [`extensions/radius/skills/`](./extensions/radius/skills), one directory
 per skill, each with a `SKILL.md` (name + description frontmatter and guidance)
 and optional `references/`. The skills (`radius-app-bicep`, `radius-app-graph`,
 `radius-environment`, `radius-deploy`) drive the same workflows the canvas
@@ -66,7 +66,7 @@ behavior, update the matching skill so the agent's guidance stays in sync.
 
 ```bash
 pnpm install
-pnpm build           # bundles the canvas extension -> plugins/radius/dist/
+pnpm build           # assembles the installable plugin -> .artifacts/radius/
 ```
 
 Other useful scripts:
@@ -125,7 +125,7 @@ pnpm changeset
 
 Select the affected packages, the bump level (`patch` / `minor` / `major`), and
 write a user-facing summary. Commit the generated `.changeset/*.md` file with
-your PR. Do not hand-edit any version: Changesets bumps `plugins/radius/package.json`, and `plugin.json` and `marketplace.json` are derived from it by `pnpm run version:sync`, which CI verifies. See [`RELEASING.md`](./docs/eng/RELEASING.md) for the version/tag convention and
+your PR. Do not hand-edit any version: Changesets bumps `extensions/radius/package.json`, and `plugin.json` and `marketplace.json` are derived from it by `pnpm run version:sync`, which CI verifies. See [`RELEASING.md`](./docs/eng/RELEASING.md) for the version/tag convention and
 release flow.
 
 Not every change ships something. A pull request without a changeset is never blocked - CI only leaves a reminder comment. If the omission is deliberate, either add an empty changeset with `pnpm changeset --empty` or label the pull request `pr:no-changeset`, which replaces the reminder with a note that it was waived.

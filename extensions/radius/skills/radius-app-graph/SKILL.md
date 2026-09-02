@@ -128,12 +128,12 @@ For the current graph view, keep the Canvas open while `.radius/app.bicep` is ge
 
 ## Related files
 
-- `plugins/radius/dist/extension.mjs` — React Flow rendering + styling (`radiusRenderGraph`)
-- `plugins/radius/dist/extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
+- `extension.mjs` — React Flow rendering + styling (`radiusRenderGraph`)
+- `extension.mjs` — provisioning/diff styling applied during render (`diffMode`, `provisioningState`)
 - `packages/adapter-shared/src/rad.ts` — modeled graph build via the real `rad app graph <app.bicep> --include-icons` CLI (`buildGraphViaRad`, downloads/caches the `rad` binary on first use). Exported from the shared adapter package `@radius-project/adapter-shared`.
 - `packages/core/src/graph/appgraph.ts` — converts `rad` application graph output into canvas resources (`applicationGraphToResources`), carrying `codeReference`/`definitionFile`/`definitionLine` through to the node
 - `packages/core/src/modeling/repo.ts` — fetches the skill-generated `app.bicep` from the repo (`fetchBicepFromRepo`); source-code reference discovery is now handled by this skill's AI agent (see [source-code-references.md](references/source-code-references.md))
 - `references/source-code-references.md` — how to locate and attach each resource's definition/initialization site so graph nodes deep-link to source
-- `plugins/radius/dist/extension.mjs` — graph diff computation + API handler (`/api/diff-branches`)
-- `plugins/radius/dist/extension.mjs` — repo file fetch helpers (`fetchFileFromRepo`) for `.radius/app.bicep` and `app.bicep`
-- `plugins/radius/dist/extension.mjs` — graph + diff pages (`graphPage`, `graphDiffPage`) and shared repo/branch dropdown logic
+- `extension.mjs` — graph diff computation + API handler (`/api/diff-branches`)
+- `extension.mjs` — repo file fetch helpers (`fetchFileFromRepo`) for `.radius/app.bicep` and `app.bicep`
+- `extension.mjs` — graph + diff pages (`graphPage`, `graphDiffPage`) and shared repo/branch dropdown logic

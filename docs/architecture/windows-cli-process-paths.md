@@ -137,7 +137,7 @@ graph LR
     Rad --> Bicep
 ```
 
-The planned `gh.ts` change therefore does not alter Radius CLI execution, Bicep compilation, application graph generation, `packages/core`, route contracts, persisted state, generated workflows, or cloud resource semantics. The built `plugins/radius/dist/extension.mjs` will contain the adapter fix because it bundles `packages/adapter-canvas`, but no other plugin source or runtime boundary changes.
+The planned `gh.ts` change therefore does not alter Radius CLI execution, Bicep compilation, application graph generation, `packages/core`, route contracts, persisted state, generated workflows, or cloud resource semantics. The built `.artifacts/radius/extension.mjs` will contain the adapter fix because it bundles `packages/adapter-canvas`, but no other plugin source or runtime boundary changes.
 
 ## Notable Details
 

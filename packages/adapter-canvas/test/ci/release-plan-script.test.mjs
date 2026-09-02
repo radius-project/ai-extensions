@@ -31,8 +31,10 @@ function writeJson(path, value) {
 
 function writePlugin(root, name, version, changelogVersions = [version]) {
   const dir = join(root, "plugins", name);
+  const extension = join(root, "extensions", name);
   mkdirSync(dir, { recursive: true });
-  writeJson(join(dir, "package.json"), {
+  mkdirSync(extension, { recursive: true });
+  writeJson(join(extension, "package.json"), {
     name,
     version,
     private: true,
@@ -41,7 +43,7 @@ function writePlugin(root, name, version, changelogVersions = [version]) {
   writeJson(join(dir, "plugin.json"), { name, version });
   writeFileSync(join(dir, "README.md"), `${name}\n`);
   writeFileSync(
-    join(dir, "CHANGELOG.md"),
+    join(extension, "CHANGELOG.md"),
     changelogVersions
       .map((entry) => `## ${entry}\n\nNotes for ${entry}.\n`)
       .join("\n")

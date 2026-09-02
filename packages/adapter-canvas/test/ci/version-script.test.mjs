@@ -19,7 +19,7 @@ const SCRIPTS = ["version.mjs", "plugins.mjs"].map((name) => [
 
 const MANIFEST = ".github/plugin/marketplace.json";
 const PLUGIN_MANIFEST = "plugins/radius/plugin.json";
-const SOURCE_OF_TRUTH = "plugins/radius/package.json";
+const SOURCE_OF_TRUTH = "extensions/radius/package.json";
 
 const RELEASED = "0.4.0";
 const SNAPSHOT = "0.5.0-edge-0b33186";
@@ -29,7 +29,7 @@ const temporaryRepositories = [];
 const objectSource = (ref, name = "radius") => ({
   source: "github",
   repo: "radius-project/ai-extensions",
-  path: `plugins/${name}/dist`,
+  path: `extensions/${name}`,
   ref
 });
 
@@ -50,7 +50,8 @@ function writeJson(file, value) {
 /** Adds a plugin directory the registry will discover. */
 function writePlugin(root, name, version = RELEASED) {
   mkdirSync(join(root, "plugins", name), { recursive: true });
-  writeJson(join(root, "plugins", name, "package.json"), {
+  mkdirSync(join(root, "extensions", name), { recursive: true });
+  writeJson(join(root, "extensions", name, "package.json"), {
     name,
     version,
     private: true,
@@ -65,7 +66,7 @@ function writePlugin(root, name, version = RELEASED) {
 }
 
 function writeChangelog(root, name, contents) {
-  writeFileSync(join(root, "plugins", name, "CHANGELOG.md"), contents);
+  writeFileSync(join(root, "extensions", name, "CHANGELOG.md"), contents);
 }
 
 function writeRepository(
@@ -183,7 +184,7 @@ describe("scripts/version.mjs across several plugins", () => {
       );
 
       expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain("plugins/radius-aws/CHANGELOG.md");
+      expect(result.stderr).toContain("extensions/radius-aws/CHANGELOG.md");
       expect(result.stderr).toContain(message);
     }
   );

@@ -66,17 +66,17 @@ additional UI surfaces beyond the Copilot canvas in the future.
 ## Agentic skills
 
 The repository also ships a set of agentic skills under
-[`plugins/radius/skills/`](./plugins/radius/skills). Each skill tells the agent how and when
+[`extensions/radius/skills/`](./extensions/radius/skills). Each skill tells the agent how and when
 to drive a part of the Radius workflow, and pairs with the matching canvas
 actions and tools:
 
-| Skill                                                                       | What it does                                                                                                                                        |
-|-----------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
-| [`radius-app-bicep`](./plugins/radius/skills/radius-app-bicep/SKILL.md)     | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies.                          |
-| [`radius-app-graph`](./plugins/radius/skills/radius-app-graph/SKILL.md)     | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.                                             |
-| [`radius-environment`](./plugins/radius/skills/radius-environment/SKILL.md) | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions.                                              |
-| [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md)           | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.                                             |
-| [`radius-delete`](./plugins/radius/skills/radius-delete/SKILL.md)           | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or delete a deploy environment and clean up its cloud state. |
+| Skill                                                                          | What it does                                                                                                                                        |
+|--------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
+| [`radius-app-bicep`](./extensions/radius/skills/radius-app-bicep/SKILL.md)     | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies.                          |
+| [`radius-app-graph`](./extensions/radius/skills/radius-app-graph/SKILL.md)     | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.                                             |
+| [`radius-environment`](./extensions/radius/skills/radius-environment/SKILL.md) | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions.                                              |
+| [`radius-deploy`](./extensions/radius/skills/radius-deploy/SKILL.md)           | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.                                             |
+| [`radius-delete`](./extensions/radius/skills/radius-delete/SKILL.md)           | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or delete a deploy environment and clean up its cloud state. |
 
 ## Architecture
 
@@ -97,7 +97,7 @@ Build the extension bundle locally:
 
 ```bash
 pnpm install
-pnpm build           # bundles the canvas extension -> plugins/radius/dist/
+pnpm build           # assembles the installable plugin -> .artifacts/radius/
 ```
 
 See [Contributing](./CONTRIBUTING.md) for prerequisites, the full development

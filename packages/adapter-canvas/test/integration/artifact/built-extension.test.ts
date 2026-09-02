@@ -31,13 +31,18 @@ import { browserEntryMarker } from "../../../src/browser/scripts.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
-const DIST = join(REPO_ROOT, "plugins", "radius", "dist");
+const DIST = join(REPO_ROOT, ".artifacts", "radius");
 const ARTIFACT = join(DIST, "extension.mjs");
 const SOURCE_MAP = `${ARTIFACT}.map`;
-const SOURCE_CHANGELOG = join(REPO_ROOT, "plugins", "radius", "CHANGELOG.md");
+const SOURCE_CHANGELOG = join(
+  REPO_ROOT,
+  "extensions",
+  "radius",
+  "CHANGELOG.md"
+);
 const SOURCE_SKILL = join(
   REPO_ROOT,
-  "plugins",
+  "extensions",
   "radius",
   "skills",
   "radius-app-bicep"
@@ -45,7 +50,7 @@ const SOURCE_SKILL = join(
 const DIST_SKILL = join(DIST, "skills", "radius-app-bicep");
 const SOURCE_CODE_REFERENCE = join(
   REPO_ROOT,
-  "plugins",
+  "extensions",
   "radius",
   "skills",
   "radius-app-graph",
@@ -132,15 +137,29 @@ function prepareBuildWorkspace(
 
   const sourcePlugin = join(REPO_ROOT, "plugins", "radius");
   const workspacePlugin = join(workspaceRoot, "plugins", "radius");
+  const sourceExtensionDir = join(REPO_ROOT, "extensions", "radius");
+  const workspaceExtensionDir = join(workspaceRoot, "extensions", "radius");
   mkdirSync(workspacePlugin, { recursive: true });
-  for (const entry of ["plugin.json", "package.json", "README.md"]) {
+  mkdirSync(workspaceExtensionDir, { recursive: true });
+  for (const entry of ["plugin.json", "README.md"]) {
     copyFileSync(join(sourcePlugin, entry), join(workspacePlugin, entry));
   }
-  cpSync(join(sourcePlugin, "skills"), join(workspacePlugin, "skills"), {
-    recursive: true
-  });
+  copyFileSync(
+    join(sourceExtensionDir, "package.json"),
+    join(workspaceExtensionDir, "package.json")
+  );
+  cpSync(
+    join(sourceExtensionDir, "skills"),
+    join(workspaceExtensionDir, "skills"),
+    { recursive: true }
+  );
+  cpSync(
+    join(sourceExtensionDir, "assets"),
+    join(workspaceExtensionDir, "assets"),
+    { recursive: true }
+  );
   if (missingAsset.length > 0) {
-    rmSync(join(workspacePlugin, "skills", ...missingAsset), {
+    rmSync(join(workspaceExtensionDir, "skills", ...missingAsset), {
       recursive: true
     });
   }
@@ -177,11 +196,11 @@ function assertCurrentArtifact(): void {
     ...filesUnder(join(REPO_ROOT, "packages", "core", "src")).filter(
       (path) => !path.endsWith(".test.ts")
     ),
-    join(REPO_ROOT, "plugins", "radius", "package.json"),
+    join(REPO_ROOT, "extensions", "radius", "package.json"),
     join(REPO_ROOT, "plugins", "radius", "plugin.json"),
     join(REPO_ROOT, "plugins", "radius", "README.md"),
     ...(existsSync(SOURCE_CHANGELOG) ? [SOURCE_CHANGELOG] : []),
-    ...filesUnder(join(REPO_ROOT, "plugins", "radius", "skills")),
+    ...filesUnder(join(REPO_ROOT, "extensions", "radius", "skills")),
     ...filesUnder(join(REPO_ROOT, ".github", "extension"))
   ];
   const newestInput = Math.max(
@@ -290,12 +309,22 @@ describe("P0-C built Radius extension artifact", () => {
         .filter((name) => name.endsWith(".mjs"))
         .sort()
     ).toEqual(["extension.mjs"]);
+    // The canvas gates discover the entry point under `extensions/`, and it
+    // loads the one bundle at the package root rather than copying it.
+    const entryPoint = join(DIST, "extensions", "extension.mjs");
+    const reExport = readFileSync(entryPoint, "utf8").match(
+      /export \* from "([^"]+)";/u
+    )?.[1];
+    expect(reExport).toBeTypeOf("string");
+    expect(resolve(dirname(entryPoint), reExport as string)).toBe(ARTIFACT);
     const packagedPaths = [
       "package.json",
       "plugin.json",
       "README.md",
       "LICENSE",
       "THIRD-PARTY-NOTICES.txt",
+      "assets/preview.png",
+      "extensions/extension.mjs",
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-bicep/scripts/show-radius-type.mjs",
@@ -349,7 +378,10 @@ describe("P0-C built Radius extension artifact", () => {
     }
 
     const sourcePackage = JSON.parse(
-      readFileSync(join(REPO_ROOT, "plugins", "radius", "package.json"), "utf8")
+      readFileSync(
+        join(REPO_ROOT, "extensions", "radius", "package.json"),
+        "utf8"
+      )
     ) as Record<string, unknown>;
     const builtPackage = JSON.parse(
       readFileSync(join(DIST, "package.json"), "utf8")
@@ -411,10 +443,10 @@ describe("P0-C built Radius extension artifact", () => {
       readFileSync(join(REPO_ROOT, "LICENSE"), "utf8")
     );
     for (const sourceSkill of filesUnder(
-      join(REPO_ROOT, "plugins", "radius", "skills")
+      join(REPO_ROOT, "extensions", "radius", "skills")
     )) {
       const relative = sourceSkill.slice(
-        join(REPO_ROOT, "plugins", "radius").length + 1
+        join(REPO_ROOT, "extensions", "radius").length + 1
       );
       if (
         relative.replaceAll("\\", "/") ===

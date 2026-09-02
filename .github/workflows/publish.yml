@@ -274,7 +274,7 @@ jobs:
           # refs pin the source commit recorded in the commit message.
           commit="$(node scripts/verified-git.mjs commit \
             --message "chore(release): publish ${PLUGIN_NAME}@${VERSION} for ${GITHUB_SHA}" \
-            --path "$PLUGIN_DIST" --path "$MANIFEST" \
+            --path "$PLUGIN_DIST=$PLUGIN_PUBLISH_DIR" --path "$MANIFEST" \
             --path ".github/extension" | jq -r .commit)"
 
           # Both names resolve to that one verified commit. They can no longer
