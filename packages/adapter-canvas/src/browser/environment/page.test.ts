@@ -206,7 +206,9 @@ function fixture(
   for (const id of REQUIRED_INPUTS) {
     if (!omitted.has(id)) add(createFakeInput(id));
   }
-  for (const id of REQUIRED_SELECTS) add(createFakeSelect(id));
+  for (const id of REQUIRED_SELECTS) {
+    if (!omitted.has(id)) add(createFakeSelect(id));
+  }
   const setValue = (id: string, value: string): void => {
     const element = browser.context.dom.inputById(id);
     if (!element) throw new Error(`Missing fixture input "${id}".`);
@@ -381,6 +383,18 @@ describe("initializeEnvironmentPage", () => {
     teardown();
     expect(page.browser.bindings.has(ENVIRONMENT_PAGE_ENTRY_KEY)).toBe(false);
     expect(page.browser.clock.pending).toBe(0);
+  });
+
+  it("initializes when optional namespace controls are absent", () => {
+    const page = fixture({
+      omit: ["azure-namespace-select", "aws-namespace-custom"]
+    });
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+
+    expect(page.browser.bindings.has(ENVIRONMENT_PAGE_ENTRY_KEY)).toBe(true);
+    teardown();
+    expect(page.browser.bindings.has(ENVIRONMENT_PAGE_ENTRY_KEY)).toBe(false);
   });
 
   it("survives a malformed escape in the query string and stays rebindable", async () => {
