@@ -267,7 +267,7 @@
       "scripts/promote-app-model.mjs",
       "scripts/validate-bicep.mjs",
       "scripts/write-app-origin.mjs",
-      "../radius-app-graph/references/source-code-references.md"
+      "references/source-code-references.md"
     ],
     "containsLegacyInlinedHeading": false
   }

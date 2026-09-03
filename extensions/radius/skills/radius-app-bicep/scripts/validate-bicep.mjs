@@ -385,7 +385,7 @@ function checkContainerImageBuildSources(
 // A container's codeReference must lead to the code the workload runs. These
 // packaging files describe how it is built or deployed instead, so they render a
 // link that answers the wrong question. Kept in step with the "Always skip" list
-// in radius-app-graph/references/source-code-references.md.
+// in ../references/source-code-references.md.
 const packagingBasenamePatterns = [
   /^dockerfile$/u,
   /^dockerfile\..+$/u,

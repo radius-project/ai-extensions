@@ -235,13 +235,14 @@ jobs:
               exit 1
             fi
 
-            # Rewriting main orphans the commit edge was published from, leaving
-            # a well-formed SHA that no longer exists here. Ancestry is then
-            # unknowable and every later push would wedge, so re-baseline the
-            # channel only when this run is main's current tip and therefore
-            # cannot be a stale rerun.
-            if ! git cat-file -e "$current_source^{commit}" 2>/dev/null; then
-              git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+            # Rewriting main removes the published source from main's history,
+            # but a stable tag or release branch may keep the commit object
+            # reachable. Check membership in current main rather than object
+            # existence alone, then re-baseline only from main's current tip so
+            # a stale rerun cannot move edge.
+            git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+            if ! git cat-file -e "$current_source^{commit}" 2>/dev/null || \
+               ! git merge-base --is-ancestor "$current_source" refs/remotes/origin/main; then
               if [ "$GITHUB_SHA" != "$(git rev-parse refs/remotes/origin/main)" ]; then
                 echo "::error::Published edge source $current_source is no longer in main's history, and $GITHUB_SHA is not main's current tip. Re-run Publish for the newest commit on main to re-baseline $PLUGIN_CHANNEL_BRANCH."
                 exit 1
@@ -263,8 +264,8 @@ jobs:
 
           # Ship the catalog alongside the plugin so `marketplace add
           # OWNER/REPO#releases/<plugin>/edge` advertises exactly what is
-          # published here. This also rewrites the source manifests, which are
-          # never among the published paths below.
+          # published here. The channel update changes only the throwaway
+          # catalog; source manifests are not among the published paths below.
           node scripts/version.mjs \
             --set "$VERSION" --plugin "$PLUGIN_NAME" --channel edge
 
@@ -274,9 +275,7 @@ jobs:
           # refs pin the source commit recorded in the commit message.
           commit="$(node scripts/verified-git.mjs commit \
             --message "chore(release): publish ${PLUGIN_NAME}@${VERSION} for ${GITHUB_SHA}" \
-            --path "$PLUGIN_DIST=$PLUGIN_PUBLISH_DIR" \
-            --path "$PLUGIN_DIST/plugin.json=$PLUGIN_DIR/plugin.json" \
-            --path "$PLUGIN_DIST/README.md=$PLUGIN_DIR/README.md" \
+            --path "$PLUGIN_DIST=$PLUGIN_DIR" \
             --path "$MANIFEST" --path ".github/extension" | jq -r .commit)"
 
           # Both names resolve to that one verified commit. They can no longer
