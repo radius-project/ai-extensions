@@ -201,6 +201,8 @@ jobs:
         uses: radius-project/ai-extensions/.github/extension/actions/restore-state@{{RADIUS_REF}}
         with:
           namespace: ${{ vars.KUBERNETES_NAMESPACE || 'default' }}
+          repository: ${{ github.repository }}
+          environment: ${{ inputs.environment }}
 
       - name: Register cloud credentials with Radius
         run: |
