@@ -315,13 +315,7 @@ async function readJsonBlob(entry, label) {
   }
 }
 
-async function verifyArtifactState({
-  plugin,
-  version,
-  source,
-  branch,
-  allowLegacyPluginRoot = false
-}) {
+async function verifyArtifactState({ plugin, version, source, branch }) {
   const ref = await readRef(`refs/heads/${branch}`, true);
   if (!ref) fail(`refs/heads/${branch} does not exist`);
   if (ref.object?.type !== "commit") {
@@ -344,9 +338,7 @@ async function verifyArtifactState({
     const allowed =
       entry.path === MARKETPLACE ||
       entry.path.startsWith(`${plugin.dir}/`) ||
-      entry.path.startsWith(`${EXTENSION_ROOT}/`) ||
-      (allowLegacyPluginRoot &&
-        entry.path.startsWith(`${plugin.extensionDir}/`));
+      entry.path.startsWith(`${EXTENSION_ROOT}/`);
     if (!allowed) fail(`${branch} contains an unexpected path: ${entry.path}`);
     if (entry.type !== "blob" || !REGULAR_MODES.has(entry.mode)) {
       fail(`${branch} contains a non-regular file: ${entry.path}`);
@@ -360,43 +352,10 @@ async function verifyArtifactState({
         .map((entry) => [entry.path.slice(root.length + 1), entry])
     );
   const pluginFiles = filesUnder(plugin.dir);
-  const legacyFiles = filesUnder(plugin.extensionDir);
-  const exactLegacyPluginRoot =
-    allowLegacyPluginRoot &&
-    pluginFiles.size > 0 &&
-    pluginFiles.size === legacyFiles.size &&
-    [...legacyFiles].every(([path, shipped]) => {
-      const pinned = pluginFiles.get(path);
-      return (
-        pinned &&
-        pinned.type === shipped.type &&
-        pinned.mode === shipped.mode &&
-        pinned.sha === shipped.sha
-      );
-    });
-  const legacyMetadata = ["plugin.json", "README.md"];
-  const metadataOnlyLegacyPluginRoot =
-    allowLegacyPluginRoot &&
-    legacyFiles.size > 0 &&
-    pluginFiles.size === legacyMetadata.length &&
-    legacyMetadata.every((path) => {
-      const pinned = pluginFiles.get(path);
-      const shipped = legacyFiles.get(path);
-      return (
-        pinned &&
-        shipped &&
-        pinned.type === shipped.type &&
-        pinned.mode === shipped.mode &&
-        pinned.sha === shipped.sha
-      );
-    });
-  const legacyPluginRoot =
-    exactLegacyPluginRoot || metadataOnlyLegacyPluginRoot;
-  if (pluginFiles.size === 0 || (legacyFiles.size > 0 && !legacyPluginRoot)) {
+  if (pluginFiles.size === 0) {
     fail(`${branch} does not publish a valid plugin at ${plugin.dir}`);
   }
-  const artifactRoot =
-    metadataOnlyLegacyPluginRoot ? plugin.extensionDir : plugin.dir;
+  const artifactRoot = plugin.dir;
 
   const rootAssets = new Map(
     files
@@ -506,8 +465,7 @@ async function verifyCompletion(args) {
     plugin,
     version,
     source,
-    branch: refs.PLUGIN_PINNED_BRANCH,
-    allowLegacyPluginRoot: args.includes("--allow-legacy-plugin-root")
+    branch: refs.PLUGIN_PINNED_BRANCH
   });
 
   await verifyTagTarget(refs.PLUGIN_SOURCE_TAG, artifact.commit);

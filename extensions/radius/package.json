@@ -6,7 +6,7 @@
   "engines": {
     "node": ">=24 <25"
   },
-  "main": "extension.mjs",
+  "main": "com.github.copilot/extensions/radius/extension.mjs",
   "description": "Radius canvas extension: application modeling, graph visualization, and deployment for GitHub Copilot.",
   "scripts": {
     "build": "pnpm --filter @radius-project/adapter-canvas run build",
