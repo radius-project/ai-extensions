@@ -807,6 +807,10 @@ describe("P0-C built Radius extension artifact", () => {
     expect(skillGuidance).toContain(
       "A package name alone, a string type, a credential-like variable name, a shared protocol, or a direct `secretKeyRef` is not proof"
     );
+    expect(skillGuidance).toContain("`aggregate-secret-alias`");
+    expect(secretsGuidance).toContain(
+      "As a fail-closed backstop, `validate-bicep.mjs` rejects a direct Recipe-managed aggregate secret key"
+    );
     for (const guidance of [
       connectionGuidance,
       secretsGuidance,
@@ -814,6 +818,11 @@ describe("P0-C built Radius extension artifact", () => {
     ]) {
       expect(guidance).not.toContain("StackExchange.Redis");
     }
+    const checker = readFileSync(
+      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
+      "utf8"
+    );
+    expect(checker).toContain("aggregate-secret-alias");
   });
 
   it("packages the exact-data-key contract for authored reference Secrets", () => {

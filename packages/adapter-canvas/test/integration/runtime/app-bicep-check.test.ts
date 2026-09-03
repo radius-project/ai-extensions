@@ -620,6 +620,137 @@ test("accepts a secretKeyRef helper regardless of its key", () => {
   assert.equal(result.stderr, "");
 });
 
+describe("aggregate Recipe secret aliases", () => {
+  function managedSecret(key: string) {
+    return {
+      valueFrom: {
+        secretKeyRef: {
+          secretName: "[reference('cache').properties.secrets.name]",
+          key
+        }
+      }
+    };
+  }
+
+  test.each(["REDIS_ADDR", "REDIS_ADDRESS", "RedisHost", "redis-port"])(
+    "rejects aggregate Recipe output assigned to address-shaped %s",
+    (name) => {
+      const directory = temporaryDirectory();
+      const compiledOutput = template({
+        cache: radiusResource("Radius.Data/redisCaches@2025-08-01-preview", {}),
+        web: containerEnv({ [name]: managedSecret("url") })
+      });
+
+      const result = runChecker(
+        directory,
+        fakeBicep(directory, sarif([]), 0, compiledOutput)
+      );
+
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /aggregate-secret-alias/u);
+      assert.match(result.stderr, new RegExp(`env\\.${name}`, "u"));
+      assert.match(result.stderr, /Recipe-managed secret key "url"/u);
+      assert.match(result.stderr, /names an address part/u);
+      assert.match(result.stderr, /stop without publishing/u);
+    }
+  );
+
+  test.each(["url", "URI", "connectionString", "connection-string", "dsn"])(
+    "recognizes aggregate secret key %s",
+    (key) => {
+      const directory = temporaryDirectory();
+      const compiledOutput = template({
+        cache: radiusResource("Radius.Data/redisCaches@2025-08-01-preview", {}),
+        web: containerEnv({ REDIS_ADDR: managedSecret(key) })
+      });
+
+      const result = runChecker(
+        directory,
+        fakeBicep(directory, sarif([]), 0, compiledOutput)
+      );
+
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /aggregate-secret-alias/u);
+    }
+  );
+
+  test.each([
+    {
+      name: "a matching aggregate-shaped target",
+      env: { REDIS_URL: managedSecret("url") }
+    },
+    {
+      name: "a discrete managed secret",
+      env: { REDIS_ADDR: managedSecret("accessKey") }
+    },
+    {
+      name: "an authored Secret",
+      env: {
+        REDIS_ADDR: {
+          valueFrom: {
+            secretKeyRef: { secretName: "app-config", key: "url" }
+          }
+        }
+      }
+    },
+    {
+      name: "a plain environment value",
+      env: { REDIS_ADDR: { value: "redis:6379" } }
+    },
+    {
+      name: "a malformed environment entry",
+      env: { REDIS_ADDR: null }
+    }
+  ])("does not report $name", ({ env }) => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: containerEnv(env)
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.doesNotMatch(result.stderr, /aggregate-secret-alias/u);
+  });
+
+  test("checks aggregate aliases passed into a local module", () => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      service: localModuleResources(
+        {
+          web: containerEnv({
+            REDIS_ADDR: {
+              valueFrom: {
+                secretKeyRef: {
+                  secretName: "[parameters('cacheSecretName')]",
+                  key: "url"
+                }
+              }
+            }
+          })
+        },
+        { cacheSecretName: { type: "string" } },
+        {
+          cacheSecretName: {
+            value: "[reference('cache').properties.secrets.name]"
+          }
+        }
+      )
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /service\.web\.properties/u);
+  });
+});
+
 test.each([
   ["a dotted name", "DB.PASSWORD"],
   ["a hyphenated name", "DB-PASSWORD"]
