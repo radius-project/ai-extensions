@@ -32,23 +32,9 @@ import { browserEntryMarker } from "../../../src/browser/scripts.js";
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
 const DIST = join(REPO_ROOT, ".artifacts", "radius");
-const ARTIFACT = join(DIST, "extension.mjs");
-const COMPATIBILITY_ARTIFACTS = [
-  {
-    path: join(DIST, "extensions", "radius", "extension.mjs"),
-    reExport: "../../extension.mjs"
-  },
-  {
-    path: join(
-      DIST,
-      "com.github.copilot",
-      "extensions",
-      "radius",
-      "extension.mjs"
-    ),
-    reExport: "../../../extension.mjs"
-  }
-] as const;
+const ARTIFACT_RELATIVE_PATH =
+  "com.github.copilot/extensions/radius/extension.mjs";
+const ARTIFACT = join(DIST, ...ARTIFACT_RELATIVE_PATH.split("/"));
 const SOURCE_MAP = `${ARTIFACT}.map`;
 const SOURCE_CHANGELOG = join(
   REPO_ROOT,
@@ -229,16 +215,10 @@ function assertCurrentArtifact(): void {
 
 describe("P0-C built Radius extension artifact", () => {
   let smoke: ArtifactSmokeResult;
-  let compatibilitySmokes: ArtifactSmokeResult[];
 
   beforeAll(async () => {
     assertCurrentArtifact();
-    [smoke, ...compatibilitySmokes] = await Promise.all([
-      runArtifactSmoke(ARTIFACT),
-      ...COMPATIBILITY_ARTIFACTS.map(({ path }) =>
-        runArtifactSmoke(path, 20_000, DIST)
-      )
-    ]);
+    smoke = await runArtifactSmoke(ARTIFACT, 20_000, DIST);
   }, 30_000);
 
   it("registers the retained SDK surface exactly once and shuts down cleanly", () => {
@@ -261,13 +241,6 @@ describe("P0-C built Radius extension artifact", () => {
         )
       ])
     );
-  });
-
-  it("registers the same SDK surface through every compatibility entry point", () => {
-    for (const compatibilitySmoke of compatibilitySmokes) {
-      expect(compatibilitySmoke.registration).toEqual(EXPECTED_REGISTRATION);
-      expect(compatibilitySmoke.closeCount).toBe(1);
-    }
   });
 
   it("keeps the SDK external and packages production modules and skill assets only", () => {
@@ -332,15 +305,7 @@ describe("P0-C built Radius extension artifact", () => {
       readdirSync(DIST)
         .filter((name) => name.endsWith(".mjs"))
         .sort()
-    ).toEqual(["extension.mjs"]);
-    for (const compatibility of COMPATIBILITY_ARTIFACTS) {
-      expect(readFileSync(compatibility.path, "utf8")).toContain(
-        `export * from "${compatibility.reExport}";`
-      );
-      expect(resolve(dirname(compatibility.path), compatibility.reExport)).toBe(
-        ARTIFACT
-      );
-    }
+    ).toEqual([]);
     const packagedPaths = [
       "package.json",
       "plugin.json",
@@ -348,10 +313,8 @@ describe("P0-C built Radius extension artifact", () => {
       "LICENSE",
       "THIRD-PARTY-NOTICES.txt",
       "assets/preview.png",
-      "extensions/radius/extension.mjs",
-      "extensions/radius/package.json",
-      "com.github.copilot/extensions/radius/extension.mjs",
-      "com.github.copilot/extensions/radius/package.json",
+      ARTIFACT_RELATIVE_PATH,
+      `${ARTIFACT_RELATIVE_PATH}.map`,
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-bicep/references/source-code-references.md",
@@ -362,18 +325,6 @@ describe("P0-C built Radius extension artifact", () => {
     for (const packagedPath of packagedPaths) {
       expect(existsSync(join(DIST, ...packagedPath.split("/")))).toBe(true);
     }
-    expect(
-      readFileSync(
-        join(
-          DIST,
-          "com.github.copilot",
-          "extensions",
-          "radius",
-          "package.json"
-        ),
-        "utf8"
-      )
-    ).toBe(readFileSync(join(DIST, "package.json"), "utf8"));
     const radiusTypeResolver = readFileSync(
       join(
         DIST,
@@ -462,11 +413,6 @@ describe("P0-C built Radius extension artifact", () => {
     }
     expect(builtPackage.version).toEqual(expect.any(String));
     expect(builtPackage).toEqual(expectedPackage);
-    expect(
-      JSON.parse(
-        readFileSync(join(DIST, "extensions", "radius", "package.json"), "utf8")
-      )
-    ).toEqual(builtPackage);
 
     const sourcePlugin = JSON.parse(
       readFileSync(join(REPO_ROOT, "plugins", "radius", "plugin.json"), "utf8")
@@ -562,6 +508,7 @@ describe("P0-C built Radius extension artifact", () => {
     const structureGuidance = readGuidance(
       "references/bicep-structure-rules.md"
     );
+    const secretsGuidance = readGuidance("references/secrets-handling.md");
     const runtimeGuidance = readGuidance("references/runtime-contract.md");
     const skillGuidance = readGuidance("SKILL.md");
     const redisExample = bicepBlocks.find(
@@ -696,14 +643,12 @@ describe("P0-C built Radius extension artifact", () => {
         /github\.com\/radius-project\/(?:radius|resource-types-contrib)\/(?:pull|issues)\//u
       );
     }
-    expect(readGuidance("references/secrets-handling.md")).toContain(
-      "`CONNECTION_MYSQLSECRET_PASSWORD`"
-    );
+    expect(secretsGuidance).toContain("`CONNECTION_MYSQLSECRET_PASSWORD`");
     for (const guidance of [
       connectionGuidance,
       structureGuidance,
       runtimeGuidance,
-      readGuidance("references/secrets-handling.md")
+      secretsGuidance
     ]) {
       expect(guidance).toContain("`@secure()`");
       expect(guidance).toContain("`env.value`");
@@ -758,6 +703,189 @@ describe("P0-C built Radius extension artifact", () => {
       );
       expect(guidance).toMatch(/never search.*PATH.*\.rad\/bin.*fallback/isu);
     }
+  });
+
+  it("packages the schema-sensitivity credential contract, not a property-name rule", () => {
+    assertCurrentArtifact();
+    const readGuidance = (relativePath: string): string =>
+      readFileSync(join(DIST_SKILL, relativePath), "utf8");
+    const secretsGuidance = readGuidance("references/secrets-handling.md");
+    const structureGuidance = readGuidance(
+      "references/bicep-structure-rules.md"
+    );
+    const skillGuidance = readGuidance("SKILL.md");
+
+    for (const guidance of [
+      secretsGuidance,
+      structureGuidance,
+      skillGuidance
+    ]) {
+      expect(guidance).toContain("`x-radius-sensitive: true`");
+      expect(guidance).toContain("`Radius.Data/mySqlDatabases.password`");
+      expect(guidance).toContain("`Radius.Messaging/rabbitMQ.password`");
+      // The regressed guidance keyed the decision on the property's name, so a
+      // reference property named `password` was assigned the raw secure param.
+      expect(guidance).not.toMatch(/`secretName`[,:]? (?:create|author)/u);
+    }
+    expect(secretsGuidance).toContain(
+      "Decide each credential input from the schema, never from the property's name"
+    );
+    expect(structureGuidance).toContain(
+      "classified by sensitivity rather than by property name"
+    );
+    expect(skillGuidance).toContain(
+      "classified by sensitivity and never by property name"
+    );
+    expect(skillGuidance).toContain(
+      "classified from the schema rather than from the property's name"
+    );
+    expect(secretsGuidance).toContain(
+      "A property named `password` may be either kind, and a reference property may be named `password`, `passwordSecret`, or `secretName`"
+    );
+    expect(secretsGuidance).toContain(
+      "Never assign a `@secure()` parameter to a reference property"
+    );
+    expect(structureGuidance).toContain(
+      "never a `@secure() param` (`Radius.Messaging/rabbitMQ.password`"
+    );
+    expect(skillGuidance).toContain(
+      "no `@secure() param` is assigned to a reference property"
+    );
+
+    const bicepBlocks = filesUnder(DIST_SKILL)
+      .filter((path) => path.endsWith(".md"))
+      .flatMap((path) => [
+        ...readFileSync(path, "utf8").matchAll(
+          /```bicep\r?\n([\s\S]*?)\r?\n```/gu
+        )
+      ])
+      .map((match) => match[1]);
+    const rabbitmqExample = bicepBlocks.find((block) =>
+      block.includes("'Radius.Messaging/rabbitMQ@")
+    );
+    expect(rabbitmqExample).toBeDefined();
+    expect(rabbitmqExample).toMatch(/password:\s*rabbitmqCredentials\.id\b/u);
+    expect(rabbitmqExample).toContain(
+      "resource rabbitmqCredentials 'Radius.Security/secrets"
+    );
+    expect(rabbitmqExample).not.toMatch(
+      /^\s*password:\s*rabbitmqPassword\s*$/mu
+    );
+    // `username` is the administrator the broker is provisioned with, not a
+    // value copied from the application's existing deployment.
+    expect(rabbitmqExample).toMatch(
+      /username:\s*'myadmin'\s*\/\/ authored broker administrator/u
+    );
+    expect(rabbitmqExample).not.toMatch(/username:[^\n]*derived from source/u);
+    expect(secretsGuidance).toContain(
+      "Writing `password: rabbitmqPassword` here deploys a broken application"
+    );
+    expect(secretsGuidance).toContain(
+      "a password is not a lowercase RFC 1123 subdomain"
+    );
+
+    // The MySQL example must keep the opposite, inline form so both
+    // conventions ship side by side.
+    const mysqlExample = bicepBlocks.find((block) =>
+      block.includes("resource mysql 'Radius.Data/mySqlDatabases@")
+    );
+    expect(mysqlExample).toBeDefined();
+    expect(mysqlExample).toMatch(/^\s*password:\s*password\s*$/mu);
+  });
+
+  it("packages the exact-data-key contract for authored reference Secrets", () => {
+    assertCurrentArtifact();
+    const readGuidance = (relativePath: string): string =>
+      readFileSync(join(DIST_SKILL, relativePath), "utf8");
+    const secretsGuidance = readGuidance("references/secrets-handling.md");
+    const skillGuidance = readGuidance("SKILL.md");
+
+    expect(secretsGuidance).toContain(
+      "the authored Secret must expose the value under the exact data key the consuming schema names, matching case"
+    );
+    expect(secretsGuidance).toContain(
+      "Data keys are case-sensitive. Do not uppercase them by convention"
+    );
+    expect(secretsGuidance).toContain(
+      "do not assume the key matches the property name, the resource name, or the application's environment-variable name"
+    );
+    expect(secretsGuidance).toContain(
+      "Every `secretKeyRef.key` that reads the same authored Secret must use that same exact key"
+    );
+    expect(secretsGuidance).toContain(
+      "Read the required key from the consuming type's schema description"
+    );
+    expect(secretsGuidance).toContain(
+      "Authoring that data key as `PASSWORD` fails even though the Bicep compiles and the resource ID is correct"
+    );
+    expect(secretsGuidance).toContain("`CreateContainerConfigError`");
+    expect(skillGuidance).toContain(
+      "the exact case-sensitive data key the consuming schema names (`password`, not `PASSWORD`)"
+    );
+
+    const bicepBlocks = filesUnder(DIST_SKILL)
+      .filter((path) => path.endsWith(".md"))
+      .flatMap((path) => [
+        ...readFileSync(path, "utf8").matchAll(
+          /```bicep\r?\n([\s\S]*?)\r?\n```/gu
+        )
+      ])
+      .map((match) => match[1]);
+
+    // The authored Secret and every reader of it must agree on the exact
+    // lowercase key the rabbitMQ Recipe hardcodes.
+    const rabbitmqExample = bicepBlocks.find((block) =>
+      block.includes("'Radius.Messaging/rabbitMQ@")
+    );
+    expect(rabbitmqExample).toBeDefined();
+    expect(rabbitmqExample).toMatch(
+      /data:\s*\{\s*password:\s*\{\s*value:\s*rabbitmqPassword\s*\}/u
+    );
+    expect(rabbitmqExample).not.toContain("PASSWORD:");
+
+    const rabbitmqConsumer = bicepBlocks.find(
+      (block) =>
+        block.includes("secretName: rabbitmqCredentials.name") &&
+        block.includes("secretKeyRef")
+    );
+    expect(rabbitmqConsumer).toBeDefined();
+    expect(rabbitmqConsumer).toMatch(/key:\s*'password'/u);
+    expect(rabbitmqConsumer).not.toMatch(/key:\s*'PASSWORD'/u);
+  });
+
+  it("packages the staged type-sensitivity contract both credential scripts share", () => {
+    assertCurrentArtifact();
+    const resolverScript = readFileSync(
+      join(DIST_SKILL, "scripts", "show-radius-type.mjs"),
+      "utf8"
+    );
+    const checkerScript = readFileSync(
+      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
+      "utf8"
+    );
+    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
+
+    // The two scripts never import each other, so the staged file name is the
+    // whole of their contract. A build that packaged one side's name and not
+    // the other's would ship a checker that silently never finds the evidence.
+    for (const script of [resolverScript, checkerScript]) {
+      expect(script).toContain('"resolved-types.json"');
+      expect(script).toContain("contractVersion");
+    }
+    expect(checkerScript).toContain("secure-parameter-target");
+    expect(skillGuidance).toContain("resolved-types.json");
+
+    // The checker verifies where a credential is assigned, not the authored
+    // Secret's data key. Layer 1's data-key rule has no mechanical guard, so
+    // the guidance must not let "the checker enforces this" read as covering
+    // it — that false confidence is the failure mode this stack exists to fix.
+    const secretsGuidance = readFileSync(
+      join(DIST_SKILL, "references", "secrets-handling.md"),
+      "utf8"
+    );
+    expect(secretsGuidance).toContain(
+      "the data-key contract below is not verified by any check"
+    );
   });
 
   it("packages each page module exactly once", () => {
@@ -934,24 +1062,30 @@ describe("P0-C built Radius extension artifact", () => {
         stdio: "pipe"
       });
 
-      const managedFiles = [
-        "extension.mjs",
-        "extension.mjs.map",
-        "THIRD-PARTY-NOTICES.txt",
-        "package.json",
+      const managedFiles: Array<readonly [string, string]> = [
+        [ARTIFACT_RELATIVE_PATH, "extension.mjs"],
+        [`${ARTIFACT_RELATIVE_PATH}.map`, "extension.mjs.map"],
+        ["THIRD-PARTY-NOTICES.txt", "THIRD-PARTY-NOTICES.txt"],
         ...relativeFilesUnder(join(DIST, "workflows")).map(
-          (filePath) => `workflows/${filePath}`
+          (filePath) =>
+            [`workflows/${filePath}`, `workflows/${filePath}`] as const
         ),
         ...relativeFilesUnder(join(DIST, "skills")).map(
-          (filePath) => `skills/${filePath}`
+          (filePath) => [`skills/${filePath}`, `skills/${filePath}`] as const
         )
       ];
-      for (const managedFile of managedFiles) {
+      for (const [source, installed] of managedFiles) {
         expectMatchingFile(
-          join(DIST, ...managedFile.split("/")),
-          join(installDir, ...managedFile.split("/"))
+          join(DIST, ...source.split("/")),
+          join(installDir, ...installed.split("/"))
         );
       }
+      const builtPackage = JSON.parse(
+        readFileSync(join(DIST, "package.json"), "utf8")
+      ) as Record<string, unknown>;
+      expect(
+        JSON.parse(readFileSync(join(installDir, "package.json"), "utf8"))
+      ).toEqual({ ...builtPackage, main: "extension.mjs" });
       expect(readFileSync(unrelatedRootFile, "utf8")).toBe("keep root\n");
       expect(existsSync(staleWorkflow)).toBe(false);
       expect(existsSync(staleSkill)).toBe(false);

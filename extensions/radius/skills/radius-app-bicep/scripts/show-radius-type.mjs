@@ -63,6 +63,19 @@ const COMMIT_DIRECTORY = /^[0-9a-f]{40}$/iu;
 // the installed plugin; the runtime test imports core and guards against drift.
 const STAGING_DIR_PREFIX = ".staging-";
 const STAGING_RUN_RECORD = "run.json";
+// Where this script hands validate-bicep.mjs the one fact about a resolved type
+// that the compiled ARM template cannot carry: whether each property is marked
+// sensitive. A `@secure()` parameter is only a `securestring` by the time the
+// checker sees it, and both `password: securePassword` and
+// `password: secret.id` compile, so without the schema flag the checker cannot
+// tell an inline sensitive value from a plain Secret resource ID. The checker
+// runs offline against the template alone and has no catalog of its own, so the
+// flag has to be staged here, where the schemas are already resolved.
+//
+// The name must stay in step with the copy in validate-bicep.mjs; the
+// built-extension smoke test asserts the two packaged scripts agree.
+const STAGING_RESOLVED_TYPES = "resolved-types.json";
+const RESOLVED_TYPES_CONTRACT_VERSION = 1;
 const RETRY_DELAY_MS = 300;
 const MAX_RETRY_DELAY_MS = 5_000;
 const USAGE =
@@ -272,6 +285,103 @@ export async function writeStagedBicepConfig(stagingInput, extension) {
   await fsp.writeFile(
     path.join(stagingDir, "bicepconfig.json"),
     `${JSON.stringify(output, null, 2)}\n`
+  );
+}
+
+// Property sensitivity for one resolved type, taken from the schema this script
+// already built. Credential inputs live in the properties envelope, which is
+// where every Radius type puts them and the only place `validate-bicep.mjs`
+// inspects, so the map is one level deep rather than a second copy of the whole
+// schema. A discriminated envelope contributes its variants' properties too: a
+// property is sensitive when any shape of the envelope marks it sensitive,
+// because reporting a property the schema does treat as sensitive would fail a
+// model that is correct.
+export function propertySensitivity(schema) {
+  const envelope = schema.properties;
+  const properties = isObject(envelope) ? envelope.properties : undefined;
+  if (!isObject(properties)) return {};
+  const groups = [properties];
+  if (isObject(properties.variants)) {
+    groups.push(...Object.values(properties.variants));
+  }
+  const sensitivity = {};
+  for (const group of groups) {
+    if (!isObject(group) || !isObject(group.properties)) continue;
+    for (const [name, property] of Object.entries(group.properties)) {
+      sensitivity[name] =
+        sensitivity[name] === true ||
+        (isObject(property) && property.sensitive === true);
+    }
+  }
+  return sensitivity;
+}
+
+// Whether one entry in the staged map is a usable `property -> sensitive`
+// record. This is deliberately the same acceptance rule validate-bicep.mjs
+// applies when it reads the file back. The two scripts cannot import each other
+// in the installed plugin, so the rule is stated twice on purpose, in the same
+// way the staging constants above mirror core; a runtime test asserts the two
+// ends agree rather than trusting them to drift together.
+function isPropertySensitivityEntry(entry) {
+  return (
+    isObject(entry) &&
+    Object.values(entry).every((sensitive) => typeof sensitive === "boolean")
+  );
+}
+
+// Records what the checker needs about the types this run resolved.
+//
+// The map is merged rather than replaced. A run may resolve types in more than
+// one invocation, and rewriting the file would erase the earlier types, which
+// the checker would then read as "never resolved" and report against a model
+// that did resolve them.
+export async function writeStagedResolvedTypes(stagingInput, resources) {
+  if (resources.length === 0) return;
+  const stagingDir = validateStagingDirectory(stagingInput);
+  const staged = path.join(stagingDir, STAGING_RESOLVED_TYPES);
+  let types = {};
+  if (fs.existsSync(staged)) {
+    let existing;
+    try {
+      existing = JSON.parse(await fsp.readFile(staged, "utf8"));
+    } catch {
+      throw new Error(`Could not parse staged resolved types "${staged}".`);
+    }
+    if (
+      !isObject(existing) ||
+      existing.contractVersion !== RESOLVED_TYPES_CONTRACT_VERSION ||
+      !isObject(existing.types)
+    ) {
+      throw new Error(
+        `Staged resolved types "${staged}" are not a version ${RESOLVED_TYPES_CONTRACT_VERSION} contract.`
+      );
+    }
+    // Every entry being merged forward is validated, not just the envelope. An
+    // entry this writer preserved unchecked would be written back out and only
+    // rejected later by the checker, which reports against a file the user
+    // never authored. Refusing here names the offending type at the step that
+    // would have reproduced it. Dropping or repairing the entry instead would
+    // be a success-shaped fallback over a file whose contents cannot be
+    // trusted.
+    for (const [type, entry] of Object.entries(existing.types)) {
+      if (!isPropertySensitivityEntry(entry)) {
+        throw new Error(
+          `Staged resolved types "${staged}" do not map each property of "${type}" to a boolean.`
+        );
+      }
+    }
+    types = existing.types;
+  }
+  for (const resource of resources) {
+    types[`${resource.type}@${resource.apiVersion}`] = propertySensitivity(
+      resource.schema
+    );
+  }
+  const sorted = {};
+  for (const name of Object.keys(types).sort()) sorted[name] = types[name];
+  await fsp.writeFile(
+    staged,
+    `${JSON.stringify({ contractVersion: RESOLVED_TYPES_CONTRACT_VERSION, types: sorted }, null, 2)}\n`
   );
 }
 
@@ -841,7 +951,8 @@ export async function main(
     stdout = process.stdout,
     stderr = process.stderr,
     resolve = resolveRadiusTypes,
-    writeConfig = writeStagedBicepConfig
+    writeConfig = writeStagedBicepConfig,
+    writeResolvedTypes = writeStagedResolvedTypes
   } = {}
 ) {
   try {
@@ -860,6 +971,7 @@ export async function main(
       notFound: contract.notFound
     })}\n`;
     await writeConfig(stagingDir, contract.extension);
+    await writeResolvedTypes(stagingDir, contract.resources);
     stdout.write(output);
     return 0;
   } catch (error) {
