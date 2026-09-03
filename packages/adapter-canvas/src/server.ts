@@ -223,7 +223,8 @@ import {
   DEPLOY_DISPATCHER_FILE,
   DEPLOY_AZURE_FILE,
   DELETE_ENV_DISPATCHER_FILE,
-  DELETE_ENV_AZURE_FILE
+  DELETE_ENV_AZURE_FILE,
+  LEGACY_DEPLOY_WORKFLOW_FILE
 } from "./infra.js";
 import type { WorkflowCommitFailure } from "./infra.js";
 import {
@@ -2857,11 +2858,6 @@ export function triggerDeployFailureNotice(
   }
   return false;
 }
-
-// Bare filename of the legacy monolithic deploy workflow that the composite-
-// action model (run-rad-commands*.yml) replaces. Removed from target repos on
-// commit so it does not double-trigger alongside the new dispatcher.
-const LEGACY_DEPLOY_WORKFLOW_FILE = "radius-deploy.yml";
 
 // The workflow that actually runs `rad` deploy commands. The deployments list
 // only surfaces deployment records produced by this workflow — records created

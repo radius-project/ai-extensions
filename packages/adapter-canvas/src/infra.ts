@@ -34,6 +34,9 @@ import {
   commitFileToRepo
 } from "./gh.js";
 
+// Removed from target repos so it cannot double-trigger beside the dispatcher.
+export const LEGACY_DEPLOY_WORKFLOW_FILE = "radius-deploy.yml";
+
 interface ManagedEnvironment {
   name: string;
   provider?: string;

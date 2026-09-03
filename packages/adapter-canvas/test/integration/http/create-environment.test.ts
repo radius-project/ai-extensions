@@ -789,11 +789,15 @@ function start(script: Script = {}): Harness {
     deleteLegacyDeployWorkflow: async (
       _repo,
       _executor,
-      _beforeDelete,
+      beforeDelete,
       branch
     ) => {
       journal.push("deleteLegacyDeployWorkflow");
       journal.push(`legacyDeployDeleteBranch:${branch || "default"}`);
+      if (script.legacyDeleteResult === "cancelled") {
+        operation.stopRequested = true;
+        if (beforeDelete && !(await beforeDelete())) return "cancelled";
+      }
       return script.legacyDeleteResult ?? true;
     },
     createPullRequestApi: async () => {
@@ -2799,6 +2803,31 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(String(body.error)).toContain(
       "could not remove the legacy deploy workflow from the default branch"
     );
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+  });
+
+  it("preserves cancellation while removing an unsafe legacy deploy workflow", async () => {
+    const harness = start({
+      ...protectedScript,
+      files: {
+        ".github/workflows/radius-deploy.yml":
+          "on:\n  workflow_run:\n    workflows: [Radius - Verify Credentials]\njobs:\n"
+      },
+      legacyDeleteResult: "cancelled"
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      cancelled: true,
+      code: "operation-stopped",
+      boundary: "before-legacy-workflow-delete",
+      operationId: "op-http"
+    });
+    expect(body.operation).toMatchObject({ terminalState: "cancelled" });
+    expect(harness.failures).toEqual([]);
     expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
   });
 
