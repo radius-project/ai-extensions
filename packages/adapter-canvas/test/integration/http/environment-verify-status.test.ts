@@ -4,6 +4,7 @@ import { createCanvasServer } from "../../../src/server/create-canvas-server.js"
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createEnvironmentsRoutes } from "../../../src/server/routes/environments.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
+import { successfulSelectedGhExecutor } from "../../support/server/selected-gh.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { EnvironmentsDependencies } from "../../../src/server/routes/environments.js";
 
@@ -33,9 +34,17 @@ function fullDeps(
   const unset = (name: string) => (): never => {
     throw new Error(`unexpected call: ${name}`);
   };
-  const base = {
+  // Typed as `EnvironmentsDependencies` directly (no `as unknown as` cast) so
+  // the compiler guarantees every seam is present: a newly-added dependency
+  // fails the build here instead of silently arriving `undefined` at runtime.
+  // Every function is an `unset` stub that throws on an unexpected call; the two
+  // seams the failed-verify path always touches without a scenario override
+  // return real values — a fully-formed test executor and "not an auth error" —
+  // rather than a masking placeholder object.
+  const base: EnvironmentsDependencies = {
     errorMessage: (error: unknown) =>
       error instanceof Error ? error.message : String(error),
+    redactDiagnostic: unset("redactDiagnostic"),
     repoMatchesWorkspace: unset("repoMatchesWorkspace"),
     readInstanceEntry: unset("readInstanceEntry"),
     runCommand: unset("runCommand"),
@@ -44,7 +53,15 @@ function fullDeps(
     resolveRepoAppName: unset("resolveRepoAppName"),
     resolveEnvDeployment: unset("resolveEnvDeployment"),
     logError: unset("logError"),
+    discoverEnvironmentTarget: unset("discoverEnvironmentTarget"),
+    activeDeleteOperation: unset("activeDeleteOperation"),
+    createOperation: unset("createOperation"),
+    buildDeleteStages: unset("buildDeleteStages"),
+    startOperation: unset("startOperation"),
+    toClientView: unset("toClientView"),
+    scheduleEnvironmentOperation: unset("scheduleEnvironmentOperation"),
     cliExec: unset("cliExec"),
+    activeDeleteEnvironment: unset("activeDeleteEnvironment"),
     envListCacheGet: unset("envListCacheGet"),
     envListCacheSet: unset("envListCacheSet"),
     envListCacheGeneration: unset("envListCacheGeneration"),
@@ -53,7 +70,7 @@ function fullDeps(
     kickoffWorkflowSync: unset("kickoffWorkflowSync"),
     now: () => 0,
     getOperation: unset("getOperation"),
-    getSelectedGitHubExecutor: () => ({}),
+    getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
     isSelectedGitHubAuthorizationError: () => false,
     hasCompleteVerificationIdentity: unset("hasCompleteVerificationIdentity"),
     findWorkflowRun: unset("findWorkflowRun"),
@@ -73,7 +90,7 @@ function fullDeps(
     reportOperationDiagnostic: unset("reportOperationDiagnostic"),
     verifyWorkflowFile: "radius-verify-credentials.yml",
     stageVerify: "verify"
-  } as unknown as EnvironmentsDependencies;
+  };
   return { ...base, ...overrides };
 }
 
