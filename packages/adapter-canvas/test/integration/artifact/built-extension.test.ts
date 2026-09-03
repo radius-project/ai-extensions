@@ -882,6 +882,41 @@ describe("P0-C built Radius extension artifact", () => {
     expect(rabbitmqConsumer).not.toMatch(/key:\s*'PASSWORD'/u);
   });
 
+  it("packages the staged type-sensitivity contract both credential scripts share", () => {
+    assertCurrentArtifact();
+    const resolverScript = readFileSync(
+      join(DIST_SKILL, "scripts", "show-radius-type.mjs"),
+      "utf8"
+    );
+    const checkerScript = readFileSync(
+      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
+      "utf8"
+    );
+    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
+
+    // The two scripts never import each other, so the staged file name is the
+    // whole of their contract. A build that packaged one side's name and not
+    // the other's would ship a checker that silently never finds the evidence.
+    for (const script of [resolverScript, checkerScript]) {
+      expect(script).toContain('"resolved-types.json"');
+      expect(script).toContain("contractVersion");
+    }
+    expect(checkerScript).toContain("secure-parameter-target");
+    expect(skillGuidance).toContain("resolved-types.json");
+
+    // The checker verifies where a credential is assigned, not the authored
+    // Secret's data key. Layer 1's data-key rule has no mechanical guard, so
+    // the guidance must not let "the checker enforces this" read as covering
+    // it — that false confidence is the failure mode this stack exists to fix.
+    const secretsGuidance = readFileSync(
+      join(DIST_SKILL, "references", "secrets-handling.md"),
+      "utf8"
+    );
+    expect(secretsGuidance).toContain(
+      "the data-key contract below is not verified by any check"
+    );
+  });
+
   it("packages each page module exactly once", () => {
     assertCurrentArtifact();
     const bundle = readFileSync(ARTIFACT, "utf8");

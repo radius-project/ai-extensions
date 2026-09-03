@@ -313,6 +313,10 @@ Do not create, replace, or select the `radius` alias yourself. When the applicat
 
 Do not upgrade or downgrade an existing compatible pinned extension merely because another release is newer. Use `radius:latest` only when the target is explicitly an edge/development environment whose release contract maps to that tag.
 
+## Resolved type sensitivity
+
+`show-radius-type.mjs` also stages `<staging-dir>/resolved-types.json`, which records, for every type it resolved, whether each properties-envelope property is marked sensitive by the schema. `validate-bicep.mjs` reads it to reject a `@secure()` parameter assigned to a property the schema leaves plain, which is a Secret resource ID property rather than an inline credential (see [secrets-handling.md](references/secrets-handling.md#developer-supplied-secret-inputs)). Later invocations merge into the file rather than replace it. Do not author, edit, or delete it; resolve every predefined type the model uses so the checker has the evidence it needs, and treat a report against a type "not resolved in this modeling run" as a missing resolution rather than a reason to edit the file.
+
 ## app.bicep Structure (mandatory order)
 
 Declare resources in this order (do NOT output this as code — it is only for your reference):
