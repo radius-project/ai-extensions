@@ -800,11 +800,12 @@ describe("P0-C built Radius extension artifact", () => {
     expect(rabbitmqExample).not.toMatch(
       /^\s*password:\s*rabbitmqPassword\s*$/mu
     );
-    // `username` is source-derived, not a placeholder, so the example keeps the
-    // application's real value and annotates where it comes from.
+    // `username` is the administrator the broker is provisioned with, not a
+    // value copied from the application's existing deployment.
     expect(rabbitmqExample).toMatch(
-      /username:\s*'username'\s*\/\/ derived from source/u
+      /username:\s*'myadmin'\s*\/\/ authored broker administrator/u
     );
+    expect(rabbitmqExample).not.toMatch(/username:[^\n]*derived from source/u);
     expect(secretsGuidance).toContain(
       "Writing `password: rabbitmqPassword` here deploys a broken application"
     );
