@@ -2,7 +2,7 @@
 # registry: https://packagefeedproxy.microsoft.io/npm
 packages:
   - packages/*
-  - plugins/*
+  - extensions/*
 
 # Turn the "engines" ranges into install-time errors; pnpm only warns otherwise.
 engineStrict: true
@@ -16,7 +16,7 @@ overrides:
 
 catalog:
   # Kept in sync with the pinned "@github/copilot-sdk" version in
-  # plugins/radius/package.json by copilot-sdk-pin.test.ts. That manifest ships
+  # extensions/radius/package.json by copilot-sdk-pin.test.ts. That manifest ships
   # to users without this file, so it must declare a literal version.
   "@github/copilot-sdk": 1.0.11
   # Must track the Node major in the "engines.node" range (>=24 <25) so

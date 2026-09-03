@@ -38,6 +38,8 @@ import { pluginRefs, repoRoot, requirePlugin } from "./plugins.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 const REF = /^refs\/(?:heads|tags)\/[^\s~^:?*[\\]+$/;
+const PUBLISHED_PATH =
+  /^(?!\/)(?!.*\/\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))[^\s\\:*?"<>|]+(?<!\/)$/;
 const MARKETPLACE = ".github/plugin/marketplace.json";
 const EXTENSION_ROOT = ".github/extension";
 const REGULAR_MODES = new Set(["100644", "100755"]);
@@ -155,7 +157,13 @@ function collect(paths) {
   if (paths.length === 0) fail("at least one --path is required");
   const files = [];
   const canonicalRoot = realpathSync(repoRoot);
-  for (const declared of paths) {
+  for (const entry of paths) {
+    // `<source>=<published>` publishes a tree under a different path, which is
+    // how an assembled artifact reaches the branch at the path its own source
+    // occupies here.
+    const separator = entry.indexOf("=");
+    const declared = separator === -1 ? entry : entry.slice(0, separator);
+    const published = separator === -1 ? undefined : entry.slice(separator + 1);
     if (isAbsolute(declared)) {
       fail(`--path must be repository-relative: ${declared}`);
     }
@@ -174,7 +182,14 @@ function collect(paths) {
     if (canonicalWithin.startsWith("..") || isAbsolute(canonicalWithin)) {
       fail(`--path resolves outside the repository: ${declared}`);
     }
-    collectFile(canonicalTarget, within.split(sep).join("/"), files);
+    let prefix = within.split(sep).join("/");
+    if (published !== undefined) {
+      if (!PUBLISHED_PATH.test(published)) {
+        fail(`--path publishes to an invalid path: ${published}`);
+      }
+      prefix = published;
+    }
+    collectFile(canonicalTarget, prefix, files);
   }
   if (files.length === 0) fail("the given paths contain no files");
   return files.sort((a, b) => (a.path < b.path ? -1 : 1));
@@ -300,7 +315,13 @@ async function readJsonBlob(entry, label) {
   }
 }
 
-async function verifyArtifactState({ plugin, version, source, branch }) {
+async function verifyArtifactState({
+  plugin,
+  version,
+  source,
+  branch,
+  allowLegacyPluginRoot = false
+}) {
   const ref = await readRef(`refs/heads/${branch}`, true);
   if (!ref) fail(`refs/heads/${branch} does not exist`);
   if (ref.object?.type !== "commit") {
@@ -322,20 +343,67 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
   for (const entry of files) {
     const allowed =
       entry.path === MARKETPLACE ||
-      entry.path.startsWith(`${plugin.distDir}/`) ||
-      entry.path.startsWith(`${EXTENSION_ROOT}/`);
+      entry.path.startsWith(`${plugin.dir}/`) ||
+      entry.path.startsWith(`${EXTENSION_ROOT}/`) ||
+      (allowLegacyPluginRoot &&
+        entry.path.startsWith(`${plugin.extensionDir}/`));
     if (!allowed) fail(`${branch} contains an unexpected path: ${entry.path}`);
     if (entry.type !== "blob" || !REGULAR_MODES.has(entry.mode)) {
       fail(`${branch} contains a non-regular file: ${entry.path}`);
     }
   }
 
+  const filesUnder = (root) =>
+    new Map(
+      files
+        .filter((entry) => entry.path.startsWith(`${root}/`))
+        .map((entry) => [entry.path.slice(root.length + 1), entry])
+    );
+  const pluginFiles = filesUnder(plugin.dir);
+  const legacyFiles = filesUnder(plugin.extensionDir);
+  const exactLegacyPluginRoot =
+    allowLegacyPluginRoot &&
+    pluginFiles.size > 0 &&
+    pluginFiles.size === legacyFiles.size &&
+    [...legacyFiles].every(([path, shipped]) => {
+      const pinned = pluginFiles.get(path);
+      return (
+        pinned &&
+        pinned.type === shipped.type &&
+        pinned.mode === shipped.mode &&
+        pinned.sha === shipped.sha
+      );
+    });
+  const legacyMetadata = ["plugin.json", "README.md"];
+  const metadataOnlyLegacyPluginRoot =
+    allowLegacyPluginRoot &&
+    legacyFiles.size > 0 &&
+    pluginFiles.size === legacyMetadata.length &&
+    legacyMetadata.every((path) => {
+      const pinned = pluginFiles.get(path);
+      const shipped = legacyFiles.get(path);
+      return (
+        pinned &&
+        shipped &&
+        pinned.type === shipped.type &&
+        pinned.mode === shipped.mode &&
+        pinned.sha === shipped.sha
+      );
+    });
+  const legacyPluginRoot =
+    exactLegacyPluginRoot || metadataOnlyLegacyPluginRoot;
+  if (pluginFiles.size === 0 || (legacyFiles.size > 0 && !legacyPluginRoot)) {
+    fail(`${branch} does not publish a valid plugin at ${plugin.dir}`);
+  }
+  const artifactRoot =
+    metadataOnlyLegacyPluginRoot ? plugin.extensionDir : plugin.dir;
+
   const rootAssets = new Map(
     files
       .filter((entry) => entry.path.startsWith(`${EXTENSION_ROOT}/`))
       .map((entry) => [entry.path.slice(EXTENSION_ROOT.length + 1), entry.sha])
   );
-  const bundledRoot = `${plugin.distDir}/workflows`;
+  const bundledRoot = `${artifactRoot}/workflows`;
   const bundledAssets = new Map(
     files
       .filter((entry) => entry.path.startsWith(`${bundledRoot}/`))
@@ -353,7 +421,7 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
     );
   }
 
-  const packagePath = `${plugin.distDir}/package.json`;
+  const packagePath = `${artifactRoot}/package.json`;
   const packageJson = await readJsonBlob(
     files.find((entry) => entry.path === packagePath),
     packagePath
@@ -397,10 +465,10 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
   if (
     catalogEntry?.version !== actualVersion ||
     catalogEntry?.source?.ref !== branch ||
-    catalogEntry?.source?.path !== plugin.distDir
+    catalogEntry?.source?.path !== artifactRoot
   ) {
     fail(
-      `${MARKETPLACE} does not publish ${plugin.name}@${actualVersion} from ${plugin.distDir} at ${branch}`
+      `${MARKETPLACE} does not publish ${plugin.name}@${actualVersion} from ${artifactRoot} at ${branch}`
     );
   }
 
@@ -438,7 +506,8 @@ async function verifyCompletion(args) {
     plugin,
     version,
     source,
-    branch: refs.PLUGIN_PINNED_BRANCH
+    branch: refs.PLUGIN_PINNED_BRANCH,
+    allowLegacyPluginRoot: args.includes("--allow-legacy-plugin-root")
   });
 
   await verifyTagTarget(refs.PLUGIN_SOURCE_TAG, artifact.commit);

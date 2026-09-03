@@ -115,7 +115,7 @@ describe(".github/extension release assets", () => {
     ["stable", "release.yml", "$SOURCE_SHA"]
   ])(
     "publishes the complete tree and validates the %s source",
-    (_channel, file, source) => {
+    (channel, file, source) => {
       const workflow = parseYaml(
         readFileSync(join(REPO_ROOT, ".github", "workflows", file), "utf8")
       );
@@ -129,6 +129,39 @@ describe(".github/extension release assets", () => {
 
       expect(commitScript).toContain('--path ".github/extension"');
       expect(validationScript).toContain(`--source "${source}"`);
+
+      // The complete install unit belongs only under plugins/<name>. Publishing
+      // the same tree under extensions/<name> creates nested extensions, skills,
+      // and workflows directories that are not release-root components.
+      expect(commitScript).not.toContain("PLUGIN_PUBLISH_DIR");
+      expect(commitScript).toContain('--path "$PLUGIN_DIST=$PLUGIN_DIR"');
+      expect(commitScript).toContain('--path "$MANIFEST"');
+      if (channel === "stable") {
+        expect(commitScript).toContain('--arg path "$PLUGIN_DIR"');
+        expect(commitScript).toContain(".source.path = $path");
+      }
     }
   );
+
+  it("re-baselines edge when a reachable source is no longer in main history", () => {
+    const workflow = parseYaml(
+      readFileSync(
+        join(REPO_ROOT, ".github", "workflows", "publish.yml"),
+        "utf8"
+      )
+    );
+    const publishScript = runScripts(workflow).find((script) =>
+      script.includes("Published edge source")
+    );
+
+    expect(publishScript).toContain(
+      'git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"'
+    );
+    expect(publishScript).toContain(
+      '! git merge-base --is-ancestor "$current_source" refs/remotes/origin/main'
+    );
+    expect(publishScript).toContain(
+      'if [ "$GITHUB_SHA" != "$(git rev-parse refs/remotes/origin/main)" ]; then'
+    );
+  });
 });

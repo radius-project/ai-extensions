@@ -27,6 +27,8 @@ const SOURCE = "f".repeat(40);
 const PACKAGE_BLOB = "1".repeat(40);
 const MARKETPLACE_BLOB = "2".repeat(40);
 const EXTENSION_BLOB = "3".repeat(40);
+const MANIFEST_BLOB = "4".repeat(40);
+const README_BLOB = "5".repeat(40);
 // File modes and symlinks are not reproducible on Windows.
 const WINDOWS = process.platform === "win32";
 
@@ -154,9 +156,13 @@ async function completionApi({
   packageVersion = "1.2.0",
   catalogVersion = "1.2.0",
   catalogRef,
-  catalogPath = "plugins/radius/dist",
+  catalogPath = "plugins/radius",
   includeRootExtension = true,
   includeBundledExtension = true,
+  includePinnedMetadata = true,
+  includePublishedExtension = false,
+  legacyPluginRoot = false,
+  extraTreePaths = [],
   rootExtensionBlob = EXTENSION_BLOB,
   bundledExtensionBlob = rootExtensionBlob,
   releaseDraft = false,
@@ -169,6 +175,28 @@ async function completionApi({
     encoding: "base64",
     content: Buffer.from(`${JSON.stringify(value)}\n`).toString("base64")
   });
+  const installFiles = [
+    ["package.json", PACKAGE_BLOB],
+    ["extension.mjs", "3".repeat(40)],
+    ["extensions/radius/extension.mjs", EXTENSION_BLOB],
+    ["extensions/radius/package.json", PACKAGE_BLOB],
+    ["com.github.copilot/extensions/radius/extension.mjs", EXTENSION_BLOB],
+    ["com.github.copilot/extensions/radius/package.json", PACKAGE_BLOB],
+    ["assets/preview.png", "4".repeat(40)],
+    ["skills/radius-app-bicep/SKILL.md", "5".repeat(40)],
+    ["plugin.json", MANIFEST_BLOB],
+    ["README.md", README_BLOB],
+    ...(includeBundledExtension ?
+      [["workflows/actions/example/action.yml", bundledExtensionBlob]]
+    : [])
+  ];
+  const treeFiles = (root, files) =>
+    files.map(([relativePath, sha]) => ({
+      path: `${root}/${relativePath}`,
+      mode: "100644",
+      type: "blob",
+      sha
+    }));
   const server = createServer((request, response) => {
     request.resume();
     request.on("end", () => {
@@ -231,18 +259,19 @@ async function completionApi({
               type: "blob",
               sha: MARKETPLACE_BLOB
             },
-            {
-              path: "plugins/radius/dist/package.json",
-              mode: "100644",
-              type: "blob",
-              sha: PACKAGE_BLOB
-            },
-            {
-              path: "plugins/radius/dist/extension.mjs",
-              mode: "100644",
-              type: "blob",
-              sha: "3".repeat(40)
-            },
+            ...(includePinnedMetadata ?
+              treeFiles(
+                "plugins/radius",
+                legacyPluginRoot ?
+                  installFiles.filter(([path]) =>
+                    ["plugin.json", "README.md"].includes(path)
+                  )
+                : installFiles
+              )
+            : []),
+            ...(includePublishedExtension ?
+              treeFiles("extensions/radius", installFiles)
+            : []),
             ...(includeRootExtension ?
               [
                 {
@@ -253,16 +282,12 @@ async function completionApi({
                 }
               ]
             : []),
-            ...(includeBundledExtension ?
-              [
-                {
-                  path: "plugins/radius/dist/workflows/actions/example/action.yml",
-                  mode: "100644",
-                  type: "blob",
-                  sha: bundledExtensionBlob
-                }
-              ]
-            : [])
+            ...extraTreePaths.map((path) => ({
+              path,
+              mode: "100644",
+              type: "blob",
+              sha: EXTENSION_BLOB
+            }))
           ]
         });
       }
@@ -317,8 +342,9 @@ function repository() {
   writeFileSync(join(root, "dist", "skills", "SKILL.md"), "# Skill\n");
   writeFileSync(join(root, "catalog.json"), '{"plugins":[]}\n');
   mkdirSync(join(root, "plugins", "radius"), { recursive: true });
+  mkdirSync(join(root, "extensions", "radius"), { recursive: true });
   writeFileSync(
-    join(root, "plugins", "radius", "package.json"),
+    join(root, "extensions", "radius", "package.json"),
     '{"name":"radius","version":"1.2.0","scripts":{"test:artifact":"echo tested"}}\n'
   );
   writeFileSync(
@@ -474,6 +500,71 @@ describe("scripts/verified-git.mjs", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("is not a root commit");
+  });
+
+  // The assembled plugin cannot be built at the path it ships from, because
+  // that path holds the tracked source it is built out of.
+  it("publishes the assembled tree under the plugin root", async () => {
+    const root = repository();
+    const { url, calls } = await api();
+
+    const result = await run(
+      root,
+      url,
+      commitArgs(["dist=plugins/radius", "catalog.json"])
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(
+      calls
+        .find((call) => call.route === "POST /git/trees")
+        .body.tree.map((entry) => entry.path)
+    ).toEqual([
+      "catalog.json",
+      "plugins/radius/extension.mjs",
+      "plugins/radius/skills/SKILL.md"
+    ]);
+  });
+
+  it("renames a single file as readily as a tree", async () => {
+    const root = repository();
+    const { url, calls } = await api();
+
+    const result = await run(
+      root,
+      url,
+      commitArgs(["catalog.json=.github/plugin/marketplace.json"])
+    );
+
+    expect(result.status).toBe(0);
+    expect(
+      calls
+        .find((call) => call.route === "POST /git/trees")
+        .body.tree.map((entry) => entry.path)
+    ).toEqual([".github/plugin/marketplace.json"]);
+  });
+
+  it.each([
+    ["dist=/etc/passwd", "an absolute destination"],
+    ["dist=.", "a dot destination"],
+    ["dist=./extensions", "a leading dot segment"],
+    ["dist=extensions/./radius", "an embedded dot segment"],
+    ["dist=../escape", "a parent traversal"],
+    ["dist=nested/../../escape", "an embedded parent traversal"],
+    ["dist=", "an empty destination"],
+    ["dist=trailing/", "a trailing separator"],
+    ["dist=double//slash", "an empty path segment"],
+    ["dist=with space", "whitespace"]
+  ])("rejects %s as a published path", async (path, _reason) => {
+    const root = repository();
+    const { url, calls } = await api();
+
+    const result = await run(root, url, commitArgs([path]));
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("publishes to an invalid path");
+    expect(calls.map((call) => call.route)).not.toContain("POST /git/trees");
   });
 
   it.skipIf(WINDOWS)("refuses to publish a symlink", async () => {
@@ -907,6 +998,46 @@ describe("scripts/verified-git.mjs", () => {
       expect(JSON.parse(result.stdout).source).toBe(SOURCE);
     });
 
+    it("accepts a metadata-only previous release only through the compatibility flag", async () => {
+      const root = repository();
+      const { url } = await completionApi({
+        catalogPath: "extensions/radius",
+        includePublishedExtension: true,
+        legacyPluginRoot: true
+      });
+
+      const strict = await run(root, url, args);
+      const compatible = await run(root, url, [
+        ...args,
+        "--allow-legacy-plugin-root"
+      ]);
+
+      expect(strict.status).toBe(1);
+      expect(strict.stderr).toContain(
+        "unexpected path: extensions/radius/package.json"
+      );
+      expect(compatible.status).toBe(0);
+    });
+
+    it("accepts a mirrored previous release only through the compatibility flag", async () => {
+      const root = repository();
+      const { url } = await completionApi({
+        includePublishedExtension: true
+      });
+
+      const strict = await run(root, url, args);
+      const compatible = await run(root, url, [
+        ...args,
+        "--allow-legacy-plugin-root"
+      ]);
+
+      expect(strict.status).toBe(1);
+      expect(strict.stderr).toContain(
+        "unexpected path: extensions/radius/package.json"
+      );
+      expect(compatible.status).toBe(0);
+    });
+
     it("rejects a release tag targeting a commit other than its artifact", async () => {
       const root = repository();
       const wrong = "9".repeat(40);
@@ -944,13 +1075,42 @@ describe("scripts/verified-git.mjs", () => {
         "does not bundle an exact copy"
       ],
       [
+        "no plugin copy beside the install unit",
+        { includePinnedMetadata: false },
+        "does not publish a valid plugin"
+      ],
+      [
+        "nested extensions under the repository-root extension",
+        {
+          extraTreePaths: ["extensions/radius/extensions/radius/extension.mjs"]
+        },
+        "unexpected path: extensions/radius/extensions/radius/extension.mjs"
+      ],
+      [
+        "skills under the repository-root extension",
+        { extraTreePaths: ["extensions/radius/skills/SKILL.md"] },
+        "unexpected path: extensions/radius/skills/SKILL.md"
+      ],
+      [
+        "workflows under the repository-root extension",
+        {
+          extraTreePaths: ["extensions/radius/workflows/action.yml"]
+        },
+        "unexpected path: extensions/radius/workflows/action.yml"
+      ],
+      [
+        "a sibling plugin's metadata",
+        { extraTreePaths: ["plugins/other/plugin.json"] },
+        "unexpected path: plugins/other/plugin.json"
+      ],
+      [
         "the wrong catalog ref",
         { catalogRef: "releases/radius/latest" },
         "does not publish"
       ],
       [
         "the wrong catalog path",
-        { catalogPath: "plugins/other/dist" },
+        { catalogPath: "extensions/other" },
         "does not publish"
       ],
       ["a draft release", { releaseDraft: true }, "published GitHub release"],
@@ -999,6 +1159,29 @@ describe("scripts/verified-git.mjs", () => {
         version: "1.2.0",
         source: SOURCE
       });
+    });
+
+    it("accepts a complete artifact published only under the plugin root", async () => {
+      const root = repository();
+      const { url } = await completionApi({
+        catalogPath: "plugins/radius",
+        includePublishedExtension: false
+      });
+
+      const result = await run(root, url, [
+        "verify-artifact",
+        "--branch",
+        "releases/radius/v1.2.0",
+        "--plugin",
+        "radius",
+        "--version",
+        "1.2.0",
+        "--source",
+        SOURCE
+      ]);
+
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
     });
   });
 });

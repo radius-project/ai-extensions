@@ -12,6 +12,7 @@ import { GRAPH_MODELING_FAILURE_MESSAGE } from "../../../src/graph-progress-cont
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
+import type { WorkspaceBranchResolution } from "../../../src/workspace.js";
 
 let container: CanvasServerContainer | undefined;
 
@@ -29,6 +30,8 @@ interface Script {
   // promise before resolving. Lets a test prove progress frames reach the socket
   // WHILE the build is still in flight, not just once the stream has ended.
   buildGate?: Promise<void>;
+  branchResolutionThrows?: Error;
+  branchResolution?: WorkspaceBranchResolution;
 }
 
 interface Harness {
@@ -55,8 +58,23 @@ function start(): Harness {
   const routes = createTestRouteTable(
     createGraphsPlanningStreamRoutes({
       readInstanceEntry: () => entryFor({ state } as CanvasServerEntry),
-      defaultBranchForState: (current) =>
-        current?.contextBranch || current?.workspaceBranch || "main",
+      resolveBranchForRequest: (_entry, _repo, requestedBranch) => {
+        if (script.branchResolutionThrows) {
+          return Promise.reject(script.branchResolutionThrows);
+        }
+        return Promise.resolve({
+          ...(script.branchResolution ?? {
+            status: "resolved" as const,
+            branch:
+              requestedBranch ||
+              state.contextBranch ||
+              state.workspaceBranch ||
+              "main",
+            followsWorkspaceBranch: false
+          })
+        });
+      },
+      commitBranchResolution: () => true,
       // The real source-ref token derivation and first-wins commit guard, run
       // against the live state the handler mutates.
       prepareSourceRef: (entry, context) => {
@@ -267,6 +285,86 @@ describe("graphs-planning load-graph-stream real-loopback HIT", () => {
       { method: "POST" }
     );
     expect(posted.status).toBe(404);
+  });
+
+  it("streams the canonical workspace branch over the real socket", async () => {
+    const harness = start();
+    harness.script.branchResolution = {
+      status: "resolved",
+      branch: "renamed-worktree",
+      followsWorkspaceBranch: true,
+      workspaceSnapshot: {
+        workspaceBranch: "old-name",
+        contextBranch: "old-name"
+      }
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/load-graph-stream?repo=octo%2Fapp&branch=old-name`
+    );
+    const result = await readFrames(response);
+
+    expect(result.frames.at(-1)).toEqual({
+      event: "done",
+      data: {
+        reload: true,
+        resolvedBranch: "renamed-worktree"
+      }
+    });
+  });
+
+  it("streams branch resolution failures over the real socket", async () => {
+    const harness = start();
+    harness.script.branchResolutionThrows = new Error("branch probe crashed");
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/load-graph-stream?repo=octo%2Fapp`
+    );
+    const result = await readFrames(response);
+
+    expect(response.status).toBe(200);
+    expect(result.frames).toEqual([
+      {
+        event: "done",
+        data: { error: "branch probe crashed" }
+      }
+    ]);
+  });
+
+  it("does not replace source state when the repository is missing", async () => {
+    const harness = start();
+    harness.state.graphResources = [
+      { id: "existing", name: "existing", type: "Radius.Compute/containers" }
+    ];
+    harness.state.sourceRefContexts = {
+      graph: {
+        view: "graph",
+        repo: "octo/app",
+        branch: "main",
+        token: "graph|octo/app|main"
+      }
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/load-graph-stream`);
+    const result = await readFrames(response);
+
+    expect(result.frames).toEqual([
+      {
+        event: "done",
+        data: { error: "Please select a repository." }
+      }
+    ]);
+    expect(harness.state.graphResources).toEqual([
+      { id: "existing", name: "existing", type: "Radius.Compute/containers" }
+    ]);
+    expect(harness.state.sourceRefContexts.graph).toMatchObject({
+      repo: "octo/app",
+      branch: "main",
+      token: "graph|octo/app|main"
+    });
   });
 
   it("flushes progress frames on the socket while the build is still in flight", async () => {

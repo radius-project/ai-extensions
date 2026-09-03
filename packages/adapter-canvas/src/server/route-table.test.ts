@@ -249,7 +249,13 @@ const productionHandlers = {
   }),
   ...createGraphsPlanningStreamRoutes({
     readInstanceEntry: () => undefined,
-    defaultBranchForState: () => "main",
+    resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
+      Promise.resolve({
+        status: "resolved",
+        branch: requestedBranch,
+        followsWorkspaceBranch: false
+      }),
+    commitBranchResolution: () => true,
     prepareSourceRef: () => ({ token: "" }),
     commitSourceRef: () => true,
     isCurrentSourceRef: () => true,
@@ -280,6 +286,13 @@ const productionHandlers = {
   ...createGraphsPlanningWritesRoutes({
     workflows: createGraphPlanningWorkflows({
       readInstanceEntry: () => undefined,
+      resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
+        Promise.resolve({
+          status: "resolved",
+          branch: requestedBranch,
+          followsWorkspaceBranch: false
+        }),
+      commitBranchResolution: () => true,
       pipeline: createGraphPipeline({
         fetchBicepSelection: () =>
           Promise.resolve({
@@ -310,7 +323,6 @@ const productionHandlers = {
       prepareSourceRefResources: () => ({ view: "graph", token: "" }),
       setSourceRefResources: () => false,
       isCurrentSourceRefToken: () => false,
-      defaultBranchForState: () => "main",
       canReuseModeledGraph: () => false,
       addGraphProgress: () => false,
       beginPlannedGraphRequest: () => 1,

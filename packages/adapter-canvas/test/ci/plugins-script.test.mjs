@@ -37,7 +37,8 @@ function writeRepository(plugins) {
   for (const [dir, packaged] of Object.entries(plugins)) {
     mkdirSync(join(root, "plugins", dir), { recursive: true });
     if (packaged === null) continue;
-    writeJson(join(root, "plugins", dir, "package.json"), {
+    mkdirSync(join(root, "extensions", dir), { recursive: true });
+    writeJson(join(root, "extensions", dir, "package.json"), {
       name: packaged,
       version: "1.0.0",
       scripts: { "test:artifact": "echo tested" }
@@ -135,7 +136,8 @@ describe("scripts/plugins.mjs", () => {
     ).toEqual({
       PLUGIN_NAME: "radius-aws",
       PLUGIN_DIR: "plugins/radius-aws",
-      PLUGIN_DIST: "plugins/radius-aws/dist",
+      PLUGIN_EXTENSION_DIR: "extensions/radius-aws",
+      PLUGIN_DIST: ".artifacts/radius-aws",
       PLUGIN_ARTIFACT: "plugin-dist-radius-aws",
       PLUGIN_SBOM_ARTIFACT: "plugin-sbom-radius-aws",
       PLUGIN_TARBALL: "radius-aws-plugin.tar.gz",
@@ -167,6 +169,7 @@ describe("scripts/plugins.mjs", () => {
     expect(Object.keys(env(root, "--env", "radius"))).toEqual([
       "PLUGIN_NAME",
       "PLUGIN_DIR",
+      "PLUGIN_EXTENSION_DIR",
       "PLUGIN_DIST",
       "PLUGIN_ARTIFACT",
       "PLUGIN_SBOM_ARTIFACT",
@@ -237,7 +240,7 @@ describe("scripts/plugins.mjs", () => {
     "rejects a plugin with a %s built-artifact smoke test",
     (_label, script) => {
       const root = writeRepository({ radius: "radius" });
-      writeJson(join(root, "plugins", "radius", "package.json"), {
+      writeJson(join(root, "extensions", "radius", "package.json"), {
         name: "radius",
         version: "1.0.0",
         ...(script === undefined ?
@@ -254,14 +257,17 @@ describe("scripts/plugins.mjs", () => {
 
   it("rejects a partial plugin instead of silently skipping it", () => {
     const root = writeRepository({ radius: null });
-    writeJson(join(root, "plugins", "radius", "package.json"), {
+    mkdirSync(join(root, "extensions", "radius"), { recursive: true });
+    writeJson(join(root, "extensions", "radius", "package.json"), {
       name: "radius",
       version: "1.0.0"
     });
 
     const result = run(root);
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("both package.json and plugin.json");
+    expect(result.stderr).toContain(
+      "needs both plugins/radius/plugin.json and extensions/radius/package.json"
+    );
   });
 
   it.each(["radius aws", "radius..aws", "radius--aws"])(

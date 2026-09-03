@@ -8,15 +8,12 @@ developers and platform engineers build and manage applications together.
 
 ## Install the plugin
 
-Radius Canvas runs only in the
-[GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app),
-so install the plugin from the app: open app settings, click **Plugins**, add the
-`radius-project/ai-extensions` marketplace, and install the `radius` plugin.
+```bash
+copilot plugin marketplace add radius-project/ai-extensions
+copilot plugin install radius@radius-plugins
+```
 
-The canvas extension is a compiled bundle that is not committed to `main`. CI builds it on every merge and publishes it — together with the skills and manifest — to generated `releases/*` branches, and the marketplace manifest points each channel at its matching artifact, so installing from the app pulls the skills and canvas automatically. See [`docs/architecture/plugin-packaging-and-publishing.md`](./docs/architecture/plugin-packaging-and-publishing.md) for how this works.
-
-See [`plugins/radius/README.md`](./plugins/radius/README.md) for what the plugin
-bundles and how to use it.
+Radius Canvas is displayed only by the [GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app), so you can also install from the app itself. See [`plugins/radius/README.md`](./plugins/radius/README.md) for both routes, what the plugin bundles, and how to use it.
 
 > **NOTE:** Radius Canvas is in preview. Send us your feedback:
 > [open an issue](https://github.com/radius-project/ai-extensions/issues/new/choose)
@@ -65,18 +62,7 @@ additional UI surfaces beyond the Copilot canvas in the future.
 
 ## Agentic skills
 
-The repository also ships a set of agentic skills under
-[`plugins/radius/skills/`](./plugins/radius/skills). Each skill tells the agent how and when
-to drive a part of the Radius workflow, and pairs with the matching canvas
-actions and tools:
-
-| Skill                                                                       | What it does                                                                                                                                        |
-|-----------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
-| [`radius-app-bicep`](./plugins/radius/skills/radius-app-bicep/SKILL.md)     | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies.                          |
-| [`radius-app-graph`](./plugins/radius/skills/radius-app-graph/SKILL.md)     | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.                                             |
-| [`radius-environment`](./plugins/radius/skills/radius-environment/SKILL.md) | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions.                                              |
-| [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md)           | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.                                             |
-| [`radius-delete`](./plugins/radius/skills/radius-delete/SKILL.md)           | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or delete a deploy environment and clean up its cloud state. |
+The plugin also ships five agentic skills, in [`extensions/radius/skills/`](./extensions/radius/skills). Each one tells the agent how and when to drive a part of the Radius workflow — modeling, graphing, environments, deployment, and deletion — and pairs with the matching canvas actions and tools. See [`plugins/radius/README.md`](./plugins/radius/README.md) for what each skill does.
 
 ## Architecture
 
@@ -93,16 +79,7 @@ layout and development workflow.
 
 ## Getting started
 
-Build the extension bundle locally:
-
-```bash
-pnpm install
-pnpm build           # bundles the canvas extension -> plugins/radius/dist/
-```
-
-See [Contributing](./CONTRIBUTING.md) for prerequisites, the full development
-workflow, testing, and how to add compute platforms, canvas actions, or new UI
-adapters.
+See [Contributing](./CONTRIBUTING.md) for prerequisites, the repository layout, the build and test workflow, and how to add compute platforms, canvas actions, or new UI adapters.
 
 ## Getting help
 

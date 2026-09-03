@@ -60,8 +60,11 @@ function repository({
   const root = mkdtempSync(join(tmpdir(), "radius-dist-"));
   temporaryRepositories.push(root);
   const plugin = join(root, "plugins", pluginName);
-  const dist = join(plugin, "dist");
+  const extension = join(root, "extensions", pluginName);
+  const dist = join(root, ".artifacts", pluginName);
   mkdirSync(join(root, "scripts"));
+  mkdirSync(plugin, { recursive: true });
+  mkdirSync(extension, { recursive: true });
   mkdirSync(join(dist, "skills"), { recursive: true });
   for (const [name, source] of SCRIPTS) {
     copyFileSync(source, join(root, "scripts", name));
@@ -69,7 +72,7 @@ function repository({
   writeFileSync(join(root, "schema-fetch.mjs"), SCHEMA_FETCH_PRELOAD);
   configureSchemaFetch(root);
 
-  writeJson(join(plugin, "package.json"), {
+  writeJson(join(extension, "package.json"), {
     name: pluginName,
     version: "1.2.0",
     scripts: { "test:artifact": "echo tested" }
@@ -97,6 +100,44 @@ function repository({
   writeFileSync(join(dist, "extension.mjs"), "export {};\n");
   mkdirSync(join(dist, "workflows"));
   return { root, dist };
+}
+
+function canvasDist(dist) {
+  mkdirSync(join(dist, "assets"), { recursive: true });
+  writeFileSync(join(dist, "assets", "preview.png"), "png\n");
+  mkdirSync(join(dist, "extensions", "radius"), { recursive: true });
+  writeFileSync(
+    join(dist, "extensions", "radius", "extension.mjs"),
+    "export {};\n"
+  );
+  copyFileSync(
+    join(dist, "package.json"),
+    join(dist, "extensions", "radius", "package.json")
+  );
+  mkdirSync(join(dist, "com.github.copilot", "extensions", "radius"), {
+    recursive: true
+  });
+  writeFileSync(
+    join(dist, "com.github.copilot", "extensions", "radius", "extension.mjs"),
+    'export * from "../../../extension.mjs";\n'
+  );
+  copyFileSync(
+    join(dist, "package.json"),
+    join(dist, "com.github.copilot", "extensions", "radius", "package.json")
+  );
+}
+
+function canvasRepository(manifest = {}) {
+  const created = repository({
+    manifest: {
+      keywords: ["radius", "canvas"],
+      logo: "assets/preview.png",
+      extensions: "extensions",
+      ...manifest
+    }
+  });
+  canvasDist(created.dist);
+  return created;
 }
 
 function run(root, ...args) {
@@ -378,6 +419,173 @@ describe("scripts/validate-plugin-dist.mjs", () => {
     });
 
     expect(run(root)).toMatchObject({ status: 0, stdout: "radius@1.2.0" });
+  });
+
+  describe("canvas contract", () => {
+    it("accepts the external canvas artifact contract", () => {
+      const { root } = canvasRepository();
+
+      expect(run(root)).toMatchObject({ status: 0, stdout: "radius@1.2.0" });
+    });
+
+    it.each([
+      [
+        "a top-level logo",
+        { logo: "assets/preview.png" },
+        "declares unknown fields: logo"
+      ],
+      [
+        "an extensions directory name",
+        { extensions: "extensions" },
+        "plugin.json#extensions must be an object"
+      ]
+    ])(
+      "holds a plugin that is not a canvas to the closed schema for %s",
+      (_label, manifest, message) => {
+        const { root, dist } = repository({ manifest });
+        canvasDist(dist);
+
+        const result = run(root);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(message);
+      }
+    );
+
+    it.each([
+      [
+        "a logo the gallery will not accept",
+        { logo: "assets/logo.png" },
+        'plugin.json#logo must be "assets/preview.png"'
+      ],
+      [
+        "source composition metadata",
+        {
+          extensions: {
+            "com.github.copilot": { logo: "assets/preview.png" }
+          }
+        },
+        'published canvas plugin.json#extensions must be "extensions"'
+      ],
+      [
+        "the wrong extensions directory",
+        { extensions: "canvas" },
+        'published canvas plugin.json#extensions must be "extensions"'
+      ]
+    ])("rejects %s", (_label, manifest, message) => {
+      const { root } = canvasRepository(manifest);
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(message);
+    });
+
+    it.each([
+      [
+        "top-level logo",
+        { logo: undefined },
+        'plugin.json#logo must be "assets/preview.png"'
+      ],
+      [
+        "extensions directory declaration",
+        { extensions: undefined },
+        'published canvas plugin.json#extensions must be "extensions"'
+      ]
+    ])("rejects a canvas missing its %s", (_label, manifest, message) => {
+      const { root } = canvasRepository(manifest);
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(message);
+    });
+
+    it.each([
+      ["assets/preview.png", "plugin.json#logo does not exist"],
+      ["extension.mjs", "canvas entry point does not exist"],
+      [
+        "extensions/radius/extension.mjs",
+        "Awesome Copilot canvas entry point does not exist"
+      ],
+      [
+        "extensions/radius/package.json",
+        "Awesome Copilot canvas package does not exist"
+      ],
+      [
+        "com.github.copilot/extensions/radius/extension.mjs",
+        "GitHub Copilot namespaced canvas entry point does not exist"
+      ],
+      [
+        "com.github.copilot/extensions/radius/package.json",
+        "GitHub Copilot namespaced canvas package does not exist"
+      ]
+    ])("rejects a canvas plugin missing %s", (missing, message) => {
+      const { root, dist } = canvasRepository();
+      rmSync(join(dist, missing), { recursive: true, force: true });
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(message);
+    });
+
+    it("rejects Canvas package metadata that differs from the plugin root", () => {
+      const { root, dist } = canvasRepository();
+      writeFileSync(
+        join(dist, "extensions", "radius", "package.json"),
+        '{"name":"other","version":"1.2.0"}\n'
+      );
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "Awesome Copilot canvas package must match package.json"
+      );
+    });
+
+    it("rejects a namespaced entry that does not re-export the root bundle", () => {
+      const { root, dist } = canvasRepository();
+      writeFileSync(
+        join(
+          dist,
+          "com.github.copilot",
+          "extensions",
+          "radius",
+          "extension.mjs"
+        ),
+        'export * from "../../extension.mjs";\n'
+      );
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "must contain 'export * from \"../../../extension.mjs\";'"
+      );
+    });
+
+    it("rejects namespaced package metadata that differs from the plugin root", () => {
+      const { root, dist } = canvasRepository();
+      writeFileSync(
+        join(
+          dist,
+          "com.github.copilot",
+          "extensions",
+          "radius",
+          "package.json"
+        ),
+        '{"name":"other","version":"1.2.0"}\n'
+      );
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "GitHub Copilot namespaced canvas package must match package.json"
+      );
+    });
   });
 
   it("rejects non-object extension namespace data", () => {

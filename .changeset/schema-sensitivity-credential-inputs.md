@@ -1,0 +1,5 @@
+---
+"radius": patch
+---
+
+**Fixed:** Generated `app.bicep` no longer breaks a backing service whose schema takes a credential as a secret reference. Two defects are corrected. First, two resource types can name a property `password` with opposite meanings — `Radius.Data/mySqlDatabases.password` is the sensitive value itself, while `Radius.Messaging/rabbitMQ.password` is the resource ID of a `Radius.Security/secrets` resource — and the previous guidance chose by property name, so a RabbitMQ app was modeled with the password where the Secret's resource ID belongs and the deployment failed Kubernetes validation. Second, an authored Secret could expose the credential under a renamed key such as `PASSWORD`, so the broker resolved the right Secret but never found the lowercase `password` key its recipe requires and the container failed to start. The application modeling guidance now decides from the schema's `x-radius-sensitive` flag instead of the property's name, requires the authored Secret to use the exact case-sensitive data key the consuming schema names, and ships a worked RabbitMQ example alongside the MySQL one.

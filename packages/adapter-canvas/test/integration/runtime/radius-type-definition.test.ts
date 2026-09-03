@@ -16,7 +16,7 @@ const root = path.resolve(
 );
 const script = path.join(
   root,
-  "plugins",
+  "extensions",
   "radius",
   "skills",
   "radius-app-bicep",
@@ -2118,5 +2118,342 @@ describe("staged Bicep configuration", () => {
     );
     await resolver.writeStagedBicepConfig(staging, identity.extension);
     expect(fs.existsSync(path.join(staging, "bicepconfig.json"))).toBe(true);
+  });
+});
+
+describe("staged resolved types", () => {
+  const RESOLVED_TYPES = "resolved-types.json";
+  const postgreSqlType = "Radius.Data/postgreSqlDatabases@2025-08-01-preview";
+
+  function readResolvedTypes(staging: string): unknown {
+    return JSON.parse(
+      fs.readFileSync(path.join(staging, RESOLVED_TYPES), "utf8")
+    );
+  }
+
+  async function resolvePostgreSql() {
+    const cacheRoot = temporaryDirectory();
+    seedCache(cacheRoot);
+    return await resolver.resolveRadiusTypes(
+      ["Radius.Data/postgreSqlDatabases"],
+      {
+        ...managedIdentityOptions(),
+        cacheRoot,
+        fetchImpl: fixtureFetch([])
+      }
+    );
+  }
+
+  it("stages the schema sensitivity of every resolved property", async () => {
+    const staging = stagingDirectory();
+    const contract = await resolvePostgreSql();
+
+    await resolver.writeStagedResolvedTypes(staging, contract.resources);
+
+    expect(readResolvedTypes(staging)).toEqual({
+      contractVersion: 1,
+      types: {
+        [postgreSqlType]: {
+          application: false,
+          connections: false,
+          environment: false,
+          host: false,
+          password: true,
+          port: false,
+          size: false,
+          username: false
+        }
+      }
+    });
+  });
+
+  it("merges the types a later invocation resolves", async () => {
+    const staging = stagingDirectory();
+    await resolver.writeStagedResolvedTypes(staging, [
+      {
+        type: "Radius.Messaging/rabbitMQ",
+        apiVersion: "2025-08-01-preview",
+        schema: {
+          type: "object",
+          properties: {
+            properties: {
+              type: "object",
+              properties: { password: { type: "string" } }
+            }
+          }
+        }
+      }
+    ]);
+    const contract = await resolvePostgreSql();
+
+    await resolver.writeStagedResolvedTypes(staging, contract.resources);
+
+    const staged = readResolvedTypes(staging) as {
+      types: Record<string, unknown>;
+    };
+    expect(Object.keys(staged.types)).toEqual([
+      postgreSqlType,
+      "Radius.Messaging/rabbitMQ@2025-08-01-preview"
+    ]);
+    expect(
+      staged.types["Radius.Messaging/rabbitMQ@2025-08-01-preview"]
+    ).toEqual({ password: false });
+  });
+
+  it("stages nothing when the run resolved no type", async () => {
+    const staging = stagingDirectory();
+
+    await resolver.writeStagedResolvedTypes(staging, []);
+
+    expect(fs.existsSync(path.join(staging, RESOLVED_TYPES))).toBe(false);
+  });
+
+  it("records a property that any variant of a discriminated envelope marks sensitive", async () => {
+    const staging = stagingDirectory();
+
+    await resolver.writeStagedResolvedTypes(staging, [
+      {
+        type: "Radius.Test/discriminated",
+        apiVersion: "2025-08-01-preview",
+        schema: {
+          type: "object",
+          properties: {
+            properties: {
+              type: "object",
+              discriminator: "kind",
+              properties: { kind: { type: "string" } },
+              variants: {
+                inline: {
+                  properties: {
+                    kind: { type: "string" },
+                    credential: { type: "string", sensitive: true }
+                  }
+                },
+                reference: {
+                  properties: {
+                    kind: { type: "string" },
+                    credential: { type: "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    ]);
+
+    expect(
+      (readResolvedTypes(staging) as { types: Record<string, unknown> }).types[
+        "Radius.Test/discriminated@2025-08-01-preview"
+      ]
+    ).toEqual({ kind: false, credential: true });
+  });
+
+  it.each([
+    { name: "no properties at all", schema: { type: "object" } },
+    {
+      name: "no properties envelope",
+      schema: { type: "object", properties: { name: { type: "string" } } }
+    },
+    {
+      name: "an envelope with no properties",
+      schema: {
+        type: "object",
+        properties: { properties: { type: "object" } }
+      }
+    },
+    {
+      name: "a variant with no properties",
+      schema: {
+        type: "object",
+        properties: {
+          properties: { type: "object", properties: {}, variants: { a: {} } }
+        }
+      }
+    },
+    {
+      name: "a variant that is not an object",
+      schema: {
+        type: "object",
+        properties: {
+          properties: { type: "object", properties: {}, variants: { a: null } }
+        }
+      }
+    },
+    {
+      name: "a property that is not an object",
+      schema: {
+        type: "object",
+        properties: {
+          properties: { type: "object", properties: { size: null } }
+        }
+      },
+      expected: { size: false }
+    }
+  ])(
+    "derives no sensitive property from a schema with $name",
+    async ({ schema, expected = {} }) => {
+      const staging = stagingDirectory();
+
+      await resolver.writeStagedResolvedTypes(staging, [
+        { type: "Radius.Test/empty", apiVersion: "2025-08-01-preview", schema }
+      ]);
+
+      expect(
+        (readResolvedTypes(staging) as { types: Record<string, unknown> })
+          .types["Radius.Test/empty@2025-08-01-preview"]
+      ).toEqual(expected);
+    }
+  );
+
+  it.each([
+    { name: "unparseable", staged: "{not json", expected: /Could not parse/u },
+    {
+      name: "from another contract version",
+      staged: JSON.stringify({ contractVersion: 2, types: {} }),
+      expected: /not a version 1 contract/u
+    },
+    {
+      name: "missing its type map",
+      staged: JSON.stringify({ contractVersion: 1 }),
+      expected: /not a version 1 contract/u
+    },
+    {
+      name: "a JSON array",
+      staged: "[]",
+      expected: /not a version 1 contract/u
+    },
+    {
+      name: "holding a type entry that is not an object",
+      staged: JSON.stringify({
+        contractVersion: 1,
+        types: { "Radius.Messaging/rabbitMQ@2025-08-01-preview": "password" }
+      }),
+      expected:
+        /do not map each property of "Radius\.Messaging\/rabbitMQ@2025-08-01-preview" to a boolean/u
+    },
+    {
+      name: "holding a non-boolean property sensitivity",
+      staged: JSON.stringify({
+        contractVersion: 1,
+        types: {
+          "Radius.Messaging/rabbitMQ@2025-08-01-preview": { password: "false" }
+        }
+      }),
+      expected:
+        /do not map each property of "Radius\.Messaging\/rabbitMQ@2025-08-01-preview" to a boolean/u
+    },
+    {
+      name: "holding a null type entry",
+      staged: JSON.stringify({
+        contractVersion: 1,
+        types: { "Radius.Test/empty@2025-08-01-preview": null }
+      }),
+      expected: /do not map each property of "Radius\.Test\/empty/u
+    }
+  ])(
+    "refuses a staged contract that is $name",
+    async ({ staged, expected }) => {
+      const staging = stagingDirectory();
+      fs.writeFileSync(path.join(staging, RESOLVED_TYPES), staged);
+
+      await expect(
+        resolver.writeStagedResolvedTypes(staging, [
+          {
+            type: "Radius.Test/empty",
+            apiVersion: "2025-08-01-preview",
+            schema: { type: "object" }
+          }
+        ])
+      ).rejects.toThrow(expected);
+      expect(fs.readFileSync(path.join(staging, RESOLVED_TYPES), "utf8")).toBe(
+        staged
+      );
+    }
+  );
+
+  it("validates the staging directory before writing", async () => {
+    const staging = path.join(
+      temporaryDirectory(),
+      ".radius",
+      `${STAGING_DIR_PREFIX}missing`
+    );
+
+    await expect(
+      resolver.writeStagedResolvedTypes(staging, [
+        {
+          type: "Radius.Test/empty",
+          apiVersion: "2025-08-01-preview",
+          schema: { type: "object" }
+        }
+      ])
+    ).rejects.toThrow(/Invalid Radius staging directory/u);
+  });
+
+  it("stages the resolved types the command resolved", async () => {
+    let stdout = "";
+    const staging = stagingDirectory();
+    const writeResolvedTypes = vi.fn();
+    const resource = {
+      type: "Radius.Core/applications",
+      apiVersion: "2025-08-01-preview",
+      schema: { type: "object" }
+    };
+
+    const status = await resolver.main(
+      ["--staging", staging, "Radius.Core/applications"],
+      {
+        stdout: { write: (value: string) => (stdout += value) },
+        stderr: { write: () => {} },
+        resolve: async () => ({
+          contractVersion: 1,
+          extension: identity.extension,
+          resources: [resource],
+          notFound: []
+        }),
+        writeConfig: async () => {},
+        writeResolvedTypes
+      }
+    );
+
+    expect(status).toBe(0);
+    expect(stdout).not.toBe("");
+    expect(writeResolvedTypes).toHaveBeenCalledExactlyOnceWith(staging, [
+      resource
+    ]);
+  });
+
+  it("keeps stdout empty when the resolved types cannot be staged", async () => {
+    let stdout = "";
+    let stderr = "";
+    const staging = stagingDirectory();
+
+    const status = await resolver.main(
+      ["--staging", staging, "Radius.Core/applications"],
+      {
+        stdout: { write: (value: string) => (stdout += value) },
+        stderr: { write: (value: string) => (stderr += value) },
+        resolve: async () => ({
+          contractVersion: 1,
+          extension: identity.extension,
+          resources: [
+            {
+              type: "Radius.Core/applications",
+              apiVersion: "2025-08-01-preview",
+              schema: { type: "object" }
+            }
+          ],
+          notFound: []
+        }),
+        writeConfig: async () => {},
+        writeResolvedTypes: async () => {
+          throw new Error("staged resolved types are unwritable");
+        }
+      }
+    );
+
+    expect(status).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toBe("staged resolved types are unwritable\n");
   });
 });
