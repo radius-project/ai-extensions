@@ -545,7 +545,7 @@ describe("flow application", () => {
     expect(instance.fits).toEqual([{ padding: 0.18 }]);
   });
 
-  it("pushes an update into React state and re-fits, preserving the viewport", () => {
+  it("pushes an update into React state without changing the viewport", () => {
     const { tree, clock, vendor, updater } = renderApp();
     const instance = createFakeFlowInstance();
     (props(tree as RenderedElement).onInit as (value: unknown) => void)(
@@ -559,10 +559,7 @@ describe("flow application", () => {
     expect(vendor.reactFlow.nodeUpdates).toHaveLength(1);
     expect(vendor.reactFlow.edgeUpdates).toHaveLength(1);
     clock.tick(40);
-    expect(instance.fits).toEqual([
-      { padding: 0.18 },
-      { padding: 0.18, duration: 200 }
-    ]);
+    expect(instance.fits).toEqual([{ padding: 0.18 }]);
   });
 
   it("survives a viewport that refuses to fit", () => {
@@ -573,13 +570,6 @@ describe("flow application", () => {
       instance
     );
     expect(() => clock.tick(30)).not.toThrow();
-  });
-
-  it("does not schedule a re-fit before the flow has reported itself", () => {
-    const { clock, vendor, updater } = renderApp();
-    vendor.react.runEffects();
-    updater.fn?.([], []);
-    expect(clock.pending).toBe(0);
   });
 
   it("unbinds the updater when the application is torn down", () => {

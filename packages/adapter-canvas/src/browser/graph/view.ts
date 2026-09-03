@@ -319,7 +319,6 @@ interface AppProps {
 
 const FIT_VIEW_OPTIONS = { padding: 0.18 };
 const FIT_AFTER_MOUNT_MS = 30;
-const FIT_AFTER_UPDATE_MS = 40;
 
 function fitView(
   instance: ReactFlowInstance,
@@ -352,19 +351,11 @@ export function createGraphApp(
     const [edges, setEdges, onEdgesChange] = flow.useEdgesState(
       props.initialEdges
     );
-    const instanceRef = react.useRef<ReactFlowInstance | null>(null);
 
     react.useEffect(() => {
       updater.fn = (nextNodes, nextEdges) => {
         setNodes(nextNodes);
         setEdges(nextEdges);
-        const instance = instanceRef.current;
-        if (instance) {
-          clock.setTimeout(
-            () => fitView(instance, { padding: 0.18, duration: 200 }),
-            FIT_AFTER_UPDATE_MS
-          );
-        }
       };
       return () => {
         updater.fn = null;
@@ -394,7 +385,6 @@ export function createGraphApp(
         elementsSelectable: true,
         proOptions: { hideAttribution: true },
         onInit: (instance: ReactFlowInstance) => {
-          instanceRef.current = instance;
           clock.setTimeout(
             () => fitView(instance, FIT_VIEW_OPTIONS),
             FIT_AFTER_MOUNT_MS

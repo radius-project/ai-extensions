@@ -26,6 +26,7 @@ import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environme
 import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
 import { GRAPH_RETRY_MS } from "../../src/browser/pages/graph-page.js";
 import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
+import { DEPLOYED_GRAPH_POLL_MS } from "../../src/browser/pages/deployed-graph-page.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const SOURCE_FILE = "src/web/app.ts";
@@ -2860,6 +2861,64 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(
       page.getByRole("button", { name: "Stop tracking deployment" })
     ).toBeVisible();
+  });
+
+  test("preserves graph zoom while a deployment refreshes in Chromium", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let graphRequests = 0;
+    await routeDeployedPage(page, () => "pending");
+    await page.unroute("**/api/deployed-graph**");
+    await page.route("**/api/deployed-graph**", async (route) => {
+      graphRequests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [
+            {
+              id: "app/web",
+              name: "web",
+              type: "Radius.Compute/containers",
+              deployStatus: graphRequests === 1 ? "pending" : "success"
+            },
+            {
+              id: "app/db",
+              name: "db",
+              type: "Radius.Data/sqlDatabases",
+              deployStatus: graphRequests === 1 ? "pending" : "success"
+            }
+          ],
+          mode: "live",
+          branch: WORKTREE_BRANCH,
+          application: "radius-app",
+          updatedAt: "2026-09-03T19:00:00Z"
+        })
+      });
+    });
+    await gotoCanvas(page, canvas, "deployed");
+    await expect(page.getByAltText("In progress")).toHaveCount(2);
+
+    const viewport = page.locator(".react-flow__viewport");
+    const zoomOut = page.locator(".react-flow__controls-zoomout");
+    await page.clock.fastForward(30);
+    const fittedTransform = await viewport.getAttribute("style");
+    await zoomOut.click();
+    await page.clock.fastForward(300);
+    const zoomedTransform = await viewport.getAttribute("style");
+    // The refresh assertion below is only meaningful if the zoom control
+    // actually moved the viewport first.
+    expect(zoomedTransform).not.toBe(fittedTransform);
+
+    await page.clock.fastForward(DEPLOYED_GRAPH_POLL_MS);
+    await expect.poll(() => graphRequests).toBe(2);
+    await page.clock.fastForward(50);
+    await expect(page.getByAltText("Deployed")).toHaveCount(2);
+    await expect
+      .poll(() => viewport.getAttribute("style"))
+      .toBe(zoomedTransform);
   });
 
   test("confirms stop-tracking recovery by keyboard and sends the failed teardown identity @safety", async ({

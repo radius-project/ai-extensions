@@ -137,6 +137,19 @@ function maximumChannelDelta(left: string, right: string): number {
   );
 }
 
+async function waitForStableTransform(viewport: HTMLElement): Promise<string> {
+  let previous = "";
+  let stableChecks = 0;
+  await waitFor(() => {
+    const current = viewport.style.transform;
+    if (current === previous && current !== "") stableChecks++;
+    else stableChecks = 0;
+    previous = current;
+    expect(stableChecks).toBeGreaterThanOrEqual(2);
+  });
+  return viewport.style.transform;
+}
+
 describe("graph view in a real browser", () => {
   it("renders changed diff states with distinct fills and borders", async () => {
     const style = document.createElement("style");
@@ -490,6 +503,43 @@ describe("graph view in a real browser", () => {
     expect(
       screen.getByText("cache", { selector: ".rad-node__title" })
     ).toBeTruthy();
+  });
+
+  it("preserves a zoomed viewport when deployment data refreshes", async () => {
+    const { graph, host } = mount({ deployMode: true });
+    await card("web");
+    const viewport = host.querySelector(".react-flow__viewport");
+    const zoomOut = host.querySelector(".react-flow__controls-zoomout");
+    if (
+      !(viewport instanceof HTMLElement) ||
+      !(zoomOut instanceof HTMLElement)
+    ) {
+      throw new Error("graph viewport controls did not render");
+    }
+
+    const fittedTransform = await waitForStableTransform(viewport);
+    await userEvent.click(zoomOut);
+    const zoomedTransform = await waitForStableTransform(viewport);
+    // Guard against a vacuous assertion: the control must really move the
+    // viewport, otherwise "unchanged after refresh" would prove nothing.
+    expect(zoomedTransform).not.toBe(fittedTransform);
+
+    const settings = resolveGraphSettings({
+      localSource: true,
+      deployMode: true
+    });
+    const next = buildGraph(
+      settings,
+      RESOURCES.map((resource) => ({
+        ...resource,
+        deployStatus: "success"
+      }))
+    );
+    layoutGraph(realGraphVendor().dagre, next.nodes, next.edges);
+    expect(graph.update(next.nodes, next.edges)).toBe(true);
+
+    await screen.findAllByAltText("Deployed");
+    expect(await waitForStableTransform(viewport)).toBe(zoomedTransform);
   });
 
   it("detaches the real root on unmount and stops answering updates", async () => {
