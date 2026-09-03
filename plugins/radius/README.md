@@ -4,7 +4,7 @@ Model, visualize, and deploy applications with [Radius](https://radapp.io) from 
 
 ## Installation
 
-The `radius` plugin will be available in the [`github/awesome-copilot`](https://github.com/github/awesome-copilot) plugin catalog.
+The `radius` plugin is available in the [`github/awesome-copilot`](https://github.com/github/awesome-copilot) plugin catalog.
 
 Open the GitHub Copilot app, select **Customize** in the side menu, and then select **Plugins**. Search for `radius` and install the plugin. See [Adding plugins](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-plugins) for details.
 
