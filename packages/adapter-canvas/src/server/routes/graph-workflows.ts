@@ -903,6 +903,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         "planned"
       );
 
+      const graphJsonPath = pipeline.graphJsonPathFor(entry, selection);
       const staged = await pipeline.stageArtifacts({
         entry,
         selection,
@@ -940,7 +941,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       addEvent(
         "building_graph",
         "running",
-        selection.graphContent ?
+        pipeline.canUseGraphArtifact(selection) ?
           "Loading the selected branch's app-graph.json."
         : "Compiling the application model and building the resource graph."
       );
@@ -949,6 +950,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
           selection,
           staged,
           log: addBuildDetail,
+          saveGraphJsonTo: graphJsonPath,
           preferGraphArtifact: true
         },
         { repo, branch }
@@ -1260,6 +1262,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         branch: data.head,
         preferGraphArtifact: true
       });
+      const baseGraphJsonPath = pipeline.graphJsonPathFor(entry, baseSelection);
+      const headGraphJsonPath = pipeline.graphJsonPathFor(entry, headSelection);
       addEvent(
         "building_base_graph",
         "running",
@@ -1269,6 +1273,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         {
           selection: baseSelection,
           staged: baseStaged,
+          saveGraphJsonTo: baseGraphJsonPath,
           preferGraphArtifact: true
         },
         { repo, branch: data.base }
@@ -1287,6 +1292,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         {
           selection: headSelection,
           staged: headStaged,
+          saveGraphJsonTo: headGraphJsonPath,
           preferGraphArtifact: true
         },
         { repo, branch: data.head }

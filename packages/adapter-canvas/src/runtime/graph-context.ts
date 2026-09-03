@@ -14,6 +14,7 @@ import type {
   AppSourceEvaluation
 } from "@radius-project/core";
 import { hashAppBicep } from "../app-bicep-hash.js";
+import { isAppGraphCurrent } from "../app-graph-artifact.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { CanvasGraphResource, CanvasState } from "../shared.js";
 
@@ -138,7 +139,7 @@ export function createGraphContextHelpers(
     log: (message: string) => void
   ): Promise<CanvasGraphResource[]> {
     const graph = await fetchGraphForBranch(repo, branch, state);
-    if (graph) {
+    if (graph && isAppGraphCurrent(graph.content, bicepContent)) {
       const definitionFile = graph.path.replace("app-graph.json", "app.bicep");
       return deps.core.filterGraphVisualizationResources(
         deps.core.applicationGraphToResources(
@@ -149,17 +150,24 @@ export function createGraphContextHelpers(
       );
     }
 
+    const isLocal = deps.workspace.isWorkspaceSelection(state, repo, branch);
+    const bicepRepoPath =
+      graph?.path.replace("app-graph.json", "app.bicep") ?? ".radius/app.bicep";
     const { dir, remote } = await deps.rad.radArtifactsDirForSelection({
-      isLocal: deps.workspace.isWorkspaceSelection(state, repo, branch),
+      isLocal,
       state,
       github: deps.github,
       repo,
       branch,
-      bicepRepoPath: ".radius/app.bicep",
+      bicepRepoPath,
       log
     });
-    return deps.rad.buildGraphViaRad(bicepContent, ".radius/app.bicep", {
+    return deps.rad.buildGraphViaRad(bicepContent, bicepRepoPath, {
       log,
+      saveGraphJsonTo:
+        isLocal ?
+          deps.workspace.workspaceGraphJsonPath(state, bicepRepoPath)
+        : undefined,
       radArtifactsDir: dir,
       cleanupRadArtifactsDir: remote
     });

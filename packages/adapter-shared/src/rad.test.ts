@@ -22,6 +22,8 @@ import {
   bicepPublishExtensionArgs,
   bicepPublishArgs,
   saveGraphJson,
+  stampAppGraphJson,
+  hashAppBicep,
   normalizeSha256,
   expectedDigest,
   tryAcquireLock,
@@ -810,20 +812,25 @@ describe("runRadAppGraph artifact completion", () => {
 
   it("accepts a valid graph after a successful exit without waiting for a lingering pipe", async () => {
     const bicepFile = path.join(binDir, "app.bicep");
-    fs.writeFileSync(
-      bicepFile,
-      "resource app 'Radius.Core/applications@2023-10-01-preview' = {}"
-    );
+    const bicepContent =
+      "resource app 'Radius.Core/applications@2023-10-01-preview' = {}";
+    fs.writeFileSync(bicepFile, bicepContent);
+    const savedGraph = path.join(binDir, "saved", "app-graph.json");
     await expect(
       runRadAppGraph(bicepFile, {
         radPath: bin,
         timeout: 4000,
+        saveGraphJsonTo: savedGraph,
         processPlatform: "win32",
         artifactPollIntervalMs: 10,
         exitCloseGraceMs: 60_000
       })
     ).resolves.toEqual({
       resources: []
+    });
+    expect(JSON.parse(fs.readFileSync(savedGraph, "utf8"))).toEqual({
+      resources: [],
+      _radius: { appBicepHash: hashAppBicep(bicepContent) }
     });
   }, 10000);
 
@@ -1377,6 +1384,32 @@ describe("saveGraphJson", () => {
   let tmp: string;
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rad-save-"));
+  });
+
+  describe("stampAppGraphJson", () => {
+    it("ties the artifact to the normalized app.bicep content", () => {
+      const stamped = JSON.parse(
+        stampAppGraphJson('{"resources":[]}', "resource app {}\r\n")
+      );
+
+      expect(stamped).toEqual({
+        resources: [],
+        _radius: { appBicepHash: hashAppBicep("resource app {}\n") }
+      });
+    });
+
+    it("rejects a non-object graph payload", () => {
+      expect(() => stampAppGraphJson("null", "resource app {}")).toThrow(
+        "must contain a JSON object"
+      );
+    });
+
+    it("wraps a bare resources array so it can carry provenance", () => {
+      expect(JSON.parse(stampAppGraphJson("[]", "resource app {}"))).toEqual({
+        resources: [],
+        _radius: { appBicepHash: hashAppBicep("resource app {}") }
+      });
+    });
   });
   afterEach(() => {
     fs.rmSync(tmp, { recursive: true, force: true });

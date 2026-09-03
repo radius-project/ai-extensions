@@ -87,6 +87,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     selectAppBicep: (_entry, _repo, branch) =>
       Promise.resolve(scripted(active.selections, branch, "selectAppBicep")),
     bicepPathOf: (selection) => selection.bicepPath || ".radius/app.bicep",
+    canUseGraphArtifact: (selection) => !!selection.graphContent,
     stageArtifacts: () => Promise.resolve({ dir: "", remote: false }),
     compileResources: ({ selection }) => {
       if (active.compileThrows) return Promise.reject(active.compileThrows);

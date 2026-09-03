@@ -47,6 +47,7 @@ import {
   resolvePersistedSessionId,
   toSafeRepoRelPath,
   workspaceFileExists,
+  workspaceGraphJsonPath,
   workspaceHeadCommit,
   workspaceModelRecoverable,
   workspaceSourceChangedSince
@@ -143,7 +144,8 @@ const dependencies: RadiusExtensionDependencies = {
     parseRepoFromRemote,
     toSafeRepoRelPath,
     isWorkspacePath,
-    workspaceFileExists
+    workspaceFileExists,
+    workspaceGraphJsonPath
   },
   github,
   core: {

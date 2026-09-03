@@ -206,6 +206,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
       return Promise.resolve(selection);
     },
     bicepPathOf: (selection) => selection.bicepPath || ".radius/app.bicep",
+    canUseGraphArtifact: (selection) => !!selection.graphContent,
     stageArtifacts: ({ branch, log }: StageArtifactsInput) => {
       order.push(`stage:${branch}`);
       const staged = requireScripted(

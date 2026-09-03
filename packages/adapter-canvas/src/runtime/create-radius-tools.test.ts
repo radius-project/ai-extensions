@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { stampAppGraphJson } from "@radius-project/adapter-shared";
 import {
   UNIDENTIFIED_APPLICATION_MESSAGE,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
@@ -585,6 +586,8 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
   });
 
   it("uses committed branch graph artifacts for PR diff markdown", async () => {
+    const baseBicep = "resource db {}";
+    const headBicep = "resource db {}\nresource cache {}";
     const { tools, deps } = setup({
       workspaceContext: {
         workspacePath: "/workspace",
@@ -592,14 +595,18 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
         branch: "work"
       },
       bicepByRepoBranch: {
-        "remote:acme/widgets@main": "resource db {}",
-        "remote:acme/widgets@feat": "resource db {}\nresource cache {}"
+        "remote:acme/widgets@main": baseBicep,
+        "remote:acme/widgets@feat": headBicep
       },
       filesByRepoBranch: {
-        "remote:acme/widgets@main:.radius/app-graph.json":
+        "remote:acme/widgets@main:.radius/app-graph.json": stampAppGraphJson(
           '{"resources":[{"id":"db","name":"db","type":"x"}]}',
-        "remote:acme/widgets@feat:.radius/app-graph.json":
-          '{"resources":[{"id":"db","name":"db","type":"x"},{"id":"cache","name":"cache","type":"x"}]}'
+          baseBicep
+        ),
+        "remote:acme/widgets@feat:.radius/app-graph.json": stampAppGraphJson(
+          '{"resources":[{"id":"db","name":"db","type":"x"},{"id":"cache","name":"cache","type":"x"}]}',
+          headBicep
+        )
       }
     });
 

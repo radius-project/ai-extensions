@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { stampAppGraphJson } from "@radius-project/adapter-shared";
 import {
   serializeAppOrigin,
   APP_ORIGIN_REPO_PATH,
@@ -514,7 +515,10 @@ describe("fetchBicepForBranch", () => {
       const { deps, loadBranchGraphResources } = helpers({
         filesByRepoBranch: {
           "workspace:acme/widgets@main:.radius/app-graph.json":
-            '{"resources":[{"id":"persisted","name":"api","type":"Radius.Compute/containers"},{"id":"image","type":"containerImages"}]}'
+            stampAppGraphJson(
+              '{"resources":[{"id":"persisted","name":"api","type":"Radius.Compute/containers"},{"id":"image","type":"containerImages"}]}',
+              MODEL
+            )
         }
       });
 
@@ -545,7 +549,10 @@ describe("fetchBicepForBranch", () => {
     it("uses a root app-graph.json on a remote selected branch", async () => {
       const { deps, loadBranchGraphResources } = helpers({
         filesByRepoBranch: {
-          "remote:acme/widgets@feature/x:app-graph.json": '{"resources":[]}'
+          "remote:acme/widgets@feature/x:app-graph.json": stampAppGraphJson(
+            '{"resources":[]}',
+            MODEL
+          )
         }
       });
 
@@ -588,7 +595,10 @@ describe("fetchBicepForBranch", () => {
     it("does not use a remote graph artifact for an edited workspace selection", async () => {
       const { deps, loadBranchGraphResources } = helpers({
         filesByRepoBranch: {
-          "remote:acme/widgets@main:.radius/app-graph.json": '{"resources":[]}'
+          "remote:acme/widgets@main:.radius/app-graph.json": stampAppGraphJson(
+            '{"resources":[]}',
+            MODEL
+          )
         }
       });
 
@@ -601,26 +611,49 @@ describe("fetchBicepForBranch", () => {
       );
 
       expect(deps.appModel.fetchRepoFile).not.toHaveBeenCalled();
-      expect(deps.rad.buildGraphViaRad).toHaveBeenCalled();
+      expect(deps.rad.buildGraphViaRad).toHaveBeenCalledWith(
+        MODEL,
+        ".radius/app.bicep",
+        expect.objectContaining({
+          saveGraphJsonTo: "/workspace/.radius/app-graph.json"
+        })
+      );
     });
 
-    it("surfaces malformed app-graph.json instead of rebuilding it", async () => {
+    it("rebuilds malformed app-graph.json", async () => {
       const { deps, loadBranchGraphResources } = helpers({
         filesByRepoBranch: {
           "remote:acme/widgets@feature/x:.radius/app-graph.json": "{not json"
         }
       });
 
-      await expect(
-        loadBranchGraphResources(
-          "acme/widgets",
-          "feature/x",
-          WORKSPACE_STATE,
-          MODEL,
-          () => {}
-        )
-      ).rejects.toThrow("JSON");
-      expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
+      await loadBranchGraphResources(
+        "acme/widgets",
+        "feature/x",
+        WORKSPACE_STATE,
+        MODEL,
+        () => {}
+      );
+      expect(deps.rad.buildGraphViaRad).toHaveBeenCalled();
+    });
+
+    it("rebuilds app-graph.json when app.bicep changed", async () => {
+      const graph = stampAppGraphJson('{"resources":[]}', MODEL);
+      const { deps, loadBranchGraphResources } = helpers({
+        filesByRepoBranch: {
+          "remote:acme/widgets@feature/x:.radius/app-graph.json": graph
+        }
+      });
+
+      await loadBranchGraphResources(
+        "acme/widgets",
+        "feature/x",
+        WORKSPACE_STATE,
+        `${MODEL}\n// newer`,
+        () => {}
+      );
+
+      expect(deps.rad.buildGraphViaRad).toHaveBeenCalled();
     });
   });
 

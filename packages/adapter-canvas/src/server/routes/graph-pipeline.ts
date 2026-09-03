@@ -1,4 +1,5 @@
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import { isAppGraphCurrent } from "../../app-graph-artifact.js";
 
 // The one modeling pipeline behind every `graphs-planning` write route.
 //
@@ -135,6 +136,7 @@ export interface GraphPipeline<
     branch: string
   ): Promise<AppBicepSelection>;
   bicepPathOf(selection: AppBicepSelection): string;
+  canUseGraphArtifact(selection: AppBicepSelection): boolean;
   stageArtifacts(
     input: StageArtifactsInput<TEntry>
   ): Promise<StagedRadArtifacts>;
@@ -160,12 +162,18 @@ export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
     return selection.bicepPath || DEFAULT_APP_BICEP_PATH;
   }
 
+  function canUseGraphArtifact(selection: AppBicepSelection): boolean {
+    return isAppGraphCurrent(selection.graphContent, selection.content);
+  }
+
   return {
     selectAppBicep(entry, repo, branch) {
       return dependencies.fetchBicepSelection(entry, repo, branch);
     },
 
     bicepPathOf,
+
+    canUseGraphArtifact,
 
     stageArtifacts({
       entry,
@@ -175,7 +183,7 @@ export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
       log,
       preferGraphArtifact
     }) {
-      if (preferGraphArtifact && selection.graphContent) {
+      if (preferGraphArtifact && canUseGraphArtifact(selection)) {
         return Promise.resolve({ dir: "", remote: false });
       }
       return dependencies.resolveRadArtifactsDir({
@@ -199,7 +207,7 @@ export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
       saveGraphJsonTo,
       preferGraphArtifact
     }) {
-      if (preferGraphArtifact && selection.graphContent) {
+      if (preferGraphArtifact && canUseGraphArtifact(selection)) {
         return Promise.resolve().then(() => {
           const appGraph = JSON.parse(selection.graphContent || "");
           return dependencies.filterGraphVisualizationResources(
@@ -240,12 +248,14 @@ export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
       // recipe or extension invalidates a cached graph the Bicep alone would
       // have matched.
       return dependencies.graphDefinitionHash(
-        (preferGraphArtifact && selection.graphContent) ||
+        (preferGraphArtifact &&
+          canUseGraphArtifact(selection) &&
+          selection.graphContent) ||
           selection.content ||
           "",
-        preferGraphArtifact && selection.graphContent ?
-          ""
-        : dependencies.radArtifactsFingerprint(staged.dir)
+        preferGraphArtifact && canUseGraphArtifact(selection) ? "" : (
+          dependencies.radArtifactsFingerprint(staged.dir)
+        )
       );
     },
 

@@ -64,6 +64,10 @@ export interface WorkspaceDependencies {
     candidate: string | null | undefined
   ): boolean;
   workspaceFileExists(worktree: string, relPath: string): Promise<boolean>;
+  workspaceGraphJsonPath(
+    state: CanvasState,
+    bicepRepoPath: string | null | undefined
+  ): string;
 }
 
 export interface GitHubContentReader {
@@ -110,6 +114,7 @@ export interface RadDependencies {
     bicepRepoPath: string,
     options: {
       log?: (message: string) => void;
+      saveGraphJsonTo?: string;
       radArtifactsDir?: string;
       cleanupRadArtifactsDir?: boolean;
     }

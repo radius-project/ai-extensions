@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { RadProcessError } from "@radius-project/adapter-shared";
+import {
+  RadProcessError,
+  stampAppGraphJson
+} from "@radius-project/adapter-shared";
 import { createRadiusCanvas } from "./create-radius-canvas.js";
 import {
   createFakeDependencies,
@@ -479,8 +482,10 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
 
   it("auto-compares committed branch graph artifacts without invoking rad", async () => {
     const bicep = "resource db 'Radius.Data/redis@2023-10-01-preview' = {}";
-    const graph =
-      '{"resources":[{"id":"1","name":"db","type":"Radius.Data/redis"}]}';
+    const graph = stampAppGraphJson(
+      '{"resources":[{"id":"1","name":"db","type":"Radius.Data/redis"}]}',
+      bicep
+    );
     const { canvas, deps } = setup({
       workspaceContext: {
         workspacePath: "/workspace",
