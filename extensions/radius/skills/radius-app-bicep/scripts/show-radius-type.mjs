@@ -314,6 +314,19 @@ export function propertySensitivity(schema) {
   return sensitivity;
 }
 
+// Whether one entry in the staged map is a usable `property -> sensitive`
+// record. This is deliberately the same acceptance rule validate-bicep.mjs
+// applies when it reads the file back. The two scripts cannot import each other
+// in the installed plugin, so the rule is stated twice on purpose, in the same
+// way the staging constants above mirror core; a runtime test asserts the two
+// ends agree rather than trusting them to drift together.
+function isPropertySensitivityEntry(entry) {
+  return (
+    isObject(entry) &&
+    Object.values(entry).every((sensitive) => typeof sensitive === "boolean")
+  );
+}
+
 // Records what the checker needs about the types this run resolved.
 //
 // The map is merged rather than replaced. A run may resolve types in more than
@@ -340,6 +353,20 @@ export async function writeStagedResolvedTypes(stagingInput, resources) {
       throw new Error(
         `Staged resolved types "${staged}" are not a version ${RESOLVED_TYPES_CONTRACT_VERSION} contract.`
       );
+    }
+    // Every entry being merged forward is validated, not just the envelope. An
+    // entry this writer preserved unchecked would be written back out and only
+    // rejected later by the checker, which reports against a file the user
+    // never authored. Refusing here names the offending type at the step that
+    // would have reproduced it. Dropping or repairing the entry instead would
+    // be a success-shaped fallback over a file whose contents cannot be
+    // trusted.
+    for (const [type, entry] of Object.entries(existing.types)) {
+      if (!isPropertySensitivityEntry(entry)) {
+        throw new Error(
+          `Staged resolved types "${staged}" do not map each property of "${type}" to a boolean.`
+        );
+      }
     }
     types = existing.types;
   }

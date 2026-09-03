@@ -2322,6 +2322,34 @@ describe("staged resolved types", () => {
       name: "a JSON array",
       staged: "[]",
       expected: /not a version 1 contract/u
+    },
+    {
+      name: "holding a type entry that is not an object",
+      staged: JSON.stringify({
+        contractVersion: 1,
+        types: { "Radius.Messaging/rabbitMQ@2025-08-01-preview": "password" }
+      }),
+      expected:
+        /do not map each property of "Radius\.Messaging\/rabbitMQ@2025-08-01-preview" to a boolean/u
+    },
+    {
+      name: "holding a non-boolean property sensitivity",
+      staged: JSON.stringify({
+        contractVersion: 1,
+        types: {
+          "Radius.Messaging/rabbitMQ@2025-08-01-preview": { password: "false" }
+        }
+      }),
+      expected:
+        /do not map each property of "Radius\.Messaging\/rabbitMQ@2025-08-01-preview" to a boolean/u
+    },
+    {
+      name: "holding a null type entry",
+      staged: JSON.stringify({
+        contractVersion: 1,
+        types: { "Radius.Test/empty@2025-08-01-preview": null }
+      }),
+      expected: /do not map each property of "Radius\.Test\/empty/u
     }
   ])(
     "refuses a staged contract that is $name",

@@ -3,12 +3,13 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, afterEach, describe, it, test } from "vitest";
 import {
   REPAIR_ATTEMPT_BUDGET,
   REPAIR_COMPILE_LIMIT,
   REPEATED_FAILURE_MESSAGE,
+  STAGING_DIR_PREFIX,
   STAGING_RUN_RECORD,
   evaluateRepairAttempt,
   fingerprintCompilerOutput,
@@ -2736,5 +2737,115 @@ describe("secure parameter targets", () => {
     // The missing envelope is a source-reference failure, not a credential one.
     assert.equal(result.status, 1);
     assert.doesNotMatch(result.stderr, /secure-parameter-target/u);
+  });
+});
+
+// The writer that produces `resolved-types.json` and the checker that consumes
+// it each state the per-entry acceptance rule in their own script, because the
+// installed plugin has no shared module for them to import. The failure that
+// duplication invites is the two ends disagreeing: a writer looser than the
+// reader merges a malformed entry forward and emits a file its own checker then
+// rejects, reporting against a file the user never authored. These cases pin
+// both ends to the same answer for the same input so they cannot drift apart.
+describe("resolved-type contract agreement", () => {
+  const resolver = path.join(
+    root,
+    "extensions",
+    "radius",
+    "skills",
+    "radius-app-bicep",
+    "scripts",
+    "show-radius-type.mjs"
+  );
+  const agreementType = "Radius.Messaging/rabbitMQ@2025-08-01-preview";
+
+  // The writer validates its staging directory, which must carry the staging
+  // name prefix and a run record with a baseline.
+  function writerStagingDirectory(): string {
+    const directory = path.join(
+      temporaryDirectory(),
+      `${STAGING_DIR_PREFIX}agreement`
+    );
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(
+      path.join(directory, STAGING_RUN_RECORD),
+      JSON.stringify({ version: 1, runId: "agreement", baseline: {} })
+    );
+    return directory;
+  }
+
+  async function writerAccepts(staged: string): Promise<boolean> {
+    const directory = writerStagingDirectory();
+    fs.writeFileSync(path.join(directory, RESOLVED_TYPES), staged);
+    const { writeStagedResolvedTypes } = (await import(
+      pathToFileURL(resolver).href
+    )) as {
+      writeStagedResolvedTypes: (
+        staging: string,
+        resources: Array<{
+          type: string;
+          apiVersion: string;
+          schema: object;
+        }>
+      ) => Promise<void>;
+    };
+    return await writeStagedResolvedTypes(directory, [
+      {
+        type: "Radius.Test/agreement",
+        apiVersion: "2025-08-01-preview",
+        schema: { type: "object" }
+      }
+    ]).then(
+      () => true,
+      () => false
+    );
+  }
+
+  // The checker is a separate script in a child process, so it is asked the
+  // same question the only way it can be: compile a model beside the staged
+  // file and see whether it calls the contract unreadable.
+  function checkerAccepts(staged: string): boolean {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    fs.writeFileSync(path.join(directory, RESOLVED_TYPES), staged);
+    const result = runChecker(
+      directory,
+      fakeBicep(
+        directory,
+        sarif([]),
+        0,
+        template({
+          rabbitmq: radiusResource(agreementType, { queue: "orders" })
+        })
+      )
+    );
+    return !/could not be read/u.test(result.stderr);
+  }
+
+  it.each([
+    { name: "an entry with no properties", entry: {}, accepted: true },
+    {
+      name: "boolean property sensitivities",
+      entry: { password: false, queue: true },
+      accepted: true
+    },
+    { name: "a string entry", entry: "password", accepted: false },
+    { name: "a null entry", entry: null, accepted: false },
+    { name: "an array entry", entry: [], accepted: false },
+    {
+      name: "a stringly-typed boolean",
+      entry: { password: "false" },
+      accepted: false
+    },
+    { name: "a numeric sensitivity", entry: { password: 0 }, accepted: false },
+    { name: "a null sensitivity", entry: { password: null }, accepted: false }
+  ])("both ends treat $name the same way", async ({ entry, accepted }) => {
+    const staged = JSON.stringify({
+      contractVersion: 1,
+      types: { [agreementType]: entry }
+    });
+
+    assert.equal(await writerAccepts(staged), accepted);
+    assert.equal(checkerAccepts(staged), accepted);
   });
 });
