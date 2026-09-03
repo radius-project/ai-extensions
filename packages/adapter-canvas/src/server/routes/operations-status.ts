@@ -615,7 +615,7 @@ export async function handleCreateOperation(
           environment,
           provider,
           cluster: data.cluster || "",
-          namespace: data.namespace || "",
+          namespace,
           profileName: data.profileName || "",
           branch: data.branch || "",
           tenantId: data.tenantId || "",

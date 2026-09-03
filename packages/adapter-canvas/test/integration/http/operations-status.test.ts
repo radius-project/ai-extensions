@@ -293,7 +293,7 @@ const VALID_AZURE_BODY = {
 
 describe("operations-status real-loopback HIT (RF-08)", () => {
   it.each(["Todo-app-3", true])(
-    "rejects invalid namespace %j before registering setup work",
+    "rejects malformed namespace value %j before registering setup work",
     async (namespace) => {
       const harness = start();
       const entry = await container!.getOrCreate("panel-a");

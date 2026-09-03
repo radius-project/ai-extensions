@@ -409,11 +409,12 @@ export function initializeEnvironmentPage(
     const error = provider === "aws" ? awsNamespaceError : azureNamespaceError;
     error.hidden = true;
     error.textContent = "";
-    for (const suffix of ["select", "custom"]) {
-      context.dom
-        .inputById(`${provider}-namespace-${suffix}`)
-        ?.removeAttribute("aria-invalid");
-    }
+    context.dom
+      .selectById(`${provider}-namespace-select`)
+      ?.removeAttribute("aria-invalid");
+    context.dom
+      .inputById(`${provider}-namespace-custom`)
+      ?.removeAttribute("aria-invalid");
   };
 
   const showNamespaceError = (
@@ -656,23 +657,36 @@ export function initializeEnvironmentPage(
   });
   scope.on(createButton, "click", createEnvironment);
   for (const provider of ["azure", "aws"] as const) {
-    const select = context.dom.inputById(`${provider}-namespace-select`);
+    const select = context.dom.selectById(`${provider}-namespace-select`);
     const custom = context.dom.inputById(`${provider}-namespace-custom`);
-    if (select) {
-      scope.on(select, "change", () => clearNamespaceError(provider));
-    }
-    if (custom) {
-      scope.on(custom, "input", () => {
-        if (
-          select?.value === "__custom__" &&
-          custom.value !== "" &&
-          !isKubernetesNamespace(custom.value)
-        ) {
-          showNamespaceError(provider, false);
-          return;
+    const controls: ReadonlyArray<
+      readonly [
+        DomInputElement | null,
+        "change" | "input",
+        (control: DomInputElement) => void
+      ]
+    > = [
+      [select, "change", () => clearNamespaceError(provider)],
+      [
+        custom,
+        "input",
+        (control) => {
+          if (
+            select?.value === "__custom__" &&
+            control.value !== "" &&
+            !isKubernetesNamespace(control.value)
+          ) {
+            showNamespaceError(provider, false);
+            return;
+          }
+          clearNamespaceError(provider);
         }
-        clearNamespaceError(provider);
-      });
+      ]
+    ];
+    for (const [control, event, handler] of controls) {
+      if (control) {
+        scope.on(control, event, () => handler(control));
+      }
     }
   }
 

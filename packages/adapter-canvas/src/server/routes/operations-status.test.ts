@@ -1203,13 +1203,14 @@ describe("handleCreateOperation (POST /api/operations)", () => {
     const resume = op.resumeRequest as {
       needsAzureCredentials: boolean;
       azure: { tenantId: string };
-      environment: { tenantId: string; provider: string };
+      environment: { tenantId: string; provider: string; namespace: string };
     };
     // The azure block is deep-cloned, not shared, so a later mutation of one
     // cannot leak into the other.
     expect(resume.azure).not.toBe((op.request as { azure: unknown }).azure);
     expect(resume.azure.tenantId).toBe("t-1");
     expect(resume.environment.provider).toBe("azure");
+    expect(resume.environment.namespace).toBe("default");
   });
 
   it("carries every supplied optional field into the azure resumeRequest environment", async () => {

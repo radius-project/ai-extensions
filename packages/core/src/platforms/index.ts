@@ -14,6 +14,7 @@ export type {
 } from "./oidc-subject.js";
 export {
   KUBERNETES_NAMESPACE_ERROR,
+  KUBERNETES_NAMESPACE_PATTERN,
   isKubernetesNamespace
 } from "./kubernetes.js";
 

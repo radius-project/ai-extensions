@@ -64,6 +64,7 @@ const EXPECTED_VALUES = [
   // public, because publish-targets.ts confines tool paths against it.
   "STAGING_DIR_PREFIX",
   "KUBERNETES_NAMESPACE_ERROR",
+  "KUBERNETES_NAMESPACE_PATTERN",
   "RADIUS_REF",
   "RADIUS_WORKFLOW_REPO",
   "RADIUS_WORKFLOW_DIR",

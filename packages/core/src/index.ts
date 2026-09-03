@@ -80,6 +80,7 @@ export {
   buildEnvironmentSuffix,
   buildFederatedCredentialName,
   KUBERNETES_NAMESPACE_ERROR,
+  KUBERNETES_NAMESPACE_PATTERN,
   isKubernetesNamespace
 } from "./platforms/index.js";
 export type {

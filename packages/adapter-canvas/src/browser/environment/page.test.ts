@@ -802,6 +802,19 @@ describe("initializeEnvironmentPage", () => {
         )
       ).toHaveLength(0);
 
+      custom.value = "";
+      page.elements[`${provider}-namespace-custom`].dispatch("input");
+      expect(error.hidden).toBe(true);
+      expect(custom.getAttribute("aria-invalid")).toBeNull();
+
+      custom.value = "Todo-app-3";
+      page.elements[`${provider}-namespace-custom`].dispatch("input");
+      select.value = "default";
+      page.elements[`${provider}-namespace-select`].dispatch("change");
+      expect(error.hidden).toBe(true);
+      expect(select.getAttribute("aria-invalid")).toBeNull();
+
+      select.value = "__custom__";
       custom.value = "todo-app-3";
       page.elements[`${provider}-namespace-custom`].dispatch("input");
       expect(error.hidden).toBe(true);
