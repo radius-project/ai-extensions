@@ -104,8 +104,8 @@ resource rabbitmq 'Radius.Messaging/rabbitMQ@2025-08-01-preview' = {
   properties: {
     environment: environment
     application: app.id
-    queue: 'orders'
-    username: 'username'
+    queue: 'orders'          // derived from source (e.g. ORDER_QUEUE_NAME)
+    username: 'username'     // derived from source (e.g. RABBITMQ_DEFAULT_USER)
     password: rabbitmqCredentials.id
   }
 }

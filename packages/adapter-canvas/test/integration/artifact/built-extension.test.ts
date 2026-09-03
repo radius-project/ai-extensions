@@ -800,6 +800,11 @@ describe("P0-C built Radius extension artifact", () => {
     expect(rabbitmqExample).not.toMatch(
       /^\s*password:\s*rabbitmqPassword\s*$/mu
     );
+    // `username` is source-derived, not a placeholder, so the example keeps the
+    // application's real value and annotates where it comes from.
+    expect(rabbitmqExample).toMatch(
+      /username:\s*'username'\s*\/\/ derived from source/u
+    );
     expect(secretsGuidance).toContain(
       "Writing `password: rabbitmqPassword` here deploys a broken application"
     );
