@@ -35,7 +35,6 @@ const DNS_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 const CANVAS_KEYWORD = "canvas";
 const CANVAS_LOGO = "assets/preview.png";
 const COPILOT_CLIENT_NAMESPACE = "com.github.copilot";
-const CANVAS_ENTRY_POINT = "com.github.copilot/extensions/radius/extension.mjs";
 
 class Failure extends Error {}
 
@@ -225,7 +224,7 @@ function isCanvasPlugin(manifest) {
   );
 }
 
-function requireCanvasContract(dist, manifest, packageJson) {
+function requireCanvasContract(dist, manifest, packageJson, pluginName) {
   const logo = manifest.extensions?.[COPILOT_CLIENT_NAMESPACE]?.logo;
   if (logo !== CANVAS_LOGO) {
     fail(
@@ -238,10 +237,11 @@ function requireCanvasContract(dist, manifest, packageJson) {
     `plugin.json#extensions.${COPILOT_CLIENT_NAMESPACE}.logo`,
     "file"
   );
-  if (packageJson.main !== CANVAS_ENTRY_POINT) {
-    fail(`package.json#main must be ${JSON.stringify(CANVAS_ENTRY_POINT)}`);
+  const canvasEntryPoint = `${COPILOT_CLIENT_NAMESPACE}/extensions/${pluginName}/extension.mjs`;
+  if (packageJson.main !== canvasEntryPoint) {
+    fail(`package.json#main must be ${JSON.stringify(canvasEntryPoint)}`);
   }
-  requirePath(dist, CANVAS_ENTRY_POINT, "canvas entry point", "file");
+  requirePath(dist, canvasEntryPoint, "canvas entry point", "file");
 }
 
 function requirePath(root, declared, label, type) {
@@ -308,7 +308,7 @@ async function main() {
   const canvas = isJsonObject(manifest) && isCanvasPlugin(manifest);
   const manifestError = validateSchema(manifest, manifestSchema, "plugin.json");
   if (manifestError !== undefined) fail(manifestError);
-  if (canvas) requireCanvasContract(dist, manifest, packageJson);
+  if (canvas) requireCanvasContract(dist, manifest, packageJson, plugin.name);
 
   if (packageJson.name !== plugin.name || manifest.name !== plugin.name) {
     fail(`dist manifests must both be named "${plugin.name}"`);
