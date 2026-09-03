@@ -280,6 +280,9 @@ the acting GitHub identity → resolve/create the app registration (owned-first)
 create the missing FICs with the *correct* subjects → assign **Contributor** on the
 resource group → assign **Azure Kubernetes Service RBAC Cluster Admin** on the
 cluster (best-effort, non-fatal; required for AKS Automatic's Azure-RBAC clusters) →
+assign **User Access Administrator** on the resource group (best-effort, non-fatal;
+`Contributor` excludes `Microsoft.Authorization/*/Write` and `/Delete`, so without it
+recipes that set a resource lock cannot create or remove that lock) →
 return the values the environment needs.
 
 Supporting endpoints added/hardened: `/api/verify-azure-login` (non-interactive

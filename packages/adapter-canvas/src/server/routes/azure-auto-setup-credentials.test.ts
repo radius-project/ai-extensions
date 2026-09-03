@@ -868,14 +868,85 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
         ) {
           return result({ code: 1, stderr: "AuthorizationFailed" });
         }
+        if (
+          line.startsWith("role assignment create ") &&
+          line.includes("User Access Administrator")
+        ) {
+          return result();
+        }
         throw new Error(`unexpected az call: ${line}`);
       }
     });
     expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
     expect(test.calls).toContain("sleep:2000");
     expect(test.calls).toContain("role:Contributor");
-    expect(test.workflow.steps.at(-1)).toContain("AuthorizationFailed");
+    expect(test.calls).toContain("role:User Access Administrator");
+    expect(
+      test.workflow.steps.some(
+        (step) =>
+          step.includes("Could not assign the AKS RBAC Cluster Admin role") &&
+          step.includes("AuthorizationFailed")
+      )
+    ).toBe(true);
     expect(test.failures).toEqual([]);
+  });
+
+  it("warns without failing when User Access Administrator cannot be granted", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: JSON.stringify([existingCredential()]) });
+        }
+        if (
+          line.startsWith("role assignment create ") &&
+          line.includes("User Access Administrator")
+        ) {
+          return result({ code: 1, stderr: "AuthorizationFailed" });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+    expect(test.failures).toEqual([]);
+    expect(test.calls).toContain("role:Contributor");
+    expect(test.calls).not.toContain("role:User Access Administrator");
+    expect(
+      test.workflow.steps.some(
+        (step) =>
+          step.includes(
+            "Could not assign the User Access Administrator role"
+          ) && step.includes("AuthorizationFailed")
+      )
+    ).toBe(true);
+  });
+
+  it("grants User Access Administrator on the resource group so locks can be managed", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: JSON.stringify([existingCredential()]) });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+    expect(test.calls).toContain("role:User Access Administrator");
+    expect(
+      test.calls.some(
+        (call) =>
+          call.startsWith("az:role assignment create ") &&
+          call.includes("--role User Access Administrator ") &&
+          call.includes(
+            `--scope /subscriptions/${SUBSCRIPTION}/resourceGroups/rg-radius `
+          )
+      )
+    ).toBe(true);
   });
 
   it("stops on a genuine Contributor assignment failure without retrying", async () => {
