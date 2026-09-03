@@ -1,4 +1,6 @@
 import { beginEntry, NOOP_TEARDOWN } from "./lifecycle.js";
+import { readBoolean, readString } from "./json.js";
+import { GRAPH_PAGE_STATE_ID } from "./page-state-ids.js";
 import type { BrowserTeardown } from "./lifecycle.js";
 import type { AbortHandle, BrowserContext } from "./ports.js";
 
@@ -9,6 +11,7 @@ export const HEARTBEAT_INTERVAL_MS = 5000;
 export const HEARTBEAT_REQUEST_TIMEOUT_MS = 4000;
 export const HEARTBEAT_MISS_THRESHOLD = 2;
 export const HEARTBEAT_RELOAD_RETRY_MS = 15000;
+export const WORKSPACE_MODEL_CHANGED_EVENT = "radius-workspace-model-changed";
 
 export interface HeartbeatOptions {
   intervalMs?: number;
@@ -37,6 +40,7 @@ export function initializeHeartbeat(
   let inFlight = false;
   let reloadRequestedAt: number | null = null;
   let activeAbort: AbortHandle | null = null;
+  let workspaceModelRevision: string | null = null;
 
   function recordMiss(): void {
     misses += 1;
@@ -73,6 +77,9 @@ export function initializeHeartbeat(
       .then(() =>
         context.net.fetch(HEARTBEAT_PING_PATH, {
           cache: "no-store",
+          ...(context.dom.byId(GRAPH_PAGE_STATE_ID) !== null ?
+            { headers: { "X-Radius-Workspace-Model": "1" } }
+          : {}),
           signal: abort === null ? undefined : abort.signal
         })
       )
@@ -94,6 +101,22 @@ export function initializeHeartbeat(
             return;
           }
           misses = 0;
+          return response.json().then((payload) => {
+            if (!scope.active) return;
+            const revision = readString(payload, "workspaceModelRevision");
+            if (!revision) return;
+            if (
+              revision !== workspaceModelRevision &&
+              (workspaceModelRevision !== null ||
+                readBoolean(payload, "workspaceModelChanged"))
+            ) {
+              context.dom.dispatch(
+                context.dom.document,
+                WORKSPACE_MODEL_CHANGED_EVENT
+              );
+            }
+            workspaceModelRevision = revision;
+          });
         },
         () => {
           if (scope.active) recordMiss();

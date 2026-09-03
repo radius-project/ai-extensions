@@ -291,6 +291,7 @@ export interface CanvasState {
   pendingSourceRefs?: PendingSourceRef[];
   page?: string;
   graphDefinitionHash?: string;
+  graphModelRevision?: string;
   graphBuildGeneration?: number;
   progressMessages?: string[];
   canvasInstanceId?: string;

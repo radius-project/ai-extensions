@@ -86,6 +86,7 @@ interface PipelineScript {
   compiled: Record<string, CanvasGraphResource[]>;
   jsonPath: string;
   definitionHash: string;
+  modelRevision: string;
   discardThrows?: Error;
   recipePackThrows?: Error;
   recipeOutputsThrows?: Error;
@@ -181,6 +182,9 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     compiled: {},
     jsonPath: "",
     definitionHash: "hash-a",
+    // Deliberately distinct from the definition hash: the model revision tracks
+    // model content alone, so a test cannot pass by conflating the two.
+    modelRevision: "model-a",
     ...script
   };
   const recipes: unknown[] = [];
@@ -241,6 +245,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     toCanvasResources: (values) => values as CanvasGraphResource[],
     graphJsonPathFor: () => harnessScript.jsonPath,
     definitionHashFor: () => harnessScript.definitionHash,
+    modelRevisionFor: () => harnessScript.modelRevision,
     discardStagedArtifacts: (staged) => {
       order.push(`discard:${staged.dir}`);
       if (harnessScript.discardThrows) throw harnessScript.discardThrows;
@@ -861,7 +866,8 @@ describe("graph planning workflows", () => {
         compiled: { "feature/x": [{ id: "res-a" } as CanvasGraphResource] },
         stageLogs: { "feature/x": "Staged local model artifacts." },
         jsonPath: "/ws/infra/app-graph.json",
-        definitionHash: "hash-x"
+        definitionHash: "hash-x",
+        modelRevision: "model-x"
       });
       harness.state.workspaceBranch = "feature/x";
 
@@ -885,7 +891,8 @@ describe("graph planning workflows", () => {
         graphFromWorkspace: true,
         activeGraphView: "graph",
         graphLoaded: true,
-        graphDefinitionHash: "hash-x"
+        graphDefinitionHash: "hash-x",
+        graphModelRevision: "model-x"
       });
       expect(harness.state.graphResources).toEqual([{ id: "res-a" }]);
       expect(messages(harness.state)).toEqual([
@@ -998,6 +1005,10 @@ describe("graph planning workflows", () => {
       // cannot contradict what this request just reported.
       expect(harness.state.graphFollowsWorkspaceBranch).toBe(false);
       expect(harness.state.graphFromWorkspace).toBe(false);
+      expect(harness.state.graphModelRevision).toBe("model-a");
+      // The cache hit turns on the definition hash, but the revision it records
+      // is the model-content one, not that hash.
+      expect(harness.state.graphDefinitionHash).toBe("hash-a");
       // The compile is skipped entirely, which is the point of the cache.
       expect(harness.order).toEqual([
         "select:main",
