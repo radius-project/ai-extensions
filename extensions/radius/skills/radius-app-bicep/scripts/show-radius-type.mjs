@@ -149,7 +149,9 @@ export function deriveExtensionReference(version) {
       typeof version === "string" ? version.trim() : ""
     );
   if (match === null) {
-    throw new Error(`Unsupported Radius version "${version ?? ""}".`);
+    throw new Error(
+      `Unsupported Radius version "${version ?? ""}". Do not replace or modify the configured Radius CLI; report this error and stop modeling.`
+    );
   }
   return `br:biceptypes.azurecr.io/radius:${match[1]}.${match[2]}`;
 }
