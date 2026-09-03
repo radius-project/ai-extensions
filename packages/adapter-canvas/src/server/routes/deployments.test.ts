@@ -1781,6 +1781,91 @@ describe("deployments routes (SU-06)", () => {
       });
     });
 
+    // The delete run removes this application's deploy-status artifact, but the
+    // session that pressed Delete also holds its own copy of that deploy. Left
+    // behind, it keeps the Deployed view reporting a deployment that no longer
+    // exists (issue #707).
+    it("discards this session's copy of the deleted application's graph", async () => {
+      const state: CanvasState = {
+        deployEnvName: "dev",
+        deployAppName: "todolist",
+        deployStatus: "complete",
+        deployRunId: 42,
+        deployedGraph: [{ name: "frontend" }],
+        deployedGraphRepo: "octo/todolist",
+        deployingResources: [{ name: "frontend", deployStatus: "success" }]
+      } as CanvasState;
+      const { recording, context: ctx } = deleteContext();
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({ readInstanceEntry: () => ({ state }) })
+      );
+
+      expect(recording.status).toBe(200);
+      expect(state.deployedGraph).toBeNull();
+      expect(state.deployingResources).toBeNull();
+      expect(state.deployStatus).toBe("");
+      expect(state.deployRunId).toBeNull();
+    });
+
+    it("keeps a session graph belonging to a different application", async () => {
+      const state: CanvasState = {
+        deployEnvName: "dev",
+        deployAppName: "storefront",
+        deployStatus: "complete",
+        deployedGraph: [{ name: "frontend" }]
+      } as CanvasState;
+      const { recording, context: ctx } = deleteContext();
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({ readInstanceEntry: () => ({ state }) })
+      );
+
+      expect(recording.status).toBe(200);
+      expect(state.deployedGraph).toEqual([{ name: "frontend" }]);
+      expect(state.deployStatus).toBe("complete");
+    });
+
+    it("keeps a session graph belonging to a different environment", async () => {
+      const state: CanvasState = {
+        deployEnvName: "staging",
+        deployAppName: "todolist",
+        deployStatus: "complete",
+        deployedGraph: [{ name: "frontend" }]
+      } as CanvasState;
+      const { recording, context: ctx } = deleteContext();
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({ readInstanceEntry: () => ({ state }) })
+      );
+
+      expect(recording.status).toBe(200);
+      expect(state.deployedGraph).toEqual([{ name: "frontend" }]);
+      expect(state.deployStatus).toBe("complete");
+    });
+
+    it("leaves the session graph alone when the dispatch is refused", async () => {
+      const state: CanvasState = {
+        deployEnvName: "dev",
+        deployAppName: "todolist",
+        deployStatus: "complete",
+        deployedGraph: [{ name: "frontend" }]
+      } as CanvasState;
+      const { recording, context: ctx } = deleteContext();
+      await handleDeleteDeployment(
+        ctx,
+        deleteDependencies({
+          readInstanceEntry: () => ({ state }),
+          runGh: () =>
+            Promise.resolve({ code: 1, stdout: "", stderr: "HTTP 403" })
+        })
+      );
+
+      expect(recording.status).toBe(400);
+      expect(state.deployedGraph).toEqual([{ name: "frontend" }]);
+      expect(state.deployStatus).toBe("complete");
+    });
+
     it("holds the reservation open for twice the listing TTL", async () => {
       const { context: ctx } = deleteContext();
       const timers: number[] = [];

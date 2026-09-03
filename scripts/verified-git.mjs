@@ -42,9 +42,6 @@ const PUBLISHED_PATH =
   /^(?!\/)(?!.*\/\/)(?!.*(?:^|\/)\.{1,2}(?:\/|$))[^\s\\:*?"<>|]+(?<!\/)$/;
 const MARKETPLACE = ".github/plugin/marketplace.json";
 const EXTENSION_ROOT = ".github/extension";
-// Published both inside the install unit and at the plugin root, so a release
-// branch answers for the plugin without being unpacked.
-const PLUGIN_METADATA = ["plugin.json", "README.md"];
 const REGULAR_MODES = new Set(["100644", "100755"]);
 
 // Unwind instead of exiting in place: calling process.exit() while a socket is
@@ -318,7 +315,13 @@ async function readJsonBlob(entry, label) {
   }
 }
 
-async function verifyArtifactState({ plugin, version, source, branch }) {
+async function verifyArtifactState({
+  plugin,
+  version,
+  source,
+  branch,
+  allowLegacyPluginRoot = false
+}) {
   const ref = await readRef(`refs/heads/${branch}`, true);
   if (!ref) fail(`refs/heads/${branch} does not exist`);
   if (ref.object?.type !== "commit") {
@@ -337,46 +340,70 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
   }
 
   const files = tree.tree.filter((entry) => entry.type !== "tree");
-  // The plugin root carries the duplicated metadata and nothing else, so it is
-  // enumerated rather than opened up as a prefix.
-  const pinnedMetadata = new Set(
-    PLUGIN_METADATA.map((name) => `${plugin.dir}/${name}`)
-  );
   for (const entry of files) {
     const allowed =
       entry.path === MARKETPLACE ||
-      entry.path.startsWith(`${plugin.publishDir}/`) ||
-      pinnedMetadata.has(entry.path) ||
-      entry.path.startsWith(`${EXTENSION_ROOT}/`);
+      entry.path.startsWith(`${plugin.dir}/`) ||
+      entry.path.startsWith(`${EXTENSION_ROOT}/`) ||
+      (allowLegacyPluginRoot &&
+        entry.path.startsWith(`${plugin.extensionDir}/`));
     if (!allowed) fail(`${branch} contains an unexpected path: ${entry.path}`);
     if (entry.type !== "blob" || !REGULAR_MODES.has(entry.mode)) {
       fail(`${branch} contains a non-regular file: ${entry.path}`);
     }
   }
 
-  // The branch carries the plugin metadata twice, so a reader must not be able
-  // to find two different answers to the same question.
-  for (const name of PLUGIN_METADATA) {
-    const pinned = files.find(
-      (entry) => entry.path === `${plugin.dir}/${name}`
+  const filesUnder = (root) =>
+    new Map(
+      files
+        .filter((entry) => entry.path.startsWith(`${root}/`))
+        .map((entry) => [entry.path.slice(root.length + 1), entry])
     );
-    if (!pinned) fail(`${branch} does not contain ${plugin.dir}/${name}`);
-    const shipped = files.find(
-      (entry) => entry.path === `${plugin.publishDir}/${name}`
-    );
-    if (!shipped || shipped.sha !== pinned.sha) {
-      fail(
-        `${branch} publishes a different ${name} at ${plugin.dir} and ${plugin.publishDir}`
+  const pluginFiles = filesUnder(plugin.dir);
+  const legacyFiles = filesUnder(plugin.extensionDir);
+  const exactLegacyPluginRoot =
+    allowLegacyPluginRoot &&
+    pluginFiles.size > 0 &&
+    pluginFiles.size === legacyFiles.size &&
+    [...legacyFiles].every(([path, shipped]) => {
+      const pinned = pluginFiles.get(path);
+      return (
+        pinned &&
+        pinned.type === shipped.type &&
+        pinned.mode === shipped.mode &&
+        pinned.sha === shipped.sha
       );
-    }
+    });
+  const legacyMetadata = ["plugin.json", "README.md"];
+  const metadataOnlyLegacyPluginRoot =
+    allowLegacyPluginRoot &&
+    legacyFiles.size > 0 &&
+    pluginFiles.size === legacyMetadata.length &&
+    legacyMetadata.every((path) => {
+      const pinned = pluginFiles.get(path);
+      const shipped = legacyFiles.get(path);
+      return (
+        pinned &&
+        shipped &&
+        pinned.type === shipped.type &&
+        pinned.mode === shipped.mode &&
+        pinned.sha === shipped.sha
+      );
+    });
+  const legacyPluginRoot =
+    exactLegacyPluginRoot || metadataOnlyLegacyPluginRoot;
+  if (pluginFiles.size === 0 || (legacyFiles.size > 0 && !legacyPluginRoot)) {
+    fail(`${branch} does not publish a valid plugin at ${plugin.dir}`);
   }
+  const artifactRoot =
+    metadataOnlyLegacyPluginRoot ? plugin.extensionDir : plugin.dir;
 
   const rootAssets = new Map(
     files
       .filter((entry) => entry.path.startsWith(`${EXTENSION_ROOT}/`))
       .map((entry) => [entry.path.slice(EXTENSION_ROOT.length + 1), entry.sha])
   );
-  const bundledRoot = `${plugin.publishDir}/workflows`;
+  const bundledRoot = `${artifactRoot}/workflows`;
   const bundledAssets = new Map(
     files
       .filter((entry) => entry.path.startsWith(`${bundledRoot}/`))
@@ -394,7 +421,7 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
     );
   }
 
-  const packagePath = `${plugin.publishDir}/package.json`;
+  const packagePath = `${artifactRoot}/package.json`;
   const packageJson = await readJsonBlob(
     files.find((entry) => entry.path === packagePath),
     packagePath
@@ -438,10 +465,10 @@ async function verifyArtifactState({ plugin, version, source, branch }) {
   if (
     catalogEntry?.version !== actualVersion ||
     catalogEntry?.source?.ref !== branch ||
-    catalogEntry?.source?.path !== plugin.publishDir
+    catalogEntry?.source?.path !== artifactRoot
   ) {
     fail(
-      `${MARKETPLACE} does not publish ${plugin.name}@${actualVersion} from ${plugin.publishDir} at ${branch}`
+      `${MARKETPLACE} does not publish ${plugin.name}@${actualVersion} from ${artifactRoot} at ${branch}`
     );
   }
 
@@ -479,7 +506,8 @@ async function verifyCompletion(args) {
     plugin,
     version,
     source,
-    branch: refs.PLUGIN_PINNED_BRANCH
+    branch: refs.PLUGIN_PINNED_BRANCH,
+    allowLegacyPluginRoot: args.includes("--allow-legacy-plugin-root")
   });
 
   await verifyTagTarget(refs.PLUGIN_SOURCE_TAG, artifact.commit);

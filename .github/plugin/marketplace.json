@@ -14,7 +14,7 @@
       "source": {
         "source": "github",
         "repo": "radius-project/ai-extensions",
-        "path": "extensions/radius",
+        "path": "plugins/radius",
         "ref": "radius@edge"
       },
       "description": "Model, visualize, and deploy applications with Radius from the GitHub Copilot app and CLI.",

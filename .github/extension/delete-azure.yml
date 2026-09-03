@@ -36,6 +36,10 @@ permissions:
   id-token: write
   contents: write
   packages: write
+  # Deleting an application also deletes the deploy-status artifact describing
+  # its last deployment, so the canvas Deployed graph does not keep rendering a
+  # deployment that no longer exists.
+  actions: write
 
 concurrency:
   group: radius-routes-gateway-${{ github.repository }}
@@ -187,6 +191,14 @@ jobs:
           name: ${{ inputs.name }}
           force: ${{ inputs.force }}
           azure-oidc-token-refresh: "${{ vars.AZURE_CLIENT_ID != '' }}"
+
+      - name: Discard the deleted application's deployed graph
+        if: ${{ inputs.resource_type == 'application' }}
+        uses: radius-project/ai-extensions/.github/extension/actions/discard-deploy-status@{{RADIUS_REF}}
+        with:
+          environment: ${{ inputs.environment }}
+          application: ${{ inputs.name }}
+          github-token: ${{ github.token }}
 
       - name: Clean up unused routes Gateway infrastructure
         if: ${{ inputs.resource_type == 'application' }}
