@@ -114,6 +114,17 @@ function canvasDist(dist) {
     join(dist, "package.json"),
     join(dist, "extensions", "radius", "package.json")
   );
+  mkdirSync(join(dist, "com.github.copilot", "extensions", "radius"), {
+    recursive: true
+  });
+  writeFileSync(
+    join(dist, "com.github.copilot", "extensions", "radius", "extension.mjs"),
+    'export * from "../../../extension.mjs";\n'
+  );
+  copyFileSync(
+    join(dist, "package.json"),
+    join(dist, "com.github.copilot", "extensions", "radius", "package.json")
+  );
 }
 
 function canvasRepository(manifest = {}) {
@@ -500,6 +511,14 @@ describe("scripts/validate-plugin-dist.mjs", () => {
       [
         "extensions/radius/package.json",
         "Awesome Copilot canvas package does not exist"
+      ],
+      [
+        "com.github.copilot/extensions/radius/extension.mjs",
+        "GitHub Copilot namespaced canvas entry point does not exist"
+      ],
+      [
+        "com.github.copilot/extensions/radius/package.json",
+        "GitHub Copilot namespaced canvas package does not exist"
       ]
     ])("rejects a canvas plugin missing %s", (missing, message) => {
       const { root, dist } = canvasRepository();
@@ -523,6 +542,48 @@ describe("scripts/validate-plugin-dist.mjs", () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(
         "Awesome Copilot canvas package must match package.json"
+      );
+    });
+
+    it("rejects a namespaced entry that does not re-export the root bundle", () => {
+      const { root, dist } = canvasRepository();
+      writeFileSync(
+        join(
+          dist,
+          "com.github.copilot",
+          "extensions",
+          "radius",
+          "extension.mjs"
+        ),
+        'export * from "../../extension.mjs";\n'
+      );
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "must contain 'export * from \"../../../extension.mjs\";'"
+      );
+    });
+
+    it("rejects namespaced package metadata that differs from the plugin root", () => {
+      const { root, dist } = canvasRepository();
+      writeFileSync(
+        join(
+          dist,
+          "com.github.copilot",
+          "extensions",
+          "radius",
+          "package.json"
+        ),
+        '{"name":"other","version":"1.2.0"}\n'
+      );
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        "GitHub Copilot namespaced canvas package must match package.json"
       );
     });
   });

@@ -115,7 +115,7 @@ describe(".github/extension release assets", () => {
     ["stable", "release.yml", "$SOURCE_SHA"]
   ])(
     "publishes the complete tree and validates the %s source",
-    (_channel, file, source) => {
+    (channel, file, source) => {
       const workflow = parseYaml(
         readFileSync(join(REPO_ROOT, ".github", "workflows", file), "utf8")
       );
@@ -130,13 +130,16 @@ describe(".github/extension release assets", () => {
       expect(commitScript).toContain('--path ".github/extension"');
       expect(validationScript).toContain(`--source "${source}"`);
 
-      // Every release branch has the same shape, whichever plugin it carries:
-      // identical install units at both accepted roots, plus the catalog.
-      expect(commitScript).toContain(
-        '--path "$PLUGIN_DIST=$PLUGIN_PUBLISH_DIR"'
-      );
+      // The complete install unit belongs only under plugins/<name>. Publishing
+      // the same tree under extensions/<name> creates nested extensions, skills,
+      // and workflows directories that are not release-root components.
+      expect(commitScript).not.toContain("PLUGIN_PUBLISH_DIR");
       expect(commitScript).toContain('--path "$PLUGIN_DIST=$PLUGIN_DIR"');
       expect(commitScript).toContain('--path "$MANIFEST"');
+      if (channel === "stable") {
+        expect(commitScript).toContain('--arg path "$PLUGIN_DIR"');
+        expect(commitScript).toContain(".source.path = $path");
+      }
     }
   );
 

@@ -553,7 +553,7 @@ jobs:
           # The install branch is an ORPHAN carrying the built plugin, a
           # canonical-path copy of the workflow assets, and a catalog that points
           # at that same branch, so `marketplace add OWNER/REPO#<branch>`
-          # installs exactly what is published there. Naming the two paths
+          # installs exactly what is published there. Naming the plugin path
           # explicitly is what keeps anything else out of the published tree, and
           # the API refuses to return unless GitHub signed the commit and wrote
           # it without parents. Moves no ref: a retry may reuse an existing
@@ -562,12 +562,12 @@ jobs:
           # stamped here: the version it publishes and the branch it publishes
           # from.
           pinned="$PLUGIN_PINNED_BRANCH"
-          jq --arg name "$PLUGIN_NAME" --arg ref "$pinned" --arg version "$VERSION" \
-            '.plugins |= map(if .name == $name then (.source.ref = $ref | .version = $version) else . end)' \
+          jq --arg name "$PLUGIN_NAME" --arg ref "$pinned" \
+            --arg path "$PLUGIN_DIR" --arg version "$VERSION" \
+            '.plugins |= map(if .name == $name then (.source.ref = $ref | .source.path = $path | .version = $version) else . end)' \
             "$catalog" >"$MANIFEST"
           built="$(node scripts/verified-git.mjs commit \
             --message "chore(release): ${PLUGIN_SOURCE_TAG} for ${SOURCE_SHA}" \
-            --path "$PLUGIN_DIST=$PLUGIN_PUBLISH_DIR" \
             --path "$PLUGIN_DIST=$PLUGIN_DIR" \
             --path "$MANIFEST" --path ".github/extension")"
           expected_pinned_commit="$(jq -r .commit <<<"$built")"

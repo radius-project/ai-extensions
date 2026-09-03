@@ -29,7 +29,7 @@ const temporaryRepositories = [];
 const objectSource = (ref, name = "radius") => ({
   source: "github",
   repo: "radius-project/ai-extensions",
-  path: `extensions/${name}`,
+  path: `plugins/${name}`,
   ref
 });
 
@@ -352,6 +352,20 @@ describe("scripts/version.mjs --set --channel edge", () => {
     const catalog = readJson(root, MANIFEST);
     expect(catalog.plugins[0].source.ref).toBe("radius@edge");
     expect(catalog.plugins[0].version).toBe(SNAPSHOT);
+  });
+
+  it("repairs a stale source path to the sole published plugin root", () => {
+    const source = objectSource("radius@edge");
+    source.path = "extensions/radius";
+    const root = writeRepository([catalogEntry(source)]);
+
+    expect(
+      runVersion(root, "--set", SNAPSHOT, "--channel", "edge").status
+    ).toBe(0);
+
+    expect(readJson(root, MANIFEST).plugins[0].source.path).toBe(
+      "plugins/radius"
+    );
   });
 
   it("leaves the plugin manifest, source of truth and catalog metadata alone", () => {
