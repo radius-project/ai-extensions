@@ -211,6 +211,26 @@ jq -e '.resources[0].outputResourceIds == []' "${progress_file}" \
     "radius-deploy-status-dev-env-my-app" ]] ||
     fail "artifact name sanitization changed"
 
+# Identity segments are sanitized on their own, matching the canvas reader's
+# sanitizeArtifactSegment, so the delete path can tell two pairs apart even when
+# they collide on one artifact name.
+[[ "$(radius_deploy_identity_segment 'My App')" == "my-app" ]] ||
+    fail "identity segment sanitization changed"
+[[ "$(radius_deploy_identity_segment 'Billing-East')" == "$(radius_deploy_identity_segment 'billing/east')" ]] ||
+    fail "case and separator variants must denote the same segment"
+[[ "$(radius_deploy_identity_segment 'Café™ App')" == "caf-app" ]] ||
+    fail "multi-byte characters must collapse bytewise"
+[[ "$(radius_deploy_identity_segment '---')" == "" ]] ||
+    fail "a segment of only separators must sanitize away"
+[[ "$(radius_deploy_identity_segment '')" == "" ]] ||
+    fail "an empty segment must stay empty"
+segment_cap="$(radius_deploy_identity_segment "$(printf 'a%.0s' {1..120})")"
+[[ "${#segment_cap}" -eq 80 ]] ||
+    fail "identity segments must be capped at 80 characters like the reader's"
+# Segments that the joined artifact name cannot distinguish must stay distinct.
+[[ "$(radius_deploy_identity_segment 'prod')" != "$(radius_deploy_identity_segment 'prod-billing')" ]] ||
+    fail "distinct environments must not collapse onto one segment"
+
 radius_clear_artifact_runtime
 [[ ! -f "${runtime_file}" ]] || fail "artifact runtime file was not removed"
 [[ -z "${ACTIONS_RUNTIME_TOKEN:-}" ]] ||
