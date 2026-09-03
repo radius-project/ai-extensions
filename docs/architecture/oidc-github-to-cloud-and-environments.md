@@ -277,13 +277,7 @@ testable:
 The largest single change (`server.ts` grew ~784 lines). The `/api/azure-auto-setup`
 handler is the end-to-end Azure setup sequence, in order: validate inputs → resolve
 the acting GitHub identity → resolve/create the app registration (owned-first) →
-create the missing FICs with the *correct* subjects → assign **Contributor** on the
-resource group → assign **Azure Kubernetes Service RBAC Cluster Admin** on the
-cluster (best-effort, non-fatal; required for AKS Automatic's Azure-RBAC clusters) →
-assign **User Access Administrator** on the resource group (best-effort, non-fatal;
-`Contributor` excludes `Microsoft.Authorization/*/Write` and `/Delete`, so without it
-recipes that set a resource lock cannot create or remove that lock) →
-return the values the environment needs.
+create the missing FICs with the *correct* subjects → assign **Contributor** on the resource group → assign **Azure Kubernetes Service RBAC Cluster Admin** on the cluster (best-effort, non-fatal; required for AKS Automatic's Azure-RBAC clusters) → assign **Locks Contributor** (Azure built-in role `28bf596f-4eb7-45ce-b5bc-6cf482fec137`) on the resource group (best-effort, non-fatal; grants only `Microsoft.Authorization/locks/read`, `Microsoft.Authorization/locks/write`, and `Microsoft.Authorization/locks/delete`, which recipes need to create and remove resource locks) → return the values the environment needs.
 
 Supporting endpoints added/hardened: `/api/verify-azure-login` (non-interactive
 session check that also returns the friendly `subscriptionName`),

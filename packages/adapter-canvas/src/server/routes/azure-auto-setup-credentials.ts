@@ -1197,29 +1197,24 @@ export async function configureAzureAutoSetupCredentials({
     return false;
   }
 
-  // Contributor cannot manage Microsoft.Authorization/locks: its notActions
-  // exclude Microsoft.Authorization/*/Write and /Delete. Recipes that set a
-  // CanNotDelete lock on the resources they create therefore fail to deploy,
-  // and — worse — fail to delete, leaving the lock and everything it protects
-  // orphaned in the subscription. User Access Administrator is the least
-  // privileged built-in role that grants those two operations.
+  // Contributor cannot manage Microsoft.Authorization/locks. Locks Contributor
+  // (28bf596f-4eb7-45ce-b5bc-6cf482fec137) grants only the lock read, write, and
+  // delete actions needed by recipes that create CanNotDelete locks.
   //
-  // Best-effort and non-fatal, like the AKS cluster role: granting it requires
-  // the operator to hold Owner or User Access Administrator themselves, which
-  // many do not, and applications that never request a lock work fine without
-  // it. Failing setup outright would block those users for a capability they
-  // may never use.
-  const lockRoleAssignmentId = deterministicProviderUuid(
-    `${operation.operationId}\0${servicePrincipalObjectId}\0User Access Administrator\0${contributorScope}`
+  // Best-effort and non-fatal, like the AKS cluster role: the operator may not
+  // be allowed to create role assignments, and applications that never request
+  // a lock work without this role.
+  const locksContributorAssignmentId = deterministicProviderUuid(
+    `${operation.operationId}\0${servicePrincipalObjectId}\0Locks Contributor\0${contributorScope}`
   );
   steps.push(
-    `Assigning User Access Administrator on ${resourceGroup} (required to manage resource locks)...`
+    `Assigning Locks Contributor on ${resourceGroup} (required to manage resource locks)...`
   );
-  const lockRole = await assignRole(
+  const locksContributor = await assignRole(
     {
       objectId: servicePrincipalObjectId,
-      assignmentId: lockRoleAssignmentId,
-      role: "User Access Administrator",
+      assignmentId: locksContributorAssignmentId,
+      role: "Locks Contributor",
       scope: contributorScope,
       subscriptionId
     },
@@ -1229,36 +1224,34 @@ export async function configureAzureAutoSetupCredentials({
     dependencies.sleep,
     stopBoundary
   );
-  if (lockRole.ok) {
-    steps.push("✅ User Access Administrator role assigned");
-    if (lockRole.created) {
+  if (locksContributor.ok) {
+    steps.push("✅ Locks Contributor role assigned");
+    if (locksContributor.created) {
       dependencies.operations.recordCreatedRoleAssignment(operation, {
-        assignmentId: lockRoleAssignmentId,
-        role: "User Access Administrator",
+        assignmentId: locksContributorAssignmentId,
+        role: "Locks Contributor",
         scope: contributorScope,
         principalObjectId: servicePrincipalObjectId
       });
-      if (
-        !(await checkpoint("after-role-assignment:User Access Administrator"))
-      )
+      if (!(await checkpoint("after-role-assignment:Locks Contributor")))
         return false;
     }
-  } else if (lockRole.stopped) {
+  } else if (locksContributor.stopped) {
     return false;
   } else {
     steps.push(
-      "⚠️ Could not assign the User Access Administrator role automatically. " +
+      "⚠️ Could not assign the Locks Contributor role automatically. " +
         "Applications whose recipes set a resource lock will fail to deploy, and " +
         'existing locked resources will fail to delete with "AuthorizationFailed". ' +
-        `Grant it manually: az role assignment create --assignee-object-id ${servicePrincipalObjectId} --assignee-principal-type ServicePrincipal --role "User Access Administrator" --scope ${contributorScope}. ` +
+        `Grant the least-privilege role manually: az role assignment create --assignee-object-id ${servicePrincipalObjectId} --assignee-principal-type ServicePrincipal --role "Locks Contributor" --scope ${contributorScope}. ` +
         "Details: " +
-        lockRole.stderr
+        locksContributor.stderr
     );
   }
   if (isRollbackPending(operation)) {
     await fail(
       409,
-      "Radius reconciled the interrupted User Access Administrator role assignment and must delete the setup resources before setup can complete.",
+      "Radius reconciled the interrupted Locks Contributor role assignment and must delete the setup resources before setup can complete.",
       "provider-rollback-pending",
       { steps, clientId, appName }
     );

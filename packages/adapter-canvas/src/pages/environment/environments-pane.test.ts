@@ -102,6 +102,16 @@ describe("environmentsPaneMarkup", () => {
     expect(html).toContain("<code>repo:octo/app</code>");
   });
 
+  it("describes the least-privilege Azure roles granted during setup", () => {
+    const html = environmentsPaneMarkup(baseOptions);
+    expect(html).toContain("<strong>Contributor</strong>");
+    expect(html).toContain("<strong>Locks Contributor</strong>");
+    expect(html).toContain(
+      "<strong>Azure Kubernetes Service RBAC Cluster Admin</strong>"
+    );
+    expect(html).not.toContain("User Access Administrator");
+  });
+
   it("keeps the identity name usable when no repository is known", () => {
     const html = environmentsPaneMarkup({ ...baseOptions, ctxRepo: "" });
     expect(html).toContain('value="radius-deploy-"');
