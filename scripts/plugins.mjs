@@ -9,8 +9,8 @@
 // Source is split the way github/awesome-copilot splits it: `plugins/<name>/`
 // carries the Agent Plugins manifest, `extensions/<name>/` carries the canvas
 // extension. The build assembles both into `.artifacts/<name>/`, which is
-// git-ignored and is published verbatim at both accepted plugin roots on a
-// release branch — so the build never writes into a tracked source tree.
+// git-ignored and is published verbatim at `plugins/<name>/` on a release
+// branch — so the build never writes into a tracked source tree.
 //
 // Naming convention, applied uniformly so a second plugin can never collide
 // with the first:
@@ -59,11 +59,8 @@ function describe(name) {
     name,
     dir,
     extensionDir: `${EXTENSIONS_DIR}/${name}`,
-    // Where the build assembles the plugin, and the catalog's canonical path.
-    // Published branches also mirror the same tree at `dir` for external
-    // intake submissions whose plugin root follows the source layout.
+    // Where the build assembles the plugin before publishing it at `dir`.
     distDir: `${ARTIFACTS_DIR}/${name}`,
-    publishDir: `${EXTENSIONS_DIR}/${name}`,
     packageFile: `${EXTENSIONS_DIR}/${name}/package.json`,
     manifestFile: `${dir}/plugin.json`,
     // Changesets writes the changelog beside the package it versions.
@@ -185,7 +182,6 @@ export function pluginRefs(plugin, { version, channel } = {}) {
     PLUGIN_DIR: plugin.dir,
     PLUGIN_EXTENSION_DIR: plugin.extensionDir,
     PLUGIN_DIST: plugin.distDir,
-    PLUGIN_PUBLISH_DIR: plugin.publishDir,
     PLUGIN_ARTIFACT: `plugin-dist-${plugin.name}`,
     PLUGIN_SBOM_ARTIFACT: `plugin-sbom-${plugin.name}`,
     PLUGIN_TARBALL: `${plugin.name}-plugin.tar.gz`,

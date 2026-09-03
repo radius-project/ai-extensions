@@ -37,6 +37,11 @@ const CANVAS_LOGO = "assets/preview.png";
 const CANVAS_ENTRY_POINT = "extension.mjs";
 const CANVAS_COMPATIBILITY_ENTRY_POINT = "extensions/radius/extension.mjs";
 const CANVAS_COMPATIBILITY_PACKAGE = "extensions/radius/package.json";
+const COPILOT_NAMESPACED_ENTRY_POINT =
+  "com.github.copilot/extensions/radius/extension.mjs";
+const COPILOT_NAMESPACED_PACKAGE =
+  "com.github.copilot/extensions/radius/package.json";
+const COPILOT_NAMESPACED_RE_EXPORT = "../../../extension.mjs";
 
 class Failure extends Error {}
 
@@ -249,12 +254,42 @@ function requireCanvasContract(dist, manifest, packageJson) {
     "Awesome Copilot canvas package",
     "file"
   );
+  requireReExport(
+    dist,
+    COPILOT_NAMESPACED_ENTRY_POINT,
+    COPILOT_NAMESPACED_RE_EXPORT,
+    "GitHub Copilot namespaced canvas entry point"
+  );
+  requirePath(
+    dist,
+    COPILOT_NAMESPACED_PACKAGE,
+    "GitHub Copilot namespaced canvas package",
+    "file"
+  );
   const canvasPackage = readJson(
     resolve(dist, CANVAS_COMPATIBILITY_PACKAGE),
     "Awesome Copilot canvas package"
   );
   if (JSON.stringify(canvasPackage) !== JSON.stringify(packageJson)) {
     fail("Awesome Copilot canvas package must match package.json");
+  }
+  const namespacedPackage = readJson(
+    resolve(dist, COPILOT_NAMESPACED_PACKAGE),
+    "GitHub Copilot namespaced canvas package"
+  );
+  if (JSON.stringify(namespacedPackage) !== JSON.stringify(packageJson)) {
+    fail("GitHub Copilot namespaced canvas package must match package.json");
+  }
+}
+
+function requireReExport(root, declared, target, label) {
+  requirePath(root, declared, label, "file");
+  const statement = `export * from "${target}";`;
+  const lines = readFileSync(resolve(root, declared), "utf8")
+    .split(/\r?\n/u)
+    .map((line) => line.trim());
+  if (!lines.includes(statement)) {
+    fail(`${label} must contain '${statement}'`);
   }
 }
 

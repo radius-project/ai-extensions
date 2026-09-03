@@ -264,8 +264,8 @@ jobs:
 
           # Ship the catalog alongside the plugin so `marketplace add
           # OWNER/REPO#releases/<plugin>/edge` advertises exactly what is
-          # published here. This also rewrites the source manifests, which are
-          # never among the published paths below.
+          # published here. The channel update changes only the throwaway
+          # catalog; source manifests are not among the published paths below.
           node scripts/version.mjs \
             --set "$VERSION" --plugin "$PLUGIN_NAME" --channel edge
 
@@ -275,7 +275,6 @@ jobs:
           # refs pin the source commit recorded in the commit message.
           commit="$(node scripts/verified-git.mjs commit \
             --message "chore(release): publish ${PLUGIN_NAME}@${VERSION} for ${GITHUB_SHA}" \
-            --path "$PLUGIN_DIST=$PLUGIN_PUBLISH_DIR" \
             --path "$PLUGIN_DIST=$PLUGIN_DIR" \
             --path "$MANIFEST" --path ".github/extension" | jq -r .commit)"
 
