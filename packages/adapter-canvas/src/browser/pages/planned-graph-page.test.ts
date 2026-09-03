@@ -53,6 +53,7 @@ interface FixtureOptions {
   withContainer?: boolean;
   envListing?: EnvListing;
   deploymentsPayload?: unknown;
+  followWorkspaceBranch?: boolean;
 }
 
 function fixture(options: FixtureOptions = {}) {
@@ -70,7 +71,8 @@ function fixture(options: FixtureOptions = {}) {
     withButton = true,
     withContainer = true,
     envListing = "ok",
-    deploymentsPayload = { deployments: [] }
+    deploymentsPayload = { deployments: [] },
+    followWorkspaceBranch = false
   } = options;
   const browser = createFakeBrowser();
   const state = createFakeElement(PLANNED_GRAPH_STATE_ID);
@@ -80,7 +82,8 @@ function fixture(options: FixtureOptions = {}) {
     environment,
     provider: providerField,
     resources,
-    localSource: true
+    localSource: true,
+    followWorkspaceBranch
   });
   const app = createFakeSelect("planned-app");
   const branch = createFakeSelect("planned-branch");
@@ -865,6 +868,23 @@ describe("initializePlannedGraphPage", () => {
     expect(status.textContent).toContain(
       "Copilot is generating .radius/app.bicep"
     );
+  });
+
+  it("reloads a renamed workspace branch before scheduling a missing-model retry", async () => {
+    const { browser } = fixture({ followWorkspaceBranch: true });
+    browser.net.handle("/api/plan-graph", () =>
+      jsonResponse({
+        needsAppBicep: true,
+        resolvedBranch: "new-name"
+      })
+    );
+
+    initializePlannedGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.clock.tick(0);
+    await flushPromises();
+
+    expect(browser.nav.reloads).toBe(1);
   });
 
   it("stops retrying and shows the server refusal when the skill cannot model the repository", async () => {

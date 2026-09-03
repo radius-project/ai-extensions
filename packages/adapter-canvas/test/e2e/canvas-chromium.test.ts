@@ -501,8 +501,6 @@ test.describe("Radius Canvas in Chromium", () => {
     await gotoCanvas(page, canvas, "graph");
 
     await expect(page.getByLabel("Branch")).toHaveValue(WORKTREE_BRANCH);
-    await page.getByRole("button", { name: "Plan Deployment" }).focus();
-    await page.getByLabel("Branch").selectOption(WORKTREE_BRANCH);
     await expect
       .poll(() =>
         canvas.requests.some(
@@ -514,6 +512,7 @@ test.describe("Radius Canvas in Chromium", () => {
     expect(bodyFor(canvas, "/api/load-graph")).toEqual({
       repo: REPOSITORY,
       branch: WORKTREE_BRANCH,
+      followWorkspaceBranch: true,
       restartWait: true
     });
     await expect
@@ -900,6 +899,63 @@ test.describe("Radius Canvas in Chromium", () => {
       page.locator("#graph-status, #graph-refresh-status")
     ).toContainText("Application graph ready");
     releaseFirst?.();
+  });
+
+  test("loads the graph from a renamed real worktree branch", async ({
+    page,
+    canvas
+  }) => {
+    const renamedBranch = "renamed-worktree";
+    canvas.renameWorkspaceBranch(renamedBranch);
+    expect(canvas.currentWorkspaceBranch()).toBe(renamedBranch);
+
+    const response = await fetch(`${canvas.baseUrl}/api/load-graph`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repo: REPOSITORY,
+        branch: WORKTREE_BRANCH,
+        followWorkspaceBranch: true,
+        restartWait: true
+      })
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      resolvedBranch: renamedBranch,
+      fromWorkspace: true
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+
+    await expect(page.getByLabel("Branch")).toHaveValue(renamedBranch);
+    await expect(
+      page.locator("#graph-status, #graph-refresh-status")
+    ).toContainText("Application graph ready");
+  });
+
+  test("reloads the graph when the server canonicalizes its branch", async ({
+    page,
+    canvas
+  }) => {
+    let requests = 0;
+    await page.route("**/api/load-graph", async (route) => {
+      requests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [],
+          ...(requests === 1 ? { resolvedBranch: "renamed-worktree" } : {})
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+
+    await expect.poll(() => requests).toBeGreaterThanOrEqual(2);
+    await expect(
+      page.locator("#graph-status, #graph-refresh-status")
+    ).toContainText("Application graph ready");
   });
 
   test("keeps the modeling status stable while the graph automatically polls", async ({

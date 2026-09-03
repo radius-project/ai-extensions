@@ -344,6 +344,27 @@ describe("createAppModelHandoff", () => {
     );
   });
 
+  it("gives a single-branch Canvas handoff a fenced permanent-failure callback", async () => {
+    const state: CanvasState = { canvasInstanceId: "radius-app" };
+    const { handOff, sent } = harness({
+      statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) }
+    });
+
+    await handOff({
+      repo: "a/b",
+      branches: ["feat"],
+      page: "graph",
+      state
+    });
+
+    const token = state.appModelAttemptTokens?.["a/b::feat"];
+    expect(token).toBeTruthy();
+    expect(state.appModelAttemptGeneration).toBe(1);
+    expect(sent[0].prompt).toContain("radius_report_modeling_failure");
+    expect(sent[0].prompt).toContain(`attemptToken \`${token}\``);
+    expect(sent[0].prompt).toContain("instanceId `radius-app`");
+  });
+
   it("re-reads the model before speaking, because a run can start and finish inside the window", async () => {
     const statuses: Record<string, AppModelStatus> = {
       feat: modelStatus("a/b", "feat", { status: "missing" })
@@ -1238,7 +1259,7 @@ describe("createAppModelHandoff", () => {
   });
 
   it("releases the panel reservation when send fails for a missing model, allowing retry", async () => {
-    const state: CanvasState = {};
+    const state: CanvasState = { canvasInstanceId: "radius-panel" };
     let sendAttempt = 0;
     const { handOff, sent } = harness({
       statuses: { feat: modelStatus("a/b", "feat", { status: "missing" }) },
@@ -1257,6 +1278,7 @@ describe("createAppModelHandoff", () => {
 
     await expect(handOff(request)).rejects.toThrow("session closed");
     expect(state.appBicepHandoffKey).toBeUndefined();
+    expect(state.appModelAttemptTokens?.["a/b::feat"]).toBeUndefined();
 
     await handOff(request);
     expect(sent).toHaveLength(1);

@@ -1,4 +1,4 @@
-// createRadiusTools — builds the 6 radius_* tools from RADIUS_TOOL_DECLARATIONS
+// createRadiusTools — builds the 7 radius_* tools from RADIUS_TOOL_DECLARATIONS
 // plus a RadiusExtensionDependencies dependency object. Same shape as
 // createRadiusCanvas: pure construction, no I/O until a handler is invoked.
 
@@ -7,7 +7,7 @@ import {
   ambiguousAppSourceBrief,
   unsupportedAppSourceReport
 } from "@radius-project/core";
-import { errorMessage } from "./util.js";
+import { errorMessage, optionalString } from "./util.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import {
   failedGraphDiffResult,
@@ -16,8 +16,13 @@ import {
 } from "./pr-graph-diff-result.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
 import type { ModelingActivity } from "./modeling-activity.js";
+import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
 import type { CanvasState } from "../shared.js";
 import type { DeployToolArgs } from "../deploy-tools.js";
+import {
+  appModelTargetKey,
+  clearAppModelAuthoringFailure
+} from "../app-model-authoring-failure.js";
 
 interface ToolArgs {
   [key: string]: unknown;
@@ -27,7 +32,10 @@ export function createRadiusTools(
   deps: RadiusExtensionDependencies,
   // Told when this tool hands the modeling skill over, so a graph render that
   // finds no model does not ask for the run that is about to start.
-  modelingActivity: ModelingActivity
+  modelingActivity: ModelingActivity,
+  // Released when a modeling run reports a terminal failure, so the retry the
+  // failure message promises is not swallowed by the dead run's claim.
+  missingModelHandoffs: MissingModelHandoffClaims
 ) {
   const {
     workspaceState,
@@ -131,6 +139,73 @@ export function createRadiusTools(
         }
         if (targetsWorkspace) announceModelingRun(state);
         return deps.radiusAppBicepSkill(repoPath, brief);
+      }
+    },
+    {
+      ...declarationByName.get("radius_report_modeling_failure")!,
+      handler: async (args: ToolArgs) => {
+        const instanceId = optionalString(args.instanceId).trim();
+        const repo = optionalString(args.repo).trim();
+        const branch = optionalString(args.branch).trim();
+        const attemptToken = optionalString(args.attemptToken).trim();
+        const failure = optionalString(args.error).trim();
+        if (!instanceId || !repo || !branch || !attemptToken || !failure) {
+          return {
+            recorded: false,
+            error:
+              "instanceId, repo, branch, attemptToken, and error are required"
+          };
+        }
+        if (failure.length > 4000) {
+          return {
+            recorded: false,
+            error: "error must not exceed 4000 characters"
+          };
+        }
+        const entry = deps.servers.get(instanceId);
+        const target = appModelTargetKey(repo, branch);
+        if (
+          !entry ||
+          entry.state.appModelAttemptTokens?.[target] !== attemptToken
+        ) {
+          return {
+            recorded: false,
+            error:
+              "The Canvas modeling attempt is no longer current; the failure was not recorded."
+          };
+        }
+        const content = await fetchBicepForBranch(repo, branch, entry.state);
+        if (content) {
+          clearAppModelAuthoringFailure(entry.state, repo, branch);
+          return {
+            recorded: false,
+            error:
+              "The application model now exists; the stale failure was not recorded."
+          };
+        }
+        if (entry.state.appModelAttemptTokens?.[target] !== attemptToken) {
+          return {
+            recorded: false,
+            error:
+              "A newer Canvas modeling attempt replaced this one; the stale failure was not recorded."
+          };
+        }
+        entry.state.appModelFailures ??= {};
+        entry.state.appModelFailures[target] = {
+          attemptToken,
+          error: failure
+        };
+        // The run this claim belongs to just ended, so the claim can only
+        // suppress the retry the failure message tells the user to make. Its
+        // target key matches this one exactly: a claim is keyed
+        // `repo::branches.join(",")`, and an attempt token is only minted for a
+        // single branch, so a recordable failure always names one branch.
+        // Without this release the explicit refresh clears the failure, asks for
+        // a handoff, and is dropped by the dead run's claim until it expires.
+        const claim = missingModelHandoffs.current(target);
+        if (claim) missingModelHandoffs.release(claim);
+        modelingActivity.release({ repo, branch });
+        return { recorded: true };
       }
     },
     {
