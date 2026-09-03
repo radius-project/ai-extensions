@@ -64,6 +64,7 @@ import {
   type PullRequestNextStep
 } from "../../verification-plan.js";
 import type { WorkflowFileReadResult } from "../../verification-plan.js";
+import { LEGACY_DEPLOY_WORKFLOW_FILE } from "../../infra.js";
 
 // Seam 4 of the `POST /api/create-environment` slice: the seven-step use case.
 //
@@ -839,7 +840,7 @@ export async function handleCreateEnvironment(
         ),
         dependencies.fetchFileFromRepoResult(
           targetRepo,
-          ".github/workflows/radius-deploy.yml",
+          `.github/workflows/${LEGACY_DEPLOY_WORKFLOW_FILE}`,
           defaultBranch,
           selectedExecutor
         )
@@ -938,6 +939,7 @@ export async function handleCreateEnvironment(
                 () => stopBoundary("before-legacy-workflow-delete"),
                 branch
               );
+          if (legacyDelete === "cancelled") return legacyDelete;
           if (
             automaticPolicy.state === "disabled" &&
             (automaticPolicy.reason === "legacy-deploy-present" ||
