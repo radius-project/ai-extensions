@@ -768,6 +768,43 @@ describe("P0-C built Radius extension artifact", () => {
     expect(mysqlExample).toMatch(/^\s*password:\s*password\s*$/mu);
   });
 
+  it("packages the StackExchange.Redis credential-shape contract", () => {
+    assertCurrentArtifact();
+    const readGuidance = (relativePath: string): string =>
+      readFileSync(join(DIST_SKILL, relativePath), "utf8");
+    const connectionGuidance = readGuidance(
+      "references/connection-conventions.md"
+    );
+    const secretsGuidance = readGuidance("references/secrets-handling.md");
+    const skillGuidance = readGuidance("SKILL.md");
+
+    for (const guidance of [
+      connectionGuidance,
+      secretsGuidance,
+      skillGuidance
+    ]) {
+      expect(guidance).toContain("`RedisCacheOptions.Configuration`");
+      expect(guidance).toContain("`ConfigurationOptions.Parse`");
+      expect(guidance).toContain("`host:port,ssl=True`");
+      expect(guidance).toContain("`rediss://...`");
+    }
+    expect(connectionGuidance).toContain(
+      "Do not remap the Recipe `url` directly to that native setting through `secretKeyRef`"
+    );
+    expect(connectionGuidance).toContain(
+      "otherwise report the gap and stop before publishing the model"
+    );
+    expect(secretsGuidance).toContain(
+      "Never bind that Recipe key directly to the native setting with `secretKeyRef`"
+    );
+    expect(secretsGuidance).toContain(
+      "A Recipe URL may still be bound directly when the checked-in source passes it to an API that accepts that exact URI syntax"
+    );
+    expect(skillGuidance).toContain(
+      "A Redis Recipe `url` was not wired to `REDIS_ADDR` or another native setting passed to StackExchange.Redis configuration parsing merely because both values are strings"
+    );
+  });
+
   it("packages the exact-data-key contract for authored reference Secrets", () => {
     assertCurrentArtifact();
     const readGuidance = (relativePath: string): string =>
