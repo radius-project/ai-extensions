@@ -6,6 +6,7 @@
 | Data store symbolic name             | `<engine>` + role suffix, camelCase         | `mysqlDb`, `postgresDb`, `redisCache` |
 | Secret symbolic name                 | `<engine>Secret` or `appSecrets`, camelCase | `appSecrets`                          |
 | Resource `name` property             | kebab-case, matches app/repo name           | `'todo-list-app'`, `'my-database'`    |
+| Backing-service resource `name`      | `'<app-name>-<engine>'`, kebab-case         | `'todo-list-app-postgres'`            |
 | Connection keys                      | lowercase, engine + role                    | `mysqldb`, `postgresdb`, `rediscache` |
 | Application name                     | kebab-case, matches repository name         | `'todo-list-app'`                     |
 | Container keys (in `containers` map) | camelCase, describes the container role     | `todo`, `frontend`, `api`             |
@@ -18,4 +19,5 @@
 - Resource `name` properties (string values) are always kebab-case
 - Map keys inside `containers`, `ports`, and `volumes` are camelCase; `connections` keys are lowercase (engine + role)
 - Never use spaces, underscores, or special characters in any name
+- `Radius.AI/*`, `Radius.Data/*`, `Radius.Messaging/*`, and `Radius.Storage/*` resource `name` values start with the application name, because a Recipe derives the provisioned cloud resource's name from a resource ID that carries no application identity. See [Backing-resource names are application-scoped](../SKILL.md#backing-resource-names-are-application-scoped)
 - Explicit deployment-contract names and parameters take precedence over defaults. Preserve a documented resource-name parameter when a target Environment Recipe or verification couples it to a provider resource with naming or uniqueness constraints.
