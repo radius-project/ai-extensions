@@ -140,7 +140,7 @@ The Azure and AWS deploy/delete provider workflows share one repository-wide rou
 GitHub Actions concurrency groups cannot coordinate runs in different repositories. Exactly one repository should own the managed lifecycle for a target cluster; repositories that share its Gateway must configure `RADIUS_ROUTES_GATEWAY_NAME=radius` and `RADIUS_ROUTES_GATEWAY_NAMESPACE=radius-system` as validation-only BYO infrastructure.
 
 - **Triggers:**
-  - `workflow_dispatch` with an `environment` input (the GitHub Environment name) plus optional `image` and `rad_commands` inputs. The `detect` job binds that environment via `environment: ${{ inputs.environment }}` to read the provider variables.
+  - `workflow_dispatch` with an `environment` input (the GitHub Environment name) plus optional `image` and `rad_commands` inputs. The `detect` job binds that environment via `environment: ${{ inputs.environment || '{{ENV}}' }}` to read the provider variables, falling back to the environment embedded when Radius generated the workflow.
 - **Inputs:**
 
   | Input          | Required | Description                                                                                                                                                                                                                                                                                                                                                                         |
