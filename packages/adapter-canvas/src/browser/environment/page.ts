@@ -416,7 +416,10 @@ export function initializeEnvironmentPage(
     }
   };
 
-  const showNamespaceError = (provider: CredentialProvider): void => {
+  const showNamespaceError = (
+    provider: CredentialProvider,
+    focus = true
+  ): void => {
     const error = provider === "aws" ? awsNamespaceError : azureNamespaceError;
     error.textContent = KUBERNETES_NAMESPACE_ERROR;
     error.hidden = false;
@@ -424,7 +427,9 @@ export function initializeEnvironmentPage(
     const custom = context.dom.inputById(`${provider}-namespace-custom`);
     select?.setAttribute("aria-invalid", "true");
     custom?.setAttribute("aria-invalid", "true");
-    (select?.value === "__custom__" ? custom : select)?.focus();
+    if (focus) {
+      (select?.value === "__custom__" ? custom : select)?.focus();
+    }
   };
 
   const failCreate = (message: string): void => {
@@ -651,13 +656,23 @@ export function initializeEnvironmentPage(
   });
   scope.on(createButton, "click", createEnvironment);
   for (const provider of ["azure", "aws"] as const) {
-    for (const suffix of ["select", "custom"]) {
-      const control = context.dom.inputById(`${provider}-namespace-${suffix}`);
-      if (control) {
-        scope.on(control, suffix === "select" ? "change" : "input", () =>
-          clearNamespaceError(provider)
-        );
-      }
+    const select = context.dom.inputById(`${provider}-namespace-select`);
+    const custom = context.dom.inputById(`${provider}-namespace-custom`);
+    if (select) {
+      scope.on(select, "change", () => clearNamespaceError(provider));
+    }
+    if (custom) {
+      scope.on(custom, "input", () => {
+        if (
+          select?.value === "__custom__" &&
+          custom.value !== "" &&
+          !isKubernetesNamespace(custom.value)
+        ) {
+          showNamespaceError(provider, false);
+          return;
+        }
+        clearNamespaceError(provider);
+      });
     }
   }
 

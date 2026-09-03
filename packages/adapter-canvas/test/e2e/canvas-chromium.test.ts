@@ -1582,7 +1582,6 @@ test.describe("Radius Canvas in Chromium", () => {
     });
     await page.locator("#env-name-input").fill("production");
     await customNamespace.fill("Todo-app-3");
-    await page.locator("#deploy-btn").click();
 
     const namespaceError = page.locator("#azure-namespace-error");
     await expect(namespaceError).toHaveText(

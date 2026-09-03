@@ -770,12 +770,9 @@ describe("initializeEnvironmentPage", () => {
     );
   });
 
-  it.each([
-    ["azure", "Todo-app-3"],
-    ["aws", ""]
-  ] as const)(
-    "rejects an invalid custom %s namespace inline",
-    async (provider, namespace) => {
+  it.each(["azure", "aws"] as const)(
+    "shows an invalid custom %s namespace inline while typing",
+    async (provider) => {
       const page = fixture();
       await openWithProfile(page, provider);
       pageInput(page, "env-name-input").value = "prod";
@@ -788,9 +785,8 @@ describe("initializeEnvironmentPage", () => {
       const select = pageInput(page, `${provider}-namespace-select`);
       const custom = pageInput(page, `${provider}-namespace-custom`);
       select.value = "__custom__";
-      custom.value = namespace;
-
-      page.elements["deploy-btn"].dispatch("click");
+      custom.value = "Todo-app-3";
+      page.elements[`${provider}-namespace-custom`].dispatch("input");
 
       const error = page.elements[`${provider}-namespace-error`];
       expect(error.hidden).toBe(false);
@@ -799,7 +795,7 @@ describe("initializeEnvironmentPage", () => {
       );
       expect(select.getAttribute("aria-invalid")).toBe("true");
       expect(custom.getAttribute("aria-invalid")).toBe("true");
-      expect(page.elements[`${provider}-namespace-custom`].focusCount).toBe(1);
+      expect(page.elements[`${provider}-namespace-custom`].focusCount).toBe(0);
       expect(
         page.browser.net.calls.filter(
           (call) => call.url === CREATE_ENVIRONMENT_OPERATION_PATH
@@ -814,6 +810,24 @@ describe("initializeEnvironmentPage", () => {
       expect(custom.getAttribute("aria-invalid")).toBeNull();
     }
   );
+
+  it("rejects an empty custom namespace on submission", async () => {
+    const page = fixture();
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "prod";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    const select = pageInput(page, "azure-namespace-select");
+    const custom = pageInput(page, "azure-namespace-custom");
+    select.value = "__custom__";
+    custom.value = "";
+
+    page.elements["deploy-btn"].dispatch("click");
+
+    expect(page.elements["azure-namespace-error"].hidden).toBe(false);
+    expect(custom.getAttribute("aria-invalid")).toBe("true");
+    expect(page.elements["azure-namespace-custom"].focusCount).toBe(1);
+  });
 
   // Radius binds one environment to one namespace, and nothing before the
   // deploy workflow reports the duplicate, so the wizard has to refuse it while
