@@ -164,4 +164,32 @@ describe(".github/extension release assets", () => {
       'if [ "$GITHUB_SHA" != "$(git rev-parse refs/remotes/origin/main)" ]; then'
     );
   });
+
+  it("uses the completed pre-canonical release as the verification cutover", () => {
+    const workflow = parseYaml(
+      readFileSync(
+        join(REPO_ROOT, ".github", "workflows", "release.yml"),
+        "utf8"
+      )
+    );
+    const completionScripts = runScripts(workflow).filter((script) =>
+      script.includes("verified-git.mjs verify-completion")
+    );
+    const previousReleaseScript = workflow.jobs.prepare.steps.find(
+      (step) => step.name === "Verify the previous release is complete"
+    ).run;
+    const cutover = 'if [ "${plugin}@${version}" = "radius@0.1.0" ]; then';
+
+    expect(completionScripts).toHaveLength(3);
+    expect(previousReleaseScript).toContain(cutover);
+    expect(previousReleaseScript).toContain(
+      "completion verification starts with its successor"
+    );
+    expect(previousReleaseScript.indexOf(cutover)).toBeLessThan(
+      previousReleaseScript.indexOf("verified-git.mjs verify-completion")
+    );
+    expect(previousReleaseScript).toMatch(
+      /if ! node scripts\/verified-git\.mjs verify-completion \\\n\s+--plugin "\$plugin" --version "\$version" >\/dev\/null 2>&1; then/u
+    );
+  });
 });
