@@ -13,6 +13,16 @@ function namesMatch(left: string, right: string): boolean {
   return left.trim().toLowerCase() === right.trim().toLowerCase();
 }
 
+// The first candidate that actually names something. A plain `a || b` would
+// stop at a blank-but-truthy string, and nothing trims what reaches
+// `deployEnvName`: prepareAndDispatch persists `envName || requestedEnvironment
+// || "dev"` as-is, so a whitespace-only request is stored verbatim. The Deployed
+// view falls back to `envName` when rendering such a graph, so resolving the
+// same way here is what keeps "discarded" and "rendered" describing one set.
+function firstNamed(...candidates: (string | undefined)[]): string {
+  return candidates.find((candidate) => candidate && candidate.trim()) || "";
+}
+
 /**
  * discardDeployedApplicationState - forget this session's copy of a deployed
  * application graph when that application is being deleted.
@@ -28,7 +38,11 @@ function namesMatch(left: string, right: string): boolean {
  * exact (environment, application) pair being deleted. A session holding
  * another application's graph, or the same application's graph in another
  * environment, is left untouched. An unnamed session deployment matches
- * nothing, so an unidentifiable graph is never discarded.
+ * nothing, so an unidentifiable graph is never discarded. "Unnamed" means
+ * blank, not merely absent: a whitespace-only `deployEnvName` names no
+ * environment, so the session's selected environment is used instead — the same
+ * resolution the Deployed view uses to decide which environment that graph
+ * belongs to.
  *
  * Safe to call before the delete run finishes: if the delete fails, the
  * artifact still exists and the next read repopulates the view.
@@ -42,9 +56,9 @@ export function discardDeployedApplicationState(
   target: DeletedDeploymentIdentity
 ): boolean {
   if (!target.environment.trim() || !target.application.trim()) return false;
-  const sessionEnvironment = state.deployEnvName || state.envName || "";
-  const sessionApplication = state.deployAppName || "";
-  if (!sessionEnvironment.trim() || !sessionApplication.trim()) return false;
+  const sessionEnvironment = firstNamed(state.deployEnvName, state.envName);
+  const sessionApplication = firstNamed(state.deployAppName);
+  if (!sessionEnvironment || !sessionApplication) return false;
   if (
     !namesMatch(sessionEnvironment, target.environment) ||
     !namesMatch(sessionApplication, target.application)

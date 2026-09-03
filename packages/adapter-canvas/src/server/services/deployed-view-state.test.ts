@@ -63,6 +63,56 @@ describe("discardDeployedApplicationState", () => {
     expect(state.deployedGraph).toBeNull();
   });
 
+  it("falls back to the session environment when the deploy environment is blank", () => {
+    // prepareAndDispatch persists `envName || requestedEnvironment || "dev"`
+    // without trimming, so a whitespace-only request is stored verbatim and a
+    // later environment selection leaves the two fields disagreeing. The
+    // Deployed view renders that graph under `envName`, so deleting that
+    // environment's application has to discard it — a truthiness check would
+    // stop at the blank string and strand the graph on screen.
+    const state = deployedState({
+      deployEnvName: "   ",
+      envName: "prod"
+    });
+
+    expect(
+      discardDeployedApplicationState(state, {
+        environment: "prod",
+        application: "billing"
+      })
+    ).toBe(true);
+    expect(state.deployedGraph).toBeNull();
+    expect(state.deployStatus).toBe("");
+    expect(state.deployRunId).toBeNull();
+  });
+
+  it("keeps a graph when neither environment field names anything", () => {
+    const state = deployedState({
+      deployEnvName: "   ",
+      envName: "  "
+    });
+
+    expect(
+      discardDeployedApplicationState(state, {
+        environment: "prod",
+        application: "billing"
+      })
+    ).toBe(false);
+    expect(state.deployedGraph).toEqual([{ name: "frontend" }]);
+  });
+
+  it("keeps a graph whose application name is only whitespace", () => {
+    const state = deployedState({ deployAppName: "   " });
+
+    expect(
+      discardDeployedApplicationState(state, {
+        environment: "prod",
+        application: "billing"
+      })
+    ).toBe(false);
+    expect(state.deployedGraph).toEqual([{ name: "frontend" }]);
+  });
+
   it("keeps another application's graph in the same environment", () => {
     const state = deployedState();
 
