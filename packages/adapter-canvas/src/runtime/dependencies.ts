@@ -84,6 +84,11 @@ export interface CoreGraphDependencies {
     repo: string,
     branch: string
   ): Promise<string | null>;
+  applicationGraphToResources(
+    appGraph: unknown,
+    definitionFile?: string,
+    definitionContent?: string
+  ): CanvasGraphResource[];
   filterGraphVisualizationResources(
     resources: CanvasGraphResource[]
   ): CanvasGraphResource[];

@@ -15,10 +15,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   buildRemediation,
+  applicationGraphToResources,
   computeGraphDiff,
   deployStatusKeys,
-  fetchBicepFromRepo,
   fetchRecipePack,
+  filterGraphVisualizationResources,
   mergeDeployedGraphMetadata,
   projectDeployedGraph,
   resolveRecipeOutputs,
@@ -1245,6 +1246,8 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
       radArtifactsDirForSelection({ ...request, github }),
     buildGraphViaRad: (content, definitionFile, options) =>
       buildGraphViaRad(content, definitionFile, options),
+    applicationGraphToResources,
+    filterGraphVisualizationResources,
     canvasGraphResources,
     workspaceGraphJsonPath,
     graphDefinitionHash,
@@ -5363,6 +5366,7 @@ async function fetchBicepSelection(
   branch: string
 ): Promise<{
   content: string | null;
+  graphContent: string | null;
   fromWorkspace: boolean;
   branch: string;
   bicepPath: string;
@@ -5370,17 +5374,43 @@ async function fetchBicepSelection(
   const access = accessForSelection(entry, repo, branch);
   if (access.useWorkspace) {
     const local = await resolveWorkspaceBicep(entry.state, repo, access.branch);
-    if (local)
+    if (local) {
+      const graphPath =
+        local.repoPath === "app.bicep" ?
+          "app-graph.json"
+        : `${local.repoPath.slice(0, local.repoPath.lastIndexOf("/") + 1)}app-graph.json`;
       return {
         content: local.content,
+        graphContent: await fetchWorkspaceFile(
+          entry.state,
+          repo,
+          access.branch,
+          graphPath
+        ),
         fromWorkspace: true,
         branch: access.branch,
         bicepPath: local.repoPath
       };
+    }
   }
-  const remote = await fetchBicepFromRepo(github, repo, access.branch);
+  for (const [bicepPath, graphPath] of [
+    [".radius/app.bicep", ".radius/app-graph.json"],
+    ["app.bicep", "app-graph.json"]
+  ] as const) {
+    const content = await fetchFileFromRepo(repo, bicepPath, access.branch);
+    if (content) {
+      return {
+        content,
+        graphContent: await fetchFileFromRepo(repo, graphPath, access.branch),
+        fromWorkspace: false,
+        branch: access.branch,
+        bicepPath
+      };
+    }
+  }
   return {
-    content: remote,
+    content: null,
+    graphContent: null,
     fromWorkspace: false,
     branch: access.branch,
     bicepPath: ""

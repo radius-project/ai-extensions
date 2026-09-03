@@ -251,6 +251,10 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       getDefaultBranch: vi.fn(async () => options.defaultBranch ?? "main")
     },
     core: {
+      applicationGraphToResources: vi.fn((appGraph: unknown) => {
+        const value = appGraph as { resources?: CanvasGraphResource[] };
+        return value.resources ?? [];
+      }),
       computeGraphDiff: vi.fn(
         (base: CanvasGraphResource[], head: CanvasGraphResource[]) => {
           const baseIds = new Set(base.map((r) => r.id));

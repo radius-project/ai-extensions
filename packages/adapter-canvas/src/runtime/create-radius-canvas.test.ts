@@ -477,6 +477,40 @@ describe("RU-15: graph-diff preload + graph/planned source-ref preparation", () 
     expect(session.log).toHaveBeenCalledWith("building graph");
   });
 
+  it("auto-compares committed branch graph artifacts without invoking rad", async () => {
+    const bicep = "resource db 'Radius.Data/redis@2023-10-01-preview' = {}";
+    const graph =
+      '{"resources":[{"id":"1","name":"db","type":"Radius.Data/redis"}]}';
+    const { canvas, deps } = setup({
+      workspaceContext: {
+        workspacePath: "/workspace",
+        repo: "acme/widgets",
+        branch: "work"
+      },
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": bicep,
+        "remote:acme/widgets@feat": bicep
+      },
+      filesByRepoBranch: {
+        "remote:acme/widgets@main:.radius/app-graph.json": graph,
+        "remote:acme/widgets@feat:.radius/app-graph.json": graph
+      }
+    });
+
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph-diff",
+        repo: "acme/widgets",
+        baseBranch: "main",
+        headBranch: "feat"
+      })
+    );
+
+    expect(deps.servers.get("radius-panel")!.state.diffNoChanges).toBe(true);
+    expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
+    expect(deps.rad.radArtifactsDirForSelection).not.toHaveBeenCalled();
+  });
+
   it("records a graph-diff failure for the current comparison", async () => {
     const { canvas, deps, sessionHolder } = setup({
       bicepByRepoBranch: {

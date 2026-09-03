@@ -291,6 +291,8 @@ const productionHandlers = {
         resolveRadArtifactsDir: () =>
           Promise.resolve({ dir: "", remote: false }),
         buildGraphViaRad: () => Promise.resolve([]),
+        applicationGraphToResources: () => [],
+        filterGraphVisualizationResources: (resources) => resources,
         canvasGraphResources: () => [],
         workspaceGraphJsonPath: () => "",
         graphDefinitionHash: () => "",

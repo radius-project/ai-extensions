@@ -37,6 +37,7 @@ export interface GraphInstanceEntry {
 // that each route handles differently, not an error.
 export interface AppBicepSelection {
   content: string | null;
+  graphContent?: string | null;
   fromWorkspace: boolean;
   branch: string;
   bicepPath: string;
@@ -65,7 +66,7 @@ export interface GraphCompileOptions {
   cleanupRadArtifactsDir?: boolean;
 }
 
-// Eight narrow seams for the whole pipeline. `github` is deliberately absent:
+// Narrow seams for the whole pipeline. `github` is deliberately absent:
 // the composition root binds it into `resolveRadArtifactsDir` so this module
 // never holds a GitHub client, and `rad` is reached only through the injected
 // `buildGraphViaRad`.
@@ -85,6 +86,14 @@ export interface GraphPipelineDependencies<
     definitionFile: string,
     options: GraphCompileOptions
   ): Promise<unknown[]>;
+  applicationGraphToResources(
+    appGraph: unknown,
+    definitionFile: string,
+    definitionContent: string
+  ): unknown[];
+  filterGraphVisualizationResources(
+    resources: CanvasGraphResource[]
+  ): CanvasGraphResource[];
   canvasGraphResources(values: unknown[]): CanvasGraphResource[];
   workspaceGraphJsonPath(
     state: CanvasState,
@@ -106,6 +115,7 @@ export interface StageArtifactsInput<
   repo: string;
   branch: string;
   log?: (message: string) => void;
+  preferGraphArtifact?: boolean;
 }
 
 export interface CompileResourcesInput {
@@ -113,6 +123,7 @@ export interface CompileResourcesInput {
   staged: StagedRadArtifacts;
   log?: (message: string) => void;
   saveGraphJsonTo?: string;
+  preferGraphArtifact?: boolean;
 }
 
 export interface GraphPipeline<
@@ -134,7 +145,8 @@ export interface GraphPipeline<
   graphJsonPathFor(entry: TEntry, selection: AppBicepSelection): string;
   definitionHashFor(
     selection: AppBicepSelection,
-    staged: StagedRadArtifacts
+    staged: StagedRadArtifacts,
+    preferGraphArtifact?: boolean
   ): string;
   discardStagedArtifacts(staged: StagedRadArtifacts): void;
 }
@@ -155,7 +167,17 @@ export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
 
     bicepPathOf,
 
-    stageArtifacts({ entry, selection, repo, branch, log }) {
+    stageArtifacts({
+      entry,
+      selection,
+      repo,
+      branch,
+      log,
+      preferGraphArtifact
+    }) {
+      if (preferGraphArtifact && selection.graphContent) {
+        return Promise.resolve({ dir: "", remote: false });
+      }
       return dependencies.resolveRadArtifactsDir({
         // The legacy branches guard this as `!!(entry && selection.fromWorkspace)`.
         // Every caller answers 503 before reaching here when the entry is
@@ -170,7 +192,27 @@ export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
       });
     },
 
-    compileResources({ selection, staged, log, saveGraphJsonTo }) {
+    compileResources({
+      selection,
+      staged,
+      log,
+      saveGraphJsonTo,
+      preferGraphArtifact
+    }) {
+      if (preferGraphArtifact && selection.graphContent) {
+        return Promise.resolve().then(() => {
+          const appGraph = JSON.parse(selection.graphContent || "");
+          return dependencies.filterGraphVisualizationResources(
+            dependencies.canvasGraphResources(
+              dependencies.applicationGraphToResources(
+                appGraph,
+                bicepPathOf(selection),
+                selection.content || ""
+              )
+            )
+          );
+        });
+      }
       return dependencies
         .buildGraphViaRad(selection.content || "", bicepPathOf(selection), {
           log,
@@ -193,13 +235,17 @@ export function createGraphPipeline<TEntry extends GraphInstanceEntry>(
         : "";
     },
 
-    definitionHashFor(selection, staged) {
+    definitionHashFor(selection, staged, preferGraphArtifact) {
       // The hash covers the artifacts as well as the Bicep, so editing a local
       // recipe or extension invalidates a cached graph the Bicep alone would
       // have matched.
       return dependencies.graphDefinitionHash(
-        selection.content || "",
-        dependencies.radArtifactsFingerprint(staged.dir)
+        (preferGraphArtifact && selection.graphContent) ||
+          selection.content ||
+          "",
+        preferGraphArtifact && selection.graphContent ?
+          ""
+        : dependencies.radArtifactsFingerprint(staged.dir)
       );
     },
 

@@ -908,9 +908,14 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         selection,
         repo,
         branch,
-        log: addBuildDetail
+        log: addBuildDetail,
+        preferGraphArtifact: true
       });
-      const definitionHash = pipeline.definitionHashFor(selection, staged);
+      const definitionHash = pipeline.definitionHashFor(
+        selection,
+        staged,
+        true
+      );
       if (!isCurrentPlan()) {
         try {
           pipeline.discardStagedArtifacts(staged);
@@ -935,13 +940,16 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       addEvent(
         "building_graph",
         "running",
-        "Compiling the application model and building the resource graph."
+        selection.graphContent ?
+          "Loading the selected branch's app-graph.json."
+        : "Compiling the application model and building the resource graph."
       );
       const resources = await compileResources(
         {
           selection,
           staged,
-          log: addBuildDetail
+          log: addBuildDetail,
+          preferGraphArtifact: true
         },
         { repo, branch }
       );
@@ -1242,13 +1250,15 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         entry,
         selection: baseSelection,
         repo,
-        branch: data.base
+        branch: data.base,
+        preferGraphArtifact: true
       });
       const headStaged = await pipeline.stageArtifacts({
         entry,
         selection: headSelection,
         repo,
-        branch: data.head
+        branch: data.head,
+        preferGraphArtifact: true
       });
       addEvent(
         "building_base_graph",
@@ -1258,7 +1268,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       const baseResources = await compileResources(
         {
           selection: baseSelection,
-          staged: baseStaged
+          staged: baseStaged,
+          preferGraphArtifact: true
         },
         { repo, branch: data.base }
       );
@@ -1275,7 +1286,8 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
       const headResources = await compileResources(
         {
           selection: headSelection,
-          staged: headStaged
+          staged: headStaged,
+          preferGraphArtifact: true
         },
         { repo, branch: data.head }
       );

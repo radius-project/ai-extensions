@@ -21,6 +21,7 @@ import { dirname, join } from "node:path";
 import os from "node:os";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
+  applicationGraphToResources,
   computeGraphDiff,
   fetchBicepFromRepo,
   filterGraphVisualizationResources
@@ -146,6 +147,7 @@ const dependencies: RadiusExtensionDependencies = {
   },
   github,
   core: {
+    applicationGraphToResources,
     computeGraphDiff,
     fetchBicepFromRepo,
     filterGraphVisualizationResources

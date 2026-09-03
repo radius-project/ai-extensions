@@ -83,6 +83,12 @@ function build(script: Script = {}): {
       if (!script.built) throw new Error("unscripted buildGraphViaRad");
       return Promise.resolve(script.built);
     },
+    applicationGraphToResources: (appGraph) => {
+      const value = appGraph as { resources?: unknown[] };
+      return value.resources ?? [];
+    },
+    filterGraphVisualizationResources: (resources) =>
+      resources.filter((resource) => resource.type !== "containerImages"),
     canvasGraphResources: (values) => {
       calls.normalized.push(values);
       return values.map((value) => ({
@@ -144,6 +150,21 @@ describe("graph pipeline", () => {
   });
 
   describe("stageArtifacts", () => {
+    it("does not stage rad artifacts when app-graph.json exists", async () => {
+      const { pipeline, calls } = build();
+
+      await expect(
+        pipeline.stageArtifacts({
+          entry: { state: {} },
+          selection: selectionOf({ graphContent: '{"resources":[]}' }),
+          repo: "octo/app",
+          branch: "main",
+          preferGraphArtifact: true
+        })
+      ).resolves.toEqual({ dir: "", remote: false });
+      expect(calls.artifactRequests).toEqual([]);
+    });
+
     it("stages a remote branch with the default bicep path and the log", async () => {
       const staged = { dir: "/tmp/staged", remote: true };
       const { pipeline, calls } = build({ staged });
@@ -195,6 +216,36 @@ describe("graph pipeline", () => {
   });
 
   describe("compileResources", () => {
+    it("loads a selected branch app-graph.json without invoking rad", async () => {
+      const { pipeline, calls } = build();
+
+      const resources = await pipeline.compileResources({
+        selection: selectionOf({
+          content: "app bicep",
+          graphContent:
+            '{"resources":[{"id":"persisted"},{"id":"image","type":"containerImages"}]}'
+        }),
+        staged: { dir: "", remote: false },
+        preferGraphArtifact: true
+      });
+
+      expect(resources).toEqual([{ id: "persisted", normalized: true }]);
+      expect(calls.compiles).toEqual([]);
+    });
+
+    it("surfaces malformed selected branch app-graph.json content", async () => {
+      const { pipeline, calls } = build();
+
+      await expect(
+        pipeline.compileResources({
+          selection: selectionOf({ graphContent: "{not json" }),
+          staged: { dir: "", remote: false },
+          preferGraphArtifact: true
+        })
+      ).rejects.toThrow("JSON");
+      expect(calls.compiles).toEqual([]);
+    });
+
     it("compiles through rad and normalizes the result", async () => {
       const { pipeline, calls } = build({
         built: [{ id: "res-a" }]
@@ -305,6 +356,21 @@ describe("graph pipeline", () => {
       });
 
       expect(calls.hashes[0]?.content).toBe("");
+    });
+
+    it("hashes a selected graph artifact without fingerprinting rad artifacts", () => {
+      const { pipeline, calls } = build();
+
+      pipeline.definitionHashFor(
+        selectionOf({ graphContent: '{"resources":[]}' }),
+        { dir: "/tmp/staged", remote: true },
+        true
+      );
+
+      expect(calls.hashes).toEqual([
+        { content: '{"resources":[]}', fingerprint: "" }
+      ]);
+      expect(calls.fingerprinted).toEqual([]);
     });
   });
 

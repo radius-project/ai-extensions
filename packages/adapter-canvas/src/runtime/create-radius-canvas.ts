@@ -61,7 +61,7 @@ export function createRadiusCanvas(
   canvasInstances: RadiusCanvasInstanceRegistry = createRadiusCanvasInstanceRegistry()
 ) {
   const closeGenerations = new Map<string, number>();
-  const { workspaceState, fetchBicepForBranch } =
+  const { workspaceState, fetchBicepForBranch, loadBranchGraphResources } =
     createGraphContextHelpers(deps);
 
   const declarationByName = new Map(
@@ -284,54 +284,22 @@ export function createRadiusCanvas(
             } catch {}
           };
 
-          const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                entry.state,
-                repo,
-                baseBranch
-              ),
-              state: entry.state,
-              github: deps.github,
-              repo,
-              branch: baseBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log
-            });
-          const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                entry.state,
-                repo,
-                headBranch
-              ),
-              state: entry.state,
-              github: deps.github,
-              repo,
-              branch: headBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log
-            });
           let baseResources: CanvasGraphResource[];
           let headResources: CanvasGraphResource[];
           try {
-            baseResources = await deps.rad.buildGraphViaRad(
+            baseResources = await loadBranchGraphResources(
+              repo,
+              baseBranch,
+              entry.state,
               baseContent || "",
-              ".radius/app.bicep",
-              {
-                log,
-                radArtifactsDir: baseRadArtifactsDir,
-                cleanupRadArtifactsDir: baseRadArtifactsRemote
-              }
+              log
             );
-            headResources = await deps.rad.buildGraphViaRad(
+            headResources = await loadBranchGraphResources(
+              repo,
+              headBranch,
+              entry.state,
               headContent || "",
-              ".radius/app.bicep",
-              {
-                log,
-                radArtifactsDir: headRadArtifactsDir,
-                cleanupRadArtifactsDir: headRadArtifactsRemote
-              }
+              log
             );
           } catch (error) {
             const failure = asGraphModelingFailure(error);

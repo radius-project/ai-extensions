@@ -15,7 +15,7 @@ import type {
 } from "@radius-project/core";
 import { hashAppBicep } from "../app-bicep-hash.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
-import type { CanvasState } from "../shared.js";
+import type { CanvasGraphResource, CanvasState } from "../shared.js";
 
 // A branch's application model, classified. `refreshable` is the branch-safety
 // half of the decision: the skill writes the working tree, so only a model that
@@ -36,6 +36,18 @@ export interface GraphContextHelpers {
     branch: string,
     state: CanvasState
   ): Promise<string | null>;
+  fetchGraphForBranch(
+    repo: string,
+    branch: string,
+    state: CanvasState
+  ): Promise<{ content: string; path: string } | null>;
+  loadBranchGraphResources(
+    repo: string,
+    branch: string,
+    state: CanvasState,
+    bicepContent: string,
+    log: (message: string) => void
+  ): Promise<CanvasGraphResource[]>;
   evaluateAppSourceForBranch(
     repo: string,
     branch: string,
@@ -85,7 +97,72 @@ export function createGraphContextHelpers(
       );
       if (local) return local;
     }
+
     return await deps.core.fetchBicepFromRepo(deps.github, repo, branch);
+  }
+
+  async function fetchGraphForBranch(
+    repo: string,
+    branch: string,
+    state: CanvasState
+  ): Promise<{ content: string; path: string } | null> {
+    const useWorkspace = deps.workspace.isWorkspaceSelection(
+      state,
+      repo,
+      branch
+    );
+    if (useWorkspace) {
+      for (const path of [".radius/app-graph.json", "app-graph.json"]) {
+        const content = await deps.appModel.fetchWorkspaceFile(
+          state,
+          repo,
+          branch,
+          path
+        );
+        if (content) return { content, path };
+      }
+      return null;
+    }
+    for (const path of [".radius/app-graph.json", "app-graph.json"]) {
+      const content = await deps.appModel.fetchRepoFile(repo, branch, path);
+      if (content) return { content, path };
+    }
+    return null;
+  }
+
+  async function loadBranchGraphResources(
+    repo: string,
+    branch: string,
+    state: CanvasState,
+    bicepContent: string,
+    log: (message: string) => void
+  ): Promise<CanvasGraphResource[]> {
+    const graph = await fetchGraphForBranch(repo, branch, state);
+    if (graph) {
+      const definitionFile = graph.path.replace("app-graph.json", "app.bicep");
+      return deps.core.filterGraphVisualizationResources(
+        deps.core.applicationGraphToResources(
+          JSON.parse(graph.content),
+          definitionFile,
+          bicepContent
+        )
+      );
+    }
+
+    const { dir, remote } = await deps.rad.radArtifactsDirForSelection({
+      isLocal: deps.workspace.isWorkspaceSelection(state, repo, branch),
+      state,
+      github: deps.github,
+      repo,
+      branch,
+      bicepRepoPath: ".radius/app.bicep",
+      log
+    });
+    return deps.rad.buildGraphViaRad(bicepContent, ".radius/app.bicep", {
+      log,
+      radArtifactsDir: dir,
+      cleanupRadArtifactsDir: remote
+    });
   }
 
   // Picks the lister that can actually see the branch — the local worktree for
@@ -241,6 +318,8 @@ export function createGraphContextHelpers(
   return {
     workspaceState,
     fetchBicepForBranch,
+    fetchGraphForBranch,
+    loadBranchGraphResources,
     evaluateAppSourceForBranch,
     listSourceTreeForBranch,
     resolveAppModelStatus

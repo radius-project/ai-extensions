@@ -584,6 +584,35 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
     expect(result.textResultForLlm).toContain("feat");
   });
 
+  it("uses committed branch graph artifacts for PR diff markdown", async () => {
+    const { tools, deps } = setup({
+      workspaceContext: {
+        workspacePath: "/workspace",
+        repo: "acme/widgets",
+        branch: "work"
+      },
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": "resource db {}",
+        "remote:acme/widgets@feat": "resource db {}\nresource cache {}"
+      },
+      filesByRepoBranch: {
+        "remote:acme/widgets@main:.radius/app-graph.json":
+          '{"resources":[{"id":"db","name":"db","type":"x"}]}',
+        "remote:acme/widgets@feat:.radius/app-graph.json":
+          '{"resources":[{"id":"db","name":"db","type":"x"},{"id":"cache","name":"cache","type":"x"}]}'
+      }
+    });
+
+    const result = await findTool(
+      tools,
+      "radius_generate_pr_diff_markdown"
+    ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
+
+    expect(result.textResultForLlm).toContain("Application Graph Diff");
+    expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
+    expect(deps.rad.radArtifactsDirForSelection).not.toHaveBeenCalled();
+  });
+
   it("maps a fetch/build failure to a friendly warning instead of throwing", async () => {
     const { tools, deps } = setup({
       bicepByRepoBranch: {
