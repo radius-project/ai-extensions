@@ -680,6 +680,31 @@ describe("P0-C built Radius extension artifact", () => {
     }
   });
 
+  it("packages fail-closed guidance for developer rad resolution failures", () => {
+    assertCurrentArtifact();
+    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
+    const graphGuidance = readFileSync(
+      join(DIST, "skills", "radius-app-graph", "SKILL.md"),
+      "utf8"
+    );
+
+    expect(skillGuidance).toMatch(
+      /show-radius-type\.mjs` fails while locating, querying, or validating.*stop the modeling run.*promote-app-model\.mjs.*--abort.*report the exact error/su
+    );
+    expect(skillGuidance).toMatch(
+      /missing binary.*invalid or incomplete version JSON.*noncanonical commit.*unsupported development, edge, or pull-request version/su
+    );
+    for (const guidance of [skillGuidance, graphGuidance]) {
+      expect(guidance).toMatch(
+        /never (?:download|install).*(?:rename|back up).*(?:delete|replace) a `rad` binary/isu
+      );
+      expect(guidance).toMatch(
+        /never change or unset `RADIUS_RAD_BINARY` or `RADIUS_RAD_SKIP_VERSION_CHECK`/iu
+      );
+      expect(guidance).toMatch(/never search.*PATH.*\.rad\/bin.*fallback/isu);
+    }
+  });
+
   it("packages the schema-sensitivity credential contract, not a property-name rule", () => {
     assertCurrentArtifact();
     const readGuidance = (relativePath: string): string =>
