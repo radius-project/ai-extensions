@@ -17,11 +17,13 @@ Never hardcode passwords, tokens, keys, or credential-bearing URLs. Use a `@secu
 
 ## Developer-supplied secret inputs
 
-Follow the exact resource schema:
+Decide each credential input from the schema, never from the property's name. A credential input property is one of two kinds:
 
-- If it defines an `x-radius-sensitive` property such as `password`, set that property from a `@secure()` parameter.
-- If it defines a secret reference such as `secretName`, author the supported secret resource and reference it exactly as the schema requires.
-- If it defines no credential input, do not invent one.
+- **Inline sensitive value** — the schema marks the property `x-radius-sensitive: true`. Assign the `@secure()` parameter directly to that property, as `Radius.Data/mySqlDatabases.password` requires.
+- **Secret resource reference** — the schema types the property as a plain, non-sensitive `string` whose description identifies it as the resource ID of a `Radius.Security/secrets` resource. Author or reuse that Secret and assign `<secret>.id`, as `Radius.Messaging/rabbitMQ.password` requires. Never assign a `@secure()` parameter to a reference property.
+- If the schema defines no credential input, do not invent one. Where a reference property is optional and the application does not need to own the credential, omitting it and consuming the Recipe-generated credential is valid.
+
+A property named `password` may be either kind, and a reference property may be named `password`, `passwordSecret`, or `secretName`. The name carries no information — read the schema. Assigning a raw credential to a reference property is a deployment failure rather than a style difference: the Recipe derives the Kubernetes Secret name for `secretKeyRef` from that value, and Kubernetes rejects a password as an RFC 1123 subdomain.
 
 When the workload consumes a developer-supplied credential through connection projection, author or reuse a `Radius.Security/secrets` resource and connect the workload to its resource ID. A sensitive backing-resource input is not readable back from that resource, so do not connect to the backing resource and expect Radius to project the supplied value. Developer-owned inputs remain inputs and must not be returned through Recipe `result.secrets`, as reflected by the PostgreSQL and MySQL ownership corrections in [resource-types-contrib#298](https://github.com/radius-project/resource-types-contrib/pull/298) and [resource-types-contrib#315](https://github.com/radius-project/resource-types-contrib/pull/315):
 
@@ -75,6 +77,41 @@ resource apiContainer 'Radius.Compute/containers@2025-08-01-preview' = {
 ```
 
 The `mysql` producer connection projects verified ordinary outputs such as `CONNECTION_MYSQL_HOST` and `CONNECTION_MYSQL_PORT`. The authored Secret connection injects `CONNECTION_MYSQLSECRET_PASSWORD`: `MYSQLSECRET` is the `mysqlSecret` connection map key uppercased without inserting a separator, and `PASSWORD` is the uppercased authored `password` data key. The names are illustrative. Confirm the resource properties, connection keys, Secret data key, generated environment names, and required value format against the target version and source. Keep the authored Secret name distinct from Recipe-owned Kubernetes Secret names. If the application requires a different native name, model an explicit supported binding rather than assuming the connection renames it.
+
+### The same property name, the opposite form
+
+`Radius.Messaging/rabbitMQ` also defines a property named `password`, but its schema types it as a plain, non-sensitive `string` whose description identifies it as the resource ID of a `Radius.Security/secrets` resource holding the broker password under the data key `password`. It therefore takes `<secret>.id` — the exact opposite of the identically named `Radius.Data/mySqlDatabases.password` above, which takes the secure parameter inline:
+
+```bicep
+@secure()
+param rabbitmqPassword string
+
+resource rabbitmqCredentials 'Radius.Security/secrets@2025-08-01-preview' = {
+  name: 'rabbitmq-credentials'
+  properties: {
+    environment: environment
+    application: app.id
+    data: {
+      password: {
+        value: rabbitmqPassword
+      }
+    }
+  }
+}
+
+resource rabbitmq 'Radius.Messaging/rabbitMQ@2025-08-01-preview' = {
+  name: 'rabbitmq'
+  properties: {
+    environment: environment
+    application: app.id
+    queue: 'orders'
+    username: 'username'
+    password: rabbitmqCredentials.id
+  }
+}
+```
+
+Writing `password: rabbitmqPassword` here deploys a broken application: the Recipe reads the property as a resource ID and uses its last segment as the Kubernetes Secret name in `secretKeyRef`, so the supplied password becomes the looked-up Secret name and Kubernetes rejects the Deployment because a password is not a lowercase RFC 1123 subdomain. Because the property is optional, omitting it entirely and consuming the Recipe-generated credential is also valid. Resolve every credential property's kind from `show-radius-type.mjs` output before assigning it; two types that share a property name do not share a convention.
 
 ## Recipe-generated secret results
 
