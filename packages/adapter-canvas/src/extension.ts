@@ -21,6 +21,7 @@ import { dirname, join } from "node:path";
 import os from "node:os";
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import {
+  applicationGraphToResources,
   computeGraphDiff,
   fetchBicepFromRepo,
   filterGraphVisualizationResources
@@ -46,6 +47,7 @@ import {
   resolvePersistedSessionId,
   toSafeRepoRelPath,
   workspaceFileExists,
+  workspaceGraphJsonPath,
   workspaceHeadCommit,
   workspaceModelRecoverable,
   workspaceSourceChangedSince
@@ -142,10 +144,12 @@ const dependencies: RadiusExtensionDependencies = {
     parseRepoFromRemote,
     toSafeRepoRelPath,
     isWorkspacePath,
-    workspaceFileExists
+    workspaceFileExists,
+    workspaceGraphJsonPath
   },
   github,
   core: {
+    applicationGraphToResources,
     computeGraphDiff,
     fetchBicepFromRepo,
     filterGraphVisualizationResources

@@ -40,6 +40,7 @@ export function createRadiusTools(
   const {
     workspaceState,
     fetchBicepForBranch,
+    loadBranchGraphResources,
     evaluateAppSourceForBranch,
     listSourceTreeForBranch
   } = createGraphContextHelpers(deps);
@@ -229,51 +230,19 @@ export function createRadiusTools(
             );
           }
 
-          const { dir: baseRadArtifactsDir, remote: baseRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                state,
-                repo,
-                baseBranch
-              ),
-              state,
-              github: deps.github,
-              repo,
-              branch: baseBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log: logToSession
-            });
-          const { dir: headRadArtifactsDir, remote: headRadArtifactsRemote } =
-            await deps.rad.radArtifactsDirForSelection({
-              isLocal: deps.workspace.isWorkspaceSelection(
-                state,
-                repo,
-                headBranch
-              ),
-              state,
-              github: deps.github,
-              repo,
-              branch: headBranch,
-              bicepRepoPath: ".radius/app.bicep",
-              log: logToSession
-            });
-          const baseResources = await deps.rad.buildGraphViaRad(
+          const baseResources = await loadBranchGraphResources(
+            repo,
+            baseBranch,
+            state,
             baseContent || "",
-            ".radius/app.bicep",
-            {
-              log: logToSession,
-              radArtifactsDir: baseRadArtifactsDir,
-              cleanupRadArtifactsDir: baseRadArtifactsRemote
-            }
+            logToSession
           );
-          const headResources = await deps.rad.buildGraphViaRad(
+          const headResources = await loadBranchGraphResources(
+            repo,
+            headBranch,
+            state,
             headContent || "",
-            ".radius/app.bicep",
-            {
-              log: logToSession,
-              radArtifactsDir: headRadArtifactsDir,
-              cleanupRadArtifactsDir: headRadArtifactsRemote
-            }
+            logToSession
           );
 
           const diffResources = deps.core.computeGraphDiff(

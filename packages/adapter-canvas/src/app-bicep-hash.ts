@@ -1,23 +1,7 @@
-// SHA-256 fingerprint of an application model.
-//
-// This lives in the adapter rather than in `@radius-project/core` because core
-// is compiled into the browser bundle through its package barrel, so it cannot
-// import `node:crypto`. Core owns the normalization (which text differences are
-// meaningful) and injects this function to do the hashing.
-//
-// The algorithm and output format must stay byte-compatible with the plugin's
-// `write-app-origin.mjs`, which re-implements them because it ships inside the
-// installed plugin where the workspace packages do not exist. A collocated
-// contract test asserts the two agree.
-
-import { createHash } from "node:crypto";
-import { normalizeAppBicep } from "@radius-project/core";
-
-export const APP_BICEP_HASH_ALGORITHM = "sha256";
-
-export function hashAppBicep(content: string): string {
-  const digest = createHash(APP_BICEP_HASH_ALGORITHM)
-    .update(normalizeAppBicep(content), "utf8")
-    .digest("hex");
-  return `${APP_BICEP_HASH_ALGORITHM}:${digest}`;
-}
+// Kept as the Canvas-facing module so existing imports stay stable. The shared
+// Node adapter owns the implementation because it also stamps generated graph
+// artifacts with the same normalized application-model hash.
+export {
+  APP_BICEP_HASH_ALGORITHM,
+  hashAppBicep
+} from "@radius-project/adapter-shared";

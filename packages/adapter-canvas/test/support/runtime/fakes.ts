@@ -236,6 +236,10 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
         return raw.replace(/^\/+/, "");
       }),
       workspaceFileExists: vi.fn(async () => true),
+      workspaceGraphJsonPath: vi.fn(
+        (_state, bicepRepoPath) =>
+          `/workspace/${String(bicepRepoPath).replace("app.bicep", "app-graph.json")}`
+      ),
       // Real implementation: path confinement is exactly the behavior the gate
       // depends on, so a hand-rolled fake would test the wrong thing.
       isWorkspacePath: vi.fn(isWorkspacePath)
@@ -251,6 +255,10 @@ export function createFakeDependencies(options: FakeDependenciesOptions = {}) {
       getDefaultBranch: vi.fn(async () => options.defaultBranch ?? "main")
     },
     core: {
+      applicationGraphToResources: vi.fn((appGraph: unknown) => {
+        const value = appGraph as { resources?: CanvasGraphResource[] };
+        return value.resources ?? [];
+      }),
       computeGraphDiff: vi.fn(
         (base: CanvasGraphResource[], head: CanvasGraphResource[]) => {
           const baseIds = new Set(base.map((r) => r.id));

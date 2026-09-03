@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { stampAppGraphJson } from "@radius-project/adapter-shared";
 import {
   createGraphPipeline,
   DEFAULT_APP_BICEP_PATH,
@@ -48,6 +49,10 @@ function selectionOf(
   };
 }
 
+function graphFor(bicepContent: string, resources: unknown[] = []): string {
+  return stampAppGraphJson(JSON.stringify({ resources }), bicepContent);
+}
+
 // Every seam throws on an unscripted call so a stage that quietly reaches for a
 // dependency the scenario did not model fails loudly instead of succeeding on a
 // default. The two pure helpers the pipeline composes (`bicepPathOf`'s fallback
@@ -83,6 +88,12 @@ function build(script: Script = {}): {
       if (!script.built) throw new Error("unscripted buildGraphViaRad");
       return Promise.resolve(script.built);
     },
+    applicationGraphToResources: (appGraph) => {
+      const value = appGraph as { resources?: unknown[] };
+      return value.resources ?? [];
+    },
+    filterGraphVisualizationResources: (resources) =>
+      resources.filter((resource) => resource.type !== "containerImages"),
     canvasGraphResources: (values) => {
       calls.normalized.push(values);
       return values.map((value) => ({
@@ -144,6 +155,42 @@ describe("graph pipeline", () => {
   });
 
   describe("stageArtifacts", () => {
+    it("does not stage rad artifacts when app-graph.json exists", async () => {
+      const { pipeline, calls } = build();
+
+      await expect(
+        pipeline.stageArtifacts({
+          entry: { state: {} },
+          selection: selectionOf({
+            graphContent: graphFor("resource app 'Radius.Compute/containers'")
+          }),
+          repo: "octo/app",
+          branch: "main",
+          preferGraphArtifact: true
+        })
+      ).resolves.toEqual({ dir: "", remote: false });
+      expect(calls.artifactRequests).toEqual([]);
+    });
+
+    it("stages rad artifacts when app.bicep is newer than app-graph.json", async () => {
+      const staged = { dir: "/tmp/staged", remote: true };
+      const { pipeline, calls } = build({ staged });
+
+      await expect(
+        pipeline.stageArtifacts({
+          entry: { state: {} },
+          selection: selectionOf({
+            content: "new app bicep",
+            graphContent: graphFor("old app bicep")
+          }),
+          repo: "octo/app",
+          branch: "main",
+          preferGraphArtifact: true
+        })
+      ).resolves.toBe(staged);
+      expect(calls.artifactRequests).toHaveLength(1);
+    });
+
     it("stages a remote branch with the default bicep path and the log", async () => {
       const staged = { dir: "/tmp/staged", remote: true };
       const { pipeline, calls } = build({ staged });
@@ -195,6 +242,38 @@ describe("graph pipeline", () => {
   });
 
   describe("compileResources", () => {
+    it("loads a selected branch app-graph.json without invoking rad", async () => {
+      const { pipeline, calls } = build();
+
+      const resources = await pipeline.compileResources({
+        selection: selectionOf({
+          content: "app bicep",
+          graphContent: graphFor("app bicep", [
+            { id: "persisted" },
+            { id: "image", type: "containerImages" }
+          ])
+        }),
+        staged: { dir: "", remote: false },
+        preferGraphArtifact: true
+      });
+
+      expect(resources).toEqual([{ id: "persisted", normalized: true }]);
+      expect(calls.compiles).toEqual([]);
+    });
+
+    it("rebuilds malformed selected branch app-graph.json content", async () => {
+      const { pipeline, calls } = build({ built: [{ id: "rebuilt" }] });
+
+      await expect(
+        pipeline.compileResources({
+          selection: selectionOf({ graphContent: "{not json" }),
+          staged: { dir: "", remote: false },
+          preferGraphArtifact: true
+        })
+      ).resolves.toEqual([{ id: "rebuilt", normalized: true }]);
+      expect(calls.compiles).toHaveLength(1);
+    });
+
     it("compiles through rad and normalizes the result", async () => {
       const { pipeline, calls } = build({
         built: [{ id: "res-a" }]
@@ -305,6 +384,26 @@ describe("graph pipeline", () => {
       });
 
       expect(calls.hashes[0]?.content).toBe("");
+    });
+
+    it("hashes a selected graph artifact without fingerprinting rad artifacts", () => {
+      const { pipeline, calls } = build();
+
+      pipeline.definitionHashFor(
+        selectionOf({
+          graphContent: graphFor("resource app 'Radius.Compute/containers'")
+        }),
+        { dir: "/tmp/staged", remote: true },
+        true
+      );
+
+      expect(calls.hashes).toEqual([
+        {
+          content: graphFor("resource app 'Radius.Compute/containers'"),
+          fingerprint: ""
+        }
+      ]);
+      expect(calls.fingerprinted).toEqual([]);
     });
   });
 

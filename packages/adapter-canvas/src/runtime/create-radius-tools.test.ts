@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { stampAppGraphJson } from "@radius-project/adapter-shared";
 import {
   UNIDENTIFIED_APPLICATION_MESSAGE,
   UNSUPPORTED_NO_DOCKERFILE_MESSAGE
@@ -746,6 +747,41 @@ describe("RU-08: radius_generate_pr_diff_markdown", () => {
     });
     expect(result.textResultForLlm).toContain("main");
     expect(result.textResultForLlm).toContain("feat");
+  });
+
+  it("uses committed branch graph artifacts for PR diff markdown", async () => {
+    const baseBicep = "resource db {}";
+    const headBicep = "resource db {}\nresource cache {}";
+    const { tools, deps } = setup({
+      workspaceContext: {
+        workspacePath: "/workspace",
+        repo: "acme/widgets",
+        branch: "work"
+      },
+      bicepByRepoBranch: {
+        "remote:acme/widgets@main": baseBicep,
+        "remote:acme/widgets@feat": headBicep
+      },
+      filesByRepoBranch: {
+        "remote:acme/widgets@main:.radius/app-graph.json": stampAppGraphJson(
+          '{"resources":[{"id":"db","name":"db","type":"x"}]}',
+          baseBicep
+        ),
+        "remote:acme/widgets@feat:.radius/app-graph.json": stampAppGraphJson(
+          '{"resources":[{"id":"db","name":"db","type":"x"},{"id":"cache","name":"cache","type":"x"}]}',
+          headBicep
+        )
+      }
+    });
+
+    const result = await findTool(
+      tools,
+      "radius_generate_pr_diff_markdown"
+    ).handler({ repo: "acme/widgets", baseBranch: "main", headBranch: "feat" });
+
+    expect(result.textResultForLlm).toContain("Application Graph Diff");
+    expect(deps.rad.buildGraphViaRad).not.toHaveBeenCalled();
+    expect(deps.rad.radArtifactsDirForSelection).not.toHaveBeenCalled();
   });
 
   it("maps a fetch/build failure to a friendly warning instead of throwing", async () => {

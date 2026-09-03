@@ -34,7 +34,8 @@ import path from "node:path";
 import type { IncomingMessage } from "node:http";
 import {
   applicationGraphToResources,
-  filterGraphVisualizationResources
+  filterGraphVisualizationResources,
+  normalizeAppBicep
 } from "@radius-project/core";
 import {
   killChildTree,
@@ -238,6 +239,33 @@ export const RADIUS_BICEP_EXPERIMENTAL_FEATURES: Readonly<{
 export const MODELED_APP_GRAPH_FLAGS: readonly string[] = Object.freeze([
   "--include-icons"
 ]);
+export const APP_BICEP_HASH_ALGORITHM = "sha256";
+export const APP_GRAPH_PROVENANCE_PROPERTY = "_radius";
+
+export function hashAppBicep(content: string): string {
+  const digest = crypto
+    .createHash(APP_BICEP_HASH_ALGORITHM)
+    .update(normalizeAppBicep(content), "utf8")
+    .digest("hex");
+  return `${APP_BICEP_HASH_ALGORITHM}:${digest}`;
+}
+
+export function stampAppGraphJson(raw: string, bicepContent: string): string {
+  const parsed: unknown = JSON.parse(raw);
+  const graph =
+    Array.isArray(parsed) ? { resources: parsed }
+    : isPlainObject(parsed) ? parsed
+    : null;
+  if (!graph) {
+    throw new Error("app-graph.json must contain a JSON object");
+  }
+  return JSON.stringify({
+    ...graph,
+    [APP_GRAPH_PROVENANCE_PROPERTY]: {
+      appBicepHash: hashAppBicep(bicepContent)
+    }
+  });
+}
 
 // Serializes concurrent toolchain preparation so only one download runs.
 let ensurePromise: Promise<string> | null = null;
@@ -1315,7 +1343,11 @@ export async function runRadAppGraph(
     const raw = fs.readFileSync(outFile, "utf8");
     if (saveGraphJsonTo) {
       if (path.isAbsolute(saveGraphJsonTo))
-        saveGraphJson(saveGraphJsonTo, raw, log);
+        saveGraphJson(
+          saveGraphJsonTo,
+          stampAppGraphJson(raw, fs.readFileSync(bicepFilePath, "utf8")),
+          log
+        );
       else
         log(
           `Warning: saveGraphJsonTo must be an absolute path; ignoring: ${saveGraphJsonTo}`
