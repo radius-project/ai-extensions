@@ -12,6 +12,10 @@ export type {
   OidcSubjectConfig,
   BuildOidcSubjectInput
 } from "./oidc-subject.js";
+export {
+  KUBERNETES_NAMESPACE_ERROR,
+  isKubernetesNamespace
+} from "./kubernetes.js";
 
 const REGISTRY: Record<string, ComputePlatform> = {
   [azure.id]: azure,

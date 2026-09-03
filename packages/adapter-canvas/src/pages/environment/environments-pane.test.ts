@@ -465,6 +465,22 @@ describe("namespace constraint guidance", () => {
       new RegExp(`<(?:select|input) id="${control}"[^>]*>`).exec(html)?.[0] ??
       "";
     expect(tag, `${control} should be rendered`).not.toBe("");
-    expect(tag).toContain(`aria-describedby="${help}"`);
+    expect(tag).toContain(`aria-describedby="${help} `);
   });
+
+  it.each(["azure", "aws"])(
+    "renders an accessible constrained custom namespace field for %s",
+    (provider) => {
+      const html = environmentsPaneMarkup(baseOptions);
+      const input =
+        new RegExp(`<input id="${provider}-namespace-custom"[^>]*>`).exec(
+          html
+        )?.[0] ?? "";
+      expect(input).toContain('maxlength="63"');
+      expect(input).toContain('pattern="[a-z0-9]([-a-z0-9]*[a-z0-9])?"');
+      expect(html).toContain(
+        `<div id="${provider}-namespace-error" class="status error" role="alert" hidden></div>`
+      );
+    }
+  );
 });

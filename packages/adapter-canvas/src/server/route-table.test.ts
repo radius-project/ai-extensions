@@ -54,6 +54,7 @@ const productionHandlers = {
       isValidRepoSlug: () => false,
       isResourceGroupName: () => false,
       isAksClusterName: () => false,
+      isKubernetesNamespace: () => false,
       isUuid: () => false,
       buildStages: () => [],
       createOperation: () => ({ operationId: "", currentStage: null }),

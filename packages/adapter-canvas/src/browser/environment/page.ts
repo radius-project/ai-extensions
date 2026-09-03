@@ -32,6 +32,10 @@ import {
 } from "./profiles.js";
 import type { BrowserTeardown } from "../lifecycle.js";
 import type { AbortHandle, BrowserContext, DomInputElement } from "../ports.js";
+import {
+  KUBERNETES_NAMESPACE_ERROR,
+  isKubernetesNamespace
+} from "@radius-project/core/platforms";
 
 export const ENVIRONMENT_PAGE_ENTRY_KEY = "environment-page";
 export const CREATE_ENVIRONMENT_OPERATION_PATH = "/api/operations";
@@ -128,6 +132,8 @@ export function initializeEnvironmentPage(
   const appNameInput = input(context, "az-app-name-input");
   const appIdInput = input(context, "az-selected-app-id");
   const formStatus = context.dom.byId("deploy-status");
+  const azureNamespaceError = context.dom.byId("azure-namespace-error");
+  const awsNamespaceError = context.dom.byId("aws-namespace-error");
   if (
     !context.dom.byId(ENVIRONMENT_PAGE_STATE_ID) ||
     !context.dom.byId("pane-environments") ||
@@ -143,7 +149,9 @@ export function initializeEnvironmentPage(
     !clientIdInput ||
     !appNameInput ||
     !appIdInput ||
-    !formStatus
+    !formStatus ||
+    !azureNamespaceError ||
+    !awsNamespaceError
   ) {
     return NOOP_TEARDOWN;
   }
@@ -397,6 +405,28 @@ export function initializeEnvironmentPage(
     formStatus.style.display = "block";
   };
 
+  const clearNamespaceError = (provider: CredentialProvider): void => {
+    const error = provider === "aws" ? awsNamespaceError : azureNamespaceError;
+    error.hidden = true;
+    error.textContent = "";
+    for (const suffix of ["select", "custom"]) {
+      context.dom
+        .inputById(`${provider}-namespace-${suffix}`)
+        ?.removeAttribute("aria-invalid");
+    }
+  };
+
+  const showNamespaceError = (provider: CredentialProvider): void => {
+    const error = provider === "aws" ? awsNamespaceError : azureNamespaceError;
+    error.textContent = KUBERNETES_NAMESPACE_ERROR;
+    error.hidden = false;
+    const select = context.dom.selectById(`${provider}-namespace-select`);
+    const custom = context.dom.inputById(`${provider}-namespace-custom`);
+    select?.setAttribute("aria-invalid", "true");
+    custom?.setAttribute("aria-invalid", "true");
+    (select?.value === "__custom__" ? custom : select)?.focus();
+  };
+
   const failCreate = (message: string): void => {
     restoreCreateButton();
     operations.hideProgress();
@@ -437,7 +467,13 @@ export function initializeEnvironmentPage(
     const region = (selectedProfile.region ?? "").trim();
     const infrastructure = discovery.currentInfraSelection(provider);
     const cluster = (infrastructure.cluster ?? "").trim();
-    const namespace = (infrastructure.namespace ?? "").trim() || "default";
+    const selectedNamespace = infrastructure.namespace ?? "";
+    const namespaceSelect = context.dom.selectById(
+      `${provider}-namespace-select`
+    );
+    const namespace =
+      selectedNamespace ||
+      (namespaceSelect?.value === "__custom__" ? "" : "default");
     const resourceGroup = (infrastructure.resourceGroup ?? "").trim();
     if (provider === "azure" && resourceGroup === "") {
       showFormError("Please specify a resource group.");
@@ -451,11 +487,16 @@ export function initializeEnvironmentPage(
       );
       return;
     }
-    // The profile's identity is validated before the namespace check, because
-    // the check compares on it. A profile that cannot name its subscription or
-    // account makes two same-named clusters indistinguishable, and the check
-    // would report a collision when the real fault is the profile. That
-    // diagnosis is also unactionable: no namespace change fixes it.
+    clearNamespaceError(provider);
+    if (!isKubernetesNamespace(namespace)) {
+      showNamespaceError(provider);
+      return;
+    }
+    // The profile's identity is validated before the namespace conflict check,
+    // because the check compares on it. A profile that cannot name its
+    // subscription or account makes two same-named clusters indistinguishable,
+    // and the check would report a collision when the real fault is the profile.
+    // That diagnosis is also unactionable: no namespace change fixes it.
     if (provider === "azure" && (subscriptionId === "" || tenantId === "")) {
       showFormError(
         "The selected profile needs both a tenant ID and subscription ID. Delete the profile and create it again with those values before creating the environment."
@@ -609,6 +650,16 @@ export function initializeEnvironmentPage(
     credentials.startWizardCreation();
   });
   scope.on(createButton, "click", createEnvironment);
+  for (const provider of ["azure", "aws"] as const) {
+    for (const suffix of ["select", "custom"]) {
+      const control = context.dom.inputById(`${provider}-namespace-${suffix}`);
+      if (control) {
+        scope.on(control, suffix === "select" ? "change" : "input", () =>
+          clearNamespaceError(provider)
+        );
+      }
+    }
+  }
 
   if (state.activeSubtab === "credentials") {
     credentials.loadCredentialTable();

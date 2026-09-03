@@ -78,7 +78,9 @@ export {
   generatePortalUrl,
   buildOidcSubject,
   buildEnvironmentSuffix,
-  buildFederatedCredentialName
+  buildFederatedCredentialName,
+  KUBERNETES_NAMESPACE_ERROR,
+  isKubernetesNamespace
 } from "./platforms/index.js";
 export type {
   ComputePlatform,

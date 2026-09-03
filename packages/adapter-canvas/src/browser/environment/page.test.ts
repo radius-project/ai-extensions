@@ -84,7 +84,9 @@ const REQUIRED_INPUTS = [
   "deploy-branch-select",
   "az-client-id",
   "az-app-name-input",
-  "az-selected-app-id"
+  "az-selected-app-id",
+  "azure-namespace-custom",
+  "aws-namespace-custom"
 ] as const;
 
 const REQUIRED_SELECTS = [
@@ -165,7 +167,9 @@ const REQUIRED_ELEMENTS = [
   "env-confirm-usage-label",
   "env-confirm-usage-list",
   "env-confirm-ok",
-  "env-confirm-cancel"
+  "env-confirm-cancel",
+  "azure-namespace-error",
+  "aws-namespace-error"
 ] as const;
 
 function fixture(
@@ -197,6 +201,8 @@ function fixture(
   for (const id of REQUIRED_ELEMENTS) {
     if (!omitted.has(id)) add(createFakeElement(id));
   }
+  elements["azure-namespace-error"].hidden = true;
+  elements["aws-namespace-error"].hidden = true;
   for (const id of REQUIRED_INPUTS) {
     if (!omitted.has(id)) add(createFakeInput(id));
   }
@@ -763,6 +769,51 @@ describe("initializeEnvironmentPage", () => {
       "Please specify an EKS cluster."
     );
   });
+
+  it.each([
+    ["azure", "Todo-app-3"],
+    ["aws", ""]
+  ] as const)(
+    "rejects an invalid custom %s namespace inline",
+    async (provider, namespace) => {
+      const page = fixture();
+      await openWithProfile(page, provider);
+      pageInput(page, "env-name-input").value = "prod";
+      if (provider === "azure") {
+        pageInput(page, "azure-rg-select").value = "app-rg";
+        pageInput(page, "azure-cluster-select").value = "aks-1";
+      } else {
+        pageInput(page, "aws-cluster-select").value = "eks-1";
+      }
+      const select = pageInput(page, `${provider}-namespace-select`);
+      const custom = pageInput(page, `${provider}-namespace-custom`);
+      select.value = "__custom__";
+      custom.value = namespace;
+
+      page.elements["deploy-btn"].dispatch("click");
+
+      const error = page.elements[`${provider}-namespace-error`];
+      expect(error.hidden).toBe(false);
+      expect(error.textContent).toBe(
+        "Kubernetes namespace must be 1-63 lowercase letters, numbers, or hyphens and must start and end with a letter or number."
+      );
+      expect(select.getAttribute("aria-invalid")).toBe("true");
+      expect(custom.getAttribute("aria-invalid")).toBe("true");
+      expect(page.elements[`${provider}-namespace-custom`].focusCount).toBe(1);
+      expect(
+        page.browser.net.calls.filter(
+          (call) => call.url === CREATE_ENVIRONMENT_OPERATION_PATH
+        )
+      ).toHaveLength(0);
+
+      custom.value = "todo-app-3";
+      page.elements[`${provider}-namespace-custom`].dispatch("input");
+      expect(error.hidden).toBe(true);
+      expect(error.textContent).toBe("");
+      expect(select.getAttribute("aria-invalid")).toBeNull();
+      expect(custom.getAttribute("aria-invalid")).toBeNull();
+    }
+  );
 
   // Radius binds one environment to one namespace, and nothing before the
   // deploy workflow reports the duplicate, so the wizard has to refuse it while

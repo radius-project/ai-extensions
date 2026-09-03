@@ -1,4 +1,5 @@
 import type { CanvasRequestContext } from "../request-context.js";
+import { KUBERNETES_NAMESPACE_ERROR } from "@radius-project/core";
 import type { SelectionHandleClaim } from "../services/github-account-readiness.js";
 import { setupStartConflictResponse } from "./operation-start-conflict.js";
 import {
@@ -82,6 +83,7 @@ export interface CreateOperationDependencies {
   isValidRepoSlug(value: unknown): boolean;
   isResourceGroupName(value: unknown): boolean;
   isAksClusterName(value: unknown): boolean;
+  isKubernetesNamespace(value: string): boolean;
   isUuid(value: unknown): boolean;
   buildStages(options: { includeIdentity: boolean }): unknown;
   createOperation(input: unknown): OperationRecord;
@@ -468,6 +470,24 @@ export async function handleCreateOperation(
     });
     return;
   }
+  const namespace =
+    (
+      data.namespace === undefined ||
+      data.namespace === null ||
+      data.namespace === ""
+    ) ?
+      "default"
+    : data.namespace;
+  if (
+    typeof namespace !== "string" ||
+    !dependencies.isKubernetesNamespace(namespace)
+  ) {
+    jsonError(context, 400, {
+      error: KUBERNETES_NAMESPACE_ERROR,
+      code: "invalid-kubernetes-namespace"
+    });
+    return;
+  }
   if (provider === "azure") {
     if (
       !dependencies.isResourceGroupName(String(data.resourceGroup || "")) ||
@@ -540,7 +560,7 @@ export async function handleCreateOperation(
       environment,
       provider,
       cluster: data.cluster || "",
-      namespace: data.namespace || "",
+      namespace,
       profileName: data.profileName || "",
       branch: data.branch || "",
       clientId: data.clientId || "",
