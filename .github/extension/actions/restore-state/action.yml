@@ -11,6 +11,15 @@ inputs:
     description: Target Kubernetes namespace (vars.KUBERNETES_NAMESPACE, defaults to default).
     required: false
     default: default
+  repository:
+    description: >-
+      Repository being deployed, as `owner/repo` (github.repository). Together
+      with `environment` it keys the Radius resource group this run deploys into,
+      so two environments backed by the same cloud scope stay separate.
+    required: true
+  environment:
+    description: Name of the GitHub deploy environment this run targets.
+    required: true
 
 outputs:
   state-restored:
@@ -22,6 +31,11 @@ outputs:
       and does not overwrite the durable archive with uninitialized state. Wire it
       from a restore-state step in the SAME job as teardown.
     value: ${{ steps.startup.outputs.state-restored }}
+  resource-group:
+    description: >-
+      The Radius resource group this run created and switched to. Reported so a
+      failed run's log shows which group its resources are in.
+    value: ${{ steps.startup.outputs.resource-group }}
 
 runs:
   using: composite
@@ -44,14 +58,18 @@ runs:
         # does not use `rad init`. `rad install kubernetes` installs the control
         # plane only. Create just the local CLI workspace here -- this is the
         # client-side config `rad startup` needs to resolve the target cluster.
-        # The `default` resource group is server-side control-plane state, so it
-        # is created *after* `rad startup` below (the restore replaces the
+        # The resource group is server-side control-plane state, so it is chosen
+        # and created *after* `rad startup` below (the restore replaces the
         # control-plane database wholesale, dropping anything created before it).
+        # `rad group switch` also requires this config-backed workspace to exist.
         rad workspace create kubernetes default
 
     - name: Restore Radius state (rad startup)
       id: startup
       shell: bash
+      env:
+        REPOSITORY: ${{ inputs.repository }}
+        ENVIRONMENT: ${{ inputs.environment }}
       run: |
         # rad startup restores the control-plane PostgreSQL databases and the
         # Terraform recipe-state Secrets saved by the previous run's `rad shutdown`
@@ -73,15 +91,35 @@ runs:
         # but still exits 0, so this is set and teardown seeds the archive.
         echo "state-restored=true" >> "$GITHUB_OUTPUT"
 
-        # Create the `default` resource group the environment and application
-        # deploy into, *after* the restore. `rad startup` replaces the
-        # control-plane database wholesale (`pg_dump --clean --if-exists`), so a
-        # group created before it is dropped when the restored snapshot lacks it.
-        # `rad install kubernetes` no longer seeds this group server-side
-        # (radius-project/radius#12829), so creating it here -- on top of whatever
-        # the restore produced -- makes it present for the deploy and persisted by
-        # the next `rad shutdown`, so a group-less archive self-heals on the next
-        # run. `rad group create` is idempotent (PUT), so this is safe whether or
-        # not the restored state already contained the group.
-        rad group create default
-        rad group switch default
+        # Choose the resource group the environment and application deploy into,
+        # *after* the restore and *before* any `rad deploy`. `rad startup`
+        # replaces the control-plane database wholesale (`pg_dump --clean
+        # --if-exists`), so a group created before it is dropped when the restored
+        # snapshot lacks it -- and `rad deploy` creates a `default` group of its
+        # own to hold the built-in recipe pack, so reading the list afterwards
+        # would no longer show what the restore produced.
+        #
+        # The group is part of the Radius resource ID a Recipe derives the
+        # provisioned cloud resource's name from, and that ID carries no
+        # environment identity, so deploying every environment into `default` made
+        # two environments backed by one Azure scope resolve to the same cloud
+        # resource. resource-group.sh derives a group from the repository and
+        # environment for a new environment, and keeps `default` for one that
+        # already has resources there -- moving those would orphan them and
+        # provision empty replacements. It fails closed to `default` when the
+        # listing cannot be read.
+        GROUPS_STATUS=ok
+        GROUPS_JSON="$(rad group list -o json 2>/dev/null)" || GROUPS_STATUS=failed
+        RESOURCE_GROUP="$(printf '%s' "$GROUPS_JSON" |
+          bash "$GITHUB_ACTION_PATH/resource-group.sh" "$REPOSITORY" "$ENVIRONMENT" "$GROUPS_STATUS")"
+        echo "Deploying into Radius resource group '$RESOURCE_GROUP'."
+        echo "resource-group=$RESOURCE_GROUP" >> "$GITHUB_OUTPUT"
+
+        # `rad group create` is idempotent (PUT), so this is safe whether or not
+        # the restored state already contained the group. `rad install kubernetes`
+        # no longer seeds a group server-side (radius-project/radius#12829), so
+        # creating it here -- on top of whatever the restore produced -- makes it
+        # present for the deploy and persisted by the next `rad shutdown`, so a
+        # group-less archive self-heals on the next run.
+        rad group create "$RESOURCE_GROUP"
+        rad group switch "$RESOURCE_GROUP"

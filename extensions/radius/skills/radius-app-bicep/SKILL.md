@@ -214,7 +214,7 @@ So two applications deployed into the same resource group and Azure scope that b
 
 The application name is the only part of that resource ID this generator controls, so prefixing it is what makes the provisioned name unique per application. `validate-bicep.mjs` rejects a backing resource whose name is not scoped this way.
 
-This does not make the name unique across *environments*: the same application deployed twice into one Azure scope still resolves to one backing resource. That is the deploy pipeline's resource group to scope, not the model's.
+This does not make the name unique across *environments*: the same application deployed twice into one Azure scope resolves to one backing resource unless something else in the resource ID separates them. The deploy pipeline scopes that half by giving each environment its own Radius resource group; the model's half is this rule.
 
 ### Connection keys
 
