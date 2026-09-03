@@ -562,6 +562,7 @@ describe("P0-C built Radius extension artifact", () => {
     const structureGuidance = readGuidance(
       "references/bicep-structure-rules.md"
     );
+    const secretsGuidance = readGuidance("references/secrets-handling.md");
     const runtimeGuidance = readGuidance("references/runtime-contract.md");
     const skillGuidance = readGuidance("SKILL.md");
     const redisExample = bicepBlocks.find(
@@ -696,14 +697,12 @@ describe("P0-C built Radius extension artifact", () => {
         /github\.com\/radius-project\/(?:radius|resource-types-contrib)\/(?:pull|issues)\//u
       );
     }
-    expect(readGuidance("references/secrets-handling.md")).toContain(
-      "`CONNECTION_MYSQLSECRET_PASSWORD`"
-    );
+    expect(secretsGuidance).toContain("`CONNECTION_MYSQLSECRET_PASSWORD`");
     for (const guidance of [
       connectionGuidance,
       structureGuidance,
       runtimeGuidance,
-      readGuidance("references/secrets-handling.md")
+      secretsGuidance
     ]) {
       expect(guidance).toContain("`@secure()`");
       expect(guidance).toContain("`env.value`");
@@ -733,6 +732,154 @@ describe("P0-C built Radius extension artifact", () => {
     for (const block of bicepBlocks) {
       expect(block).not.toMatch(literalCredentialAssignment);
     }
+  });
+
+  it("packages the schema-sensitivity credential contract, not a property-name rule", () => {
+    assertCurrentArtifact();
+    const readGuidance = (relativePath: string): string =>
+      readFileSync(join(DIST_SKILL, relativePath), "utf8");
+    const secretsGuidance = readGuidance("references/secrets-handling.md");
+    const structureGuidance = readGuidance(
+      "references/bicep-structure-rules.md"
+    );
+    const skillGuidance = readGuidance("SKILL.md");
+
+    for (const guidance of [
+      secretsGuidance,
+      structureGuidance,
+      skillGuidance
+    ]) {
+      expect(guidance).toContain("`x-radius-sensitive: true`");
+      expect(guidance).toContain("`Radius.Data/mySqlDatabases.password`");
+      expect(guidance).toContain("`Radius.Messaging/rabbitMQ.password`");
+      // The regressed guidance keyed the decision on the property's name, so a
+      // reference property named `password` was assigned the raw secure param.
+      expect(guidance).not.toMatch(/`secretName`[,:]? (?:create|author)/u);
+    }
+    expect(secretsGuidance).toContain(
+      "Decide each credential input from the schema, never from the property's name"
+    );
+    expect(structureGuidance).toContain(
+      "classified by sensitivity rather than by property name"
+    );
+    expect(skillGuidance).toContain(
+      "classified by sensitivity and never by property name"
+    );
+    expect(skillGuidance).toContain(
+      "classified from the schema rather than from the property's name"
+    );
+    expect(secretsGuidance).toContain(
+      "A property named `password` may be either kind, and a reference property may be named `password`, `passwordSecret`, or `secretName`"
+    );
+    expect(secretsGuidance).toContain(
+      "Never assign a `@secure()` parameter to a reference property"
+    );
+    expect(structureGuidance).toContain(
+      "never a `@secure() param` (`Radius.Messaging/rabbitMQ.password`"
+    );
+    expect(skillGuidance).toContain(
+      "no `@secure() param` is assigned to a reference property"
+    );
+
+    const bicepBlocks = filesUnder(DIST_SKILL)
+      .filter((path) => path.endsWith(".md"))
+      .flatMap((path) => [
+        ...readFileSync(path, "utf8").matchAll(
+          /```bicep\r?\n([\s\S]*?)\r?\n```/gu
+        )
+      ])
+      .map((match) => match[1]);
+    const rabbitmqExample = bicepBlocks.find((block) =>
+      block.includes("'Radius.Messaging/rabbitMQ@")
+    );
+    expect(rabbitmqExample).toBeDefined();
+    expect(rabbitmqExample).toMatch(/password:\s*rabbitmqCredentials\.id\b/u);
+    expect(rabbitmqExample).toContain(
+      "resource rabbitmqCredentials 'Radius.Security/secrets"
+    );
+    expect(rabbitmqExample).not.toMatch(
+      /^\s*password:\s*rabbitmqPassword\s*$/mu
+    );
+    // `username` is the administrator the broker is provisioned with, not a
+    // value copied from the application's existing deployment.
+    expect(rabbitmqExample).toMatch(
+      /username:\s*'myadmin'\s*\/\/ authored broker administrator/u
+    );
+    expect(rabbitmqExample).not.toMatch(/username:[^\n]*derived from source/u);
+    expect(secretsGuidance).toContain(
+      "Writing `password: rabbitmqPassword` here deploys a broken application"
+    );
+    expect(secretsGuidance).toContain(
+      "a password is not a lowercase RFC 1123 subdomain"
+    );
+
+    // The MySQL example must keep the opposite, inline form so both
+    // conventions ship side by side.
+    const mysqlExample = bicepBlocks.find((block) =>
+      block.includes("resource mysql 'Radius.Data/mySqlDatabases@")
+    );
+    expect(mysqlExample).toBeDefined();
+    expect(mysqlExample).toMatch(/^\s*password:\s*password\s*$/mu);
+  });
+
+  it("packages the exact-data-key contract for authored reference Secrets", () => {
+    assertCurrentArtifact();
+    const readGuidance = (relativePath: string): string =>
+      readFileSync(join(DIST_SKILL, relativePath), "utf8");
+    const secretsGuidance = readGuidance("references/secrets-handling.md");
+    const skillGuidance = readGuidance("SKILL.md");
+
+    expect(secretsGuidance).toContain(
+      "the authored Secret must expose the value under the exact data key the consuming schema names, matching case"
+    );
+    expect(secretsGuidance).toContain(
+      "Data keys are case-sensitive. Do not uppercase them by convention"
+    );
+    expect(secretsGuidance).toContain(
+      "do not assume the key matches the property name, the resource name, or the application's environment-variable name"
+    );
+    expect(secretsGuidance).toContain(
+      "Every `secretKeyRef.key` that reads the same authored Secret must use that same exact key"
+    );
+    expect(secretsGuidance).toContain(
+      "Read the required key from the consuming type's schema description"
+    );
+    expect(secretsGuidance).toContain(
+      "Authoring that data key as `PASSWORD` fails even though the Bicep compiles and the resource ID is correct"
+    );
+    expect(secretsGuidance).toContain("`CreateContainerConfigError`");
+    expect(skillGuidance).toContain(
+      "the exact case-sensitive data key the consuming schema names (`password`, not `PASSWORD`)"
+    );
+
+    const bicepBlocks = filesUnder(DIST_SKILL)
+      .filter((path) => path.endsWith(".md"))
+      .flatMap((path) => [
+        ...readFileSync(path, "utf8").matchAll(
+          /```bicep\r?\n([\s\S]*?)\r?\n```/gu
+        )
+      ])
+      .map((match) => match[1]);
+
+    // The authored Secret and every reader of it must agree on the exact
+    // lowercase key the rabbitMQ Recipe hardcodes.
+    const rabbitmqExample = bicepBlocks.find((block) =>
+      block.includes("'Radius.Messaging/rabbitMQ@")
+    );
+    expect(rabbitmqExample).toBeDefined();
+    expect(rabbitmqExample).toMatch(
+      /data:\s*\{\s*password:\s*\{\s*value:\s*rabbitmqPassword\s*\}/u
+    );
+    expect(rabbitmqExample).not.toContain("PASSWORD:");
+
+    const rabbitmqConsumer = bicepBlocks.find(
+      (block) =>
+        block.includes("secretName: rabbitmqCredentials.name") &&
+        block.includes("secretKeyRef")
+    );
+    expect(rabbitmqConsumer).toBeDefined();
+    expect(rabbitmqConsumer).toMatch(/key:\s*'password'/u);
+    expect(rabbitmqConsumer).not.toMatch(/key:\s*'PASSWORD'/u);
   });
 
   it("packages each page module exactly once", () => {
