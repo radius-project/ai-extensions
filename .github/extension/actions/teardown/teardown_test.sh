@@ -7,7 +7,8 @@
 #
 # Invariants covered:
 #   1. restore-state sets `state-restored=true` on $GITHUB_OUTPUT after
-#      `rad startup` succeeds, and creates the `default` group AFTER startup.
+#      `rad startup` succeeds, then selects one resource group from the restored
+#      listing and creates/switches/reports it AFTER startup.
 #   2. First run: `rad startup` is a no-op restore that still exits 0, so the
 #      output is still set (teardown then seeds the archive).
 #   3. Negative path: when `rad startup` fails, the block exits non-zero and
@@ -127,6 +128,11 @@ def run_block(script, env_extra=None, rad_fail_on="", capture_output=False,
         'if [ -n "${RAD_FAIL_ON}" ] && [[ "$*" == *"${RAD_FAIL_ON}"* ]]; then\n'
         "  exit 1\n"
         "fi\n"
+        # The restore block pipes `rad group list` into the group selector, so the
+        # stub has to answer on stdout for that wiring to be exercised at all.
+        'if [[ "$*" == "group list"* ]]; then\n'
+        '  printf \'%s\' "${RAD_GROUP_LIST}"\n'
+        "fi\n"
         "exit 0\n",
         encoding="utf-8",
     )
@@ -143,6 +149,14 @@ def run_block(script, env_extra=None, rad_fail_on="", capture_output=False,
     env["RAD_LOG"] = str(rad_log)
     env["GITHUB_OUTPUT"] = str(github_output)
     env["RAD_FAIL_ON"] = rad_fail_on
+    env["RAD_GROUP_LIST"] = ""
+    # The restore block resolves its bundled group selector through this, exactly
+    # as the composite action does on a runner.
+    env["GITHUB_ACTION_PATH"] = str(restore_action.parent)
+    # The composite action injects these from its inputs; the extracted block
+    # cannot see the `env:` mapping that does it, so stand in for it here.
+    env["REPOSITORY"] = "radius-project/samples"
+    env["ENVIRONMENT"] = "dev"
     if env_extra:
         env.update(env_extra)
 
@@ -192,14 +206,73 @@ if "startup" not in restore_rad:
     fail("restore-state block must call `rad startup`")
 if "state-restored=true" not in restore_out:
     fail("restore-state must write `state-restored=true` to $GITHUB_OUTPUT after startup")
-# Group create/switch must come AFTER `rad startup` in the invocation log.
+# Group create/switch must come AFTER `rad startup` in the invocation log, and
+# the group list it selects from must be read before `rad deploy` creates one.
 rad_calls = [c for c in restore_rad.splitlines() if c.strip()]
 startup_idx = next((i for i, c in enumerate(rad_calls) if c.startswith("startup")), None)
+list_idx = next((i for i, c in enumerate(rad_calls) if c.startswith("group list")), None)
 group_idx = next((i for i, c in enumerate(rad_calls) if c.startswith("group create")), None)
 if startup_idx is None or group_idx is None:
-    fail("restore-state must call both `rad startup` and `rad group create default`")
+    fail("restore-state must call both `rad startup` and `rad group create`")
 elif group_idx < startup_idx:
-    fail("restore-state must create the `default` group AFTER `rad startup`, not before")
+    fail("restore-state must create the resource group AFTER `rad startup`, not before")
+elif list_idx is None or not startup_idx < list_idx < group_idx:
+    fail("restore-state must list the restored groups between `rad startup` and `rad group create`")
+
+# The group it creates, the group it switches to, and the group it reports must
+# all be the same one; a mismatch would deploy into a group nothing switches to.
+created = [c.split(maxsplit=2)[2] for c in rad_calls if c.startswith("group create ")]
+switched = [c.split(maxsplit=2)[2] for c in rad_calls if c.startswith("group switch ")]
+reported = [
+    line.split("=", 1)[1]
+    for line in restore_out.splitlines()
+    if line.startswith("resource-group=")
+]
+if len(created) != 1 or created != switched or reported != created:
+    fail(
+        "restore-state must create, switch to, and report one resource group; "
+        f"created={created} switched={switched} reported={reported}"
+    )
+
+# 1b. An unreadable group listing falls back to `default`, so an environment
+#     deployed before per-environment groups is never moved out from under its
+#     resources. The stub answers `rad group list` with nothing by default.
+if created != ["default"]:
+    fail(f"restore-state must fall back to the `default` group, got {created}")
+
+# 1c. A restore that produced no groups at all is a first deploy, which takes the
+#     per-environment group so it cannot collide with another environment.
+_, _, fresh_rad, fresh_out = run_block(
+    restore_block,
+    env_extra={
+        "RAD_GROUP_LIST": "[]",
+        "REPOSITORY": "radius-project/samples",
+        "ENVIRONMENT": "dev",
+    },
+)
+fresh_created = [
+    c.split(maxsplit=2)[2] for c in fresh_rad.splitlines() if c.startswith("group create ")
+]
+if fresh_created == ["default"] or len(fresh_created) != 1:
+    fail(
+        "restore-state must deploy a never-deployed environment into a "
+        f"per-environment group, got {fresh_created}"
+    )
+if "resource-group=" + fresh_created[0] not in fresh_out:
+    fail("restore-state must report the per-environment group it selected")
+
+# 1d. Without the repository/environment the selection is keyed on, the block
+#     must stop rather than pick a group that could strand an environment's
+#     resources. The composite action marks both inputs required, and the five
+#     caller workflows are pinned to the same commit as the action, so a run that
+#     reaches here with them empty is a wiring bug and not a supported config.
+_, _, _, unkeyed_out = run_block(
+    restore_block,
+    env_extra={"RAD_GROUP_LIST": "[]", "REPOSITORY": "", "ENVIRONMENT": ""},
+    expect_failure=True,
+)
+if "resource-group=" in unkeyed_out:
+    fail("restore-state must not report a resource group it could not key")
 
 # 2. First run: `rad startup` no-op still exits 0, so the output is still set.
 #    (The stub models the no-op restore by succeeding without side effects.)
