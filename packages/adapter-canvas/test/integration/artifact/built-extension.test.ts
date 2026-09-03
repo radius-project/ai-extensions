@@ -768,7 +768,7 @@ describe("P0-C built Radius extension artifact", () => {
     expect(mysqlExample).toMatch(/^\s*password:\s*password\s*$/mu);
   });
 
-  it("packages the StackExchange.Redis credential-shape contract", () => {
+  it("packages the app-native configuration format contract", () => {
     assertCurrentArtifact();
     const readGuidance = (relativePath: string): string =>
       readFileSync(join(DIST_SKILL, relativePath), "utf8");
@@ -783,26 +783,37 @@ describe("P0-C built Radius extension artifact", () => {
       secretsGuidance,
       skillGuidance
     ]) {
-      expect(guidance).toContain("`RedisCacheOptions.Configuration`");
-      expect(guidance).toContain("`ConfigurationOptions.Parse`");
-      expect(guidance).toContain("`host:port,ssl=True`");
-      expect(guidance).toContain("`rediss://...`");
+      expect(guidance).toMatch(
+        /read the application code|trace every app-native|traced through checked-in source/iu
+      );
+      expect(guidance).toMatch(
+        /exact format that parser expects|exact syntax that parser accepts/u
+      );
+      expect(guidance).toContain("safe");
+      expect(guidance).toContain("runtime");
     }
     expect(connectionGuidance).toContain(
-      "Do not remap the Recipe `url` directly to that native setting through `secretKeyRef`"
+      "do not remap the Recipe `url` to a native setting merely because both are strings or use the same protocol"
     );
     expect(connectionGuidance).toContain(
       "otherwise report the gap and stop before publishing the model"
     );
     expect(secretsGuidance).toContain(
-      "Never bind that Recipe key directly to the native setting with `secretKeyRef`"
+      "including separators, option names, encoding, TLS flags, and whether it expects one aggregate value or discrete fields"
     );
     expect(secretsGuidance).toContain(
-      "A Recipe URL may still be bound directly when the checked-in source passes it to an API that accepts that exact URI syntax"
+      "Bind a Recipe output directly only when it matches that exact format"
     );
     expect(skillGuidance).toContain(
-      "A Redis Recipe `url` was not wired to `REDIS_ADDR` or another native setting passed to StackExchange.Redis configuration parsing merely because both values are strings"
+      "A package name alone, a string type, a credential-like variable name, a shared protocol, or a direct `secretKeyRef` is not proof"
     );
+    for (const guidance of [
+      connectionGuidance,
+      secretsGuidance,
+      skillGuidance
+    ]) {
+      expect(guidance).not.toContain("StackExchange.Redis");
+    }
   });
 
   it("packages the exact-data-key contract for authored reference Secrets", () => {

@@ -2,4 +2,4 @@
 "radius": patch
 ---
 
-**Fixed:** Application modeling no longer binds a Redis Recipe URI directly to a StackExchange.Redis configuration setting, preventing generated deployments from failing when the client parses `REDIS_ADDR`.
+**Fixed:** Application modeling now traces native environment and configuration values to their consuming parser, matches the exact required format, and safely composes incompatible Recipe outputs or stops before publishing a broken model.

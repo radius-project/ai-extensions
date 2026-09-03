@@ -104,7 +104,7 @@ connections: {
 
 If the Redis Recipe declares `url` in `result.secrets`, the connection injects secret-backed `CONNECTION_REDIS_URL`. The suffix is the uppercased exact result key; do not author a wrapper Secret, connect to `redisCache.properties.secrets.name`, or invent a different suffix.
 
-That generated variable is usable only when the pinned application parser accepts the Recipe's exact URL syntax. In particular, a `rediss://...` Recipe URL is incompatible with a native `REDIS_ADDR` value passed to StackExchange.Redis `RedisCacheOptions.Configuration` or `ConfigurationOptions.Parse`, which expects option syntax such as `host:port,ssl=True`, with credentials supplied through supported options when required. Do not remap the Recipe `url` directly to that native setting through `secretKeyRef`. Follow [Credential shape](secrets-handling.md#credential-shape): use schema-declared parts only through a safe, proven runtime composition path, and otherwise report the gap and stop before publishing the model.
+That generated variable is usable only when the pinned application parser accepts the Recipe's exact URL syntax. Read the application code from the environment or configuration value through the API that consumes it, determine the exact format that parser expects, and do not remap the Recipe `url` to a native setting merely because both are strings or use the same protocol. Follow [Credential shape](secrets-handling.md#credential-shape): use schema-declared parts only through a safe, proven runtime composition path, and otherwise report the gap and stop before publishing the model.
 
 ## Source expects native configuration
 
