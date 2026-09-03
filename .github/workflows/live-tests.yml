@@ -3,16 +3,16 @@
 name: Live upstream tests
 
 # Runs the opt-in `*.live.test.ts` suites that fetch the real workflow templates
-# from radius-project/radius at runtime and assert YAML validity plus the OIDC
-# environment-binding contract. A failure means an upstream template change
-# broke what the extension generates (e.g. the invalid-YAML deploy regression
-# in #407).
+# from radius-project/ai-extensions `.github/extension/` at runtime and assert
+# YAML validity plus the OIDC environment-binding contract. A failure means a
+# template change broke what the extension generates (e.g. the invalid-YAML
+# deploy regression in #407).
 #
 # This is a SEPARATE workflow from the hermetic Build suite (build.yml), which
 # stays fully offline and deterministic. These live suites are intentionally
 # excluded from that suite and from the publish/release pipeline because they are
-# non-hermetic: they depend on an external repo's moving `main` ref and on
-# network access to raw.githubusercontent.com.
+# non-hermetic: they depend on a moving ref and on network access to
+# raw.githubusercontent.com.
 #
 # The generated Radius definition compatibility job is more isolated still: it
 # runs only nightly or by manual dispatch. It downloads the latest stable rad
@@ -25,11 +25,10 @@ name: Live upstream tests
 # plus nightly as a catch-all in case no PR lands between an upstream change and
 # the next run.
 #
-# Tradeoff to be aware of: because they fetch from radius-project/radius@main, a
-# regression pushed upstream can turn an otherwise-good ai-extensions PR red until
-# upstream is fixed. That is intentional here — surfacing the break early is the
-# point — but a failure in this job should be triaged against the current
-# upstream templates, not assumed to be caused by the PR's own changes.
+# On pull requests the suites fetch the PR's OWN templates (RADIUS_LIVE_REF is
+# set to the PR head SHA below), so a PR validates the templates it actually
+# ships. Pushes to `main`, nightly, and manual runs fall back to the pushed SHA
+# (effectively `main`), surfacing any regression that has already landed.
 
 on:
   pull_request:
@@ -48,6 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: read
     env:
       # Enables the `describe.skipIf(!LIVE)` blocks in the workflow live tests
       # (workflow-yaml.live.test.ts, oidc-environment-contract.live.test.ts,
@@ -64,10 +64,19 @@ jobs:
       # `az` parses the arguments, so it needs no login and touches no cloud
       # resources.
       RUN_LIVE_AZ_CLI_TESTS: "1"
+      # Validate the templates on the ref under test. On pull requests this is the
+      # PR head SHA, so the suite fetches the PR's own `.github/extension/`
+      # templates; on push/schedule/dispatch it is the pushed SHA (effectively
+      # `main`). The live tests fall back to RADIUS_REF when this is unset.
+      RADIUS_LIVE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Pin to the PR head (not the default merge commit) so the checked-out
+          # templates match the SHA fetched by the API-based live suites.
+          # Falls back to the pushed SHA on push/schedule/dispatch.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Install pnpm
@@ -82,8 +91,27 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install yq
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          YQ_VERSION: v4.53.3
+        run: bash .github/extension/actions/load-contrib-catalog/install-yq.sh
+
       - name: Run live upstream workflow tests
+        env:
+          # The templates live in this internal repo, so the live suites read
+          # them through the authenticated GitHub contents API rather than
+          # anonymous raw.githubusercontent.com.
+          GITHUB_TOKEN: ${{ github.token }}
         run: pnpm test -- src/workflows/workflow-yaml.live.test.ts src/workflows/oidc-environment-contract.live.test.ts
+
+      - name: Verify live contrib workflow consumers
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+          bash build/scripts/verify-contrib-consumers.sh
 
       - name: Run live verify marker round trip
         working-directory: packages/adapter-canvas

@@ -16,6 +16,8 @@ const STAGE_CONFIGURE = "configure-environment";
 
 interface Recorder {
   ports: AdmissionPorts;
+  /** Operation ids the namespace rung resolved an account for. */
+  claimReads: string[];
   entered: Array<{ operationId: string; stage: string }>;
   finished: Array<{ operationId: string; failure: Record<string, unknown> }>;
   diagnostics: Array<{ code: string; message: string }>;
@@ -42,6 +44,15 @@ interface Script {
   start?: OperationStartResult;
   persistRejects?: Error;
   created?: CreateEnvironmentOperation;
+  // The repository's environments as the namespace rung would read them from
+  // GitHub: a name/value variable map per environment. `claimsFailure` scripts
+  // the unreadable case the rung has to fail closed on.
+  claimants?: Record<string, Record<string, string>>;
+  claimsFailure?: string;
+  claimsVariableFailure?: string;
+  // No GitHub account pinned to the operation, so the claim read cannot run as
+  // the account the customer selected.
+  noPinnedAccount?: boolean;
 }
 
 // Every port is a scripted fake that throws on an unscripted call, except the
@@ -51,15 +62,50 @@ function ports(script: Script = {}): Recorder {
   const entered: Recorder["entered"] = [];
   const finished: Recorder["finished"] = [];
   const diagnostics: Recorder["diagnostics"] = [];
+  const recordedClaimReads: string[] = [];
   let persistCalls = 0;
   const recorder: Recorder = {
     entered,
     finished,
     diagnostics,
+    claimReads: recordedClaimReads,
     get persistCalls() {
       return persistCalls;
     },
     ports: {
+      namespaceClaimsFor: (operationId: string) => {
+        recordedClaimReads.push(operationId);
+        if (script.noPinnedAccount) return null;
+        return {
+          listEnvironmentNames: async () => {
+            if (script.claimsFailure) {
+              return { ok: false as const, reason: script.claimsFailure };
+            }
+            return {
+              ok: true as const,
+              names: Object.keys(script.claimants ?? {})
+            };
+          },
+          readEnvironmentVariables: async (
+            _repo: string,
+            environment: string
+          ) => {
+            if (script.claimsVariableFailure) {
+              return {
+                ok: false as const,
+                reason: script.claimsVariableFailure
+              };
+            }
+            const variables = (script.claimants ?? {})[environment];
+            if (!variables) {
+              throw new Error(
+                `unscripted readEnvironmentVariables(${environment})`
+              );
+            }
+            return { ok: true as const, variables };
+          }
+        };
+      },
       isValidRepoSlug: (repo) => /^[^/\s]+\/[^/\s]+$/.test(repo),
       getOperation: (operationId) => {
         if (!("existing" in script)) {
@@ -274,7 +320,7 @@ describe("the create-environment refusal ladder", () => {
         status: 409,
         body: {
           error:
-            "An earlier setup for octo/app must finish rollback before a new setup can start.",
+            "An earlier setup for octo/app must finish deletion before a new setup can start.",
           code: "previous-cleanup-required",
           operationId: "op-cleanup"
         }
@@ -327,6 +373,278 @@ describe("the create-environment refusal ladder", () => {
     ]);
     // The configure stage is never entered on this rung: the record is closed.
     expect(recorder.entered).toEqual([]);
+  });
+
+  // Rung 7. The invariant the wizard's own check cannot carry: the browser's
+  // listing can be empty because nothing is claimed or because nothing could be
+  // read, and only this rung can tell those apart.
+  it("rung 7 — refuses 409 naming the environment that holds the namespace", async () => {
+    const recorder = ports({
+      existing: operation({ environment: "prod" }),
+      claimants: {
+        dev: {
+          RADIUS_MANAGED: "true",
+          AZURE_CLIENT_ID: "client-1",
+          AZURE_SUBSCRIPTION_ID: "sub-1",
+          AZURE_AKS_CLUSTER_NAME: "aks-1",
+          KUBERNETES_NAMESPACE: "payments"
+        }
+      }
+    });
+
+    const result = await admitCreateEnvironmentRequest(
+      {
+        repo: "octo/app",
+        environment: "prod",
+        operationEnvironment: "prod",
+        operationId: "op-1",
+        provider: "azure",
+        subscriptionId: "sub-1",
+        cluster: "aks-1",
+        namespace: "payments"
+      },
+      recorder.ports
+    );
+
+    expect(result).toEqual({
+      outcome: "refused",
+      operation: null,
+      refusal: {
+        status: 409,
+        body: {
+          error:
+            'Namespace "payments" on cluster "aks-1" already belongs to environment "dev". Radius allows one environment per namespace, so choose a different namespace or deploy to "dev".',
+          code: "namespace-already-claimed",
+          environment: "dev"
+        }
+      }
+    });
+    // Refused before any record was created, so nothing is left to reconcile.
+    expect(recorder.persistCalls).toBe(0);
+  });
+
+  it.each([
+    ["the environment list", { claimsFailure: "gh: forbidden" }],
+    ["an environment's variables", { claimsVariableFailure: "gh: forbidden" }]
+  ])(
+    "rung 7 — fails closed when %s cannot be read",
+    async (_label, failure) => {
+      const recorder = ports({
+        existing: operation({ environment: "prod" }),
+        claimants: {
+          dev: {
+            RADIUS_MANAGED: "true",
+            AZURE_CLIENT_ID: "client-1",
+            AZURE_AKS_CLUSTER_NAME: "aks-1"
+          }
+        },
+        ...failure
+      });
+
+      const result = await admitCreateEnvironmentRequest(
+        {
+          repo: "octo/app",
+          environment: "prod",
+          operationEnvironment: "prod",
+          operationId: "op-1",
+          provider: "azure",
+          subscriptionId: "sub-1",
+          cluster: "aks-1",
+          namespace: "payments"
+        },
+        recorder.ports
+      );
+
+      expect(result).toEqual({
+        outcome: "refused",
+        operation: null,
+        refusal: {
+          status: 409,
+          body: {
+            error:
+              "Radius created nothing because it could not confirm which namespaces octo/app's environments already use: gh: forbidden",
+            code: "namespace-claims-unavailable"
+          }
+        }
+      });
+      expect(recorder.persistCalls).toBe(0);
+    }
+  );
+
+  it("rung 7 — fails closed when a managed environment cannot describe itself", async () => {
+    const recorder = ports({
+      // Radius-managed, but without the marker that says which cloud it is, so
+      // its claim cannot be established and might be the requested namespace.
+      existing: operation({ environment: "prod" }),
+      claimants: {
+        dev: { RADIUS_MANAGED: "true", KUBERNETES_NAMESPACE: "payments" }
+      }
+    });
+
+    const result = await admitCreateEnvironmentRequest(
+      {
+        repo: "octo/app",
+        environment: "prod",
+        operationEnvironment: "prod",
+        operationId: "op-1",
+        provider: "azure",
+        subscriptionId: "sub-1",
+        cluster: "aks-1",
+        namespace: "payments"
+      },
+      recorder.ports
+    );
+
+    expect(result).toEqual({
+      outcome: "refused",
+      operation: null,
+      refusal: {
+        status: 409,
+        body: {
+          error:
+            'Radius created nothing because it could not confirm which namespaces octo/app\'s environments already use: environment "dev" does not record its cloud provider.',
+          code: "namespace-claims-unavailable"
+        }
+      }
+    });
+    expect(recorder.persistCalls).toBe(0);
+  });
+
+  // The claim read is authoritative, so it has to run as the account pinned to
+  // this operation. Reading as the ambient `gh` account would refuse a creation
+  // the selected account could have proven safe.
+  it("rung 7 — reads the claims through the account pinned to the operation", async () => {
+    const recorder = ports({
+      existing: operation({ environment: "prod" }),
+      claimants: {
+        dev: {
+          RADIUS_MANAGED: "true",
+          AZURE_CLIENT_ID: "client-1",
+          AZURE_SUBSCRIPTION_ID: "sub-1",
+          AZURE_AKS_CLUSTER_NAME: "aks-1",
+          KUBERNETES_NAMESPACE: "orders"
+        }
+      }
+    });
+
+    const result = await admitCreateEnvironmentRequest(
+      {
+        repo: "octo/app",
+        environment: "prod",
+        operationEnvironment: "prod",
+        operationId: "op-1",
+        provider: "azure",
+        subscriptionId: "sub-1",
+        cluster: "aks-1",
+        namespace: "payments"
+      },
+      recorder.ports
+    );
+
+    expect(result.outcome).toBe("admitted");
+    // Resolved against this operation, not against an ambient account.
+    expect(recorder.claimReads).toEqual(["op-1"]);
+  });
+
+  it("rung 7 — fails closed when the operation has no pinned account", async () => {
+    const recorder = ports({
+      existing: operation({ environment: "prod" }),
+      noPinnedAccount: true
+    });
+
+    const result = await admitCreateEnvironmentRequest(
+      {
+        repo: "octo/app",
+        environment: "prod",
+        operationEnvironment: "prod",
+        operationId: "op-1",
+        provider: "azure",
+        subscriptionId: "sub-1",
+        cluster: "aks-1",
+        namespace: "payments"
+      },
+      recorder.ports
+    );
+
+    expect(result).toEqual({
+      outcome: "refused",
+      operation: null,
+      refusal: {
+        status: 409,
+        body: {
+          error:
+            "Radius created nothing because it could not confirm which namespaces octo/app's environments already use: the GitHub account pinned to this setup is unavailable.",
+          code: "namespace-claims-unavailable"
+        }
+      }
+    });
+    expect(recorder.persistCalls).toBe(0);
+  });
+
+  it("rung 7 — admits a save that keeps the environment's own namespace", async () => {
+    const recorder = ports({
+      existing: operation(),
+      claimants: {
+        dev: {
+          RADIUS_MANAGED: "true",
+          AZURE_CLIENT_ID: "client-1",
+          AZURE_SUBSCRIPTION_ID: "sub-1",
+          AZURE_AKS_CLUSTER_NAME: "aks-1",
+          KUBERNETES_NAMESPACE: "payments"
+        }
+      },
+      start: { ok: true } as OperationStartResult
+    });
+
+    const result = await admitCreateEnvironmentRequest(
+      {
+        repo: "octo/app",
+        environment: "dev",
+        operationEnvironment: "dev",
+        operationId: "op-1",
+        provider: "azure",
+        subscriptionId: "sub-1",
+        cluster: "aks-1",
+        namespace: "payments"
+      },
+      recorder.ports
+    );
+
+    expect(result.outcome).toBe("admitted");
+  });
+
+  // The identity gap: the same cluster name in another subscription is another
+  // cluster, and refusing it would block a legitimate environment.
+  it("rung 7 — admits the same namespace on a same-named cluster elsewhere", async () => {
+    const recorder = ports({
+      existing: operation({ environment: "prod" }),
+      claimants: {
+        dev: {
+          RADIUS_MANAGED: "true",
+          AZURE_CLIENT_ID: "client-1",
+          AZURE_SUBSCRIPTION_ID: "sub-1",
+          AZURE_AKS_CLUSTER_NAME: "aks-1",
+          KUBERNETES_NAMESPACE: "payments"
+        }
+      },
+      start: { ok: true } as OperationStartResult
+    });
+
+    const result = await admitCreateEnvironmentRequest(
+      {
+        repo: "octo/app",
+        environment: "prod",
+        operationEnvironment: "prod",
+        operationId: "op-1",
+        provider: "azure",
+        subscriptionId: "sub-2",
+        cluster: "aks-1",
+        namespace: "payments"
+      },
+      recorder.ports
+    );
+
+    expect(result.outcome).toBe("admitted");
   });
 
   it("descends the ladder in order, so a malformed slug is refused before any operation lookup", async () => {

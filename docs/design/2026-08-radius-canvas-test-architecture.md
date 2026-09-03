@@ -8,7 +8,7 @@
 
 ## Overview
 
-Radius Canvas is the visual part of the Radius Copilot extension. It opens a panel where a developer can inspect an application graph, compare branches, configure cloud credentials, create a Radius environment, and deploy or delete an application. The host talks to the extension through the Copilot SDK; the extension starts a private HTTP server on `127.0.0.1`; that server renders one of seven pages; and browser code on the page calls 40 local API routes to read or change state.
+Radius Canvas is the visual part of the Radius Copilot extension. It opens a panel where a developer can inspect an application graph, compare branches, configure cloud credentials, create a Radius environment, and deploy or delete an application. The host talks to the extension through the Copilot SDK; the extension starts a private HTTP server on `127.0.0.1`; that server renders one of seven pages; and browser code on the page calls the declared local API routes to read or change state.
 
 The extension is built as one generated, loadable file at `plugins/radius/dist/extension.mjs`. The test architecture must preserve that packaging contract and the existing server-rendered interface.
 
@@ -35,7 +35,7 @@ flowchart LR
 ```
 
 - **Copilot host** discovers the extension, opens the panel, and routes actions and tools.
-- **Extension runtime** declares the canvas, two actions, six tools, hooks, and instance lifecycle.
+- **Extension runtime** declares the canvas, two actions, seven tools, hooks, and instance lifecycle.
 - **Local loopback server** owns per-instance HTTP state and serves only on `127.0.0.1`.
 - **Rendered page** is server-produced HTML for one of the seven Radius views.
 - **Browser code** handles forms, polling, graph interaction, navigation, focus, and status updates.
@@ -68,7 +68,7 @@ The approved architecture describes a target, not the current contents of `main`
 | 7     | Complete: add reviewed visual baselines and extended resilience coverage                            | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                                                                                       |
 | 8     | Not started: qualify the controlled real-host suite and require it before release                   | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                                                                                       |
 
-The current accepted runtime surface is two actions, `get_graph_resources` and `update_source_refs`, and six tools: `radius_generate_app`, `radius_generate_pr_diff_markdown`, `radius_publish_custom_type_extension`, `radius_publish_recipe`, `radius_deploy`, and `radius_deploy_status`. The authoritative Phase 2 inventory contains 40 local API routes with no legacy fallback.
+The current accepted runtime surface is two actions, `get_graph_resources` and `update_source_refs`, and seven tools: `radius_generate_app`, `radius_report_modeling_failure`, `radius_generate_pr_diff_markdown`, `radius_publish_custom_type_extension`, `radius_publish_recipe`, `radius_deploy`, and `radius_deploy_status`. The authoritative Phase 2 inventory contains 40 local API routes with no legacy fallback.
 
 ## Objectives
 

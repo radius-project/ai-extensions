@@ -137,6 +137,17 @@ describe("DOM and focus ports", () => {
     plain.scrollHeight = 120;
     expect(dom.scrollToEnd(plain)).toBe(true);
     expect(plain.scrollTop).toBe(120);
+    plain.clientHeight = 40;
+    plain.scrollTop = 76;
+    expect(dom.isScrolledToEnd(plain)).toBe(true);
+    plain.scrollTop = 75;
+    expect(dom.isScrolledToEnd(plain)).toBe(false);
+    Object.assign(plain, { scrollTop: Number.NaN });
+    expect(dom.isScrolledToEnd(plain)).toBe(false);
+    Object.assign(plain, { scrollTop: 80, scrollHeight: Number.NaN });
+    expect(dom.isScrolledToEnd(plain)).toBe(false);
+    Object.assign(plain, { scrollHeight: 120, clientHeight: Number.NaN });
+    expect(dom.isScrolledToEnd(plain)).toBe(false);
     Object.assign(plain, { scrollHeight: Number.NaN });
     expect(dom.scrollToEnd(plain)).toBe(false);
   });
@@ -496,6 +507,133 @@ describe("resolveBrowserContext", () => {
       "click failed"
     );
     expect(body.children).toEqual([]);
+  });
+
+  it("downloads generated text through a temporary object URL and cleans it up", () => {
+    const document = new FakeDocument();
+    const body = document.body;
+    if (!(body instanceof FakeElement)) throw new Error("expected fake body");
+    const blobs: unknown[] = [];
+    const revoked: string[] = [];
+    class FakeBlob {
+      constructor(
+        readonly parts: unknown[],
+        readonly options: Record<string, unknown>
+      ) {
+        blobs.push(this);
+      }
+    }
+    const revokeHandlers: Array<() => void> = [];
+    const context = resolveBrowserContext(
+      createScope({
+        document,
+        setTimeout: (handler: () => void) => {
+          revokeHandlers.push(handler);
+          return 1;
+        },
+        Blob: FakeBlob,
+        URL: {
+          createObjectURL: () => "blob:diagnostic",
+          revokeObjectURL: (url: string) => revoked.push(url)
+        }
+      })
+    );
+
+    expect(
+      context.download.save(
+        '{"state":"failed"}',
+        "application/json",
+        "diagnostic.json"
+      )
+    ).toBe(true);
+    const anchor = document.created.at(-1);
+    expect(anchor?.attributes.get("href")).toBe("blob:diagnostic");
+    expect(anchor?.attributes.get("download")).toBe("diagnostic.json");
+    expect(anchor?.clickCount).toBe(1);
+    expect(blobs).toHaveLength(1);
+    expect(blobs[0]).toMatchObject({
+      parts: ['{"state":"failed"}'],
+      options: { type: "application/json" }
+    });
+    expect(revoked).toEqual([]);
+    revokeHandlers[0]?.();
+    expect(revoked).toEqual(["blob:diagnostic"]);
+    expect(body.children).toEqual([]);
+  });
+
+  it("refuses generated downloads without every required browser capability", () => {
+    const document = new FakeDocument();
+    const valid = {
+      document,
+      Blob: class {},
+      URL: {
+        createObjectURL: () => "blob:diagnostic",
+        revokeObjectURL: () => undefined
+      }
+    };
+    for (const overrides of [
+      { ...valid, Blob: undefined },
+      { ...valid, URL: undefined },
+      { ...valid, URL: { revokeObjectURL: () => undefined } },
+      { ...valid, URL: { createObjectURL: () => "blob:diagnostic" } }
+    ]) {
+      expect(
+        resolveBrowserContext(createScope(overrides)).download.save(
+          "{}",
+          "application/json",
+          "diagnostic.json"
+        )
+      ).toBe(false);
+    }
+
+    document.body = null;
+    expect(
+      resolveBrowserContext(createScope(valid)).download.save(
+        "{}",
+        "application/json",
+        "diagnostic.json"
+      )
+    ).toBe(false);
+  });
+
+  it("refuses an invalid object URL and cleans up after a download click failure", () => {
+    const invalidUrl = resolveBrowserContext(
+      createScope({
+        Blob: class {},
+        URL: {
+          createObjectURL: () => null,
+          revokeObjectURL: () => undefined
+        }
+      })
+    );
+    expect(
+      invalidUrl.download.save("{}", "application/json", "diagnostic.json")
+    ).toBe(false);
+
+    const document = new FakeDocument();
+    const body = document.body;
+    if (!(body instanceof FakeElement)) throw new Error("expected fake body");
+    const brokenAnchor = new FakeElement("broken", "a");
+    brokenAnchor.click = () => {
+      throw new Error("click failed");
+    };
+    document.createElement = () => brokenAnchor;
+    const revoked: string[] = [];
+    const context = resolveBrowserContext(
+      createScope({
+        document,
+        Blob: class {},
+        URL: {
+          createObjectURL: () => "blob:diagnostic",
+          revokeObjectURL: (url: string) => revoked.push(url)
+        }
+      })
+    );
+    expect(() =>
+      context.download.save("{}", "application/json", "diagnostic.json")
+    ).toThrow("click failed");
+    expect(body.children).toEqual([]);
+    expect(revoked).toEqual(["blob:diagnostic"]);
   });
 
   it("falls back to window.open and reports blocked or empty requests", () => {

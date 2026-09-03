@@ -119,6 +119,13 @@ export const templatePathParameters = (() => {
 export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare("ANY", "/api/ping", "exact", "none", "liveness-source"),
   declare("GET", "/api/operations", "exact", "none", "operations-status"),
+  declare(
+    "GET",
+    "/api/operations/:operationId/diagnostics",
+    "template",
+    "none",
+    "operations-status"
+  ),
   declare("GET", "/api/operations/", "prefix", "none", "operations-status"),
   legacyPost("/api/open-source", "exact", "json", "liveness-source"),
   legacyPost(
@@ -186,10 +193,12 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare("GET", "/api/progress", "exact", "none", "graphs-planning"),
   declare("GET", "/api/deployed-graph", "exact", "none", "graphs-planning"),
   declare("GET", "/api/deploy-status", "exact", "none", "deployments"),
+  declare("GET", "/api/deploy-notification", "exact", "none", "deployments"),
   legacyPost("/api/load-graph", "exact", "json", "graphs-planning"),
   declare("GET", "/api/list-environments", "exact", "none", "environments"),
   declare("GET", "/api/list-applications", "exact", "none", "deployments"),
   declare("GET", "/api/list-deployments", "exact", "none", "deployments"),
+  declare("GET", "/api/delete-conflict", "exact", "none", "deployments"),
   legacyPost("/api/delete-deployment", "exact", "json", "deployments"),
   declare("POST", "/api/abandon-deployment", "exact", "json", "deployments"),
   declare("GET", "/api/verify-status", "exact", "none", "environments"),
@@ -215,6 +224,13 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
     "none",
     "operations-status"
   ),
+  declare(
+    "POST",
+    "/api/operations/:operationId/dismiss",
+    "template",
+    "none",
+    "operations-status"
+  ),
   // Cooperative controls in the same family: a durable stop request, the two
   // first-choice commands after a stop, and the three retries. All carry the
   // operation id mid-path, so they are template routes like the two above, and
@@ -233,6 +249,13 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare(
     "POST",
     "/api/operations/:operationId/continue",
+    "template",
+    "json",
+    "operations-status"
+  ),
+  declare(
+    "POST",
+    "/api/operations/:operationId/cancel-workflow",
     "template",
     "json",
     "operations-status"

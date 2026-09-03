@@ -5,7 +5,7 @@ import globals from "globals";
 const sourceFiles = [
   "eslint.config.mjs",
   "packages/**/*.{ts,mjs}",
-  "plugins/radius/skills/**/*.mjs",
+  "extensions/radius/skills/**/*.mjs",
   "scripts/**/*.mjs",
   "vitest.config.ts"
 ];
@@ -29,7 +29,7 @@ const restrictedCoreImports = [
 
 export default [
   {
-    ignores: ["plugins/radius/dist/**"]
+    ignores: [".artifacts/**"]
   },
   {
     files: sourceFiles,

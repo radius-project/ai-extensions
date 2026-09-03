@@ -1,6 +1,8 @@
 import { escapeBrowserHtml } from "../html.js";
+import { requireSuccessfulJsonResponse } from "../http.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { isRecord, readArray, readRecord, readString } from "../json.js";
+import { tableErrorRowMarkup } from "./table-error.js";
 import type { EnvironmentConfirmDialog } from "./confirm-dialog.js";
 import type { EnvironmentInfrastructure } from "./discovery.js";
 import type { BrowserTeardown } from "../lifecycle.js";
@@ -17,6 +19,7 @@ export const ENVIRONMENTS_ENTRY_KEY = "environment-environments";
 export const ENVIRONMENT_LIST_PATH = "/api/list-environments";
 export const ENVIRONMENT_DELETE_PATH = "/api/delete-environment";
 export const ENVIRONMENT_POLL_MS = 10000;
+const ENVIRONMENT_LIST_FAILURE = "Could not load environments.";
 
 export interface EnvironmentRecord {
   name: string;
@@ -47,6 +50,12 @@ export interface EnvironmentPaneDependencies {
   ): void;
   currentInfraSelection?(provider: "azure" | "aws"): EnvironmentInfrastructure;
   canSubmit?(): boolean;
+  // Deletion is an async operation (Radius env delete, credential cleanup,
+  // GitHub env delete, app-registration cleanup). The page composes the
+  // operation-progress controller, so once the request is accepted the pane
+  // hands the environment and provider back to follow it to a terminal state
+  // in the shared progress panel.
+  startDeleteProgress(environment: string, provider: string): void;
 }
 
 export interface EnvironmentDecisionPort {
@@ -63,6 +72,8 @@ export interface EnvironmentPaneOptions {
 export interface EnvironmentPaneController {
   switchSubtab(name: string): void;
   loadEnvironmentTable(): void;
+  listedEnvironments(): readonly EnvironmentRecord[];
+  editingEnvironment(): string;
   showEnvironmentForm(preset?: EnvironmentFormPreset): void;
   showEnvironmentLanding(): void;
   showWizardStep(step: 1 | 2): void;
@@ -99,6 +110,7 @@ export function environmentStatusMarkup(status: string): string {
     failed: "Failed",
     pending: "Pending",
     unverified: "Unverified",
+    deleting: "Deleting…",
     unknown: "Available"
   };
   return labels[status] ?? labels.pending;
@@ -120,11 +132,116 @@ export function parseEnvironmentRecords(payload: unknown): EnvironmentRecord[] {
           cluster: readString(config, "cluster"),
           namespace: readString(config, "namespace"),
           vpcId: readString(config, "vpcId"),
-          subnetIds: readString(config, "subnetIds")
+          subnetIds: readString(config, "subnetIds"),
+          subscriptionId: readString(config, "subscriptionId"),
+          accountId: readString(config, "accountId"),
+          region: readString(config, "region")
         }
       };
     })
     .filter((entry) => entry.name !== "");
+}
+
+export interface NamespaceClaim {
+  readonly provider: string;
+  readonly cluster: string;
+  readonly namespace: string;
+  readonly subscriptionId?: string;
+  readonly accountId?: string;
+  readonly region?: string;
+  readonly excludeEnvironment?: string;
+}
+
+function normalizeIdentifier(value: string | undefined): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+// True when both sides name the same physical cluster. A cluster name alone is
+// not a cluster: the same name can exist in two Azure subscriptions or two AWS
+// account/region pairs. An account either side did not record distinguishes
+// nothing, so the two are held to be the same cluster until something proves
+// otherwise. The server's rung applies the same rule, so this check stays no
+// stricter than the authority it defers to.
+function sameCluster(
+  config: EnvironmentInfrastructure | undefined,
+  claim: NamespaceClaim
+): boolean {
+  if (
+    normalizeIdentifier(config?.cluster) !== normalizeIdentifier(claim.cluster)
+  )
+    return false;
+  const scopes: ReadonlyArray<readonly [string, string]> =
+    normalizeIdentifier(claim.provider) === "aws" ?
+      [
+        [
+          normalizeIdentifier(config?.accountId),
+          normalizeIdentifier(claim.accountId)
+        ],
+        [normalizeIdentifier(config?.region), normalizeIdentifier(claim.region)]
+      ]
+    : [
+        [
+          normalizeIdentifier(config?.subscriptionId),
+          normalizeIdentifier(claim.subscriptionId)
+        ]
+      ];
+  return scopes.every(
+    ([listed, claimed]) => listed === "" || claimed === "" || listed === claimed
+  );
+}
+
+// The namespace a deployment resolves to when the environment does not record
+// one, as `vars.KUBERNETES_NAMESPACE || 'default'` in the generated workflow.
+// The listing omits a variable whose value is empty, so an environment holding
+// the default namespace reports no namespace at all, and comparing the raw
+// strings would miss a real collision the server refuses. The admission rung
+// maps the same way, so mapping here keeps the two aligned.
+const DEFAULT_NAMESPACE = "default";
+
+function normalizeNamespace(value: string | undefined): string {
+  return normalizeIdentifier(value) || DEFAULT_NAMESPACE;
+}
+
+// Radius binds one environment to one namespace within a cluster. Nothing
+// upstream of the deploy workflow reports the duplicate, so the wizard has to
+// find it here, while the namespace is still being chosen. A listed environment
+// whose cluster is unknown cannot prove a claim either way, so it is skipped
+// rather than blocking a legitimate environment. An unrecorded namespace is not
+// unknown in the same way: it means the environment holds the default, so it is
+// compared rather than skipped.
+//
+// This is fast feedback, not the invariant: an empty listing means "nothing
+// known", not "nothing claimed", so it cannot refuse on its own authority. The
+// create route's admission rung establishes the claims from GitHub and fails
+// closed, and this check is deliberately no stricter than that one so it can
+// never refuse an environment the server would admit.
+//
+// The environment's stored resource group is the application's, not the
+// cluster's, so it is not part of the key: including it would stop two
+// environments that genuinely share a cluster from conflicting whenever their
+// application resource groups differ — the exact duplicate this guard exists to
+// catch.
+export function findNamespaceConflict(
+  environments: readonly EnvironmentRecord[],
+  claim: NamespaceClaim
+): EnvironmentRecord | null {
+  const cluster = normalizeIdentifier(claim.cluster);
+  if (cluster === "") return null;
+  const namespace = normalizeNamespace(claim.namespace);
+  const provider = normalizeIdentifier(claim.provider);
+  const excluded = normalizeIdentifier(claim.excludeEnvironment);
+  return (
+    environments.find((environment) => {
+      if (excluded !== "" && normalizeIdentifier(environment.name) === excluded)
+        return false;
+      const listedProvider = normalizeIdentifier(environment.provider);
+      if (listedProvider !== "" && listedProvider !== provider) return false;
+      if (normalizeNamespace(environment.config?.namespace) !== namespace) {
+        return false;
+      }
+      return sameCluster(environment.config, claim);
+    }) ?? null
+  );
 }
 
 function fallbackSettingsUrl(repo: string): string {
@@ -156,6 +273,12 @@ export function environmentRowsMarkup(
       const provider = environment.provider || "—";
       const credentials = environment.credentialProfile || "—";
       const name = escapeBrowserHtml(environment.name);
+      // A delete already running for this environment fails closed: the Delete
+      // action is greyed out so a second deletion can't be started on top of
+      // the first while cleanup is in flight.
+      const deleting = environment.status === "deleting";
+      const deleteAttrs =
+        deleting ? ' disabled title="This environment is being deleted."' : "";
       return (
         "<tr>" +
         `<td class="rad-table__env">${name}</td>` +
@@ -165,7 +288,7 @@ export function environmentRowsMarkup(
         '<td class="rad-table__actions">' +
         `<button class="rad-link js-edit-env" data-env="${name}" style="background:none; border:none; padding:0; margin:0; font:inherit; cursor:pointer;">edit</button>` +
         `<button class="rad-btn rad-btn--neutral js-plan-deployment" data-env="${name}" style="margin:0;">Plan Deployment</button>` +
-        `<button class="rad-btn rad-btn--danger-outline js-delete-env" data-env="${name}" style="margin:0;">Delete Env</button>` +
+        `<button class="rad-btn rad-btn--danger-outline js-delete-env" data-env="${name}" style="margin:0;"${deleteAttrs}>Delete Env</button>` +
         "</td></tr>"
       );
     })
@@ -283,7 +406,11 @@ export function initializeEnvironmentPane(
     banner.scrollIntoView({ block: "nearest" });
   };
 
-  const deleteEnvironment = (name: string, button: DomElement): void => {
+  const deleteEnvironment = (
+    name: string,
+    provider: string,
+    button: DomElement
+  ): void => {
     setButtonState(button, true, "Deleting…");
     void context.net
       .fetch(ENVIRONMENT_DELETE_PATH, {
@@ -326,7 +453,11 @@ export function initializeEnvironmentPane(
             );
             return;
           }
-          loadEnvironmentTable();
+          // The request was accepted; deletion now runs as a tracked
+          // operation. Follow it in the shared progress panel instead of
+          // refreshing the table immediately, so cleanup and any failure are
+          // surfaced the same way as environment creation.
+          dependencies.startDeleteProgress(name, provider);
         },
         () => {
           if (!active) return;
@@ -373,13 +504,18 @@ export function initializeEnvironmentPane(
       ".js-delete-env"
     )) {
       bind(rows, button, "click", () => {
+        // A disabled Delete button (an environment mid-deletion) is inert: never
+        // start a second deletion on top of one already running.
+        if (Reflect.get(button, "disabled") === true) return;
         const name = button.getAttribute("data-env") ?? "";
         if (!name) return;
+        const environment = environmentRows.find((row) => row.name === name);
+        const provider = environment?.provider ?? "";
         options.confirmDialog?.show({
           title: "Delete environment?",
-          message: `This deletes the GitHub environment "${name}" and its Radius configuration. Applications already deployed to it must be deleted first.`,
+          message: `This deletes the GitHub environment "${name}", removes the Radius environment from the cluster, and permanently deletes the environment's federated credential from its Azure app registration (which may be shared). Applications already deployed to it must be deleted first.`,
           confirmLabel: "Delete environment",
-          onConfirm: () => deleteEnvironment(name, button)
+          onConfirm: () => deleteEnvironment(name, provider, button)
         });
       });
     }
@@ -404,10 +540,9 @@ export function initializeEnvironmentPane(
         `${ENVIRONMENT_LIST_PATH}?repo=${encodeURIComponent(options.repo)}`,
         listAbort ? { signal: listAbort.signal } : undefined
       )
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
+      .then((response) =>
+        requireSuccessfulJsonResponse(response, ENVIRONMENT_LIST_FAILURE)
+      )
       .then(
         (payload) => {
           if (!active || request !== listRequest) return;
@@ -416,7 +551,11 @@ export function initializeEnvironmentPane(
           body.innerHTML = environmentRowsMarkup(environments);
           wireRows();
           if (
-            environments.some((environment) => environment.status === "pending")
+            environments.some(
+              (environment) =>
+                environment.status === "pending" ||
+                environment.status === "deleting"
+            )
           ) {
             pollTimer = context.clock.setTimeout(
               loadEnvironmentTable,
@@ -432,8 +571,11 @@ export function initializeEnvironmentPane(
           ) {
             return;
           }
-          body.innerHTML =
-            '<tr><td colspan="5" style="color:var(--rad-text-tertiary);">Could not load environments.</td></tr>';
+          body.innerHTML = tableErrorRowMarkup(
+            error,
+            5,
+            ENVIRONMENT_LIST_FAILURE
+          );
         }
       );
   };
@@ -586,6 +728,8 @@ export function initializeEnvironmentPane(
   const controller: EnvironmentPaneController = {
     switchSubtab,
     loadEnvironmentTable,
+    listedEnvironments: () => environmentRows,
+    editingEnvironment: () => editTarget,
     showEnvironmentForm,
     showEnvironmentLanding,
     showWizardStep,
@@ -624,6 +768,18 @@ export function initializeEnvironmentPane(
       const banner = context.dom.byId("env-action-banner");
       const text = context.dom.byId("env-action-banner-text");
       if (!banner || !text) return;
+      // A delete operation that stopped because the environment still has
+      // deployed applications carries a ready-to-render message; show it
+      // verbatim rather than the create-flow "is set up, one step left"
+      // guidance, which does not apply to a halted deletion.
+      if (readString(terminal, "code") === "environment-has-applications") {
+        text.textContent =
+          readString(terminal, "userMessage") ||
+          "This environment still has one or more deployed applications. Delete the application(s) first, then delete the environment.";
+        banner.style.display = "flex";
+        banner.scrollIntoView({ block: "nearest" });
+        return;
+      }
       const hasPullRequest = /^https:\/\/github\.com\//.test(pullRequestUrl);
       let html = `<strong>${escapeBrowserHtml(
         providerLabel(provider)

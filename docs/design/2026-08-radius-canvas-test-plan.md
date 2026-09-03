@@ -36,7 +36,7 @@ Start with the status table. Use the phase sections for the work still to come. 
 - Close servers, streams, processes, timers, browser sessions, and temporary workspaces after success or failure.
 - Every long-running workflow states whether close cancels it or leaves a durable, resumable operation running. Late work from a closed or superseded context must not mutate newer state.
 - For local API changes, test cross-site mutation attempts, malformed bodies, approved request-size boundaries, path traversal, workspace confinement, and destructive actions that must stop safely.
-- Preserve the seven page values, retained action and tool contracts, current 40 routes, branch behavior, and the single packaged extension unless a separate approved change says otherwise.
+- Preserve the seven page values, retained action and tool contracts, declared route table, branch behavior, and the single packaged extension unless a separate approved change says otherwise.
 
 ## Required checks
 
@@ -158,7 +158,8 @@ The full plan is complete when every requirement in the appendices has a passing
 
 | ID    | Tool                                   | Required contract                                                                                        |
 |-------|----------------------------------------|----------------------------------------------------------------------------------------------------------|
-| TL-02 | `radius_generate_app`                  | Workspace analysis and authoritative bundled skill content, including standalone installs                |
+| TL-02 | `radius_generate_app`                  | Workspace analysis; compact skill handoff; packaged, source-checkout, and repaired-plugin discovery      |
+| TL-11 | `radius_report_modeling_failure`       | Current-attempt fencing, missing-model verification, permanent-failure recording, stale-report rejection |
 | TL-05 | `radius_generate_pr_diff_markdown`     | Repository/base/head mapping, fetch failure, Mermaid and summary result/error                            |
 | TL-07 | `radius_publish_custom_type_extension` | Workspace confinement, managed Radius command, defaults, output/error                                    |
 | TL-08 | `radius_publish_recipe`                | Workspace confinement, GHCR target validation, publish output/error                                      |
@@ -178,9 +179,11 @@ These declarations are not part of the current accepted surface. Their old shape
 | CA-02 `render_graph`       | `resources` graph array                                              | TL-03 `radius_render_graph`       | Duplicated canonical branch-aware graph loading; tool only invoked its paired action |
 | CA-03 `render_graph_diff`  | Base/head resources, repository, base/head branches                  | TL-04 `radius_render_graph_diff`  | Duplicated graph-diff open behavior                                                  |
 
-#### Current route inventory: 40 routes in eight API families
+#### Phase 2 closeout route inventory: 40 routes in eight API families
 
 The Phase 0 baseline recorded 37 routes. The authoritative Phase 2 closeout inventory contains 40 routes and is pinned by exact fixture, declaration, and concrete-handler set equality.
+
+Approved features after Phase 2 add routes through `SERVER_ROUTE_DECLARATIONS`; the current declaration and concrete-handler equality tests are authoritative for the live route set. The historical closeout table below is not a current route count.
 
 | Requirement/family         | Exact methods and paths                                                                                                                                                                                                                                                          | Count |
 |----------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------|
@@ -206,7 +209,7 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 | RF-05 | Workspace/remote selection, stream/progress, missing model, build errors, plan resolution, missing recipe pack, unsupported service, explicit diff branches, removed-source branch    |
 | RF-06 | Parameter parsing, create validation/provider mapping, cache/expiry, workflow throttling, credential status, active-application guard, fail-closed delete                             |
 | RF-07 | Queued/pending/in-progress/success/failure/cancelled/timed-out/deleting/deleted/unrelated states, branch dispatch, workflow publication, reset, cache invalidation, surfaced failures |
-| RF-08 | Latest/by-ID lookup, null/unknown, safe projection, resumability, raw-failure redaction                                                                                               |
+| RF-08 | Latest/by-ID lookup, null/unknown, safe projection, resumability, raw-failure redaction, and allowlisted local diagnostic download                                                    |
 | RF-09 | Default and explicit pages, unknown page, active graph view, in-progress deployment redirect                                                                                          |
 
 #### Seven pages
@@ -301,7 +304,7 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 | RU-04 | Removed action/tool declarations absent; prior shape recorded                                             |
 | RU-05 | Graph-resources not-ready, active/explicit view, missing/all, filtering, context                          |
 | RU-06 | Source-reference missing/stale input, update/queue/skip, page, reload                                     |
-| RU-07 | Generate-app workspace analysis and bundled skill, including standalone fallback                          |
+| RU-07 | Generate-app workspace analysis; compact handoff; candidate order, required assets, and failure           |
 | RU-08 | PR-diff repository/base/head mapping, fetch failure, Markdown result                                      |
 | RU-09 | Custom-type publish confinement, defaults, invocation, errors                                             |
 | RU-10 | Recipe publish confinement, GHCR validation, errors                                                       |

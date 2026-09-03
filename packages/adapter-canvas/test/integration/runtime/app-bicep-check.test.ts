@@ -26,7 +26,7 @@ const root = path.resolve(
 );
 const checker = path.join(
   root,
-  "plugins",
+  "extensions",
   "radius",
   "skills",
   "radius-app-bicep",
@@ -535,6 +535,262 @@ test.each([
   assert.ok(
     githubSourceReferenceUrl(codeReference) || srcPathFromRef(codeReference)
   );
+});
+
+const containersType = "Radius.Compute/containers@2025-08-01-preview";
+
+function containerEnv(env: object, containerKey = "web") {
+  return radiusResource(containersType, {
+    containers: { [containerKey]: { env } }
+  });
+}
+
+test("fails when a plain value reads a plain helper that does not sort before it", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: containerEnv({
+      APP_DATABASE_OPTIONS: {
+        value: "host=db;password=$(DB_PASSWORD)"
+      },
+      DB_PASSWORD: { value: "secret" }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /runtime-variable/u);
+  assert.match(result.stderr, /web\.properties\.containers\.web\.env\./u);
+  assert.match(result.stderr, /\$\(DB_PASSWORD\)/u);
+  assert.match(result.stderr, /valueFrom\.secretKeyRef/u);
+  assert.match(result.stderr, /authored or reused Secret/u);
+  assert.match(result.stderr, /compatible Kubernetes Secret connection/u);
+  assert.match(
+    result.stderr,
+    /explicit schema-supported or legacy @secure\(\) env\.value fallback/u
+  );
+  assert.doesNotMatch(result.stderr, /has to stay a plain value/u);
+});
+
+test("accepts a plain helper whose key sorts before its consumer", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: containerEnv({
+      APP_DATABASE_CREDENTIAL: { value: "secret" },
+      APP_DATABASE_OPTIONS: {
+        value: "host=db;password=$(APP_DATABASE_CREDENTIAL)"
+      }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("accepts a secretKeyRef helper regardless of its key", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: containerEnv({
+      APP_DATABASE_OPTIONS: {
+        value: "host=db;password=$(ZZ_PASSWORD)"
+      },
+      ZZ_PASSWORD: {
+        valueFrom: {
+          secretKeyRef: { secretName: "db-secret", key: "password" }
+        }
+      }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test.each([
+  ["a dotted name", "DB.PASSWORD"],
+  ["a hyphenated name", "DB-PASSWORD"]
+])("reports %s that the kubelet would still look up", (_label, helper) => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: containerEnv({
+      APP_DATABASE_OPTIONS: { value: `password=$(${helper})` },
+      [helper]: { value: "secret" }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /runtime-variable/u);
+});
+
+test("reports a repeated reference once", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: containerEnv({
+      APP_DATABASE_OPTIONS: {
+        value: "primary=$(DB_PASSWORD);replica=$(DB_PASSWORD)"
+      },
+      DB_PASSWORD: { value: "secret" }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr.match(/runtime-variable/gu)?.length, 1);
+});
+
+test("ignores a name this container's env does not define", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: containerEnv({
+      APP_ENDPOINT: { value: "http://$(CONNECTION_DB_HOST):5432" }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("reports a variable that reads itself", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: containerEnv({ APP_PATH: { value: "$(APP_PATH):/extra" } })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /cannot read itself/u);
+});
+
+test("treats an escaped $$(NAME) as literal text", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: containerEnv({
+      APP_TEMPLATE: { value: "literal $$(DB_PASSWORD)" },
+      DB_PASSWORD: { value: "secret" }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("reports an unresolved expansion inside a nested module", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    stack: localModuleResources({
+      web: containerEnv({
+        APP_DATABASE_OPTIONS: { value: "password=$(DB_PASSWORD)" },
+        DB_PASSWORD: { value: "secret" }
+      })
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /stack\.web\.properties\.containers\.web\.env\./u
+  );
+});
+
+test("reports an unresolved expansion in a value supplied by a parameter default", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template(
+    {
+      web: containerEnv({
+        APP_DATABASE_OPTIONS: { value: "[parameters('options')]" },
+        DB_PASSWORD: { value: "secret" }
+      })
+    },
+    { options: { type: "string", defaultValue: "password=$(DB_PASSWORD)" } }
+  );
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /runtime-variable/u);
+});
+
+test("stays silent when letter case decides the ordering", () => {
+  const directory = temporaryDirectory();
+  // Ordinally APP_credential sorts after APP_OPTIONS ('c' > 'O'), but folded it
+  // sorts before ('C' < 'O'). The two answers disagree, so the check says
+  // nothing rather than risk failing a model the deployed sort would resolve.
+  const compiledOutput = template({
+    web: containerEnv({
+      APP_OPTIONS: { value: "password=$(APP_credential)" },
+      APP_credential: { value: "secret" }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("reports a lowercase helper that sorts after under every comparison", () => {
+  const directory = temporaryDirectory();
+  const compiledOutput = template({
+    web: containerEnv({
+      APP_DATABASE_OPTIONS: { value: "password=$(app_password)" },
+      app_password: { value: "secret" }
+    })
+  });
+
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, compiledOutput)
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /runtime-variable/u);
 });
 
 test("resolves a top-level source-reference parameter default", () => {

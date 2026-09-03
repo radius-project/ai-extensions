@@ -7,6 +7,12 @@
 
 import { cliExec } from "./gh.js";
 import type { SelectedGhExecutor } from "./gh.js";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  type GhCommandPresentation
+} from "./gh-command-display.js";
+import { FORK_REPOSITORY_SETUP_GUIDANCE } from "./repository-access-guidance.js";
 
 type DeployStatus = "pending" | "in_progress" | "success" | "failed";
 
@@ -49,6 +55,7 @@ interface WorkflowRun {
   createdAt?: string;
   status?: string;
   conclusion?: string | null;
+  displayTitle?: string;
 }
 
 interface WorkflowRunDetail extends WorkflowRun {
@@ -111,7 +118,8 @@ function parseWorkflowRun(value: unknown): WorkflowRun | null {
     conclusion:
       typeof value.conclusion === "string" || value.conclusion === null ?
         value.conclusion
-      : undefined
+      : undefined,
+    displayTitle: stringField(value.displayTitle)
   };
 }
 
@@ -119,17 +127,25 @@ function selectedAuthorizationStatus(
   stdout: string,
   stderr: string
 ): 401 | 403 | null {
-  const match = /\bHTTP\s+(401|403)\b/i.exec(`${stderr}\n${stdout}`);
-  if (!match) return null;
+  const detail = `${stderr}\n${stdout}`;
+  const match = /\bHTTP\s+(401|403)\b/i.exec(detail);
+  if (!match) return isSamlAuthorizationFailure(detail) ? 403 : null;
   return match[1] === "401" ? 401 : 403;
+}
+
+function isSamlAuthorizationFailure(detail: string): boolean {
+  return /Resource protected by organization SAML enforcement|grant your OAuth token access/i.test(
+    detail
+  );
 }
 
 function selectedFailureStatus(
   stdout: string,
   stderr: string
 ): 401 | 403 | 404 | 429 | null {
-  const match = /\bHTTP\s+(401|403|404|429)\b/i.exec(`${stderr}\n${stdout}`);
-  if (!match) return null;
+  const detail = `${stderr}\n${stdout}`;
+  const match = /\bHTTP\s+(401|403|404|429)\b/i.exec(detail);
+  if (!match) return isSamlAuthorizationFailure(detail) ? 403 : null;
   const status = Number(match[1]);
   if (status === 401 || status === 403 || status === 404 || status === 429) {
     return status;
@@ -362,9 +378,14 @@ export async function findWorkflowRun(
   sinceMs: number,
   knownId?: number | string | null,
   executor?: SelectedGhExecutor,
-  afterRunId?: number | string | null
+  afterRunId?: number | string | null,
+  correlationId?: string | null
 ): Promise<number | string | null> {
   if (knownId) return knownId;
+  const fields =
+    correlationId ?
+      "databaseId,status,createdAt,displayTitle"
+    : "databaseId,status,createdAt";
   const args = [
     "run",
     "list",
@@ -372,7 +393,7 @@ export async function findWorkflowRun(
     "--limit",
     "5",
     "--json",
-    "databaseId,status,createdAt",
+    fields,
     "--repo",
     repo
   ];
@@ -384,6 +405,23 @@ export async function findWorkflowRun(
         selectedRead.value
       : []
     : await ghJson(args, []);
+  return selectWorkflowRunId(runs, sinceMs, correlationId, afterRunId);
+}
+
+/**
+ * Pick the database id of the workflow run this caller dispatched from a
+ * `gh run list` payload. Runs are newest-first; accept the first created within
+ * ~60s before dispatch (clock-skew tolerance) so stale prior runs are ignored.
+ * When a correlation id is supplied the run's display title must also contain it
+ * (the dispatcher echoes it via `run-name:`), so a concurrent or manual deletion
+ * of a different environment is never mistaken for this one.
+ */
+export function selectWorkflowRunId(
+  runs: unknown,
+  sinceMs: number,
+  correlationId?: string | null,
+  afterRunId?: number | string | null
+): number | string | null {
   if (!Array.isArray(runs)) return null;
   // Prefer a monotonic run-id baseline when the caller captured one just before
   // dispatch: accept the smallest run id that exceeds it, which is the first run
@@ -413,7 +451,11 @@ export async function findWorkflowRun(
     const r = parseWorkflowRun(value);
     if (!r) continue;
     const created = Date.parse(r.createdAt || "") || 0;
-    if (created >= cutoff && r.databaseId !== undefined) return r.databaseId;
+    if (created < cutoff || r.databaseId === undefined) continue;
+    if (correlationId && !(r.displayTitle || "").includes(correlationId)) {
+      continue;
+    }
+    return r.databaseId;
   }
   return null;
 }
@@ -722,14 +764,18 @@ export function cloudCredentialsComplete(
 // setup: (1) the wrong gh account is active (repo invisible → read 404), and
 // (2) the account can read the repo but lacks the admin needed to create a
 // deployment environment (PUT /repos/{repo}/environments → 404).
-export function explainRepoAccessForEnvSetup({
-  repo,
-  login,
-  readFailed,
-  permissions
-}: RepoAccessInput = {}): string {
+export function explainRepoAccessForEnvSetup(
+  { repo, login, readFailed, permissions }: RepoAccessInput = {},
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+): string {
   const who = login || "the active gh account";
   if (readFailed) {
+    const switchCommand = displayGhCommand(ghCommandPresentation, [
+      "auth",
+      "switch",
+      "--user",
+      "<account>"
+    ]);
     return (
       'Can\u2019t read repository "' +
       repo +
@@ -737,8 +783,11 @@ export function explainRepoAccessForEnvSetup({
       who +
       '". ' +
       "Either this account lacks access, or the wrong account is active (for example a personal account instead of your enterprise one). " +
-      "Switch accounts with: gh auth switch --user <account>  (or sign in the account that has access), then retry. " +
-      "Note: gh auth switch changes your machine\u2019s active GitHub account for every tool in this terminal until you switch back."
+      (switchCommand ?
+        `Switch accounts with: ${switchCommand} (or sign in the account that has access), then retry. ${ghCommandPresentation.installationNote} `
+      : `${ghCommandPresentation.installationNote} `) +
+      "Note: gh auth switch changes your machine\u2019s active GitHub account for every tool in this terminal until you switch back. " +
+      FORK_REPOSITORY_SETUP_GUIDANCE
     );
   }
   if (permissions && permissions.admin === true) return "";
@@ -766,7 +815,8 @@ export function explainRepoAccessForEnvSetup({
     '", but ' +
     haveClause +
     ". " +
-    "Ask a repository or organization admin to grant you Admin (repo Settings \u2192 Collaborators and teams), then retry."
+    "Ask a repository or organization admin to grant you Admin (repo Settings \u2192 Collaborators and teams), then retry. " +
+    FORK_REPOSITORY_SETUP_GUIDANCE
   );
 }
 

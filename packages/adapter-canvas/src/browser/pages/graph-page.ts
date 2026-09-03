@@ -23,6 +23,10 @@ import type { GraphResource } from "../graph/model.js";
 import type { GraphController } from "../graph/surface.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import { readPageState } from "./state.js";
+import {
+  showGraphModelingFailure,
+  unsupportedGraphModelMessage
+} from "./graph-modeling-failure.js";
 
 const ENTRY_KEY = "graph-page";
 export const GRAPH_PAGE_STATE_ID = "radius-graph-page-state";
@@ -40,6 +44,7 @@ interface GraphPageState {
   resources: GraphResource[];
   loaded: boolean;
   localSource: boolean;
+  followWorkspaceBranch: boolean;
 }
 
 function parseState(context: BrowserContext): GraphPageState {
@@ -49,7 +54,8 @@ function parseState(context: BrowserContext): GraphPageState {
     branch: readString(state, "branch") || "main",
     resources: parseGraphResources(readArray(state, "resources")),
     loaded: readBoolean(state, "loaded"),
-    localSource: readBoolean(state, "localSource")
+    localSource: readBoolean(state, "localSource"),
+    followWorkspaceBranch: readBoolean(state, "followWorkspaceBranch")
   };
 }
 
@@ -71,16 +77,6 @@ function showStatus(
   status.textContent = message;
 }
 
-// The status strip sits directly above the graph surface, so a failure written
-// to both renders as two identical error boxes. Clearing the strip leaves the
-// surface itself as the single place a failure is reported.
-function hideStatus(context: BrowserContext): void {
-  const status = statusElement(context);
-  if (!status) return;
-  status.style.display = "none";
-  status.textContent = "";
-}
-
 export function initializeGraphPage(
   context: BrowserContext,
   globalScope: unknown
@@ -98,8 +94,11 @@ export function initializeGraphPage(
   // Report a failure once, on the graph surface. The surface owns the content
   // area, so writing there also clears whatever loading state was showing.
   const showFailure = (message: string): void => {
-    setError("graph-container", message);
-    hideStatus(context);
+    showGraphModelingFailure(context, setError, message, {
+      containerId: "graph-container",
+      statusIds: ["graph-status", "graph-refresh-status"],
+      staleContentIds: ["graph-guidance"]
+    });
   };
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
@@ -117,6 +116,7 @@ export function initializeGraphPage(
   // for a server-rendered graph, because that page immediately re-requests the
   // graph and the refresh decides the real state.
   let modelState: "pending" | "ready" | "failed" = "pending";
+  let followWorkspaceBranch = page.followWorkspaceBranch;
 
   // Keep the primary button in step with the compile state. The server renders
   // the button without a mode and loadModeledEnvState assigns "plan" later, so
@@ -235,12 +235,18 @@ export function initializeGraphPage(
       payload.fromWorkspace
     : page.localSource;
 
+  const showGuidance = (): void => {
+    const guidance = context.dom.byId("graph-guidance");
+    if (guidance) guidance.style.display = "";
+  };
+
   const showLoadedGraph = (): void => {
     const wrapper = context.dom.byId("graph-container-wrapper");
     if (wrapper) {
       const container = context.dom.createElement("div");
       container.id = "graph-container";
       const hint = context.dom.createElement("div");
+      hint.id = "graph-guidance";
       hint.setAttribute(
         "style",
         "margin-top:8px; font-size:12px; color:var(--rad-text-tertiary);"
@@ -248,6 +254,7 @@ export function initializeGraphPage(
       hint.textContent = "Click a node to view source code links.";
       wrapper.replaceChildren(container, hint);
     }
+    showGuidance();
     const status =
       context.dom.byId("graph-status") ??
       context.dom.byId("graph-refresh-status");
@@ -329,6 +336,7 @@ export function initializeGraphPage(
         body: JSON.stringify({
           repo: page.repo,
           branch,
+          followWorkspaceBranch,
           restartWait: options.continuing !== true
         }),
         signal: requestAbort?.signal
@@ -336,6 +344,11 @@ export function initializeGraphPage(
       .then((response) => response.json())
       .then((payload) => {
         if (requestGeneration !== generation) return;
+        const resolvedBranch = readString(payload, "resolvedBranch");
+        if (resolvedBranch && resolvedBranch !== branch) {
+          context.nav.reload();
+          return;
+        }
         if (isRecord(payload) && Array.isArray(payload.resources)) {
           modelState = "ready";
           syncPrimaryButton();
@@ -379,13 +392,14 @@ export function initializeGraphPage(
           return;
         }
         const error = readString(payload, "error");
+        const unsupported = unsupportedGraphModelMessage(payload);
         stopProgress();
-        if (error) {
-          if (readBoolean(payload, "modelingFailed")) {
+        if (error || unsupported) {
+          if (readBoolean(payload, "modelingFailed") || unsupported !== null) {
             modelState = "failed";
             syncPrimaryButton();
           }
-          showFailure(error);
+          showFailure(unsupported || error);
         } else {
           showFailure(
             "The application graph response did not include any resources."
@@ -410,6 +424,7 @@ export function initializeGraphPage(
   if (branchSelect) {
     entry.on(branchSelect, "change", () => {
       branchSelectionGeneration++;
+      followWorkspaceBranch = false;
       stopRequest();
       modelState = "pending";
       syncPrimaryButton();
@@ -448,6 +463,7 @@ export function initializeGraphPage(
           body: JSON.stringify({
             repo: page.repo,
             branch: page.branch,
+            followWorkspaceBranch,
             refresh: true,
             restartWait: options.continuing !== true
           }),
@@ -456,6 +472,11 @@ export function initializeGraphPage(
         .then((response) => response.json())
         .then((payload) => {
           if (refreshGeneration !== generation) return;
+          const resolvedBranch = readString(payload, "resolvedBranch");
+          if (resolvedBranch && resolvedBranch !== page.branch) {
+            context.nav.reload();
+            return;
+          }
           if (isRecord(payload) && Array.isArray(payload.resources)) {
             modelState = "ready";
             syncPrimaryButton();
@@ -465,6 +486,17 @@ export function initializeGraphPage(
               ...graphOptions,
               localSource: sourceProvenance(payload)
             });
+            showGuidance();
+            return;
+          }
+          const unsupported = unsupportedGraphModelMessage(payload);
+          if (unsupported) {
+            modelState = "failed";
+            syncPrimaryButton();
+            stopProgress();
+            showFailure(
+              `Unable to refresh the application graph: ${unsupported}`
+            );
           } else if (readBoolean(payload, "needsAppBicep")) {
             // A preloaded graph refresh can discover that the model disappeared
             // just like the initial load can. The server owns how long that wait

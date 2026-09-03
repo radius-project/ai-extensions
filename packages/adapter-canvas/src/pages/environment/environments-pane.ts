@@ -65,7 +65,7 @@ export function environmentsPaneMarkup(
         <div id="env-progress-headline-note" class="env-progress__headline-note" style="display:none;"></div>
         <div id="env-progress-activity" class="env-progress__activity" role="status" aria-live="polite"></div>
       </div>
-      <div id="env-progress-elapsed" class="env-progress__elapsed" aria-label="Elapsed time"></div>
+      <div id="env-progress-elapsed" class="env-progress__elapsed" role="timer" aria-label="Elapsed time"></div>
     </div>
     <ol id="env-progress-stages" class="env-progress__stages"></ol>
     <div id="env-progress-failure" class="env-progress__failure" style="display:none;" role="alert">
@@ -86,6 +86,7 @@ export function environmentsPaneMarkup(
          abandon it. -->
     <div id="env-progress-commands" class="env-progress__commands" role="group" aria-label="Environment setup controls" style="display:none;">
       <div id="env-progress-command-buttons" class="env-progress__command-buttons"></div>
+      <div id="env-progress-command-descriptions" class="env-progress__command-descriptions"></div>
       <div id="env-progress-command-note" class="env-progress__command-note"></div>
       <!-- Why a path the customer might expect is missing. Silence reads as a
            bug, so every refusal that a customer can reach gets a sentence. -->
@@ -96,6 +97,11 @@ export function environmentsPaneMarkup(
     <details id="env-progress-details" class="env-progress__details">
       <summary>Show details</summary>
       <ol id="env-progress-steps" class="env-progress__steps"></ol>
+      <div id="env-progress-diagnostics" class="env-progress__diagnostics" style="display:none;">
+        <button type="button" id="env-progress-diagnostics-open" class="rad-btn rad-btn--secondary" aria-describedby="env-progress-diagnostics-note">Download diagnostic snapshot</button>
+        <span id="env-progress-diagnostics-note" class="env-progress__diagnostics-note">Captures this paused or unsuccessful state in a local, redacted JSON file. Radius does not upload it.</span>
+        <span id="env-progress-diagnostics-status" class="env-progress__diagnostics-status" role="status" aria-live="polite"></span>
+      </div>
       <!-- Resource inventory stays inside Details while work is active. The
            renderer exposes it only for a terminal decision state — a stopped or
            partially failed attempt the customer must continue or roll back. A
@@ -108,7 +114,7 @@ export function environmentsPaneMarkup(
           <ul id="env-progress-state-created" class="env-progress__failure-list"></ul>
         </div>
         <div id="env-progress-state-retained-block" class="env-progress__failure-block" style="display:none;">
-          <div class="env-progress__failure-label">Created by Radius and available to roll back</div>
+          <div class="env-progress__failure-label">Created by Radius and available to delete</div>
           <ul id="env-progress-state-retained" class="env-progress__failure-list"></ul>
         </div>
         <div id="env-progress-state-reused-block" class="env-progress__failure-block" style="display:none;">
@@ -135,13 +141,53 @@ export function environmentsPaneMarkup(
       <button type="button" id="env-progress-dismiss" class="rad-btn rad-btn--secondary" aria-label="Dismiss completed environment setup progress">Dismiss</button>
     </div>
   </div>
+  <div id="env-diagnostics-modal" role="dialog" aria-modal="true" aria-labelledby="env-diagnostics-title" aria-describedby="env-diagnostics-intro" style="display:none; position:fixed; inset:0; z-index:1004; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
+    <div class="env-diagnostics__panel">
+      <div id="env-diagnostics-title" class="env-diagnostics__title" tabindex="-1">Download diagnostic snapshot</div>
+      <div id="env-diagnostics-intro" class="env-diagnostics__intro">Review what the local file will contain. Radius does not upload it.</div>
+      <section aria-labelledby="env-diagnostics-always-title">
+        <div id="env-diagnostics-always-title" class="env-diagnostics__section-title">Always included</div>
+        <ul class="env-diagnostics__list">
+          <li>Product and operation schema versions</li>
+          <li>Operation states, stages, timing, attempts, and safe classifications</li>
+          <li>Recovery, mutation, verification, and cleanup summaries</li>
+          <li>No tokens, secrets, command output, logs, credential profile names, or local paths</li>
+        </ul>
+      </section>
+      <div class="env-diagnostics__option">
+        <input type="checkbox" id="env-diagnostics-include-identifiers">
+        <label for="env-diagnostics-include-identifiers">Include contextual identifiers</label>
+      </div>
+      <div id="env-diagnostics-context-note" class="env-diagnostics__intro">Repository, branch, environment, and GitHub login can help support diagnose account and branch mismatches.</div>
+      <div id="env-diagnostics-preview" class="env-diagnostics__preview" style="display:none;">
+        <div class="env-diagnostics__section-title">Review identifiers that will be included</div>
+        <dl class="env-diagnostics__identifiers">
+          <dt>Repository</dt><dd id="env-diagnostics-repository"></dd>
+          <dt>Branch</dt><dd id="env-diagnostics-branch"></dd>
+          <dt>Environment</dt><dd id="env-diagnostics-environment"></dd>
+          <dt>GitHub account</dt><dd id="env-diagnostics-github-login"></dd>
+        </dl>
+        <div class="env-diagnostics__warning">These values may identify people, customers, or private projects. Treat them as untrusted data.</div>
+        <div id="env-diagnostics-review-block" class="env-diagnostics__option">
+          <input type="checkbox" id="env-diagnostics-reviewed-identifiers">
+          <label for="env-diagnostics-reviewed-identifiers">I reviewed these identifiers</label>
+        </div>
+      </div>
+      <div id="env-diagnostics-status" class="env-diagnostics__status" role="status" aria-live="polite"></div>
+      <div id="env-diagnostics-error" class="env-diagnostics__error" role="alert"></div>
+      <div class="env-diagnostics__buttons">
+        <button type="button" id="env-diagnostics-cancel" class="rad-btn rad-btn--neutral">Cancel</button>
+        <a id="env-diagnostics-download" class="rad-btn rad-btn--primary" download="radius-environment-operation-diagnostics.json" aria-disabled="true">Download snapshot</a>
+      </div>
+    </div>
+  </div>
   <!-- Rollback confirmation. Removing cloud resources cannot be undone, so the
        destructive command is confirmed against a server-projected preview that
        names exactly what goes and exactly what stays. The lists are filled from
        the operation record; nothing here is reconstructed in the browser. -->
   <div id="env-rollback-modal" role="dialog" aria-modal="true" aria-labelledby="env-rollback-title" aria-describedby="env-rollback-intro" style="display:none; position:fixed; inset:0; z-index:1004; background:rgba(0,0,0,0.45); align-items:center; justify-content:center;">
     <div class="env-rollback__panel">
-      <div id="env-rollback-title" class="env-rollback__title" tabindex="-1">Roll back resources created by this setup?</div>
+      <div id="env-rollback-title" class="env-rollback__title" tabindex="-1">Delete this setup and its created resources?</div>
       <div id="env-rollback-intro" class="env-rollback__intro">Radius removes only the resources it proved it created before the workflows were committed. This cannot be undone.</div>
       <div id="env-rollback-remove-block" class="env-progress__failure-block" style="display:none;">
         <div class="env-progress__failure-label">Radius will remove</div>
@@ -156,8 +202,8 @@ export function environmentsPaneMarkup(
         <ul id="env-rollback-manual" class="env-progress__failure-list"></ul>
       </div>
       <div class="env-rollback__buttons">
-        <button type="button" id="env-rollback-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Keep resources</button>
-        <button type="button" id="env-rollback-confirm" class="rad-btn rad-btn--danger" style="margin:0;">Roll back resources</button>
+        <button type="button" id="env-rollback-cancel" class="rad-btn rad-btn--neutral" style="margin:0;">Keep setup</button>
+        <button type="button" id="env-rollback-confirm" class="rad-btn rad-btn--danger" style="margin:0;">Delete setup</button>
       </div>
     </div>
   </div>
@@ -345,25 +391,26 @@ export function environmentsPaneMarkup(
 
       <!-- Azure infra -->
       <div id="panel-azure">
+        <div class="rad-field__help">Select an existing Azure resource group and AKS cluster, then choose the Kubernetes namespace for this environment. To use a new namespace, enter its name and Radius will create it during environment setup.</div>
         <div style="display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin:8px 0;">
           <div id="azure-discover-status" style="font-size:12px; color:var(--rad-text-tertiary);">Select a credential profile to discover resources.</div>
           <button type="button" id="azure-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
+          <div id="azure-discover-remediation" hidden></div>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
           <div class="rad-field">
             <label for="azure-rg-select">Resource Group</label>
             <select id="azure-rg-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-rg-custom" type="text" aria-label="Resource Group (custom)" placeholder="Enter resource group" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
             <label for="azure-cluster-select">Cluster</label>
             <select id="azure-cluster-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-cluster-custom" type="text" aria-label="Cluster (custom)" placeholder="Enter cluster name" style="display:none; margin-top:4px;" />
           </div>
           <div class="rad-field">
             <label for="azure-namespace-select">Namespace</label>
-            <select id="azure-namespace-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-namespace-custom" type="text" aria-label="Namespace (custom)" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <select id="azure-namespace-select" aria-describedby="azure-namespace-help"><option value="" disabled selected>Loading…</option></select>
+            <input id="azure-namespace-custom" type="text" aria-label="Namespace (custom)" aria-describedby="azure-namespace-help" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <div class="rad-field__help" id="azure-namespace-help">A namespace backs one environment. Pick one that no other environment on this cluster uses.</div>
           </div>
         </div>
       </div>
@@ -382,8 +429,9 @@ export function environmentsPaneMarkup(
           </div>
           <div class="rad-field">
             <label for="aws-namespace-select">Namespace</label>
-            <select id="aws-namespace-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-namespace-custom" type="text" aria-label="Namespace (custom)" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <select id="aws-namespace-select" aria-describedby="aws-namespace-help"><option value="" disabled selected>Loading…</option></select>
+            <input id="aws-namespace-custom" type="text" aria-label="Namespace (custom)" aria-describedby="aws-namespace-help" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <div class="rad-field__help" id="aws-namespace-help">A namespace backs one environment. Pick one that no other environment on this cluster uses.</div>
           </div>
           <div class="rad-field">
             <label for="aws-vpc-select">VPC</label>

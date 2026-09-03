@@ -27,6 +27,9 @@ import {
   shouldStop,
   sanitizeResumeTarget,
   OPERATION_SCHEMA_VERSION,
+  OPERATION_KIND_DELETE,
+  buildDeleteStages,
+  STAGE_DELETE_STATE_PACKAGE,
   STAGE_VERIFY,
   toClientView,
   canStartRollback,
@@ -247,7 +250,9 @@ describe("operation restart functional coverage", () => {
 
     const restored = await restart();
     expect(restored.get(op.operationId)).toMatchObject({
-      recoveryState: "verification_pending",
+      state: "action_required",
+      recoveryState: "provider_restart_decision",
+      terminal: { reason: "provider-restart-decision" },
       verification: {
         runId: "777",
         ref: "feature/cart",
@@ -256,7 +261,7 @@ describe("operation restart functional coverage", () => {
     });
   });
 
-  it("restores verification pending when stage and dispatch identity are checkpointed together", async () => {
+  it("restores verification into a paused recovery decision", async () => {
     const { first, restart } = await persistedRegistries();
     const op = operation();
     first.start(op);
@@ -274,7 +279,8 @@ describe("operation restart functional coverage", () => {
     const restored = await restart();
     expect(restored.get(op.operationId)).toMatchObject({
       currentStage: STAGE_VERIFY,
-      recoveryState: "verification_pending",
+      state: "action_required",
+      recoveryState: "provider_restart_decision",
       verification: {
         workflow: "radius-verify-credentials.yml",
         ref: "feature/cart",
@@ -311,8 +317,8 @@ describe("operation restart functional coverage", () => {
 
     const restored = await restart();
     const recovered = restored.get(op.operationId);
-    expect(recovered.state).toBe("failed_partial");
-    expect(recovered.failure.code).toBe("operation-interrupted");
+    expect(recovered.state).toBe("action_required");
+    expect(recovered.terminal.reason).toBe("provider-restart-decision");
     expect(recovered.setupArtifacts.cleanup.state).toBe("not_needed");
   });
 
@@ -530,8 +536,8 @@ describe("operation restart functional coverage", () => {
       deleteGitHubEnvironment: async () => {}
     });
     expect(recovered).toMatchObject({
-      state: "failed_partial",
-      failure: { code: "operation-interrupted" },
+      state: "action_required",
+      terminal: { reason: "provider-restart-decision" },
       setupArtifacts: {
         azureApp: { state: "not_started" },
         cleanup: { state: "not_needed" }
@@ -586,7 +592,8 @@ describe("operation restart functional coverage", () => {
       }
     });
     expect(recovered).toMatchObject({
-      state: "failed_partial",
+      state: "action_required",
+      terminal: { reason: "provider-restart-decision" },
       setupArtifacts: {
         githubEnvironment: { state: "not_started" },
         cleanup: { state: "not_needed" }
@@ -770,7 +777,8 @@ describe("cooperative control functional coverage", () => {
     const restored = await restart();
     const recovered = restored.get(op.operationId);
     expect(recovered.context.githubLogin).toBe("alice");
-    expect(recovered.state).toBe("running");
+    expect(recovered.state).toBe("action_required");
+    expect(recovered.terminal.reason).toBe("provider-restart-decision");
     expect(recovered.control.attempts.verification).toBe(1);
     expect(recovered.control.outcomes).toEqual([
       expect.objectContaining({
@@ -866,7 +874,8 @@ describe("cooperative control functional coverage", () => {
     expect(recovered.control.attempts).toEqual({
       setup: 1,
       verification: 0,
-      cleanup: 0
+      cleanup: 0,
+      deletion: 0
     });
     expect(recovered.control.commands).toEqual([]);
     // The version 1 ledger had no workflow provenance, so the restored record
@@ -906,6 +915,53 @@ describe("cooperative control functional coverage", () => {
     expect(recovered.state).toBe("input_required");
     expect(recovered.recoveryState).toBe("waiting_input");
     expect(legacyRecoveryQuarantine(recovered)).toBeNull();
+  });
+
+  it("durably adds the state-package stage to a retryable version 6 deletion with warnings", async () => {
+    const { first, filePath, restart } = await persistedRegistries();
+    const op = createOperation({
+      provider: "azure",
+      repo: "contoso/store",
+      environment: "dev",
+      kind: OPERATION_KIND_DELETE,
+      stages: buildDeleteStages()
+    });
+    op.context = { githubLogin: "alice" };
+    op.request = {
+      repo: "contoso/store",
+      environment: "dev",
+      provider: "azure",
+      clientId: "app-1",
+      tenantId: "tenant-1",
+      repoId: 42
+    };
+    first.start(op);
+    finish(op, "succeeded_with_warnings");
+    await first.persist();
+
+    const envelope = JSON.parse(await fs.readFile(filePath, "utf8"));
+    envelope.operations[0].schemaVersion = 6;
+    envelope.operations[0].stages = envelope.operations[0].stages.filter(
+      (stage) => stage.id !== STAGE_DELETE_STATE_PACKAGE
+    );
+    await fs.writeFile(filePath, JSON.stringify(envelope, null, 2));
+
+    const recovered = (await restart()).get(op.operationId);
+
+    expect(
+      recovered.stages.find((stage) => stage.id === STAGE_DELETE_STATE_PACKAGE)
+    ).toMatchObject({ state: "pending" });
+    expect(
+      JSON.parse(await fs.readFile(filePath, "utf8")).operations[0]
+    ).toMatchObject({
+      schemaVersion: OPERATION_SCHEMA_VERSION,
+      stages: expect.arrayContaining([
+        expect.objectContaining({
+          id: STAGE_DELETE_STATE_PACKAGE,
+          state: "pending"
+        })
+      ])
+    });
   });
 
   it("keeps the browser view free of secrets, evidence, and the private ledger", async () => {
@@ -976,7 +1032,7 @@ describe("the checkpoint every Azure mutation passes through", () => {
       {
         status: 409,
         code: "provider-rollback-pending",
-        error: expect.stringContaining("must roll back")
+        error: expect.stringContaining("must delete the setup resources")
       }
     ]);
   });

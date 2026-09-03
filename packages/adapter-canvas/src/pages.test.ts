@@ -177,6 +177,7 @@ describe("compiled page entry API contracts", () => {
       "deploying-page",
       [
         "/api/run-remediation",
+        "/api/delete-conflict",
         "/api/discover-branches",
         "/api/list-applications",
         "/api/list-environments",
@@ -531,6 +532,7 @@ describe("compiled graph page network contracts", () => {
     [
       "deployed-graph-page",
       [
+        "/api/delete-conflict",
         "/api/deploy",
         "/api/list-deployments",
         "/api/deployed-graph",

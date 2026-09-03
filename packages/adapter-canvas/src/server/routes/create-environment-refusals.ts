@@ -3,10 +3,16 @@ import type {
   CreateEnvironmentRefusal,
   OperationStartResult
 } from "./create-environment-types.js";
+import { setupStartConflictResponse } from "./operation-start-conflict.js";
+import {
+  findNamespaceClaimConflict,
+  loadNamespaceClaims,
+  type NamespaceClaimsPorts
+} from "./create-environment-namespace-claims.js";
 
 // Seam 1 of the `POST /api/create-environment` slice: the refusal ladder.
 //
-// Six rungs, in this exact order, every one of them reached before the route
+// Seven rungs, in this exact order, every one of them reached before the route
 // performs any GitHub mutation:
 //
 //   1. 403 not server-owned            (before the body is even read)
@@ -15,10 +21,18 @@ import type {
 //   4. 409 continuation does not match the operation it claims to continue
 //   5. 409 another setup is already running for the repo
 //   6. 500 the setup recovery record could not be persisted
+//   7. 409 the namespace is held by another environment, or its claims
+//          could not be established
 //
 // Rung 6 also finalizes the operation as failed, because a record that cannot be
 // saved must not be left looking live. Rungs are returned as data rather than
 // written to the socket so the ladder is assertable without a live response.
+//
+// The namespace rung runs last of the pre-mutation checks, once the operation
+// this request belongs to is settled. That ordering is required rather than
+// cosmetic: the claim read is authoritative, so it must run as the GitHub
+// account pinned to this operation, and that account is only known once the
+// operation is adopted or started. It still precedes every GitHub mutation.
 
 export const SERVER_OWNED_REFUSAL: CreateEnvironmentRefusal = {
   status: 403,
@@ -81,6 +95,7 @@ export interface AdmissionPorts {
   errorMessage(error: unknown): string;
   stageAuthorizeIdentity: string;
   stageConfigureEnvironment: string;
+  namespaceClaimsFor(operationId: string): NamespaceClaimsPorts | null;
 }
 
 export interface AdmittedCreateEnvironmentRequest {
@@ -110,7 +125,59 @@ export function refuseUnlessServerOwned(
   return isServerOwned ? null : SERVER_OWNED_REFUSAL;
 }
 
-// Rungs 2 through 6. Returns the adopted or freshly started operation on
+// The namespace rung, factored out because it runs once the operation whose
+// pinned GitHub account will perform the read is known: adopted on the
+// continuation path, freshly started otherwise. It reads through that account
+// rather than the ambient one, so a customer who passed readiness with the
+// selected account is never refused because some other account cannot see the
+// repository.
+async function refuseClaimedNamespace(
+  data: CreateEnvironmentRequestData,
+  targetRepo: string,
+  envName: string,
+  provider: string,
+  operationId: string,
+  ports: AdmissionPorts
+): Promise<CreateEnvironmentRefusal | null> {
+  const unavailable = (reason: string): CreateEnvironmentRefusal => ({
+    status: 409,
+    body: {
+      error: `Radius created nothing because it could not confirm which namespaces ${targetRepo}'s environments already use: ${reason}`,
+      code: "namespace-claims-unavailable"
+    }
+  });
+  const claimsPorts = ports.namespaceClaimsFor(operationId);
+  if (!claimsPorts) {
+    return unavailable(
+      "the GitHub account pinned to this setup is unavailable."
+    );
+  }
+  const claims = await loadNamespaceClaims(targetRepo, claimsPorts);
+  if (!claims.ok) return unavailable(claims.reason);
+  const conflict = findNamespaceClaimConflict(claims.claims, {
+    provider,
+    subscriptionId: data.subscriptionId ?? "",
+    accountId: data.accountId ?? "",
+    region: data.region ?? "",
+    cluster: data.cluster ?? "",
+    namespace: data.namespace ?? "",
+    // Saving an environment must not collide with the namespace it already
+    // holds. The form locks the name on edit, so the submitted name is the
+    // environment being written.
+    excludeEnvironment: envName
+  });
+  if (!conflict) return null;
+  return {
+    status: 409,
+    body: {
+      error: `Namespace "${conflict.namespace}" on cluster "${conflict.cluster}" already belongs to environment "${conflict.environment}". Radius allows one environment per namespace, so choose a different namespace or deploy to "${conflict.environment}".`,
+      code: "namespace-already-claimed",
+      environment: conflict.environment
+    }
+  };
+}
+
+// Rungs 2 through 7. Returns the adopted or freshly started operation on
 // success, with the configure-environment stage already entered.
 export async function admitCreateEnvironmentRequest(
   data: CreateEnvironmentRequestData,
@@ -188,6 +255,19 @@ export async function admitCreateEnvironmentRequest(
         }
       };
     }
+    // Rung 7, on the continuation path: the operation is proven to match this
+    // request, so its pinned account is the one to read the claims with.
+    const adoptedRefusal = await refuseClaimedNamespace(
+      data,
+      targetRepo,
+      envName,
+      provider,
+      existing.operationId,
+      ports
+    );
+    if (adoptedRefusal) {
+      return { outcome: "refused", operation: null, refusal: adoptedRefusal };
+    }
     ports.enterStage(existing, ports.stageConfigureEnvironment);
     return {
       outcome: "admitted",
@@ -212,23 +292,12 @@ export async function admitCreateEnvironmentRequest(
   });
   const started = ports.startOperation(operation);
   if (!started.ok) {
-    const previousCleanup = started.reason === "previous-cleanup-required";
     return {
       outcome: "refused",
       operation: null,
       refusal: {
         status: 409,
-        body: {
-          error:
-            previousCleanup ?
-              `An earlier setup for ${targetRepo} must finish rollback before a new setup can start.`
-            : `Setup is already running for ${targetRepo}.`,
-          code:
-            previousCleanup ?
-              "previous-cleanup-required"
-            : "operation-in-progress",
-          operationId: started.conflict.operationId
-        }
+        body: setupStartConflictResponse(targetRepo, started)
       }
     };
   }
@@ -260,6 +329,19 @@ export async function admitCreateEnvironmentRequest(
         }
       }
     };
+  }
+  // Rung 7, on the fresh-start path: the record now exists, so the account
+  // pinned to it is the one to read the claims with.
+  const startedRefusal = await refuseClaimedNamespace(
+    data,
+    targetRepo,
+    envName,
+    provider,
+    operation.operationId,
+    ports
+  );
+  if (startedRefusal) {
+    return { outcome: "refused", operation, refusal: startedRefusal };
   }
   ports.enterStage(operation, ports.stageConfigureEnvironment);
   return {

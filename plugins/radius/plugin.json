@@ -1,7 +1,12 @@
 {
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "radius",
-  "version": "0.0.0",
-  "description": "Model, visualize, and deploy applications with Radius from the GitHub Copilot app and CLI. Analyze your source code, build and diff the application graph, configure cloud environments, and deploy through GitHub Actions.",
+  "version": "0.1.0",
+  "description": "Model, visualize, and deploy applications with Radius from the GitHub Copilot app and CLI.",
+  "author": {
+    "name": "Radius",
+    "url": "https://github.com/radius-project"
+  },
   "license": "Apache-2.0",
   "repository": "https://github.com/radius-project/ai-extensions",
   "homepage": "https://radapp.io",
@@ -14,6 +19,6 @@
     "deploy",
     "canvas"
   ],
-  "skills": "./skills/",
-  "extensions": "."
+  "extensions": "extensions",
+  "logo": "assets/preview.png"
 }

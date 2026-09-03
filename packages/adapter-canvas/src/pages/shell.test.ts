@@ -28,7 +28,9 @@ describe("pageShell", () => {
     expect(html).toContain(
       'title="https://github.com/radius-project/ai-extensions/issues/new?template=feedback-or-bug-report.yml"'
     );
-    expect(html).toContain('title="https://radapp.io"');
+    expect(html).toContain(
+      'title="https://edge.docs.radapp.io/integrations/github-copilot-app/canvas-extension/"'
+    );
   });
 
   it("renders larger top-navigation icons without a border or filled background", () => {
@@ -265,6 +267,51 @@ describe("the graph build chip in the shell", () => {
   });
 });
 
+describe("the deploy notification chip in the shell", () => {
+  const shell = pageShell("Environments", "<div></div>", "environments");
+
+  it("ships on every page, hidden until a deploy has something to report", () => {
+    // A deploy outlives the Deployments page that started it, and success used
+    // to be announced only there, so the chip has to reach the user wherever
+    // they wandered off to.
+    const html = pageShell("Applications", "<div></div>", "applications");
+    expect(html).toContain('id="rad-deploychip"');
+    expect(html).toContain('id="rad-deploychip-label"');
+    expect(html).toMatch(
+      /<a class="rad-opchip" id="rad-deploychip" href="\/\?page=deploying" hidden/
+    );
+  });
+
+  it("announces itself politely and never acts on its own", () => {
+    expect(shell).toMatch(/id="rad-deploychip"[^>]*aria-live="polite"/);
+    expect(shell).toContain(
+      'class="rad-opchip__dot" id="rad-deploychip-dot" aria-hidden="true"'
+    );
+    expect(shell).not.toContain('rad-deploychip" onclick');
+  });
+
+  it("carries the poller that fills it in", () => {
+    expect(shell).toContain("/api/deploy-notification");
+    expect(shell).toContain("radiusDeployChipAck");
+    expect(shell).toContain(browserEntryMarker("deploy-chip"));
+    expect(shell.split(browserScript("deploy-chip"))).toHaveLength(2);
+  });
+
+  it("keeps every tab named when the nav collapses to icons", () => {
+    // The narrow-panel rule hides .rad-topnav__label, which would strip the
+    // anchor's accessible name if the label were its only text.
+    for (const label of ["Applications", "Environments", "Deployments"]) {
+      expect(shell).toContain(`aria-label="${label}"`);
+    }
+  });
+
+  it("takes its own slot in the chip row rather than evicting a sibling", () => {
+    expect(shell).toMatch(
+      /<span class="rad-topnav__chips">[\s\S]*id="rad-graphchip"[\s\S]*id="rad-deploychip"[\s\S]*id="rad-opchip"[\s\S]*<\/span><\/nav>/
+    );
+  });
+});
+
 describe("pageShell document structure", () => {
   const html = pageShell("Application Graph", '<p id="body">hello</p>');
 
@@ -406,7 +453,9 @@ describe("pageShell document structure", () => {
     expect(html).toContain(
       'href="https://github.com/radius-project/ai-extensions/issues/new?template=feedback-or-bug-report.yml"'
     );
-    expect(html).toContain('href="https://radapp.io"');
+    expect(html).toContain(
+      'href="https://edge.docs.radapp.io/integrations/github-copilot-app/canvas-extension/"'
+    );
     expect(html).toContain('rel="noopener noreferrer"');
   });
 

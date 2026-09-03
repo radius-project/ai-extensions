@@ -14,6 +14,10 @@ import type {
   DomSelectElement
 } from "../ports.js";
 import { readPageState } from "./state.js";
+import {
+  showGraphModelingFailure,
+  unsupportedGraphModelMessage
+} from "./graph-modeling-failure.js";
 
 const ENTRY_KEY = "graph-diff-page";
 export const GRAPH_DIFF_STATE_ID = "radius-graph-diff-state";
@@ -69,6 +73,7 @@ export function initializeGraphDiffPage(
     state.resources.length > 0 ?
       requireBrowserFunction(globalScope, "radiusRenderGraph")
     : null;
+  const setError = requireBrowserFunction(globalScope, "radiusSetGraphError");
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
   const baseSelect = context.dom.selectById("base-branch");
@@ -92,12 +97,11 @@ export function initializeGraphDiffPage(
   const showModelingFailure = (message: string): void => {
     controller?.destroy();
     controller = null;
-    requireBrowserFunction(globalScope, "radiusSetGraphError")(
-      "graph-container",
-      message
-    );
-    const status = context.dom.byId("diff-status");
-    if (status) status.style.display = "none";
+    showGraphModelingFailure(context, setError, message, {
+      containerId: "graph-container",
+      statusIds: ["diff-status"],
+      staleContentIds: ["graph-diff-summary"]
+    });
     modelingFailureVisible = true;
   };
   if (state.modelingError) showModelingFailure(state.modelingError);
@@ -151,6 +155,8 @@ export function initializeGraphDiffPage(
     if (modelingFailureVisible) {
       const graphContainer = context.dom.byId("graph-container");
       if (graphContainer) graphContainer.innerHTML = "";
+      const summary = context.dom.byId("graph-diff-summary");
+      if (summary) summary.style.display = "";
       modelingFailureVisible = false;
     }
     const requestGeneration = ++generation;
@@ -193,13 +199,9 @@ export function initializeGraphDiffPage(
       .then((payload) => {
         if (requestGeneration !== generation) return;
         stopProgress();
-        if (readBoolean(payload, "appBicepUnsupported")) {
-          showStatus(
-            context,
-            readString(payload, "error") ||
-              "The Radius app-bicep skill cannot model this repository.",
-            "error"
-          );
+        const unsupported = unsupportedGraphModelMessage(payload);
+        if (unsupported) {
+          showModelingFailure(unsupported);
         } else if (readBoolean(payload, "needsAppBicep")) {
           showStatus(
             context,

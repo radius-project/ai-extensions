@@ -4,6 +4,8 @@
 // process-spawning surface besides the deploy monitor and infra modules.
 
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type {
   ChildProcess,
   ExecFileException,
@@ -71,6 +73,7 @@ export interface GhPackageCredentials {
   token: string;
   username: string;
   source: Exclude<GhPackageCredentialSource, "unavailable">;
+  scopes?: readonly string[];
 }
 
 type GhPackageCredentialResolution =
@@ -164,8 +167,10 @@ export function parseGhVersion(
   return match ? [Number(match[1]), Number(match[2])] : null;
 }
 
-export function supportsGhMultiAccount(version: [number, number]): boolean {
-  return version[0] > 2 || (version[0] === 2 && version[1] >= 40);
+export function supportsWorkflowDispatchRunDetails(
+  version: [number, number]
+): boolean {
+  return version[0] > 2 || (version[0] === 2 && version[1] >= 87);
 }
 
 const MIN_OPAQUE_TOKEN_REDACTION_LENGTH = 12;
@@ -202,8 +207,54 @@ function errorMessage(error: unknown): string {
 // `workflow` (so setup acts as the identity the user sees), and fall back to a
 // stored keyring login only when we must for scope. The snapshot of `gh auth
 // status` is memoized.
-function ghExecutable() {
+
+// A bare name, never an absolute path: the GitHub Copilot app prepends its
+// bundled GitHub CLI directory to PATH before forking canvas extensions, so
+// letting the OS resolve `gh` against the inherited PATH picks up the bundled
+// CLI without requiring a machine-wide install or a hardcoded versioned path.
+function ghExecutable(): string {
   return process.platform === "win32" ? "gh.exe" : "gh";
+}
+
+function searchPathKey(key: string): string | null {
+  if (process.platform !== "win32") {
+    return key === "PATH" || key === "PATHEXT" ? key : null;
+  }
+  const lower = key.toLowerCase();
+  return lower === "path" || lower === "pathext" ? lower : null;
+}
+
+// Node replaces (rather than extends) the child environment when `env` is set,
+// and the token-stripping call sites below depend on that. An override that
+// omits PATH therefore costs the child the app-prepended search path that makes
+// the bundled `gh` resolvable. Windows hides this because libuv back-fills PATH
+// from the parent, but on macOS and Linux execvp falls back to a bare system
+// default and the bundled CLI disappears. Carry the inherited search path across
+// per key, without re-adding anything else a caller deliberately dropped, and
+// never override a search path the caller set itself.
+function withInheritedPath(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (!env) return { ...process.env };
+  const next = { ...env };
+  const supplied = new Set(
+    Object.keys(next)
+      .map(searchPathKey)
+      .filter((key): key is string => key !== null)
+  );
+  for (const [key, value] of Object.entries(process.env)) {
+    const inheritedKey = searchPathKey(key);
+    if (inheritedKey && !supplied.has(inheritedKey)) {
+      next[key] = value;
+    }
+  }
+  return next;
+}
+
+function execGhFile(
+  args: string[],
+  options: ExecFileOptionsWithStringEncoding,
+  callback: CliCallback
+): ChildProcess {
+  return execFile(ghExecutable(), args, options, callback);
 }
 
 // Memoized snapshot of `gh auth status` (default env + token-stripped env) and
@@ -216,10 +267,10 @@ let _ghSnapshotPromise: Promise<GhSnapshot> | null = null;
 let _ghStrategy: GhTokenStrategy | null = null;
 
 // Single-flight resolution of the credential GHCR/GitHub Packages calls use.
-// Memoized alongside the snapshot (and cleared by the same reset) so the
-// identity endpoints can report the credential that will ACTUALLY be used —
-// including the injected-token fallback taken when the keyring lookup fails —
-// without spawning a second `gh auth token` per read.
+// Memoized alongside the snapshot (and cleared by the same reset) so identity
+// endpoints can report the credential that will ACTUALLY be used without
+// spawning a second `gh auth token` per read. Destructive retries explicitly
+// bypass this cache after the user may have refreshed package scopes.
 let _ghPackageCredentialPromise: Promise<GhPackageCredentialResolution> | null =
   null;
 const GH_KEYRING_TOKEN_TIMEOUT_MS = 8000;
@@ -292,8 +343,7 @@ export function decideGhTokenStrategy({
 // on a slow/locked-down network.
 function ghAuthStatusText(env: NodeJS.ProcessEnv): Promise<string> {
   return new Promise((resolve) => {
-    execFile(
-      ghExecutable(),
+    execGhFile(
       ["auth", "status", "--hostname", "github.com"],
       {
         env,
@@ -414,7 +464,7 @@ export function resetGhIdentityCache(): void {
 // (the identity endpoints and the deploy flow), which is before any
 // workflow-scope write, so the strategy is in effect when it matters.
 function ghChildEnv(baseEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env = { ...(baseEnv || process.env) };
+  const env = withInheritedPath(baseEnv);
   if (ghStrategyCached().useKeyring) {
     delete env.GH_TOKEN;
     delete env.GITHUB_TOKEN;
@@ -467,18 +517,21 @@ function ensurePackageCredential(): Promise<GhPackageCredentialResolution> {
       return {
         ok: false,
         error:
-          "No GitHub account is available for package setup. Sign in with: gh auth login"
+          "No GitHub account is available for package setup. Sign in with GitHub CLI, then retry."
       };
     }
-    const hasKeyringEntry = snapshot.keyringAccts.some(
-      (a) => a.login === login
-    );
-    if (hasKeyringEntry) {
+    const keyringAccount = snapshot.keyringAccts.find((a) => a.login === login);
+    if (keyringAccount) {
       const token = await ghKeyringTokenForUser(login);
       if (token) {
         return {
           ok: true,
-          credentials: { token, username: login, source: "keyring" }
+          credentials: {
+            token,
+            username: login,
+            source: "keyring",
+            scopes: [...keyringAccount.scopes]
+          }
         };
       }
     }
@@ -490,13 +543,14 @@ function ensurePackageCredential(): Promise<GhPackageCredentialResolution> {
         credentials: {
           token: injected,
           username: login,
-          source: "injected-token"
+          source: "injected-token",
+          scopes: [...(snapshot.tokenAcct?.scopes || [])]
         }
       };
     }
     return {
       ok: false,
-      error: `Could not obtain a GitHub token for @${login}. Sign in with: gh auth login`
+      error: `Could not obtain a GitHub token for @${login}. Sign in with GitHub CLI, then retry.`
     };
   })();
   return _ghPackageCredentialPromise;
@@ -650,8 +704,7 @@ function ghKeyringTokenForUser(login: string): Promise<string> {
   delete env.GITHUB_TOKEN;
   delete env.GH_HOST;
   return new Promise((resolve) => {
-    execFile(
-      ghExecutable(),
+    execGhFile(
       ["auth", "token", "--hostname", "github.com", "--user", login],
       { env, timeout: GH_KEYRING_TOKEN_TIMEOUT_MS, windowsHide: true },
       (e, stdout) => {
@@ -663,8 +716,7 @@ function ghKeyringTokenForUser(login: string): Promise<string> {
 
 function ghVersion(): Promise<[major: number, minor: number] | null> {
   return new Promise((resolve) => {
-    execFile(
-      ghExecutable(),
+    execGhFile(
       ["--version"],
       { timeout: 5000, windowsHide: true },
       (error, stdout) => {
@@ -728,18 +780,13 @@ function pinnedGhExec(
     env,
     encoding: "utf8"
   };
-  return execFile(
-    ghExecutable(),
-    args,
-    execOptions,
-    (error, stdout, stderr) => {
-      callback(
-        error ? selectedExecError(error, redact) : null,
-        redact((stdout || "").toString()),
-        redact((stderr || "").toString())
-      );
-    }
-  );
+  return execGhFile(args, execOptions, (error, stdout, stderr) => {
+    callback(
+      error ? selectedExecError(error, redact) : null,
+      redact((stdout || "").toString()),
+      redact((stderr || "").toString())
+    );
+  });
 }
 
 export async function createSelectedGhExecutor(
@@ -748,6 +795,17 @@ export async function createSelectedGhExecutor(
 ): Promise<SelectedGhExecutor> {
   const login = selectedLogin.trim();
   if (!login) throw new Error("A GitHub account login is required.");
+  const version = await ghVersion();
+  if (!version) {
+    throw new Error(
+      "Radius could not determine the installed GitHub CLI version. Install GitHub CLI 2.87 or newer and retry."
+    );
+  }
+  if (!supportsWorkflowDispatchRunDetails(version)) {
+    throw new Error(
+      "GitHub CLI 2.87 or newer is required so workflow dispatch returns the created run. Upgrade GitHub CLI and retry."
+    );
+  }
 
   const snapshot = await ensureGhSnapshot();
   const injectedToken = getInjectedGhToken(env);
@@ -774,13 +832,6 @@ export async function createSelectedGhExecutor(
         account: keyringAccount,
         source: "keyring"
       };
-    } else {
-      const version = await ghVersion();
-      if (version && !supportsGhMultiAccount(version)) {
-        throw new Error(
-          `GitHub CLI 2.40 or newer is required to select @${login} without relying on the active account. Upgrade GitHub CLI and retry.`
-        );
-      }
     }
   }
   const injectedCredential =
@@ -794,7 +845,7 @@ export async function createSelectedGhExecutor(
   const useInjected =
     injectedCredential !== null &&
     (keyringCredential === null ||
-      requiredScopeScore(injectedAccount) >
+      requiredScopeScore(injectedAccount) >=
         requiredScopeScore(keyringCredential.account));
   const selectedCredential =
     useInjected ? injectedCredential : keyringCredential;
@@ -1062,8 +1113,7 @@ export function switchGhKeyringAccount(
   delete env.GITHUB_TOKEN;
   delete env.GH_HOST;
   return new Promise((resolve) => {
-    execFile(
-      ghExecutable(),
+    execGhFile(
       ["auth", "switch", "--hostname", "github.com", "--user", selectedLogin],
       { env, timeout: 15000, windowsHide: true },
       (error, _stdout, stderr) => {
@@ -1095,7 +1145,12 @@ export function switchGhKeyringAccount(
 // credential can be resolved. `username` is always the acting login so the
 // Basic-auth pair matches the token, and `source` names the credential that was
 // actually resolved so callers can give guidance that applies to it.
-export async function getGhPackageCredentials(): Promise<GhPackageCredentials> {
+export async function getGhPackageCredentials({
+  fresh = false
+}: {
+  fresh?: boolean;
+} = {}): Promise<GhPackageCredentials> {
+  if (fresh) resetGhIdentityCache();
   const resolution = await ensurePackageCredential();
   if (!resolution.ok) throw new Error(resolution.error);
   return resolution.credentials;
@@ -1105,6 +1160,13 @@ export async function getGhPackageCredentials(): Promise<GhPackageCredentials> {
 // passes "gh", "gh.exe", or an absolute path to the executable.
 function isGhCmd(cmd: string): boolean {
   return /(?:^|[\\/])gh(?:\.exe)?$/i.test(cmd);
+}
+
+// Azure CLI's Windows entry point is an az.cmd batch shim. Explicit .cmd and
+// .bat paths need the same treatment, while native CLIs retain argv boundaries
+// by going directly through execFile.
+function isWindowsBatchCommand(cmd: string): boolean {
+  return /(?:^|[\\/])az(?:\.cmd)?$/i.test(cmd) || /\.(?:cmd|bat)$/i.test(cmd);
 }
 
 function quoteWindowsCmdArgument(value: string): string {
@@ -1128,6 +1190,55 @@ function windowsCmdCommandLine(command: string, args: string[]): string {
   return executableNeedsQuoting ? `"${commandLine}"` : commandLine;
 }
 
+// Matches cmd.exe's default when PATHEXT is absent from the child environment.
+const DEFAULT_WINDOWS_PATHEXT = ".COM;.EXE;.BAT;.CMD";
+
+function readSearchPathVar(
+  env: NodeJS.ProcessEnv,
+  name: "path" | "pathext"
+): string {
+  for (const [key, value] of Object.entries(env)) {
+    if (searchPathKey(key) === name && value) return value;
+  }
+  return "";
+}
+
+// CreateProcess resolves a bare command name by appending `.exe` only, while
+// cmd.exe searches every PATHEXT extension. A CLI installed solely as a batch
+// shim -- AWS CLI v1 from pip ships `aws.cmd` -- is therefore invisible to a
+// direct launch, so decide which launcher a bare name reaches by searching PATH
+// the way cmd.exe would, and report whether the winning entry is a batch file.
+//
+// Choosing up front rather than retrying a failed direct launch matters twice
+// over. It keeps one spawn per call, so the ChildProcess cliExec returns is
+// always the process that runs the command. And it never hands an unresolvable
+// name to cmd.exe, whose search starts in the current directory: the CLI
+// children inherit the open repository as their working directory, so a repo
+// that carried its own `kubectl.cmd` would otherwise be executed on any machine
+// where the real CLI is absent.
+function resolvesToWindowsBatchShim(
+  cmd: string,
+  env: NodeJS.ProcessEnv
+): boolean {
+  if (/[\\/.]/.test(cmd)) return false;
+  const extensions = (
+    readSearchPathVar(env, "pathext") || DEFAULT_WINDOWS_PATHEXT
+  )
+    .split(";")
+    .map((extension) => extension.trim())
+    .filter((extension) => extension.length > 0);
+  for (const rawDirectory of readSearchPathVar(env, "path").split(";")) {
+    const directory = rawDirectory.trim().replace(/^"(.*)"$/, "$1");
+    if (!directory) continue;
+    for (const extension of extensions) {
+      if (existsSync(join(directory, `${cmd}${extension}`))) {
+        return /^\.(?:cmd|bat)$/i.test(extension);
+      }
+    }
+  }
+  return false;
+}
+
 // Azure CLI 2.88+ "agentic session": when COPILOT_AGENT_SESSION_ID is set, az injects it as a
 // `client_session` query param + a claims challenge that BYPASSES the token cache and forces a
 // fresh ESTS fetch on every call. The GitHub Copilot app sets this var for all child processes,
@@ -1137,43 +1248,47 @@ function windowsCmdCommandLine(command: string, args: string[]): string {
 // for infra setup, so agentic tagging is both unwanted and fatal here — strip it so az uses normal
 // cache-first user auth. Applies to every child CLI (az/aws/kubectl/gh); none of them need it.
 function withoutAgentSession(baseEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env = { ...(baseEnv || process.env) };
+  const env = withInheritedPath(baseEnv);
   delete env.COPILOT_AGENT_SESSION_ID;
   return env;
 }
 
-// Run a CLI (gh/az/aws). GitHub CLI ships as gh.exe on Windows, so invoke that
-// executable directly: passing it through cmd.exe would let metacharacters in an
-// API path (for example, '&' in a query string) be interpreted as shell syntax.
-// Other Windows CLIs may only provide `.cmd` shims. Route those through cmd.exe
-// with one verbatim command line so the validated argument shapes used here
-// retain their boundaries. A simple executable name must stay unquoted because
-// cmd.exe's first-token quote stripping breaks Azure CLI's batch launcher.
+// Run a CLI (gh/az/aws/kubectl). Native Windows executables run directly so
+// shell metacharacters remain ordinary argv content. Azure CLI's az.cmd
+// launcher, explicitly named batch files, and bare names that PATH resolves to a
+// batch shim go through cmd.exe with one verbatim command line. A simple
+// executable name must stay unquoted because cmd.exe's first-token quote
+// stripping breaks Azure CLI's batch launcher.
 export function cliExec(
   cmd: string,
   args: string[],
   opts: CliOptions,
   cb: CliCallback
 ): ChildProcess {
-  const isWindows = process.platform === "win32";
-  const isWindowsGh = isWindows && isGhCmd(cmd);
-  const file =
-    isWindowsGh ? ghExecutable()
-    : isWindows ? "cmd.exe"
-    : cmd;
-  const finalArgs =
-    isWindows && !isWindowsGh ? ["/c", windowsCmdCommandLine(cmd, args)] : args;
   const execOpts: ExecFileOptionsWithStringEncoding = {
     maxBuffer: 10 * 1024 * 1024,
     windowsHide: true,
     ...opts,
     encoding: "utf8"
   };
-  if (isWindows && !isWindowsGh) {
-    execOpts.windowsVerbatimArguments = true;
-  }
   if (isGhCmd(cmd)) execOpts.env = ghChildEnv(execOpts.env);
   execOpts.env = withoutAgentSession(execOpts.env);
+  const isWindows = process.platform === "win32";
+  const isWindowsGh = isWindows && isGhCmd(cmd);
+  const usesWindowsCmd =
+    isWindows &&
+    !isWindowsGh &&
+    (isWindowsBatchCommand(cmd) ||
+      resolvesToWindowsBatchShim(cmd, execOpts.env));
+  const file =
+    isWindowsGh ? ghExecutable()
+    : usesWindowsCmd ? "cmd.exe"
+    : cmd;
+  const finalArgs =
+    usesWindowsCmd ? ["/c", windowsCmdCommandLine(cmd, args)] : args;
+  if (usesWindowsCmd) {
+    execOpts.windowsVerbatimArguments = true;
+  }
   return execFile(file, finalArgs, execOpts, cb);
 }
 
@@ -1204,7 +1319,7 @@ export function runGhKeyringCommand(
   args: string[],
   opts: CommandOptions = {}
 ): Promise<string> {
-  const env = { ...(opts.env || process.env) };
+  const env = withInheritedPath(opts.env);
   delete env.GH_TOKEN;
   delete env.GITHUB_TOKEN;
   delete env.GH_HOST;

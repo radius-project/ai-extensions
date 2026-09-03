@@ -17,6 +17,11 @@ import { createRadiusTools } from "./create-radius-tools.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import { createAppModelHandoff } from "./app-model-handoff.js";
 import {
+  createModelingActivity,
+  observeWorkspaceModelingRun
+} from "./modeling-activity.js";
+import { createMissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
+import {
   RADIUS_CANVAS_INSTANCE_ID,
   RADIUS_SESSION_START_CONTEXT
 } from "./declarations.js";
@@ -123,6 +128,30 @@ export function createRadiusExtension(
     return true;
   }
 
+  const missingModelHandoffs = createMissingModelHandoffClaims(() =>
+    deps.clock.now()
+  );
+
+  // Modeling runs already under way, so a render that finds no model does not
+  // ask the agent to generate one that something else is mid-way through
+  // generating. Extension-scoped, because a run outlives the canvas instance
+  // whose render observed it.
+  //
+  // Staging directories only ever describe the workspace checkout, so the probe
+  // is refused for any other target: local activity says nothing about a remote
+  // branch or a different repository, and reading it as evidence would let
+  // unrelated work silence a handoff that should have been sent.
+  const modelingActivity = createModelingActivity({
+    now: () => deps.clock.now(),
+    observeStagedRun: (repo, branches, workspace) =>
+      observeWorkspaceModelingRun(
+        repo,
+        branches,
+        workspace,
+        deps.appModel.modelingRunLastActivityAtMs
+      )
+  });
+
   const pullRequestGraphDiffGuard = createPullRequestGraphDiffGuard({
     hasRadiusApplicationModel: (workspacePath) =>
       deps.workspace.hasRadiusApplicationModel(workspacePath),
@@ -179,6 +208,14 @@ export function createRadiusExtension(
       evaluateAppSourceForBranch(repo, branch, state),
     send: (message) =>
       Promise.resolve(deps.session.get().send(message)).then(() => undefined),
+    modelingInFlight: (repo, branches, context, waitStartedAtMs) =>
+      modelingActivity.inFlight(repo, branches, {
+        repo: context.workspaceRepo || "",
+        branch: context.workspaceBranch || "",
+        path: context.workspacePath,
+        waitStartedAtMs
+      }),
+    wait: (ms) => deps.clock.wait(ms),
     log: (message) => {
       try {
         deps.session.get().log?.(message);
@@ -189,10 +226,12 @@ export function createRadiusExtension(
     shouldRequestRefresh,
     releaseRefreshMemo: (key: string) => {
       requestedRefreshes.delete(key);
-    }
+    },
+    missingModelHandoffs
   });
-  deps.hostCallbacks.setAppBicepHandoff(({ repo, branches, page, state }) =>
-    handOffAppModel({ repo, branches, page, state })
+  deps.hostCallbacks.setAppBicepHandoff(
+    ({ repo, branches, page, progressView, state }) =>
+      handOffAppModel({ repo, branches, page, progressView, state })
   );
   deps.hostCallbacks.setDeployRepairHandoff(
     ({ repo, branch, error, deployRunUrl, attemptId }) =>
@@ -458,7 +497,7 @@ export function createRadiusExtension(
 
   return {
     canvases: [createRadiusCanvas(deps, canvasInstances)],
-    tools: createRadiusTools(deps),
+    tools: createRadiusTools(deps, modelingActivity, missingModelHandoffs),
     hooks: {
       // Nothing here inspects the application model any more. Opening a graph
       // page used to be denied until .radius/app.bicep existed, but every graph

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { isUuid } from "../../azure-oidc.js";
+import {
+  azureDiscoveryContract,
+  temporaryKubeconfigDouble,
+  TEST_KUBECONFIG_PATH
+} from "../../../test/support/azure-discovery-contract.js";
 import { discoverResources, type DiscoveryDependencies } from "./discovery.js";
 
 describe("discovery service (SU-08)", () => {
@@ -7,10 +12,7 @@ describe("discovery service (SU-08)", () => {
     DiscoveryDependencies,
     "createTemporaryKubeconfig"
   > = {
-    createTemporaryKubeconfig: () => ({
-      path: "/tmp/radius-kubeconfig-test",
-      remove: () => {}
-    })
+    createTemporaryKubeconfig: () => temporaryKubeconfigDouble()
   };
 
   it("can reject unsafe subscription input without an HTTP context or CLI call", async () => {
@@ -137,17 +139,9 @@ describe("discovery service (SU-08)", () => {
         dependencies
       )
     ).resolves.toMatchObject({ namespaces: [] });
-    expect(calls).toContainEqual([
-      "aks",
-      "get-credentials",
-      "--name",
-      cluster,
-      "--resource-group",
-      resourceGroup,
-      "--file",
-      "/tmp/radius-kubeconfig-test",
-      "--overwrite-existing"
-    ]);
+    expect(calls).toContainEqual(
+      azureDiscoveryContract({ cluster, resourceGroup }).getCredentials?.args
+    );
   });
 
   it("queries namespaces from the explicitly selected Azure target", async () => {
@@ -183,30 +177,17 @@ describe("discovery service (SU-08)", () => {
     );
 
     expect(result.namespaces).toEqual(["default", "selected-team"]);
+    const contract = azureDiscoveryContract({
+      cluster: "aks-selected",
+      resourceGroup: "rg-selected"
+    });
     expect(calls.at(-2)).toEqual({
-      command: "az",
-      args: [
-        "aks",
-        "get-credentials",
-        "--name",
-        "aks-selected",
-        "--resource-group",
-        "rg-selected",
-        "--file",
-        "/tmp/radius-kubeconfig-test",
-        "--overwrite-existing"
-      ]
+      command: contract.getCredentials?.tool,
+      args: contract.getCredentials?.args
     });
     expect(calls.at(-1)).toEqual({
-      command: "kubectl",
-      args: [
-        "--kubeconfig",
-        "/tmp/radius-kubeconfig-test",
-        "get",
-        "namespaces",
-        "-o",
-        "jsonpath={.items[*].metadata.name}"
-      ]
+      command: contract.namespaces?.tool,
+      args: contract.namespaces?.args
     });
   });
 
@@ -294,7 +275,7 @@ describe("discovery service (SU-08)", () => {
     const dependencies: DiscoveryDependencies = {
       isUuid,
       createTemporaryKubeconfig: () => ({
-        path: "/tmp/radius-kubeconfig-test",
+        path: TEST_KUBECONFIG_PATH,
         remove: () => {
           throw new Error("cleanup failed");
         }
@@ -313,5 +294,320 @@ describe("discovery service (SU-08)", () => {
         dependencies
       )
     ).rejects.toThrow("cleanup failed");
+  });
+
+  it("gives every az query the Windows-sized budget and kubectl its own", async () => {
+    const budgets: Array<{ line: string; timeout: number }> = [];
+    const dependencies: DiscoveryDependencies = {
+      isUuid,
+      ...temporaryKubeconfig,
+      async runCli(command, args, options) {
+        budgets.push({
+          line: [command, ...args].join(" "),
+          timeout: options.timeout
+        });
+        if (command === "kubectl") return "default";
+        if (args[0] === "aks" && args[1] === "list") return "[]";
+        if (args[0] === "group") return "[]";
+        return "";
+      }
+    };
+
+    await discoverResources(
+      {
+        provider: "azure",
+        subscriptionId: "5f2b4b31-1a3a-4a1d-9b5e-6c8f9d0e1a2b",
+        resourceGroup: "rg-valid",
+        cluster: "aks-valid"
+      },
+      dependencies
+    );
+
+    expect(
+      budgets.map(({ line, timeout }) => ({
+        step: line.split(" ").slice(0, 3).join(" "),
+        timeout
+      }))
+    ).toEqual([
+      // Best-effort context switch keeps its own short budget: its failure is
+      // already absorbed by the explicit `--subscription` argument below.
+      { step: "az account set", timeout: 10000 },
+      { step: "az aks list", timeout: 45000 },
+      { step: "az group list", timeout: 45000 },
+      { step: "az aks get-credentials", timeout: 45000 },
+      {
+        step: "kubectl --kubeconfig /tmp/radius-kubeconfig-test",
+        timeout: 10000
+      }
+    ]);
+  });
+
+  it("reports the credential step when the az call is killed", async () => {
+    const removed: string[] = [];
+    const dependencies: DiscoveryDependencies = {
+      isUuid,
+      createTemporaryKubeconfig: () => ({
+        path: "/tmp/radius-kubeconfig-test",
+        remove: () => {
+          removed.push("/tmp/radius-kubeconfig-test");
+        }
+      }),
+      async runCli(command, args) {
+        if (args[0] === "aks" && args[1] === "get-credentials") {
+          // A budget kill arrives with empty stdout and stderr, so the runner
+          // rejects with nothing but the spawned command line.
+          throw new Error(
+            'Command failed: cmd.exe /c az "aks" "get-credentials"'
+          );
+        }
+        if (command === "kubectl") {
+          throw new Error("kubectl must not run without credentials");
+        }
+        return "[]";
+      }
+    };
+
+    const result = await discoverResources(
+      { provider: "azure", resourceGroup: "rg-valid", cluster: "aks-valid" },
+      dependencies
+    );
+
+    expect(result.namespaces).toEqual([]);
+    expect(result.errors?.namespaces).toBe(
+      'az aks get-credentials failed: Command failed: cmd.exe /c az "aks" "get-credentials"'
+    );
+    expect(removed).toEqual(["/tmp/radius-kubeconfig-test"]);
+  });
+
+  it("reports the kubectl step once credentials are written", async () => {
+    const dependencies: DiscoveryDependencies = {
+      isUuid,
+      ...temporaryKubeconfig,
+      async runCli(command, args) {
+        if (command === "kubectl") throw new Error("connection refused");
+        if (args[0] === "aks" && args[1] === "list") return "[]";
+        if (args[0] === "group") return "[]";
+        return "";
+      }
+    };
+
+    const result = await discoverResources(
+      { provider: "azure", resourceGroup: "rg-valid", cluster: "aks-valid" },
+      dependencies
+    );
+
+    expect(result.namespaces).toEqual([]);
+    expect(result.errors?.namespaces).toBe(
+      "kubectl get namespaces failed: connection refused"
+    );
+  });
+
+  it("truncates a labelled namespace failure to 800 characters", async () => {
+    const dependencies: DiscoveryDependencies = {
+      isUuid,
+      ...temporaryKubeconfig,
+      async runCli(_command, args) {
+        if (args[0] === "aks" && args[1] === "get-credentials") {
+          throw new Error("x".repeat(1000));
+        }
+        return "[]";
+      }
+    };
+
+    const result = await discoverResources(
+      { provider: "azure", resourceGroup: "rg-valid", cluster: "aks-valid" },
+      dependencies
+    );
+
+    const label = "az aks get-credentials failed: ";
+    expect(result.errors?.namespaces).toBe(
+      `${label}${"x".repeat(800 - label.length)}`
+    );
+  });
+
+  it("creates the errors bag for a namespace failure that follows successful facets", async () => {
+    const dependencies: DiscoveryDependencies = {
+      isUuid,
+      ...temporaryKubeconfig,
+      async runCli(_command, args) {
+        if (args[0] === "aks" && args[1] === "get-credentials") {
+          throw "credentials exploded";
+        }
+        return "[]";
+      }
+    };
+
+    const result = await discoverResources(
+      { provider: "azure", resourceGroup: "rg-valid", cluster: "aks-valid" },
+      dependencies
+    );
+
+    expect(result.errors).toEqual({
+      namespaces: "az aks get-credentials failed: credentials exploded"
+    });
+  });
+
+  it.each([
+    {
+      detail: "trace and correlation details AADSTS50076 secret-tail",
+      marker: "AADSTS50076",
+      failedCommand: "aks",
+      facet: "clusters"
+    },
+    {
+      detail: "AADSTS50079 secret-tail",
+      marker: "AADSTS50079",
+      failedCommand: "group",
+      facet: "resourceGroups"
+    },
+    {
+      detail: "AADSTS50173: Refresh Token has expired secret-tail",
+      marker: "AADSTS50173",
+      failedCommand: "group",
+      facet: "resourceGroups"
+    },
+    {
+      detail: "AADSTS70043 sign-in frequency secret-tail",
+      marker: "AADSTS70043",
+      failedCommand: "aks",
+      facet: "clusters"
+    },
+    {
+      detail: "AADSTS700082 refresh token inactive secret-tail",
+      marker: "AADSTS700082",
+      failedCommand: "aks",
+      facet: "clusters"
+    },
+    {
+      detail: "error: interaction_required secret-tail",
+      marker: "interaction_required",
+      failedCommand: "group",
+      facet: "resourceGroups"
+    },
+    {
+      detail: "ERROR: Please run 'az login' to setup account secret-tail",
+      marker: "Please run 'az login'",
+      failedCommand: "aks",
+      facet: "clusters"
+    },
+    {
+      detail: "invalid_grant: the session expired secret-tail",
+      marker: "invalid_grant",
+      failedCommand: "group",
+      facet: "resourceGroups"
+    }
+  ])(
+    "classifies $marker from Azure $facet discovery without exposing the raw diagnostic",
+    async ({ detail, marker, failedCommand, facet }) => {
+      const dependencies: DiscoveryDependencies = {
+        isUuid,
+        ...temporaryKubeconfig,
+        async runCli(_command, args) {
+          if (args[0] === failedCommand) {
+            throw new Error(detail);
+          }
+          return "[]";
+        }
+      };
+
+      const result = await discoverResources(
+        {
+          provider: "azure",
+          tenantId: "11111111-2222-3333-4444-555555555555"
+        },
+        dependencies
+      );
+
+      expect(result.errors?.[facet]).toBe(
+        `Azure CLI sign-in is required to discover resources. (${marker})`
+      );
+      expect(result.errors?.[facet]).not.toContain("secret-tail");
+      expect(result.remediation).toMatchObject({
+        id: "azure-cli-login",
+        params: {
+          tenantId: "11111111-2222-3333-4444-555555555555",
+          nextStep: "refresh-discovery"
+        },
+        command:
+          "az login --use-device-code --tenant 11111111-2222-3333-4444-555555555555",
+        runnable: true,
+        followUp:
+          "After the login finishes, return to the Radius canvas and refresh resource discovery."
+      });
+    }
+  );
+
+  it.each([
+    {
+      scenario: "a bare invalid_grant without a re-authentication signal",
+      detail: "AADSTS900432: invalid_grant for the requested audience"
+    },
+    {
+      scenario: "a resource group whose name contains invalid_grant",
+      detail: "ResourceGroupNotFound: resource group 'invalid_grant' not found"
+    },
+    {
+      scenario: "a Conditional Access denial a device-code login cannot fix",
+      detail: "AADSTS530003: your device is required to be managed"
+    },
+    {
+      scenario: "an expired client secret",
+      detail: "AADSTS7000222: invalid_client, the client secret has expired"
+    }
+  ])(
+    "keeps the raw diagnostic and offers no login remediation for $scenario",
+    async ({ detail }) => {
+      const dependencies: DiscoveryDependencies = {
+        isUuid,
+        ...temporaryKubeconfig,
+        async runCli(_command, args) {
+          if (args[0] === "aks") throw new Error(detail);
+          return "[]";
+        }
+      };
+
+      const result = await discoverResources(
+        {
+          provider: "azure",
+          tenantId: "11111111-2222-3333-4444-555555555555"
+        },
+        dependencies
+      );
+
+      expect(result.errors?.clusters).toBe(detail);
+      expect(result.remediation).toBeUndefined();
+    }
+  );
+
+  it("classifies an interaction-required credential failure and drops an invalid tenant", async () => {
+    const dependencies: DiscoveryDependencies = {
+      isUuid,
+      ...temporaryKubeconfig,
+      async runCli(_command, args) {
+        if (args[0] === "aks" && args[1] === "get-credentials") {
+          throw new Error("Status_InteractionRequired");
+        }
+        return "[]";
+      }
+    };
+
+    const result = await discoverResources(
+      {
+        provider: "azure",
+        tenantId: "$(whoami)",
+        resourceGroup: "rg-valid",
+        cluster: "aks-valid"
+      },
+      dependencies
+    );
+
+    expect(result.errors).toEqual({
+      namespaces:
+        "Azure CLI sign-in is required to discover resources. (Status_InteractionRequired)"
+    });
+    expect(result.remediation?.params).toEqual({
+      nextStep: "refresh-discovery"
+    });
+    expect(result.remediation?.command).toBe("az login --use-device-code");
   });
 });

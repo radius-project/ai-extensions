@@ -1,16 +1,10 @@
 # Radius Canvas architecture
 
-Radius Canvas is the application-modeling + deployment product behind the Radius
-GitHub canvas. This document describes how the code is laid out after the
-modularization refactor (see
-[`docs/design/radius-extension-modularization.md`](../../docs/design/radius-extension-modularization.md))
-and gives step-by-step guides for the three changes contributors make most
-often: **adding a compute platform**, **adding a canvas action/tool**, and
-**adding a whole new UI adapter**.
+Radius Canvas is the application-modeling and deployment product for the GitHub Copilot app. This document describes how the code is laid out after the modularization refactor (see [`docs/design/radius-extension-modularization.md`](../../docs/design/radius-extension-modularization.md)) and gives step-by-step guides for the three changes contributors make most often: **adding a compute platform**, **adding a canvas action/tool**, and **adding a whole new UI adapter**.
 
 ## Layout
 
-```
+```text
 packages/core/      UI-agnostic core (this package). No SDK, no HTTP, no DOM.
   src/
     graph/                    Bicep -> application graph build + diff (pure).
@@ -31,7 +25,7 @@ packages/adapter-canvas/      The Copilot-canvas UI adapter (thin).
     infra.mjs                 OIDC / workflow / portal wrappers over the core.
     gh.mjs                    Shell + GitHub API port primitives.
     shared.mjs               escapeHtml + shared credential state.
-  build.mjs                   esbuild bundle -> plugins/radius/dist/.
+  build.mjs                   esbuild bundle -> .artifacts/radius/.
 ```
 
 ### The dependency rule
@@ -108,7 +102,7 @@ shared and UI-agnostic, lift it into `packages/core` first.
 
 ```bash
 pnpm --filter @radius-project/core typecheck
-pnpm build:canvas     # esbuild -> plugins/radius/dist/
+pnpm build:canvas     # esbuild -> .artifacts/radius/
 ```
 
 ## Testing

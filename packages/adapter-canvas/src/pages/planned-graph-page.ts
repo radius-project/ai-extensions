@@ -25,6 +25,11 @@ export function plannedGraphPage(state: CanvasState = {}): string {
     typeof state?.plannedFromWorkspace === "boolean" ?
       state.plannedFromWorkspace
     : isWorkspaceSelection(state, targetRepo, graphBranch);
+  const followWorkspaceBranch =
+    state.plannedFollowsWorkspaceBranch ??
+    (state.contextBranchSource === "workspace" &&
+      targetRepo === state.workspaceRepo &&
+      graphBranch === state.contextBranch);
 
   if (plannedResources.length === 0) {
     return pageShell(
@@ -62,7 +67,8 @@ ${graphHeader("planned")}
           environment: defaultEnvironment,
           provider,
           resources: [],
-          localSource
+          localSource,
+          followWorkspaceBranch
         })
       )}</div>
 ${browserScriptTag("planned-graph-page")}
@@ -107,7 +113,8 @@ ${graphHeader("planned")}
         environment: defaultEnvironment,
         provider,
         resources: plannedResources,
-        localSource
+        localSource,
+        followWorkspaceBranch
       })
     )}</div>
 ${browserScriptTag("planned-graph-page")}

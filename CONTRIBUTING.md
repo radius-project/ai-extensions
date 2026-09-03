@@ -1,8 +1,6 @@
-# Contributing to Radius AI Extension
+# Contributing to Radius Canvas
 
-Radius AI Extension is in preview and under active development. We welcome
-feedback in the form of issues along with code contributions that
-follow the guidelines below.
+Radius Canvas is in preview and under active development. We welcome feedback in the form of issues along with code contributions that follow the guidelines below.
 
 For what this repository is and does, see the [README](./README.md). This guide
 covers how to build, test, and contribute to it.
@@ -38,6 +36,10 @@ This is a [pnpm](https://pnpm.io/) workspace monorepo. Packages live under the
 | `packages/core/`           | `@radius-project/core`           | Shared, UI-agnostic core: app graph, modeling, compute platforms, workflows.    |
 | `packages/adapter-shared/` | `@radius-project/adapter-shared` | Helpers shared across adapters (e.g. building the app graph via `rad`).         |
 | `packages/adapter-canvas/` | `@radius-project/adapter-canvas` | Copilot canvas adapter: SDK wiring + loopback HTTP host that backs the webview. |
+| `plugins/<name>/`          | —                                | Plugin manifest and catalog readme. A directory here is what makes a plugin.    |
+| `extensions/<name>/`       | `<name>`                         | Canvas extension source: package, skills, and gallery assets.                   |
+
+A plugin is shippable once `plugins/<name>/plugin.json` and `extensions/<name>/package.json` agree on the same ref-safe name and `plugins/<name>/README.md` exists; [`scripts/plugins.mjs`](./scripts/plugins.mjs) discovers it from there and derives every branch, tag, and artifact name. `pnpm build` assembles both source roots into the git-ignored `.artifacts/<name>/`, which is the tree a release publishes. That output cannot be assembled in place, because `extensions/<name>/` means source here and the assembled plugin on a release branch — see [`docs/architecture/plugin-packaging-and-publishing.md`](./docs/architecture/plugin-packaging-and-publishing.md).
 
 The `adapter-` directory prefix is deliberate: it marks a package as an adapter at a glance and is what the core boundary lint rule in [`eslint.config.mjs`](./eslint.config.mjs) matches on to reject relative imports that escape into an adapter. The npm names stay unprefixed, so a directory name and its npm name differ by that prefix.
 
@@ -57,7 +59,7 @@ platform**, **adding a canvas action/tool**, and **adding a new UI adapter**.
 
 ### Agentic skills
 
-Agentic skills live in [`plugins/radius/skills/`](./plugins/radius/skills), one directory
+Agentic skills live in [`extensions/radius/skills/`](./extensions/radius/skills), one directory
 per skill, each with a `SKILL.md` (name + description frontmatter and guidance)
 and optional `references/`. The skills (`radius-app-bicep`, `radius-app-graph`,
 `radius-environment`, `radius-deploy`) drive the same workflows the canvas
@@ -68,13 +70,15 @@ behavior, update the matching skill so the agent's guidance stays in sync.
 
 ```bash
 pnpm install
-pnpm build           # bundles the canvas extension -> plugins/radius/dist/
+pnpm build           # assembles the installable plugin -> .artifacts/radius/
 ```
 
 Other useful scripts:
 
 ```bash
 pnpm watch           # rebuild the canvas bundle on change
+pnpm build:install   # assemble, then copy into the local extension directory
+pnpm watch:dev       # rebuild and reinstall on change
 pnpm typecheck       # typecheck core + shared + canvas
 ```
 
@@ -127,10 +131,10 @@ pnpm changeset
 
 Select the affected packages, the bump level (`patch` / `minor` / `major`), and
 write a user-facing summary. Commit the generated `.changeset/*.md` file with
-your PR. Do not hand-edit any version: Changesets bumps `plugins/radius/package.json`, and `plugin.json` and `marketplace.json` are derived from it by `pnpm run version:sync`, which CI verifies. See [`RELEASING.md`](./docs/eng/RELEASING.md) for the version/tag convention and
+your PR. Do not hand-edit any version: Changesets bumps `extensions/radius/package.json`, and `plugin.json` and `marketplace.json` are derived from it by `pnpm run version:sync`, which CI verifies. See [`RELEASING.md`](./docs/eng/RELEASING.md) for the version/tag convention and
 release flow.
 
-Not every change ships something. A pull request without a changeset is never blocked - CI only leaves a reminder comment. If the omission is deliberate, either add an empty changeset with `pnpm changeset --empty` or label the pull request `pr/no-changeset`, which replaces the reminder with a note that it was waived.
+Not every change ships something. A pull request without a changeset is never blocked - CI only leaves a reminder comment. If the omission is deliberate, either add an empty changeset with `pnpm changeset --empty` or label the pull request `pr:no-changeset`, which replaces the reminder with a note that it was waived.
 
 ## Developer Certificate of Origin
 

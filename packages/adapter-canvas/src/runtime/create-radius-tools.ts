@@ -1,4 +1,4 @@
-// createRadiusTools — builds the 6 radius_* tools from RADIUS_TOOL_DECLARATIONS
+// createRadiusTools — builds the 7 radius_* tools from RADIUS_TOOL_DECLARATIONS
 // plus a RadiusExtensionDependencies dependency object. Same shape as
 // createRadiusCanvas: pure construction, no I/O until a handler is invoked.
 
@@ -7,7 +7,7 @@ import {
   ambiguousAppSourceBrief,
   unsupportedAppSourceReport
 } from "@radius-project/core";
-import { errorMessage } from "./util.js";
+import { errorMessage, optionalString } from "./util.js";
 import { createGraphContextHelpers } from "./graph-context.js";
 import {
   failedGraphDiffResult,
@@ -15,13 +15,28 @@ import {
   unavailableGraphDiffResult
 } from "./pr-graph-diff-result.js";
 import type { RadiusExtensionDependencies } from "./dependencies.js";
+import type { ModelingActivity } from "./modeling-activity.js";
+import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
+import type { CanvasState } from "../shared.js";
 import type { DeployToolArgs } from "../deploy-tools.js";
+import {
+  appModelTargetKey,
+  clearAppModelAuthoringFailure
+} from "../app-model-authoring-failure.js";
 
 interface ToolArgs {
   [key: string]: unknown;
 }
 
-export function createRadiusTools(deps: RadiusExtensionDependencies) {
+export function createRadiusTools(
+  deps: RadiusExtensionDependencies,
+  // Told when this tool hands the modeling skill over, so a graph render that
+  // finds no model does not ask for the run that is about to start.
+  modelingActivity: ModelingActivity,
+  // Released when a modeling run reports a terminal failure, so the retry the
+  // failure message promises is not swallowed by the dead run's claim.
+  missingModelHandoffs: MissingModelHandoffClaims
+) {
   const {
     workspaceState,
     fetchBicepForBranch,
@@ -40,23 +55,36 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
     }
   }
 
+  // Records that a modeling run is about to start, so a graph render that finds
+  // no model defers to it instead of asking for the same work again. Called
+  // only on the paths that actually hand the skill over: a refused repository
+  // is not being modeled.
+  function announceModelingRun(state: CanvasState | null): void {
+    if (!state?.contextRepo || !state.contextBranch) return;
+    modelingActivity.announce({
+      repo: state.contextRepo,
+      branch: state.contextBranch
+    });
+  }
+
   return [
     {
       ...declarationByName.get("radius_generate_app")!,
-      // Two source checks gate the authoring instructions, and they differ in
+      // Two source checks gate the authoring handoff, and they differ in
       // kind. A repository with no Dockerfile is refused outright (2.1): the
       // product cannot model it, so the skill is withheld entirely. A repository
       // with SEVERAL Dockerfiles is not refused at all (2.2) — it is the normal
       // shape of a microservices application and must still be modeled as one
-      // application — so the skill is handed over as usual, with a brief
-      // appended describing the candidate directories and the narrow case in
-      // which the agent should stop and ask the user where the application is.
+      // application — so the bootstrap is returned as usual, with a brief field
+      // describing the candidate directories and the narrow case in which the
+      // agent should stop and ask the user where the application is.
       //
-      // Any failure to establish the repository's contents hands over the skill
+      // Any failure to establish the repository's contents returns the handoff
       // unchanged: both checks act on evidence, never on a lookup that did not
       // work.
       handler: async (args: ToolArgs) => {
         const repoPath = args.repoPath as string | undefined;
+        let brief: string | undefined;
         const state = await workspaceState().catch(() => null);
         // The listing this check can obtain describes the worktree, so it is
         // evidence about the worktree and anything inside it — a subdirectory
@@ -104,15 +132,80 @@ export function createRadiusTools(deps: RadiusExtensionDependencies) {
             !!repoPath &&
             deps.workspace.isWorkspacePath(state.workspacePath, repoPath) &&
             !deps.workspace.isWorkspacePath(repoPath, state.workspacePath);
-          const brief =
-            answeredWithDirectory ? null : (
-              ambiguousAppSourceBrief(source, listing)
+          brief =
+            answeredWithDirectory ? undefined : (
+              (ambiguousAppSourceBrief(source, listing) ?? undefined)
             );
-          if (brief) {
-            return `${deps.radiusAppBicepSkill(repoPath)}\n---\n\n${brief}\n`;
-          }
         }
-        return deps.radiusAppBicepSkill(repoPath);
+        if (targetsWorkspace) announceModelingRun(state);
+        return deps.radiusAppBicepSkill(repoPath, brief);
+      }
+    },
+    {
+      ...declarationByName.get("radius_report_modeling_failure")!,
+      handler: async (args: ToolArgs) => {
+        const instanceId = optionalString(args.instanceId).trim();
+        const repo = optionalString(args.repo).trim();
+        const branch = optionalString(args.branch).trim();
+        const attemptToken = optionalString(args.attemptToken).trim();
+        const failure = optionalString(args.error).trim();
+        if (!instanceId || !repo || !branch || !attemptToken || !failure) {
+          return {
+            recorded: false,
+            error:
+              "instanceId, repo, branch, attemptToken, and error are required"
+          };
+        }
+        if (failure.length > 4000) {
+          return {
+            recorded: false,
+            error: "error must not exceed 4000 characters"
+          };
+        }
+        const entry = deps.servers.get(instanceId);
+        const target = appModelTargetKey(repo, branch);
+        if (
+          !entry ||
+          entry.state.appModelAttemptTokens?.[target] !== attemptToken
+        ) {
+          return {
+            recorded: false,
+            error:
+              "The Canvas modeling attempt is no longer current; the failure was not recorded."
+          };
+        }
+        const content = await fetchBicepForBranch(repo, branch, entry.state);
+        if (content) {
+          clearAppModelAuthoringFailure(entry.state, repo, branch);
+          return {
+            recorded: false,
+            error:
+              "The application model now exists; the stale failure was not recorded."
+          };
+        }
+        if (entry.state.appModelAttemptTokens?.[target] !== attemptToken) {
+          return {
+            recorded: false,
+            error:
+              "A newer Canvas modeling attempt replaced this one; the stale failure was not recorded."
+          };
+        }
+        entry.state.appModelFailures ??= {};
+        entry.state.appModelFailures[target] = {
+          attemptToken,
+          error: failure
+        };
+        // The run this claim belongs to just ended, so the claim can only
+        // suppress the retry the failure message tells the user to make. Its
+        // target key matches this one exactly: a claim is keyed
+        // `repo::branches.join(",")`, and an attempt token is only minted for a
+        // single branch, so a recordable failure always names one branch.
+        // Without this release the explicit refresh clears the failure, asks for
+        // a handoff, and is dropped by the dead run's claim until it expires.
+        const claim = missingModelHandoffs.current(target);
+        if (claim) missingModelHandoffs.release(claim);
+        modelingActivity.release({ repo, branch });
+        return { recorded: true };
       }
     },
     {

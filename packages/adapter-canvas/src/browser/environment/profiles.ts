@@ -11,11 +11,14 @@
 import { isDomElement } from "../context.js";
 import { createCommandAction } from "../command-action.js";
 import type { CommandActionHandle } from "../command-action.js";
-import {
-  isRemediationId,
-  remediationView
-} from "@radius-project/core/remediations";
+import { isRemediationId } from "@radius-project/core/remediations";
 import type { RemediationView } from "@radius-project/core/remediations";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  presentedRemediationView,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
 import { setChildren } from "../dom.js";
 import type { ElementSpec } from "../dom.js";
 import { beginEntry } from "../lifecycle.js";
@@ -26,11 +29,13 @@ import type {
   DomEventListener,
   DomEventTarget
 } from "../ports.js";
+import type { ScopeTimer } from "../lifecycle.js";
 
 export const PROFILES_PANEL_ENTRY_KEY = "environment-profiles-panel";
 export const CREDENTIAL_PROFILES_ENDPOINT = "/api/credential-profiles";
 export const GITHUB_IDENTITY_ENDPOINT = "/api/github-identity";
 export const GITHUB_ACCOUNT_ENDPOINT = "/api/github-account";
+export const GITHUB_ENVIRONMENT_RECHECK_DELAY_MS = 2_000;
 export const PROFILE_PLACEHOLDER_TEXT = "Select a credential profile…";
 
 export const PROFILE_MENU_IDS = {
@@ -189,7 +194,10 @@ export function parseGithubIdentity(payload: unknown): GithubIdentity {
   };
 }
 
-export function parseGithubReadiness(payload: unknown): GithubReadiness {
+export function parseGithubReadiness(
+  payload: unknown,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+): GithubReadiness {
   const readiness =
     isRecord(payload) && isRecord(payload.readiness) ? payload.readiness : {};
   const checksValue =
@@ -221,7 +229,7 @@ export function parseGithubReadiness(payload: unknown): GithubReadiness {
           if (typeof value === "string") params[key] = value;
         }
       }
-      const view = remediationView(id, params);
+      const view = presentedRemediationView(id, params, ghCommandPresentation);
       return view.runnable ? view : null;
     })(),
     selectionHandle: readString(payload, "selectionHandle"),
@@ -286,7 +294,8 @@ export function githubAccountLabel(
 // a repo-access problem outranks an account mismatch, which outranks a missing
 // scope, which falls back to the muted "acts as" message.
 export function githubIdentityNote(
-  identity: GithubIdentity
+  identity: GithubIdentity,
+  ghCommandPresentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): GithubIdentityNote {
   if (identity.repoAccess !== "") {
     return {
@@ -306,6 +315,10 @@ export function githubIdentityNote(
     };
   }
   const packagesMissing = !githubPackagesWriteAvailable(identity);
+  const installation =
+    ghCommandPresentation.installationNote ?
+      ` ${ghCommandPresentation.installationNote}`
+    : "";
   if (!identity.actingHasWorkflow || packagesMissing) {
     if (
       packagesMissing &&
@@ -317,22 +330,49 @@ export function githubIdentityNote(
       // picker when a stored account can actually publish.
       const publishingLogin = identity.packagesLogin || identity.actingLogin;
       const alternative = packagesAlternativeAccount(identity, publishingLogin);
+      const loginCommand = displayGhCommand(ghCommandPresentation, [
+        "auth",
+        "login",
+        "-h",
+        "github.com",
+        "-s",
+        "read:packages",
+        "-s",
+        "write:packages"
+      ]);
       let message =
         `The Copilot session token for @${publishingLogin} is missing the write:packages scope. ` +
         "It overrides stored gh credentials, so refreshing or switching a keyring login does not " +
         "change this token. " +
         (alternative ?
           `Select the stored account @${alternative.login} below, or restart the session with package write access.`
-        : 'No stored GitHub CLI account can publish packages either, so run "gh auth login -h github.com -s read:packages -s write:packages" and re-check, or restart the session with package write access.');
+        : loginCommand ?
+          `No stored GitHub CLI account can publish packages either, so run "${loginCommand}" and re-check, or restart the session with package write access.${installation}`
+        : `No stored GitHub CLI account can publish packages either. ${ghCommandPresentation.installationNote} Then re-check, or restart the session with package write access.`);
       // The workflow scope lives on the credential gh commands use, which is
       // not the packages credential — so its guidance still applies and must
       // not be dropped with the packages warning.
       if (!identity.actingHasWorkflow) {
+        const switchCommand = displayGhCommand(ghCommandPresentation, [
+          "auth",
+          "switch",
+          "-h",
+          "github.com",
+          "-u",
+          identity.actingLogin
+        ]);
+        const refreshCommand = displayGhCommand(ghCommandPresentation, [
+          "auth",
+          "refresh",
+          "-h",
+          "github.com",
+          "-s",
+          "workflow"
+        ]);
         message +=
-          ` Separately, the credential for @${identity.actingLogin} is missing the workflow scope ` +
-          `environment setup needs: run "gh auth switch -h github.com -u ${identity.actingLogin} && ` +
-          'gh auth refresh -h github.com -s workflow". Note: gh auth switch changes your active GitHub ' +
-          "account machine-wide for every tool in this terminal until you switch back.";
+          switchCommand && refreshCommand ?
+            ` Separately, the credential for @${identity.actingLogin} is missing the workflow scope environment setup needs: run "${switchCommand}\n${refreshCommand}".${installation} Note: gh auth switch changes your active GitHub account machine-wide for every tool in this terminal until you switch back.`
+          : ` Separately, the credential for @${identity.actingLogin} is missing the workflow scope environment setup needs. ${ghCommandPresentation.installationNote}`;
       }
       return { specs: textNote(message), tone: "warning", showRecheck: true };
     }
@@ -346,11 +386,15 @@ export function githubIdentityNote(
     // Built from the registry rather than hand-written here, so this note shows
     // the same command the callout would run, quoted the same way, and stays
     // paste-able in Windows PowerShell (which cannot parse `&&`).
-    const view = remediationView("github-account-scopes", {
-      login: identity.actingLogin,
-      ...(identity.actingHasWorkflow ? {} : { workflow: "true" }),
-      ...(identity.actingHasPackages ? {} : { packages: "true" })
-    });
+    const view = presentedRemediationView(
+      "github-account-scopes",
+      {
+        login: identity.actingLogin,
+        ...(identity.actingHasWorkflow ? {} : { workflow: "true" }),
+        ...(identity.actingHasPackages ? {} : { packages: "true" })
+      },
+      ghCommandPresentation
+    );
     const runLine =
       view.runnable ?
         ` Run:\n${view.command}\n`
@@ -471,7 +515,9 @@ export function profileDetailSpecs(
 
 export interface CredentialProfilesPanelDeps {
   readonly repo: string;
+  readonly selectableProviders: readonly CredentialProvider[];
   readonly mutationNonce?: string;
+  readonly ghCommandPresentation?: GhCommandPresentation;
   environmentName(): string;
   onProfileChange(profile: CredentialProfile | null): void;
   onReadinessChange?(readiness: GithubReadiness | null): void;
@@ -569,6 +615,9 @@ export function initializeCredentialProfilesPanel(
   };
 
   let profiles: CredentialProfile[] = [];
+  // Profiles the repository has but this build cannot offer. Tracked so the
+  // empty menu can say they were filtered out rather than claim none exist.
+  let unsupportedProfileCount = 0;
   let selectedProfile: CredentialProfile | null = null;
   let profilesToken = 0;
   let githubIdentity: GithubIdentity | null = null;
@@ -576,6 +625,9 @@ export function initializeCredentialProfilesPanel(
   let selectedGithubLogin = "";
   let checking = false;
   let githubRequestGeneration = 0;
+  let loadingIdentityGeneration: number | null = null;
+  let environmentNameInvalidated = false;
+  let environmentRecheckTimer: ScopeTimer | null = null;
 
   const profileOptionBindings: Registration[] = [];
   const githubAccountOptionBindings: Registration[] = [];
@@ -671,7 +723,13 @@ export function initializeCredentialProfilesPanel(
       });
       optionsEl.appendChild(optionButton);
     }
-    if (emptyEl) emptyEl.style.display = profiles.length > 0 ? "none" : "";
+    if (emptyEl) {
+      emptyEl.style.display = profiles.length > 0 ? "none" : "";
+      emptyEl.textContent =
+        unsupportedProfileCount > 0 ?
+          "No supported credential profiles yet."
+        : "No credential profiles yet.";
+    }
   };
 
   const loadProfiles = async (preselectName = ""): Promise<void> => {
@@ -682,7 +740,15 @@ export function initializeCredentialProfilesPanel(
       );
       const payload = await response.json();
       if (!scope.active || token !== profilesToken) return;
-      profiles = parseCredentialProfiles(payload);
+      const parsed = parseCredentialProfiles(payload);
+      profiles = parsed.filter((profile) => {
+        const provider = profile.provider;
+        return (
+          (provider === "azure" || provider === "aws") &&
+          deps.selectableProviders.includes(provider)
+        );
+      });
+      unsupportedProfileCount = parsed.length - profiles.length;
       renderProfileOptions();
       setProfileValue(
         preselectName === "" ? null : findProfile(profiles, preselectName)
@@ -690,6 +756,7 @@ export function initializeCredentialProfilesPanel(
     } catch {
       if (!scope.active || token !== profilesToken) return;
       profiles = [];
+      unsupportedProfileCount = 0;
       renderProfileOptions();
       setProfileValue(null);
     }
@@ -807,6 +874,7 @@ export function initializeCredentialProfilesPanel(
 
   const loadGithubIdentity = async (fresh = false): Promise<void> => {
     const generation = ++githubRequestGeneration;
+    loadingIdentityGeneration = generation;
     checking = true;
     githubReadiness = null;
     deps.onReadinessChange?.(null);
@@ -829,7 +897,13 @@ export function initializeCredentialProfilesPanel(
           "";
       }
       renderGithubIdentity();
-      if (selectedGithubLogin) {
+      const environment = deps.environmentName().trim();
+      // A pending debounce owns the account check for the edited environment.
+      if (
+        selectedGithubLogin &&
+        environmentRecheckTimer === null &&
+        (!environmentNameInvalidated || environment !== "")
+      ) {
         await checkGitHubAccount(selectedGithubLogin);
       }
     } catch {
@@ -837,6 +911,9 @@ export function initializeCredentialProfilesPanel(
       if (fieldEl) fieldEl.style.display = "none";
       deps.onReadinessChange?.(null);
     } finally {
+      if (loadingIdentityGeneration === generation) {
+        loadingIdentityGeneration = null;
+      }
       if (generation === githubRequestGeneration) {
         checking = false;
         renderGithubIdentity();
@@ -859,16 +936,34 @@ export function initializeCredentialProfilesPanel(
     }
   };
 
+  const cancelEnvironmentRecheck = (): void => {
+    if (environmentRecheckTimer === null) return;
+    scope.cancel(environmentRecheckTimer);
+    environmentRecheckTimer = null;
+  };
+
   const invalidateReadiness = (): void => {
-    githubRequestGeneration += 1;
+    cancelEnvironmentRecheck();
+    environmentNameInvalidated = true;
+    if (loadingIdentityGeneration !== githubRequestGeneration) {
+      githubRequestGeneration += 1;
+    }
     githubReadiness = null;
-    checking = false;
+    checking = loadingIdentityGeneration === githubRequestGeneration;
     deps.onReadinessChange?.(null);
+    const environment = deps.environmentName().trim();
+    const canScheduleRecheck =
+      environment !== "" &&
+      (selectedGithubLogin !== "" || loadingIdentityGeneration !== null);
     if (noteEl && selectedGithubLogin) {
       setChildren(
         context.dom,
         noteEl,
-        textNote("Re-check GitHub access for this environment.")
+        textNote(
+          canScheduleRecheck ?
+            "GitHub access will be checked automatically."
+          : "Re-check GitHub access for this environment."
+        )
       );
       noteEl.style.color = "var(--rad-warning, #9a6700)";
       noteEl.style.display = "";
@@ -878,9 +973,25 @@ export function initializeCredentialProfilesPanel(
       recheckBtn.style.display = "";
       recheckBtn.textContent = "Re-check";
     }
+    if (!canScheduleRecheck) return;
+    environmentRecheckTimer = scope.after(
+      GITHUB_ENVIRONMENT_RECHECK_DELAY_MS,
+      () => {
+        environmentRecheckTimer = null;
+        const currentEnvironment = deps.environmentName().trim();
+        if (currentEnvironment === "" || selectedGithubLogin === "") return;
+        void checkGitHubAccount(selectedGithubLogin, currentEnvironment);
+      }
+    );
   };
 
-  const checkGitHubAccount = async (login: string): Promise<void> => {
+  const checkGitHubAccount = async (
+    login: string,
+    environment = deps.environmentName().trim() || "dev"
+  ): Promise<void> => {
+    cancelEnvironmentRecheck();
+    loadingIdentityGeneration = null;
+    environmentNameInvalidated = false;
     const generation = ++githubRequestGeneration;
     selectedGithubLogin = login;
     githubReadiness = null;
@@ -897,7 +1008,7 @@ export function initializeCredentialProfilesPanel(
         body: JSON.stringify({
           login,
           repo: deps.repo,
-          environment: deps.environmentName().trim() || "dev"
+          environment
         })
       });
       const payload = await response.json();
@@ -907,7 +1018,10 @@ export function initializeCredentialProfilesPanel(
           readString(payload, "error") || "Could not check GitHub access."
         );
       }
-      githubReadiness = parseGithubReadiness(payload);
+      githubReadiness = parseGithubReadiness(
+        payload,
+        deps.ghCommandPresentation
+      );
       deps.onReadinessChange?.(githubReadiness);
     } catch (error) {
       if (!scope.active || generation !== githubRequestGeneration) return;

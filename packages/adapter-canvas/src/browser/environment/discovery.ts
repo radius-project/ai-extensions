@@ -7,14 +7,18 @@
 // file belong to the environments/deploying page and credentials modules, not
 // here, and are intentionally not reproduced.
 
+import { remediationView } from "@radius-project/core/remediations";
 import {
   discoverStatusText,
   formatServesReposLabel,
   isUuid
 } from "../../azure-oidc.js";
+import { remediationReference } from "../../remediation-reference.js";
+import { createCommandAction } from "../command-action.js";
 import { beginEntry } from "../lifecycle.js";
 import { isRecord, readArray, readString, readStringArray } from "../json.js";
 import type { DiscoveryData } from "../../azure-oidc.js";
+import type { CommandActionHandle } from "../command-action.js";
 import type {
   BrowserContext,
   DomElement,
@@ -35,8 +39,6 @@ export const DEFAULT_NAMESPACES: readonly string[] = [
 ];
 
 export const COMBO_PAIRS: readonly (readonly [string, string])[] = [
-  ["azure-cluster-select", "azure-cluster-custom"],
-  ["azure-rg-select", "azure-rg-custom"],
   ["azure-namespace-select", "azure-namespace-custom"],
   ["aws-cluster-select", "aws-cluster-custom"],
   ["aws-namespace-select", "aws-namespace-custom"],
@@ -93,12 +95,27 @@ export interface DiscoveryPanelHandle {
   teardown(): void;
 }
 
+export interface DiscoveryPanelOptions {
+  readonly mutationNonce: string;
+}
+
+const MISSING_MUTATION_NONCE_REASON =
+  "Reload the Radius canvas before asking Copilot to run this command.";
+
 export interface EnvironmentInfrastructure {
   readonly resourceGroup?: string;
   readonly cluster?: string;
   readonly namespace?: string;
   readonly vpcId?: string;
   readonly subnetIds?: string;
+  // The cloud account a cluster name is scoped to. A cluster name alone is not
+  // a cluster: the same name can exist in two Azure subscriptions or two AWS
+  // account/region pairs. Carried so the wizard's duplicate-namespace check
+  // compares the same identity the server's admission rung does, and cannot
+  // refuse an environment the server would admit.
+  readonly subscriptionId?: string;
+  readonly accountId?: string;
+  readonly region?: string;
 }
 
 export function abandonedOperationError(
@@ -202,7 +219,8 @@ function renderSelectOptions(
   context: BrowserContext,
   select: DomSelectElement,
   items: readonly DiscoveryOption[],
-  placeholder: string
+  placeholder: string,
+  allowCustom = true
 ): void {
   const optionElements: DomOptionElement[] = [];
   if (items.length === 0) {
@@ -227,12 +245,14 @@ function renderSelectOptions(
       );
     }
   }
-  optionElements.push(
-    context.dom.createOption({
-      value: "__custom__",
-      label: "+ Enter custom..."
-    })
-  );
+  if (allowCustom) {
+    optionElements.push(
+      context.dom.createOption({
+        value: "__custom__",
+        label: "+ Enter custom..."
+      })
+    );
+  }
   select.replaceChildren(...optionElements);
 }
 
@@ -240,11 +260,12 @@ function renderSelect(
   context: BrowserContext,
   selectId: string,
   items: readonly DiscoveryOption[],
-  placeholder: string
+  placeholder: string,
+  allowCustom = true
 ): void {
   const select = context.dom.selectById(selectId);
   if (!select) return;
-  renderSelectOptions(context, select, items, placeholder);
+  renderSelectOptions(context, select, items, placeholder, allowCustom);
 }
 
 function renderSelectLoading(
@@ -282,16 +303,17 @@ function selectOfferedValue(
 function renderAzureClusters(
   context: BrowserContext,
   list: readonly DiscoveryOption[],
-  keepValue: string
+  keepValue: string,
+  allowAutoSelect = true
 ): void {
   const select = context.dom.selectById("azure-cluster-select");
   if (!select) return;
-  renderSelectOptions(context, select, list, "Select AKS cluster…");
+  renderSelectOptions(context, select, list, "Select AKS cluster…", false);
   if (keepValue !== "") {
     // Both callers pass a non-empty value only after confirming it is present
     // in the list, so no second membership branch is needed here.
     select.value = keepValue;
-  } else if (list.length === 1) {
+  } else if (allowAutoSelect && list.length === 1) {
     select.value = list[0].id;
   }
 }
@@ -568,7 +590,8 @@ export function showAppPicker(
 }
 
 export function initializeDiscoveryPanel(
-  context: BrowserContext
+  context: BrowserContext,
+  options: DiscoveryPanelOptions = { mutationNonce: "" }
 ): DiscoveryPanelHandle | null {
   const scope = beginEntry(context, DISCOVERY_PANEL_ENTRY_KEY);
   if (!scope) return null;
@@ -598,6 +621,34 @@ export function initializeDiscoveryPanel(
     aws: { subscriptionId: "", tenantId: "" }
   };
   const accountDiscovered = { azure: false, aws: false };
+  const remediationHost = context.dom.byId("azure-discover-remediation");
+  let remediationAction: CommandActionHandle | null = null;
+  const renderAzureRemediation = (payload: unknown): void => {
+    remediationAction?.dispose();
+    remediationAction = null;
+    if (!remediationHost) return;
+    remediationHost.replaceChildren();
+    remediationHost.hidden = true;
+    if (!isRecord(payload)) return;
+    const reference = remediationReference(payload["remediation"]);
+    if (!reference) return;
+    const remediation = remediationView(reference.id, reference.params);
+    const guardedRemediation =
+      remediation.runnable && options.mutationNonce.trim() === "" ?
+        {
+          ...remediation,
+          runnable: false,
+          unsupportedReason: MISSING_MUTATION_NONCE_REASON
+        }
+      : remediation;
+    remediationHost.hidden = false;
+    remediationAction = createCommandAction(context, {
+      host: remediationHost,
+      remediation: guardedRemediation,
+      mutationNonce: options.mutationNonce,
+      idPrefix: "azure-discover-login"
+    });
+  };
   // A pending selection belongs to the provider whose form asked for it.
   // Azure and AWS discovery can be outstanding at the same time, so the
   // provider is recorded alongside the config and only a matching response is
@@ -607,6 +658,10 @@ export function initializeDiscoveryPanel(
     provider: "azure" | "aws";
     config: EnvironmentInfrastructure;
   } | null = null;
+  // A saved namespace survives one extra discovery round trip: the first,
+  // untargeted request cannot list namespaces, so the restored value has to be
+  // reapplied once the follow-up request returns the cluster's real list.
+  let pendingAzureNamespace = "";
 
   const comboValue = (selectId: string, customId: string): string => {
     const select = context.dom.selectById(selectId);
@@ -620,9 +675,6 @@ export function initializeDiscoveryPanel(
   const selectedAzureClusterId = (): string => {
     const select = context.dom.selectById("azure-cluster-select");
     if (!select) return "";
-    if (select.value === "__custom__") {
-      return context.dom.inputById("azure-cluster-custom")?.value ?? "";
-    }
     return renderedAzureClusters.get(select.value)?.id ?? select.value;
   };
 
@@ -801,7 +853,10 @@ export function initializeDiscoveryPanel(
           }
         : { ...item, id: optionValue(item, index) }
       ),
-      keepValue
+      keepValue,
+      // A caller asking to keep a specific cluster that the list no longer
+      // offers must fail closed rather than silently target another cluster.
+      keepCluster === ""
     );
   };
 
@@ -834,16 +889,6 @@ export function initializeDiscoveryPanel(
       select.value = matches[0][0];
       return;
     }
-    if (
-      matches.length === 0 &&
-      !azureClusters.some((item) => item.id === cluster)
-    ) {
-      restoreInfrastructureValue(
-        "azure-cluster-select",
-        "azure-cluster-custom",
-        cluster
-      );
-    }
   };
 
   const resetAzureNamespaceDiscovery = (): void => {
@@ -872,36 +917,16 @@ export function initializeDiscoveryPanel(
     if (!clusterSelect || !rgSelect) return;
     azureFilterWired = true;
     scope.on(rgSelect, "change", () => {
-      applyAzureResourceGroupFilter(
-        comboValue("azure-rg-select", "azure-rg-custom")
-      );
+      applyAzureResourceGroupFilter(rgSelect.value);
     });
     scope.on(clusterSelect, "change", () => {
       const clusterId = clusterSelect.value;
-      if (clusterId === "__custom__" || clusterId === "") {
+      if (clusterId === "") {
         resetAzureNamespaceDiscovery();
         return;
       }
       void rediscoverAzureNamespaces();
     });
-    const customResourceGroup = context.dom.inputById("azure-rg-custom");
-    const customCluster = context.dom.inputById("azure-cluster-custom");
-    if (customResourceGroup) {
-      scope.on(customResourceGroup, "change", () => {
-        if (rgSelect.value !== "__custom__") return;
-        const customClusterSelected = clusterSelect.value === "__custom__";
-        applyAzureResourceGroupFilter(customResourceGroup.value);
-        if (customClusterSelected) {
-          clusterSelect.value = "__custom__";
-          void rediscoverAzureNamespaces();
-        }
-      });
-    }
-    if (customCluster) {
-      scope.on(customCluster, "change", () => {
-        void rediscoverAzureNamespaces();
-      });
-    }
   };
 
   const discoverResources = async (
@@ -924,29 +949,21 @@ export function initializeDiscoveryPanel(
         previousAccount.tenantId !== tenantId);
     discoveryAccounts[provider] = { subscriptionId, tenantId };
     accountDiscovered[provider] = true;
-    const pending =
-      pendingInfrastructure?.provider === provider ?
-        pendingInfrastructure.config
-      : null;
+    const hasPendingSelection = pendingInfrastructure?.provider === provider;
     const deploymentResourceGroup =
-      provider === "azure" && (!accountChanged || pending !== null) ?
-        (pending?.resourceGroup ??
-        comboValue("azure-rg-select", "azure-rg-custom"))
+      provider === "azure" && !accountChanged && !hasPendingSelection ?
+        (context.dom.selectById("azure-rg-select")?.value ?? "")
       : "";
     const cluster =
-      provider === "azure" && (!accountChanged || pending !== null) ?
-        (pending?.cluster ?? selectedAzureClusterId())
+      provider === "azure" && !accountChanged && !hasPendingSelection ?
+        selectedAzureClusterId()
       : "";
-    const clusterIsCustom =
-      context.dom.selectById("azure-cluster-select")?.value === "__custom__";
-    const clusterIsKnown = azureClusters.some((item) => item.id === cluster);
     const discoveredClusterResourceGroup =
       provider === "azure" ? findAzureClusterResourceGroup(cluster) : "";
     const clusterResourceGroup =
-      discoveredClusterResourceGroup !== "" || clusterIsKnown ?
-        discoveredClusterResourceGroup
-      : clusterIsCustom || azureClusters.length > 0 ? deploymentResourceGroup
-      : "";
+      cluster === "" ? ""
+      : discoveredClusterResourceGroup !== "" ? discoveredClusterResourceGroup
+      : deploymentResourceGroup;
     const identity = [
       subscriptionId,
       tenantId,
@@ -981,6 +998,7 @@ export function initializeDiscoveryPanel(
       provider === "azure" ? "azure-discover-status" : "aws-discover-status"
     );
     if (statusEl) statusEl.textContent = "Discovering resources…";
+    if (provider === "azure") renderAzureRemediation(null);
     const payload: Record<string, string> = { provider };
     if (subscriptionId !== "") payload.subscriptionId = subscriptionId;
     if (tenantId !== "") payload.tenantId = tenantId;
@@ -998,6 +1016,7 @@ export function initializeDiscoveryPanel(
       if (isStale()) return;
       const data = toDiscoveryData(raw);
       if (provider === "azure") {
+        renderAzureRemediation(raw);
         if (statusEl) statusEl.textContent = discoverStatusText(data, "azure");
         azureClusters = sortDiscoveryOptions(
           parseDiscoveryOptions(readArray(raw, "clusters"))
@@ -1008,15 +1027,12 @@ export function initializeDiscoveryPanel(
           sortDiscoveryOptions(
             parseDiscoveryOptions(readArray(raw, "resourceGroups"))
           ),
-          "Select resource group…"
+          "Select resource group…",
+          false
         );
-        restoreInfrastructureValue(
-          "azure-rg-select",
-          "azure-rg-custom",
-          deploymentResourceGroup
-        );
+        selectOfferedValue(context, "azure-rg-select", deploymentResourceGroup);
         renderClustersForResourceGroup(
-          comboValue("azure-rg-select", "azure-rg-custom"),
+          context.dom.selectById("azure-rg-select")?.value ?? "",
           cluster
         );
         restoreAzureClusterValue(cluster, clusterResourceGroup);
@@ -1028,11 +1044,18 @@ export function initializeDiscoveryPanel(
           ),
           "Select namespace…"
         );
-        selectOfferedValue(context, "azure-namespace-select", "default");
-        wireAzureInfraFilter();
-        if (cluster === "" && selectedAzureClusterId() !== "") {
-          void rediscoverAzureNamespaces();
+        if (pendingAzureNamespace !== "") {
+          const namespace = pendingAzureNamespace;
+          pendingAzureNamespace = "";
+          restoreInfrastructureValue(
+            "azure-namespace-select",
+            "azure-namespace-custom",
+            namespace
+          );
+        } else {
+          selectOfferedValue(context, "azure-namespace-select", "default");
         }
+        wireAzureInfraFilter();
       } else {
         if (statusEl) statusEl.textContent = discoverStatusText(data, "aws");
         const awsClusters = sortDiscoveryOptions(
@@ -1071,13 +1094,13 @@ export function initializeDiscoveryPanel(
           "Select subnets…"
         );
       }
-      applyPendingInfrastructure(provider);
+      const restoredNamespace = applyPendingInfrastructure(provider);
       if (
         provider === "azure" &&
-        pending !== null &&
-        cluster !== "" &&
-        clusterResourceGroup === ""
+        cluster === "" &&
+        selectedAzureClusterId() !== ""
       ) {
+        pendingAzureNamespace = restoredNamespace;
         void rediscoverAzureNamespaces();
       }
     } catch (error) {
@@ -1085,6 +1108,7 @@ export function initializeDiscoveryPanel(
       if (statusEl)
         statusEl.textContent = `Discovery error: ${errorMessageOf(error)}`;
       if (provider === "azure") {
+        renderAzureRemediation(null);
         renderSelect(
           context,
           "azure-namespace-select",
@@ -1106,7 +1130,8 @@ export function initializeDiscoveryPanel(
 
   const rediscoverAzureNamespaces = async (): Promise<void> => {
     const account = discoveryAccounts.azure;
-    const resourceGroup = comboValue("azure-rg-select", "azure-rg-custom");
+    const resourceGroup =
+      context.dom.selectById("azure-rg-select")?.value ?? "";
     const cluster = selectedAzureClusterId();
     const clusterResourceGroup =
       findAzureClusterResourceGroup(cluster) || resourceGroup;
@@ -1119,31 +1144,40 @@ export function initializeDiscoveryPanel(
     customId: string,
     value: string
   ): void => {
-    if (value === "" || selectOfferedValue(context, selectId, value)) return;
+    if (value === "") return;
     const custom = context.dom.inputById(customId);
+    if (selectOfferedValue(context, selectId, value)) {
+      // A previous restore may have revealed the custom input; the select now
+      // carries the value directly, so the leftover input must not stay visible.
+      if (custom) custom.style.display = "none";
+      return;
+    }
     if (!custom || !selectOfferedValue(context, selectId, "__custom__")) return;
     custom.value = value;
     custom.style.display = "";
   };
 
-  const applyPendingInfrastructure = (provider: "azure" | "aws"): void => {
+  const applyPendingInfrastructure = (provider: "azure" | "aws"): string => {
     const pending = pendingInfrastructure;
-    if (!pending || pending.provider !== provider) return;
+    if (!pending || pending.provider !== provider) return "";
     const config = pending.config;
     pendingInfrastructure = null;
     if (provider === "azure") {
-      restoreInfrastructureValue(
+      selectOfferedValue(
+        context,
         "azure-rg-select",
-        "azure-rg-custom",
         config.resourceGroup ?? ""
       );
-      restoreAzureClusterValue(config.cluster ?? "", "");
+      const resourceGroup =
+        context.dom.selectById("azure-rg-select")?.value ?? "";
+      renderClustersForResourceGroup(resourceGroup, config.cluster ?? "");
+      restoreAzureClusterValue(config.cluster ?? "", resourceGroup);
       restoreInfrastructureValue(
         "azure-namespace-select",
         "azure-namespace-custom",
         config.namespace ?? ""
       );
-      return;
+      return config.namespace ?? "";
     }
     restoreInfrastructureValue(
       "aws-cluster-select",
@@ -1165,6 +1199,7 @@ export function initializeDiscoveryPanel(
       "aws-subnets-custom",
       config.subnetIds ?? ""
     );
+    return "";
   };
 
   return {
@@ -1174,7 +1209,16 @@ export function initializeDiscoveryPanel(
     discoverResources,
     findAzureClusterResourceGroup,
     setPendingInfraSelection(config, provider) {
+      pendingAzureNamespace = "";
       pendingInfrastructure = config ? { provider, config } : null;
+      const request = discoveryRequests[provider];
+      if (config && request.identity !== null) {
+        // Editing another environment changes what the pending response should
+        // restore, even when the account and currently rendered target match.
+        // Supersede that response so the new selection starts target-free.
+        request.token += 1;
+        request.identity = null;
+      }
     },
     currentInfraSelection(provider) {
       return provider === "aws" ?
@@ -1188,7 +1232,8 @@ export function initializeDiscoveryPanel(
             subnetIds: comboValue("aws-subnets-select", "aws-subnets-custom")
           }
         : {
-            resourceGroup: comboValue("azure-rg-select", "azure-rg-custom"),
+            resourceGroup:
+              context.dom.selectById("azure-rg-select")?.value ?? "",
             cluster: selectedAzureClusterId(),
             namespace: comboValue(
               "azure-namespace-select",
@@ -1197,6 +1242,9 @@ export function initializeDiscoveryPanel(
           };
     },
     teardown() {
+      remediationAction?.dispose();
+      remediationAction = null;
+      if (remediationHost) remediationHost.hidden = true;
       scope.teardown();
     }
   };

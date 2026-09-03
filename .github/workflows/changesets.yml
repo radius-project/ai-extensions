@@ -6,7 +6,7 @@ name: Changesets
 # fails a pull request, following the Changesets project's own recommendation
 # against blocking contributions over a missing changeset.
 #
-# Label a pull request `pr/no-changeset` to record that the omission is
+# Label a pull request `pr:no-changeset` to record that the omission is
 # deliberate. The reminder is then replaced by a note saying so, rather than
 # left behind to look unaddressed. `labeled`/`unlabeled` are triggers so the
 # label takes effect immediately instead of waiting for the next push.
@@ -26,7 +26,7 @@ jobs:
     name: Check changesets
     if: >-
       github.event.pull_request.head.ref != 'changeset-release/main' &&
-      !contains(github.event.pull_request.labels.*.name, 'pr/no-changeset')
+      !contains(github.event.pull_request.labels.*.name, 'pr:no-changeset')
     runs-on: ubuntu-latest
     permissions:
       contents: read # actions/checkout; pr-status itself needs no token
@@ -50,7 +50,7 @@ jobs:
 
       - name: Generate changeset status
         id: status
-        uses: changesets/action/pr-status@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.0.0-next.4
+        uses: changesets/action/pr-status@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.1.1
 
   comment:
     name: Report changeset status
@@ -67,9 +67,9 @@ jobs:
     steps:
       # Keep the write token isolated from the checkout and untrusted PR files.
       - name: Create or update pull request comment
-        uses: changesets/action/pr-comment@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.0.0-next.4
+        uses: changesets/action/pr-comment@8488615a623b1b9c987934bb89eae8af6a946ac1 # v2.1.1
         with:
           body: >-
             ${{ needs.status.outputs.comment-body || 'Changeset check skipped:
-            this pull request is labelled `pr/no-changeset`, so it is not
+            this pull request is labelled `pr:no-changeset`, so it is not
             expected to ship anything releasable.' }}

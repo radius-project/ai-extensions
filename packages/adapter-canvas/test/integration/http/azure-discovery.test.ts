@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { remediationView } from "@radius-project/core/remediations";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   isUuid,
@@ -7,6 +8,11 @@ import {
 import { createCanvasServer } from "../../../src/server/create-canvas-server.js";
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createAzureDiscoveryRoutes } from "../../../src/server/routes/azure-discovery.js";
+import {
+  azureDiscoveryContract,
+  commandLine,
+  temporaryKubeconfigDouble
+} from "../../support/azure-discovery-contract.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 
@@ -34,8 +40,15 @@ interface AzResult {
 }
 
 const CLI = {
-  aks: "az aks list --query [].{id:name, name:name, resourceGroup:resourceGroup} -o json",
-  groups: "az group list --query [].{id:name, name:name} -o json",
+  aks: commandLine(azureDiscoveryContract().aksList),
+  groups: commandLine(azureDiscoveryContract().groupList),
+  credentials: (cluster: string, rg: string) =>
+    commandLine(
+      azureDiscoveryContract({ cluster, resourceGroup: rg }).getCredentials!
+    ),
+  namespaces: commandLine(
+    azureDiscoveryContract({ cluster: "c", resourceGroup: "rg" }).namespaces!
+  ),
   eks: "aws eks list-clusters --query clusters --output json",
   vpcs: "aws ec2 describe-vpcs --query Vpcs[].{id:VpcId, name:VpcId} --output json",
   subnets:
@@ -79,10 +92,7 @@ function start(): {
         return Promise.resolve(scripted);
       },
       isUuid,
-      createTemporaryKubeconfig: () => ({
-        path: "/tmp/radius-kubeconfig-test",
-        remove: () => {}
-      }),
+      createTemporaryKubeconfig: () => temporaryKubeconfigDouble(),
       parseServedReposFromSubjects: (subjects) =>
         parseServedReposFromSubjects(subjects as Iterable<unknown>)
     })
@@ -224,14 +234,8 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
         { id: "rg-selected", name: "rg-selected" }
       ])
     );
-    cli.set(
-      "az aks get-credentials --name aks-selected --resource-group rg-selected --file /tmp/radius-kubeconfig-test --overwrite-existing",
-      ""
-    );
-    cli.set(
-      "kubectl --kubeconfig /tmp/radius-kubeconfig-test get namespaces -o jsonpath={.items[*].metadata.name}",
-      '"default" "radius-system"'
-    );
+    cli.set(CLI.credentials("aks-selected", "rg-selected"), "");
+    cli.set(CLI.namespaces, '"default" "radius-system"');
     const entry = await container!.getOrCreate("panel-a");
 
     const response = await fetch(`${entry.baseUrl}/api/discover`, {
@@ -255,6 +259,40 @@ describe("azure-discovery real-loopback HIT (RF-03)", () => {
     // Only POST is declared, so a GET reaches unmatched routing.
     const got = await fetch(`${entry.baseUrl}/api/discover`);
     expect(got.status).toBe(404);
+  });
+
+  it("returns a concise tenant-scoped remediation for Azure interaction-required failures", async () => {
+    const { cli } = start();
+    const tenantId = "11111111-2222-3333-4444-555555555555";
+    cli.set(CLI.aks, {
+      throws: new Error(
+        "invalid_grant AADSTS50076 trace-id=redacted Status_InteractionRequired"
+      )
+    });
+    cli.set(CLI.groups, "[]");
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/discover`, {
+      method: "POST",
+      body: JSON.stringify({ provider: "azure", tenantId })
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      clusters: [],
+      resourceGroups: [],
+      namespaces: [],
+      vpcs: [],
+      subnets: [],
+      errors: {
+        clusters:
+          "Azure CLI sign-in is required to discover resources. (AADSTS50076)"
+      },
+      remediation: remediationView("azure-cli-login", {
+        tenantId,
+        nextStep: "refresh-discovery"
+      })
+    });
   });
 
   it("answers 200 with the refusal shape for unsafe discovery inputs and a bad body", async () => {

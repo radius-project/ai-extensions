@@ -1,7 +1,6 @@
-# Radius AI Extension
+# Radius Canvas
 
-Radius AI Extension is a GitHub Copilot **plugin** for the
-[GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app).
+Radius Canvas is bundled with the `radius` plugin for the [GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app).
 It lets you define, visualize, and deploy an
 application with [Radius](https://github.com/radius-project/radius) without
 leaving Copilot. Radius is a cloud-native application platform that helps
@@ -15,12 +14,9 @@ The Radius canvas runs only in the [GitHub Copilot app](https://docs.github.com/
 
 Restart your Copilot session after installing so the skills and canvas become available. Use the plugin's three-dot menu to update or uninstall it.
 
-The canvas extension is a compiled bundle that is not committed to `main`. CI builds it on every merge and publishes it — together with the skills and manifest — to generated `releases/*` branches, and the marketplace manifest points each channel at its matching artifact, so installing from the app pulls the skills and canvas automatically. See [`docs/architecture/plugin-packaging-and-publishing.md`](./docs/architecture/plugin-packaging-and-publishing.md) for how this works.
+Radius Canvas is displayed only by the [GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app), so you can also install from the app itself. See [`plugins/radius/README.md`](./plugins/radius/README.md) for both routes, what the plugin bundles, and how to use it.
 
-See [`plugins/radius/README.md`](./plugins/radius/README.md) for what the plugin
-bundles and how to use it.
-
-> **NOTE:** Radius AI Extension is in preview. Send us your feedback:
+> **NOTE:** Radius Canvas is in preview. Send us your feedback:
 > [open an issue](https://github.com/radius-project/ai-extensions/issues/new/choose)
 > and tell us what you think.
 
@@ -42,7 +38,7 @@ controls for people with agent-callable capabilities. Each canvas extension is a
 small package (typically a `package.json` and an `extension.mjs` entry file) that
 defines the canvas behavior and its capabilities.
 
-The **Radius Canvas extension** turns your source code into a modeled Radius
+**Radius Canvas** turns your source code into a modeled Radius
 application, shows that application as a live graph across its lifecycle, and
 deploys it to your cloud environment, all from inside Copilot. It is organized
 into three areas:
@@ -67,19 +63,7 @@ additional UI surfaces beyond the Copilot canvas in the future.
 
 ## Agentic skills
 
-The repository also ships a set of agentic skills under
-[`plugins/radius/skills/`](./plugins/radius/skills). Each skill tells the agent how and when
-to drive a part of the Radius workflow, and pairs with the matching canvas
-actions and tools:
-
-| Skill                                                                                               | What it does                                                                                                                                                                    |
-|-----------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| [`radius-app-bicep`](./plugins/radius/skills/radius-app-bicep/SKILL.md)                             | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies.                                                      |
-| [`radius-app-graph`](./plugins/radius/skills/radius-app-graph/SKILL.md)                             | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.                                                                         |
-| [`radius-environment`](./plugins/radius/skills/radius-environment/SKILL.md)                         | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions.                                                                          |
-| [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md)                                   | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.                                                                         |
-| [`radius-delete`](./plugins/radius/skills/radius-delete/SKILL.md)                                   | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or remove a GitHub deploy environment.                                                   |
-| [`radius-fix-canvas-installation`](./plugins/radius/skills/radius-fix-canvas-installation/SKILL.md) | Repair a missing Radius canvas after install/update by copying the canvas files into the app's probed `extensions/` folder (temporary workaround for a GitHub Copilot app bug). |
+The plugin also ships five agentic skills, in [`extensions/radius/skills/`](./extensions/radius/skills). Each one tells the agent how and when to drive a part of the Radius workflow — modeling, graphing, environments, deployment, and deletion — and pairs with the matching canvas actions and tools. See [`plugins/radius/README.md`](./plugins/radius/README.md) for what each skill does.
 
 ## Architecture
 
@@ -96,16 +80,7 @@ layout and development workflow.
 
 ## Getting started
 
-Build the extension bundle locally:
-
-```bash
-pnpm install
-pnpm build           # bundles the canvas extension -> plugins/radius/dist/
-```
-
-See [Contributing](./CONTRIBUTING.md) for prerequisites, the full development
-workflow, testing, and how to add compute platforms, canvas actions, or new UI
-adapters.
+See [Contributing](./CONTRIBUTING.md) for prerequisites, the repository layout, the build and test workflow, and how to add compute platforms, canvas actions, or new UI adapters.
 
 ## Getting help
 
@@ -113,7 +88,7 @@ adapters.
 - ⚠️ **Found an issue?** - [Open a bug report](https://github.com/radius-project/ai-extensions/issues/new/choose)
 - 💡 **Have a proposal?** - [Open a feature request](https://github.com/radius-project/ai-extensions/issues/new/choose)
 
-## Contributing to Radius AI Extension
+## Contributing to Radius Canvas
 
 Visit [Contributing](./CONTRIBUTING.md) for more information on how to build,
 test, and contribute to this repository.
@@ -128,7 +103,7 @@ guidelines and more, head over to the
 
 ## Releasing
 
-[Changesets](https://changesets.dev/) drives the release: add a changeset with your pull request, and every merge to `main` refreshes the rolling `edge` channel. When a maintainer runs the **Release** workflow, Changesets opens a release pull request; merging it validates and publishes the exact source commit, creates the canonical `radius@<version>` source tag and immutable `radius/v<version>` artifact tag, and moves the stable `latest` channel. Follow the [release runbook](./docs/eng/RELEASE_RUNBOOK.md) to cut one, or see [`RELEASING.md`](./docs/eng/RELEASING.md) for the full release flow.
+[Changesets](https://changesets.dev/) drives independent plugin versions and changelogs. Every merge to `main` refreshes each plugin's rolling `<plugin>@edge` channel. The **Release** workflow can prepare one plugin or every pending plugin; merging its scope-labelled PR validates the exact version diff, builds behind shared gates, and publishes attested assets on a zero-history `releases/<plugin>/v<version>` branch tagged `<plugin>@<version>` — the one tag a stable release writes, and the tag its GitHub release is cut from. GitHub immutable-release enforcement is an optional repository-variable switch. Follow the [release runbook](./docs/eng/RELEASE_RUNBOOK.md) to cut one, or see [`RELEASING.md`](./docs/eng/RELEASING.md) for the full lifecycle.
 
 ## Code of conduct
 

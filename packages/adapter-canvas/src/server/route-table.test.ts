@@ -46,7 +46,9 @@ const productionHandlers = {
       latest: () => null,
       latestAny: () => null,
       get: () => null,
-      toClientView: () => null
+      toClientView: () => null,
+      productVersion: () => "0.0.0",
+      now: () => 0
     },
     {
       isValidRepoSlug: () => false,
@@ -79,6 +81,8 @@ const productionHandlers = {
       requireInput: () => {},
       finish: () => {},
       isTerminalState: () => false,
+      canDismissOperation: () => false,
+      dismissOperation: () => {},
       persistOperations: () => Promise.resolve(),
       toClientView: () => null,
       scheduleEnvironmentOperation: () => true,
@@ -94,6 +98,8 @@ const productionHandlers = {
     acquireForRetry: () => ({ ok: true }),
     persistOperations: () => Promise.resolve(),
     checkPullRequestMerge: () => Promise.resolve({ state: "open" }),
+    inspectVerificationWorkflow: () => Promise.resolve("inactive"),
+    cancelVerificationWorkflow: () => Promise.resolve("inactive"),
     schedule: () => true,
     invalidateEnvironmentListing: () => {}
   }),
@@ -103,6 +109,7 @@ const productionHandlers = {
     repoMatchesWorkspace: () => false
   }),
   ...createDeploymentsRoutes({
+    probeDeleteConflict: () => Promise.resolve({ state: "clear" as const }),
     isValidRepoSlug: () => true,
     readInstanceEntry: () => undefined,
     triggerDeployRepairHandoff: () => false,
@@ -215,6 +222,7 @@ const productionHandlers = {
   }),
   ...createRemediationRoutes(
     productionRemediationDependencies({
+      presentRemediation: (remediation) => remediation,
       runSessionPrompt: () => Promise.resolve({ status: 200 }),
       errorMessage: (error) => String(error)
     })
@@ -241,7 +249,13 @@ const productionHandlers = {
   }),
   ...createGraphsPlanningStreamRoutes({
     readInstanceEntry: () => undefined,
-    defaultBranchForState: () => "main",
+    resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
+      Promise.resolve({
+        status: "resolved",
+        branch: requestedBranch,
+        followsWorkspaceBranch: false
+      }),
+    commitBranchResolution: () => true,
     prepareSourceRef: () => ({ token: "" }),
     commitSourceRef: () => true,
     isCurrentSourceRef: () => true,
@@ -272,6 +286,13 @@ const productionHandlers = {
   ...createGraphsPlanningWritesRoutes({
     workflows: createGraphPlanningWorkflows({
       readInstanceEntry: () => undefined,
+      resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
+        Promise.resolve({
+          status: "resolved",
+          branch: requestedBranch,
+          followsWorkspaceBranch: false
+        }),
+      commitBranchResolution: () => true,
       pipeline: createGraphPipeline({
         fetchBicepSelection: () =>
           Promise.resolve({
@@ -302,7 +323,6 @@ const productionHandlers = {
       prepareSourceRefResources: () => ({ view: "graph", token: "" }),
       setSourceRefResources: () => false,
       isCurrentSourceRefToken: () => false,
-      defaultBranchForState: () => "main",
       canReuseModeledGraph: () => false,
       addGraphProgress: () => false,
       beginPlannedGraphRequest: () => 1,
@@ -319,6 +339,7 @@ const productionHandlers = {
   }),
   ...createEnvironmentsRoutes({
     errorMessage: (error) => String(error),
+    redactDiagnostic: (value) => value,
     repoMatchesWorkspace: () => false,
     readInstanceEntry: () => undefined,
     runCommand: () => Promise.resolve(""),
@@ -327,7 +348,24 @@ const productionHandlers = {
     resolveRepoAppName: () => Promise.resolve(""),
     resolveEnvDeployment: () => Promise.resolve(null),
     logError: () => {},
+    discoverEnvironmentTarget: () =>
+      Promise.resolve({
+        provider: "",
+        clientId: "",
+        tenantId: "",
+        repoId: 1
+      }),
+    activeDeleteOperation: () => null,
+    createOperation: () => ({ operationId: "op", currentStage: null }),
+    buildDeleteStages: () => [],
+    startOperation: () => ({
+      ok: true as const,
+      operation: { operationId: "op", currentStage: null }
+    }),
+    toClientView: () => ({}),
+    scheduleEnvironmentOperation: () => true,
     cliExec: () => {},
+    activeDeleteEnvironment: () => "",
     envListCacheGet: () => undefined,
     envListCacheSet: () => {},
     envListCacheDelete: () => {},
@@ -366,6 +404,11 @@ const productionHandlers = {
     getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
     cliExec: () => ({ stdin: null }),
     readProcessEnv: () => ({}),
+    namespaceClaimsFor: () => ({
+      listEnvironmentNames: () => Promise.resolve({ ok: true, names: [] }),
+      readEnvironmentVariables: () =>
+        Promise.resolve({ ok: true, variables: {} })
+    }),
     isValidRepoSlug: () => false,
     getOperation: () => null,
     isStale: () => false,
@@ -400,6 +443,7 @@ const productionHandlers = {
     tempFile: { write: () => "", remove: () => {} },
     setCanonicalEnvironment: () => {},
     recordGitHubEnvironment: () => {},
+    recordGitHubEnvironmentVariable: () => {},
     promoteCreatedGitHubEnvironment: () => false,
     envListCacheDelete: () => {},
     ociStateBackend: "oci",
@@ -467,8 +511,10 @@ describe("server route ownership boundary", () => {
       "POST /api/abandon-deployment",
       "POST /api/operations/:operationId/resume/:code",
       "POST /api/operations/:operationId/abandon",
+      "POST /api/operations/:operationId/dismiss",
       "POST /api/operations/:operationId/stop",
       "POST /api/operations/:operationId/continue",
+      "POST /api/operations/:operationId/cancel-workflow",
       "POST /api/operations/:operationId/rollback",
       "POST /api/operations/:operationId/exit",
       "POST /api/operations/:operationId/retry/:retryKind"
@@ -501,14 +547,23 @@ describe("server route ownership boundary", () => {
     );
   });
 
-  it("matches the exact operations route before the by-id prefix route", () => {
+  it("matches operations status and diagnostics before the by-id prefix route", () => {
     const latest = matchRoute(table, "GET", "/api/operations");
+    const diagnostics = matchRoute(
+      table,
+      "GET",
+      "/api/operations/op-1/diagnostics"
+    );
     const byId = matchRoute(table, "GET", "/api/operations/abc");
     expect(routeKey(latest!)).toBe("GET /api/operations");
+    expect(routeKey(diagnostics!)).toBe(
+      "GET /api/operations/:operationId/diagnostics"
+    );
     expect(routeKey(byId!)).toBe("GET /api/operations/");
     // The prefix rule must not swallow the exact route, and the two routes must
     // land on genuinely different handlers.
     expect(latest?.handler).not.toBe(byId?.handler);
+    expect(diagnostics?.handler).not.toBe(byId?.handler);
     // A trailing slash with no id is a by-id lookup for the empty id.
     expect(routeKey(matchRoute(table, "GET", "/api/operations/")!)).toBe(
       "GET /api/operations/"
@@ -516,7 +571,8 @@ describe("server route ownership boundary", () => {
     // Declaration order is what makes that true, so pin it.
     expect(
       SERVER_ROUTE_DECLARATIONS.findIndex(
-        (route) => routeKey(route) === "GET /api/operations"
+        (route) =>
+          routeKey(route) === "GET /api/operations/:operationId/diagnostics"
       )
     ).toBeLessThan(
       SERVER_ROUTE_DECLARATIONS.findIndex(

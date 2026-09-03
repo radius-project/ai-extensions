@@ -1,4 +1,5 @@
 import { hasVerificationOperationMarker } from "./verification-run-identity.js";
+import { githubCredentialSourceLabel } from "./github-credential-source.js";
 
 export interface PullRequestState {
   branch: string;
@@ -31,20 +32,20 @@ export function hasWorkflowRunTrigger(workflow: unknown): boolean {
 
 export async function planCredentialVerification({
   targetRepo,
+  defaultBranch,
   prState,
   pullRequestUrl = "",
   verifyWorkflowPath = ".github/workflows/radius-verify-credentials.yml",
   dispatcherWorkflowPath = ".github/workflows/run-rad-commands.yml",
-  fetchFile,
-  resolveDefaultBranch
+  fetchFile
 }: {
   targetRepo: string;
+  defaultBranch: string;
   prState: PullRequestState | null;
   pullRequestUrl?: string;
   verifyWorkflowPath?: string;
   dispatcherWorkflowPath?: string;
   fetchFile: FetchFile;
-  resolveDefaultBranch: (repo: string) => Promise<string | null | undefined>;
 }): Promise<CredentialVerificationPlan> {
   if (!prState) {
     // The dispatch runs against the default branch here, so the workflow that
@@ -53,24 +54,21 @@ export async function planCredentialVerification({
     // declare it, and GitHub answers that with a 422 the journal reads as a
     // conclusive refusal — failing setup with a message about the dispatch
     // rather than the template.
-    const directBranch = (await resolveDefaultBranch(targetRepo)) || "main";
     const directWorkflow = await fetchFile(
       targetRepo,
       verifyWorkflowPath,
-      directBranch
+      defaultBranch
     );
     return {
       shouldDispatch: true,
-      ref: "",
-      defaultBranch: "",
+      ref: defaultBranch,
+      defaultBranch,
       pullRequestUrl: "",
       skipReason: "",
       supportsOperationMarker: hasVerificationOperationMarker(directWorkflow)
     };
   }
 
-  const defaultBranch =
-    (await resolveDefaultBranch(targetRepo)) || prState.base || "main";
   // `verifyExists` and `dispatcherChains` are questions about the default
   // branch: whether the workflow has landed, and whether merging would chain a
   // deploy off it. Marker support is a question about the ref the dispatch
@@ -132,4 +130,139 @@ export function buildVerifyWorkflowDispatchArgs({
     targetRepo,
     ...(ref ? ["--ref", ref] : [])
   ];
+}
+
+export function describeVerificationDispatch({
+  login,
+  credentialSource,
+  workflowFile,
+  targetRepo,
+  envName,
+  ref
+}: {
+  login: string;
+  credentialSource: "injected" | "keyring";
+  workflowFile: string;
+  targetRepo: string;
+  envName: string;
+  ref: string;
+}): string {
+  return (
+    `Credential verification dispatch is configured for @${login} using ${githubCredentialSourceLabel(credentialSource)}: ` +
+    `workflow "${workflowFile}", environment "${envName}", repository "${targetRepo}", ref "${ref}".`
+  );
+}
+
+// What the customer's pull request is actually waiting on, once the plan, the
+// cloud credentials, and the dispatch have all had their say. Verification has
+// two independent blockers, the workflows not being on the default branch and
+// the cloud credentials being incomplete, and either, both, or neither can
+// hold. Collapsing them loses the case where merging is necessary but not
+// sufficient, and tells that customer the merge alone will start verification.
+export type PullRequestNextStep =
+  | "verification-running"
+  | "awaiting-merge"
+  | "awaiting-credentials"
+  | "awaiting-merge-and-credentials";
+
+// The pull-request guidance and the verification outcome are the same answer
+// told twice, so they are derived from one decision rather than predicted
+// before `planCredentialVerification`, the credential check, and the dispatch
+// have made it. Only `awaiting-merge` may promise that merging starts
+// verification, because it is the only case where the merge is the last thing
+// standing in the way.
+export function describePullRequestNextStep({
+  outcome,
+  baseBranch,
+  ref
+}: {
+  outcome: PullRequestNextStep;
+  baseBranch: string;
+  ref: string;
+}): string {
+  if (outcome === "verification-running")
+    return `Credential verification is running against branch "${ref}", so it is not waiting for the merge. Merging the pull request above puts the workflows on "${baseBranch}".`;
+  if (outcome === "awaiting-credentials")
+    return `Merging the pull request above puts the workflows on "${baseBranch}", but credential verification is waiting on the cloud credentials above, not on the merge.`;
+  if (outcome === "awaiting-merge-and-credentials")
+    return `Merge the pull request above to put the workflows on "${baseBranch}", and finish the cloud credentials above. Credential verification is waiting on both, so merging alone will not start it.`;
+  return `Merge the pull request above to finish setup; credential verification and deploys run once it lands on "${baseBranch}".`;
+}
+
+// The terminal message the customer reads in the panel headline and the
+// operation chip, which must agree with the step above rather than making the
+// promise the step just withdrew. Only reached when the merge is outstanding,
+// so it turns on whether the credentials are outstanding too.
+export function describeMergeRequiredTerminal({
+  outcome,
+  branch,
+  baseBranch,
+  hasPullRequest
+}: {
+  outcome: PullRequestNextStep;
+  branch: string;
+  baseBranch: string;
+  hasPullRequest: boolean;
+}): string {
+  const alsoCredentials = outcome === "awaiting-merge-and-credentials";
+  if (hasPullRequest)
+    return alsoCredentials ?
+        "Merge the pull request and finish the cloud credentials to complete setup. Credential verification is waiting on both, so merging alone will not start it."
+      : "Merge the pull request to finish setup; credential verification and deploys run once it lands.";
+  return alsoCredentials ?
+      `Open and merge a pull request from "${branch}" into "${baseBranch}", and finish the cloud credentials, to complete setup. Credential verification is waiting on both, so merging alone will not start it.`
+    : `Open and merge a pull request from "${branch}" into "${baseBranch}" to finish setup.`;
+}
+
+export interface VerifyWorkflowRunIdentity {
+  runId: string;
+  runUrl: string;
+}
+
+export function parseVerifyWorkflowRunUrl(
+  stdout: string,
+  {
+    targetRepo,
+    host = "github.com"
+  }: {
+    targetRepo: string;
+    host?: string;
+  }
+): VerifyWorkflowRunIdentity {
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length !== 1) {
+    throw new Error("GitHub CLI did not return exactly one workflow run URL.");
+  }
+  const [owner, repo, extra] = targetRepo.split("/");
+  if (!owner || !repo || extra) {
+    throw new Error("The target GitHub repository is invalid.");
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(lines[0]);
+  } catch {
+    throw new Error("GitHub CLI returned a malformed workflow run URL.");
+  }
+  const expectedPath = `/${owner}/${repo}/actions/runs/`;
+  const runId =
+    parsed.pathname.startsWith(expectedPath) ?
+      parsed.pathname.slice(expectedPath.length)
+    : "";
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.hostname.toLowerCase() !== host.toLowerCase() ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    !/^[1-9]\d*$/.test(runId)
+  ) {
+    throw new Error(
+      "GitHub CLI returned a workflow run URL for an unexpected location."
+    );
+  }
+  return { runId, runUrl: parsed.toString() };
 }

@@ -1,10 +1,6 @@
 # Radius Plugin
 
-Model, visualize, and deploy applications with [Radius](https://radapp.io) directly from the GitHub Copilot app. The plugin bundles six skills and a canvas extension that turn Copilot into a Radius application-modeling and deployment assistant.
-
-The canvas runs only in the
-[GitHub Copilot app](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-plugins),
-which is the only host that can display it, so the plugin is installed from the app.
+Model, visualize, and deploy applications with [Radius](https://radapp.io) from the GitHub Copilot app. The plugin bundles five skills and Radius Canvas, which turn Copilot into a Radius application-modeling and deployment assistant.
 
 ## Installation
 
@@ -14,53 +10,37 @@ Open the GitHub Copilot app, select **Customize** in the side menu, and then sel
 
 Restart your Copilot session after installing so the skills and the canvas extension become available. Use the plugin's three-dot menu to update or uninstall it.
 
-> **NOTE:** Due to a GitHub Copilot app bug, the canvas may not appear after installing or updating the plugin, even though the skills load. If the Radius canvas is missing, run the bundled `radius-fix-canvas-installation` skill (ask Copilot to "fix radius canvas") and then reload extensions or restart the app. This is a temporary workaround that will be removed once the upstream bug is fixed.
-
-<!-- markdownlint-disable-next-line MD028 -->
-
-> **NOTE:** The canvas `extension.mjs` is a compiled build artifact that is not committed to `main`. CI rebuilds it on every merge, assembles the complete plugin into `plugins/radius/dist/`, and publishes that to a generated `releases/edge` branch (also tagged `edge`); the marketplace manifest pins the plugin `source` to that path and branch — so installing from the app delivers the skills and canvas without any manual build. See [`docs/design/2026-07-canvas-bundle-publishing.md`](../../docs/design/2026-07-canvas-bundle-publishing.md).
-
-## What's included
+## What's Included
 
 ### Skills
 
-| Skill | Use it when you want to… |
-| ----- | ------------------------- |
-| `radius-app-bicep` | Generate or update the `.radius/app.bicep` manifest from a repo's contents. |
-| `radius-app-graph` | Build, refresh, or diff the Radius application graph. |
-| `radius-environment` | Create and verify an AWS/Azure deploy environment and its OIDC trust. |
-| `radius-deploy` | Deploy (or troubleshoot) an app via the generated GitHub Actions workflow. |
-| `radius-delete` | Delete a deployed app via the generated GitHub Actions workflow, or remove a GitHub deploy environment. |
-| `radius-fix-canvas-installation` | Repair a missing Radius canvas after install/update by copying the canvas files into the app's probed `extensions/` folder (temporary workaround for a GitHub Copilot app bug). |
+| Skill                | Use it when you want to…                                                                                                      |
+|----------------------|-------------------------------------------------------------------------------------------------------------------------------|
+| `radius-app-bicep`   | Generate or update the `.radius/app.bicep` manifest from a repo's contents.                                                   |
+| `radius-app-graph`   | Build, refresh, or diff the Radius application graph.                                                                         |
+| `radius-environment` | Create and verify an AWS/Azure deploy environment and its OIDC trust.                                                         |
+| `radius-deploy`      | Deploy (or troubleshoot) an app via the generated GitHub Actions workflow.                                                    |
+| `radius-delete`      | Delete a deployed app via the generated GitHub Actions workflow, or delete a deploy environment and clean up its cloud state. |
 
-### Canvas extension
+### Radius Canvas
 
-`extension.mjs` registers the **Radius** canvas
-plus supporting tools for OIDC configuration, `app.bicep` generation,
-application-graph rendering, PR graph diffs, and environment creation. It is a
-built artifact — see [Development](#development) to rebuild it.
+Radius Canvas is the interactive surface the plugin opens in the app's side panel. It renders your application graph, walks you through creating a deploy environment, and reports deployment progress, so you steer the work on the canvas instead of reading it back from chat.
 
 ## Usage
 
-Once installed, just ask Copilot naturally:
+Once installed, ask Copilot naturally:
 
-```
+```text
 generate an app.bicep for this repo
 show me the application graph
 set up cloud credentials for Azure
 deploy my app
 ```
 
-## Development
+## Source
 
-The canvas extension is produced from TypeScript source in the repository root
-(`packages/core/` + `packages/adapter-canvas/`) via esbuild:
+This plugin is part of [radius-project/ai-extensions](https://github.com/radius-project/ai-extensions).
 
-```bash
-pnpm install
-pnpm build        # bundles -> plugins/radius/dist/
-```
+## License
 
-See the repository [`README.md`](../../README.md) and
-[`packages/core/README.md`](../../packages/core/README.md) for architecture and
-extension recipes.
+Apache-2.0

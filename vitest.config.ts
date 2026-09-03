@@ -10,19 +10,28 @@ export default defineConfig({
       include: [
         "packages/*/src/**/*.ts",
         "packages/*/src/**/*.mjs",
-        "plugins/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs",
-        "plugins/radius/skills/radius-app-bicep/scripts/radius-type-schema.mjs"
+        "extensions/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs",
+        "extensions/radius/skills/radius-app-bicep/scripts/radius-recipe-pack.mjs",
+        "extensions/radius/skills/radius-app-bicep/scripts/radius-type-schema.mjs"
       ],
       exclude: ["packages/*/src/**/*.test.ts"],
       thresholds: {
         ...coverageBaseline.aggregate,
-        "plugins/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs": {
-          statements: 100,
-          branches: 100,
-          functions: 100,
-          lines: 100
-        },
-        "plugins/radius/skills/radius-app-bicep/scripts/radius-type-schema.mjs":
+        "extensions/radius/skills/radius-app-bicep/scripts/show-radius-type.mjs":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
+        "extensions/radius/skills/radius-app-bicep/scripts/radius-recipe-pack.mjs":
+          {
+            statements: 100,
+            branches: 100,
+            functions: 100,
+            lines: 100
+          },
+        "extensions/radius/skills/radius-app-bicep/scripts/radius-type-schema.mjs":
           {
             statements: 100,
             branches: 100,

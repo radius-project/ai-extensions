@@ -516,6 +516,25 @@ stateDiagram-v2
 
 The panel does not show a percentage because the amount of work varies by path. It shows the current stage, current step when available, elapsed time, and completed-step history.
 
+### Environment deletion reuses the operation model
+
+Issue #303 extends this model to environment deletion. Deleting an environment used to remove only the GitHub environment (`gh api DELETE …/environments/{env}`), leaving the Radius environment on the cluster and the per-environment Azure federated credential (`repo:<owner>/<repo>:environment:<env>`) orphaned. The orphaned credential later surfaces as a confusing OIDC error (`AADSTS7002138`) when an environment of the same name is created.
+
+Deletion is now a background `OperationRecord` with `kind: "delete"`, driven by the same registry, progress panel, journey continuity, keepalive, per-repository single-flight, and restart recovery as creation. `POST /api/delete-environment` fails closed on its existing guards (bad input, an unconfirmable active-app check, and a `409` when an application is still deployed with a redirect to the deployment-deletion flow). It also refuses a non-Azure environment up front with a `provider-unsupported` error, since the bundled env-delete workflow is Azure-only and AWS deletion is not supported yet — so no operation is created for it. For a supported (Azure) environment it discovers the `AZURE_CLIENT_ID` from the environment's GitHub variables, then returns `202 Accepted` with the operation view instead of deleting synchronously.
+
+`buildDeleteStages({ includeAzureCleanup })` produces the delete-specific stages. Because a non-Azure environment is already refused up front, `includeAzureCleanup` is always `true` in practice; the flag is kept so the stage set stays explicit at the one place it is decided.
+
+The stage order is load-bearing:
+
+1. **Delete the Radius environment** by dispatching the delete-environment workflow and monitoring its Actions run to completion. This runs first, while the environment's federated credential still exists, because the workflow authenticates to the cluster with it.
+2. **Remove the federated credential** with `az ad app federated-credential delete`.
+3. **Delete the GitHub environment** and drop it from the environment-list cache.
+4. **Leave the app registration in place**: record an informational step noting that the app registration (its client ID) was left behind. Radius never deletes a Microsoft Entra app registration — the identity may be shared with other environments or repositories — so this stage makes no `az` calls and never prompts.
+
+Every step is best-effort and idempotent: a not-found Radius environment, credential, or GitHub environment is treated as already-deleted and recorded as a warning step, so a partially completed prior deletion still converges. The operation finishes `succeeded` or, when best-effort warnings were recorded, `succeeded_with_warnings`.
+
+The app registration is intentionally never touched. Rather than prompting for a decision, the runner records the informational "left in place" step, and on a successful azure deletion the panel shows a single-button acknowledgement dialog reminding the user that the app registration was not deleted and that they can remove it themselves in the Azure portal if it is no longer needed. Because the runner is resume-safe — each stage runs only while it is still pending — a delete operation that was mid-flight when the extension restarted is rescheduled and converges.
+
 ### Blocking prerequisites — operation lifecycle
 
 These are not polish items. Two of them can lose or corrupt a real cloud operation.
@@ -886,10 +905,10 @@ No new runtime dependency or packaging format. The new modules are included in t
 
 **Issue #274 ownership and rollback:**
 
-- A newly created Entra app receives the signed-in user as an explicit owner, and setup verifies the owner readback before continuing.
+- A newly created Entra app receives the current Azure CLI caller (a user or service principal) as an explicit owner, and setup verifies the owner readback before continuing.
 - Radius provenance tags record the repository, environment, operation, and managed marker on new apps without changing the owner-based reuse policy.
-- Existing `AZURE_CLIENT_ID`, explicit app selection, and display-name matching all reuse any app the signed-in user owns, whether or not Radius tagged it.
-- All three non-owner paths say that the signed-in user is not listed as an owner. A matching Radius provenance tag adds orphan guidance but never authorizes automatic reclamation.
+- Existing `AZURE_CLIENT_ID`, explicit app selection, and display-name matching all reuse any app the current Azure CLI caller owns, whether or not Radius tagged it.
+- All three non-owner paths say that the current Azure CLI identity is not listed as an owner. A matching Radius provenance tag adds orphan guidance but never authorizes automatic reclamation.
 - A blank or package-scope-deficient GHCR credential fails before the first Azure mutation.
 - Failure injection after app, owner, tag, service-principal, federated-credential, role-assignment, GitHub Environment, workflow, and verification-dispatch steps cleans only current-operation Azure artifacts in reverse dependency order.
 - Reused apps, service principals, federated credentials, role assignments, and pre-existing GitHub Environments are never deleted by rollback.
@@ -1007,7 +1026,7 @@ Building the prototype in draft PR #244 exposed several cases where a correct ba
 | Journey fields were never populated                  | The model had a next-page target but the UI sent none                                                                    | Record repo and branch and render **View planned graph**                                                                                        |
 | Workflow dispatch could target the wrong environment | A PR-ref verify run could trigger a stale default-branch dispatcher                                                      | Inspect whether the dispatcher has `workflow_run`; require an environment match only when it can auto-run                                       |
 | GHCR check rejected a valid repository token         | The shared action assumed GHCR bearer tokens were JWTs; GHCR returned an opaque token with no decodable `access` claim   | Start a blob-upload session and require HTTP 202; upload no content                                                                             |
-| Failed setup left an ownerless Entra app             | App creation assumed the creator became an owner, so retry could call Radius's own leftover app another user's resource  | Add and verify the signed-in user as owner, tag new apps with Radius provenance, and use precise missing-owner language across every reuse path |
+| Failed setup left an ownerless Entra app             | App creation assumed the creator became an owner, so retry could call Radius's own leftover app another user's resource  | Add and verify the CLI caller as owner, tag new apps with Radius provenance, and use precise missing-owner language across every reuse path     |
 | A late setup failure left Azure artifacts behind     | The two setup requests had no shared provenance record or rollback boundary                                              | Carry a server-only artifact ledger by operation ID and clean only current-operation Azure artifacts before verification dispatch or PR handoff |
 | Cleanup could delete or hide the wrong resource      | An idempotent create response could not prove whether this process created a GitHub Environment                          | Treat the environment as a created candidate, retain it, and show manual cleanup guidance; never use a weak timestamp or tag as deletion proof  |
 | Advisory text caused a false enterprise diagnosis    | The classifier scanned the whole run log, including a shell step that mentioned `AADSTS7002381` as hypothetical guidance | Isolate the actual **Azure Login (OIDC)** step before classifying; preserve `No subscriptions found` as the real error                          |

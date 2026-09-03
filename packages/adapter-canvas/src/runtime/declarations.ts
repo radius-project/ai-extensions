@@ -202,13 +202,13 @@ export interface ToolDeclaration {
   parameters: Record<string, unknown>;
 }
 
-// The 6 tools, in their current order. Declarative shape only — see tools.ts
+// The 7 tools, in their current order. Declarative shape only — see tools.ts
 // for the handlers.
 export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
     name: "radius_generate_app",
     description:
-      "Generates a Radius app.bicep file by analyzing the repository structure using the radius-app-bicep skill. Returns the full radius-app-bicep skill (SKILL.md and all reference files, bundled with the extension) so the agent uses authoritative, schema-accurate Radius.* types and compiles the result before finishing.",
+      "Starts Radius app.bicep authoring after checking whether the repository is modelable. For supported repositories, returns one JSON object with the radius-app-bicep skill name, repository path, packaged skill path, instruction, optional generator version, and optional ambiguity brief. For repositories without a Dockerfile, returns a Markdown refusal instead of invoking the skill handoff.",
     parameters: {
       type: "object",
       properties: {
@@ -217,6 +217,39 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
           description: "Path to the repository to analyze"
         }
       }
+    }
+  },
+  {
+    name: "radius_report_modeling_failure",
+    description:
+      "Reports a permanent radius-app-bicep authoring failure to the Radius Canvas attempt that requested it. Use only when the Canvas handoff supplies the exact instance, repository, branch, and attempt token; never report transient failures, cancellations, or a run that wrote app.bicep.",
+    parameters: {
+      type: "object",
+      properties: {
+        instanceId: {
+          type: "string",
+          description: "Radius Canvas instance that requested modeling"
+        },
+        repo: {
+          type: "string",
+          description: "Repository supplied by the Canvas handoff"
+        },
+        branch: {
+          type: "string",
+          description: "Branch supplied by the Canvas handoff"
+        },
+        attemptToken: {
+          type: "string",
+          description: "Opaque attempt token supplied by the Canvas handoff"
+        },
+        error: {
+          type: "string",
+          description:
+            "Actionable permanent-failure summary without credentials or secrets",
+          maxLength: 4000
+        }
+      },
+      required: ["instanceId", "repo", "branch", "attemptToken", "error"]
     }
   },
   {

@@ -14,6 +14,8 @@ import {
   STAGING_DIR_PREFIX,
   STAGING_IGNORE_PATTERN,
   STAGING_RUN_RECORD,
+  STAGING_SELF_IGNORE,
+  STAGING_SELF_IGNORE_FILE,
   evaluateStagedRun,
   publishableFiles
 } from "@radius-project/core/modeling";
@@ -28,7 +30,7 @@ import { hashAppBicep } from "./app-bicep-hash.js";
 
 const script = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  "../../../plugins/radius/skills/radius-app-bicep/scripts/promote-app-model.mjs"
+  "../../../extensions/radius/skills/radius-app-bicep/scripts/promote-app-model.mjs"
 );
 
 const MODEL =
@@ -143,6 +145,14 @@ function stagedInGit(root: string): string[] {
     .filter(Boolean);
 }
 
+// Everything git would report as changed or untracked, including inside
+// directories it has not been told to ignore.
+function gitStatus(root: string): string[] {
+  return git(root, ["status", "--porcelain", "--untracked-files=all"])
+    .split("\n")
+    .filter(Boolean);
+}
+
 describe("--begin", () => {
   it("creates a staging directory inside .radius and prints it", () => {
     const target = repo();
@@ -172,8 +182,53 @@ describe("--begin", () => {
     );
   });
 
-  // A run that finished always removed its own staging directory, so anything
-  // still there belongs to an interrupted run and is never a real model.
+  // The directory hides itself from git the moment it exists. Before this, the
+  // only ignore rule was written at publish time, so on a repository where no
+  // run had ever finished an interrupted run left model files that a bulk
+  // `git add -A` would commit.
+  it("gives the staging directory an ignore file that excludes everything", () => {
+    const target = repo();
+    const stagingDir = begin(target);
+    expect(
+      fs.readFileSync(path.join(stagingDir, STAGING_SELF_IGNORE_FILE), "utf8")
+    ).toBe(STAGING_SELF_IGNORE);
+  });
+
+  it("leaves git with nothing to report for a run in flight", () => {
+    const target = repo();
+    const stagingDir = begin(target);
+    fs.writeFileSync(path.join(stagingDir, "app.bicep"), MODEL);
+
+    expect(gitStatus(target.root)).toEqual([]);
+  });
+
+  // The regression this fix exists for: no run has ever published, so
+  // `.radius/.gitignore` does not exist, and something stages everything.
+  it("stages nothing when an interrupted first-ever run is bulk-added", () => {
+    const target = repo();
+    const stagingDir = begin(target);
+    stageCompleteRun(stagingDir);
+    expect(fs.existsSync(path.join(target.radiusDir, ".gitignore"))).toBe(
+      false
+    );
+
+    git(target.root, ["add", "-A"]);
+
+    expect(stagedInGit(target.root)).toEqual([]);
+  });
+
+  // The ignore file lives inside the directory the sweep already deletes, so it
+  // needs no separate undo and leaves nothing behind.
+  it("removes the ignore file along with a swept staging directory", () => {
+    const target = repo();
+    const leftover = begin(target, "old");
+
+    run(target.root, ["--begin", "--run-id", "new", "--stale-after-ms", "0"]);
+
+    expect(fs.existsSync(leftover)).toBe(false);
+    expect(gitStatus(target.root)).toEqual([]);
+  });
+
   it("removes a staging directory left behind by an interrupted run", () => {
     const target = repo();
     const leftover = path.join(target.radiusDir, `${STAGING_DIR_PREFIX}old`);
@@ -424,6 +479,21 @@ describe("publish", () => {
         .filter((line) => line.trim() === STAGING_IGNORE_PATTERN)
     ).toHaveLength(1);
     expect(stagedInGit(target.root)).toContain(".radius/.gitignore");
+  });
+
+  // The staging directory's own ignore file excludes everything, so publishing
+  // it into `.radius/` would hide the model from git entirely.
+  it("does not publish the staging directory's ignore file", () => {
+    const target = repo();
+    const stagingDir = begin(target);
+    stageCompleteRun(stagingDir);
+
+    expect(run(target.root, ["--staging", stagingDir]).status).toBe(0);
+
+    expect(
+      fs.readFileSync(path.join(target.radiusDir, ".gitignore"), "utf8")
+    ).toBe(`${STAGING_IGNORE_PATTERN}\n`);
+    expect(stagedInGit(target.root)).toContain(".radius/app.bicep");
   });
 
   it("appends the ignore rule without disturbing an existing file", () => {

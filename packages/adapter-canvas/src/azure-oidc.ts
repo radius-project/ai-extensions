@@ -17,7 +17,8 @@
 // `process is not defined` page error.
 import {
   buildOidcSubject,
-  buildFederatedCredentialName
+  buildFederatedCredentialName,
+  buildEnvironmentSuffix
 } from "@radius-project/core/platforms";
 import type { OidcSubjectConfig } from "@radius-project/core/platforms";
 
@@ -97,6 +98,8 @@ export type GitHubJsonRunner = (apiPath: string) => Promise<GitHubJsonResponse>;
 export interface FetchGitHubJsonOptions {
   retries?: number;
   baseDelayMs?: number;
+  maxElapsedMs?: number;
+  now?: () => number;
   sleepFn?: (milliseconds: number) => Promise<unknown>;
 }
 
@@ -225,6 +228,95 @@ export function buildAppCreateArgs({
     args.push("--service-management-reference", serviceManagementReference);
   }
   return args;
+}
+
+/**
+ * Which principal the Azure CLI is authenticated as.
+ *
+ * `unsupported` carries the reason Radius will surface, because every consumer
+ * of this type drives a destructive setup path that must fail closed rather
+ * than guess an identity.
+ */
+export type CallerIdentity =
+  | { kind: "user" }
+  | { kind: "servicePrincipal"; appId: string }
+  | { kind: "unsupported"; reason: string };
+
+/** Build the argv reading the signed-in human user's Entra object id. */
+export function buildSignedInUserObjectIdArgs(): string[] {
+  return ["ad", "signed-in-user", "show", "--query", "id", "-o", "tsv"];
+}
+
+/**
+ * Build the argv reading a service principal's Entra object id from its app id.
+ *
+ * `az account show` reports a service principal's `user.name` as its appId,
+ * while owner add and owner list both speak object ids.
+ *
+ * The caller's own service principal already exists before setup begins. A
+ * failure here should fail closed (do not guess at another identity), while
+ * callers may still apply a short, bounded retry for transient throttling or
+ * network errors.
+ */
+export function buildServicePrincipalObjectIdArgs({
+  appId
+}: {
+  appId: string;
+}): string[] {
+  return ["ad", "sp", "show", "--id", appId, "--query", "id", "-o", "tsv"];
+}
+
+/** Parse the `az account show` caller projection into a principal type. */
+export function parseCallerIdentity(stdout: unknown): CallerIdentity {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(stdout ?? "").trim() || "null");
+  } catch {
+    return {
+      kind: "unsupported",
+      reason:
+        'Azure CLI returned an unreadable caller identity from "az account show". Run "az login" and retry.'
+    };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return {
+      kind: "unsupported",
+      reason:
+        'Azure CLI reported no caller identity from "az account show". Run "az login" and retry.'
+    };
+  }
+  const caller = parsed as { type?: unknown; name?: unknown };
+  const type =
+    typeof caller.type === "string" ? caller.type.trim().toLowerCase() : "";
+  const name = typeof caller.name === "string" ? caller.name.trim() : "";
+  if (!type) {
+    return {
+      kind: "unsupported",
+      reason:
+        'Azure CLI reported no caller identity type from "az account show". Run "az login" and retry.'
+    };
+  }
+  if (type === "user") return { kind: "user" };
+  if (type === "serviceprincipal") {
+    // A managed identity also reports `servicePrincipal`, but names itself
+    // `systemAssignedIdentity` rather than an appId, so there is nothing to
+    // resolve an object id from.
+    if (!isUuid(name)) {
+      return {
+        kind: "unsupported",
+        reason:
+          `Azure CLI is authenticated as a service principal whose name ("${name}") is not an application id, ` +
+          'so Radius cannot resolve its Entra object id. Sign in with "az login --service-principal -u <appId>" and retry.'
+      };
+    }
+    return { kind: "servicePrincipal", appId: name };
+  }
+  return {
+    kind: "unsupported",
+    reason:
+      `Azure CLI reported an unsupported caller identity type ("${type}"). ` +
+      "Radius supports a signed-in user or a service principal."
+  };
 }
 
 /** Build the argv for `az ad app owner add`. */
@@ -395,26 +487,26 @@ export function isRadiusProvenanceMatch(
  * Pure ownership classification for the Radius-tagged-app reuse path.
  *
  * - Owned apps always reuse, regardless of any Radius tags.
- * - Radius-tagged repo/environment matches that the signed-in user does not
- *   own get a dedicated orphaning message with manual cleanup guidance.
- * - Everything else falls back to the precise "signed-in user is not listed as
- *   an owner" message.
+ * - Radius-tagged repo/environment matches that the calling Azure CLI identity
+ *   does not own get a dedicated orphaning message with manual cleanup guidance.
+ * - Everything else falls back to the precise "Azure CLI identity is not listed
+ *   as an owner" message.
  */
 export function decideRadiusAppOwnership({
-  ownedBySignedInUser,
+  ownedByCaller,
   radiusProvenance
 }: {
-  ownedBySignedInUser: boolean;
+  ownedByCaller: boolean;
   radiusProvenance?: RadiusAppProvenanceInput;
 }): RadiusAppOwnershipDecision {
-  if (ownedBySignedInUser) return { action: "reuse" };
+  if (ownedByCaller) return { action: "reuse" };
 
   if (isRadiusProvenanceMatch(radiusProvenance)) {
     return {
       action: "error",
       code: "app-registration-radius-orphaned",
       reason:
-        "A Radius-tagged App Registration already exists for this repository/environment, but the current signed-in user is not listed as one of its owners. " +
+        "A Radius-tagged App Registration already exists for this repository/environment, but the current Azure CLI identity is not listed as one of its owners. " +
         "It may be a leftover from a previous Radius setup that was orphaned. Ask an administrator or current owner to review the owners and Radius tags and clean it up manually if needed. " +
         "This flow will not reclaim, delete, or add owners.",
       radiusOrphan: true
@@ -425,7 +517,7 @@ export function decideRadiusAppOwnership({
     action: "error",
     code: "app-registration-not-owned",
     reason:
-      "The current signed-in user is not listed as one of this App Registration's owners. " +
+      "The current Azure CLI identity is not listed as one of this App Registration's owners. " +
       "Setup will not reuse it. " +
       "Choose an owned application or create a new one."
   };
@@ -442,6 +534,186 @@ export function missingRequiredAppTags(
 /** Build the argv for `az ad app delete`. */
 export function buildAppDeleteArgs({ appId }: { appId: string }): string[] {
   return ["ad", "app", "delete", "--id", appId];
+}
+
+/**
+ * Argv for `az ad app federated-credential list`, used to enumerate the
+ * credentials on an app registration when deciding whether it is now unused.
+ *
+ * `-o json` is passed explicitly so the command emits a JSON array regardless of
+ * the caller's `core.output` config or `AZURE_CORE_OUTPUT` env. Without it, a
+ * machine configured with `core.output=none` returns empty stdout, which the
+ * parse would read as "no credentials" — falsely marking a still-shared app
+ * registration as unused and offering it for deletion.
+ */
+export function buildFederatedCredentialListArgs({
+  appId
+}: {
+  appId: string;
+}): string[] {
+  return [
+    "ad",
+    "app",
+    "federated-credential",
+    "list",
+    "--id",
+    appId,
+    "-o",
+    "json"
+  ];
+}
+
+/**
+ * Argv for `az ad app federated-credential delete`, targeting one credential on
+ * an app registration by its federated-credential id (its name).
+ */
+export function buildFederatedCredentialDeleteArgs({
+  appId,
+  credentialId
+}: {
+  appId: string;
+  credentialId: string;
+}): string[] {
+  return [
+    "ad",
+    "app",
+    "federated-credential",
+    "delete",
+    "--id",
+    appId,
+    "--federated-credential-id",
+    credentialId
+  ];
+}
+
+export interface AzureFederatedCredential {
+  id: string;
+  name: string;
+  subject: string;
+  issuer: string;
+  audiences: string[];
+}
+
+/**
+ * Parse the JSON array emitted by `az ad app federated-credential list` into the
+ * identity fields the deletion flow needs. Callers must first use
+ * `federatedCredentialListUnreadable` so malformed or incomplete identity is
+ * never mistaken for an empty credential list.
+ */
+export function parseFederatedCredentials(
+  stdout: unknown
+): AzureFederatedCredential[] {
+  let parsed: unknown = stdout;
+  if (typeof stdout === "string") {
+    const trimmed = stdout.trim();
+    if (!trimmed) return [];
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(parsed)) return [];
+  const creds: AzureFederatedCredential[] = [];
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const name = typeof record.name === "string" ? record.name : "";
+    if (!name) continue;
+    const audiences =
+      Array.isArray(record.audiences) ?
+        record.audiences.filter(
+          (audience): audience is string => typeof audience === "string"
+        )
+      : [];
+    creds.push({
+      id: typeof record.id === "string" ? record.id : "",
+      name,
+      subject: typeof record.subject === "string" ? record.subject : "",
+      issuer: typeof record.issuer === "string" ? record.issuer : "",
+      audiences
+    });
+  }
+  return creds;
+}
+
+/**
+ * True when `az … federated-credential list` returned output we cannot interpret
+ * as a credential array: a non-empty payload that is not valid JSON, or a
+ * non-array value. This lets the deletion flow distinguish a genuine "no
+ * credentials" result (empty/whitespace stdout, or an empty array) from a
+ * malformed one, so it warns and leaves the app registration in place rather
+ * than reporting a false "nothing to remove" or prompting to delete an app whose
+ * credentials it could not actually read.
+ */
+export function federatedCredentialListUnreadable(stdout: unknown): boolean {
+  if (stdout == null) return true;
+  let parsed: unknown = stdout;
+  if (typeof stdout === "string") {
+    const trimmed = stdout.trim();
+    if (!trimmed) return true;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return true;
+    }
+  }
+  if (!Array.isArray(parsed)) return true;
+  return parsed.some((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry))
+      return true;
+    const record = entry as Record<string, unknown>;
+    return (
+      typeof record.id !== "string" ||
+      !record.id ||
+      typeof record.name !== "string" ||
+      !record.name ||
+      typeof record.subject !== "string" ||
+      typeof record.issuer !== "string" ||
+      !record.issuer ||
+      !Array.isArray(record.audiences) ||
+      record.audiences.length === 0 ||
+      record.audiences.some(
+        (audience) => typeof audience !== "string" || !audience
+      )
+    );
+  });
+}
+
+/**
+ * Select the federated credentials on an app registration that belong to one
+ * GitHub environment, so they can be removed when that environment is deleted.
+ *
+ * A credential belongs to the environment when either its `name` matches one of
+ * the names the setup flow mints for it (the bare, `-mutable`, and `-immutable`
+ * variants) or its `subject` is exactly the default subject THIS repository would
+ * mint for the environment (`repo:<owner>/<repo>:environment:<env>`).
+ *
+ * The subject match is deliberately scoped to the current repository. An app
+ * registration is a per-repo deploy identity, but a user can intentionally share
+ * one across repositories; a broad `…:environment:<env>` suffix match would then
+ * select — and delete — another repository's credential that merely shares the
+ * environment name. Matching the full repo-qualified subject (plus the
+ * deterministic per-repo names) keeps deletion confined to this repo.
+ */
+export function selectEnvironmentFederatedCredentials(
+  credentials: AzureFederatedCredential[],
+  { repoFullName, envName }: { repoFullName: string; envName: string }
+): AzureFederatedCredential[] {
+  if (!Array.isArray(credentials) || !envName) return [];
+  const names = new Set(
+    ["", "mutable", "immutable"].map((variant) =>
+      buildFederatedCredentialName({
+        repoFullName,
+        envName,
+        ...(variant ? { variant } : {})
+      })
+    )
+  );
+  const expectedSubject = `repo:${repoFullName}:${buildEnvironmentSuffix(envName)}`;
+  return credentials.filter(
+    (cred) => names.has(cred.name) || cred.subject === expectedSubject
+  );
 }
 
 /**
@@ -493,7 +765,7 @@ export function decideAppSelection({
     const picked = owned.find((m) => norm(m.appId) === norm(explicitAppId));
     if (picked) return { action: "reuse", appId: picked.appId };
     const decision = decideRadiusAppOwnership({
-      ownedBySignedInUser: false,
+      ownedByCaller: false,
       radiusProvenance
     });
     return {
@@ -510,7 +782,7 @@ export function decideAppSelection({
   if (owned.length === 0) {
     if (hasUnownedMatch) {
       const decision = decideRadiusAppOwnership({
-        ownedBySignedInUser: false,
+        ownedByCaller: false,
         radiusProvenance
       });
       return {
@@ -750,7 +1022,7 @@ export function isAzResourceNotFound(stderr: unknown): boolean {
  *   `showStatus` is the classified result of `az ad app show --id <clientId>`.
  * @returns {{action:'reuse'|'error'|'fallthrough'|'fatal', code?:string, reason?:string, radiusOrphan?:boolean}}
  *   - reuse: the wired app exists and is owned — use it directly.
- *   - error: exists but the current signed-in user is not listed as an owner — do NOT repoint.
+ *   - error: exists but the current Azure CLI identity is not listed as an owner — do NOT repoint.
  *   - fatal `client-id-lookup-failed`: a real lookup failure (not a not-found).
  *   - fallthrough: no clientId, or a not-found (stale var) — use the name lookup.
  */
@@ -777,7 +1049,7 @@ export function decideExistingClientId({
   if (showStatus === "found") {
     if (owned) return { action: "reuse" };
     const decision = decideRadiusAppOwnership({
-      ownedBySignedInUser: false,
+      ownedByCaller: false,
       radiusProvenance
     });
     return {
@@ -825,17 +1097,40 @@ export async function fetchGitHubJson(
   {
     retries = 3,
     baseDelayMs = 300,
+    maxElapsedMs = 45_000,
+    now = Date.now,
     sleepFn = defaultSleep
   }: FetchGitHubJsonOptions = {}
 ): Promise<GitHubJsonResponse | undefined> {
+  const startedAt = now();
   let last: GitHubJsonResponse | undefined;
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     last = await runner(apiPath);
     const status = last?.status;
+    const transportFailure =
+      status == null &&
+      /(?:ECONNRESET|ECONNABORTED|ETIMEDOUT|EAI_AGAIN|network is unreachable|socket hang up|timed? ?out|error connecting to api\.github\.com|failed to connect|could not resolve host)/i.test(
+        last?.stderr || ""
+      );
     const retriable =
-      status === 429 || (status != null && status >= 500) || status == null;
+      status === 429 || (status != null && status >= 500) || transportFailure;
     if (last?.ok || !retriable || attempt === retries) return last;
-    await sleepFn(baseDelayMs * attempt);
+    const remaining = maxElapsedMs - (now() - startedAt);
+    if (remaining <= 0) return last;
+    const retryAfter = /Retry-After\s*:\s*([^\r\n]+)/i
+      .exec(last.stderr || "")?.[1]
+      ?.trim();
+    const seconds = Number(retryAfter);
+    const requestedDelay =
+      retryAfter && Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000
+      : retryAfter ? Date.parse(retryAfter) - now()
+      : baseDelayMs * attempt;
+    const delay = Math.max(
+      0,
+      Number.isFinite(requestedDelay) ? requestedDelay : baseDelayMs * attempt
+    );
+    if (delay >= remaining) return last;
+    await sleepFn(delay);
   }
   return last;
 }

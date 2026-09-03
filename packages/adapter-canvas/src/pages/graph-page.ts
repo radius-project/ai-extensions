@@ -14,6 +14,11 @@ export function graphPage(state: CanvasState = {}): string {
       state.graphFromWorkspace
     : isWorkspaceSelection(state, targetRepo, graphBranch);
   const loaded = resources.length > 0 || state.graphLoaded === true;
+  const followWorkspaceBranch =
+    state.graphFollowsWorkspaceBranch ??
+    (state.contextBranchSource === "workspace" &&
+      targetRepo === state.workspaceRepo &&
+      graphBranch === state.contextBranch);
 
   const controls =
     loaded ?
@@ -47,7 +52,7 @@ export function graphPage(state: CanvasState = {}): string {
     loaded ?
       `<div id="graph-container"></div>
 <div id="graph-refresh-status" class="status error" style="display:none;"></div>
-<div style="margin-top:8px; font-size:12px; color:var(--rad-text-tertiary);">
+<div id="graph-guidance" style="margin-top:8px; font-size:12px; color:var(--rad-text-tertiary);">
   Click a node to view source code links.
 </div>`
     : `<div id="graph-status" class="status info">Select a branch to generate the application graph. If no app.bicep exists, one will be generated from the repo structure.</div>
@@ -69,7 +74,8 @@ ${graphBody}
         branch: graphBranch,
         resources,
         loaded,
-        localSource
+        localSource,
+        followWorkspaceBranch
       })
     )}</div>
 ${browserScriptTag("graph-page")}

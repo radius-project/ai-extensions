@@ -68,6 +68,9 @@ describe("canvas pages over real loopback HTTP", () => {
     expect(response.body).toContain(
       '<a href="?page=graph" data-page="graph" data-radius-graph-page="graph" class="rad-subtab rad-subtab--active"'
     );
+    expect(response.body).toContain(
+      'href="https://edge.docs.radapp.io/integrations/github-copilot-app/canvas-extension/"'
+    );
   });
 
   it.each([
@@ -164,6 +167,30 @@ describe("canvas pages over real loopback HTTP", () => {
     }
   });
 
+  it("serves the Azure discovery remediation host", async () => {
+    resetState({ contextRepo: "octo/app" });
+
+    const response = await get("/?page=environment");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toContain(
+      '<div id="azure-discover-remediation" hidden></div>'
+    );
+  });
+
+  it("serves only discovered Azure infrastructure selectors with namespace creation guidance", async () => {
+    resetState({ contextRepo: "octo/app" });
+
+    const response = await get("/?page=environment");
+
+    expect(response.body).toContain(
+      "Select an existing Azure resource group and AKS cluster, then choose the Kubernetes namespace for this environment. To use a new namespace, enter its name and Radius will create it during environment setup."
+    );
+    expect(response.body).not.toContain('id="azure-rg-custom"');
+    expect(response.body).not.toContain('id="azure-cluster-custom"');
+    expect(response.body).toContain('id="azure-namespace-custom"');
+  });
+
   // The diff page carries the worktree branch to the browser so each node can be
   // routed to a local file or a github.com URL; through the real server this is
   // the only place that value is produced.
@@ -191,6 +218,28 @@ describe("canvas pages over real loopback HTTP", () => {
       ).toMatchObject({ workspaceBranch: expected });
     }
   );
+
+  it("serves stable graph context markers for terminal browser failures", async () => {
+    resetState({
+      contextRepo: "octo/app",
+      graphTargetRepo: "octo/app",
+      graphBranch: "feature/x",
+      graphLoaded: true,
+      graphResources: [{ id: "app/web" }],
+      diffTargetRepo: "octo/app",
+      diffBase: "main",
+      diffHead: "feature/x",
+      diffResources: [{ id: "app/web", diffStatus: "unchanged" }]
+    });
+
+    const graph = await get("/?page=graph");
+    const diff = await get("/?page=graph-diff");
+
+    expect(graph.status).toBe(200);
+    expect(graph.body).toContain('id="graph-guidance"');
+    expect(diff.status).toBe(200);
+    expect(diff.body).toContain('id="graph-diff-summary"');
+  });
 
   it("falls back to the environment page for a page value it does not know", async () => {
     resetState({ contextRepo: "octo/app" });
@@ -236,6 +285,19 @@ describe("canvas pages over real loopback HTTP", () => {
 
     await get("/?page=environment");
     expect(entry.state.activeSubtab).toBe("environments");
+  });
+
+  it("serves the AWS credential provider as visible but disabled", async () => {
+    resetState({ contextRepo: "octo/app" });
+
+    const response = await get("/?page=credentials");
+
+    expect(response.body).toContain(
+      '<option value="aws" disabled>AWS (coming soon)</option>'
+    );
+    expect(response.body).toContain(
+      '<div id="cred-panel-aws" class="rad-section" style="display:none;">'
+    );
   });
 
   it("redirects an implicit environment landing to the live deployment", async () => {

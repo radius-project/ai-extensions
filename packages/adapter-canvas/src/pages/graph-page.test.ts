@@ -22,7 +22,8 @@ describe("graphPage", () => {
       branch: "feature",
       resources: [],
       loaded: false,
-      localSource: false
+      localSource: false,
+      followWorkspaceBranch: false
     });
   });
 
@@ -33,17 +34,42 @@ describe("graphPage", () => {
       graphLoaded: true,
       graphTargetRepo: "octo/app",
       graphBranch: "worktree",
-      graphFromWorkspace: true
+      graphFromWorkspace: true,
+      contextRepo: "octo/app",
+      contextBranch: "worktree",
+      contextBranchSource: "workspace",
+      workspaceRepo: "octo/app"
     });
+
     expect(html).toContain('id="graph-container"');
     expect(html).toContain('id="graph-refresh-status"');
+    expect(html).toContain('id="graph-guidance"');
     expect(readBrowserPageState(html, "radius-graph-page-state")).toEqual({
       repo: "octo/app",
       branch: "worktree",
       resources,
       loaded: true,
-      localSource: true
+      localSource: true,
+      followWorkspaceBranch: true
     });
+  });
+
+  it("preserves an explicit selection even when its name matches the workspace branch", () => {
+    const html = graphPage({
+      graphTargetRepo: "octo/app",
+      graphBranch: "worktree",
+      graphFollowsWorkspaceBranch: false,
+      contextBranch: "worktree",
+      contextBranchSource: "workspace",
+      workspaceRepo: "octo/app"
+    });
+
+    expect(readBrowserPageState(html, "radius-graph-page-state")).toMatchObject(
+      {
+        branch: "worktree",
+        followWorkspaceBranch: false
+      }
+    );
   });
 
   it("keeps hostile repository and branch state inert", () => {

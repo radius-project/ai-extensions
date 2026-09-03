@@ -11,6 +11,8 @@ import {
   buildAppTagPatchArgs,
   buildAppTagShowArgs,
   buildRadiusAppProvenanceTags,
+  buildServicePrincipalObjectIdArgs,
+  buildSignedInUserObjectIdArgs,
   isServiceManagementReferenceError,
   isAppOwnerAlreadyAssignedError,
   fetchGitHubJson,
@@ -21,6 +23,7 @@ import {
   isAzResourceNotFound,
   missingRequiredAppTags,
   parseAppTags,
+  parseCallerIdentity,
   parseRadiusAppProvenanceTags,
   decideRadiusAppOwnership,
   isRadiusProvenanceMatch,
@@ -30,6 +33,11 @@ import {
   parseServedReposFromSubjects,
   validateAppRegistrationName,
   formatServesReposLabel,
+  buildFederatedCredentialListArgs,
+  buildFederatedCredentialDeleteArgs,
+  parseFederatedCredentials,
+  federatedCredentialListUnreadable,
+  selectEnvironmentFederatedCredentials,
   RADIUS_MANAGED_APP_TAG,
   type GitHubJsonResponse
 } from "./azure-oidc.js";
@@ -143,6 +151,124 @@ describe("buildAppCreateArgs", () => {
     const i = args.indexOf("--service-management-reference");
     expect(i).toBeGreaterThan(-1);
     expect(args[i + 1]).toBe(UUID);
+  });
+});
+
+describe("caller identity resolution", () => {
+  it("builds the argv reading a signed-in user's Graph object id", () => {
+    expect(buildSignedInUserObjectIdArgs()).toEqual([
+      "ad",
+      "signed-in-user",
+      "show",
+      "--query",
+      "id",
+      "-o",
+      "tsv"
+    ]);
+  });
+
+  it("builds the argv resolving a service principal object id from its app id", () => {
+    expect(buildServicePrincipalObjectIdArgs({ appId: UUID })).toEqual([
+      "ad",
+      "sp",
+      "show",
+      "--id",
+      UUID,
+      "--query",
+      "id",
+      "-o",
+      "tsv"
+    ]);
+  });
+
+  it.each([
+    ["a lowercase type", '{"type":"user","name":"dev@contoso.com"}'],
+    ["a mixed-case type", '{"type":"User","name":"dev@contoso.com"}'],
+    ["a padded type", '  {"type":" user ","name":"dev@contoso.com"}  ']
+  ])("classifies %s as a signed-in user", (_label, stdout) => {
+    expect(parseCallerIdentity(stdout)).toEqual({ kind: "user" });
+  });
+
+  it.each([
+    ["an exact type", `{"type":"servicePrincipal","name":"${UUID}"}`],
+    ["a lowercase type", `{"type":"serviceprincipal","name":"${UUID}"}`],
+    ["a padded app id", `{"type":"servicePrincipal","name":"  ${UUID}  "}`]
+  ])(
+    "classifies %s as a service principal and keeps its app id",
+    (_label, stdout) => {
+      expect(parseCallerIdentity(stdout)).toEqual({
+        kind: "servicePrincipal",
+        appId: UUID
+      });
+    }
+  );
+
+  it("refuses a service principal whose name is not an application id", () => {
+    const identity = parseCallerIdentity(
+      '{"type":"servicePrincipal","name":"systemAssignedIdentity"}'
+    );
+    expect(identity.kind).toBe("unsupported");
+    expect(identity.kind === "unsupported" && identity.reason).toContain(
+      "systemAssignedIdentity"
+    );
+  });
+
+  it("refuses a service principal with no name at all", () => {
+    const identity = parseCallerIdentity('{"type":"servicePrincipal"}');
+    expect(identity.kind).toBe("unsupported");
+    expect(identity.kind === "unsupported" && identity.reason).toContain(
+      "not an application id"
+    );
+  });
+
+  it("names an unexpected principal type in the refusal", () => {
+    const identity = parseCallerIdentity('{"type":"managedIdentity"}');
+    expect(identity.kind).toBe("unsupported");
+    expect(identity.kind === "unsupported" && identity.reason).toContain(
+      "managedidentity"
+    );
+  });
+
+  it.each([
+    ["a null user projection", '{"type":null,"name":null}'],
+    ["a blank type", '{"type":"   ","name":"dev@contoso.com"}'],
+    ["a non-string type", '{"type":7}']
+  ])("refuses %s", (_label, stdout) => {
+    const identity = parseCallerIdentity(stdout);
+    expect(identity.kind).toBe("unsupported");
+    expect(identity.kind === "unsupported" && identity.reason).toContain(
+      "no caller identity type"
+    );
+  });
+
+  it.each([
+    ["empty output", ""],
+    ["whitespace-only output", "   "],
+    ["a JSON null", "null"],
+    ["a JSON array", "[]"],
+    ["a JSON scalar", '"user"']
+  ])("refuses %s as no identity at all", (_label, stdout) => {
+    const identity = parseCallerIdentity(stdout);
+    expect(identity.kind).toBe("unsupported");
+    expect(identity.kind === "unsupported" && identity.reason).toContain(
+      "no caller identity"
+    );
+  });
+
+  it.each([
+    ["malformed JSON", "{oops"],
+    ["a CLI error banner", "ERROR: Please run 'az login'"]
+  ])("refuses %s as unreadable", (_label, stdout) => {
+    const identity = parseCallerIdentity(stdout);
+    expect(identity.kind).toBe("unsupported");
+    expect(identity.kind === "unsupported" && identity.reason).toContain(
+      "unreadable caller identity"
+    );
+  });
+
+  it("refuses a missing payload without throwing", () => {
+    expect(parseCallerIdentity(undefined).kind).toBe("unsupported");
+    expect(parseCallerIdentity(null).kind).toBe("unsupported");
   });
 });
 
@@ -303,6 +429,44 @@ describe("fetchGitHubJson retry", () => {
     expect(runner).toHaveBeenCalledTimes(3);
   });
 
+  it("does not retry before Retry-After when it exceeds the elapsed budget", async () => {
+    let now = 1000;
+    const sleeps: number[] = [];
+    const runner = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      stderr: "Retry-After: 60"
+    });
+    const res = await fetchGitHubJson(runner, "/x", {
+      retries: 3,
+      maxElapsedMs: 2000,
+      now: () => now,
+      sleepFn: async (milliseconds) => {
+        sleeps.push(milliseconds);
+        now += milliseconds;
+      }
+    });
+    expect(res?.ok).toBe(false);
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(sleeps).toEqual([]);
+  });
+
+  it("does not start another read after the elapsed budget is exhausted", async () => {
+    let now = 0;
+    const runner = vi.fn(async () => {
+      now += 45_000;
+      return { ok: false, status: 503, stderr: "unavailable" };
+    });
+    const res = await fetchGitHubJson(runner, "/x", {
+      retries: 3,
+      maxElapsedMs: 45_000,
+      now: () => now,
+      sleepFn: async () => {}
+    });
+    expect(res?.status).toBe(503);
+    expect(runner).toHaveBeenCalledTimes(1);
+  });
+
   it("does not retry a 404", async () => {
     const runner = vi
       .fn()
@@ -320,6 +484,31 @@ describe("fetchGitHubJson retry", () => {
     const res = await fetchGitHubJson(runner, "/x", noSleep);
     expect(res?.ok).toBe(true);
     expect(runner).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries the GitHub CLI standard connection diagnostic", async () => {
+    const runner = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: null,
+        stderr: "error connecting to api.github.com"
+      })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: {} });
+    const res = await fetchGitHubJson(runner, "/x", noSleep);
+    expect(res?.ok).toBe(true);
+    expect(runner).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry a malformed response with no HTTP status", async () => {
+    const runner = vi.fn().mockResolvedValue({
+      ok: false,
+      status: null,
+      stderr: "GitHub returned an invalid JSON response."
+    });
+    const res = await fetchGitHubJson(runner, "/x", noSleep);
+    expect(res?.ok).toBe(false);
+    expect(runner).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -969,7 +1158,11 @@ describe("selectMissingFederatedCredentials", () => {
 describe("decideExistingClientId", () => {
   it("falls through when clientId is empty", () => {
     expect(
-      decideExistingClientId({ clientId: "", showStatus: "found", owned: true })
+      decideExistingClientId({
+        clientId: "",
+        showStatus: "found",
+        owned: true
+      })
     ).toEqual({ action: "fallthrough" });
     expect(decideExistingClientId({})).toEqual({ action: "fallthrough" });
   });
@@ -984,7 +1177,7 @@ describe("decideExistingClientId", () => {
     ).toEqual({ action: "reuse" });
   });
 
-  it("reports that the current signed-in user is not listed as an owner", () => {
+  it("reports that the current Azure CLI identity is not listed as an owner", () => {
     const result = decideExistingClientId({
       clientId: "abc",
       showStatus: "found",
@@ -995,7 +1188,7 @@ describe("decideExistingClientId", () => {
       code: "app-registration-not-owned"
     });
     expect(result.reason).toContain(
-      "The current signed-in user is not listed as one of this App Registration's owners."
+      "The current Azure CLI identity is not listed as one of this App Registration's owners."
     );
   });
 
@@ -1019,7 +1212,7 @@ describe("decideExistingClientId", () => {
       code: "app-registration-radius-orphaned",
       radiusOrphan: true
     });
-    expect(result.reason).toContain("current signed-in user is not listed");
+    expect(result.reason).toContain("current Azure CLI identity is not listed");
     expect(result.reason).toContain("clean it up manually");
   });
 
@@ -1235,7 +1428,7 @@ describe("decideAppSelection", () => {
     const r = decideAppSelection({ ownedMatches: [], hasUnownedMatch: true });
     expect(r.action).toBe("error");
     expect(r.code).toBe("app-registration-not-owned");
-    expect(r.reason).toContain("current signed-in user is not listed");
+    expect(r.reason).toContain("current Azure CLI identity is not listed");
   });
 
   it("reuses the single owned match", () => {
@@ -1279,7 +1472,7 @@ describe("decideAppSelection", () => {
     const r = decideAppSelection({ ownedMatches: [A], explicitAppId: "zzz" });
     expect(r.action).toBe("error");
     expect(r.code).toBe("app-registration-not-owned");
-    expect(r.reason).toContain("current signed-in user is not listed");
+    expect(r.reason).toContain("current Azure CLI identity is not listed");
   });
 
   it("surfaces Radius-orphan guidance when an explicit unowned app matches Radius provenance", () => {
@@ -1387,7 +1580,7 @@ describe("decideAppSelection", () => {
     expect(r.radiusOrphan).toBe(true);
     expect(r.reason).toBeDefined();
     expect(r.reason!.toLowerCase()).toContain(
-      "current signed-in user is not listed as one of its owners"
+      "current azure cli identity is not listed as one of its owners"
     );
     expect(r.reason).toContain("orphaned");
     expect(r.reason).toContain("manual");
@@ -1399,7 +1592,7 @@ describe("decideAppSelection", () => {
     expect(r.code).toBe("app-registration-not-owned");
     expect(r.reason).toBeDefined();
     expect(r.reason!.toLowerCase()).toContain(
-      "current signed-in user is not listed as one of this app registration's owners"
+      "current azure cli identity is not listed as one of this app registration's owners"
     );
     expect(r.reason).not.toContain("another user");
   });
@@ -1426,7 +1619,7 @@ describe("Radius provenance ownership decisions", () => {
   it("reuses any owned app regardless of Radius provenance", () => {
     expect(
       decideRadiusAppOwnership({
-        ownedBySignedInUser: true,
+        ownedByCaller: true,
         radiusProvenance: {
           tags: [
             "radius-managed",
@@ -1442,7 +1635,7 @@ describe("Radius provenance ownership decisions", () => {
 
   it("returns the orphaned cleanup guidance for same-repo/environment Radius apps", () => {
     const r = decideRadiusAppOwnership({
-      ownedBySignedInUser: false,
+      ownedByCaller: false,
       radiusProvenance: {
         tags: [
           "radius-managed",
@@ -1456,7 +1649,7 @@ describe("Radius provenance ownership decisions", () => {
     expect(r.action).toBe("error");
     expect(r.code).toBe("app-registration-radius-orphaned");
     expect(r.radiusOrphan).toBe(true);
-    expect(r.reason).toContain("current signed-in user is not listed");
+    expect(r.reason).toContain("current Azure CLI identity is not listed");
     expect(r.reason).toContain("orphaned");
     expect(r.reason).toContain("manual");
   });
@@ -1649,5 +1842,222 @@ describe("validateAppRegistrationName", () => {
       ok: true,
       name: "radius-deploy-octo-app"
     });
+  });
+});
+
+describe("federated credential argv builders", () => {
+  it("builds the list argv targeting the app registration", () => {
+    expect(buildFederatedCredentialListArgs({ appId: "app-1" })).toEqual([
+      "ad",
+      "app",
+      "federated-credential",
+      "list",
+      "--id",
+      "app-1",
+      "-o",
+      "json"
+    ]);
+  });
+
+  it("builds the delete argv targeting one credential by name", () => {
+    expect(
+      buildFederatedCredentialDeleteArgs({
+        appId: "app-1",
+        credentialId: "cred-a"
+      })
+    ).toEqual([
+      "ad",
+      "app",
+      "federated-credential",
+      "delete",
+      "--id",
+      "app-1",
+      "--federated-credential-id",
+      "cred-a"
+    ]);
+  });
+});
+
+describe("parseFederatedCredentials", () => {
+  it("parses a JSON string array into id/name/subject", () => {
+    const creds = parseFederatedCredentials(
+      JSON.stringify([
+        {
+          id: "c1",
+          name: "n1",
+          subject: "s1",
+          issuer: "issuer",
+          audiences: ["aud"]
+        },
+        { name: "n2", subject: "s2" }
+      ])
+    );
+    expect(creds).toEqual([
+      {
+        id: "c1",
+        name: "n1",
+        subject: "s1",
+        issuer: "issuer",
+        audiences: ["aud"]
+      },
+      { id: "", name: "n2", subject: "s2", issuer: "", audiences: [] }
+    ]);
+  });
+
+  it("accepts an already-parsed array", () => {
+    expect(parseFederatedCredentials([{ name: "n", subject: "sub" }])).toEqual([
+      { id: "", name: "n", subject: "sub", issuer: "", audiences: [] }
+    ]);
+  });
+
+  it("returns [] for empty, malformed, or non-array input", () => {
+    expect(parseFederatedCredentials("")).toEqual([]);
+    expect(parseFederatedCredentials("   ")).toEqual([]);
+    expect(parseFederatedCredentials("not json")).toEqual([]);
+    expect(parseFederatedCredentials("{}")).toEqual([]);
+    expect(parseFederatedCredentials(null)).toEqual([]);
+  });
+
+  it("skips entries without a usable name", () => {
+    expect(
+      parseFederatedCredentials([{ subject: "sub" }, "string", { name: "" }])
+    ).toEqual([]);
+  });
+});
+
+describe("federatedCredentialListUnreadable", () => {
+  it("treats an explicit empty array and complete identities as readable", () => {
+    expect(federatedCredentialListUnreadable("[]")).toBe(false);
+    expect(federatedCredentialListUnreadable([])).toBe(false);
+    expect(
+      federatedCredentialListUnreadable([
+        {
+          id: "fic-1",
+          name: "n",
+          subject: "repo:octo/app:environment:dev",
+          issuer: "https://token.actions.githubusercontent.com",
+          audiences: ["api://AzureADTokenExchange"]
+        }
+      ])
+    ).toBe(false);
+  });
+
+  it("treats missing, malformed, partial, or non-array payloads as unreadable", () => {
+    expect(federatedCredentialListUnreadable("")).toBe(true);
+    expect(federatedCredentialListUnreadable("   ")).toBe(true);
+    expect(federatedCredentialListUnreadable(null)).toBe(true);
+    expect(federatedCredentialListUnreadable(undefined)).toBe(true);
+    expect(federatedCredentialListUnreadable("not json")).toBe(true);
+    expect(federatedCredentialListUnreadable('{"name":"n"}')).toBe(true);
+    expect(federatedCredentialListUnreadable("42")).toBe(true);
+    expect(federatedCredentialListUnreadable({ name: "n" })).toBe(true);
+    expect(federatedCredentialListUnreadable([{ name: "n" }])).toBe(true);
+  });
+});
+
+describe("selectEnvironmentFederatedCredentials", () => {
+  const repoFullName = "octo/app";
+  const live = (credential: { id: string; name: string; subject: string }) => ({
+    ...credential,
+    issuer: "https://token.actions.githubusercontent.com",
+    audiences: ["api://AzureADTokenExchange"]
+  });
+  it("matches by subject targeting the environment", () => {
+    const creds = [
+      {
+        id: "1",
+        name: "custom-name",
+        subject: "repo:octo/app:environment:dev"
+      },
+      { id: "2", name: "other", subject: "repo:octo/app:environment:prod" }
+    ];
+    const selected = selectEnvironmentFederatedCredentials(creds.map(live), {
+      repoFullName,
+      envName: "dev"
+    });
+    expect(selected.map((c) => c.name)).toEqual(["custom-name"]);
+  });
+
+  it("matches by the minted credential name variants", () => {
+    const creds = [
+      { id: "1", name: "github-octo-app-dev-mutable", subject: "" },
+      { id: "2", name: "github-octo-app-dev-immutable", subject: "" },
+      { id: "3", name: "github-octo-app-dev", subject: "" },
+      { id: "4", name: "github-octo-app-prod-mutable", subject: "" }
+    ];
+    const selected = selectEnvironmentFederatedCredentials(creds.map(live), {
+      repoFullName,
+      envName: "dev"
+    });
+    expect(selected.map((c) => c.name).sort()).toEqual([
+      "github-octo-app-dev",
+      "github-octo-app-dev-immutable",
+      "github-octo-app-dev-mutable"
+    ]);
+  });
+
+  it("does not select another repo's credential sharing the environment name", () => {
+    // A shared app registration may carry a credential for a different repo that
+    // targets the same environment name. Deleting this repo's "dev" environment
+    // must not remove the other repo's credential.
+    const creds = [
+      {
+        id: "1",
+        name: "custom-name",
+        subject: "repo:octo/app:environment:dev"
+      },
+      {
+        id: "2",
+        name: "foreign",
+        subject: "repo:other/repo:environment:dev"
+      }
+    ];
+    const selected = selectEnvironmentFederatedCredentials(creds.map(live), {
+      repoFullName,
+      envName: "dev"
+    });
+    expect(selected.map((c) => c.name)).toEqual(["custom-name"]);
+  });
+
+  it("matches an environment name whose colon is percent-encoded in the subject", () => {
+    const creds = [
+      {
+        id: "1",
+        name: "custom-name",
+        subject: "repo:octo/app:environment:dev%3Aeast"
+      }
+    ];
+    const selected = selectEnvironmentFederatedCredentials(creds.map(live), {
+      repoFullName,
+      envName: "dev:east"
+    });
+    expect(selected.map((c) => c.name)).toEqual(["custom-name"]);
+  });
+
+  it("returns [] when no credentials belong to the environment", () => {
+    expect(
+      selectEnvironmentFederatedCredentials(
+        [
+          live({
+            id: "1",
+            name: "x",
+            subject: "repo:octo/app:environment:prod"
+          })
+        ],
+        { repoFullName, envName: "dev" }
+      )
+    ).toEqual([]);
+    expect(
+      selectEnvironmentFederatedCredentials([], {
+        repoFullName,
+        envName: "dev"
+      })
+    ).toEqual([]);
+    expect(
+      selectEnvironmentFederatedCredentials(
+        [live({ id: "1", name: "x", subject: "" })],
+        { repoFullName, envName: "" }
+      )
+    ).toEqual([]);
   });
 });

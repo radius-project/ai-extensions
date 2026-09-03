@@ -6,12 +6,14 @@ import {
   ENVIRONMENT_POLL_MS,
   environmentRowsMarkup,
   environmentStatusMarkup,
+  findNamespaceConflict,
   initializeEnvironmentPane,
   isEnvironmentPaneController,
   parseEnvironmentRecords,
   providerLabel,
   safeEnvironmentEditUrl
 } from "./environments.js";
+import type { EnvironmentRecord } from "./environments.js";
 import {
   createDeferred,
   createFakeBrowser,
@@ -22,6 +24,13 @@ import {
 } from "../../../test/support/browser/fakes.js";
 import type { FakeBrowser } from "../../../test/support/browser/fakes.js";
 import type { HttpResponse } from "../ports.js";
+
+function confirm(options: EnvironmentConfirmOptions) {
+  if (!options.onConfirm) {
+    throw new Error("Expected confirmation callback.");
+  }
+  return options.onConfirm();
+}
 
 function renderPage(repo = "octo/app", withoutInfraSelection = false) {
   const browser = createFakeBrowser();
@@ -79,14 +88,15 @@ function renderPage(repo = "octo/app", withoutInfraSelection = false) {
     loadGitHubIdentity: vi.fn(),
     clearSharedAppPin: vi.fn(),
     setPendingInfraSelection: vi.fn(),
-    currentInfraSelection: vi.fn(() => ({}))
+    currentInfraSelection: vi.fn(() => ({})),
+    startDeleteProgress: vi.fn()
   };
   const decisions = {
     confirm: vi.fn(() => true),
     notify: vi.fn()
   };
   const confirmDialog = {
-    show: vi.fn((options: EnvironmentConfirmOptions) => options.onConfirm()),
+    show: vi.fn(confirm),
     close: vi.fn(),
     teardown: vi.fn()
   };
@@ -155,7 +165,8 @@ function renderRequiredOnly() {
       setPendingInfraSelection() {},
       currentInfraSelection() {
         return {};
-      }
+      },
+      startDeleteProgress() {}
     }
   );
   if (!isEnvironmentPaneController(initialized)) {
@@ -180,10 +191,64 @@ describe("environment records and markup", () => {
     ["failed", "Failed"],
     ["pending", "Pending"],
     ["unverified", "Unverified"],
+    ["deleting", "Deleting…"],
     ["unknown", "Available"],
     ["mystery", "Pending"]
   ])("renders %s as text without a colored circle", (status, label) => {
     expect(environmentStatusMarkup(status)).toBe(label);
+  });
+
+  // The identity the conflict check compares on. If these are dropped in
+  // parsing, every listed environment looks accountless, the check can no
+  // longer tell two same-named clusters apart, and it refuses environments the
+  // server would admit.
+  it("parses the cluster identity each provider records", () => {
+    expect(
+      parseEnvironmentRecords({
+        environments: [
+          {
+            name: "azure-env",
+            provider: "azure",
+            config: {
+              cluster: "aks-1",
+              namespace: "payments",
+              subscriptionId: "sub-1"
+            }
+          },
+          {
+            name: "aws-env",
+            provider: "aws",
+            config: {
+              cluster: "eks-1",
+              namespace: "orders",
+              accountId: "111122223333",
+              region: "us-east-1"
+            }
+          }
+        ]
+      }).map((environment) => environment.config)
+    ).toEqual([
+      {
+        cluster: "aks-1",
+        namespace: "payments",
+        subscriptionId: "sub-1",
+        resourceGroup: "",
+        vpcId: "",
+        subnetIds: "",
+        accountId: "",
+        region: ""
+      },
+      {
+        cluster: "eks-1",
+        namespace: "orders",
+        accountId: "111122223333",
+        region: "us-east-1",
+        resourceGroup: "",
+        subscriptionId: "",
+        vpcId: "",
+        subnetIds: ""
+      }
+    ]);
   });
 
   it("parses valid records and drops malformed or unnamed entries", () => {
@@ -215,7 +280,10 @@ describe("environment records and markup", () => {
           cluster: "",
           namespace: "",
           vpcId: "",
-          subnetIds: ""
+          subnetIds: "",
+          subscriptionId: "",
+          accountId: "",
+          region: ""
         }
       }
     ]);
@@ -278,6 +346,44 @@ describe("environment records and markup", () => {
       markup.indexOf("js-delete-env")
     );
   });
+
+  it("disables the Delete button for an environment being deleted", () => {
+    const markup = environmentRowsMarkup(
+      [
+        {
+          name: "dev",
+          status: "deleting",
+          provider: "azure",
+          credentialProfile: "profile",
+          webUrl: ""
+        }
+      ],
+      "octo/app"
+    );
+    const deleteButton =
+      /<button[^>]*js-delete-env[^>]*>Delete Env<\/button>/.exec(markup);
+    expect(deleteButton).not.toBeNull();
+    expect(deleteButton?.[0]).toContain("disabled");
+    expect(deleteButton?.[0]).toContain("This environment is being deleted.");
+  });
+
+  it("keeps the Delete button enabled for a normal environment", () => {
+    const markup = environmentRowsMarkup(
+      [
+        {
+          name: "dev",
+          status: "success",
+          provider: "azure",
+          credentialProfile: "profile",
+          webUrl: ""
+        }
+      ],
+      "octo/app"
+    );
+    const deleteButton =
+      /<button[^>]*js-delete-env[^>]*>Delete Env<\/button>/.exec(markup);
+    expect(deleteButton?.[0]).not.toContain("disabled");
+  });
 });
 
 describe("environment pane initialization", () => {
@@ -293,7 +399,8 @@ describe("environment pane initialization", () => {
         loadCredentialTable() {},
         loadProfiles() {},
         loadGitHubIdentity() {},
-        clearSharedAppPin() {}
+        clearSharedAppPin() {},
+        startDeleteProgress() {}
       }
     );
     expect(isEnvironmentPaneController(initialized)).toBe(false);
@@ -349,7 +456,8 @@ describe("environment pane initialization", () => {
         loadCredentialTable() {},
         loadProfiles() {},
         loadGitHubIdentity() {},
-        clearSharedAppPin() {}
+        clearSharedAppPin() {},
+        startDeleteProgress() {}
       }
     );
     expect(isEnvironmentPaneController(second)).toBe(false);
@@ -725,6 +833,33 @@ describe("environment list behavior", () => {
     expect(rows.deploy.listenerCount("click")).toBe(1);
   });
 
+  it("keeps polling while an environment is being deleted", async () => {
+    const page = renderPage();
+    addRowButtons(page.browser);
+    page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({
+        environments: [
+          {
+            name: "dev",
+            status: "deleting",
+            provider: "azure",
+            credentialProfile: "profile"
+          }
+        ]
+      })
+    );
+
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+
+    // A deleting environment schedules a refresh so the row clears once the
+    // teardown finishes and the environment disappears from GitHub.
+    expect(page.browser.clock.timeouts).toBe(1);
+    page.browser.clock.tick(ENVIRONMENT_POLL_MS);
+    await flushPromises();
+    expect(page.browser.net.calls).toHaveLength(2);
+  });
+
   it("URL-encodes the environment selected for planning", async () => {
     const page = renderPage();
     const rows = addRowButtons(page.browser, "dev/team east");
@@ -800,7 +935,13 @@ describe("environment list behavior", () => {
     let mode: "empty" | "malformed" | "http" | "reject" = "empty";
     page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () => {
       if (mode === "reject") return Promise.reject(new Error("offline"));
-      if (mode === "http") return jsonResponse({}, false, 503);
+      if (mode === "http") {
+        return jsonResponse(
+          { error: "GitHub repository access was denied." },
+          false,
+          403
+        );
+      }
       if (mode === "malformed") return jsonResponse({ environments: "bad" });
       return jsonResponse({ environments: [] });
     });
@@ -822,7 +963,7 @@ describe("environment list behavior", () => {
     page.controller.loadEnvironmentTable();
     await flushPromises();
     expect(page.elements.tableBody.innerHTML).toContain(
-      "Could not load environments"
+      "GitHub repository access was denied."
     );
 
     mode = "reject";
@@ -831,6 +972,19 @@ describe("environment list behavior", () => {
     expect(page.elements.tableBody.innerHTML).toContain(
       "Could not load environments"
     );
+  });
+
+  it("escapes a server-provided list error before displaying it", async () => {
+    const page = renderPage();
+    page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({ error: '<img src=x onerror="alert(1)">' }, false, 500)
+    );
+
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+
+    expect(page.elements.tableBody.innerHTML).toContain("&lt;img");
+    expect(page.elements.tableBody.innerHTML).not.toContain("<img");
   });
 
   it("ignores a stale list response", async () => {
@@ -949,7 +1103,7 @@ describe("environment deletion", () => {
     const rows = addRowButtons(page.browser, name);
     page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
       jsonResponse({
-        environments: [{ name: "dev", status: "success" }]
+        environments: [{ name: "dev", provider: "azure", status: "success" }]
       })
     );
     page.controller.loadEnvironmentTable();
@@ -973,7 +1127,23 @@ describe("environment deletion", () => {
     expect(refused.page.browser.net.calls).toHaveLength(1);
   });
 
-  it("posts the exact target and refreshes only after explicit success", async () => {
+  it("confirms deletion with an empty provider when the row is unknown", async () => {
+    const { page, rows } = await readyDelete();
+    // A delete button whose environment is not among the loaded rows still
+    // confirms, threading an empty provider rather than throwing.
+    rows.remove.setAttribute("data-env", "ghost");
+    page.confirmDialog.show.mockImplementation(() => {});
+    rows.remove.dispatch("click");
+    expect(page.confirmDialog.show).toHaveBeenCalledOnce();
+    expect(page.confirmDialog.show.mock.calls[0][0].message).toContain("ghost");
+    // The confirm copy warns about the full blast radius: cluster teardown and
+    // the shared app-registration credential, not just the GitHub environment.
+    expect(page.confirmDialog.show.mock.calls[0][0].message).toContain(
+      "federated credential"
+    );
+  });
+
+  it("posts the exact target and follows the delete operation on success", async () => {
     const { page, rows } = await readyDelete();
     page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () =>
       jsonResponse({ success: true })
@@ -991,9 +1161,18 @@ describe("environment deletion", () => {
       repo: "octo/app",
       environment: "dev"
     });
-    expect(page.browser.net.calls.at(-1)?.url).toBe(
-      `${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`
+    // Success hands off to the shared progress panel (with the row's provider)
+    // instead of refreshing the table, so cleanup and any failure surface the
+    // same way as environment creation.
+    expect(page.dependencies.startDeleteProgress).toHaveBeenCalledWith(
+      "dev",
+      "azure"
     );
+    expect(
+      page.browser.net.calls.filter((entry) =>
+        entry.url.includes(ENVIRONMENT_LIST_PATH)
+      )
+    ).toHaveLength(1);
   });
 
   it.each([
@@ -1021,9 +1200,7 @@ describe("environment deletion", () => {
     const { page, rows } = await readyDelete();
     page.confirmDialog.show
       .mockReset()
-      .mockImplementationOnce((options: EnvironmentConfirmOptions) =>
-        options.onConfirm()
-      )
+      .mockImplementationOnce(confirm)
       .mockImplementation(() => {});
     page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () =>
       jsonResponse(
@@ -1056,7 +1233,7 @@ describe("environment deletion", () => {
 
     // Only an explicit confirmation navigates, and a hostile redirect is
     // replaced by the deployments page.
-    conflict.onConfirm();
+    confirm(conflict);
     expect(page.browser.nav.assigned).toEqual(["/?page=deploying"]);
   });
 
@@ -1064,9 +1241,7 @@ describe("environment deletion", () => {
     const { page, rows } = await readyDelete();
     page.confirmDialog.show
       .mockReset()
-      .mockImplementationOnce((options: EnvironmentConfirmOptions) =>
-        options.onConfirm()
-      )
+      .mockImplementationOnce(confirm)
       .mockImplementation(() => {});
     page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () =>
       jsonResponse(
@@ -1085,7 +1260,7 @@ describe("environment deletion", () => {
     expect(conflict.message).toContain(
       "An application is still deployed to this environment."
     );
-    conflict.onConfirm();
+    confirm(conflict);
     expect(page.browser.nav.assigned).toEqual(["/?page=deploying&env=dev"]);
   });
 
@@ -1093,9 +1268,7 @@ describe("environment deletion", () => {
     const { page, rows } = await readyDelete();
     page.confirmDialog.show
       .mockReset()
-      .mockImplementationOnce((options: EnvironmentConfirmOptions) =>
-        options.onConfirm()
-      )
+      .mockImplementationOnce(confirm)
       .mockImplementation(() => {});
     page.browser.net.handle(ENVIRONMENT_DELETE_PATH, () =>
       jsonResponse(
@@ -1113,7 +1286,7 @@ describe("environment deletion", () => {
     await flushPromises();
     const conflict = page.confirmDialog.show.mock.calls[1][0];
     expect(conflict.message).toContain("The previous teardown failed.");
-    conflict.onConfirm();
+    confirm(conflict);
     expect(page.browser.nav.assigned).toEqual([
       "/?page=deployed&application=app&environment=dev"
     ]);
@@ -1161,6 +1334,21 @@ describe("environment deletion", () => {
     pendingFailure.reject(new Error("late"));
     await flushPromises();
     expect(failure.page.decisions.notify).not.toHaveBeenCalled();
+  });
+
+  it("ignores clicks on a disabled Delete button", async () => {
+    const { page, rows } = await readyDelete();
+    // A row that is mid-deletion renders its Delete button disabled; a click on
+    // it must not start a second deletion.
+    rows.remove.disabled = true;
+    rows.remove.dispatch("click");
+    await flushPromises();
+    expect(page.confirmDialog.show).not.toHaveBeenCalled();
+    expect(
+      page.browser.net.calls.filter(
+        (entry) => entry.url === ENVIRONMENT_DELETE_PATH
+      )
+    ).toHaveLength(0);
   });
 });
 
@@ -1237,6 +1425,34 @@ describe("environment terminal banners", () => {
     );
   });
 
+  it("renders a halted-deletion action-required state verbatim", () => {
+    const page = renderPage();
+
+    // A delete that stopped because applications are still deployed carries its
+    // own ready-to-render guidance and must be shown verbatim (as text, not the
+    // create-flow "one step left" HTML).
+    page.controller.showActionRequired("azure", "dev", "", {
+      code: "environment-has-applications",
+      userMessage:
+        "Delete the app in <prod> first, then delete the environment."
+    });
+    expect(page.elements.actionText.textContent).toBe(
+      "Delete the app in <prod> first, then delete the environment."
+    );
+    expect(page.elements.actionText.innerHTML).not.toContain(
+      "one step is left"
+    );
+    expect(page.elements.action.style.display).toBe("flex");
+
+    // Without a carried message it falls back to a default deletion prompt.
+    page.controller.showActionRequired("azure", "dev", "", {
+      code: "environment-has-applications"
+    });
+    expect(page.elements.actionText.textContent).toContain(
+      "still has one or more deployed applications"
+    );
+  });
+
   it("dismisses and clears every terminal banner", () => {
     const page = renderPage();
     for (const banner of [
@@ -1296,5 +1512,223 @@ describe("environment pane teardown", () => {
     await flushPromises();
     expect(page.elements.tableBody.innerHTML).not.toContain("late");
     expect(rows.deploy.listenerCount()).toBe(0);
+  });
+});
+
+describe("namespace conflict detection", () => {
+  const baseConfig = { cluster: "aks-1", namespace: "payments" };
+  const listed = (
+    overrides: Partial<EnvironmentRecord> = {}
+  ): EnvironmentRecord => ({
+    name: "dev",
+    status: "verified",
+    provider: "azure",
+    credentialProfile: "azure-prod",
+    webUrl: "",
+    config: { cluster: "aks-1", namespace: "payments" },
+    ...overrides
+  });
+  const claim = {
+    provider: "azure",
+    cluster: "aks-1",
+    namespace: "payments"
+  };
+
+  it("reports the environment already bound to the cluster namespace", () => {
+    expect(findNamespaceConflict([listed()], claim)?.name).toBe("dev");
+  });
+
+  it("compares cluster and namespace ignoring case and padding", () => {
+    expect(
+      findNamespaceConflict([listed()], {
+        provider: "azure",
+        cluster: "  AKS-1 ",
+        namespace: "Payments "
+      })?.name
+    ).toBe("dev");
+  });
+
+  it.each([
+    ["a different cluster", { ...claim, cluster: "aks-2" }],
+    ["a different namespace", { ...claim, namespace: "orders" }]
+  ])("allows %s", (_label, distinctClaim) => {
+    expect(findNamespaceConflict([listed()], distinctClaim)).toBeNull();
+  });
+
+  it("does not report the environment being edited against itself", () => {
+    expect(
+      findNamespaceConflict([listed()], {
+        ...claim,
+        excludeEnvironment: "DEV"
+      })
+    ).toBeNull();
+  });
+
+  it("still reports another environment while editing", () => {
+    expect(
+      findNamespaceConflict([listed(), listed({ name: "staging" })], {
+        ...claim,
+        excludeEnvironment: "dev"
+      })?.name
+    ).toBe("staging");
+  });
+
+  it("ignores an environment on another provider's cluster", () => {
+    expect(
+      findNamespaceConflict([listed({ provider: "aws" })], claim)
+    ).toBeNull();
+  });
+
+  it("reports an environment whose provider was not recorded", () => {
+    expect(findNamespaceConflict([listed({ provider: "" })], claim)?.name).toBe(
+      "dev"
+    );
+  });
+
+  // An environment whose cluster the listing could not report proves nothing,
+  // so it must not block a legitimate create. An unreported namespace is a
+  // different case, covered below: it means the environment holds "default".
+  it.each([
+    ["no configuration", undefined],
+    ["no cluster", { namespace: "payments" }],
+    ["an unreported namespace on another cluster", { cluster: "aks-2" }],
+    ["empty values", { cluster: "", namespace: "" }]
+  ])("skips an environment with %s", (_label, config) => {
+    expect(findNamespaceConflict([listed({ config })], claim)).toBeNull();
+  });
+
+  // The listing omits a variable whose value is empty, so an environment
+  // holding the default namespace comes back reporting none. Comparing the raw
+  // strings would miss the collision and let the user submit into a server
+  // refusal instead of being told here. The admission rung maps the same way.
+  it.each([
+    ["the environment reports no namespace", { cluster: "aks-1" }, "default"],
+    [
+      "the request leaves the namespace unset",
+      { cluster: "aks-1", namespace: "default" },
+      ""
+    ],
+    ["neither side records one", { cluster: "aks-1" }, ""]
+  ])(
+    "reports a default-namespace collision when %s",
+    (_label, config, requested) => {
+      expect(
+        findNamespaceConflict([listed({ config })], {
+          ...claim,
+          namespace: requested
+        })?.name
+      ).toBe("dev");
+    }
+  );
+
+  it("cannot claim a namespace without a cluster", () => {
+    expect(
+      findNamespaceConflict([listed()], { ...claim, cluster: " " })
+    ).toBeNull();
+  });
+
+  it("finds no conflict in an empty listing", () => {
+    expect(findNamespaceConflict([], claim)).toBeNull();
+  });
+
+  // A cluster name is not a cluster. Refusing here would block a legitimate
+  // environment the server's admission rung would admit, and the client must
+  // never be stricter than the authority.
+  it("allows the same cluster name in another Azure subscription", () => {
+    expect(
+      findNamespaceConflict(
+        [listed({ config: { ...baseConfig, subscriptionId: "sub-1" } })],
+        { ...claim, subscriptionId: "sub-2" }
+      )
+    ).toBeNull();
+  });
+
+  it("reports a duplicate within the same Azure subscription", () => {
+    expect(
+      findNamespaceConflict(
+        [listed({ config: { ...baseConfig, subscriptionId: "sub-1" } })],
+        { ...claim, subscriptionId: "sub-1" }
+      )?.name
+    ).toBe("dev");
+  });
+
+  it.each([
+    ["account", { accountId: "4444" }],
+    ["region", { region: "eu-west-1" }]
+  ])("allows the same EKS cluster name in another %s", (_label, difference) => {
+    const config = {
+      cluster: "eks-1",
+      namespace: "payments",
+      accountId: "1111",
+      region: "us-east-1"
+    };
+    expect(
+      findNamespaceConflict([listed({ provider: "aws", config })], {
+        provider: "aws",
+        cluster: "eks-1",
+        namespace: "payments",
+        accountId: "1111",
+        region: "us-east-1",
+        ...difference
+      })
+    ).toBeNull();
+  });
+
+  // An environment listed before the identity was reported cannot be proven
+  // distinct, so it still conflicts rather than being waved through.
+  it("still conflicts when the listed environment records no account", () => {
+    expect(
+      findNamespaceConflict([listed()], { ...claim, subscriptionId: "sub-9" })
+        ?.name
+    ).toBe("dev");
+  });
+});
+
+describe("environment pane namespace state", () => {
+  it("exposes the listed environments and the environment being edited", async () => {
+    const page = renderPage();
+    page.browser.net.handle(`${ENVIRONMENT_LIST_PATH}?repo=octo%2Fapp`, () =>
+      jsonResponse({
+        environments: [
+          {
+            name: "dev",
+            status: "verified",
+            provider: "azure",
+            config: { cluster: "aks-1", namespace: "payments" }
+          }
+        ]
+      })
+    );
+    expect(page.controller.listedEnvironments()).toEqual([]);
+
+    page.controller.loadEnvironmentTable();
+    await flushPromises();
+
+    expect(page.controller.listedEnvironments()).toEqual([
+      {
+        name: "dev",
+        status: "verified",
+        provider: "azure",
+        credentialProfile: "",
+        webUrl: "",
+        config: {
+          cluster: "aks-1",
+          namespace: "payments",
+          resourceGroup: "",
+          vpcId: "",
+          subnetIds: "",
+          subscriptionId: "",
+          accountId: "",
+          region: ""
+        }
+      }
+    ]);
+    expect(page.controller.editingEnvironment()).toBe("");
+
+    page.controller.showEnvironmentForm({ name: "dev", editing: "dev" });
+    expect(page.controller.editingEnvironment()).toBe("dev");
+
+    page.controller.showEnvironmentLanding();
+    expect(page.controller.editingEnvironment()).toBe("");
   });
 });

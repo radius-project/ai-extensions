@@ -23,7 +23,11 @@ import {
 import type { HandoffMessage } from "./hooks.js";
 import type { AppModelStatus } from "./graph-context.js";
 import type { CanvasState } from "../shared.js";
+import type { GraphProgressView } from "../shared.js";
 import type { AppSourceEvaluation } from "@radius-project/core";
+import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
+import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
+import { appModelTargetKey } from "../app-model-authoring-failure.js";
 
 export interface AppModelHandoffRequest {
   repo: string;
@@ -31,6 +35,7 @@ export interface AppModelHandoffRequest {
   // views, two for a diff. Empty or falsy entries are dropped.
   branches: ReadonlyArray<string | undefined>;
   page: string;
+  progressView?: GraphProgressView;
   // The canvas instance's state: the branch context the readers resolve against,
   // the latest request for cancellation, and delivered handoffs keyed by target.
   state?: CanvasState;
@@ -54,6 +59,18 @@ export interface AppModelHandoffDependencies {
     state: CanvasState
   ): Promise<AppSourceEvaluation>;
   send(message: HandoffMessage): Promise<void>;
+  // True when a modeling run targeting these branches is already under way. The
+  // handoff is abandoned rather than deferred when it is: the routes re-report
+  // on every render, so a run that dies is asked about again.
+  modelingInFlight(
+    repo: string,
+    branches: ReadonlyArray<string>,
+    context: CanvasState,
+    waitStartedAtMs?: number
+  ): Promise<boolean>;
+  // Injected so the grace window below is driven by a fake clock in tests, and
+  // so nothing here owns a timer.
+  wait(ms: number): Promise<void>;
   log(message: string): void;
   // False once the same staleness evidence has already been handed off. Owned by
   // the caller so the memo outlives any single canvas instance.
@@ -61,11 +78,30 @@ export interface AppModelHandoffDependencies {
   // Releases an extension-scoped refresh memo entry. Called when delivery fails
   // so a later attempt can re-deliver the same staleness signal.
   releaseRefreshMemo(key: string): void;
+  missingModelHandoffs: MissingModelHandoffClaims;
 }
 
 export type AppModelHandoff = (
   request: AppModelHandoffRequest
 ) => Promise<void>;
+
+// How long a render that found no model waits to see whether something else is
+// already generating one before it asks the agent to.
+//
+// The render that raises the handoff usually happens BEFORE either in-flight
+// signal exists: the agent opens the canvas, the graph route reports the model
+// missing, and only then does the agent reach for radius_generate_app. Probing
+// once at that instant would therefore observe nothing and ask anyway, which is
+// exactly the duplicate this gate exists to prevent. The window spans the gap
+// between the render and the tool call, which is one agent decision long.
+//
+// Waiting costs nothing that the user sees. The handoff is fire-and-forget and
+// never blocks the HTTP response, the view keeps polling and renders the model
+// in place whenever it appears, and a handoff is only ever a request for work
+// that has not started.
+export const MODELING_GRACE_WINDOW_MS = 15000;
+export const MODELING_GRACE_POLL_MS = 1000;
+const RECOVERY_WINDOW_MS = 60_000;
 
 // Identifies one repo+branches situation *including what is wrong with it*, not
 // merely which branches were looked at. A model that changes from stale to
@@ -100,10 +136,31 @@ export function createAppModelHandoff(
   const targetKey = (repo: string, branches: ReadonlyArray<string>): string =>
     `${repo}::${branches.join(",")}`;
 
+  // Polls for an in-flight modeling run across the grace window. Answers true
+  // as soon as one is observed, so the common case where the agent starts
+  // generating immediately costs one extra poll rather than the whole window.
+  async function modelingClaimedIt(
+    repo: string,
+    branches: ReadonlyArray<string>,
+    context: CanvasState,
+    waitStartedAtMs?: number
+  ): Promise<boolean> {
+    for (let waitedMs = 0; ; waitedMs += MODELING_GRACE_POLL_MS) {
+      if (
+        await deps.modelingInFlight(repo, branches, context, waitStartedAtMs)
+      ) {
+        return true;
+      }
+      if (waitedMs >= MODELING_GRACE_WINDOW_MS) return false;
+      await deps.wait(MODELING_GRACE_POLL_MS);
+    }
+  }
+
   return async function handOffAppModel({
     repo,
     branches,
     page,
+    progressView,
     state
   }: AppModelHandoffRequest): Promise<void> {
     if (!repo) return;
@@ -112,6 +169,26 @@ export function createAppModelHandoff(
     );
     if (!targets.length) return;
     const context = state ?? (await deps.resolveContext());
+    const modelProgressView =
+      progressView ?? (page === "graph-diff" ? "diff" : "graph");
+    // The app.bicep wait is measured from when the model was first found
+    // missing, not from when the graph build began, so the recovery deadline
+    // has to share that origin to land inside the wait it belongs to. The
+    // field is absent on the very first render, because the wait is only
+    // recorded once the outcome settles; the claim then falls back to its
+    // ordinary TTL, which is the same length the deadline would have imposed.
+    const waitStartedAtMs =
+      context.graphProgressRecords?.[modelProgressView]
+        ?.graphProgressWaitStartedAtMs;
+    const recoveryDeadlineAtMs =
+      waitStartedAtMs === undefined ? undefined : (
+        waitStartedAtMs + GRAPH_APP_BICEP_IDLE_TIMEOUT_MS - RECOVERY_WINDOW_MS
+      );
+    const target = targetKey(repo, targets);
+    // Capture only the claim that existed before status resolution began. If
+    // this read later reports a model, releasing that token cannot erase a
+    // newer missing-model owner that started while the read was in flight.
+    const observedClaim = deps.missingModelHandoffs.current(target);
 
     // resolveStatus absorbs every read failure into a "missing" classification,
     // so a rejection here means the reader itself is broken. Letting it
@@ -121,20 +198,19 @@ export function createAppModelHandoff(
       targets.map((branch) => deps.resolveStatus(repo, branch, context))
     );
     const key = appModelHandoffKey(repo, targets, statuses);
-    const target = targetKey(repo, targets);
     if (state?.appBicepHandoffKeys?.[target] === key) return;
 
-    if (state) {
+    const reserveState = (): void => {
+      if (!state) return;
       state.appBicepHandoffKeys ??= {};
       state.appBicepHandoffKeys[target] = key;
       state.appBicepHandoffKey = key;
-    }
-
-    const ownsReservation = (): boolean =>
+    };
+    const ownsStateReservation = (): boolean =>
       state === undefined ||
       (state.appBicepHandoffKeys?.[target] === key &&
         state.appBicepHandoffKey === key);
-    const releaseReservation = (): void => {
+    const releaseStateReservation = (): void => {
       if (state?.appBicepHandoffKeys?.[target] === key) {
         delete state.appBicepHandoffKeys[target];
       }
@@ -148,6 +224,23 @@ export function createAppModelHandoff(
     );
 
     if (!present.length) {
+      // Claim extension-wide before consuming the per-panel reservation. A
+      // reopened panel that loses this claim must remain free to retry if the
+      // owner later abandons delivery.
+      const claim = deps.missingModelHandoffs.claim(
+        target,
+        key,
+        recoveryDeadlineAtMs
+      );
+      if (!claim) return;
+      reserveState();
+      const ownsReservation = (): boolean =>
+        ownsStateReservation() && deps.missingModelHandoffs.owns(claim);
+      const releaseReservation = (): void => {
+        releaseStateReservation();
+        deps.missingModelHandoffs.release(claim);
+      };
+
       // Reserve the key before the asynchronous source probe. Modeled, Planned,
       // and Diff can all discover the same missing model together; without this
       // reservation they each pass the check above while the first probe is in
@@ -168,17 +261,105 @@ export function createAppModelHandoff(
         releaseReservation();
         return;
       }
-      if (!ownsReservation()) return;
+      if (!ownsReservation()) {
+        releaseReservation();
+        return;
+      }
+
+      // Nobody is generating this model yet as far as one probe can tell, but
+      // the agent that just opened this view may be about to start. Watch for
+      // that before speaking, and abandon the handoff if it happens.
+      let claimed: boolean;
+      try {
+        claimed = await modelingClaimedIt(
+          repo,
+          targets,
+          context,
+          waitStartedAtMs
+        );
+      } catch (error) {
+        releaseReservation();
+        throw error;
+      }
+      if (claimed || !ownsReservation()) {
+        // Deliberately does NOT consume the key: if the run it deferred to dies
+        // without publishing, the next render must be free to ask again.
+        releaseReservation();
+        return;
+      }
+
+      // The window is long enough for a run to have both started and finished
+      // inside it, so the classification this handoff was built from has to be
+      // re-read before it is acted on.
+      let settled: AppModelStatus[];
+      try {
+        settled = await Promise.all(
+          targets.map((branch) => deps.resolveStatus(repo, branch, context))
+        );
+      } catch (error) {
+        releaseReservation();
+        throw error;
+      }
+      if (!ownsReservation()) {
+        releaseReservation();
+        return;
+      }
+      if (settled.some((status) => status.freshness.status !== "missing")) {
+        releaseReservation();
+        return;
+      }
+
+      const attemptToken =
+        state && state.canvasInstanceId && targets.length === 1 ?
+          `${state.canvasInstanceId}::attempt-${(state.appModelAttemptGeneration ?? 0) + 1}`
+        : undefined;
+      if (state && attemptToken) {
+        state.appModelAttemptGeneration =
+          (state.appModelAttemptGeneration ?? 0) + 1;
+        state.appModelAttemptTokens ??= {};
+        state.appModelAttemptTokens[appModelTargetKey(repo, targets[0])] =
+          attemptToken;
+      }
       try {
         await deps.send(
-          appBicepHandoffMessage(repo, page, targets, state?.canvasInstanceId)
+          appBicepHandoffMessage(
+            repo,
+            page,
+            targets,
+            state?.canvasInstanceId,
+            attemptToken && state?.canvasInstanceId ?
+              {
+                attemptToken,
+                instanceId: state.canvasInstanceId,
+                branch: targets[0]
+              }
+            : undefined
+          )
         );
       } catch (sendError) {
+        if (
+          state &&
+          attemptToken &&
+          state.appModelAttemptTokens?.[appModelTargetKey(repo, targets[0])] ===
+            attemptToken
+        ) {
+          delete state.appModelAttemptTokens[
+            appModelTargetKey(repo, targets[0])
+          ];
+        }
         releaseReservation();
         throw sendError;
       }
+      // send() resolves when the handoff is queued, not when the queued turn
+      // runs. Keep the extension claim until its bounded expiry, while clearing
+      // the panel reservation so this same view can retry after that expiry.
+      deps.missingModelHandoffs.markDelivered(claim);
+      releaseStateReservation();
       return;
     }
+
+    if (observedClaim) deps.missingModelHandoffs.release(observedClaim);
+    reserveState();
 
     // Checked before plain staleness: a model this extension cannot prove it
     // generated needs the user's agreement, because regenerating it destroys
@@ -189,13 +370,13 @@ export function createAppModelHandoff(
     if (unverified) {
       const refreshKey = refreshRequestKey(unverified);
       if (!deps.shouldRequestRefresh(refreshKey)) {
-        releaseReservation();
+        releaseStateReservation();
         return;
       }
       try {
         await deps.send(appModelUnverifiedMessage(unverified));
       } catch (sendError) {
-        releaseReservation();
+        releaseStateReservation();
         deps.releaseRefreshMemo(refreshKey);
         throw sendError;
       }
@@ -208,13 +389,13 @@ export function createAppModelHandoff(
     if (outdated) {
       const refreshKey = refreshRequestKey(outdated);
       if (!deps.shouldRequestRefresh(refreshKey)) {
-        releaseReservation();
+        releaseStateReservation();
         return;
       }
       try {
         await deps.send(appModelRefreshMessage(outdated));
       } catch (sendError) {
-        releaseReservation();
+        releaseStateReservation();
         deps.releaseRefreshMemo(refreshKey);
         throw sendError;
       }

@@ -1,6 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import type { SelectedGhExecutor } from "../../gh.js";
 import type {
+  CallerIdentity,
   GitHubJsonResponse,
   RadiusAppProvenanceInput,
   ResolveOidcSubjectResult
@@ -95,6 +96,7 @@ export interface AzureAutoSetupOperationProgressPort {
 }
 
 export interface AzureAutoSetupOperationArtifactPort {
+  withCredentialProvenanceLock<T>(work: () => Promise<T>): Promise<T>;
   recordAzureApp(
     operation: AzureAutoSetupOperation,
     patch: Record<string, unknown>
@@ -107,6 +109,24 @@ export interface AzureAutoSetupOperationArtifactPort {
     operation: AzureAutoSetupOperation,
     entry: { name: string; subject: string; providerId?: string | null }
   ): void;
+  recordFederatedCredentialProvenance(
+    operation: AzureAutoSetupOperation,
+    entry: {
+      repo: string;
+      repoId: number;
+      environment: string;
+      tenantId: string;
+      clientId: string;
+      applicationObjectId: string;
+      credentialId: string;
+      name: string;
+      subject: string;
+      issuer: string;
+      audiences: string[];
+      subjectConfig: ResolveOidcSubjectResult["subjectConfig"];
+      origin: "created" | "reused";
+    }
+  ): Promise<void>;
   recordCreatedRoleAssignment(
     operation: AzureAutoSetupOperation,
     entry: {
@@ -216,7 +236,7 @@ export interface AzureAutoSetupWorkflow {
 
 export interface AzureAutoSetupApplicationInput {
   workflow: AzureAutoSetupWorkflow;
-  dependencies: {
+  dependencies: Pick<AzureAutoSetupDependencies, "sleep"> & {
     operations: Pick<
       AzureAutoSetupOperationLifecyclePort,
       "persist" | "report" | "finish"
@@ -231,6 +251,7 @@ export interface AzureAutoSetupApplicationInput {
   requestedAppName: string;
   requestedClientId: string;
   serviceManagementReference: string;
+  callerIdentity: CallerIdentity;
 }
 
 export interface AzureAutoSetupApplicationResult {
@@ -250,6 +271,8 @@ export interface AzureAutoSetupCredentialInput {
         AzureAutoSetupOperationLifecyclePort,
       | "recordServicePrincipal"
       | "recordCreatedFederatedCredential"
+      | "recordFederatedCredentialProvenance"
+      | "withCredentialProvenanceLock"
       | "recordCreatedRoleAssignment"
       | "persist"
     >;
@@ -257,6 +280,7 @@ export interface AzureAutoSetupCredentialInput {
   oidc: ResolveOidcSubjectResult;
   oidcSuffix: string;
   clientId: string;
+  tenantId: string;
   appName: string;
   subscriptionId: string;
   resourceGroup: string;

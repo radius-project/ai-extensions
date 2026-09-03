@@ -56,7 +56,7 @@ export function topNav(active: string): string {
           "rad-topnav__tab rad-topnav__tab--active"
         : "rad-topnav__tab";
       return (
-        `<a href="/?page=${t.page}" class="${cls}">` +
+        `<a href="/?page=${t.page}" class="${cls}" aria-label="${t.label}">` +
         `<span class="rad-topnav__icon">${t.icon}</span>` +
         `<span class="rad-topnav__label">${t.label}</span></a>`
       );
@@ -75,9 +75,17 @@ export function topNav(active: string): string {
     ` aria-live="polite" title="View graph progress">` +
     `<span class="rad-opchip__dot" id="rad-graphchip-dot" aria-hidden="true"></span>` +
     `<span class="rad-opchip__label" id="rad-graphchip-label"></span></a>`;
+  // A third chip, so a deploy that finishes while the user is looking at a
+  // graph still reaches them instead of being announced only on the page they
+  // left.
+  const deployChip =
+    `<a class="rad-opchip" id="rad-deploychip" href="/?page=deploying" hidden` +
+    ` aria-live="polite" title="View deployment">` +
+    `<span class="rad-opchip__dot" id="rad-deploychip-dot" aria-hidden="true"></span>` +
+    `<span class="rad-opchip__label" id="rad-deploychip-label"></span></a>`;
   return (
     `<nav class="rad-topnav" id="radius-topnav">${items}` +
-    `<span class="rad-topnav__chips">${graphChip}${chip}</span></nav>`
+    `<span class="rad-topnav__chips">${graphChip}${deployChip}${chip}</span></nav>`
   );
 }
 
@@ -172,7 +180,8 @@ export function feedbackWidget(): string {
     `<circle cx="8.5" cy="11.5" r="1.1" fill="currentColor"/><circle cx="12" cy="11.5" r="1.1" fill="currentColor"/><circle cx="15.5" cy="11.5" r="1.1" fill="currentColor"/></svg>`;
   const feedbackUrl =
     "https://github.com/radius-project/ai-extensions/issues/new?template=feedback-or-bug-report.yml";
-  const learnUrl = "https://radapp.io";
+  const learnUrl =
+    "https://edge.docs.radapp.io/integrations/github-copilot-app/canvas-extension/";
   return `<div id="rad-feedback" class="rad-feedback">
   <div id="rad-feedback-pop" class="rad-feedback__pop" style="display:none;">
     <a class="rad-feedback__link" href="${feedbackUrl}" target="_blank" rel="noopener noreferrer" title="${feedbackUrl}">Share feedback</a>

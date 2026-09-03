@@ -93,6 +93,82 @@ describe("createEnvironmentConfirmDialog", () => {
     expect(elements["env-confirm-cancel"].textContent).toBe("Stay here");
   });
 
+  it("hides cancel and focuses confirm for an acknowledgement dialog", () => {
+    const { dialog, elements, browser } = openDialog();
+
+    dialog.show({
+      title: "Environment deleted",
+      message: "The app registration was left in place.",
+      confirmLabel: "Done",
+      confirmVariant: "primary",
+      hideCancel: true,
+      onConfirm: vi.fn()
+    });
+
+    expect(elements["env-confirm-modal"].style.display).toBe("flex");
+    expect(elements["env-confirm-cancel"].style.display).toBe("none");
+    // Confirm is the only actionable button, so it takes focus rather than
+    // cancel.
+    expect(elements["env-confirm-ok"].focusCount).toBe(1);
+    expect(elements["env-confirm-cancel"].focusCount).toBe(0);
+
+    // Tab keeps focus on confirm instead of cycling onto the hidden cancel.
+    browser.document.activeElement = elements["env-confirm-ok"];
+    browser.document.dispatch("keydown", { key: "Tab" });
+    expect(elements["env-confirm-ok"].focusCount).toBe(2);
+    expect(elements["env-confirm-cancel"].focusCount).toBe(0);
+  });
+
+  it("renders an external link inline with an acknowledgement message", () => {
+    const { dialog, elements } = openDialog();
+
+    dialog.show({
+      title: "Environment deleted",
+      message: "Delete the retained app registration in the ",
+      messageLink: {
+        label: "Azure portal",
+        href: "https://portal.azure.com/#view/apps",
+        suffix: "."
+      },
+      confirmLabel: "Done",
+      hideCancel: true,
+      onConfirm: vi.fn()
+    });
+
+    const message = elements["env-confirm-message"];
+    expect(fakeText(message)).toBe(
+      "Delete the retained app registration in the Azure portal."
+    );
+    const link = message.children[1];
+    expect(link?.textContent).toBe("Azure portal");
+    expect(link?.getAttribute("href")).toBe(
+      "https://portal.azure.com/#view/apps"
+    );
+    expect(link?.getAttribute("target")).toBe("_blank");
+    expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+
+  it("restores the cancel button on a later dialog after hiding it once", () => {
+    const { dialog, elements } = openDialog();
+
+    dialog.show({
+      title: "Environment deleted",
+      message: "Acknowledgement only.",
+      confirmLabel: "Done",
+      hideCancel: true,
+      onConfirm: vi.fn()
+    });
+    expect(elements["env-confirm-cancel"].style.display).toBe("none");
+
+    dialog.show({
+      title: "Delete environment?",
+      message: "This deletes the GitHub environment.",
+      confirmLabel: "Delete environment",
+      onConfirm: vi.fn()
+    });
+    expect(elements["env-confirm-cancel"].style.display).toBe("");
+  });
+
   it("lists the usage it was given and hides the block without any", () => {
     const { dialog, elements } = openDialog();
 
@@ -121,6 +197,45 @@ describe("createEnvironmentConfirmDialog", () => {
     expect(elements["env-confirm-usage"].style.display).toBe("none");
     expect(fakeText(elements["env-confirm-usage-list"])).toBe("");
     expect(elements["env-confirm-usage-label"].textContent).toBe("");
+  });
+
+  // A standalone caution, such as the forced-delete orphan warning, has no
+  // list behind it but must still be shown — only when it says so.
+  it("shows the caution block for a label that opts out of a list", () => {
+    const { dialog, elements } = openDialog();
+
+    dialog.show({
+      title: "Force delete this deployment?",
+      message: "It may still be updating.",
+      usageLabel: "Resources may be left behind.",
+      showUsageWithoutItems: true,
+      confirmLabel: "Force delete",
+      onConfirm: vi.fn()
+    });
+
+    expect(elements["env-confirm-usage"].style.display).toBe("");
+    expect(elements["env-confirm-usage-label"].textContent).toBe(
+      "Resources may be left behind."
+    );
+    expect(fakeText(elements["env-confirm-usage-list"])).toBe("");
+  });
+
+  // The credential-profile dialog always labels its usage list, even when the
+  // profile turned out to have no environments. That label heads a list, so it
+  // must stay hidden rather than render over nothing.
+  it("hides a list label whose list came back empty", () => {
+    const { dialog, elements } = openDialog();
+
+    dialog.show({
+      title: "Delete credential profile?",
+      message: "This deletes the profile.",
+      usageLabel: "These environments were created from it:",
+      usage: [],
+      confirmLabel: "Delete profile",
+      onConfirm: vi.fn()
+    });
+
+    expect(elements["env-confirm-usage"].style.display).toBe("none");
   });
 
   it("does not leak one caller's presentation into the next dialog", () => {
@@ -164,6 +279,22 @@ describe("createEnvironmentConfirmDialog", () => {
     expect(elements["env-confirm-modal"].style.display).toBe("none");
   });
 
+  it("closes without error when confirmed with no onConfirm handler", () => {
+    const { dialog, elements } = openDialog();
+    // A pure acknowledgement dialog (e.g. the "Environment deleted" notice)
+    // supplies no onConfirm: confirming simply closes it.
+    dialog.show({
+      title: "Environment deleted",
+      message: "The environment was deleted.",
+      confirmLabel: "Done",
+      hideCancel: true
+    });
+
+    expect(elements["env-confirm-modal"].style.display).toBe("flex");
+    expect(() => elements["env-confirm-ok"].dispatch("click")).not.toThrow();
+    expect(elements["env-confirm-modal"].style.display).toBe("none");
+  });
+
   it.each([
     [
       "cancel",
@@ -180,17 +311,20 @@ describe("createEnvironmentConfirmDialog", () => {
   ])("dismisses without acting on %s", (_name, dismiss) => {
     const { dialog, elements, browser } = openDialog();
     const onConfirm = vi.fn();
+    const onCancel = vi.fn();
     dialog.show({
       title: "Delete environment?",
       message: "This deletes the GitHub environment.",
       confirmLabel: "Delete environment",
-      onConfirm
+      onConfirm,
+      onCancel
     });
 
     dismiss(elements, browser);
 
     expect(elements["env-confirm-modal"].style.display).toBe("none");
     expect(onConfirm).not.toHaveBeenCalled();
+    expect(onCancel).toHaveBeenCalledOnce();
     // The dismissed action stays dismissed even if the confirm button is
     // somehow clicked afterwards.
     elements["env-confirm-ok"].dispatch("click");

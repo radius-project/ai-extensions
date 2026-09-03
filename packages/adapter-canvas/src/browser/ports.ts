@@ -134,6 +134,7 @@ export interface DomPort {
     selectors: string
   ): readonly DomElement[];
   dispatch(target: DomElement, type: string): void;
+  isScrolledToEnd(element: DomElement): boolean;
   scrollToEnd(element: DomElement): boolean;
 }
 
@@ -204,6 +205,10 @@ export interface ClipboardPort {
   write(text: string): Promise<boolean>;
 }
 
+export interface DownloadPort {
+  save(text: string, mimeType: string, filename: string): boolean;
+}
+
 export interface DialogPort {
   confirm(message: string): boolean;
   notify(message: string): void;
@@ -229,6 +234,7 @@ export interface BrowserContext {
   readonly focus: FocusPort;
   readonly external: ExternalOpenPort;
   readonly clipboard: ClipboardPort;
+  readonly download: DownloadPort;
   readonly dialogs: DialogPort;
   readonly logger: LoggerPort;
   readonly bindings: BindingRegistry;

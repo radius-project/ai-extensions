@@ -35,7 +35,9 @@ interface FixtureOptions {
   withWrapper?: boolean;
   withBranchSelect?: boolean;
   withButton?: boolean;
+  withGuidance?: boolean;
   stateBranch?: string;
+  followWorkspaceBranch?: boolean;
 }
 
 function fixture(options: FixtureOptions = {}) {
@@ -47,7 +49,9 @@ function fixture(options: FixtureOptions = {}) {
     withWrapper = !loaded,
     withBranchSelect = true,
     withButton = true,
-    stateBranch = "feature"
+    withGuidance = true,
+    stateBranch = "feature",
+    followWorkspaceBranch = false
   } = options;
   const browser = createFakeBrowser();
   const state = createFakeElement(GRAPH_PAGE_STATE_ID);
@@ -56,7 +60,8 @@ function fixture(options: FixtureOptions = {}) {
     branch: stateBranch,
     resources: loaded ? [{ id: "app/web" }] : [],
     loaded,
-    localSource: true
+    localSource: true,
+    followWorkspaceBranch
   });
   const app = createFakeSelect("graph-app");
   const branch = createFakeSelect("graph-branch");
@@ -67,7 +72,10 @@ function fixture(options: FixtureOptions = {}) {
   // The real loading surface mounts this host; the fake render globals do not,
   // so the fixture provides it for the shared progress panel to render into.
   const progressHost = createFakeElement("progress-steps");
+  const guidance = createFakeElement("graph-guidance");
+  guidance.textContent = "Click a node to view source code links.";
   const elements = [state, app, container, progressHost];
+  if (withGuidance) elements.push(guidance);
   if (withBranchSelect) elements.push(branch);
   if (withButton) elements.push(button);
   if (withWrapper) elements.push(wrapper);
@@ -104,7 +112,8 @@ function fixture(options: FixtureOptions = {}) {
     container,
     wrapper,
     status,
-    progressHost
+    progressHost,
+    guidance
   };
 }
 
@@ -571,6 +580,7 @@ describe("initializeGraphPage", () => {
         : jsonResponse({ needsAppBicep: true })
       );
     });
+
     initializeGraphPage(
       browser.context,
       globals({
@@ -611,6 +621,53 @@ describe("initializeGraphPage", () => {
     );
     expect(browser.clock.timeouts).toBe(1);
     expect(calls).toBe(3);
+  });
+
+  it("reloads an initial graph when the server resolves a renamed workspace branch", async () => {
+    const { browser } = fixture({
+      loaded: false,
+      branchValue: "old-name",
+      stateBranch: "old-name",
+      followWorkspaceBranch: true
+    });
+    const render = vi.fn();
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        resources: [{ id: "app/generated" }],
+        fromWorkspace: true,
+        resolvedBranch: "new-name"
+      })
+    );
+
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    expect(browser.nav.reloads).toBe(1);
+    expect(render).not.toHaveBeenCalled();
+  });
+
+  it("reloads a renamed workspace branch before scheduling a missing-model retry", async () => {
+    const { browser } = fixture({
+      loaded: false,
+      branchValue: "old-name",
+      stateBranch: "old-name",
+      followWorkspaceBranch: true
+    });
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        needsAppBicep: true,
+        resolvedBranch: "new-name"
+      })
+    );
+
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+
+    expect(browser.nav.reloads).toBe(1);
+    expect(browser.clock.timeouts).toBe(0);
   });
 
   it("presents an empty successful graph as loaded without a ready banner", async () => {
@@ -948,6 +1005,32 @@ describe("initializeGraphPage", () => {
     expect(render).toHaveBeenCalledTimes(1);
     expect(controller.update).toHaveBeenCalledWith([{ id: "app/refreshed" }]);
     expect(controller.destroy).not.toHaveBeenCalled();
+  });
+
+  it("reloads a preloaded graph when the workspace branch was renamed", async () => {
+    const { browser } = fixture({
+      loaded: true,
+      branchValue: "old-name",
+      stateBranch: "old-name",
+      followWorkspaceBranch: true
+    });
+    const controller = { update: vi.fn(() => controller), destroy: vi.fn() };
+    const render = vi.fn(() => controller);
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({
+        resources: [{ id: "app/refreshed" }],
+        resolvedBranch: "new-name"
+      })
+    );
+
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    expect(browser.nav.reloads).toBe(1);
+    expect(controller.update).not.toHaveBeenCalled();
   });
 
   it("destroys and recreates the controller when the graph cannot accept refreshed resources", async () => {
@@ -1792,6 +1875,67 @@ describe("initializeGraphPage", () => {
         "octo/app has no Dockerfile on main."
       );
       expect(status?.textContent).toBe("");
+    });
+
+    it("hides stale modeled graph guidance after a terminal refusal", async () => {
+      const { browser, guidance } = fixture({ loaded: true });
+      const setError = vi.fn();
+      browser.net.handle("/api/load-graph", () =>
+        jsonResponse({
+          error: "octo/app has no Dockerfile on main.",
+          appBicepUnsupported: true
+        })
+      );
+
+      initializeGraphPage(
+        browser.context,
+        globals({ radiusSetGraphError: setError })
+      );
+      await flushPromises();
+
+      expect(setError).toHaveBeenCalledWith(
+        "graph-container",
+        "Unable to refresh the application graph: octo/app has no Dockerfile on main."
+      );
+      expect(guidance.style.display).toBe("none");
+    });
+
+    it("restores modeled graph guidance after a successful branch change", async () => {
+      const { browser, branch, guidance } = fixture({ loaded: true });
+      let requests = 0;
+      browser.net.handle("/api/load-graph", () => {
+        requests++;
+        return jsonResponse(
+          requests === 1 ?
+            {
+              error: "octo/app has no Dockerfile on main.",
+              appBicepUnsupported: true
+            }
+          : { resources: [{ id: "app/web" }] }
+        );
+      });
+
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+      expect(guidance.style.display).toBe("none");
+
+      branch.value = "release";
+      branch.dispatch("change");
+      await flushPromises();
+
+      expect(guidance.style.display).toBe("");
+    });
+
+    it("renders a successful refresh when optional guidance is absent", async () => {
+      const { browser } = fixture({ loaded: true, withGuidance: false });
+      browser.net.handle("/api/load-graph", () =>
+        jsonResponse({ resources: [{ id: "app/web" }] })
+      );
+
+      expect(() =>
+        initializeGraphPage(browser.context, globals())
+      ).not.toThrow();
+      await flushPromises();
     });
 
     it.each([

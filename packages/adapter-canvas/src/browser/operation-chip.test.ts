@@ -19,6 +19,10 @@ import {
   jsonResponse
 } from "../../test/support/browser/fakes.js";
 import type { BrowserContext, HttpResponse, StoragePort } from "./ports.js";
+import {
+  SETUP_DELETED_REASONS,
+  SETUP_EXITED_REASON
+} from "../operation-terminal-reasons.js";
 
 function setup() {
   const browser = createFakeBrowser();
@@ -65,37 +69,63 @@ describe("operation status payload parsing", () => {
   it("keeps only rendered fields and defaults malformed optional values", () => {
     expect(
       parseOperationStatus({
-        operation: { state: "running", extra: "ignored", operationId: 12 }
+        operation: {
+          state: "running",
+          extra: "ignored",
+          operationId: 12,
+          terminal: { reason: "rollback-complete", extra: "ignored" }
+        }
       })
     ).toEqual({
       operationId: "",
       state: "running",
       environment: "",
-      summary: ""
+      summary: "",
+      terminalReason: "rollback-complete"
     });
   });
 });
 
 describe("operation chip labelling", () => {
   it.each([
-    ["running", "Setting up dev…", "rad-opchip--running"],
-    ["succeeded", "dev ready", "rad-opchip--done"],
-    ["succeeded_with_warnings", "dev ready · warnings", "rad-opchip--warn"],
-    ["action_required", "dev needs you", "rad-opchip--warn"],
-    ["failed", "dev setup failed", "rad-opchip--failed"],
-    ["failed_partial", "dev setup failed", "rad-opchip--failed"],
-    ["cancelled", "dev setup stopped", ""],
-    ["unheard-of", "", ""]
-  ])("renders %s", (state, text, tone) => {
-    const status = {
-      operationId: "op-1",
-      state,
-      environment: "dev",
-      summary: ""
-    };
-    expect(operationChipLabel(status)).toBe(text);
-    expect(operationChipTone(state)).toBe(tone);
-  });
+    ["running", "", "Setting up dev…", "rad-opchip--running"],
+    ["succeeded", "", "dev ready", "rad-opchip--done"],
+    ["succeeded_with_warnings", "", "dev ready · warnings", "rad-opchip--warn"],
+    ["action_required", "", "dev needs you", "rad-opchip--warn"],
+    ["failed", "", "dev setup failed", "rad-opchip--failed"],
+    ["failed_partial", "", "dev setup failed", "rad-opchip--failed"],
+    ["cancelled", "stopped-at-boundary", "dev setup paused", ""],
+    ["cancelled", SETUP_EXITED_REASON, "dev setup closed", ""],
+    ["unheard-of", "", "", ""]
+  ])(
+    "renders %s with terminal reason %s",
+    (state, terminalReason, text, tone) => {
+      const status = {
+        operationId: "op-1",
+        state,
+        environment: "dev",
+        summary: "",
+        terminalReason
+      };
+      expect(operationChipLabel(status)).toBe(text);
+      expect(operationChipTone(state)).toBe(tone);
+    }
+  );
+
+  it.each(SETUP_DELETED_REASONS)(
+    "renders cancelled operations with terminal reason %s as deleted",
+    (terminalReason) => {
+      expect(
+        operationChipLabel({
+          operationId: "op-1",
+          state: "cancelled",
+          environment: "dev",
+          summary: "",
+          terminalReason
+        })
+      ).toBe("dev setup deleted");
+    }
+  );
 
   it("falls back to a generic environment name", () => {
     expect(
@@ -103,7 +133,8 @@ describe("operation chip labelling", () => {
         operationId: "op-1",
         state: "running",
         environment: "",
-        summary: ""
+        summary: "",
+        terminalReason: ""
       })
     ).toBe("Setting up environment…");
   });

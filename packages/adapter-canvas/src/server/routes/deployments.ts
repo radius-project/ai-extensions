@@ -4,8 +4,19 @@ import type { RouteHandlerRegistry } from "../route-table.js";
 import type { DeploymentAbandonmentService } from "../services/deployment-abandonment.js";
 import type { DeployRequestService } from "../services/deploy-request.js";
 import type { DeploymentRow } from "../services/deployment-resolver.js";
+import type {
+  DeleteConflictProbe,
+  DeleteConflictRequest
+} from "../services/delete-conflict.js";
 import { shouldRetryWithKeyringCredential } from "../services/workflow-credential-fallback.js";
+import { discardDeployedApplicationState } from "../services/deployed-view-state.js";
+import { DELETE_FAILED_STATUS } from "../services/delete-conflict.js";
 import { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE } from "../../infra.js";
+import {
+  BARE_GH_COMMAND_PRESENTATION,
+  displayGhCommand,
+  type GhCommandPresentation
+} from "../../gh-command-display.js";
 
 // What the webview needs to decide whether to keep polling after a failed
 // deploy. Shaped to match `deployHandoffStatus` in `server.ts`, which is
@@ -77,6 +88,7 @@ export interface DeploymentsInstanceEntry {
 }
 
 export interface DeploymentsDependencies {
+  ghCommandPresentation?: GhCommandPresentation;
   isValidRepoSlug(value: unknown): boolean;
   readInstanceEntry(instanceId: string): DeploymentsInstanceEntry | undefined;
   triggerDeployRepairHandoff(
@@ -154,6 +166,12 @@ export interface DeploymentsDependencies {
   // GitHub-side cleanup is a separate use case from cloud deletion. The route
   // only parses HTTP input and serializes this service's result.
   abandonment: DeploymentAbandonmentService;
+  // Decides whether the last delete of an application failed with the stranded
+  // non-terminal-state conflict, which is the only thing that unlocks the
+  // force-delete path in the UI.
+  probeDeleteConflict(
+    request: DeleteConflictRequest
+  ): Promise<DeleteConflictProbe>;
 }
 
 function errorMessage(error: unknown): string {
@@ -478,6 +496,10 @@ export async function handleDeleteDeployment(
     const repo = data.repo || "";
     const environment = data.environment || "";
     const application = data.application || "";
+    // Forcing is destructive beyond an ordinary delete — it removes records
+    // whose external resources may still exist — so only the exact boolean
+    // `true` enables it. A truthy string from a hand-made request does not.
+    const force = record(data).force === true;
     if (
       !repo ||
       !environment ||
@@ -556,6 +578,49 @@ export async function handleDeleteDeployment(
           : "This application is still being deployed to the selected environment. Wait for the deployment to finish before deleting it."
       });
       return;
+    }
+    // Forcing removes control-plane records whose external resources may still
+    // exist, so it is not an alternative way to run a first delete: it is only
+    // reachable as a retry of a delete GitHub already recorded as failed.
+    if (force && current?.status !== DELETE_FAILED_STATUS) {
+      releaseReservation();
+      respond(409, {
+        error:
+          "A delete can only be forced after a previous delete of this application failed. Run the delete normally first."
+      });
+      return;
+    }
+    // `delete-failed` alone is not proof: a delete can fail for credential,
+    // network or workflow-configuration reasons that forcing cannot fix and
+    // must not paper over. Forcing is only for a resource stranded in a
+    // non-terminal provisioning state, so re-read the failed run's artifact
+    // here rather than trusting the client's probe, which may be stale or
+    // absent entirely. Fails closed: anything but a proven conflict refuses.
+    if (force) {
+      let proof: DeleteConflictProbe;
+      try {
+        proof = await dependencies.probeDeleteConflict({
+          repo,
+          environment,
+          application
+        });
+      } catch (error) {
+        releaseReservation();
+        respond(503, {
+          error: `The previous delete failure could not be verified, so this delete was not forced: ${errorMessage(error)}`
+        });
+        return;
+      }
+      if (proof.state !== "conflict") {
+        releaseReservation();
+        respond(409, {
+          error:
+            proof.state === "clear" ?
+              "The previous delete did not fail because a resource was stuck in a non-terminal state, so forcing would not help. Run the delete normally and address the reported failure."
+            : `The previous delete failure could not be verified, so this delete was not forced: ${proof.detail}`
+        });
+        return;
+      }
     }
 
     // Dispatching a workflow requires the `workflow` scope, which an injected
@@ -639,11 +704,18 @@ export async function handleDeleteDeployment(
       "environment=" + environment,
       "-f",
       "application=" + application,
+      ...(force ? ["-f", "force=true"] : []),
       "--repo",
       repo
     ];
     let dispatch: CommandResult = { code: 1, stdout: "", stderr: "" };
-    const dispatchDelays = justCreated ? [0, 2000, 5000] : [0];
+    // A `force` dispatch also has to survive the *input-schema* race: the
+    // dispatcher that was just committed or updated declares the `force` input,
+    // but GitHub answers 422 "unexpected inputs" until it has re-read the file
+    // from the default branch. Give that the same bounded retry the
+    // not-yet-registered workflow gets, rather than reporting a failure the
+    // user cannot act on.
+    const dispatchDelays = justCreated || force ? [0, 2000, 5000] : [0];
     if (justCreated) await sleep(dependencies, 3000);
     for (const delay of dispatchDelays) {
       // `> 0` vs `> 1` is equivalent over the fixed delay set {0, 2000, 5000}:
@@ -652,18 +724,52 @@ export async function handleDeleteDeployment(
       dispatch = await ghWorkflow(dispatchArgs);
       if (dispatch.code === 0) break;
       if (dispatch.timedOut) break;
-      // Only the not-found registration race self-resolves; any other failure
-      // (scope, Actions disabled, …) won't, so stop retrying.
-      if (!/not found|HTTP 404/i.test(dispatch.stderr || "")) break;
+      // Only the not-found registration race and the unexpected-input race
+      // self-resolve; any other failure (scope, Actions disabled, …) won't, so
+      // stop retrying.
+      if (
+        !/not found|HTTP 404/i.test(dispatch.stderr || "") &&
+        !(force && /unexpected inputs?|HTTP 422/i.test(dispatch.stderr || ""))
+      ) {
+        break;
+      }
     }
     if (dispatch.code !== 0) {
       releaseReservation();
       const de = (dispatch.stderr || "").trim();
       // `{0,20}` vs `{1,20}` differs only for the literal "workflowscope" with
       // no separator, which no real `gh` diagnostic emits; left alive.
+      const ghCommandPresentation =
+        dependencies.ghCommandPresentation || BARE_GH_COMMAND_PRESENTATION;
+      const refreshCommand = displayGhCommand(ghCommandPresentation, [
+        "auth",
+        "refresh",
+        "-h",
+        "github.com",
+        "-s",
+        "workflow"
+      ]);
+      const installation =
+        ghCommandPresentation.installationNote ?
+          ` ${ghCommandPresentation.installationNote}`
+        : "";
+      // An exhausted unexpected-input retry is a stale dispatcher, not a
+      // permissions or Actions problem, so it says so instead of sending the
+      // user to check settings that are already correct.
+      const staleForceInput = force && /unexpected inputs?|HTTP 422/i.test(de);
       const hint =
-        /workflow.{0,20}scope/i.test(de) ?
-          ' Your GitHub token is missing the "workflow" scope. Run `gh auth refresh -h github.com -s workflow` in a terminal, then retry.'
+        staleForceInput ?
+          " GitHub is still rejecting the `force` input, which means the copy" +
+          " of " +
+          DELETE_APP_DISPATCHER_FILE +
+          " on the default branch of " +
+          repo +
+          " has not picked up that input yet. It is committed automatically," +
+          " so wait a moment and retry the forced delete."
+        : /workflow.{0,20}scope/i.test(de) ?
+          refreshCommand ?
+            ` Your GitHub token is missing the "workflow" scope. Run \`${refreshCommand}\` in a terminal, then retry.${installation}`
+          : ` Your GitHub token is missing the "workflow" scope. ${ghCommandPresentation.installationNote}`
         : " The delete workflow is committed to the default branch" +
           " automatically before dispatch, so a persistent failure usually" +
           " means GitHub Actions is disabled for " +
@@ -704,11 +810,73 @@ export async function handleDeleteDeployment(
     // A delete is now in flight, so the cached listing is stale — drop it so the
     // next poll reflects the "Deleting…" state immediately.
     dependencies.deployListCache.delete(repo);
-    respond(200, { success: true, runUrl });
+    // The delete run removes the deploy-status artifact for exactly this
+    // environment and application, which is what stops other sessions rendering
+    // the deleted deployment. This session also holds its own copy of that
+    // deploy, so retire it here or the Deployed view keeps showing "Last
+    // deployment" from state no artifact read can override.
+    discardDeployedApplicationState(entry.state, { environment, application });
+    respond(200, { success: true, runUrl, forced: force });
   } catch (e) {
     releaseReservation();
     respond(400, { error: errorMessage(e) });
   }
+}
+
+// Reports whether the last delete of an application failed with the stranded
+// non-terminal-state conflict, so the page can offer the force-delete
+// confirmation instead of the ordinary one. Read-only: it dispatches nothing
+// and is safe to call on every delete click.
+export async function handleDeleteConflict(
+  context: CanvasRequestContext,
+  dependencies: DeploymentsDependencies
+): Promise<void> {
+  const repo = context.url.searchParams.get("repo") || "";
+  const environment = context.url.searchParams.get("environment") || "";
+  const application = context.url.searchParams.get("application") || "";
+  if (
+    !repo ||
+    !environment ||
+    !application ||
+    !dependencies.isValidRepoSlug(repo)
+  ) {
+    context.json(400, {
+      error: "A valid repo, environment, and application are required."
+    });
+    return;
+  }
+  let probe: DeleteConflictProbe;
+  try {
+    probe = await dependencies.probeDeleteConflict({
+      repo,
+      environment,
+      application
+    });
+  } catch (error) {
+    // Never fail the click: an unreadable probe simply leaves the ordinary
+    // delete path in place.
+    context.json(
+      200,
+      {
+        conflict: false,
+        resourceState: "",
+        forced: false,
+        detail: errorMessage(error)
+      },
+      { "Cache-Control": "no-store" }
+    );
+    return;
+  }
+  context.json(
+    200,
+    {
+      conflict: probe.state === "conflict",
+      resourceState: probe.state === "conflict" ? probe.resourceState : "",
+      forced: probe.state === "conflict" ? probe.forced : false,
+      detail: probe.state === "unknown" ? probe.detail : ""
+    },
+    { "Cache-Control": "no-store" }
+  );
 }
 
 export async function handleAbandonDeployment(
@@ -746,16 +914,63 @@ export async function handleDeploy(
   context.json(result.status, result.body);
 }
 
+// The ambient deploy chip's read-only source. Deliberately NOT served from
+// `/api/deploy-status`: that route drives the repair handoff and the failure
+// notice as a side effect of being polled, and the chip polls from every page
+// in the canvas. Reusing it would let a graph page open a repair loop simply by
+// being open. This handler only reads state, and reports the few fields a
+// notification needs rather than the resource list and log buffer.
+export function handleDeployNotification(
+  context: CanvasRequestContext,
+  dependencies: DeploymentsDependencies
+): void {
+  const state = dependencies.readInstanceEntry(context.instanceId)?.state;
+  const runId = state?.deployRunId;
+  context.json(
+    200,
+    {
+      attemptId: state?.deployAttempt?.id || "",
+      // Advanced by `beginDeployAttempt` on every deploy invocation, so two
+      // pre-dispatch failures inside one repair loop — which share an attempt
+      // id, have no run, and never update the finish time — are still distinct
+      // notifications rather than one the user already dismissed.
+      generation: state?.deployGeneration || 0,
+      // Part of the notification's outcome identity: a repair loop reuses its
+      // attempt id across redeploys, so the run is what separates one outcome
+      // from the next. Reset to null at attempt start, so a dispatch that never
+      // reached GitHub reports "" rather than the previous run.
+      runId: runId === null || runId === undefined ? "" : String(runId),
+      status: state?.deployStatus || "pending",
+      application: state?.deployAppName || "",
+      // The attempt records the environment atomically when the deploy opens,
+      // whereas `deployEnvName` is only written later, during dispatch. Reading
+      // the attempt first stops a deploy that failed preflight from being
+      // reported against the *previous* deploy's environment.
+      environment:
+        state?.deployAttempt?.environment || state?.deployEnvName || "",
+      error: state?.deployError || "",
+      runUrl: state?.deployRunUrl || "",
+      repairing: state?.deployRepairing || false,
+      finishedAt: state?.deployFinishedAt || 0
+    },
+    { "Cache-Control": "no-store" }
+  );
+}
+
 export function createDeploymentsRoutes(
   dependencies: DeploymentsDependencies
 ): RouteHandlerRegistry {
   return {
     "GET /api/deploy-status": (context) =>
       handleDeployStatus(context, dependencies),
+    "GET /api/deploy-notification": (context) =>
+      handleDeployNotification(context, dependencies),
     "GET /api/list-applications": (context) =>
       handleListApplications(context, dependencies),
     "GET /api/list-deployments": (context) =>
       handleListDeployments(context, dependencies),
+    "GET /api/delete-conflict": (context) =>
+      handleDeleteConflict(context, dependencies),
     "POST /api/deploy": (context) => handleDeploy(context, dependencies),
     "POST /api/deploy-reset": (context) =>
       handleDeployReset(context, dependencies),

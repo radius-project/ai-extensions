@@ -6,7 +6,8 @@ import { createRequestContext } from "../request-context.js";
 import { ENTRA_APP_RETENTION_NOTICE } from "./azure-auto-setup-application.js";
 import {
   createAzureAutoSetupRoutes,
-  handleAzureAutoSetup
+  handleAzureAutoSetup,
+  parseAzureAccountIdentity
 } from "./azure-auto-setup.js";
 import type {
   AzureAutoSetupCommandResult,
@@ -20,6 +21,50 @@ const SUBSCRIPTION = "22222222-2222-2222-2222-222222222222";
 const TENANT = "11111111-1111-1111-1111-111111111111";
 const APP_ID = "33333333-3333-3333-3333-333333333333";
 const USER_ID = "44444444-4444-4444-4444-444444444444";
+const AZURE_USER = { type: "user", name: "dev@contoso.com" };
+
+describe("Azure account identity parsing", () => {
+  it("accepts the subscription and tenant GUIDs Azure reports", () => {
+    expect(
+      parseAzureAccountIdentity(
+        JSON.stringify({
+          id: SUBSCRIPTION,
+          tenantId: TENANT,
+          user: AZURE_USER
+        })
+      )
+    ).toEqual({
+      subscriptionId: SUBSCRIPTION,
+      tenantId: TENANT,
+      callerIdentity: { kind: "user" }
+    });
+  });
+
+  it("classifies a service-principal caller from the same account payload", () => {
+    expect(
+      parseAzureAccountIdentity(
+        JSON.stringify({
+          id: SUBSCRIPTION,
+          tenantId: TENANT,
+          user: { type: "servicePrincipal", name: APP_ID }
+        })
+      )
+    ).toEqual({
+      subscriptionId: SUBSCRIPTION,
+      tenantId: TENANT,
+      callerIdentity: { kind: "servicePrincipal", appId: APP_ID }
+    });
+  });
+
+  it.each([
+    ["invalid JSON", "{"],
+    ["a non-object", "[]"],
+    ["a non-string tenant", JSON.stringify({ id: SUBSCRIPTION, tenantId: 42 })],
+    ["a non-string subscription", JSON.stringify({ id: 42, tenantId: TENANT })]
+  ])("rejects %s", (_label, stdout) => {
+    expect(parseAzureAccountIdentity(stdout)).toBeNull();
+  });
+});
 
 const servers = new Set<ReturnType<typeof createServer>>();
 
@@ -126,6 +171,7 @@ function orchestrationHarness(
   };
   const events: string[] = [];
   const failures: AzureAutoSetupFailureInput[] = [];
+  const writtenCredentialFiles: string[] = [];
   const runAz =
     options.runAz ??
     (async (args: string[]): Promise<AzureAutoSetupCommandResult> => {
@@ -137,7 +183,11 @@ function orchestrationHarness(
       if (line === "account show --output json") {
         return {
           code: 0,
-          stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+          stdout: JSON.stringify({
+            id: SUBSCRIPTION,
+            tenantId: TENANT,
+            user: AZURE_USER
+          }),
           stderr: ""
         };
       }
@@ -155,8 +205,18 @@ function orchestrationHarness(
           code: 0,
           stdout: JSON.stringify([
             {
+              id: "fic-dev",
               name: "dev",
-              subject: "repo:octo/app:environment:dev"
+              subject: "repo:octo/app:environment:dev",
+              issuer: "https://token.actions.githubusercontent.com",
+              audiences: ["api://AzureADTokenExchange"]
+            },
+            {
+              id: "fic-dev-immutable",
+              name: "dev-immutable",
+              subject: "repo:octo@7/app@5:environment:dev",
+              issuer: "https://token.actions.githubusercontent.com",
+              audiences: ["api://AzureADTokenExchange"]
             }
           ]),
           stderr: ""
@@ -164,6 +224,17 @@ function orchestrationHarness(
       }
       if (line.includes("federated-credential create")) {
         return { code: 0, stdout: "", stderr: "" };
+      }
+      // Our credential setup re-reads the just-created federated credential to
+      // verify and record its provenance. Echo the written credential document
+      // so the live identity matches the required subject/issuer/audiences.
+      if (line.includes("federated-credential show")) {
+        const contents = JSON.parse(writtenCredentialFiles.at(-1) || "{}");
+        return {
+          code: 0,
+          stdout: JSON.stringify({ id: "fic-created", ...contents }),
+          stderr: ""
+        };
       }
       if (line.startsWith("role assignment create ")) {
         return { code: 1, stdout: "", stderr: "already exists" };
@@ -230,7 +301,9 @@ function orchestrationHarness(
     },
     tempFile: {
       createPath: () => "C:\\temp\\fic.json",
-      write: () => {},
+      write: (_path: string, contents: string) => {
+        writtenCredentialFiles.push(contents);
+      },
       remove: () => {}
     },
     ensureServicePrincipal:
@@ -500,7 +573,7 @@ describe("POST /api/azure-auto-setup admission and validation (SU-08)", () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({
       error:
-        "An earlier setup for octo/app must finish rollback before a new setup can start.",
+        "An earlier setup for octo/app must finish deletion before a new setup can start.",
       code: "previous-cleanup-required",
       operationId: "op-cleanup"
     });
@@ -656,7 +729,11 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         set: { code: 0, stdout: "", stderr: "" },
         show: {
           code: 0,
-          stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+          stdout: JSON.stringify({
+            id: SUBSCRIPTION,
+            tenantId: TENANT,
+            user: AZURE_USER
+          }),
           stderr: ""
         }
       },
@@ -669,7 +746,11 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         set: { code: 0, stdout: "", stderr: "" },
         show: {
           code: 0,
-          stdout: JSON.stringify({ id: "not-a-guid", tenantId: TENANT }),
+          stdout: JSON.stringify({
+            id: "not-a-guid",
+            tenantId: TENANT,
+            user: AZURE_USER
+          }),
           stderr: ""
         }
       },
@@ -683,7 +764,7 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         show: { code: 0, stdout: "null", stderr: "" }
       },
       {},
-      "az-account-incomplete"
+      "az-account-parse"
     ]
   ])(
     "reports %s before OIDC resolution",
@@ -825,7 +906,11 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       if (line === "account show --output json") {
         return {
           code: 0,
-          stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+          stdout: JSON.stringify({
+            id: SUBSCRIPTION,
+            tenantId: TENANT,
+            user: AZURE_USER
+          }),
           stderr: ""
         };
       }
@@ -900,7 +985,11 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         if (line === "account show --output json") {
           return {
             code: 0,
-            stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+            stdout: JSON.stringify({
+              id: SUBSCRIPTION,
+              tenantId: TENANT,
+              user: AZURE_USER
+            }),
             stderr: ""
           };
         }
@@ -1004,7 +1093,11 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         if (line === "account show --output json") {
           return {
             code: 0,
-            stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+            stdout: JSON.stringify({
+              id: SUBSCRIPTION,
+              tenantId: TENANT,
+              user: AZURE_USER
+            }),
             stderr: ""
           };
         }
@@ -1058,7 +1151,11 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         if (line === "account show --output json") {
           return {
             code: 0,
-            stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+            stdout: JSON.stringify({
+              id: SUBSCRIPTION,
+              tenantId: TENANT,
+              user: AZURE_USER
+            }),
             stderr: ""
           };
         }
@@ -1142,12 +1239,19 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
         if (line === "account show --output json") {
           return {
             code: 0,
-            stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+            stdout: JSON.stringify({
+              id: SUBSCRIPTION,
+              tenantId: TENANT,
+              user: AZURE_USER
+            }),
             stderr: ""
           };
         }
         if (line.startsWith("ad app list ")) {
           return { code: 0, stdout: "[]", stderr: "" };
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return { code: 0, stdout: USER_ID, stderr: "" };
         }
         if (line.startsWith("ad app create ")) {
           return { code: 0, stdout: APP_ID, stderr: "" };
@@ -1197,7 +1301,11 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       if (command === "account show --output json") {
         return {
           code: 0,
-          stdout: JSON.stringify({ id: SUBSCRIPTION, tenantId: TENANT }),
+          stdout: JSON.stringify({
+            id: SUBSCRIPTION,
+            tenantId: TENANT,
+            user: AZURE_USER
+          }),
           stderr: ""
         };
       }
@@ -1215,6 +1323,17 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
       }
       if (command.includes("federated-credential create")) {
         return { code: 0, stdout: "", stderr: "" };
+      }
+      if (command.includes("federated-credential show")) {
+        const contents = JSON.parse(written.at(-1) || "{}");
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            id: "fic-dev",
+            ...contents
+          }),
+          stderr: ""
+        };
       }
       if (command.startsWith("role assignment create ")) {
         return { code: 0, stdout: "", stderr: "" };
@@ -1321,6 +1440,12 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     expect(journal.indexOf("record:app")).toBeLessThan(
       journal.indexOf("record:sp")
     );
+    expect(
+      journal.filter((entry) => entry === "az:account show --output json")
+    ).toHaveLength(1);
+    expect(
+      journal.filter((entry) => entry.startsWith("az:account show "))
+    ).toEqual(["az:account show --output json"]);
     expect(journal.at(-1)).not.toBe("checkpoint");
     expect(journal).toContain("stage:succeeded");
   });
