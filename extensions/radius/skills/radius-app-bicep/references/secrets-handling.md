@@ -113,6 +113,29 @@ resource rabbitmq 'Radius.Messaging/rabbitMQ@2025-08-01-preview' = {
 
 Writing `password: rabbitmqPassword` here deploys a broken application: the Recipe reads the property as a resource ID and uses its last segment as the Kubernetes Secret name in `secretKeyRef`, so the supplied password becomes the looked-up Secret name and Kubernetes rejects the Deployment because a password is not a lowercase RFC 1123 subdomain. Because the property is optional, omitting it entirely and consuming the Recipe-generated credential is also valid. Resolve every credential property's kind from `show-radius-type.mjs` output before assigning it; two types that share a property name do not share a convention.
 
+### The data key is part of the contract
+
+Pointing at the right Secret is only half of a reference property's contract. When a schema property references a `Radius.Security/secrets` resource, the authored Secret must expose the value under the exact data key the consuming schema names, matching case. The key is fixed by the consuming type and its Recipe, not chosen by the model.
+
+- Data keys are case-sensitive. Do not uppercase them by convention, and do not assume the key matches the property name, the resource name, or the application's environment-variable name.
+- Read the required key from the consuming type's schema description, not from the native variable the application happens to call it. `Radius.Messaging/rabbitMQ.password` is documented as the resource ID of the `Radius.Security/secrets` resource that holds the broker password under the data key `password`, so the authored key is exactly `password`.
+- Every `secretKeyRef.key` that reads the same authored Secret must use that same exact key. The uppercased form appears only in a generated `CONNECTION_<CONNECTION>_<SECRETKEY>` variable name; it is a projection of the key, never a replacement for it.
+
+In the example above the authored data key is `password`, the broker receives `rabbitmqCredentials.id`, and a container reading the same Secret uses the identical lowercase key:
+
+```bicep
+RABBITMQ_PASSWORD: {
+  valueFrom: {
+    secretKeyRef: {
+      secretName: rabbitmqCredentials.name
+      key: 'password'
+    }
+  }
+}
+```
+
+Authoring that data key as `PASSWORD` fails even though the Bicep compiles and the resource ID is correct. The RabbitMQ Kubernetes Recipe reads a hardcoded lowercase `password` key from the resolved Secret, so the broker Pod resolves the right Secret, finds no `password` entry, and never starts — a `CreateContainerConfigError` rather than an admission failure. A key-casing mismatch is not cosmetic, and it survives every check that only validates the resource ID.
+
 ## Recipe-generated secret results
 
 Some Recipes generate sensitive values such as access keys, URLs, or connection strings through `result.secrets`. Their contract varies:

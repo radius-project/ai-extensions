@@ -816,6 +816,66 @@ describe("P0-C built Radius extension artifact", () => {
     expect(mysqlExample).toMatch(/^\s*password:\s*password\s*$/mu);
   });
 
+  it("packages the exact-data-key contract for authored reference Secrets", () => {
+    assertCurrentArtifact();
+    const readGuidance = (relativePath: string): string =>
+      readFileSync(join(DIST_SKILL, relativePath), "utf8");
+    const secretsGuidance = readGuidance("references/secrets-handling.md");
+    const skillGuidance = readGuidance("SKILL.md");
+
+    expect(secretsGuidance).toContain(
+      "the authored Secret must expose the value under the exact data key the consuming schema names, matching case"
+    );
+    expect(secretsGuidance).toContain(
+      "Data keys are case-sensitive. Do not uppercase them by convention"
+    );
+    expect(secretsGuidance).toContain(
+      "do not assume the key matches the property name, the resource name, or the application's environment-variable name"
+    );
+    expect(secretsGuidance).toContain(
+      "Every `secretKeyRef.key` that reads the same authored Secret must use that same exact key"
+    );
+    expect(secretsGuidance).toContain(
+      "Read the required key from the consuming type's schema description"
+    );
+    expect(secretsGuidance).toContain(
+      "Authoring that data key as `PASSWORD` fails even though the Bicep compiles and the resource ID is correct"
+    );
+    expect(secretsGuidance).toContain("`CreateContainerConfigError`");
+    expect(skillGuidance).toContain(
+      "the exact case-sensitive data key the consuming schema names (`password`, not `PASSWORD`)"
+    );
+
+    const bicepBlocks = filesUnder(DIST_SKILL)
+      .filter((path) => path.endsWith(".md"))
+      .flatMap((path) => [
+        ...readFileSync(path, "utf8").matchAll(
+          /```bicep\r?\n([\s\S]*?)\r?\n```/gu
+        )
+      ])
+      .map((match) => match[1]);
+
+    // The authored Secret and every reader of it must agree on the exact
+    // lowercase key the rabbitMQ Recipe hardcodes.
+    const rabbitmqExample = bicepBlocks.find((block) =>
+      block.includes("'Radius.Messaging/rabbitMQ@")
+    );
+    expect(rabbitmqExample).toBeDefined();
+    expect(rabbitmqExample).toMatch(
+      /data:\s*\{\s*password:\s*\{\s*value:\s*rabbitmqPassword\s*\}/u
+    );
+    expect(rabbitmqExample).not.toContain("PASSWORD:");
+
+    const rabbitmqConsumer = bicepBlocks.find(
+      (block) =>
+        block.includes("secretName: rabbitmqCredentials.name") &&
+        block.includes("secretKeyRef")
+    );
+    expect(rabbitmqConsumer).toBeDefined();
+    expect(rabbitmqConsumer).toMatch(/key:\s*'password'/u);
+    expect(rabbitmqConsumer).not.toMatch(/key:\s*'PASSWORD'/u);
+  });
+
   it("packages each page module exactly once", () => {
     assertCurrentArtifact();
     const bundle = readFileSync(ARTIFACT, "utf8");
