@@ -130,13 +130,20 @@ function parseArguments(args) {
   return { help: false, stagingDir, selectors };
 }
 
-export function deriveExtensionReference(version) {
+export function deriveExtensionReference(release) {
+  const normalized = typeof release === "string" ? release.trim() : "";
+  if (normalized === "edge" || /^pr-[0-9A-Za-z.-]+$/u.test(normalized)) {
+    return "br:biceptypes.azurecr.io/radius:latest";
+  }
   const match =
-    /^v?(\d+)\.(\d+)\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.exec(
-      typeof version === "string" ? version.trim() : ""
+    /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/u.exec(
+      normalized
     );
   if (match === null) {
-    throw new Error(`Unsupported Radius version "${version ?? ""}".`);
+    throw new Error(`Unsupported Radius release "${release ?? ""}".`);
+  }
+  if (match[4] !== undefined) {
+    return `br:biceptypes.azurecr.io/radius:${match[1]}.${match[2]}.${match[3]}-${match[4]}`;
   }
   return `br:biceptypes.azurecr.io/radius:${match[1]}.${match[2]}`;
 }
@@ -149,13 +156,13 @@ export function parseRadiusIdentity(output) {
     throw new Error("Managed Radius returned invalid version JSON.");
   }
   requireObject(parsed, "Managed Radius version JSON");
-  if (typeof parsed.version !== "string" || parsed.version.trim() === "") {
-    throw new Error('Managed Radius version JSON is missing "version".');
+  if (typeof parsed.release !== "string" || parsed.release.trim() === "") {
+    throw new Error('Managed Radius version JSON is missing "release".');
   }
   if (typeof parsed.commit !== "string" || parsed.commit.trim() === "") {
     throw new Error('Managed Radius version JSON is missing "commit".');
   }
-  const version = parsed.version.trim();
+  const release = parsed.release.trim();
   const commit = parsed.commit.trim();
   if (!/^[0-9a-f]{40}$/iu.test(commit)) {
     throw new Error(
@@ -164,7 +171,7 @@ export function parseRadiusIdentity(output) {
   }
   return {
     commit: commit.toLowerCase(),
-    extension: deriveExtensionReference(version)
+    extension: deriveExtensionReference(release)
   };
 }
 
