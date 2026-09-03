@@ -32,23 +32,9 @@ import { browserEntryMarker } from "../../../src/browser/scripts.js";
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
 const DIST = join(REPO_ROOT, ".artifacts", "radius");
-const ARTIFACT = join(DIST, "extension.mjs");
-const COMPATIBILITY_ARTIFACTS = [
-  {
-    path: join(DIST, "extensions", "radius", "extension.mjs"),
-    reExport: "../../extension.mjs"
-  },
-  {
-    path: join(
-      DIST,
-      "com.github.copilot",
-      "extensions",
-      "radius",
-      "extension.mjs"
-    ),
-    reExport: "../../../extension.mjs"
-  }
-] as const;
+const ARTIFACT_RELATIVE_PATH =
+  "com.github.copilot/extensions/radius/extension.mjs";
+const ARTIFACT = join(DIST, ...ARTIFACT_RELATIVE_PATH.split("/"));
 const SOURCE_MAP = `${ARTIFACT}.map`;
 const SOURCE_CHANGELOG = join(
   REPO_ROOT,
@@ -229,16 +215,10 @@ function assertCurrentArtifact(): void {
 
 describe("P0-C built Radius extension artifact", () => {
   let smoke: ArtifactSmokeResult;
-  let compatibilitySmokes: ArtifactSmokeResult[];
 
   beforeAll(async () => {
     assertCurrentArtifact();
-    [smoke, ...compatibilitySmokes] = await Promise.all([
-      runArtifactSmoke(ARTIFACT),
-      ...COMPATIBILITY_ARTIFACTS.map(({ path }) =>
-        runArtifactSmoke(path, 20_000, DIST)
-      )
-    ]);
+    smoke = await runArtifactSmoke(ARTIFACT, 20_000, DIST);
   }, 30_000);
 
   it("registers the retained SDK surface exactly once and shuts down cleanly", () => {
@@ -261,13 +241,6 @@ describe("P0-C built Radius extension artifact", () => {
         )
       ])
     );
-  });
-
-  it("registers the same SDK surface through every compatibility entry point", () => {
-    for (const compatibilitySmoke of compatibilitySmokes) {
-      expect(compatibilitySmoke.registration).toEqual(EXPECTED_REGISTRATION);
-      expect(compatibilitySmoke.closeCount).toBe(1);
-    }
   });
 
   it("keeps the SDK external and packages production modules and skill assets only", () => {
@@ -332,15 +305,7 @@ describe("P0-C built Radius extension artifact", () => {
       readdirSync(DIST)
         .filter((name) => name.endsWith(".mjs"))
         .sort()
-    ).toEqual(["extension.mjs"]);
-    for (const compatibility of COMPATIBILITY_ARTIFACTS) {
-      expect(readFileSync(compatibility.path, "utf8")).toContain(
-        `export * from "${compatibility.reExport}";`
-      );
-      expect(resolve(dirname(compatibility.path), compatibility.reExport)).toBe(
-        ARTIFACT
-      );
-    }
+    ).toEqual([]);
     const packagedPaths = [
       "package.json",
       "plugin.json",
@@ -348,10 +313,8 @@ describe("P0-C built Radius extension artifact", () => {
       "LICENSE",
       "THIRD-PARTY-NOTICES.txt",
       "assets/preview.png",
-      "extensions/radius/extension.mjs",
-      "extensions/radius/package.json",
-      "com.github.copilot/extensions/radius/extension.mjs",
-      "com.github.copilot/extensions/radius/package.json",
+      ARTIFACT_RELATIVE_PATH,
+      `${ARTIFACT_RELATIVE_PATH}.map`,
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
       "skills/radius-app-bicep/references/source-code-references.md",
@@ -362,18 +325,6 @@ describe("P0-C built Radius extension artifact", () => {
     for (const packagedPath of packagedPaths) {
       expect(existsSync(join(DIST, ...packagedPath.split("/")))).toBe(true);
     }
-    expect(
-      readFileSync(
-        join(
-          DIST,
-          "com.github.copilot",
-          "extensions",
-          "radius",
-          "package.json"
-        ),
-        "utf8"
-      )
-    ).toBe(readFileSync(join(DIST, "package.json"), "utf8"));
     const radiusTypeResolver = readFileSync(
       join(
         DIST,
@@ -462,11 +413,6 @@ describe("P0-C built Radius extension artifact", () => {
     }
     expect(builtPackage.version).toEqual(expect.any(String));
     expect(builtPackage).toEqual(expectedPackage);
-    expect(
-      JSON.parse(
-        readFileSync(join(DIST, "extensions", "radius", "package.json"), "utf8")
-      )
-    ).toEqual(builtPackage);
 
     const sourcePlugin = JSON.parse(
       readFileSync(join(REPO_ROOT, "plugins", "radius", "plugin.json"), "utf8")
@@ -1091,24 +1037,30 @@ describe("P0-C built Radius extension artifact", () => {
         stdio: "pipe"
       });
 
-      const managedFiles = [
-        "extension.mjs",
-        "extension.mjs.map",
-        "THIRD-PARTY-NOTICES.txt",
-        "package.json",
+      const managedFiles: Array<readonly [string, string]> = [
+        [ARTIFACT_RELATIVE_PATH, "extension.mjs"],
+        [`${ARTIFACT_RELATIVE_PATH}.map`, "extension.mjs.map"],
+        ["THIRD-PARTY-NOTICES.txt", "THIRD-PARTY-NOTICES.txt"],
         ...relativeFilesUnder(join(DIST, "workflows")).map(
-          (filePath) => `workflows/${filePath}`
+          (filePath) =>
+            [`workflows/${filePath}`, `workflows/${filePath}`] as const
         ),
         ...relativeFilesUnder(join(DIST, "skills")).map(
-          (filePath) => `skills/${filePath}`
+          (filePath) => [`skills/${filePath}`, `skills/${filePath}`] as const
         )
       ];
-      for (const managedFile of managedFiles) {
+      for (const [source, installed] of managedFiles) {
         expectMatchingFile(
-          join(DIST, ...managedFile.split("/")),
-          join(installDir, ...managedFile.split("/"))
+          join(DIST, ...source.split("/")),
+          join(installDir, ...installed.split("/"))
         );
       }
+      const builtPackage = JSON.parse(
+        readFileSync(join(DIST, "package.json"), "utf8")
+      ) as Record<string, unknown>;
+      expect(
+        JSON.parse(readFileSync(join(installDir, "package.json"), "utf8"))
+      ).toEqual({ ...builtPackage, main: "extension.mjs" });
       expect(readFileSync(unrelatedRootFile, "utf8")).toBe("keep root\n");
       expect(existsSync(staleWorkflow)).toBe(false);
       expect(existsSync(staleSkill)).toBe(false);

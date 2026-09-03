@@ -4,6 +4,7 @@ import {
   copyFileSync,
   mkdirSync,
   mkdtempSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync
@@ -160,8 +161,6 @@ async function completionApi({
   includeRootExtension = true,
   includeBundledExtension = true,
   includePinnedMetadata = true,
-  includePublishedExtension = false,
-  legacyPluginRoot = false,
   extraTreePaths = [],
   rootExtensionBlob = EXTENSION_BLOB,
   bundledExtensionBlob = rootExtensionBlob,
@@ -177,11 +176,7 @@ async function completionApi({
   });
   const installFiles = [
     ["package.json", PACKAGE_BLOB],
-    ["extension.mjs", "3".repeat(40)],
-    ["extensions/radius/extension.mjs", EXTENSION_BLOB],
-    ["extensions/radius/package.json", PACKAGE_BLOB],
     ["com.github.copilot/extensions/radius/extension.mjs", EXTENSION_BLOB],
-    ["com.github.copilot/extensions/radius/package.json", PACKAGE_BLOB],
     ["assets/preview.png", "4".repeat(40)],
     ["skills/radius-app-bicep/SKILL.md", "5".repeat(40)],
     ["plugin.json", MANIFEST_BLOB],
@@ -260,17 +255,7 @@ async function completionApi({
               sha: MARKETPLACE_BLOB
             },
             ...(includePinnedMetadata ?
-              treeFiles(
-                "plugins/radius",
-                legacyPluginRoot ?
-                  installFiles.filter(([path]) =>
-                    ["plugin.json", "README.md"].includes(path)
-                  )
-                : installFiles
-              )
-            : []),
-            ...(includePublishedExtension ?
-              treeFiles("extensions/radius", installFiles)
+              treeFiles("plugins/radius", installFiles)
             : []),
             ...(includeRootExtension ?
               [
@@ -507,6 +492,18 @@ describe("scripts/verified-git.mjs", () => {
   it("publishes the assembled tree under the plugin root", async () => {
     const root = repository();
     const { url, calls } = await api();
+    const canvasDirectory = join(
+      root,
+      "dist",
+      "com.github.copilot",
+      "extensions",
+      "radius"
+    );
+    mkdirSync(canvasDirectory, { recursive: true });
+    renameSync(
+      join(root, "dist", "extension.mjs"),
+      join(canvasDirectory, "extension.mjs")
+    );
 
     const result = await run(
       root,
@@ -522,7 +519,7 @@ describe("scripts/verified-git.mjs", () => {
         .body.tree.map((entry) => entry.path)
     ).toEqual([
       "catalog.json",
-      "plugins/radius/extension.mjs",
+      "plugins/radius/com.github.copilot/extensions/radius/extension.mjs",
       "plugins/radius/skills/SKILL.md"
     ]);
   });
@@ -998,46 +995,6 @@ describe("scripts/verified-git.mjs", () => {
       expect(JSON.parse(result.stdout).source).toBe(SOURCE);
     });
 
-    it("accepts a metadata-only previous release only through the compatibility flag", async () => {
-      const root = repository();
-      const { url } = await completionApi({
-        catalogPath: "extensions/radius",
-        includePublishedExtension: true,
-        legacyPluginRoot: true
-      });
-
-      const strict = await run(root, url, args);
-      const compatible = await run(root, url, [
-        ...args,
-        "--allow-legacy-plugin-root"
-      ]);
-
-      expect(strict.status).toBe(1);
-      expect(strict.stderr).toContain(
-        "unexpected path: extensions/radius/package.json"
-      );
-      expect(compatible.status).toBe(0);
-    });
-
-    it("accepts a mirrored previous release only through the compatibility flag", async () => {
-      const root = repository();
-      const { url } = await completionApi({
-        includePublishedExtension: true
-      });
-
-      const strict = await run(root, url, args);
-      const compatible = await run(root, url, [
-        ...args,
-        "--allow-legacy-plugin-root"
-      ]);
-
-      expect(strict.status).toBe(1);
-      expect(strict.stderr).toContain(
-        "unexpected path: extensions/radius/package.json"
-      );
-      expect(compatible.status).toBe(0);
-    });
-
     it("rejects a release tag targeting a commit other than its artifact", async () => {
       const root = repository();
       const wrong = "9".repeat(40);
@@ -1078,25 +1035,6 @@ describe("scripts/verified-git.mjs", () => {
         "no plugin copy beside the install unit",
         { includePinnedMetadata: false },
         "does not publish a valid plugin"
-      ],
-      [
-        "nested extensions under the repository-root extension",
-        {
-          extraTreePaths: ["extensions/radius/extensions/radius/extension.mjs"]
-        },
-        "unexpected path: extensions/radius/extensions/radius/extension.mjs"
-      ],
-      [
-        "skills under the repository-root extension",
-        { extraTreePaths: ["extensions/radius/skills/SKILL.md"] },
-        "unexpected path: extensions/radius/skills/SKILL.md"
-      ],
-      [
-        "workflows under the repository-root extension",
-        {
-          extraTreePaths: ["extensions/radius/workflows/action.yml"]
-        },
-        "unexpected path: extensions/radius/workflows/action.yml"
       ],
       [
         "a sibling plugin's metadata",
@@ -1163,10 +1101,7 @@ describe("scripts/verified-git.mjs", () => {
 
     it("accepts a complete artifact published only under the plugin root", async () => {
       const root = repository();
-      const { url } = await completionApi({
-        catalogPath: "plugins/radius",
-        includePublishedExtension: false
-      });
+      const { url } = await completionApi();
 
       const result = await run(root, url, [
         "verify-artifact",

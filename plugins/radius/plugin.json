@@ -19,6 +19,9 @@
     "deploy",
     "canvas"
   ],
-  "extensions": "extensions",
-  "logo": "assets/preview.png"
+  "extensions": {
+    "com.github.copilot": {
+      "logo": "assets/preview.png"
+    }
+  }
 }
