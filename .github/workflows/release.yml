@@ -161,8 +161,7 @@ jobs:
             version="$(node scripts/version.mjs --plugin "$plugin")"
             if node scripts/version.mjs --plugin "$plugin" --release-notes >/dev/null 2>&1 && \
                ! node scripts/verified-git.mjs verify-completion \
-                   --plugin "$plugin" --version "$version" \
-                   --allow-legacy-plugin-root >/dev/null 2>&1; then
+                 --plugin "$plugin" --version "$version" >/dev/null 2>&1; then
               echo "::error::${plugin}@${version} has not finished publishing. Re-run its failed Release workflow before preparing another version."
               exit 1
             fi

@@ -34,14 +34,8 @@ const SUPPORTED_SCHEMA_KEYWORDS = new Set([
 const DNS_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 const CANVAS_KEYWORD = "canvas";
 const CANVAS_LOGO = "assets/preview.png";
-const CANVAS_ENTRY_POINT = "extension.mjs";
-const CANVAS_COMPATIBILITY_ENTRY_POINT = "extensions/radius/extension.mjs";
-const CANVAS_COMPATIBILITY_PACKAGE = "extensions/radius/package.json";
-const COPILOT_NAMESPACED_ENTRY_POINT =
-  "com.github.copilot/extensions/radius/extension.mjs";
-const COPILOT_NAMESPACED_PACKAGE =
-  "com.github.copilot/extensions/radius/package.json";
-const COPILOT_NAMESPACED_RE_EXPORT = "../../../extension.mjs";
+const COPILOT_CLIENT_NAMESPACE = "com.github.copilot";
+const CANVAS_ENTRY_POINT = "com.github.copilot/extensions/radius/extension.mjs";
 
 class Failure extends Error {}
 
@@ -232,65 +226,22 @@ function isCanvasPlugin(manifest) {
 }
 
 function requireCanvasContract(dist, manifest, packageJson) {
-  if (manifest.logo !== CANVAS_LOGO) {
+  const logo = manifest.extensions?.[COPILOT_CLIENT_NAMESPACE]?.logo;
+  if (logo !== CANVAS_LOGO) {
     fail(
-      `plugin.json#logo must be ${JSON.stringify(CANVAS_LOGO)} for a plugin keyworded "${CANVAS_KEYWORD}"`
+      `plugin.json#extensions.${COPILOT_CLIENT_NAMESPACE}.logo must be ${JSON.stringify(CANVAS_LOGO)} for a plugin keyworded "${CANVAS_KEYWORD}"`
     );
   }
-  if (manifest.extensions !== "extensions") {
-    fail('published canvas plugin.json#extensions must be "extensions"');
+  requirePath(
+    dist,
+    logo,
+    `plugin.json#extensions.${COPILOT_CLIENT_NAMESPACE}.logo`,
+    "file"
+  );
+  if (packageJson.main !== CANVAS_ENTRY_POINT) {
+    fail(`package.json#main must be ${JSON.stringify(CANVAS_ENTRY_POINT)}`);
   }
-  requirePath(dist, manifest.logo, "plugin.json#logo", "file");
   requirePath(dist, CANVAS_ENTRY_POINT, "canvas entry point", "file");
-  requirePath(
-    dist,
-    CANVAS_COMPATIBILITY_ENTRY_POINT,
-    "Awesome Copilot canvas entry point",
-    "file"
-  );
-  requirePath(
-    dist,
-    CANVAS_COMPATIBILITY_PACKAGE,
-    "Awesome Copilot canvas package",
-    "file"
-  );
-  requireReExport(
-    dist,
-    COPILOT_NAMESPACED_ENTRY_POINT,
-    COPILOT_NAMESPACED_RE_EXPORT,
-    "GitHub Copilot namespaced canvas entry point"
-  );
-  requirePath(
-    dist,
-    COPILOT_NAMESPACED_PACKAGE,
-    "GitHub Copilot namespaced canvas package",
-    "file"
-  );
-  const canvasPackage = readJson(
-    resolve(dist, CANVAS_COMPATIBILITY_PACKAGE),
-    "Awesome Copilot canvas package"
-  );
-  if (JSON.stringify(canvasPackage) !== JSON.stringify(packageJson)) {
-    fail("Awesome Copilot canvas package must match package.json");
-  }
-  const namespacedPackage = readJson(
-    resolve(dist, COPILOT_NAMESPACED_PACKAGE),
-    "GitHub Copilot namespaced canvas package"
-  );
-  if (JSON.stringify(namespacedPackage) !== JSON.stringify(packageJson)) {
-    fail("GitHub Copilot namespaced canvas package must match package.json");
-  }
-}
-
-function requireReExport(root, declared, target, label) {
-  requirePath(root, declared, label, "file");
-  const statement = `export * from "${target}";`;
-  const lines = readFileSync(resolve(root, declared), "utf8")
-    .split(/\r?\n/u)
-    .map((line) => line.trim());
-  if (!lines.includes(statement)) {
-    fail(`${label} must contain '${statement}'`);
-  }
 }
 
 function requirePath(root, declared, label, type) {
@@ -355,12 +306,7 @@ async function main() {
     );
   }
   const canvas = isJsonObject(manifest) && isCanvasPlugin(manifest);
-  const portable = canvas ? { ...manifest } : manifest;
-  if (canvas) {
-    delete portable.logo;
-    delete portable.extensions;
-  }
-  const manifestError = validateSchema(portable, manifestSchema, "plugin.json");
+  const manifestError = validateSchema(manifest, manifestSchema, "plugin.json");
   if (manifestError !== undefined) fail(manifestError);
   if (canvas) requireCanvasContract(dist, manifest, packageJson);
 

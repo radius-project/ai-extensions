@@ -34,7 +34,7 @@ Today `plugins/` holds one entry, `radius`, paired with `extensions/radius/`. Th
 
 Because every package is private, [`privatePackages.version`](https://changesets.dev/guide/config#privatepackages) is enabled so Changesets versions plugins it will never publish to a registry. `privatePackages.tag` is deliberately disabled: the generic Changesets tag command scans every eligible package and tags the source commit, while the release workflow must create only the selected plugin's tag, on its artifact commit. The `ignore` list keeps the internal `packages/*` workspaces inert.
 
-Each plugin package owns a `build` script that assembles its own `.artifacts/<name>/`. That is the contract CI relies on: `pnpm --filter <plugin> run build` is how any plugin is built, so a new one plugs in without touching a workflow. The output is git-ignored and never assembled in place, because on a release branch the assembled tree is published at `extensions/<name>/` - the same path its canvas source occupies on `main`.
+Each plugin package owns a `build` script that assembles its own `.artifacts/<name>/`. That is the contract CI relies on: `pnpm --filter <plugin> run build` is how any plugin is built, so a new one plugs in without touching a workflow. The output is git-ignored and never assembled in place; on a release branch, the assembled tree is published at `plugins/<name>/`, while `extensions/<name>/` remains source-only on `main`.
 
 ## Where the version lives
 
@@ -103,7 +103,7 @@ graph LR
 - Neither release job compiles anything - the bundle and its SBOM both arrive as build artifacts. The version job runs only the Changesets CLI, so it installs with `--ignore-scripts`; the publish job installs no dependencies at all, because every script it runs uses Node built-ins alone. Dependency code therefore never executes in a job holding the GitHub App token or the ability to move published refs. `build.yml` keeps lifecycle scripts enabled because it does build the bundle.
 - Shared static, Node, Windows, and Chromium checks upload one gate artifact. Plugin builds run in a separate matrix and upload disjoint artifacts. Publish legs require the shared gate plus their own artifact, so failed shared validation blocks all publishing while one failed plugin does not cancel or serialize its siblings.
 - The release tag is published before the GitHub release, so its presence proves nothing on its own. Completion means `verified-git.mjs verify-completion` can still prove the artifact branch, its tag, the published release, and its exact asset set together; both the prepare gate and the end of a publish leg require that. Until it holds, rerun the original workflow; it rebuilds the expected orphan tree and verifies existing refs and assets. A mutable published release's assets are reconciled with `--clobber`; an actually immutable release reuses its published native SBOM and compares protected assets without modification.
-- Every generated install branch - edge, latest, and versioned - is an orphan root commit containing the assembled plugin only at `plugins/<plugin>/`, plus `.github/extension/` and the generated marketplace catalog. `verified-git.mjs commit` maps the locally built `.artifacts/<plugin>/` to that published plugin path, so nothing has to be staged into a tracked source tree first. Creation and reuse both check that the commit has zero parents and that GitHub verified it. The stable `verify-artifact` and `verify-completion` checks reject repository-root `extensions/<plugin>/` content, require the root extension tree to match `plugins/<plugin>/workflows/` by path and Git blob SHA, and require the package source pin to match the source recorded in the commit message. The release-preparation compatibility check still recognizes historical extension-root layouts explicitly.
+- Every generated install branch - edge, latest, and versioned - is an orphan root commit containing the assembled plugin at `plugins/<plugin>/`, plus `.github/extension/` and the generated marketplace catalog. `verified-git.mjs commit` maps the locally built `.artifacts/<plugin>/` to that published plugin path, so nothing has to be staged into a tracked source tree first. Creation and reuse both check that the commit has zero parents and that GitHub verified it. The stable `verify-artifact` and `verify-completion` checks require the root extension tree to match `plugins/<plugin>/workflows/` by path and Git blob SHA and require the package source pin to match the source recorded in the commit message.
 - Nothing a stable release publishes rolls forward, so a prerelease is not a special case for refs: it gets `releases/<plugin>/v<version>` and its `<plugin>@<version>` tag like any other version, and only its GitHub release differs. GitHub stores "published but not Latest" as `prerelease: true`, so a stable release never asks for `make_latest: false`; it uses `make_latest: legacy`, which ranks on version and date so a rerun of an older release cannot take Latest from a newer one. The published `draft` and `prerelease` flags are read back and must match before the release counts as complete.
 - [Immutable releases](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes) lock only the tag used by a published release. No release is created for `<plugin>@edge`, so that channel tag remains movable in either mode.
 
@@ -130,9 +130,9 @@ Publishing (say) `@radius-project/core` so third parties can build their own ada
 
 Because Changesets owns the version, an edge build cannot claim to be a release: the build runs a **plugin-scoped** [`changeset version --snapshot edge`](https://changesets.dev/guide/snapshot-releases) to ask what that plugin's next release will be and stamps it with an `edge` prerelease plus the seven-character source SHA, for example `0.1.0-edge-0b33186`. CI adds an ephemeral patch changeset for that plugin so documentation-only pushes still get a next-patch snapshot; pending changesets for other plugins are ignored in this matrix leg.
 
-`.artifacts/<plugin>/` is a complete, self-contained plugin: `plugin.json`, `package.json`, `README.md`, `CHANGELOG.md`, `assets/`, all of `skills/`, the compiled root `extension.mjs` (plus its source map), a nested `extensions/<plugin>/` package with its re-export and matching `package.json`, a matching namespaced package under `com.github.copilot/extensions/<plugin>/`, and `workflows/`, a complete copy of `.github/extension/` including reusable workflows, composite actions, scripts, and their checked-in bundles. The plugin's own `build` script assembles it from the two tracked source directories, wiping and rebuilding the tree each time - and refusing to wipe it at all if `git ls-files` reports anything tracked there. `package.json#radiusSourceRef` and the compiled generator both carry the full source commit, so an installed extension never follows a mutable ref when fetching a template or generating a first-party action reference.
+`.artifacts/<plugin>/` is a complete, self-contained plugin: `plugin.json`, `package.json`, `README.md`, `CHANGELOG.md`, `assets/`, all of `skills/`, the compiled `com.github.copilot/extensions/<plugin>/extension.mjs` plus its source map, and `workflows/`, a complete copy of `.github/extension/` including reusable workflows, composite actions, scripts, and their checked-in bundles. The plugin's own `build` script assembles it from the two tracked source directories, wiping and rebuilding the tree each time - and refusing to wipe it at all if `git ls-files` reports anything tracked there. `package.json#main` names the canonical bundle, while `package.json#radiusSourceRef` and the compiled generator both carry the full source commit, so an installed extension never follows a mutable ref when fetching a template or generating a first-party action reference.
 
-`assets/` is tracked extension source copied verbatim; `extension.mjs` is generated directly at the plugin root named by `package.json#main`.
+`assets/` is tracked extension source copied verbatim; `extension.mjs` and its source map are generated directly at the canonical path named by `package.json#main`.
 
 A release does **not** touch `.github/plugin/marketplace.json`. Changesets owns `extensions/<plugin>/package.json`, `scripts/version.mjs` derives `plugins/<plugin>/plugin.json` from it, and each publish stamps the version and its own install ref into the throwaway catalog copy it ships — so the entry on `main` never has to be kept in step with a release.
 
@@ -175,24 +175,21 @@ The versioned branch and its tag name the same orphan commit, so `marketplace ad
 
 ### The canvas contract
 
-A plugin whose `keywords` include `canvas` has separate source and served contracts because Awesome Copilot's [canvas-extension source guide](https://github.com/github/awesome-copilot/blob/main/.github/skills/create-canvas-extension/SKILL.md) and [external-plugin intake](https://github.com/github/awesome-copilot/blob/main/CONTRIBUTING.md#adding-external-plugins) currently expect different manifest shapes:
+A plugin whose `keywords` include `canvas` must publish the canonical manifest metadata and served paths required by Awesome Copilot's [canvas-extension source guide](https://github.com/github/awesome-copilot/blob/main/.github/skills/create-canvas-extension/SKILL.md) and [external-plugin intake](https://github.com/github/awesome-copilot/blob/main/CONTRIBUTING.md#adding-external-plugins):
 
-| Requirement                                            | Where it is produced                                      |
-|--------------------------------------------------------|-----------------------------------------------------------|
-| `plugin.json#logo` = `assets/preview.png`              | hardcoded in `plugins/<plugin>/plugin.json`               |
-| `plugin.json#extensions` = `extensions`                | hardcoded in `plugins/<plugin>/plugin.json`               |
-| `assets/preview.png`                                   | tracked in `extensions/<plugin>/assets/`                  |
-| Root `extension.mjs`                                   | generated by `build.mjs`                                  |
-| `extensions/<plugin>/extension.mjs`                    | generated re-export for Canvas discovery                  |
-| `extensions/<plugin>/package.json`                     | copied from the processed root package with matching data |
-| `com.github.copilot/extensions/<plugin>/extension.mjs` | generated namespaced re-export for Copilot discovery      |
-| `com.github.copilot/extensions/<plugin>/package.json`  | copied from the same processed root package metadata      |
+| Requirement                                                             | Where it is produced                           |
+|-------------------------------------------------------------------------|------------------------------------------------|
+| `plugin.json#extensions.com.github.copilot.logo` = `assets/preview.png` | hardcoded in `plugins/<plugin>/plugin.json`    |
+| `assets/preview.png`                                                    | tracked in `extensions/<plugin>/assets/`       |
+| Root `package.json#main`                                                | canonical Canvas entry-point path              |
+| `com.github.copilot/extensions/<plugin>/extension.mjs`                  | generated runtime bundle for Copilot discovery |
+| `com.github.copilot/extensions/<plugin>/extension.mjs.map`              | generated source map beside the runtime bundle |
 
-The build copies the fixed Canvas metadata instead of deriving it. `validate-plugin-dist.mjs` withholds the intake-required legacy `logo` and string-valued `extensions` fields from the closed schema check, then independently requires their exact values, the preview, root runtime entry, nested extension entry, matching nested package metadata, and namespaced Copilot package with its exact root-bundle re-export and matching metadata. Awesome Copilot reports the two legacy fields as non-blocking Agent Plugins spec warnings; its Canvas structure and install gates can still pass.
+The build copies the fixed Canvas metadata instead of deriving it. `validate-plugin-dist.mjs` validates the complete manifest against the closed Agent Plugins schema, then independently requires the exact namespaced preview metadata, preview asset, canonical `package.json#main`, and Canvas bundle.
 
 Do not add `com.github.awesome-copilot` to this repository's manifest. That namespace is source-composition metadata consumed by Awesome Copilot's own materializer: its `skills` entries resolve against that repository's top-level `skills/`, and its `extensions` entries resolve against that repository's top-level `extensions/`. Radius instead publishes an already-assembled external plugin whose five skills are discovered from the standard `skills/` directory beneath `source.path`.
 
-The [issue #2903 intake feedback](https://github.com/github/awesome-copilot/issues/2903#issuecomment-5502058332) was generated against an old release where `source.path: plugins/radius` contained only metadata. New release branches publish the complete artifact there, including `assets/preview.png` and `extensions/radius/extension.mjs`. Submit `source.path: plugins/<plugin>` with a newly cut immutable stable `<plugin>@<version>` tag, its full artifact commit SHA, and the matching version. Do not move or reuse an older release tag or submit the mutable `<plugin>@edge` ref. After editing the issue, comment `/rerun-intake` if the automatic rerun does not start.
+For Awesome Copilot intake, submit `source.path: plugins/<plugin>` with a newly cut immutable stable `<plugin>@<version>` tag, its full artifact commit SHA, and the matching version. The plugin root contains `assets/preview.png` and `com.github.copilot/extensions/<plugin>/extension.mjs`. Do not move or reuse a release tag or submit the mutable `<plugin>@edge` ref. After editing the issue, comment `/rerun-intake` if the automatic rerun does not start.
 
 ## Verifying a published bundle
 
@@ -208,7 +205,7 @@ The SPDX asset is pnpm's native selected-plugin document. It lists the workspace
 The same works for a bundle taken straight off an install target, since provenance is matched by digest:
 
 ```bash
-gh attestation verify ~/.copilot/installed-plugins/radius-plugins/radius/extension.mjs \
+gh attestation verify ~/.copilot/installed-plugins/radius-plugins/radius/com.github.copilot/extensions/radius/extension.mjs \
   --repo radius-project/ai-extensions
 ```
 
