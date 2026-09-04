@@ -58,25 +58,31 @@ export async function fetchGitHubWithRetry(
   const fetchImpl = options.fetchImpl ?? fetch;
   const retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
   const delay = options.sleep ?? sleep;
+  const maxAttempts = retryDelaysMs.length + 1;
 
-  for (let attemptIndex = 0; ; attemptIndex += 1) {
+  for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex += 1) {
+    const isFinalAttempt = attemptIndex === maxAttempts - 1;
     try {
       const response = await fetchImpl(url, init);
       if (
         response.ok ||
         !isTransientStatus(response.status) ||
-        attemptIndex >= retryDelaysMs.length
+        isFinalAttempt
       ) {
         return { response, attempts: attemptIndex + 1 };
       }
     } catch (error) {
-      if (attemptIndex >= retryDelaysMs.length) {
+      if (isFinalAttempt) {
         throw error;
       }
     }
 
-    await delay(retryDelaysMs[attemptIndex]);
+    if (!isFinalAttempt) {
+      await delay(retryDelaysMs[attemptIndex]);
+    }
   }
+
+  throw new Error("GitHub fetch retry loop exhausted without a result");
 }
 
 // Fetch one file under a repo's `.github/extension/` tree as raw text through
@@ -98,9 +104,9 @@ export async function fetchExtensionFile(
     options
   );
   if (!res.ok) {
-    const attemptSummary = attempts === 1 ? "" : ` after ${attempts} attempts`;
+    const attemptNoun = attempts === 1 ? "attempt" : "attempts";
     throw new Error(
-      `failed to fetch ${url}${attemptSummary}: ${res.status} ${res.statusText}`
+      `failed to fetch ${url} after ${attempts} ${attemptNoun}: ${res.status} ${res.statusText}`
     );
   }
   return res.text();

@@ -42,7 +42,7 @@ describe("live GitHub test support", () => {
     expect(delays).toEqual([5]);
   });
 
-  it("does not retry permanent GitHub responses", async () => {
+  it("does not retry permanent GitHub content fetch responses", async () => {
     let calls = 0;
     const fetchImpl: typeof fetch = async () => {
       calls += 1;
@@ -51,6 +51,30 @@ describe("live GitHub test support", () => {
         statusText: "Not Found"
       });
     };
+
+    await expect(
+      fetchExtensionFile(
+        "owner/repo",
+        ".github/extension",
+        "missing.yml",
+        "main",
+        {
+          fetchImpl,
+          sleep: noDelay
+        }
+      )
+    ).rejects.toThrow(
+      "failed to fetch https://api.github.com/repos/owner/repo/contents/.github/extension/missing.yml?ref=main after 1 attempt: 404 Not Found"
+    );
+    expect(calls).toBe(1);
+  });
+
+  it("returns permanent GitHub responses without consuming the retry budget", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response("missing", {
+        status: 404,
+        statusText: "Not Found"
+      });
 
     const result = await fetchGitHubWithRetry(
       "https://api.github.com/test",
@@ -62,10 +86,9 @@ describe("live GitHub test support", () => {
         sleep: noDelay
       }
     );
-
     expect(result.response.status).toBe(404);
     expect(result.attempts).toBe(1);
-    expect(calls).toBe(1);
+    expect(result.attempts).toBe(1);
   });
 
   it("retries rejected fetches before surfacing the final rejection", async () => {
