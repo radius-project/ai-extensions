@@ -340,4 +340,58 @@ describe("createNodeCloudFixturePorts", () => {
       expect(typeof outcome.stderr).toBe("string");
     }
   }, 30_000);
+
+  it("redacts Azure output through the real runAz port wiring", async () => {
+    const token = "fake-azure-token-for-port-test";
+    const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-az-"));
+    const originalPath = process.env.PATH;
+    const originalPathExt = process.env.PATHEXT;
+    const originalToken = process.env.AZURE_FEDERATED_TOKEN;
+
+    await fs.writeFile(
+      path.join(fakeBin, "az"),
+      [
+        "#!/bin/sh",
+        'printf "accessToken=%s\\n" "$AZURE_FEDERATED_TOKEN"',
+        'printf "failure: %s\\n" "$AZURE_FEDERATED_TOKEN" >&2',
+        "exit 7",
+        ""
+      ].join("\n")
+    );
+    await fs.chmod(path.join(fakeBin, "az"), 0o755);
+    await fs.writeFile(
+      path.join(fakeBin, "az.cmd"),
+      [
+        "@echo off",
+        "echo accessToken=%AZURE_FEDERATED_TOKEN%",
+        "echo failure: %AZURE_FEDERATED_TOKEN% 1>&2",
+        "exit /b 7",
+        ""
+      ].join("\r\n")
+    );
+
+    try {
+      process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
+      process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+      process.env.AZURE_FEDERATED_TOKEN = token;
+
+      const result = await createNodeCloudFixturePorts().commands.runAz([
+        "--version"
+      ]);
+
+      expect(result.code).toBe(7);
+      expect(result.stdout).toContain("accessToken=[REDACTED]");
+      expect(result.stdout).not.toContain(token);
+      expect(result.stderr).toContain("failure: [REDACTED]");
+      expect(result.stderr).not.toContain(token);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (originalPathExt === undefined) delete process.env.PATHEXT;
+      else process.env.PATHEXT = originalPathExt;
+      if (originalToken === undefined) delete process.env.AZURE_FEDERATED_TOKEN;
+      else process.env.AZURE_FEDERATED_TOKEN = originalToken;
+      await fs.rm(fakeBin, { recursive: true, force: true });
+    }
+  });
 });

@@ -70,7 +70,7 @@ The product is not implicated. Establish that, then decide whether to re-run or 
 
 A previous run did not clean up, so this one refused to start rather than asserting against someone else's leftovers. This is the failure the clean-slate probe exists to produce, and it is working correctly when you see it.
 
-The cleanup workflow reclaims this automatically, twice daily. It deletes tagged resource groups created by the suite immediately, and applies the six-hour age threshold to the less exact Entra and GitHub state. **Run it by hand rather than deleting things yourself** - it deletes exactly what the suite creates, using the same pinned constants, and nothing else:
+The cleanup workflow reclaims this automatically, twice daily. It deletes CI-owned resource groups created by terminal workflow runs immediately, and applies the six-hour age threshold to local resource groups plus the less exact Entra and GitHub state. **Run it by hand rather than deleting things yourself** - it deletes exactly what the suite creates, using the same pinned constants, and nothing else:
 
 ```bash
 gh workflow run cloud-e2e-cleanup.yml --repo radius-project/ai-extensions
@@ -95,12 +95,12 @@ gh api "repos/<fixture>/git/ref/heads/<default-branch>" --jq .object.sha
 
 Two boundaries worth knowing before you go looking for a gap:
 
-- **Resource groups are swept by our cleanup first and without an age delay.** The workflow deletes only groups with the fixture prefix and the `radius-canvas-e2e=true` tag, and both come from the suite. The shared Radius purge job still deletes `^radtest-` groups older than six hours in this subscription, but that is now only a safety net for cases where this workflow cannot run.
+- **CI-owned resource groups are swept by our cleanup first and without an age delay.** The workflow deletes only groups with the fixture prefix, `radius-canvas-e2e=true`, a `github-run-id` tag, and a completed owning workflow run. Local `pnpm test:cloud` groups do not have an Actions run id, so the shared Radius purge job still catches them through the `^radtest-` prefix after six hours.
 - **The Entra application is repository-scoped, not run-scoped.** The product derives its name from the repository alone, with no per-run uniqueness. That is why both workflows share one `concurrency` group with `cancel-in-progress: false`: two concurrent runs would contend for one Entra object, and a cancelled run strands cloud state that turns into tomorrow's leaked-state failure.
 
 ## When a run is cancelled
 
-Do not cancel a Cloud E2E run. Cancelling mid-flight strands a resource group, an AKS cluster, an Entra application, and GitHub state, converting one slow run into a failure on the next one. The workflow is configured never to cancel itself for this reason. If a run must be stopped, dispatch the cleanup workflow after cancellation completes; it deletes tagged test resource groups immediately, while younger Entra and GitHub state still waits for the six-hour threshold because cleanup cannot prove that those younger objects are abandoned.
+Do not cancel a Cloud E2E run. Cancelling mid-flight strands a resource group, an AKS cluster, an Entra application, and GitHub state, converting one slow run into a failure on the next one. The workflow is configured never to cancel itself for this reason. If a CI run must be stopped, dispatch the cleanup workflow after cancellation completes; it deletes that terminal run's tagged resource groups immediately, while younger Entra and GitHub state still waits for the six-hour threshold because cleanup cannot prove that those younger objects are abandoned.
 
 ## It has never run
 

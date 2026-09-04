@@ -87,6 +87,7 @@ export interface CloudFixtureOptions {
   readonly baselineSha?: string;
   /** Node count for the discovery-target cluster. One is enough. */
   readonly nodeCount?: number;
+  readonly githubRunId?: string;
   readonly assertionTimeoutMs?: number;
   readonly assertionPollIntervalMs?: number;
 }
@@ -123,6 +124,11 @@ export async function createCloudFixture(
   const defaultBranch = options.defaultBranch ?? FIXTURE_REPO_DEFAULT_BRANCH;
   const baselineSha = options.baselineSha ?? FIXTURE_BASELINE_SHA;
   const nodeCount = options.nodeCount ?? DEFAULT_NODE_COUNT;
+  const tags = [
+    `creationTime=${radiusPurgeCreationTime(ports.now())}`,
+    "radius-canvas-e2e=true",
+    ...(options.githubRunId ? [`github-run-id=${options.githubRunId}`] : [])
+  ];
   const assertionTimeoutMs = requirePositiveNumber(
     options.assertionTimeoutMs ?? DEFAULT_ASSERTION_TIMEOUT_MS,
     "Assertion timeout"
@@ -143,9 +149,9 @@ export async function createCloudFixture(
   let workspacePath = "";
 
   try {
-    // `creationTime` plus the fixture tag lets scheduled cleanup prove the group
-    // is ours and old enough. The `radtest-` prefix leaves Radius purge as the
-    // fallback safety net if this cleanup cannot run.
+    // The fixture tag proves the group is ours; github-run-id limits immediate
+    // scheduled cleanup to CI-created groups. The creationTime/radtest pair
+    // leaves Radius purge as the fallback safety net if this cleanup cannot run.
     expectSuccess(
       await commands.runAz([
         "group",
@@ -157,8 +163,7 @@ export async function createCloudFixture(
         "--subscription",
         subscriptionId,
         "--tags",
-        `creationTime=${radiusPurgeCreationTime(ports.now())}`,
-        "radius-canvas-e2e=true",
+        ...tags,
         "--output",
         "none"
       ]),
