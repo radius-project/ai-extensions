@@ -16,7 +16,7 @@
     "watch:dev": "pnpm --filter @radius-project/adapter-canvas run watch:dev",
     "typecheck": "tsc -p tsconfig.test.json && pnpm -r run --if-present typecheck",
     "test": "vitest run",
-    "test:integration:windows-process": "pnpm --filter @radius-project/adapter-canvas run test:integration:windows-process",
+    "test:integration:windows-process": "pnpm --filter @radius-project/adapter-shared --filter @radius-project/adapter-canvas run test:integration:windows-process",
     "test:integration:runtime": "pnpm --filter @radius-project/adapter-canvas run test:integration:runtime",
     "test:integration:http": "pnpm --filter @radius-project/adapter-canvas run test:integration:http",
     "test:integration:artifact": "pnpm --filter @radius-project/adapter-canvas run test:integration:artifact",
