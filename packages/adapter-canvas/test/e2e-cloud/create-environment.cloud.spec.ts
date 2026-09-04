@@ -7,11 +7,10 @@
 //
 // Two rules govern the file:
 //
-// 1. **It never runs unless it can prove something.** Without `RADIUS_CLOUD_E2E`,
-//    without a provisioned fixture repository, or without credentials, it skips
-//    with the specific reason. An ordinary `pnpm test` is therefore never broken
-//    by absent credentials, and a placeholder pin can never produce a green
-//    cloud result.
+// 1. **It never runs unless it can prove something.** Without `RADIUS_CLOUD_E2E`
+//    it skips by default. After explicit opt-in, missing fixture provisioning or
+//    credentials fail preflight so a broken cloud job cannot pass without
+//    executing assertions.
 // 2. **It contains no logic.** Every decision — the skip gate, the expected
 //    federated-credential subjects, which workflow publication path was taken,
 //    whether the GitHub Environment names the right identity — lives in
@@ -51,6 +50,7 @@ import {
   readRepositoryIdentity,
   readServicePrincipalObjectId,
   readWorkflowDirectory,
+  runCleanupSteps,
   selectFallbackBranches,
   selectFallbackPullRequests,
   workflowFallbackBranchPrefix
@@ -79,7 +79,8 @@ const gate = evaluateCreateEnvironmentGate({
   subscriptionId,
   githubToken
 });
-const skipReason = gate.enabled ? "" : gate.reason;
+const skipReason =
+  !gate.enabled && gate.disposition === "skip" ? gate.reason : "";
 
 const ports: CloudFixturePorts = createNodeCloudFixturePorts();
 
@@ -139,12 +140,13 @@ async function createCredentialProfile(
 
 test.describe("Radius Canvas creates an environment against real cloud", () => {
   test.describe.configure({ mode: "serial" });
-  test.skip(!gate.enabled, skipReason);
+  test.skip(!gate.enabled && gate.disposition === "skip", skipReason);
 
   let fixture: CloudFixture | undefined;
+  let productOperationStarted = false;
 
   test.beforeAll(async () => {
-    if (!gate.enabled) return;
+    if (!gate.enabled) throw new Error(gate.reason);
     fixture = await createCloudFixture({
       subscriptionId,
       ports
@@ -158,15 +160,20 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
     const current = fixture;
     fixture = undefined;
     if (!current) return;
-    try {
-      const reclaimed = await current.reclaimLeakedProductArtifacts();
-      if (reclaimed.length > 0)
-        console.info(
-          `Cleaned up this stage-one run's product-created artifacts: ${reclaimed.join(", ")}.`
-        );
-    } finally {
-      await current.dispose();
-    }
+    await runCleanupSteps([
+      {
+        label: "reclaim product-created artifacts",
+        run: async () => {
+          if (!productOperationStarted) return;
+          const reclaimed = await current.reclaimLeakedProductArtifacts();
+          if (reclaimed.length > 0)
+            console.info(
+              `Cleaned up this stage-one run's product-created artifacts: ${reclaimed.join(", ")}.`
+            );
+        }
+      },
+      { label: "dispose cloud fixture", run: () => current.dispose() }
+    ]);
   });
 
   test("creates the Azure identity, the GitHub Environment, and the workflows", async ({
@@ -193,6 +200,7 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
       initialPage: "credentials"
     });
 
+    let primaryError: unknown;
     try {
       await harness.seedState(
         cloudCanvasState({
@@ -247,6 +255,7 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
         })
       );
       expect(operationId).toMatch(/^op_/);
+      productOperationStarted = true;
 
       const snapshot = async (): Promise<
         ReturnType<typeof readOperationSnapshot>
@@ -384,8 +393,14 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
           defaultBranch: cloud.defaultBranch
         })
       ).toBe("committed");
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
-      await harness.cleanup();
+      await runCleanupSteps(
+        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
+        primaryError
+      );
     }
   });
 });
