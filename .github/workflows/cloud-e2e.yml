@@ -75,6 +75,7 @@ permissions: {}
 concurrency:
   group: cloud-e2e-shared-cloud-estate
   cancel-in-progress: false
+  queue: max
 
 jobs:
   cloud-e2e:

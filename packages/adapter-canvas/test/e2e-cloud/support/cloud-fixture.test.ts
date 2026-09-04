@@ -245,6 +245,13 @@ describe("createCloudFixture", () => {
       expect(Number.isInteger(Number(creationTime?.split("=")[1]))).toBe(true);
       expect(create.args).toContain(RESOURCE_GROUP);
       expect(RESOURCE_GROUP.startsWith("radtest-")).toBe(true);
+      expect(create.args).not.toContain("github-run-id=123456");
+    });
+
+    it("tags CI-created groups with the owning GitHub Actions run id", async () => {
+      const { fake } = await createHarness([], {}, { githubRunId: "123456" });
+
+      expect(fake.commands.calls[0].args).toContain("github-run-id=123456");
     });
 
     it("formats creation time for cleanup's integer comparison", () => {

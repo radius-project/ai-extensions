@@ -203,6 +203,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       location: resolveFixtureLocation(
         process.env.AIEXT_CLOUD_E2E_AZURE_LOCATION
       ),
+      githubRunId: process.env.GITHUB_RUN_ID,
       ports
     });
     // Turns every assertion below from an observation into a proof: none of the
