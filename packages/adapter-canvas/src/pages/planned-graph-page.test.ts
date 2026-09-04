@@ -48,7 +48,8 @@ describe("plannedGraphPage", () => {
       environment: "dev",
       provider: "azure",
       resources: [],
-      localSource: false
+      localSource: false,
+      followWorkspaceBranch: false
     });
   });
 
@@ -59,15 +60,39 @@ describe("plannedGraphPage", () => {
       plannedBranch: "worktree",
       plannedEnvironment: "dev",
       plannedResources: resources,
-      plannedFromWorkspace: true
+      plannedFromWorkspace: true,
+      contextRepo: "octo/app",
+      contextBranch: "worktree",
+      contextBranchSource: "workspace",
+      workspaceRepo: "octo/app"
     });
+
     expect(readBrowserPageState(html, "radius-planned-graph-state")).toEqual({
       repo: "octo/app",
       branch: "worktree",
       environment: "dev",
       provider: "azure",
       resources,
-      localSource: true
+      localSource: true,
+      followWorkspaceBranch: true
+    });
+  });
+
+  it("preserves an explicit selection even when its name matches the workspace branch", () => {
+    const html = plannedGraphPage({
+      plannedRepo: "octo/app",
+      plannedBranch: "worktree",
+      plannedFollowsWorkspaceBranch: false,
+      contextBranch: "worktree",
+      contextBranchSource: "workspace",
+      workspaceRepo: "octo/app"
+    });
+
+    expect(
+      readBrowserPageState(html, "radius-planned-graph-state")
+    ).toMatchObject({
+      branch: "worktree",
+      followWorkspaceBranch: false
     });
   });
 

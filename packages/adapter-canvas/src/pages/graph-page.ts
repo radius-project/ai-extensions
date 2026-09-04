@@ -14,6 +14,11 @@ export function graphPage(state: CanvasState = {}): string {
       state.graphFromWorkspace
     : isWorkspaceSelection(state, targetRepo, graphBranch);
   const loaded = resources.length > 0 || state.graphLoaded === true;
+  const followWorkspaceBranch =
+    state.graphFollowsWorkspaceBranch ??
+    (state.contextBranchSource === "workspace" &&
+      targetRepo === state.workspaceRepo &&
+      graphBranch === state.contextBranch);
 
   const controls =
     loaded ?
@@ -69,7 +74,8 @@ ${graphBody}
         branch: graphBranch,
         resources,
         loaded,
-        localSource
+        localSource,
+        followWorkspaceBranch
       })
     )}</div>
 ${browserScriptTag("graph-page")}

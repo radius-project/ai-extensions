@@ -27,6 +27,7 @@ import type { GraphProgressView } from "../shared.js";
 import type { AppSourceEvaluation } from "@radius-project/core";
 import type { MissingModelHandoffClaims } from "./missing-model-handoff-claims.js";
 import { GRAPH_APP_BICEP_IDLE_TIMEOUT_MS } from "../graph-progress-contract.js";
+import { appModelTargetKey } from "../app-model-authoring-failure.js";
 
 export interface AppModelHandoffRequest {
   repo: string;
@@ -308,11 +309,44 @@ export function createAppModelHandoff(
         return;
       }
 
+      const attemptToken =
+        state && state.canvasInstanceId && targets.length === 1 ?
+          `${state.canvasInstanceId}::attempt-${(state.appModelAttemptGeneration ?? 0) + 1}`
+        : undefined;
+      if (state && attemptToken) {
+        state.appModelAttemptGeneration =
+          (state.appModelAttemptGeneration ?? 0) + 1;
+        state.appModelAttemptTokens ??= {};
+        state.appModelAttemptTokens[appModelTargetKey(repo, targets[0])] =
+          attemptToken;
+      }
       try {
         await deps.send(
-          appBicepHandoffMessage(repo, page, targets, state?.canvasInstanceId)
+          appBicepHandoffMessage(
+            repo,
+            page,
+            targets,
+            state?.canvasInstanceId,
+            attemptToken && state?.canvasInstanceId ?
+              {
+                attemptToken,
+                instanceId: state.canvasInstanceId,
+                branch: targets[0]
+              }
+            : undefined
+          )
         );
       } catch (sendError) {
+        if (
+          state &&
+          attemptToken &&
+          state.appModelAttemptTokens?.[appModelTargetKey(repo, targets[0])] ===
+            attemptToken
+        ) {
+          delete state.appModelAttemptTokens[
+            appModelTargetKey(repo, targets[0])
+          ];
+        }
         releaseReservation();
         throw sendError;
       }

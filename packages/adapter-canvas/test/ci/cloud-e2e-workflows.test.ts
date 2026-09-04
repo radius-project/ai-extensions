@@ -379,6 +379,24 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(raw).toContain("FIXTURE_BASELINE_SHA");
   });
 
+  it("exports cleanup scope constants from the fixture pin", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const pin = steps(workflow.jobs?.purge).find(
+      (step) => step.name === "Resolve the pinned fixture repository"
+    );
+    const script = pin?.run ?? "";
+
+    expect(script).toContain(
+      "`resource-group-prefix=${pin.RESOURCE_GROUP_PREFIX}`"
+    );
+    expect(script).toContain(
+      "`environment-prefix=${pin.ENVIRONMENT_NAME_PREFIX}`"
+    );
+    expect(script).toContain(
+      "`workflow-fallback-branch-prefix=${pin.WORKFLOW_FALLBACK_BRANCH_PREFIX}`"
+    );
+  });
+
   it("matches environments by the prefix the suite actually applies", async () => {
     // Taken from the module, so a rename there cannot leave this sweeping a
     // prefix nothing uses - or, worse, one something else does.
@@ -461,6 +479,9 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain("$DEFAULT_BRANCH");
     expect(script).toContain("failures+=");
     expect(script).toContain("git/matching-refs/heads/$FALLBACK_BRANCH_PREFIX");
+    expect(purge?.env?.FALLBACK_BRANCH_PREFIX).toBe(
+      "${{ steps.pin.outputs.workflow-fallback-branch-prefix }}"
+    );
     expect(script.indexOf("-f state=closed")).toBeLessThan(
       script.indexOf("-X DELETE")
     );

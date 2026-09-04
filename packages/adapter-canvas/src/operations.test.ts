@@ -126,6 +126,7 @@ import {
   STAGE_DELETE_RADIUS_ENV,
   STAGE_DELETE_CREDENTIAL,
   STAGE_DELETE_GITHUB_ENV,
+  STAGE_DELETE_STATE_PACKAGE,
   STAGE_REVIEW_APP_REGISTRATION
 } from "./operations.js";
 
@@ -1486,11 +1487,15 @@ describe("delete stage inventory", () => {
       STAGE_DELETE_RADIUS_ENV,
       STAGE_DELETE_CREDENTIAL,
       STAGE_DELETE_GITHUB_ENV,
+      STAGE_DELETE_STATE_PACKAGE,
       STAGE_REVIEW_APP_REGISTRATION
     ]);
     expect(
       stages.every((s) => typeof s.label === "string" && s.label.length > 0)
     ).toBe(true);
+    expect(
+      stages.find((stage) => stage.id === STAGE_DELETE_STATE_PACKAGE)?.label
+    ).toBe("Delete GHCR state package");
     expect(stages.every((s) => s.state === "pending")).toBe(true);
   });
 
@@ -1498,7 +1503,8 @@ describe("delete stage inventory", () => {
     const stages = buildDeleteStages({ includeAzureCleanup: false });
     expect(stages.map((s) => s.id)).toEqual([
       STAGE_DELETE_RADIUS_ENV,
-      STAGE_DELETE_GITHUB_ENV
+      STAGE_DELETE_GITHUB_ENV,
+      STAGE_DELETE_STATE_PACKAGE
     ]);
   });
 });
@@ -3696,6 +3702,73 @@ describe("startup reconciliation", () => {
     reconcileRestoredOperation(restored);
     expect(restored.state).toBe("failed_partial");
   });
+
+  it("adds the state-package stage to an unfinished version 6 deletion", () => {
+    const op = newDeleteOp();
+    finish(op, "failed_partial", {
+      failure: { code: "github-environment-delete-failed" }
+    });
+    const persisted = toPersistedOperation(op);
+    persisted.schemaVersion = 6;
+    persisted.stages = persisted.stages.filter(
+      (candidate: { id: string }) => candidate.id !== STAGE_DELETE_STATE_PACKAGE
+    );
+
+    const restored = fromPersistedOperation(persisted);
+
+    expect(restored.schemaVersion).toBe(OPERATION_SCHEMA_VERSION);
+    expect(restored.requiresDurableRewrite).toBe(true);
+    expect(restored.stages.map((stage: { id: string }) => stage.id)).toEqual([
+      STAGE_DELETE_RADIUS_ENV,
+      STAGE_DELETE_CREDENTIAL,
+      STAGE_DELETE_GITHUB_ENV,
+      STAGE_DELETE_STATE_PACKAGE,
+      STAGE_REVIEW_APP_REGISTRATION
+    ]);
+    expect(
+      restored.stages.find(
+        (stage: { id: string }) => stage.id === STAGE_DELETE_STATE_PACKAGE
+      ).state
+    ).toBe("pending");
+  });
+
+  it("does not reopen a completed version 6 deletion", () => {
+    const op = newDeleteOp();
+    finishSucceeded(op);
+    const persisted = toPersistedOperation(op);
+    persisted.schemaVersion = 6;
+    persisted.stages = persisted.stages.filter(
+      (candidate: { id: string }) => candidate.id !== STAGE_DELETE_STATE_PACKAGE
+    );
+
+    const restored = fromPersistedOperation(persisted);
+
+    expect(
+      restored.stages.some(
+        (stage: { id: string }) => stage.id === STAGE_DELETE_STATE_PACKAGE
+      )
+    ).toBe(false);
+    expect(restored.requiresDurableRewrite).toBeUndefined();
+  });
+
+  it("adds the state-package stage to a retryable version 6 deletion with warnings", () => {
+    const op = newDeleteOp();
+    finish(op, "succeeded_with_warnings");
+    const persisted = toPersistedOperation(op);
+    persisted.schemaVersion = 6;
+    persisted.stages = persisted.stages.filter(
+      (candidate: { id: string }) => candidate.id !== STAGE_DELETE_STATE_PACKAGE
+    );
+
+    const restored = fromPersistedOperation(persisted);
+
+    expect(
+      restored.stages.find(
+        (stage: { id: string }) => stage.id === STAGE_DELETE_STATE_PACKAGE
+      )
+    ).toMatchObject({ state: "pending" });
+    expect(restored.requiresDurableRewrite).toBe(true);
+  });
 });
 
 describe("keepalive predicate", () => {
@@ -5434,7 +5507,8 @@ describe("action projection", () => {
     op.stages[0].state = "succeeded";
     op.stages[1].state = "failed";
     op.stages[2].state = "skipped";
-    op.stages[3].state = "succeeded";
+    op.stages[3].state = "failed";
+    op.stages[4].state = "succeeded";
     addStep(op, {
       stage: op.stages[0].id,
       kind: "mutation",
@@ -5460,6 +5534,7 @@ describe("action projection", () => {
 
     expect(op.stages.map((stage) => stage.state)).toEqual([
       "succeeded",
+      "pending",
       "pending",
       "pending",
       "succeeded"

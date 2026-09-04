@@ -501,8 +501,6 @@ test.describe("Radius Canvas in Chromium", () => {
     await gotoCanvas(page, canvas, "graph");
 
     await expect(page.getByLabel("Branch")).toHaveValue(WORKTREE_BRANCH);
-    await page.getByRole("button", { name: "Plan Deployment" }).focus();
-    await page.getByLabel("Branch").selectOption(WORKTREE_BRANCH);
     await expect
       .poll(() =>
         canvas.requests.some(
@@ -514,6 +512,7 @@ test.describe("Radius Canvas in Chromium", () => {
     expect(bodyFor(canvas, "/api/load-graph")).toEqual({
       repo: REPOSITORY,
       branch: WORKTREE_BRANCH,
+      followWorkspaceBranch: true,
       restartWait: true
     });
     await expect
@@ -900,6 +899,112 @@ test.describe("Radius Canvas in Chromium", () => {
       page.locator("#graph-status, #graph-refresh-status")
     ).toContainText("Application graph ready");
     releaseFirst?.();
+  });
+
+  test("loads the graph from a renamed real worktree branch", async ({
+    page,
+    canvas
+  }) => {
+    const renamedBranch = "renamed-worktree";
+    canvas.renameWorkspaceBranch(renamedBranch);
+    expect(canvas.currentWorkspaceBranch()).toBe(renamedBranch);
+
+    const response = await fetch(`${canvas.baseUrl}/api/load-graph`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repo: REPOSITORY,
+        branch: WORKTREE_BRANCH,
+        followWorkspaceBranch: true,
+        restartWait: true
+      })
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      resolvedBranch: renamedBranch,
+      fromWorkspace: true
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+
+    await expect(page.getByLabel("Branch")).toHaveValue(renamedBranch);
+    await expect(
+      page.locator("#graph-status, #graph-refresh-status")
+    ).toContainText("Application graph ready");
+  });
+
+  test("refreshes an open graph after the workspace model is regenerated", async ({
+    page,
+    canvas
+  }) => {
+    let graphRequests = 0;
+    await page.route("**/api/load-graph", async (route) => {
+      graphRequests++;
+      if (graphRequests === 1) {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [
+            {
+              id: "app/regenerated",
+              name: "regenerated",
+              type: "Radius.Compute/containers",
+              connections: [],
+              outputResources: []
+            }
+          ],
+          fromWorkspace: true
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+    await expect(
+      page.locator("#graph-status, #graph-refresh-status")
+    ).toContainText("Application graph ready", { timeout: 15_000 });
+
+    await fs.appendFile(
+      path.join(canvas.workspacePath, ".radius", "app.bicep"),
+      "\n// regenerated model\n",
+      "utf8"
+    );
+    await expect
+      .poll(async () => {
+        await page.evaluate("window.dispatchEvent(new Event('focus'))");
+        return graphRequests;
+      })
+      .toBe(2);
+    await expect(page.locator(".rad-node")).toHaveCount(1);
+    await expect(page.locator(".rad-node")).toContainText("regenerated");
+  });
+
+  test("reloads the graph when the server canonicalizes its branch", async ({
+    page,
+    canvas
+  }) => {
+    let requests = 0;
+    await page.route("**/api/load-graph", async (route) => {
+      requests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [],
+          ...(requests === 1 ? { resolvedBranch: "renamed-worktree" } : {})
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+
+    await expect.poll(() => requests).toBeGreaterThanOrEqual(2);
+    await expect(
+      page.locator("#graph-status, #graph-refresh-status")
+    ).toContainText("Application graph ready");
   });
 
   test("keeps the modeling status stable while the graph automatically polls", async ({
@@ -1508,7 +1613,122 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(namespace).not.toContainText("default");
     await expect(namespace).not.toContainText("selected-team");
     await namespace.selectOption("__custom__");
-    await expect(page.locator("#azure-namespace-custom")).toBeVisible();
+    const customNamespace = page.locator("#azure-namespace-custom");
+    await expect(customNamespace).toBeVisible();
+
+    let operationPosts = 0;
+    await page.route("**/api/operations", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      operationPosts += 1;
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ operationId: "unexpected" })
+      });
+    });
+    await page.locator("#env-name-input").fill("production");
+    await customNamespace.fill("Todo-app-3");
+
+    const namespaceError = page.locator("#azure-namespace-error");
+    await expect(namespaceError).toHaveText(
+      "Kubernetes namespace must be 1-63 lowercase letters, numbers, or hyphens and must start and end with a letter or number."
+    );
+    await expect(namespaceError).toBeVisible();
+    await expect(customNamespace).toHaveAttribute("aria-invalid", "true");
+    await expect(customNamespace).toBeFocused();
+    expect(operationPosts).toBe(0);
+    await expectNoWcagViolations(page);
+
+    await customNamespace.fill("todo-app-3");
+    await expect(namespaceError).toBeHidden();
+    await expect(customNamespace).not.toHaveAttribute("aria-invalid", "true");
+  });
+
+  test("turns Azure MFA discovery failure into a tenant-scoped login callout", async ({
+    page,
+    canvas
+  }) => {
+    const remediationRequests: unknown[] = [];
+    await page.route("**/api/run-remediation", async (route) => {
+      remediationRequests.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ success: true })
+      });
+    });
+    const scenario = defaultFakeCliScenario();
+    const resourceCommands = azureDiscoveryCommands({
+      subscriptionId: PROFILE_SUBSCRIPTION_ID,
+      clusters: [],
+      resourceGroups: []
+    });
+    const clusterList = resourceCommands.find(
+      (command) =>
+        command.tool === "az" &&
+        command.args?.[0] === "aks" &&
+        command.args[1] === "list"
+    );
+    if (!clusterList) {
+      throw new Error("discovery stubs no longer include the AKS list step");
+    }
+    clusterList.exitCode = 1;
+    clusterList.stdout = "";
+    clusterList.stderr =
+      "invalid_grant AADSTS50076 trace-id=not-useful Status_InteractionRequired";
+    scenario.commands.push(...resourceCommands);
+    await canvas.setScenario(scenario);
+    await gotoCanvas(page, canvas, "environment");
+
+    await openEnvironmentWizard(page);
+
+    await expect(page.locator("#azure-discover-status")).toHaveText(
+      "Discovery failed: Azure CLI sign-in is required to discover resources. (AADSTS50076)"
+    );
+    const remediation = page.locator("#azure-discover-remediation");
+    await expect(remediation).toContainText("Sign in to Azure CLI");
+    await expect(remediation).toContainText(
+      `az login --use-device-code --tenant ${VALID_TENANT_ID}`
+    );
+    const runButton = remediation.getByRole("button", {
+      name: COMMAND_RUN_LABEL
+    });
+    await expect(runButton).toBeVisible();
+    await expect(page.locator("body")).not.toContainText("trace-id=not-useful");
+    await expectNoWcagViolations(page);
+
+    await runButton.focus();
+    await expect(runButton).toBeFocused();
+    await runButton.press("Enter");
+    await expect
+      .poll(() => remediationRequests)
+      .toEqual([
+        {
+          id: "azure-cli-login",
+          params: {
+            tenantId: VALID_TENANT_ID,
+            nextStep: "refresh-discovery"
+          },
+          confirmed: false
+        }
+      ]);
+    await expect(remediation.getByRole("status")).toContainText(
+      "Copilot was asked to run this command"
+    );
+
+    clusterList.exitCode = 0;
+    clusterList.stderr = "";
+    clusterList.stdout = "[]";
+    await canvas.setScenario(scenario);
+    await page.getByRole("button", { name: "Refresh" }).click();
+
+    await expect(page.locator("#azure-discover-status")).toHaveText(
+      "Found 0 cluster(s), 0 resource group(s)"
+    );
+    await expect(remediation).toBeEmpty();
   });
 
   test("verifies Azure credentials through the fake az boundary and keeps secret-shaped stderr out of the page @safety", async ({
@@ -1596,6 +1816,11 @@ test.describe("Radius Canvas in Chromium", () => {
   }) => {
     await gotoCanvas(page, canvas, "credentials");
     await page.getByRole("button", { name: "New Credential Profile" }).click();
+    const awsOption = page
+      .getByLabel("Provider")
+      .locator('option[value="aws"]');
+    await expect(awsOption).toBeDisabled();
+    await expect(awsOption).toHaveText("AWS (coming soon)");
     await page.getByRole("button", { name: "Verify Credentials" }).click();
 
     await expect(page.locator("#cred-verify-status")).toContainText(
@@ -1609,6 +1834,53 @@ test.describe("Radius Canvas in Chromium", () => {
           request.path === "/api/verify-azure-login"
       )
     ).toBe(false);
+  });
+
+  test("keeps unsupported credential profiles out of environment creation @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.route("**/api/credential-profiles**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          profiles: [
+            {
+              name: "fixture-aws",
+              provider: "aws",
+              status: "verified"
+            },
+            {
+              name: "fixture-future",
+              provider: "future-cloud",
+              status: "verified"
+            }
+          ]
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "credentials");
+    for (const name of ["fixture-aws", "fixture-future"]) {
+      const row = page.getByRole("row").filter({ hasText: name });
+      await expect(row).toBeVisible();
+      await expect(
+        row.getByRole("button", { name: "Create Env" })
+      ).toBeDisabled();
+      await expect(row.locator(".js-cred-createenv")).toHaveCount(0);
+    }
+
+    await gotoCanvas(page, canvas, "environment");
+    await page.getByRole("button", { name: "New Environment" }).click();
+    const profileButton = page.locator("#env-profile-button");
+    await profileButton.click();
+    await expect(profileButton).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator("#env-profile-options")).toBeEmpty();
+    await expect(page.locator("#env-profile-empty")).toHaveText(
+      "No supported credential profiles yet."
+    );
+    await expect(page.locator("#env-step1-next")).toBeDisabled();
   });
 
   test("keeps server-owned setup durable across navigation and downloads redacted diagnostics by keyboard @safety", async ({

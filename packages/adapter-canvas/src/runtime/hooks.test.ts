@@ -143,6 +143,27 @@ describe("appBicepHandoffPrompt", () => {
     expect(msg).not.toContain("refreshes its server and client connections");
   });
 
+  it("fences a permanent-failure report to the requesting Canvas attempt", () => {
+    const msg = appBicepHandoffPrompt(
+      "acme/widgets",
+      "graph",
+      ["feat"],
+      "app-graph",
+      {
+        attemptToken: "attempt-7",
+        instanceId: "app-graph",
+        branch: "feat"
+      }
+    );
+
+    expect(msg).toContain("radius_report_modeling_failure");
+    expect(msg).toContain("instanceId `app-graph`");
+    expect(msg).toContain("repo `acme/widgets`");
+    expect(msg).toContain("branch `feat`");
+    expect(msg).toContain("attemptToken `attempt-7`");
+    expect(msg).toContain("Do not report transient failures");
+  });
+
   it("names multiple branches when given several", () => {
     const msg = appBicepHandoffPrompt("acme/widgets", "graph-diff", [
       "main",

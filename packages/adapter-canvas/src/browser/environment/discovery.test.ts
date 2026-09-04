@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { COMMAND_COPY_LABEL, COMMAND_RUN_LABEL } from "../command-action.js";
 import {
   APP_SERVES_REPOS_ENDPOINT,
   COMBO_PAIRS,
@@ -53,6 +54,7 @@ interface DiscoveryPage {
   selects: Record<string, ReturnType<typeof createFakeSelect>>;
   customs: Record<string, ReturnType<typeof createFakeInput>>;
   azureStatus: ReturnType<typeof createFakeElement>;
+  azureRemediation: ReturnType<typeof createFakeElement>;
   awsStatus: ReturnType<typeof createFakeElement>;
   selectedAppId: ReturnType<typeof createFakeInput>;
   selectedAppNote: ReturnType<typeof createFakeElement>;
@@ -92,6 +94,7 @@ function renderDiscoveryPage(omit: readonly string[] = []): DiscoveryPage {
     if (!omit.includes(customId)) browser.document.add(custom);
   }
   const azureStatus = createFakeElement("azure-discover-status");
+  const azureRemediation = createFakeElement("azure-discover-remediation");
   const awsStatus = createFakeElement("aws-discover-status");
   const selectedAppId = createFakeInput("az-selected-app-id");
   const selectedAppNote = createFakeElement("az-selected-app-note");
@@ -113,6 +116,7 @@ function renderDiscoveryPage(omit: readonly string[] = []): DiscoveryPage {
   const appselectCancel = createFakeInput("env-appselect-cancel");
   for (const element of [
     azureStatus,
+    azureRemediation,
     awsStatus,
     selectedAppId,
     selectedAppNote,
@@ -140,6 +144,7 @@ function renderDiscoveryPage(omit: readonly string[] = []): DiscoveryPage {
     selects,
     customs,
     azureStatus,
+    azureRemediation,
     awsStatus,
     selectedAppId,
     selectedAppNote,
@@ -1104,6 +1109,192 @@ describe("discoverResources", () => {
       )
     ).toEqual(["", "__custom__"]);
     expect(page.selects["azure-namespace-select"].value).toBe("");
+  });
+
+  it("renders the trusted Azure login remediation and hands it off with the page nonce", async () => {
+    const page = renderDiscoveryPage();
+    const tenantId = "11111111-2222-3333-4444-555555555555";
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(
+        azurePayload({
+          clusters: [],
+          resourceGroups: [],
+          errors: {
+            clusters: "Azure CLI sign-in is required to discover resources."
+          },
+          remediation: {
+            id: "azure-cli-login",
+            params: { tenantId, nextStep: "refresh-discovery" },
+            command: "ignored server-authored command text"
+          }
+        })
+      )
+    );
+    page.browser.net.handle("/api/run-remediation", (init) => {
+      expect(init?.headers).toEqual({
+        "Content-Type": "application/json",
+        "X-Radius-Mutation-Nonce": "nonce-647"
+      });
+      expect(JSON.parse(init?.body ?? "{}")).toEqual({
+        id: "azure-cli-login",
+        params: { tenantId, nextStep: "refresh-discovery" },
+        confirmed: false
+      });
+      return jsonResponse({ success: true, message: "Handed off." });
+    });
+    const handle = initializeDiscoveryPanel(page.browser.context, {
+      mutationNonce: "nonce-647"
+    });
+
+    await handle?.discoverResources("azure", "", tenantId);
+
+    expect(page.azureStatus.textContent).toBe(
+      "Discovery failed: Azure CLI sign-in is required to discover resources."
+    );
+    expect(page.azureRemediation.hidden).toBe(false);
+    expect(fakeText(page.azureRemediation)).toContain("Sign in to Azure CLI");
+    expect(fakeText(page.azureRemediation)).toContain(
+      `az login --use-device-code --tenant ${tenantId}`
+    );
+    expect(fakeText(page.azureRemediation)).not.toContain(
+      "ignored server-authored command text"
+    );
+    const runButton = fakeTree(page.azureRemediation).find(
+      (element) => element.textContent === COMMAND_RUN_LABEL
+    );
+    expect(runButton).toBeDefined();
+    runButton?.dispatch("click");
+    await flushPromises();
+
+    expect(page.browser.net.calls.at(-1)?.url).toBe("/api/run-remediation");
+    expect(fakeText(page.azureRemediation)).toContain(
+      "refresh resource discovery"
+    );
+  });
+
+  it("renders an unsupported discovery remediation disabled with its reason", async () => {
+    const page = renderDiscoveryPage();
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(
+        azurePayload({
+          errors: {
+            clusters: "Azure CLI sign-in is required to discover resources."
+          },
+          remediation: {
+            id: "untrusted-command",
+            params: {},
+            command: "ignored server-authored command text"
+          }
+        })
+      )
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context, {
+      mutationNonce: "nonce-647"
+    });
+
+    await handle?.discoverResources("azure", "", "");
+
+    expect(page.azureRemediation.hidden).toBe(false);
+    expect(fakeText(page.azureRemediation)).toContain(
+      "Radius does not offer to run this command."
+    );
+    expect(fakeText(page.azureRemediation)).not.toContain(
+      "ignored server-authored command text"
+    );
+    const runButton = fakeTree(page.azureRemediation).find(
+      (element) => element.textContent === COMMAND_RUN_LABEL
+    );
+    if (!runButton)
+      throw new Error("unsupported remediation did not render Run");
+    expect(Reflect.get(runButton, "disabled")).toBe(true);
+    runButton.dispatch("click");
+    await flushPromises();
+    expect(page.browser.net.calls).toHaveLength(1);
+  });
+
+  it("keeps Copy available but disables Run when the page nonce is missing", async () => {
+    const page = renderDiscoveryPage();
+    const tenantId = "11111111-2222-3333-4444-555555555555";
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(
+        azurePayload({
+          errors: {
+            clusters: "Azure CLI sign-in is required to discover resources."
+          },
+          remediation: {
+            id: "azure-cli-login",
+            params: { tenantId, nextStep: "refresh-discovery" }
+          }
+        })
+      )
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context);
+
+    await handle?.discoverResources("azure", "", tenantId);
+
+    expect(page.azureRemediation.hidden).toBe(false);
+    expect(fakeText(page.azureRemediation)).toContain(
+      "Reload the Radius canvas before asking Copilot to run this command."
+    );
+    const runButton = fakeTree(page.azureRemediation).find(
+      (element) => element.textContent === COMMAND_RUN_LABEL
+    );
+    const copyButton = fakeTree(page.azureRemediation).find(
+      (element) => element.textContent === COMMAND_COPY_LABEL
+    );
+    if (!runButton || !copyButton)
+      throw new Error("missing-nonce remediation did not render both actions");
+    expect(Reflect.get(runButton, "disabled")).toBe(true);
+    expect(Reflect.get(copyButton, "disabled")).toBe(false);
+
+    runButton.dispatch("click");
+    copyButton.dispatch("click");
+    await flushPromises();
+
+    expect(page.browser.net.calls).toHaveLength(1);
+    expect(page.browser.clipboard.writes).toEqual([
+      `az login --use-device-code --tenant ${tenantId}`
+    ]);
+  });
+
+  it("clears discovery remediation on refresh success and teardown", async () => {
+    const page = renderDiscoveryPage();
+    let interactionRequired = true;
+    page.browser.net.handle(DISCOVER_ENDPOINT, () =>
+      discoverResponse(
+        interactionRequired ?
+          azurePayload({
+            errors: {
+              resourceGroups:
+                "Azure CLI sign-in is required to discover resources."
+            },
+            remediation: {
+              id: "azure-cli-login",
+              params: { nextStep: "refresh-discovery" }
+            }
+          })
+        : azurePayload()
+      )
+    );
+    const handle = initializeDiscoveryPanel(page.browser.context, {
+      mutationNonce: "nonce-647"
+    });
+
+    await handle?.discoverResources("azure", "", "");
+    expect(page.azureRemediation.children.length).toBeGreaterThan(0);
+    expect(page.azureRemediation.hidden).toBe(false);
+
+    interactionRequired = false;
+    await handle?.discoverResources("azure", "", "");
+    expect(page.azureRemediation.children).toEqual([]);
+    expect(page.azureRemediation.hidden).toBe(true);
+
+    interactionRequired = true;
+    await handle?.discoverResources("azure", "", "");
+    expect(page.azureRemediation.children.length).toBeGreaterThan(0);
+    handle?.teardown();
+    expect(page.azureRemediation.children).toEqual([]);
+    expect(page.azureRemediation.hidden).toBe(true);
   });
 
   it("selects a sole cluster and a discovered default namespace", async () => {

@@ -4,6 +4,7 @@ import {
   copyFileSync,
   mkdirSync,
   mkdtempSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync
@@ -27,6 +28,8 @@ const SOURCE = "f".repeat(40);
 const PACKAGE_BLOB = "1".repeat(40);
 const MARKETPLACE_BLOB = "2".repeat(40);
 const EXTENSION_BLOB = "3".repeat(40);
+const MANIFEST_BLOB = "4".repeat(40);
+const README_BLOB = "5".repeat(40);
 // File modes and symlinks are not reproducible on Windows.
 const WINDOWS = process.platform === "win32";
 
@@ -144,8 +147,7 @@ async function api({
 
 async function completionApi({
   artifactBranch = "releases/radius/v1.2.0",
-  artifactTarget = COMMIT,
-  sourceTarget = SOURCE,
+  releaseTagTarget = COMMIT,
   commitVerified = true,
   parents = [],
   commitSource = SOURCE,
@@ -155,17 +157,15 @@ async function completionApi({
   packageVersion = "1.2.0",
   catalogVersion = "1.2.0",
   catalogRef,
-  catalogPath = "plugins/radius/dist",
+  catalogPath = "plugins/radius",
   includeRootExtension = true,
   includeBundledExtension = true,
+  includePinnedMetadata = true,
+  extraTreePaths = [],
   rootExtensionBlob = EXTENSION_BLOB,
   bundledExtensionBlob = rootExtensionBlob,
   releaseDraft = false,
-  releaseAssets = [
-    "radius-plugin.tar.gz",
-    "radius-plugin.spdx.json",
-    "radius-awesome-copilot.zip"
-  ]
+  releaseAssets = ["radius-plugin.tar.gz", "radius-plugin.spdx.json"]
 } = {}) {
   const calls = [];
   const publishedVersion = commitVersion ?? packageVersion;
@@ -174,6 +174,24 @@ async function completionApi({
     encoding: "base64",
     content: Buffer.from(`${JSON.stringify(value)}\n`).toString("base64")
   });
+  const installFiles = [
+    ["package.json", PACKAGE_BLOB],
+    ["com.github.copilot/extensions/radius/extension.mjs", EXTENSION_BLOB],
+    ["assets/preview.png", "4".repeat(40)],
+    ["skills/radius-app-bicep/SKILL.md", "5".repeat(40)],
+    ["plugin.json", MANIFEST_BLOB],
+    ["README.md", README_BLOB],
+    ...(includeBundledExtension ?
+      [["workflows/actions/example/action.yml", bundledExtensionBlob]]
+    : [])
+  ];
+  const treeFiles = (root, files) =>
+    files.map(([relativePath, sha]) => ({
+      path: `${root}/${relativePath}`,
+      mode: "100644",
+      type: "blob",
+      sha
+    }));
   const server = createServer((request, response) => {
     request.resume();
     request.on("end", () => {
@@ -192,13 +210,9 @@ async function completionApi({
           type: "commit",
           sha: COMMIT
         },
-        "/git/ref/tags/radius/v1.2.0": {
-          type: "commit",
-          sha: artifactTarget
-        },
         "/git/ref/tags/radius@1.2.0": {
           type: "commit",
-          sha: sourceTarget
+          sha: releaseTagTarget
         }
       };
       if (request.method === "GET" && refs[path]) {
@@ -207,15 +221,9 @@ async function completionApi({
           object: refs[path]
         });
       }
-      if (route === `GET /git/tags/${TAG}`) {
-        return send(200, {
-          object: { type: "commit", sha: artifactTarget },
-          verification: { verified: true, reason: "valid" }
-        });
-      }
       if (route === `GET /git/tags/${SOURCE_TAG}`) {
         return send(200, {
-          object: { type: "commit", sha: sourceTarget },
+          object: { type: "commit", sha: releaseTagTarget },
           verification: { verified: true, reason: "valid" }
         });
       }
@@ -246,18 +254,9 @@ async function completionApi({
               type: "blob",
               sha: MARKETPLACE_BLOB
             },
-            {
-              path: "plugins/radius/dist/package.json",
-              mode: "100644",
-              type: "blob",
-              sha: PACKAGE_BLOB
-            },
-            {
-              path: "plugins/radius/dist/extension.mjs",
-              mode: "100644",
-              type: "blob",
-              sha: "3".repeat(40)
-            },
+            ...(includePinnedMetadata ?
+              treeFiles("plugins/radius", installFiles)
+            : []),
             ...(includeRootExtension ?
               [
                 {
@@ -268,16 +267,12 @@ async function completionApi({
                 }
               ]
             : []),
-            ...(includeBundledExtension ?
-              [
-                {
-                  path: "plugins/radius/dist/workflows/actions/example/action.yml",
-                  mode: "100644",
-                  type: "blob",
-                  sha: bundledExtensionBlob
-                }
-              ]
-            : [])
+            ...extraTreePaths.map((path) => ({
+              path,
+              mode: "100644",
+              type: "blob",
+              sha: EXTENSION_BLOB
+            }))
           ]
         });
       }
@@ -332,8 +327,9 @@ function repository() {
   writeFileSync(join(root, "dist", "skills", "SKILL.md"), "# Skill\n");
   writeFileSync(join(root, "catalog.json"), '{"plugins":[]}\n');
   mkdirSync(join(root, "plugins", "radius"), { recursive: true });
+  mkdirSync(join(root, "extensions", "radius"), { recursive: true });
   writeFileSync(
-    join(root, "plugins", "radius", "package.json"),
+    join(root, "extensions", "radius", "package.json"),
     '{"name":"radius","version":"1.2.0","scripts":{"test:artifact":"echo tested"}}\n'
   );
   writeFileSync(
@@ -489,6 +485,83 @@ describe("scripts/verified-git.mjs", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("is not a root commit");
+  });
+
+  // The assembled plugin cannot be built at the path it ships from, because
+  // that path holds the tracked source it is built out of.
+  it("publishes the assembled tree under the plugin root", async () => {
+    const root = repository();
+    const { url, calls } = await api();
+    const canvasDirectory = join(
+      root,
+      "dist",
+      "com.github.copilot",
+      "extensions",
+      "radius"
+    );
+    mkdirSync(canvasDirectory, { recursive: true });
+    renameSync(
+      join(root, "dist", "extension.mjs"),
+      join(canvasDirectory, "extension.mjs")
+    );
+
+    const result = await run(
+      root,
+      url,
+      commitArgs(["dist=plugins/radius", "catalog.json"])
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(
+      calls
+        .find((call) => call.route === "POST /git/trees")
+        .body.tree.map((entry) => entry.path)
+    ).toEqual([
+      "catalog.json",
+      "plugins/radius/com.github.copilot/extensions/radius/extension.mjs",
+      "plugins/radius/skills/SKILL.md"
+    ]);
+  });
+
+  it("renames a single file as readily as a tree", async () => {
+    const root = repository();
+    const { url, calls } = await api();
+
+    const result = await run(
+      root,
+      url,
+      commitArgs(["catalog.json=.github/plugin/marketplace.json"])
+    );
+
+    expect(result.status).toBe(0);
+    expect(
+      calls
+        .find((call) => call.route === "POST /git/trees")
+        .body.tree.map((entry) => entry.path)
+    ).toEqual([".github/plugin/marketplace.json"]);
+  });
+
+  it.each([
+    ["dist=/etc/passwd", "an absolute destination"],
+    ["dist=.", "a dot destination"],
+    ["dist=./extensions", "a leading dot segment"],
+    ["dist=extensions/./radius", "an embedded dot segment"],
+    ["dist=../escape", "a parent traversal"],
+    ["dist=nested/../../escape", "an embedded parent traversal"],
+    ["dist=", "an empty destination"],
+    ["dist=trailing/", "a trailing separator"],
+    ["dist=double//slash", "an empty path segment"],
+    ["dist=with space", "whitespace"]
+  ])("rejects %s as a published path", async (path, _reason) => {
+    const root = repository();
+    const { url, calls } = await api();
+
+    const result = await run(root, url, commitArgs([path]));
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("publishes to an invalid path");
+    expect(calls.map((call) => call.route)).not.toContain("POST /git/trees");
   });
 
   it.skipIf(WINDOWS)("refuses to publish a symlink", async () => {
@@ -892,7 +965,7 @@ describe("scripts/verified-git.mjs", () => {
       SOURCE
     ];
 
-    it("accepts a complete release whose marker targets its pinned artifact", async () => {
+    it("accepts a complete release whose only tag targets its pinned artifact", async () => {
       const root = repository();
       const { url } = await completionApi();
 
@@ -910,10 +983,22 @@ describe("scripts/verified-git.mjs", () => {
       });
     });
 
-    it("rejects a verified completion tag targeting the wrong commit", async () => {
+    // The prepare gate knows only the plugin and version, so it reads the
+    // source back out of the artifact instead of pinning one.
+    it("accepts a complete release without a pinned source", async () => {
+      const root = repository();
+      const { url } = await completionApi();
+
+      const result = await run(root, url, args.slice(0, -2));
+
+      expect(result.status).toBe(0);
+      expect(JSON.parse(result.stdout).source).toBe(SOURCE);
+    });
+
+    it("rejects a release tag targeting a commit other than its artifact", async () => {
       const root = repository();
       const wrong = "9".repeat(40);
-      const { url } = await completionApi({ artifactTarget: wrong });
+      const { url } = await completionApi({ releaseTagTarget: wrong });
 
       const result = await run(root, url, args);
 
@@ -947,18 +1032,23 @@ describe("scripts/verified-git.mjs", () => {
         "does not bundle an exact copy"
       ],
       [
-        "a source tag on the wrong commit",
-        { sourceTarget: TARGET },
-        `points at ${TARGET}, not ${SOURCE}`
+        "no plugin copy beside the install unit",
+        { includePinnedMetadata: false },
+        "does not publish a valid plugin"
+      ],
+      [
+        "a sibling plugin's metadata",
+        { extraTreePaths: ["plugins/other/plugin.json"] },
+        "unexpected path: plugins/other/plugin.json"
       ],
       [
         "the wrong catalog ref",
-        { catalogRef: "radius@latest" },
+        { catalogRef: "releases/radius/latest" },
         "does not publish"
       ],
       [
         "the wrong catalog path",
-        { catalogPath: "plugins/other/dist" },
+        { catalogPath: "extensions/other" },
         "does not publish"
       ],
       ["a draft release", { releaseDraft: true }, "published GitHub release"],
@@ -969,7 +1059,6 @@ describe("scripts/verified-git.mjs", () => {
           releaseAssets: [
             "radius-plugin.tar.gz",
             "radius-plugin.spdx.json",
-            "radius-awesome-copilot.zip",
             "unexpected.txt"
           ]
         },
@@ -1010,72 +1099,24 @@ describe("scripts/verified-git.mjs", () => {
       });
     });
 
-    it("inspects a verified latest artifact before exposing its version", async () => {
+    it("accepts a complete artifact published only under the plugin root", async () => {
       const root = repository();
-      const branch = "releases/radius/latest";
-      const { url } = await completionApi({
-        artifactBranch: branch,
-        packageVersion: "2.0.0",
-        catalogVersion: "2.0.0"
-      });
+      const { url } = await completionApi();
 
       const result = await run(root, url, [
-        "inspect-artifact",
+        "verify-artifact",
         "--branch",
-        branch,
+        "releases/radius/v1.2.0",
         "--plugin",
-        "radius"
+        "radius",
+        "--version",
+        "1.2.0",
+        "--source",
+        SOURCE
       ]);
 
       expect(result.status).toBe(0);
-      expect(JSON.parse(result.stdout)).toEqual({
-        commit: COMMIT,
-        tree: TREE,
-        version: "2.0.0",
-        source: SOURCE
-      });
-    });
-
-    it("inspects a complete legacy latest artifact for forward migration", async () => {
-      const root = repository();
-      const branch = "releases/radius/latest";
-      const { url } = await completionApi({
-        artifactBranch: branch,
-        includePackageSource: false,
-        includeRootExtension: false,
-        includeBundledExtension: false
-      });
-
-      const result = await run(root, url, [
-        "inspect-artifact",
-        "--branch",
-        branch,
-        "--plugin",
-        "radius"
-      ]);
-
-      expect(result.status).toBe(0);
-      expect(JSON.parse(result.stdout).source).toBe(SOURCE);
-    });
-
-    it("rejects a partially migrated latest artifact", async () => {
-      const root = repository();
-      const branch = "releases/radius/latest";
-      const { url } = await completionApi({
-        artifactBranch: branch,
-        includeBundledExtension: false
-      });
-
-      const result = await run(root, url, [
-        "inspect-artifact",
-        "--branch",
-        branch,
-        "--plugin",
-        "radius"
-      ]);
-
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain("does not bundle an exact copy");
+      expect(result.stderr).toBe("");
     });
   });
 });

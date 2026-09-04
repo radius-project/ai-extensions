@@ -39,7 +39,11 @@ export const REQUIRED_DEFAULT_BRANCH_WORKFLOWS: readonly string[] = [
 
 export type JourneyGate =
   | { readonly enabled: true }
-  | { readonly enabled: false; readonly reason: string };
+  | {
+      readonly enabled: false;
+      readonly disposition: "skip" | "fail";
+      readonly reason: string;
+    };
 
 export interface JourneyGateInput {
   /** `RADIUS_CLOUD_E2E`, as read from the environment. */
@@ -60,10 +64,9 @@ function isSet(value: string | undefined): boolean {
 /**
  * Whether the journey may run, and why not when it may not.
  *
- * Absent credentials skip rather than fail, so an ordinary `pnpm test` is never
- * broken by a machine that has none. The reason is always specific: a skip that
- * says only "cloud disabled" is indistinguishable from a suite nobody noticed
- * had stopped running.
+ * An ordinary `pnpm test` skips when cloud execution was not requested. Once a
+ * run opts in, every missing prerequisite is a preflight failure so a broken
+ * cloud job cannot be green without executing any cloud assertion.
  */
 export function evaluateCreateEnvironmentGate(
   input: JourneyGateInput
@@ -71,20 +74,27 @@ export function evaluateCreateEnvironmentGate(
   if (!isSet(input.cloudE2eFlag))
     return {
       enabled: false,
+      disposition: "skip",
       reason:
         "RADIUS_CLOUD_E2E is not set, so the cloud create-environment journey is opt-out by default."
     };
   if (!input.fixtureProvisioned)
-    return { enabled: false, reason: input.unprovisionedReason };
+    return {
+      enabled: false,
+      disposition: "fail",
+      reason: input.unprovisionedReason
+    };
   if (!isSet(input.subscriptionId))
     return {
       enabled: false,
+      disposition: "fail",
       reason:
         "AZURE_SUBSCRIPTION_ID is not set; the fixture needs a subscription to provision the per-run resource group and cluster in."
     };
   if (!isSet(input.githubToken))
     return {
       enabled: false,
+      disposition: "fail",
       reason:
         "GH_TOKEN is not set; the cloud harness needs a token for the fixture repository."
     };
@@ -620,15 +630,25 @@ export function readOperationSnapshot(payload: unknown): OperationSnapshot {
     );
   const state = operation.state.trim();
   const failure = asRecord(operation.failure);
+  const rawOperationError =
+    typeof operation.error === "string" ? operation.error.trim() : "";
   const error =
     typeof failure?.message === "string" && failure.message.trim() !== "" ?
       failure.message.trim()
-    : typeof operation.error === "string" ? operation.error
+    : rawOperationError;
+  const terminalState =
+    typeof operation.terminalState === "string" ?
+      operation.terminalState.trim()
     : "";
-  const terminal =
-    (typeof operation.terminalState === "string" &&
-      operation.terminalState.trim() !== "") ||
-    TERMINAL_STATES.includes(state);
+  if (
+    operation.terminalState !== undefined &&
+    operation.terminalState !== null &&
+    !TERMINAL_STATES.includes(terminalState)
+  )
+    throw new Error(
+      'The operation status response carried an unknown "operation.terminalState".'
+    );
+  const terminal = terminalState !== "" || TERMINAL_STATES.includes(state);
   return {
     state,
     terminal,
@@ -679,10 +699,10 @@ export function readWorkflowDirectory(
 ): string[] {
   if (result.code !== 0) {
     if (isGitHubApiNotFound(result)) return [];
+    const diagnostic =
+      result.stderr.trim() || result.stdout.trim() || "<no output>";
     throw new Error(
-      `${context} failed with exit code ${result.code}: ${(
-        result.stderr || result.stdout
-      ).trim()}`
+      `${context} failed with exit code ${result.code}: ${diagnostic}`
     );
   }
   return readDirectoryPaths(parseJsonPayload(result.stdout, context));
@@ -715,4 +735,37 @@ export function cloudCanvasState(input: CloudCanvasStateInput): CanvasState {
     deployingRepo: input.repository,
     deployingBranch: input.branch
   };
+}
+
+export interface CleanupStep {
+  readonly label: string;
+  readonly run: () => Promise<void>;
+}
+
+export async function runCleanupSteps(
+  steps: readonly CleanupStep[],
+  primaryError?: unknown
+): Promise<void> {
+  const cleanupErrors: Error[] = [];
+  for (const step of steps) {
+    try {
+      await step.run();
+    } catch (error) {
+      cleanupErrors.push(
+        new Error(`${step.label}: ${describeError(error)}`, { cause: error })
+      );
+    }
+  }
+  if (cleanupErrors.length === 0) return;
+
+  if (primaryError !== undefined)
+    throw new AggregateError(
+      [primaryError, ...cleanupErrors],
+      "The create-environment journey failed and cleanup also failed."
+    );
+  if (cleanupErrors.length === 1) throw cleanupErrors[0];
+  throw new AggregateError(
+    cleanupErrors,
+    "The create-environment journey cleanup failed."
+  );
 }

@@ -3,6 +3,7 @@
 // and failure panels the client script drives.
 
 import { escapeHtml } from "../../shared.js";
+import { KUBERNETES_NAMESPACE_PATTERN } from "@radius-project/core/platforms";
 
 export interface EnvironmentsPaneOptions {
   activeSubtab: string;
@@ -395,6 +396,7 @@ export function environmentsPaneMarkup(
         <div style="display:flex; flex-direction:column; align-items:flex-start; gap:6px; margin:8px 0;">
           <div id="azure-discover-status" style="font-size:12px; color:var(--rad-text-tertiary);">Select a credential profile to discover resources.</div>
           <button type="button" id="azure-refresh-btn" class="rad-btn rad-btn--ghost" style="font-size:12px; padding:2px 10px;" disabled>↻ Refresh</button>
+          <div id="azure-discover-remediation" hidden></div>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px;">
           <div class="rad-field">
@@ -407,8 +409,10 @@ export function environmentsPaneMarkup(
           </div>
           <div class="rad-field">
             <label for="azure-namespace-select">Namespace</label>
-            <select id="azure-namespace-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-namespace-custom" type="text" aria-label="Namespace (custom)" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <select id="azure-namespace-select" aria-describedby="azure-namespace-help azure-namespace-error"><option value="" disabled selected>Loading…</option></select>
+            <input id="azure-namespace-custom" type="text" maxlength="63" pattern="${KUBERNETES_NAMESPACE_PATTERN}" aria-label="Namespace (custom)" aria-describedby="azure-namespace-help azure-namespace-error" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <div class="rad-field__help" id="azure-namespace-help">A namespace backs one environment. Pick one that no other environment on this cluster uses.</div>
+            <div id="azure-namespace-error" class="status error" role="alert" hidden></div>
           </div>
         </div>
       </div>
@@ -427,8 +431,10 @@ export function environmentsPaneMarkup(
           </div>
           <div class="rad-field">
             <label for="aws-namespace-select">Namespace</label>
-            <select id="aws-namespace-select"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-namespace-custom" type="text" aria-label="Namespace (custom)" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <select id="aws-namespace-select" aria-describedby="aws-namespace-help aws-namespace-error"><option value="" disabled selected>Loading…</option></select>
+            <input id="aws-namespace-custom" type="text" maxlength="63" pattern="${KUBERNETES_NAMESPACE_PATTERN}" aria-label="Namespace (custom)" aria-describedby="aws-namespace-help aws-namespace-error" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <div class="rad-field__help" id="aws-namespace-help">A namespace backs one environment. Pick one that no other environment on this cluster uses.</div>
+            <div id="aws-namespace-error" class="status error" role="alert" hidden></div>
           </div>
           <div class="rad-field">
             <label for="aws-vpc-select">VPC</label>

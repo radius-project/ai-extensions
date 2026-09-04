@@ -159,6 +159,7 @@ The full plan is complete when every requirement in the appendices has a passing
 | ID    | Tool                                   | Required contract                                                                                        |
 |-------|----------------------------------------|----------------------------------------------------------------------------------------------------------|
 | TL-02 | `radius_generate_app`                  | Workspace analysis; compact skill handoff; packaged, source-checkout, and repaired-plugin discovery      |
+| TL-11 | `radius_report_modeling_failure`       | Current-attempt fencing, missing-model verification, permanent-failure recording, stale-report rejection |
 | TL-05 | `radius_generate_pr_diff_markdown`     | Repository/base/head mapping, fetch failure, Mermaid and summary result/error                            |
 | TL-07 | `radius_publish_custom_type_extension` | Workspace confinement, managed Radius command, defaults, output/error                                    |
 | TL-08 | `radius_publish_recipe`                | Workspace confinement, GHCR target validation, publish output/error                                      |

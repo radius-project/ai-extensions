@@ -22,6 +22,10 @@ import type { GraphProgressRecord, GraphProgressView } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
 import type { CanvasServerEntry } from "../types.js";
+import type {
+  ResolvedWorkspaceBranch,
+  WorkspaceBranchResolution
+} from "../../workspace.js";
 
 // The two read-only halves of the `graphs-planning` family: the progress log the
 // page polls, and the deployed-graph projection. They are migrated together
@@ -617,7 +621,16 @@ export interface GraphsPlanningStreamDependencies {
   // request context's `state` snapshot cannot express it: it substitutes `{}`
   // for a missing entry.
   readInstanceEntry(instanceId: string): CanvasServerEntry | undefined;
-  defaultBranchForState(state: CanvasState | undefined): string;
+  resolveBranchForRequest(
+    entry: CanvasServerEntry,
+    repo: string,
+    requestedBranch: string
+  ): Promise<WorkspaceBranchResolution>;
+  commitBranchResolution(
+    entry: CanvasServerEntry,
+    repo: string,
+    resolution: ResolvedWorkspaceBranch
+  ): boolean;
   // Prepares the source-ref context for the entry and returns its token.
   prepareSourceRef(
     entry: CanvasServerEntry,
@@ -684,19 +697,18 @@ export async function handleLoadGraphStream(
 ): Promise<void> {
   const { response, url, instanceId } = context;
   const repo = url.searchParams.get("repo") || "";
+  const requestedBranch = url.searchParams.get("branch") || "";
   const entry = dependencies.readInstanceEntry(instanceId);
   if (!entry) {
     response.writeHead(503);
     response.end("Canvas server state is unavailable.");
     return;
   }
-  const branch =
-    url.searchParams.get("branch") ||
-    dependencies.defaultBranchForState(entry.state);
-  const sourceRefContext = dependencies.prepareSourceRef(entry, {
-    repo,
-    branch
-  });
+  // Claim arrival order before the asynchronous live-branch lookup. The JSON
+  // graph route shares this generation, so whichever request arrived later owns
+  // the graph state regardless of which branch lookup finishes first.
+  const requestGeneration = (entry.state.graphBuildGeneration =
+    (entry.state.graphBuildGeneration || 0) + 1);
 
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
@@ -706,15 +718,55 @@ export async function handleLoadGraphStream(
   const sendProgress = (message: string): void => {
     response.write(`event: progress\ndata: ${JSON.stringify({ message })}\n\n`);
   };
-  const sendDone = (data: unknown): void => {
-    response.write(`event: done\ndata: ${JSON.stringify(data)}\n\n`);
+  let resolvedBranch: string | undefined;
+  const sendDone = (data: Record<string, unknown>): void => {
+    response.write(
+      `event: done\ndata: ${JSON.stringify({
+        ...data,
+        ...(resolvedBranch ? { resolvedBranch } : {})
+      })}\n\n`
+    );
     response.end();
   };
 
+  let branchResolution: WorkspaceBranchResolution;
+  try {
+    branchResolution = await dependencies.resolveBranchForRequest(
+      entry,
+      repo,
+      requestedBranch
+    );
+  } catch (error) {
+    sendDone({ error: dependencies.errorMessage(error) });
+    return;
+  }
+  if (entry.state.graphBuildGeneration !== requestGeneration) {
+    sendDone({ stale: true });
+    return;
+  }
+  if (branchResolution.status === "unavailable") {
+    sendDone({
+      error: branchResolution.error,
+      workspaceBranchUnavailable: true,
+      repo
+    });
+    return;
+  }
   if (!repo) {
     sendDone({ error: "Please select a repository." });
     return;
   }
+  if (!dependencies.commitBranchResolution(entry, repo, branchResolution)) {
+    sendDone({ stale: true });
+    return;
+  }
+  const branch = branchResolution.branch;
+  resolvedBranch =
+    requestedBranch && requestedBranch !== branch ? branch : undefined;
+  const sourceRefContext = dependencies.prepareSourceRef(entry, {
+    repo,
+    branch
+  });
 
   try {
     sendProgress(`Checking ${repo} for existing app.bicep...`);
@@ -745,6 +797,13 @@ export async function handleLoadGraphStream(
         return;
       }
       dependencies.triggerAppBicepHandoff(entry, repo, branch);
+      // Deliberately outside the terminal-failure contract that the JSON
+      // load-graph/plan-graph routes implement: this stream has no restartWait,
+      // so every connection is a fresh explicit open with no way to distinguish
+      // a user retry from an automatic one. The shipped browser does not use
+      // this route. Do not wire it to a polling client without first teaching it
+      // to honour a recorded appModelAuthoringFailure, or a permanently failed
+      // model will request generation on every reconnect.
       sendDone({
         error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
         needsAppBicep: true,
@@ -793,6 +852,8 @@ export async function handleLoadGraphStream(
     }
     entry.state.graphTargetRepo = repo;
     entry.state.graphBranch = branch;
+    entry.state.graphFollowsWorkspaceBranch =
+      branchResolution.followsWorkspaceBranch === true;
     // Authoritative provenance: true only when the local workspace actually
     // supplied the app.bicep content (file is on disk).
     entry.state.graphFromWorkspace = selection.fromWorkspace;

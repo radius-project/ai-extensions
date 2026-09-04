@@ -3,12 +3,13 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, afterEach, describe, it, test } from "vitest";
 import {
   REPAIR_ATTEMPT_BUDGET,
   REPAIR_COMPILE_LIMIT,
   REPEATED_FAILURE_MESSAGE,
+  STAGING_DIR_PREFIX,
   STAGING_RUN_RECORD,
   evaluateRepairAttempt,
   fingerprintCompilerOutput,
@@ -26,7 +27,7 @@ const root = path.resolve(
 );
 const checker = path.join(
   root,
-  "plugins",
+  "extensions",
   "radius",
   "skills",
   "radius-app-bicep",
@@ -2273,3 +2274,578 @@ describe("agreement with the core repair rules", () => {
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
+// The staged contract show-radius-type.mjs writes for the checker. The name is
+// this suite's copy of the literal both scripts declare, and the resolver suite
+// proves the writer stages it under exactly this name.
+const RESOLVED_TYPES = "resolved-types.json";
+const rabbitMqType = "Radius.Messaging/rabbitMQ@2025-08-01-preview";
+const mySqlType = "Radius.Data/mySqlDatabases@2025-08-01-preview";
+const securePassword = { type: "securestring" };
+
+function stagedResolvedTypes(directory: string, contract: unknown): void {
+  fs.writeFileSync(
+    path.join(directory, RESOLVED_TYPES),
+    typeof contract === "string" ? contract : JSON.stringify(contract, null, 2)
+  );
+}
+
+function resolvedTypes(types: object): object {
+  return { contractVersion: 1, types };
+}
+
+// The failing shape the check exists to catch: the raw credential assigned to a
+// property that holds a Radius.Security/secrets resource ID.
+function rabbitMqWithRawPassword(): string {
+  return template(
+    {
+      rabbitmq: radiusResource(rabbitMqType, {
+        queue: "orders",
+        password: "[parameters('rabbitmqPassword')]"
+      })
+    },
+    { rabbitmqPassword: securePassword }
+  );
+}
+
+describe("secure parameter targets", () => {
+  it("flags a secure parameter assigned to a property the schema leaves plain", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(
+      directory,
+      resolvedTypes({ [rabbitMqType]: { password: false, queue: false } })
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, rabbitMqWithRawPassword())
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /secure-parameter-target/u);
+    assert.match(result.stderr, /rabbitmq\.properties\.password/u);
+    assert.match(result.stderr, /does not mark password sensitive/u);
+    assert.match(result.stderr, /<secret>\.id/u);
+  });
+
+  it("accepts a secure parameter assigned to a property the schema marks sensitive", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(
+      directory,
+      resolvedTypes({ [mySqlType]: { password: true, database: false } })
+    );
+    const compiledOutput = template(
+      {
+        mysql: radiusResource(mySqlType, {
+          database: "orders",
+          password: "[parameters('mysqlPassword')]"
+        })
+      },
+      { mysqlPassword: securePassword }
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it("separates the two types that name the property the same way", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(
+      directory,
+      resolvedTypes({
+        [mySqlType]: { password: true },
+        [rabbitMqType]: { password: false }
+      })
+    );
+    const compiledOutput = template(
+      {
+        mysql: radiusResource(mySqlType, {
+          password: "[parameters('credential')]"
+        }),
+        rabbitmq: radiusResource(rabbitMqType, {
+          password: "[parameters('credential')]"
+        })
+      },
+      { credential: securePassword }
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /rabbitmq\.properties\.password/u);
+    assert.doesNotMatch(result.stderr, /mysql\.properties\.password/u);
+  });
+
+  it("reports a secure parameter the run staged no resolved types for", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, rabbitMqWithRawPassword())
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /staged no resolved type schemas/u);
+    assert.match(result.stderr, /show-radius-type\.mjs/u);
+  });
+
+  it("passes a staged run with no resolved types and no secure parameter", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    const compiledOutput = template({
+      rabbitmq: radiusResource(rabbitMqType, { queue: "orders" })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it("does not apply to a compile outside a staged modeling run", () => {
+    const directory = temporaryDirectory();
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, rabbitMqWithRawPassword())
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it("fails closed when the staged resolved types are not valid JSON", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(directory, "{not json");
+    // No secure parameter anywhere: the refusal comes from the unreadable
+    // contract rather than from anything in the model.
+    const compiledOutput = template({
+      rabbitmq: radiusResource(rabbitMqType, { queue: "orders" })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /could not be read: it is not valid JSON/u);
+    assert.match(result.stderr, new RegExp(escapeRegExp(RESOLVED_TYPES), "u"));
+  });
+
+  it.each([
+    {
+      name: "a different contract version",
+      contract: { contractVersion: 2, types: {} },
+      expected: /is not a version 1 resolved-type contract/u
+    },
+    {
+      name: "no type map",
+      contract: { contractVersion: 1 },
+      expected: /is not a version 1 resolved-type contract/u
+    },
+    {
+      name: "a JSON array",
+      contract: [],
+      expected: /is not a version 1 resolved-type contract/u
+    },
+    {
+      name: "a type that is not an object",
+      contract: { contractVersion: 1, types: { [rabbitMqType]: "password" } },
+      expected: /does not map each property to a boolean/u
+    },
+    {
+      name: "a property sensitivity that is not a boolean",
+      contract: {
+        contractVersion: 1,
+        types: { [rabbitMqType]: { password: "false" } }
+      },
+      expected: /does not map each property to a boolean/u
+    }
+  ])(
+    "fails closed on staged resolved types with $name",
+    ({ contract, expected }) => {
+      const directory = temporaryDirectory();
+      stagedRun(directory);
+      stagedResolvedTypes(directory, contract);
+
+      const result = runChecker(
+        directory,
+        fakeBicep(directory, sarif([]), 0, rabbitMqWithRawPassword())
+      );
+
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, expected);
+    }
+  );
+
+  it("fails closed when the staged resolved types cannot be read at all", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    fs.mkdirSync(path.join(directory, RESOLVED_TYPES));
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, rabbitMqWithRawPassword())
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /could not be read/u);
+  });
+
+  it("reports a secure parameter on a type this run never resolved", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(
+      directory,
+      resolvedTypes({ [mySqlType]: { password: true } })
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, rabbitMqWithRawPassword())
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /was not resolved in this modeling run/u);
+    assert.match(result.stderr, new RegExp(escapeRegExp(rabbitMqType), "u"));
+  });
+
+  it("reports a secure parameter on a property the resolved schema omits", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(
+      directory,
+      resolvedTypes({ [rabbitMqType]: { queue: false } })
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, rabbitMqWithRawPassword())
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /does not describe password/u);
+  });
+
+  it("ignores a generated custom type the resolver cannot resolve", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(directory, resolvedTypes({}));
+    const compiledOutput = template(
+      {
+        broker: radiusResource("Radius.Resources/brokers@2025-08-01-preview", {
+          password: "[parameters('brokerPassword')]"
+        })
+      },
+      { brokerPassword: securePassword }
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it("checks secure parameter targets inside a local module", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(
+      directory,
+      resolvedTypes({ [rabbitMqType]: { password: false } })
+    );
+    const compiledOutput = template(
+      {
+        messaging: localModuleResources(
+          {
+            rabbitmq: radiusResource(rabbitMqType, {
+              password: "[parameters('modulePassword')]"
+            })
+          },
+          { modulePassword: securePassword },
+          { modulePassword: { value: "[parameters('rootPassword')]" } }
+        )
+      },
+      { rootPassword: securePassword }
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /messaging\.rabbitmq\.properties\.password/u);
+  });
+
+  it("ignores a module resource without a nested template", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(
+      directory,
+      resolvedTypes({ [rabbitMqType]: { password: false } })
+    );
+    const compiledOutput = template({
+      messaging: {
+        type: "Microsoft.Resources/deployments",
+        properties: { parameters: {}, template: "not a template" }
+      }
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it.each([
+    {
+      name: "an interpolated secure parameter",
+      value: "[format('{0}', parameters('rabbitmqPassword'))]"
+    },
+    {
+      name: "a secret resource ID",
+      value: "[reference('rabbitmqCredentials').id]"
+    },
+    { name: "a literal", value: "rabbitmq-credentials" },
+    { name: "a value that is not a string", value: 42 }
+  ])("does not report $name", ({ value }) => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(
+      directory,
+      resolvedTypes({ [rabbitMqType]: { password: false } })
+    );
+    const compiledOutput = template(
+      {
+        rabbitmq: radiusResource(rabbitMqType, { password: value })
+      },
+      { rabbitmqPassword: securePassword }
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it.each([
+    { name: "is not secure", declaration: { type: "string" } },
+    // A `@secure()` object legitimately carries a whole Secret data map, whose
+    // enclosing property the schema does not mark sensitive.
+    { name: "is a secure object", declaration: { type: "secureObject" } }
+  ])("does not report a parameter that $name", ({ declaration }) => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(
+      directory,
+      resolvedTypes({ [rabbitMqType]: { password: false } })
+    );
+    const compiledOutput = template(
+      {
+        rabbitmq: radiusResource(rabbitMqType, {
+          password: "[parameters('secretId')]"
+        })
+      },
+      { secretId: declaration }
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it("does not report a secure parameter nested inside an object property", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(
+      directory,
+      resolvedTypes({
+        "Radius.Security/secrets@2025-08-01-preview": { data: false }
+      })
+    );
+    const compiledOutput = template(
+      {
+        credentials: radiusResource(
+          "Radius.Security/secrets@2025-08-01-preview",
+          {
+            data: {
+              password: { value: "[parameters('rabbitmqPassword')]" }
+            }
+          }
+        )
+      },
+      { rabbitmqPassword: securePassword }
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it("ignores a Radius resource with no properties envelope", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(
+      directory,
+      resolvedTypes({ [rabbitMqType]: { password: false } })
+    );
+    const compiledOutput = template({
+      rabbitmq: {
+        type: rabbitMqType,
+        properties: { properties: "[parameters('rabbitmqPassword')]" }
+      }
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    // The missing envelope is a source-reference failure, not a credential one.
+    assert.equal(result.status, 1);
+    assert.doesNotMatch(result.stderr, /secure-parameter-target/u);
+  });
+});
+
+// The writer that produces `resolved-types.json` and the checker that consumes
+// it each state the per-entry acceptance rule in their own script, because the
+// installed plugin has no shared module for them to import. The failure that
+// duplication invites is the two ends disagreeing: a writer looser than the
+// reader merges a malformed entry forward and emits a file its own checker then
+// rejects, reporting against a file the user never authored. These cases pin
+// both ends to the same answer for the same input so they cannot drift apart.
+describe("resolved-type contract agreement", () => {
+  const resolver = path.join(
+    root,
+    "extensions",
+    "radius",
+    "skills",
+    "radius-app-bicep",
+    "scripts",
+    "show-radius-type.mjs"
+  );
+  const agreementType = "Radius.Messaging/rabbitMQ@2025-08-01-preview";
+
+  // The writer validates its staging directory, which must carry the staging
+  // name prefix and a run record with a baseline.
+  function writerStagingDirectory(): string {
+    const directory = path.join(
+      temporaryDirectory(),
+      `${STAGING_DIR_PREFIX}agreement`
+    );
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(
+      path.join(directory, STAGING_RUN_RECORD),
+      JSON.stringify({ version: 1, runId: "agreement", baseline: {} })
+    );
+    return directory;
+  }
+
+  async function writerAccepts(staged: string): Promise<boolean> {
+    const directory = writerStagingDirectory();
+    fs.writeFileSync(path.join(directory, RESOLVED_TYPES), staged);
+    const { writeStagedResolvedTypes } = (await import(
+      pathToFileURL(resolver).href
+    )) as {
+      writeStagedResolvedTypes: (
+        staging: string,
+        resources: Array<{
+          type: string;
+          apiVersion: string;
+          schema: object;
+        }>
+      ) => Promise<void>;
+    };
+    return await writeStagedResolvedTypes(directory, [
+      {
+        type: "Radius.Test/agreement",
+        apiVersion: "2025-08-01-preview",
+        schema: { type: "object" }
+      }
+    ]).then(
+      () => true,
+      () => false
+    );
+  }
+
+  // The checker is a separate script in a child process, so it is asked the
+  // same question the only way it can be: compile a model beside the staged
+  // file and see whether it calls the contract unreadable.
+  function checkerAccepts(staged: string): boolean {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    fs.writeFileSync(path.join(directory, RESOLVED_TYPES), staged);
+    const result = runChecker(
+      directory,
+      fakeBicep(
+        directory,
+        sarif([]),
+        0,
+        template({
+          rabbitmq: radiusResource(agreementType, { queue: "orders" })
+        })
+      )
+    );
+    return !/could not be read/u.test(result.stderr);
+  }
+
+  it.each([
+    { name: "an entry with no properties", entry: {}, accepted: true },
+    {
+      name: "boolean property sensitivities",
+      entry: { password: false, queue: true },
+      accepted: true
+    },
+    { name: "a string entry", entry: "password", accepted: false },
+    { name: "a null entry", entry: null, accepted: false },
+    { name: "an array entry", entry: [], accepted: false },
+    {
+      name: "a stringly-typed boolean",
+      entry: { password: "false" },
+      accepted: false
+    },
+    { name: "a numeric sensitivity", entry: { password: 0 }, accepted: false },
+    { name: "a null sensitivity", entry: { password: null }, accepted: false }
+  ])("both ends treat $name the same way", async ({ entry, accepted }) => {
+    const staged = JSON.stringify({
+      contractVersion: 1,
+      types: { [agreementType]: entry }
+    });
+
+    assert.equal(await writerAccepts(staged), accepted);
+    assert.equal(checkerAccepts(staged), accepted);
+  });
+});

@@ -3,11 +3,10 @@
 // {@link GitHub} port; the canvas adapter supplies the concrete `gh`-CLI
 // implementation.
 //
-// Source-code reference discovery for graph nodes is now handled by the AI
-// agent via the radius-app-graph skill (see source-code-references.md). The
-// hard-coded heuristics that lived here have been removed in favor of the
-// agent-driven approach, which can adapt to any repo layout without
-// maintaining a static pattern list.
+// Source-code reference discovery is owned by the radius-app-bicep skill. The
+// hard-coded heuristics that lived here have been removed in favor of that
+// agent-driven approach, which can adapt to any repo layout without maintaining
+// a static pattern list.
 
 import type { GitHub } from "../ports/index.js";
 
