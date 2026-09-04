@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_AZURE_FILE,
+  DELETE_ENV_AZURE_FILE,
+  DELETE_ENV_DISPATCHER_FILE,
   DEPLOY_AZURE_FILE,
   DEPLOY_DISPATCHER_FILE
 } from "../../../src/infra.js";
@@ -80,7 +82,9 @@ describe("required workflow and variable inventories", () => {
     expect(REQUIRED_LIFECYCLE_WORKFLOWS).toEqual([
       ...REQUIRED_DEFAULT_BRANCH_WORKFLOWS,
       ...REQUIRED_DEPLOY_WORKFLOWS,
-      ...REQUIRED_DELETE_WORKFLOWS
+      ...REQUIRED_DELETE_WORKFLOWS,
+      DELETE_ENV_DISPATCHER_FILE,
+      DELETE_ENV_AZURE_FILE
     ]);
   });
 
