@@ -10,18 +10,19 @@ name: Cloud E2E Cleanup
 #
 #   In scope   Leaked resource groups, Entra service principals and
 #              applications, stale GitHub Environments, fallback pull requests
-#              and branches older than six hours, and resetting the fixture
-#              default branch to the baseline.
+#              and branches, and resetting the fixture default branch to the
+#              baseline.
 #
 # Resource groups are deliberately reclaimed here, not left to the shared Radius
 # purge job. The Radius purge job still matches `^radtest-` older than six
 # hours, so the per-run `radtest-canvas-<uid>` group remains inside its safety
 # net if this workflow cannot run, but this job owns the test leak first.
 #
-# Everything destructive here is named exactly, never matched by wildcard, and
-# never applied to something younger than the age threshold - so a purge can
-# never race a run that is still using its own state. The shared concurrency
-# group with cloud-e2e.yml is the other half of that guarantee.
+# Resource groups are deleted as soon as this workflow sees the fixture prefix
+# and tag, because those identify the groups the tests created. Other leaked
+# state still waits for the age threshold. The shared concurrency group with
+# cloud-e2e.yml is what prevents either path from racing a run that is still
+# using its own state.
 #
 # See docs/eng/CLOUD_E2E_RUNBOOK.md. Like cloud-e2e.yml, this has never
 # executed: the fixture repository does not exist yet, and the pin below is
@@ -155,8 +156,9 @@ jobs:
 
       # Per-run resource groups carry both the fixture prefix and a fixture-owned
       # tag. The Radius purge job is only the safety net; this workflow deletes
-      # the test groups it can prove are old enough and ours.
-      - name: Purge stale Azure resource groups
+      # the test groups it can prove are ours without waiting for the safety-net
+      # age threshold.
+      - name: Purge Azure resource groups created by the suite
         if: steps.pin.outputs.provisioned == 'true'
         env:
           RESOURCE_GROUP_PREFIX: ${{ steps.pin.outputs.resource-group-prefix }}
@@ -164,9 +166,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
           groups="$RUNNER_TEMP/resource-groups.json"
-          expired_groups="$RUNNER_TEMP/expired-resource-groups.json"
+          test_groups="$RUNNER_TEMP/test-resource-groups.json"
 
           az group list \
             --subscription "$SUBSCRIPTION_ID" \
@@ -174,23 +175,23 @@ jobs:
             -o json >"$groups"
 
           node --input-type=module - \
-            "$groups" "$RESOURCE_GROUP_PREFIX" "$cutoff" "$expired_groups" <<'NODE'
+            "$groups" "$RESOURCE_GROUP_PREFIX" "$test_groups" <<'NODE'
           import { readFile, writeFile } from "node:fs/promises";
-          const [groupsFile, prefix, cutoff, expiredGroupsFile] = process.argv.slice(2);
-          const { selectExpiredResourceGroups } = await import(
+          const [groupsFile, prefix, testGroupsFile] = process.argv.slice(2);
+          const { selectTestResourceGroups } = await import(
             "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
           );
           const groups = JSON.parse(await readFile(groupsFile, "utf8"));
           await writeFile(
-            expiredGroupsFile,
-            JSON.stringify(selectExpiredResourceGroups(groups, prefix, cutoff))
+            testGroupsFile,
+            JSON.stringify(selectTestResourceGroups(groups, prefix))
           );
           NODE
 
           purged=0
           while read -r name; do
             [[ -n "$name" ]] || continue
-            echo "Deleting stale resource group $name, created before $cutoff."
+            echo "Deleting test-created resource group $name."
             az group delete \
               --name "$name" \
               --subscription "$SUBSCRIPTION_ID" \
@@ -198,7 +199,7 @@ jobs:
               --no-wait \
               --output none
             purged=$((purged + 1))
-          done < <(jq -r '.[].name' "$expired_groups")
+          done < <(jq -r '.[]' "$test_groups")
 
           echo "- Azure resource groups purged: $purged" >>"$GITHUB_STEP_SUMMARY"
 

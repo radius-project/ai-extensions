@@ -337,13 +337,13 @@ describe("cloud-e2e.yml", () => {
 });
 
 describe("cloud-e2e-cleanup.yml", () => {
-  it("deletes only tagged stale resource groups the suite creates", async () => {
+  it("deletes tagged resource groups the suite creates without waiting for age", async () => {
     // The shared Radius purge job remains a safety net, but this workflow owns
     // test leaks first. The fixture tag is what stops a prefix match from
     // becoming a broad subscription sweep.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const purge = steps(workflow.jobs?.purge).find((step) =>
-      step.run?.includes("selectExpiredResourceGroups"),
+      step.run?.includes("selectTestResourceGroups"),
     );
     const script = purge?.run ?? "";
 
@@ -356,7 +356,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
     expect(script).toContain("starts_with(name, '$RESOURCE_GROUP_PREFIX')");
     expect(script).toContain('--subscription "$SUBSCRIPTION_ID"');
-    expect(script).toContain("MAX_AGE_HOURS hours ago");
+    expect(script).not.toContain("MAX_AGE_HOURS hours ago");
     expect(script).toContain("az group delete");
     expect(RESOURCE_GROUP_PREFIX.startsWith("radtest-")).toBe(true);
   });
@@ -399,7 +399,7 @@ describe("cloud-e2e-cleanup.yml", () => {
       expect(step.if).toBe("steps.pin.outputs.provisioned == 'true'");
   });
 
-  it("only deletes state older than the age threshold", async () => {
+  it("keeps the age threshold for Entra and GitHub state", async () => {
     // Without a provable age a purge cannot tell leaked state from a run in
     // progress, and the shared concurrency group is only half that guarantee.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
