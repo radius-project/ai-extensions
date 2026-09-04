@@ -22,7 +22,7 @@ import {
   parseJsonArray,
   type CloudCommandPort,
   type CloudCommandResult,
-  type CloudFixturePorts
+  type CloudFixturePorts,
 } from "./cloud-command-port.js";
 import {
   appRegistrationName,
@@ -34,7 +34,7 @@ import {
   resourceGroupName,
   resourceGroupScope,
   shortenUniqueId,
-  WORKFLOW_FALLBACK_BRANCH_PREFIX
+  WORKFLOW_FALLBACK_BRANCH_PREFIX,
 } from "./fixture-repository.js";
 
 /** The Entra application the product creates, as the fixture observed it. */
@@ -113,11 +113,11 @@ interface UnwindStep {
 }
 
 export async function createCloudFixture(
-  options: CloudFixtureOptions
+  options: CloudFixtureOptions,
 ): Promise<CloudFixture> {
   const subscriptionId = requireValue(
     options.subscriptionId,
-    "A subscription id is required to provision the cloud fixture."
+    "A subscription id is required to provision the cloud fixture.",
   );
   const ports = options.ports;
   const commands = ports.commands;
@@ -128,11 +128,11 @@ export async function createCloudFixture(
   const nodeCount = options.nodeCount ?? DEFAULT_NODE_COUNT;
   const assertionTimeoutMs = requirePositiveNumber(
     options.assertionTimeoutMs ?? DEFAULT_ASSERTION_TIMEOUT_MS,
-    "Assertion timeout"
+    "Assertion timeout",
   );
   const assertionPollIntervalMs = requirePositiveNumber(
     options.assertionPollIntervalMs ?? DEFAULT_ASSERTION_POLL_INTERVAL_MS,
-    "Assertion poll interval"
+    "Assertion poll interval",
   );
 
   const uniqueId = shortenUniqueId(ports.newUniqueId());
@@ -174,8 +174,9 @@ export async function createCloudFixture(
       }
     });
 
-    // `creationTime` plus the `radtest-` prefix is what lets the Radius purge
-    // job in this subscription reclaim the group if the runner dies outright.
+    // `creationTime` plus the fixture tag lets scheduled cleanup prove the group
+    // is ours and old enough. The `radtest-` prefix leaves Radius purge as the
+    // fallback safety net if this cleanup cannot run.
     expectSuccess(
       await commands.runAz([
         "group",
@@ -190,9 +191,9 @@ export async function createCloudFixture(
         `creationTime=${radiusPurgeCreationTime(ports.now())}`,
         "radius-canvas-e2e=true",
         "--output",
-        "none"
+        "none",
       ]),
-      `az group create ${resourceGroup}`
+      `az group create ${resourceGroup}`,
     );
     unwind.push({
       describe: `delete resource group ${resourceGroup}`,
@@ -208,11 +209,11 @@ export async function createCloudFixture(
             "--yes",
             "--no-wait",
             "--output",
-            "none"
+            "none",
           ]),
-          `az group delete ${resourceGroup}`
+          `az group delete ${resourceGroup}`,
         );
-      }
+      },
     });
 
     // Purely a discovery target: the product runs `az aks list` and must find a
@@ -234,27 +235,27 @@ export async function createCloudFixture(
         CLUSTER_NODE_SIZE,
         "--generate-ssh-keys",
         "--output",
-        "none"
+        "none",
       ]),
-      `az aks create ${clusterName}`
+      `az aks create ${clusterName}`,
     );
 
     workspacePath = await ports.makeWorkspaceDir(`radtest-canvas-${uniqueId}`);
     unwind.push({
       describe: `remove workspace ${workspacePath}`,
-      run: () => ports.removeDir(workspacePath)
+      run: () => ports.removeDir(workspacePath),
     });
 
     expectSuccess(
       await commands.runGh(["repo", "clone", repository, workspacePath]),
-      `gh repo clone ${repository}`
+      `gh repo clone ${repository}`,
     );
     // Pin the clone to the reviewed baseline rather than trusting the branch
     // head, so a run that starts against a repository someone left dirty fails
     // at the clean-slate check instead of quietly testing a different app.
     expectSuccess(
       await commands.runGit(["reset", "--hard", baselineSha], workspacePath),
-      `git reset --hard ${baselineSha}`
+      `git reset --hard ${baselineSha}`,
     );
   } catch (error) {
     const cleanupFailures = await unwindAll(unwind);
@@ -263,7 +264,7 @@ export async function createCloudFixture(
         `Cloud fixture construction failed: ${describeError(error)}\n` +
           "Cleanup after the construction failure also failed:\n" +
           cleanupFailures.map((failure) => `  - ${failure}`).join("\n"),
-        { cause: error }
+        { cause: error },
       );
     throw error;
   }
@@ -290,7 +291,7 @@ export async function createCloudFixture(
         baselineSha,
         environmentName,
         expectedAppName,
-        scope
+        scope,
       });
       if (findings.length === 0) return;
       throw new Error(
@@ -298,7 +299,7 @@ export async function createCloudFixture(
           `the create-environment journey for ${repository} must start with none of the ` +
           "artifacts the product is responsible for creating, but found:\n" +
           findings.map((finding) => `  - ${finding}`).join("\n") +
-          "\nReclaim it before re-running; see the cloud E2E runbook."
+          "\nReclaim it before re-running; see the cloud E2E runbook.",
       );
     },
 
@@ -313,12 +314,12 @@ export async function createCloudFixture(
             throw new Error(
               `Expected exactly one app registration named "${expectedAppName}", but found ${apps.length} ` +
                 `(${apps.map((app) => app.appId).join(", ")}). The product does not scope this name per run, ` +
-                "so a concurrent run against the same fixture repository is the likely cause."
+                "so a concurrent run against the same fixture repository is the likely cause.",
             );
           return apps[0];
         },
         timeoutMessage: () =>
-          `Timed out after ${assertionTimeoutMs}ms waiting for the product to create an app registration named "${expectedAppName}".`
+          `Timed out after ${assertionTimeoutMs}ms waiting for the product to create an app registration named "${expectedAppName}".`,
       });
     },
 
@@ -331,10 +332,10 @@ export async function createCloudFixture(
         intervalMs: assertionPollIntervalMs,
         probe: async () => {
           credentials = await listFederatedCredentials(commands, app.objectId);
-          return (
-              credentials.some((credential) => credential.subject === subject)
-            ) ?
-              true
+          return credentials.some(
+            (credential) => credential.subject === subject,
+          )
+            ? true
             : undefined;
         },
         timeoutMessage: () => {
@@ -342,25 +343,25 @@ export async function createCloudFixture(
           // remains a real product defect when the bounded wait expires.
           const caseOnly = credentials.filter(
             (credential) =>
-              credential.subject.toLowerCase() === subject.toLowerCase()
+              credential.subject.toLowerCase() === subject.toLowerCase(),
           );
           const detail =
-            caseOnly.length > 0 ?
-              ` A credential differing only by letter casing exists (${caseOnly
-                .map((credential) => `"${credential.subject}"`)
-                .join(
-                  ", "
-                )}); Entra would reject a token presenting the expected subject.`
-            : credentials.length === 0 ?
-              " The app registration carries no federated credentials at all."
-            : ` Existing subjects: ${credentials
-                .map((credential) => `"${credential.subject}"`)
-                .join(", ")}.`;
+            caseOnly.length > 0
+              ? ` A credential differing only by letter casing exists (${caseOnly
+                  .map((credential) => `"${credential.subject}"`)
+                  .join(
+                    ", ",
+                  )}); Entra would reject a token presenting the expected subject.`
+              : credentials.length === 0
+                ? " The app registration carries no federated credentials at all."
+                : ` Existing subjects: ${credentials
+                    .map((credential) => `"${credential.subject}"`)
+                    .join(", ")}.`;
           return (
             `Timed out after ${assertionTimeoutMs}ms waiting for app registration ${app.appId} ` +
             `to carry a federated credential for subject "${subject}".${detail}`
           );
-        }
+        },
       });
     },
 
@@ -375,26 +376,24 @@ export async function createCloudFixture(
         intervalMs: assertionPollIntervalMs,
         probe: async () => {
           assignments = await listRoleAssignments(commands, scope);
-          return (
-              assignments.some(
-                (assignment) =>
-                  assignment.principalId.toLowerCase() ===
-                  principalId.toLowerCase()
-              )
-            ) ?
-              true
+          return assignments.some(
+            (assignment) =>
+              assignment.principalId.toLowerCase() ===
+              principalId.toLowerCase(),
+          )
+            ? true
             : undefined;
         },
         timeoutMessage: () =>
           `Timed out after ${assertionTimeoutMs}ms waiting for a role assignment for principal ` +
           `${principalId} at or below ${scope}; found ` +
-          (assignments.length === 0 ?
-            "no role assignments at all."
-          : `only assignments for ${[
-              ...new Set(
-                assignments.map((assignment) => assignment.principalId)
-              )
-            ].join(", ")}.`)
+          (assignments.length === 0
+            ? "no role assignments at all."
+            : `only assignments for ${[
+                ...new Set(
+                  assignments.map((assignment) => assignment.principalId),
+                ),
+              ].join(", ")}.`),
       });
     },
 
@@ -406,18 +405,18 @@ export async function createCloudFixture(
         probe: async () => {
           const probe = await commands.runGh([
             "api",
-            `repos/${repository}/environments/${environmentName}`
+            `repos/${repository}/environments/${environmentName}`,
           ]);
           if (probe.code === 0) return true;
           if (isNotFound(probe)) return undefined;
           throw new Error(
             `Could not determine whether GitHub Environment "${environmentName}" exists in ${repository}: ` +
-              `gh exited ${probe.code}: ${(probe.stderr || probe.stdout).trim()}`
+              `gh exited ${probe.code}: ${(probe.stderr || probe.stdout).trim()}`,
           );
         },
         timeoutMessage: () =>
           `Timed out after ${assertionTimeoutMs}ms waiting for the product to create ` +
-          `GitHub Environment "${environmentName}" in ${repository}.`
+          `GitHub Environment "${environmentName}" in ${repository}.`,
       });
     },
 
@@ -427,7 +426,7 @@ export async function createCloudFixture(
 
       const attempt = async (
         label: string,
-        run: () => Promise<void>
+        run: () => Promise<void>,
       ): Promise<void> => {
         try {
           await run();
@@ -443,7 +442,7 @@ export async function createCloudFixture(
       // clean-slate check.
       const principals = await listServicePrincipals(
         commands,
-        expectedAppName
+        expectedAppName,
       ).catch((error: unknown) => {
         failures.push(`list service principals: ${describeError(error)}`);
         return [] as Array<{ objectId: string }>;
@@ -458,9 +457,9 @@ export async function createCloudFixture(
               "--id",
               principal.objectId,
               "--output",
-              "none"
+              "none",
             ]),
-            `az ad sp delete ${principal.objectId}`
+            `az ad sp delete ${principal.objectId}`,
           );
         });
 
@@ -468,7 +467,7 @@ export async function createCloudFixture(
         (error: unknown) => {
           failures.push(`list app registrations: ${describeError(error)}`);
           return [] as AppRegistrationRecord[];
-        }
+        },
       );
       for (const app of apps)
         await attempt(`app registration ${app.appId}`, async () => {
@@ -480,15 +479,15 @@ export async function createCloudFixture(
               "--id",
               app.objectId,
               "--output",
-              "none"
+              "none",
             ]),
-            `az ad app delete ${app.objectId}`
+            `az ad app delete ${app.objectId}`,
           );
         });
 
       const environment = await commands.runGh([
         "api",
-        `repos/${repository}/environments/${environmentName}`
+        `repos/${repository}/environments/${environmentName}`,
       ]);
       if (environment.code === 0)
         await attempt(`GitHub environment ${environmentName}`, async () => {
@@ -497,16 +496,16 @@ export async function createCloudFixture(
               "api",
               "--method",
               "DELETE",
-              `repos/${repository}/environments/${environmentName}`
+              `repos/${repository}/environments/${environmentName}`,
             ]),
-            `gh api DELETE environments/${environmentName}`
+            `gh api DELETE environments/${environmentName}`,
           );
         });
       else if (!isNotFound(environment))
         failures.push(
           `probe GitHub environment ${environmentName}: gh exited ${environment.code}: ${(
             environment.stderr || environment.stdout
-          ).trim()}`
+          ).trim()}`,
         );
 
       // Close pull requests before removing their head branches so cleanup does
@@ -515,10 +514,10 @@ export async function createCloudFixture(
         (error: unknown) => {
           failures.push(`list open pull requests: ${describeError(error)}`);
           return [] as OpenPullRequest[];
-        }
+        },
       );
       for (const pull of pulls.filter((candidate) =>
-        candidate.headRef.startsWith(WORKFLOW_FALLBACK_BRANCH_PREFIX)
+        candidate.headRef.startsWith(WORKFLOW_FALLBACK_BRANCH_PREFIX),
       ))
         await attempt(`pull request #${pull.number}`, async () => {
           expectSuccess(
@@ -528,9 +527,9 @@ export async function createCloudFixture(
               "PATCH",
               `repos/${repository}/pulls/${pull.number}`,
               "-f",
-              "state=closed"
+              "state=closed",
             ]),
-            `gh api PATCH pulls/${pull.number}`
+            `gh api PATCH pulls/${pull.number}`,
           );
         });
 
@@ -538,10 +537,10 @@ export async function createCloudFixture(
       // same way a leaked Entra application does.
       const branches = await listWorkflowFallbackBranches(
         commands,
-        repository
+        repository,
       ).catch((error: unknown) => {
         failures.push(
-          `list workflow fallback branches: ${describeError(error)}`
+          `list workflow fallback branches: ${describeError(error)}`,
         );
         return [] as string[];
       });
@@ -552,16 +551,16 @@ export async function createCloudFixture(
               "api",
               "--method",
               "DELETE",
-              `repos/${repository}/git/refs/heads/${branch}`
+              `repos/${repository}/git/refs/heads/${branch}`,
             ]),
-            `gh api DELETE refs/heads/${branch}`
+            `gh api DELETE refs/heads/${branch}`,
           );
         });
 
       const head = await readDefaultBranchSha(
         commands,
         repository,
-        defaultBranch
+        defaultBranch,
       ).catch((error: unknown) => {
         failures.push(`read ${defaultBranch} head: ${describeError(error)}`);
         return null;
@@ -577,9 +576,9 @@ export async function createCloudFixture(
               "-f",
               `sha=${baselineSha}`,
               "-F",
-              "force=true"
+              "force=true",
             ]),
-            `gh api PATCH refs/heads/${defaultBranch}`
+            `gh api PATCH refs/heads/${defaultBranch}`,
           );
         });
 
@@ -587,9 +586,9 @@ export async function createCloudFixture(
         throw new Error(
           `Could not fully reclaim leaked product state for ${repository}:\n` +
             failures.map((failure) => `  - ${failure}`).join("\n") +
-            (reclaimed.length > 0 ?
-              `\nReclaimed before failing: ${reclaimed.join(", ")}.`
-            : "")
+            (reclaimed.length > 0
+              ? `\nReclaimed before failing: ${reclaimed.join(", ")}.`
+              : ""),
         );
       return reclaimed;
     },
@@ -601,9 +600,9 @@ export async function createCloudFixture(
       if (failures.length > 0)
         throw new Error(
           `Cloud fixture teardown for ${resourceGroup} did not complete:\n` +
-            failures.map((failure) => `  - ${failure}`).join("\n")
+            failures.map((failure) => `  - ${failure}`).join("\n"),
         );
-    }
+    },
   };
 
   return fixture;
@@ -659,16 +658,16 @@ async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
   const apps = await listAppRegistrations(commands, input.expectedAppName);
   for (const app of apps)
     findings.push(
-      `app registration "${app.displayName}" (appId ${app.appId}, object ${app.objectId})`
+      `app registration "${app.displayName}" (appId ${app.appId}, object ${app.objectId})`,
     );
 
   const principals = await listServicePrincipals(
     commands,
-    input.expectedAppName
+    input.expectedAppName,
   );
   for (const principal of principals)
     findings.push(
-      `service principal ${principal.objectId} for "${input.expectedAppName}"`
+      `service principal ${principal.objectId} for "${input.expectedAppName}"`,
     );
 
   // Only reachable when an application survived, since a federated credential
@@ -677,7 +676,7 @@ async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
     const credentials = await listFederatedCredentials(commands, app.objectId);
     for (const credential of credentials)
       findings.push(
-        `federated credential "${credential.name}" (subject "${credential.subject}") on app ${app.appId}`
+        `federated credential "${credential.name}" (subject "${credential.subject}") on app ${app.appId}`,
       );
   }
 
@@ -689,32 +688,32 @@ async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
   const assignments = await listRoleAssignments(commands, input.scope);
   for (const assignment of assignments)
     findings.push(
-      `role assignment "${assignment.roleDefinitionName}" for principal ${assignment.principalId} at ${input.scope}`
+      `role assignment "${assignment.roleDefinitionName}" for principal ${assignment.principalId} at ${input.scope}`,
     );
 
   const environment = await commands.runGh([
     "api",
-    `repos/${repository}/environments/${input.environmentName}`
+    `repos/${repository}/environments/${input.environmentName}`,
   ]);
   if (environment.code === 0)
     findings.push(
-      `GitHub environment "${input.environmentName}" in ${repository}`
+      `GitHub environment "${input.environmentName}" in ${repository}`,
     );
   else if (!isNotFound(environment))
     throw new Error(
       `Could not probe GitHub environment "${input.environmentName}" in ${repository}: ` +
-        `gh exited ${environment.code}: ${(environment.stderr || environment.stdout).trim()}`
+        `gh exited ${environment.code}: ${(environment.stderr || environment.stdout).trim()}`,
     );
 
   const head = await readDefaultBranchSha(
     commands,
     repository,
-    input.defaultBranch
+    input.defaultBranch,
   );
   if (!sameSha(head, input.baselineSha))
     findings.push(
       `${repository}@${input.defaultBranch} is at ${head}, not the pinned baseline ${input.baselineSha} ` +
-        "(a previous run committed workflow files to the default branch)"
+        "(a previous run committed workflow files to the default branch)",
     );
 
   // The product only commits to the default branch when its token carries
@@ -727,7 +726,7 @@ async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
 
   for (const pull of await listOpenPullRequests(commands, repository))
     findings.push(
-      `open pull request #${pull.number} ("${pull.title}", head "${pull.headRef}") in ${repository}`
+      `open pull request #${pull.number} ("${pull.title}", head "${pull.headRef}") in ${repository}`,
     );
 
   return findings;
@@ -735,7 +734,7 @@ async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
 
 async function listAppRegistrations(
   commands: CloudCommandPort,
-  displayName: string
+  displayName: string,
 ): Promise<AppRegistrationRecord[]> {
   const context = `az ad app list --filter displayName eq '${displayName}'`;
   const entries = parseJsonArray(
@@ -748,9 +747,9 @@ async function listAppRegistrations(
       "--query",
       "[].{appId:appId,id:id,displayName:displayName}",
       "-o",
-      "json"
+      "json",
     ]),
-    context
+    context,
   );
   return entries.map((entry, index) => {
     const record = asRecord(entry, context, index);
@@ -761,15 +760,15 @@ async function listAppRegistrations(
         record.displayName,
         "displayName",
         context,
-        index
-      )
+        index,
+      ),
     };
   });
 }
 
 async function listServicePrincipals(
   commands: CloudCommandPort,
-  displayName: string
+  displayName: string,
 ): Promise<Array<{ objectId: string }>> {
   const context = `az ad sp list --filter displayName eq '${displayName}'`;
   const entries = parseJsonArray(
@@ -782,23 +781,23 @@ async function listServicePrincipals(
       "--query",
       "[].{id:id}",
       "-o",
-      "json"
+      "json",
     ]),
-    context
+    context,
   );
   return entries.map((entry, index) => ({
     objectId: requireString(
       asRecord(entry, context, index).id,
       "id",
       context,
-      index
-    )
+      index,
+    ),
   }));
 }
 
 async function listFederatedCredentials(
   commands: CloudCommandPort,
-  appObjectId: string
+  appObjectId: string,
 ): Promise<Array<{ name: string; subject: string }>> {
   const context = `az ad app federated-credential list --id ${appObjectId}`;
   const entries = parseJsonArray(
@@ -812,9 +811,9 @@ async function listFederatedCredentials(
       "--query",
       "[].{name:name,subject:subject}",
       "-o",
-      "json"
+      "json",
     ]),
-    context
+    context,
   );
   return entries.map((entry, index) => {
     const record = asRecord(entry, context, index);
@@ -822,14 +821,14 @@ async function listFederatedCredentials(
       name: requireString(record.name, "name", context, index),
       // A flexible federated credential legitimately reports no subject, so an
       // absent one is skipped rather than rejected.
-      subject: typeof record.subject === "string" ? record.subject : ""
+      subject: typeof record.subject === "string" ? record.subject : "",
     };
   });
 }
 
 async function listRoleAssignments(
   commands: CloudCommandPort,
-  scope: string
+  scope: string,
 ): Promise<Array<{ principalId: string; roleDefinitionName: string }>> {
   const context = `az role assignment list --scope ${scope}`;
   const entries = parseJsonArray(
@@ -842,9 +841,9 @@ async function listRoleAssignments(
       "--query",
       "[].{principalId:principalId,roleDefinitionName:roleDefinitionName}",
       "-o",
-      "json"
+      "json",
     ]),
-    context
+    context,
   );
   return entries.map((entry, index) => {
     const record = asRecord(entry, context, index);
@@ -853,19 +852,19 @@ async function listRoleAssignments(
         record.principalId,
         "principalId",
         context,
-        index
+        index,
       ),
       roleDefinitionName:
-        typeof record.roleDefinitionName === "string" ?
-          record.roleDefinitionName
-        : "(unnamed role)"
+        typeof record.roleDefinitionName === "string"
+          ? record.roleDefinitionName
+          : "(unnamed role)",
     };
   });
 }
 
 async function listWorkflowFallbackBranches(
   commands: CloudCommandPort,
-  repository: string
+  repository: string,
 ): Promise<string[]> {
   const context = `gh api matching-refs ${WORKFLOW_FALLBACK_BRANCH_PREFIX} in ${repository}`;
   // `matching-refs` answers 200 with an empty array when nothing matches, so
@@ -873,17 +872,17 @@ async function listWorkflowFallbackBranches(
   const entries = parseJsonArray(
     await commands.runGh([
       "api",
-      `repos/${repository}/git/matching-refs/heads/${WORKFLOW_FALLBACK_BRANCH_PREFIX}`
+      `repos/${repository}/git/matching-refs/heads/${WORKFLOW_FALLBACK_BRANCH_PREFIX}`,
     ]),
-    context
+    context,
   );
   return entries.map((entry, index) =>
     requireString(
       asRecord(entry, context, index).ref,
       "ref",
       context,
-      index
-    ).replace(/^refs\/heads\//, "")
+      index,
+    ).replace(/^refs\/heads\//, ""),
   );
 }
 
@@ -895,14 +894,14 @@ interface OpenPullRequest {
 
 async function listOpenPullRequests(
   commands: CloudCommandPort,
-  repository: string
+  repository: string,
 ): Promise<OpenPullRequest[]> {
   const context = `gh api open pull requests in ${repository}`;
   const result = await commands.runGh([
     "api",
     "--paginate",
     "--slurp",
-    `repos/${repository}/pulls?state=open&per_page=100`
+    `repos/${repository}/pulls?state=open&per_page=100`,
   ]);
   expectSuccess(result, context);
   if (!result.stdout.trim())
@@ -911,7 +910,7 @@ async function listOpenPullRequests(
   const entries = pages.flatMap((page, index) => {
     if (!Array.isArray(page))
       throw new Error(
-        `${context} returned page ${index} with JSON type "${typeof page}" where an array was expected.`
+        `${context} returned page ${index} with JSON type "${typeof page}" where an array was expected.`,
       );
     return page;
   });
@@ -921,7 +920,7 @@ async function listOpenPullRequests(
     return {
       number: requirePositiveInteger(record.number, "number", context, index),
       title: typeof record.title === "string" ? record.title : "(untitled)",
-      headRef: typeof head.ref === "string" ? head.ref : "(unknown)"
+      headRef: typeof head.ref === "string" ? head.ref : "(unknown)",
     };
   });
 }
@@ -929,21 +928,21 @@ async function listOpenPullRequests(
 async function readDefaultBranchSha(
   commands: CloudCommandPort,
   repository: string,
-  branch: string
+  branch: string,
 ): Promise<string> {
   const result = expectSuccess(
     await commands.runGh([
       "api",
       `repos/${repository}/commits/${branch}`,
       "--jq",
-      ".sha"
+      ".sha",
     ]),
-    `gh api commits/${branch} in ${repository}`
+    `gh api commits/${branch} in ${repository}`,
   );
   const sha = result.stdout.trim();
   if (!sha)
     throw new Error(
-      `gh api commits/${branch} in ${repository} returned no commit SHA.`
+      `gh api commits/${branch} in ${repository} returned no commit SHA.`,
     );
   return sha;
 }
@@ -965,11 +964,11 @@ function sameSha(left: string, right: string): boolean {
 function asRecord(
   value: unknown,
   context: string,
-  index: number
+  index: number,
 ): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error(
-      `${context} returned a non-object entry at index ${index}; cannot read the result.`
+      `${context} returned a non-object entry at index ${index}; cannot read the result.`,
     );
   return value as Record<string, unknown>;
 }
@@ -978,11 +977,11 @@ function requireString(
   value: unknown,
   field: string,
   context: string,
-  index: number
+  index: number,
 ): string {
   if (typeof value !== "string" || value.trim() === "")
     throw new Error(
-      `${context} returned an entry at index ${index} with no usable "${field}".`
+      `${context} returned an entry at index ${index} with no usable "${field}".`,
     );
   return value;
 }
@@ -996,11 +995,11 @@ function requirePositiveInteger(
   value: unknown,
   field: string,
   context: string,
-  index: number
+  index: number,
 ): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0)
     throw new Error(
-      `${context} returned an entry at index ${index} with no usable "${field}".`
+      `${context} returned an entry at index ${index} with no usable "${field}".`,
     );
   return value;
 }

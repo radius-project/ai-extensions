@@ -8,20 +8,15 @@ name: Cloud E2E Cleanup
 #
 # SCOPE, and the boundary matters:
 #
-#   In scope   Leaked Entra service principals and applications, stale GitHub
-#              Environments, fallback pull requests and branches older than six
-#              hours, and resetting the fixture default branch to the baseline.
+#   In scope   Leaked resource groups, Entra service principals and
+#              applications, stale GitHub Environments, fallback pull requests
+#              and branches older than six hours, and resetting the fixture
+#              default branch to the baseline.
 #
-#   NOT in     Resource groups. This is deliberate and is a cross-repository
-#   scope      dependency, recorded here so a future reader does not "fix" the
-#              apparent gap. The Radius purge job already deletes resource
-#              groups matching `^radtest-` older than six hours, twice daily,
-#              in this same subscription. The per-run group is named
-#              `radtest-canvas-<uid>` - see `RESOURCE_GROUP_PREFIX` in
-#              packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts
-#              - precisely so that job is our safety net for free. Sweeping
-#              them here would duplicate a job we do not own and would put a
-#              second deleter on a shared subscription.
+# Resource groups are deliberately reclaimed here, not left to the shared Radius
+# purge job. The Radius purge job still matches `^radtest-` older than six
+# hours, so the per-run `radtest-canvas-<uid>` group remains inside its safety
+# net if this workflow cannot run, but this job owns the test leak first.
 #
 # Everything destructive here is named exactly, never matched by wildcard, and
 # never applied to something younger than the age threshold - so a purge can
@@ -64,7 +59,7 @@ jobs:
       contents: read # actions/checkout
       id-token: write # OIDC token exchanged for an Azure token by azure/login
     env:
-      # Matches the Radius purge job's own threshold, and is comfortably longer
+      # Matches the safety-net Radius purge threshold, and is comfortably longer
       # than the 90-minute ceiling a Cloud E2E run can occupy.
       MAX_AGE_HOURS: "6"
     steps:
@@ -102,6 +97,7 @@ jobs:
               `default-branch=${pin.FIXTURE_REPO_DEFAULT_BRANCH}`,
               `baseline-sha=${pin.FIXTURE_BASELINE_SHA}`,
               `application-name=${pin.appRegistrationName()}`,
+              `resource-group-prefix=${pin.RESOURCE_GROUP_PREFIX}`,
               `environment-prefix=${pin.ENVIRONMENT_NAME_PREFIX}`,
               `reason=${pin.describeUnprovisionedFixtureRepository()}`
             ];
@@ -156,6 +152,55 @@ jobs:
           permission-contents: write
           permission-environments: write
           permission-pull-requests: write
+
+      # Per-run resource groups carry both the fixture prefix and a fixture-owned
+      # tag. The Radius purge job is only the safety net; this workflow deletes
+      # the test groups it can prove are old enough and ours.
+      - name: Purge stale Azure resource groups
+        if: steps.pin.outputs.provisioned == 'true'
+        env:
+          RESOURCE_GROUP_PREFIX: ${{ steps.pin.outputs.resource-group-prefix }}
+          SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
+          groups="$RUNNER_TEMP/resource-groups.json"
+          expired_groups="$RUNNER_TEMP/expired-resource-groups.json"
+
+          az group list \
+            --subscription "$SUBSCRIPTION_ID" \
+            --query "[?starts_with(name, '$RESOURCE_GROUP_PREFIX')].{name:name,tags:tags}" \
+            -o json >"$groups"
+
+          node --input-type=module - \
+            "$groups" "$RESOURCE_GROUP_PREFIX" "$cutoff" "$expired_groups" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [groupsFile, prefix, cutoff, expiredGroupsFile] = process.argv.slice(2);
+          const { selectExpiredResourceGroups } = await import(
+            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+          );
+          const groups = JSON.parse(await readFile(groupsFile, "utf8"));
+          await writeFile(
+            expiredGroupsFile,
+            JSON.stringify(selectExpiredResourceGroups(groups, prefix, cutoff))
+          );
+          NODE
+
+          purged=0
+          while read -r name; do
+            [[ -n "$name" ]] || continue
+            echo "Deleting stale resource group $name, created before $cutoff."
+            az group delete \
+              --name "$name" \
+              --subscription "$SUBSCRIPTION_ID" \
+              --yes \
+              --no-wait \
+              --output none
+            purged=$((purged + 1))
+          done < <(jq -r '.[].name' "$expired_groups")
+
+          echo "- Azure resource groups purged: $purged" >>"$GITHUB_STEP_SUMMARY"
 
       # Both object types are matched by the exact display name the product
       # derives from the fixture repository, never by prefix. Service principals

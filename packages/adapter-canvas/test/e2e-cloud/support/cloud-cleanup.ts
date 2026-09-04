@@ -7,11 +7,15 @@ interface CleanupPullRequest {
   readonly headRef: string;
 }
 
+interface CleanupResourceGroup {
+  readonly name: string;
+}
+
 const ISO_INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ?
-      (value as Record<string, unknown>)
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
     : null;
 }
 
@@ -40,16 +44,22 @@ function expired(value: unknown, cutoff: number): boolean {
   return milliseconds !== null && milliseconds < cutoff;
 }
 
+function expiredEpochSeconds(value: unknown, cutoff: number): boolean {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return false;
+  const milliseconds = Number(value) * 1_000;
+  return Number.isFinite(milliseconds) && milliseconds < cutoff;
+}
+
 function flattenPages(payload: unknown, context: string): unknown[] {
   return requireArray(payload, context).flatMap((page) =>
-    Array.isArray(page) ? page : [page]
+    Array.isArray(page) ? page : [page],
   );
 }
 
 export function selectExpiredDirectoryObjects(
   payload: unknown,
   displayName: string,
-  cutoff: string
+  cutoff: string,
 ): CleanupDirectoryObject[] {
   const cutoffMilliseconds = requireCutoff(cutoff);
   const candidates: CleanupDirectoryObject[] = [];
@@ -69,7 +79,7 @@ export function selectExpiredDirectoryObjects(
 export function selectExpiredEnvironments(
   payload: unknown,
   prefix: string,
-  cutoff: string
+  cutoff: string,
 ): string[] {
   const cutoffMilliseconds = requireCutoff(cutoff);
   const names: string[] = [];
@@ -89,10 +99,31 @@ export function selectExpiredEnvironments(
   return names;
 }
 
+export function selectExpiredResourceGroups(
+  payload: unknown,
+  prefix: string,
+  cutoff: string,
+): CleanupResourceGroup[] {
+  const cutoffMilliseconds = requireCutoff(cutoff);
+  const groups: CleanupResourceGroup[] = [];
+  for (const entry of requireArray(payload, "Azure resource groups")) {
+    const item = asRecord(entry);
+    const tags = asRecord(item?.tags);
+    if (
+      typeof item?.name === "string" &&
+      item.name.startsWith(prefix) &&
+      tags?.["radius-canvas-e2e"] === "true" &&
+      expiredEpochSeconds(tags.creationTime, cutoffMilliseconds)
+    )
+      groups.push({ name: item.name });
+  }
+  return groups;
+}
+
 export function selectExpiredFallbackPullRequests(
   payload: unknown,
   branchPrefix: string,
-  cutoff: string
+  cutoff: string,
 ): CleanupPullRequest[] {
   const cutoffMilliseconds = requireCutoff(cutoff);
   const pulls: CleanupPullRequest[] = [];
@@ -115,16 +146,16 @@ export function selectExpiredFallbackPullRequests(
 export function selectExpiredFallbackBranches(
   payload: unknown,
   branchPrefix: string,
-  cutoff: string
+  cutoff: string,
 ): string[] {
   const cutoffMilliseconds = requireCutoff(cutoff);
   const branches: string[] = [];
   for (const entry of flattenPages(payload, "GitHub fallback branches")) {
     const item = asRecord(entry);
     const ref =
-      typeof item?.ref === "string" ?
-        item.ref.replace(/^refs\/heads\//, "")
-      : "";
+      typeof item?.ref === "string"
+        ? item.ref.replace(/^refs\/heads\//, "")
+        : "";
     if (
       ref.startsWith(branchPrefix) &&
       expired(item?.created_at, cutoffMilliseconds)
