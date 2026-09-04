@@ -318,7 +318,9 @@ export function environmentIsReady(status: string): boolean {
 }
 
 export function environmentAllowsDeploy(status: string): boolean {
-  return environmentIsReady(status) || status === "unknown";
+  return (
+    environmentIsReady(status) || status === "unknown" || status === "bypassed"
+  );
 }
 
 // The server reports "success", "failed", or "pending". Anything else — an
@@ -336,6 +338,8 @@ export function environmentOptionLabel(environment: EnvironmentInfo): string {
   if (environmentIsPending(status))
     return `${environment.name} (being created…)`;
   if (status === "unknown") return `${environment.name} (available)`;
+  if (status === "bypassed")
+    return `${environment.name} (verification bypassed)`;
   return `${environment.name} (status unknown)`;
 }
 

@@ -3183,6 +3183,147 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#deploy-progress-modal")).toBeAttached();
   });
 
+  test("shows the cloud-auth-drift panel and routes Re-verify to Environments @safety", async ({
+    page,
+    canvas
+  }) => {
+    // Exception 5.2: an environment that verified earlier can later fail to sign
+    // in to the cloud before any resource is touched. The compiled deploying
+    // page must render the dedicated "Cloud credentials need re-verifying" panel
+    // (not the generic failure) and send the Re-verify button to Environments.
+    // Unit tests cover the render in jsdom; this guards the built browser script
+    // and the resume-from-redirect wiring end to end in Chromium.
+    await page.route("**/api/deploy-status**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "failed",
+          active: false,
+          error:
+            "ERROR: AADSTS700213: No matching federated identity record found.",
+          deployRunUrl: `https://github.com/${REPOSITORY}/actions/runs/77`,
+          errorKind: "cloud-auth-drift",
+          errorBranch: "",
+          errorPaths: "",
+          repairing: false,
+          handoff: { pending: false, state: "idle" },
+          attempt: { targetRepo: "", environment: "" }
+        })
+      });
+    });
+
+    await page.goto(
+      `${canvas.baseUrl}/?page=deploying&application=todolist&environment=fixture-environment`
+    );
+    await page.waitForLoadState("domcontentloaded");
+
+    await expect(page.locator("#deploy-progress-title")).toHaveText(
+      "Cloud credentials need re-verifying"
+    );
+    await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+      "could not authenticate to the cloud"
+    );
+    const reverify = page.locator("#deploy-reverify-credentials");
+    await expect(reverify).toBeVisible();
+    await expect(reverify).toHaveText("Re-verify credentials");
+    // The generic "Deployment ... failed" heading must not be what the user sees
+    // for a credential-drift failure, and no model-repair button is offered.
+    await expect(page.locator("#deploy-progress-title")).not.toContainText(
+      "failed"
+    );
+
+    await reverify.click();
+    await page.waitForURL(/\/\?page=environment$/);
+  });
+
+  test("offers the verify-bypass recovery and sends the mutation nonce when Create environment anyway is clicked @safety", async ({
+    page,
+    canvas
+  }) => {
+    // Exceptions 4.4/4.5: a verification that fails on a recoverable category
+    // (missing permissions / unreachable endpoint) offers a "Create environment
+    // anyway" bypass. This drives the real restart-recovery path — the tracker
+    // observes a live operation, the server then loses that record, and the
+    // verify-status endpoint reports a bypassable failure — and asserts the
+    // compiled button renders in #env-progress-verify-bypass and POSTs with the
+    // browser mutation nonce the real page was served. Unit tests cover the
+    // render in jsdom; only Chromium proves the built script's real fetch
+    // actually carries the nonce header.
+    const operation = {
+      operationId: "op-bypass-e2e",
+      kind: "create",
+      environment: "fixture-environment",
+      provider: "azure",
+      state: "verifying",
+      currentStage: "verify",
+      startedAt: new Date().toISOString(),
+      verification: { dispatchedAt: Date.now(), runId: "555" }
+    };
+    let opCalls = 0;
+    // The tracker must observe the operation at least once (so it commits to
+    // this environment) before the record disappears; only then does it fall
+    // back to the verify-status endpoint that surfaces the bypass. Serving the
+    // operation for the first two reads (resume + first poll) and nothing after
+    // reproduces that sequence deterministically.
+    await page.route(/\/api\/operations\?repo=/, async (route) => {
+      opCalls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(opCalls <= 2 ? { operation } : { operation: null })
+      });
+    });
+    await page.route("**/api/verify-status**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "failed",
+          terminal: false,
+          category: "permissions",
+          missingPermissions: ["Contributor"],
+          runId: "555",
+          runUrl: `https://github.com/${REPOSITORY}/actions/runs/555`
+        })
+      });
+    });
+    let bypassNonce: string | null = null;
+    let bypassBody: unknown = null;
+    await page.route("**/api/bypass-verification**", async (route) => {
+      const request = route.request();
+      bypassNonce = request.headers()["x-radius-mutation-nonce"] ?? null;
+      bypassBody = request.postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ success: true, category: "permissions" })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+
+    const bypassButton = page.locator("#env-progress-verify-bypass-button");
+    await expect(bypassButton).toBeVisible();
+    await expect(bypassButton).toHaveText("Create environment anyway");
+
+    await bypassButton.click();
+
+    await expect(page.locator("#env-success-banner")).toBeVisible();
+    await expect(page.locator("#env-success-banner-text")).toContainText(
+      "fixture-environment"
+    );
+    // The security contract: the built button's POST carries the nonce the real
+    // server injected into the page, not an empty string.
+    expect(bypassNonce).toBeTruthy();
+    expect(bypassBody).toMatchObject({
+      repo: REPOSITORY,
+      environment: "fixture-environment",
+      operationId: "op-bypass-e2e",
+      runId: "555"
+    });
+  });
+
   test("does not re-announce an unchanged deploy while it keeps polling", async ({
     page,
     canvas

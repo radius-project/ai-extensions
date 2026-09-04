@@ -2,18 +2,21 @@ import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
 import type {
   EnvironmentActiveDeployment,
+  EnvironmentRunStep,
   EnvironmentsDependencies,
   EnvironmentVerifyRun
 } from "./environments-types.js";
+import { classifyVerifyFailure } from "./verify-failure-classification.js";
 
 // The `environments` family, minus `POST /api/create-environment`, which is
-// large enough to live in its own `create-environment*.ts` seams. The four routes
-// here are the environment picker's read surface (`list-environments`,
-// `verify-status`), the deploy page's parameter probe (`app-params`), and the
-// one destructive route (`delete-environment`). They are migrated together
-// because they are the environment lifecycle the picker drives; nothing is
-// moved out of `server.ts`, every helper is injected, so this module spawns no
-// process, owns no cache, and reads no module-level mutable state.
+// large enough to live in its own `create-environment*.ts` seams. The five
+// routes here are the environment picker's read surface (`list-environments`,
+// `verify-status`), the deploy page's parameter probe (`app-params`), the
+// verify-failure override (`bypass-verification`), and the one destructive
+// route (`delete-environment`). They are migrated together because they are the
+// environment lifecycle the picker drives; nothing is moved out of `server.ts`,
+// every helper is injected, so this module spawns no process, owns no cache, and
+// reads no module-level mutable state.
 //
 // The dependency seam and supporting types live in `environments-types.ts`;
 // they are re-exported here so existing importers keep a single entry point.
@@ -366,6 +369,297 @@ export async function handleDeleteEnvironment(
   }
 }
 
+// The GitHub environment variable that records that a user chose to keep an
+// environment whose credential verification did not pass (exception scenarios
+// 4.4 permissions and 4.5 unreachable). It is durable because the environment
+// listing derives an environment's status live from its verify run, which stays
+// "failed" forever; the marker is what lets the listing report the environment
+// as usable so it can be selected for a deploy. Its value is the id of the
+// failed run the user accepted, so the listing only treats the environment as
+// bypassed for that exact run — a different later failure is reported as failed
+// and re-examined, and a genuine later "success" run wins on its own.
+const VERIFICATION_BYPASS_VARIABLE = "RADIUS_VERIFICATION_BYPASSED";
+
+// The exception categories a user is allowed to bypass: a permissions gap (4.4)
+// or an unreachable cluster / cloud endpoint (4.5) can be resolved after the
+// environment record exists. An OIDC-trust gap (4.3) and any unclassified
+// ("generic") failure must be fixed first and are never bypassable.
+const BYPASSABLE_VERIFY_CATEGORIES: ReadonlySet<string> = new Set([
+  "permissions",
+  "cluster-unreachable",
+  "cloud-unreachable"
+]);
+
+// Records a verification bypass for an environment by writing the durable marker
+// variable, then invalidates the repo's cached listing so the picker re-derives
+// the environment as usable on its next read.
+//
+// The bypass is a mutation that makes a failed environment deployable, so it is
+// authorized entirely server-side rather than trusting the caller's word that
+// the failure is bypassable. The request must name the tracked verification
+// operation and the exact run it observed; the handler resolves that operation's
+// pinned GitHub executor, re-fetches and re-classifies the run under that
+// identity, and confirms the target is a Radius-managed environment whose latest
+// verify run genuinely reached a terminal, bypassable failure (4.4 / 4.5) for
+// that same run id. The marker's value is that run id, so the listing only
+// treats the environment as bypassed for the specific failed run the user
+// accepted — a different later failure (new run id) is not silently inherited,
+// and a real later success supersedes it.
+//
+// The narrow shape handleBypassVerification reads from the (unknown-typed)
+// tracked operation. Every field is optional and defensively re-checked at the
+// use site so a shape change fails closed instead of throwing.
+interface BypassVerificationOperation {
+  repo?: unknown;
+  environment?: unknown;
+  verification?: { runId?: unknown } | null;
+  context?: { githubLogin?: unknown } | null;
+}
+export async function handleBypassVerification(
+  context: CanvasRequestContext,
+  dependencies: EnvironmentsDependencies
+): Promise<void> {
+  const { response } = context;
+  const json = (status: number, payload: unknown): void => {
+    response.setHeader("Content-Type", "application/json");
+    response.writeHead(status);
+    response.end(JSON.stringify(payload));
+  };
+  const body = await context.readTextBody();
+  let data: { [key: string]: unknown };
+  try {
+    data = JSON.parse(body || "{}");
+  } catch (e) {
+    // Only a malformed request body is a client error. Everything after this is
+    // server-side work whose failures must surface as 5xx, not 400.
+    json(400, { error: dependencies.errorMessage(e) });
+    return;
+  }
+  try {
+    // Every identifier is a JSON boundary value. Validate types explicitly so a
+    // non-string field yields a clean 400 rather than a coerced value or a
+    // "trim is not a function" TypeError. A GitHub run id may arrive as either a
+    // JSON number or a string; the rest must be strings.
+    const readStringField = (value: unknown): string =>
+      typeof value === "string" ? value.trim() : "";
+    const repo = readStringField(data.repo);
+    const envName = readStringField(data.environment);
+    const operationId = readStringField(data.operationId);
+    const runId =
+      typeof data.runId === "number" || typeof data.runId === "string" ?
+        String(data.runId).trim()
+      : "";
+    if (!repo || !envName || !operationId || !runId) {
+      json(400, {
+        error: "repo, environment, operationId and runId are required."
+      });
+      return;
+    }
+
+    // 1. The request must reference the live verification operation for this
+    //    exact repo, environment and run. This binds the bypass to a tracked
+    //    operation instead of an arbitrary caller-supplied target. getOperation
+    //    is typed unknown, so read it through a narrow shape rather than `any`.
+    const verifyOp = dependencies.getOperation(operationId) as
+      BypassVerificationOperation | null | undefined;
+    if (
+      !verifyOp ||
+      verifyOp.repo !== repo ||
+      verifyOp.environment !== envName ||
+      String(verifyOp.verification?.runId ?? "") !== runId
+    ) {
+      json(409, {
+        error:
+          "The verification operation does not match this bypass request. Re-run verification and try again."
+      });
+      return;
+    }
+    if (!dependencies.hasCompleteVerificationIdentity(verifyOp)) {
+      json(409, {
+        error:
+          "The verification operation has incomplete dispatch identity and cannot be bypassed."
+      });
+      return;
+    }
+
+    // 2. Resolve the pinned executor / login that started verification and
+    //    re-fetch the run under that identity, so the server — not the browser —
+    //    decides the run's outcome and classification.
+    const pinnedLogin =
+      typeof verifyOp.context?.githubLogin === "string" ?
+        verifyOp.context.githubLogin.trim()
+      : "";
+    const selectedExecutor =
+      dependencies.getSelectedGitHubExecutor(operationId) || undefined;
+    if (!pinnedLogin || !selectedExecutor) {
+      json(409, {
+        error:
+          "Radius cannot confirm the GitHub account that ran verification, so the failure cannot be bypassed."
+      });
+      return;
+    }
+
+    // 3. Confirm the target is a Radius-managed environment, reading under the
+    //    pinned executor so the check runs as the authorized identity — not the
+    //    server's ambient gh auth. Anything without the RADIUS_MANAGED marker
+    //    was not created by this extension and is not a valid bypass target.
+    let managed = false;
+    try {
+      const varsResult = await selectedExecutor.run(
+        [
+          "api",
+          `/repos/${repo}/environments/${encodeURIComponent(
+            envName
+          )}/variables?per_page=100`,
+          "--jq",
+          ".variables[].name"
+        ],
+        { timeout: 20000 }
+      );
+      if (varsResult.code !== 0 && varsResult.code !== "0") {
+        throw new Error(
+          varsResult.stderr || varsResult.stdout || "gh api failed"
+        );
+      }
+      managed = (varsResult.stdout || "")
+        .split("\n")
+        .map((line) => line.trim())
+        .includes("RADIUS_MANAGED");
+    } catch (e) {
+      json(502, {
+        error:
+          "Could not confirm the environment before recording a bypass: " +
+          dependencies.errorMessage(e)
+      });
+      return;
+    }
+    if (!managed) {
+      json(409, {
+        error:
+          "That environment is not managed by Radius and cannot be bypassed."
+      });
+      return;
+    }
+
+    // 4. Re-fetch and re-classify the run server-side under the pinned identity.
+    //    A GitHub read failure fails closed (502) like the checks above, never
+    //    falling through to the outer client-error handler. Only a terminal run
+    //    that genuinely *failed* (not cancelled, timed out or skipped) and whose
+    //    classification is a bypassable category is allowed through.
+    let detail: Awaited<ReturnType<typeof dependencies.getRunDetail>>;
+    try {
+      detail = await dependencies.getRunDetail(repo, runId, selectedExecutor);
+    } catch (e) {
+      json(502, {
+        error:
+          "Could not read the verification run to confirm the bypass: " +
+          dependencies.errorMessage(e)
+      });
+      return;
+    }
+    if (!detail) {
+      json(502, {
+        error:
+          "Could not read the verification run to confirm the bypass. Try again."
+      });
+      return;
+    }
+    if (detail.status !== "completed") {
+      json(409, {
+        error:
+          "Credential verification is still running. Wait for it to finish before bypassing."
+      });
+      return;
+    }
+    if (detail.conclusion === "success") {
+      json(409, {
+        error:
+          "Credential verification passed, so there is nothing to bypass. Reload the environment list."
+      });
+      return;
+    }
+    if (detail.conclusion !== "failure") {
+      json(409, {
+        error:
+          "Credential verification did not fail cleanly (it may have been cancelled or timed out). Re-run verification before deciding whether to bypass."
+      });
+      return;
+    }
+    const failed = (detail.steps || []).filter(
+      (s: EnvironmentRunStep) =>
+        s.conclusion && s.conclusion !== "success" && s.conclusion !== "skipped"
+    );
+    let log: string;
+    try {
+      log =
+        (await dependencies.fetchRunLog(repo, runId, selectedExecutor)) || "";
+    } catch (e) {
+      json(502, {
+        error:
+          "Could not read the verification run log to confirm the bypass: " +
+          dependencies.errorMessage(e)
+      });
+      return;
+    }
+    const azureLoginLog = dependencies.extractGitHubActionsStepLog(
+      log,
+      "Azure Login (OIDC)"
+    );
+    const oidcHelp = dependencies.explainOidcEnterpriseClaim(azureLoginLog);
+    const noSubscriptionsHelp =
+      oidcHelp === "" ? dependencies.explainNoSubscriptions(log) : "";
+    const classification = classifyVerifyFailure({
+      failedSteps: failed,
+      log,
+      oidcHelp,
+      noSubscriptionsHelp
+    });
+    if (!BYPASSABLE_VERIFY_CATEGORIES.has(classification.category)) {
+      json(409, {
+        error:
+          "This verification failure must be fixed before the environment can be used; it cannot be bypassed."
+      });
+      return;
+    }
+
+    // 5. Record the bypass under the pinned executor, keyed to the specific run
+    //    the user accepted.
+    try {
+      const writeResult = await selectedExecutor.run(
+        [
+          "variable",
+          "set",
+          VERIFICATION_BYPASS_VARIABLE,
+          "--body",
+          runId,
+          "--env",
+          envName,
+          "--repo",
+          repo
+        ],
+        { timeout: 20000 }
+      );
+      if (writeResult.code !== 0 && writeResult.code !== "0") {
+        throw new Error(
+          writeResult.stderr || writeResult.stdout || "gh variable set failed"
+        );
+      }
+    } catch (e) {
+      json(500, {
+        error:
+          "Could not record the verification bypass: " +
+          dependencies.errorMessage(e)
+      });
+      return;
+    }
+    dependencies.envListCacheDelete(repo);
+    json(200, { success: true, category: classification.category });
+  } catch (e) {
+    // The body already parsed; anything thrown here is a server-side failure.
+    json(500, { error: dependencies.errorMessage(e) });
+  }
+}
+
 // The GitHub environment variables that hold what the creation form asks for,
 // mapped to the form's own field names. Everything else the environment stores
 // is either derived from the credential profile or internal Radius state.
@@ -655,6 +949,10 @@ export async function handleListEnvironments(
         const depIds = depIdsRaw ? depIdsRaw.split("\n").filter(Boolean) : [];
         let status =
           verifyRunsResult.ok && depIds.length > 0 ? "unknown" : "pending";
+        // The run id that determined `status`, so a bypass marker can be matched
+        // to the specific failed run it was granted for rather than overriding
+        // any later or unrelated failure.
+        let matchedRunId = "";
         if (verifyRunsResult.ok && verifyRuns.size > 0) {
           // Resolve every deployment's originating-run URL in parallel
           // (deployments come back newest-first), then pick the newest one
@@ -679,10 +977,25 @@ export async function handleListEnvironments(
               const run = verifyRuns.get(m[1]);
               if (run) {
                 status = verifyStatusOf(run) || status;
+                matchedRunId = m[1];
                 break;
               }
             }
           }
+        }
+
+        // A user who kept an environment despite a failed verification (4.4 /
+        // 4.5) leaves this durable marker, whose value is the run id that
+        // failed. Surface "bypassed" only when the current status is a failure
+        // of that exact run: a real later "success" wins on its own, and a
+        // different later failure (a new run id) is not silently inherited but
+        // reported as failed so it is re-examined.
+        if (
+          status === "failed" &&
+          matchedRunId !== "" &&
+          vars[VERIFICATION_BYPASS_VARIABLE] === matchedRunId
+        ) {
+          status = "bypassed";
         }
 
         const webUrl =
@@ -994,6 +1307,12 @@ export async function handleVerifyStatus(
     const failureHelp = oidcHelp || noSubscriptionsHelp;
     if (failureHelp)
       errMsg = failureHelp + "\n\n\u2014 raw error \u2014\n" + errMsg;
+    const classification = classifyVerifyFailure({
+      failedSteps: failed,
+      log: log || "",
+      oidcHelp,
+      noSubscriptionsHelp
+    });
     if (verifyOp && verifyOp.currentStage === dependencies.stageVerify) {
       const failedAtAzureAccess = isAzureRbacVerificationFailure(
         failed,
@@ -1027,7 +1346,23 @@ export async function handleVerifyStatus(
           dependencies.reportOperationDiagnostic(diagnostic)
       });
     }
-    respond({ state: "failed", runId, runUrl, error: errMsg });
+    respond({
+      state: "failed",
+      runId,
+      runUrl,
+      error: errMsg,
+      category: classification.category,
+      ...(classification.component ?
+        { component: classification.component }
+      : {}),
+      ...((
+        classification.missingPermissions &&
+        classification.missingPermissions.length > 0
+      ) ?
+        { missingPermissions: classification.missingPermissions }
+      : {}),
+      ...(classification.detail ? { detail: classification.detail } : {})
+    });
   } catch (e) {
     if (!isCurrentVerificationRequest()) {
       respondWithCurrentVerification();
@@ -1090,6 +1425,8 @@ export function createEnvironmentsRoutes(
     "POST /api/app-params": (context) => handleAppParams(context, dependencies),
     "POST /api/delete-environment": (context) =>
       handleDeleteEnvironment(context, dependencies),
+    "POST /api/bypass-verification": (context) =>
+      handleBypassVerification(context, dependencies),
     "GET /api/list-environments": (context) =>
       handleListEnvironments(context, dependencies),
     "GET /api/verify-status": (context) =>

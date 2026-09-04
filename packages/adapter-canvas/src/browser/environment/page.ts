@@ -13,6 +13,7 @@ import {
 } from "./credentials.js";
 import { initializeDiscoveryPanel } from "./discovery.js";
 import { createEnvironmentConfirmDialog } from "./confirm-dialog.js";
+import { validateEnvironmentName } from "./form-validation.js";
 import {
   findNamespaceConflict,
   initializeEnvironmentPane,
@@ -455,8 +456,9 @@ export function initializeEnvironmentPage(
       return;
     }
     const environment = environmentInput.value.trim();
-    if (environment === "") {
-      showFormError("Please enter an environment name.");
+    const environmentNameError = validateEnvironmentName(environment);
+    if (environmentNameError !== "") {
+      showFormError(environmentNameError);
       return;
     }
     const targetRepo = targetRepoInput.value.trim();

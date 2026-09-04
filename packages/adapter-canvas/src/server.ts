@@ -234,6 +234,7 @@ import {
   extractGitHubActionsStepLog,
   extractRadDeployError,
   explainOidcEnterpriseClaim,
+  classifyDeployCloudAuthDrift,
   explainNoSubscriptions,
   explainRepoAccessForEnvSetup,
   isGitHubRateLimitError,
@@ -2513,6 +2514,13 @@ export const DEPLOY_OIDC_SUBJECT_MISSING_KIND: DeployErrorKind =
 export const DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND: DeployErrorKind =
   "oidc-subject-case-mismatch";
 
+// Marks a redeploy whose cloud login/authorization failed before any resource
+// was touched (exception 5.2): an environment that verified earlier no longer
+// authenticates, so its trust or permissions drifted. The fix is to re-verify
+// the credentials, not to change the model, so like the OIDC-subject kinds this
+// never opens an automatic repair loop.
+export const DEPLOY_CLOUD_AUTH_DRIFT_KIND: DeployErrorKind = "cloud-auth-drift";
+
 // Ceiling for the preflight's `az` call. The check is advisory — it can only
 // block on a definitive answer — so a slow or hung `az` must not hold up a
 // deploy that authenticates in Actions rather than locally.
@@ -2703,6 +2711,9 @@ export function triggerDeployRepairHandoff(
       // token GitHub would mint. Repairing the model cannot change that.
       state.deployErrorKind === DEPLOY_OIDC_SUBJECT_MISSING_KIND ||
       state.deployErrorKind === DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND ||
+      // Cloud auth drifted since the environment verified: only re-verifying
+      // (not a model repair + redeploy) can fix it, so keep it out of the loop.
+      state.deployErrorKind === DEPLOY_CLOUD_AUTH_DRIFT_KIND ||
       // An attempt whose run may still be in flight can never be repaired: the
       // resolver refuses its redeploy. Opening a loop only to refuse its first
       // call would spend a cycle and tell the agent two different things.
@@ -3218,6 +3229,8 @@ const deployOutcomeService = createDeployOutcomeService({
   extractGitHubActionsStepLog,
   explainOidcEnterpriseClaim,
   extractRadDeployError: (logText) => extractRadDeployError(logText),
+  classifyDeployCloudAuthDrift,
+  cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
   sleep: (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
   now: () => Date.now()

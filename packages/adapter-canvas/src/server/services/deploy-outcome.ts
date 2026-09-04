@@ -44,6 +44,17 @@ export interface DeployOutcomeDependencies {
   ): string;
   explainOidcEnterpriseClaim(logText: string | null | undefined): string;
   extractRadDeployError(logText: string | null | undefined): string;
+  // Exception 5.2: classify a deploy that failed at the cloud login/credentials
+  // step before any resource was touched as credential drift. Returns the
+  // user-facing message, or '' when the failure is not auth drift.
+  classifyDeployCloudAuthDrift(input: {
+    provider?: string | null;
+    resourcesTouched: boolean;
+    failedStepNames: readonly (string | undefined)[];
+  }): string;
+  // The deployErrorKind stamped on an auth-drift failure so the repair guard
+  // leaves it for the user to re-verify rather than auto-redeploying it.
+  cloudAuthDriftKind: CanvasState["deployErrorKind"];
   sleep(milliseconds: number): Promise<void>;
   now(): number;
 }
@@ -78,6 +89,7 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployOutcomeDependencies)[] = [
   "extractGitHubActionsStepLog",
   "explainOidcEnterpriseClaim",
   "extractRadDeployError",
+  "classifyDeployCloudAuthDrift",
   "sleep",
   "now"
 ];
@@ -90,7 +102,18 @@ export function createDeployOutcomeService(
     dependencies,
     REQUIRED_DEPENDENCIES
   );
-
+  // assertDeployDependencies only guards function-typed dependencies, so the
+  // string-valued cloudAuthDriftKind is validated here: an empty or missing
+  // value would silently stamp auth-drift failures with a blank kind and defeat
+  // the repair guard that relies on it.
+  if (
+    typeof dependencies.cloudAuthDriftKind !== "string" ||
+    dependencies.cloudAuthDriftKind.trim() === ""
+  ) {
+    throw new Error(
+      "createDeployOutcomeService requires a non-empty cloudAuthDriftKind."
+    );
+  }
   // The producer publishes its artifact from a step that runs after
   // `rad deploy` and before teardown, so by the time the run reports completed
   // the upload has normally landed. Retry a few times anyway to absorb
@@ -264,6 +287,29 @@ export function createDeployOutcomeService(
       }
       log("");
       log("❌ Deployment failed. Conclusion: " + conclusion);
+      // Exception 5.2: a redeploy whose cloud login/credentials step failed
+      // before "Run rad commands" ever started touched no resource, so classify
+      // it as credential drift. `deployStepStartedAt` is 0 until that step is
+      // observed running, which is the "no resource touched" signal. Computed
+      // here (before the guarded describeFailure read) so the degraded-message
+      // path below still gets the drift prefix and kind. Only a genuine
+      // "failure" conclusion can be drift: a "cancelled" or "timed_out" run that
+      // happened to stop at the cloud-login step must not be stamped as drift.
+      const authDriftMessage =
+        conclusion === "failure" ?
+          dependencies.classifyDeployCloudAuthDrift({
+            provider,
+            resourcesTouched: deployStepStartedAt > 0,
+            failedStepNames: request.steps
+              .filter(
+                (s) =>
+                  s.conclusion &&
+                  s.conclusion !== "success" &&
+                  s.conclusion !== "skipped"
+              )
+              .map((s) => s.name)
+          })
+        : "";
       // Assemble the error BEFORE flipping the status to "failed". The webview's
       // /api/deploy-status poll fires triggerDeployRepairHandoff the instant it
       // observes "failed", and describeFailure awaits network reads (run log +
@@ -292,6 +338,14 @@ export function createDeployOutcomeService(
           "/actions/runs/" +
           request.runId +
           ".";
+      }
+      // Stamp the drift prefix + kind last so it leads the message regardless of
+      // which describeFailure path ran. The kind keeps the repair guard from
+      // auto-redeploying a failure only the user can fix by re-verifying.
+      if (authDriftMessage) {
+        entry.state.deployErrorKind = dependencies.cloudAuthDriftKind;
+        entry.state.deployError =
+          authDriftMessage + "\n\n" + entry.state.deployError;
       }
       entry.state.deployStatus = "failed";
     }

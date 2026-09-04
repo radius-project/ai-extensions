@@ -54,6 +54,7 @@ import {
   classifyDeployDispatchFailure,
   DEPLOY_BRANCH_NOT_PUSHED_KIND,
   DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
+  DEPLOY_CLOUD_AUTH_DRIFT_KIND,
   DEPLOY_RUN_UNCONFIRMED_KIND
 } from "./server.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
@@ -4814,6 +4815,22 @@ describe("triggerDeployRepairHandoff", () => {
         failedEntry({
           deployErrorKind: DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND
         })
+      )
+    ).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does not hand off a cloud-auth-drift failure, which only re-verifying can fix", () => {
+    const calls: DeployRepairHandoffInput[] = [];
+    setDeployRepairHandoff((payload) => {
+      calls.push(payload);
+    });
+    // Exception 5.2: the credentials drifted since the environment verified, so
+    // redeploying the same model would only fail login again — the user must
+    // re-verify first.
+    expect(
+      triggerDeployRepairHandoff(
+        failedEntry({ deployErrorKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND })
       )
     ).toBe(false);
     expect(calls).toHaveLength(0);

@@ -1963,6 +1963,7 @@ describe("deployed pane state", () => {
     ["success", true],
     ["pending", false],
     ["failed", false],
+    ["bypassed", false],
     ["", false]
   ])("treats %s as ready=%s", (status, ready) => {
     expect(environmentIsReady(status)).toBe(ready);
@@ -1971,6 +1972,7 @@ describe("deployed pane state", () => {
   it.each([
     ["success", true],
     ["unknown", true],
+    ["bypassed", true],
     ["", false],
     ["pending", false],
     ["failed", false],
@@ -2148,6 +2150,13 @@ describe("deployed pane state", () => {
         status: "unknown"
       })
     ).toBe("dev (available)");
+    expect(
+      environmentOptionLabel({
+        name: "dev",
+        provider: "azure",
+        status: "bypassed"
+      })
+    ).toBe("dev (verification bypassed)");
     expect(
       environmentOptionLabel({
         name: "dev",

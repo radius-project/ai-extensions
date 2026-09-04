@@ -15,7 +15,8 @@ import {
   previewEntryLabel,
   previewResourceLabel,
   parseOperationResponse,
-  parseVerifyStatus
+  parseVerifyStatus,
+  describeVerifyFailure
 } from "./operations.js";
 import type {
   AppPickerChoice,
@@ -305,7 +306,10 @@ function controllerWithHarness(
 ) {
   const harness = createDeps();
   return {
-    controller: controllerFor(browser, { deps: harness.deps }),
+    controller: controllerFor(browser, {
+      deps: harness.deps,
+      mutationNonce: "browser-nonce"
+    }),
     harness
   };
 }
@@ -815,7 +819,12 @@ describe("parseVerifyStatus", () => {
       terminal: false,
       error: "",
       runUrl: "",
-      activity: ""
+      runId: "",
+      activity: "",
+      category: "",
+      component: "",
+      missingPermissions: [],
+      detail: ""
     });
   });
 
@@ -826,6 +835,7 @@ describe("parseVerifyStatus", () => {
         terminal: true,
         error: "",
         runUrl: "https://example.test/run",
+        runId: 42,
         activity: "Checking credentials"
       })
     ).toEqual({
@@ -833,8 +843,143 @@ describe("parseVerifyStatus", () => {
       terminal: true,
       error: "",
       runUrl: "https://example.test/run",
-      activity: "Checking credentials"
+      runId: "42",
+      activity: "Checking credentials",
+      category: "",
+      component: "",
+      missingPermissions: [],
+      detail: ""
     });
+  });
+
+  it("reads a categorized failure payload with permissions and detail", () => {
+    expect(
+      parseVerifyStatus({
+        state: "failed",
+        terminal: true,
+        error: "denied",
+        runUrl: "https://example.test/run",
+        runId: "555",
+        activity: "",
+        category: "permissions",
+        component: "cloud provider",
+        missingPermissions: ["eks:DescribeCluster", "sts:AssumeRole"],
+        detail: "The identity is missing required permissions."
+      })
+    ).toEqual({
+      state: "failed",
+      terminal: true,
+      error: "denied",
+      runUrl: "https://example.test/run",
+      runId: "555",
+      activity: "",
+      category: "permissions",
+      component: "cloud provider",
+      missingPermissions: ["eks:DescribeCluster", "sts:AssumeRole"],
+      detail: "The identity is missing required permissions."
+    });
+  });
+
+  it("ignores an unrecognized category value", () => {
+    expect(
+      parseVerifyStatus({ state: "failed", category: "bogus" }).category
+    ).toBe("");
+  });
+});
+
+describe("describeVerifyFailure", () => {
+  const failure = (over: Record<string, unknown>) =>
+    parseVerifyStatus({ state: "failed", ...over });
+
+  it("describes an OIDC-trust failure without offering bypass", () => {
+    const desc = describeVerifyFailure(
+      failure({ category: "oidc-trust" }),
+      "azure"
+    );
+    expect(desc.headline).toContain("isn’t trusted to sign in to Azure");
+    expect(desc.guidance).toContain("OIDC trust");
+    expect(desc.offerBypass).toBe(false);
+    expect(desc.permissions).toEqual([]);
+  });
+
+  it("prefers a server-supplied detail for the OIDC guidance", () => {
+    const desc = describeVerifyFailure(
+      failure({ category: "oidc-trust", detail: "Add the enterprise claim." }),
+      "aws"
+    );
+    expect(desc.headline).toContain("AWS");
+    expect(desc.guidance).toBe("Add the enterprise claim.");
+  });
+
+  it("lists missing permissions and offers bypass for a permissions failure", () => {
+    const desc = describeVerifyFailure(
+      failure({
+        category: "permissions",
+        missingPermissions: ["eks:DescribeCluster"]
+      }),
+      "aws"
+    );
+    expect(desc.headline).toContain("Signed in to AWS");
+    expect(desc.permissions).toEqual(["eks:DescribeCluster"]);
+    expect(desc.offerBypass).toBe(true);
+  });
+
+  it("prefers a server-supplied detail for the permissions guidance", () => {
+    const desc = describeVerifyFailure(
+      failure({ category: "permissions", detail: "Grant Reader." }),
+      "azure"
+    );
+    expect(desc.guidance).toBe("Grant Reader.");
+  });
+
+  it("names the cluster component when unreachable", () => {
+    const desc = describeVerifyFailure(
+      failure({ category: "cluster-unreachable", component: "aks-prod" }),
+      "azure"
+    );
+    expect(desc.headline).toContain("Kubernetes cluster");
+    expect(desc.guidance).toContain("(aks-prod)");
+    expect(desc.offerBypass).toBe(true);
+  });
+
+  it("omits the component parenthetical when none is provided", () => {
+    const desc = describeVerifyFailure(
+      failure({ category: "cluster-unreachable" }),
+      "azure"
+    );
+    expect(desc.guidance).not.toContain("(");
+  });
+
+  it("omits the parenthetical when component is the generic cluster label", () => {
+    const desc = describeVerifyFailure(
+      failure({
+        category: "cluster-unreachable",
+        component: "Kubernetes cluster"
+      }),
+      "azure"
+    );
+    // The headline already says "Kubernetes cluster"; repeating it in a
+    // parenthetical reads as "the cluster (Kubernetes cluster)".
+    expect(desc.guidance).not.toContain("(");
+  });
+
+  it("describes a cloud-unreachable failure", () => {
+    const desc = describeVerifyFailure(
+      failure({ category: "cloud-unreachable" }),
+      "aws"
+    );
+    expect(desc.headline).toContain("reach AWS");
+    expect(desc.offerBypass).toBe(true);
+  });
+
+  it("falls back to the raw error for an unclassified failure", () => {
+    const desc = describeVerifyFailure(
+      failure({ category: "", error: "boom" }),
+      "unknown-provider"
+    );
+    expect(desc.headline).toBe("Credential verification failed.");
+    expect(desc.guidance).toBe("boom");
+    expect(desc.offerBypass).toBe(false);
   });
 });
 
@@ -1924,6 +2069,427 @@ describe("verify status polling", () => {
     );
   });
 
+  it("renders category-specific guidance and missing permissions on a classified failure", async () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        runUrl: "",
+        category: "permissions",
+        missingPermissions: ["eks:DescribeCluster", "sts:AssumeRole"]
+      })
+    );
+
+    await tickClock(browser.clock, 1500);
+
+    const text = browser.els[PROGRESS_IDS.activity].textContent ?? "";
+    expect(text).toContain("missing required permissions");
+    expect(text).toContain("Missing: eks:DescribeCluster, sts:AssumeRole.");
+  });
+
+  it("offers a bypass button on a bypassable failure and records the bypass on click", async () => {
+    const browser = setup();
+    const { controller, harness } = controllerWithHarness(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        category: "permissions",
+        missingPermissions: ["Reader"],
+        runId: "555"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    const container = browser.els[PROGRESS_IDS.verifyBypass];
+    expect(container.style.display).toBe("flex");
+    const button = container.children[0];
+    expect(button.textContent).toBe("Create environment anyway");
+
+    browser.net.handle("/api/bypass-verification", () =>
+      jsonResponse({ success: true })
+    );
+    button.dispatch("click");
+    await flushPromises();
+
+    const bypassCall = browser.net.calls.find(
+      (call) => call.url === "/api/bypass-verification"
+    );
+    expect(bypassCall?.init?.method).toBe("POST");
+    // The bypass is a nonce-protected mutation: the request must carry the
+    // browser's mutation nonce or the server rejects it.
+    expect(
+      (bypassCall?.init?.headers as Record<string, string>)?.[
+        "X-Radius-Mutation-Nonce"
+      ]
+    ).toBe("browser-nonce");
+    expect(JSON.parse(String(bypassCall?.init?.body ?? ""))).toEqual({
+      repo: REPO,
+      environment: "dev",
+      operationId: "op-1",
+      runId: "555"
+    });
+    expect(harness.successBanners).toEqual([
+      { provider: "azure", environment: "dev" }
+    ]);
+    expect(harness.reloadCount).toBe(1);
+    expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
+  });
+
+  it("sends an empty mutation nonce header when the page was served without one", async () => {
+    // The bypass POST always sets the nonce header; when the controller was
+    // initialized without a mutationNonce it falls back to an empty string
+    // (which the server then rejects) rather than omitting the header. This
+    // exercises that `|| ""` fallback branch.
+    const browser = setup();
+    const harness = createDeps();
+    const controller = controllerFor(browser, { deps: harness.deps });
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        category: "permissions",
+        runId: "555"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    const container = browser.els[PROGRESS_IDS.verifyBypass];
+    const button = container.children[0];
+    browser.net.handle("/api/bypass-verification", () =>
+      jsonResponse({ success: true })
+    );
+    button.dispatch("click");
+    await flushPromises();
+
+    const bypassCall = browser.net.calls.find(
+      (call) => call.url === "/api/bypass-verification"
+    );
+    expect(
+      (bypassCall?.init?.headers as Record<string, string>)?.[
+        "X-Radius-Mutation-Nonce"
+      ]
+    ).toBe("");
+  });
+
+  it("ignores a click on a bypass button left over from a superseded session", async () => {
+    const browser = setup();
+    const { controller, harness } = controllerWithHarness(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        category: "permissions",
+        runId: "555"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    const container = browser.els[PROGRESS_IDS.verifyBypass];
+    const button = container.children[0];
+    browser.net.handle("/api/bypass-verification", () =>
+      jsonResponse({ success: true })
+    );
+
+    // Start a new tracking session, then click the detached stale button.
+    controller?.trackProgress("staging", "aws");
+    await flushPromises();
+    button.dispatch("click");
+    await flushPromises();
+
+    expect(
+      browser.net.calls.some((call) => call.url === "/api/bypass-verification")
+    ).toBe(false);
+    expect(harness.successBanners).toEqual([]);
+  });
+
+  it("does not offer a bypass button for a non-bypassable failure", async () => {
+    const browser = setup();
+    const controller = controllerFor(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Trust missing",
+        category: "oidc-trust"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    const container = browser.els[PROGRESS_IDS.verifyBypass];
+    expect(container.style.display).toBe("none");
+    expect(container.children).toHaveLength(0);
+  });
+
+  it("keeps the bypass button usable and reports the error when the bypass fails", async () => {
+    const browser = setup();
+    const { controller, harness } = controllerWithHarness(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        category: "cloud-unreachable",
+        runId: "555"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    const container = browser.els[PROGRESS_IDS.verifyBypass];
+    const button = container.children[0] as FakeElement & {
+      disabled: boolean;
+    };
+    browser.net.handle("/api/bypass-verification", () =>
+      jsonResponse({ error: "gh exploded" }, false)
+    );
+    button.dispatch("click");
+    await flushPromises();
+
+    expect(harness.successBanners).toEqual([]);
+    expect(button.disabled).toBe(false);
+    expect(container.children[1].textContent).toBe("gh exploded");
+    expect(browser.els[PROGRESS_IDS.panel].style.display).not.toBe("none");
+  });
+
+  it("does nothing when the host page omits the bypass container", async () => {
+    const browser = setupWithout([PROGRESS_IDS.verifyBypass]);
+    const controller = controllerFor(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        category: "permissions",
+        runId: "555"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    expect(
+      browser.els[PROGRESS_IDS.panel].classList.contains("env-progress--failed")
+    ).toBe(true);
+    expect(browser.els[PROGRESS_IDS.verifyBypass]).toBeUndefined();
+  });
+
+  it("ignores a second bypass click while the first request is in flight", async () => {
+    const browser = setup();
+    const { controller, harness } = controllerWithHarness(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        category: "permissions",
+        runId: "555"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    const button = browser.els[PROGRESS_IDS.verifyBypass].children[0];
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle("/api/bypass-verification", () => pending.promise);
+
+    button.dispatch("click");
+    button.dispatch("click");
+    pending.resolve(jsonResponse({ success: true }));
+    await flushPromises();
+
+    const bypassCalls = browser.net.calls.filter(
+      (call) => call.url === "/api/bypass-verification"
+    );
+    expect(bypassCalls).toHaveLength(1);
+    expect(harness.reloadCount).toBe(1);
+  });
+
+  it("treats a 2xx bypass response without success:true as a failure", async () => {
+    const browser = setup();
+    const { controller, harness } = controllerWithHarness(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        category: "permissions",
+        runId: "555"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    const container = browser.els[PROGRESS_IDS.verifyBypass];
+    const button = container.children[0] as FakeElement & {
+      disabled: boolean;
+    };
+    browser.net.handle("/api/bypass-verification", () => textResponse("ok"));
+    button.dispatch("click");
+    await flushPromises();
+
+    expect(harness.successBanners).toEqual([]);
+    expect(button.disabled).toBe(false);
+    expect(container.children[1].textContent).toBe(
+      "Could not create the environment. Try again."
+    );
+  });
+
+  it("reports a generic error when the bypass request rejects", async () => {
+    const browser = setup();
+    const { controller, harness } = controllerWithHarness(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        category: "permissions",
+        runId: "555"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    const container = browser.els[PROGRESS_IDS.verifyBypass];
+    const button = container.children[0] as FakeElement & {
+      disabled: boolean;
+    };
+    browser.net.handle("/api/bypass-verification", () =>
+      Promise.reject(new Error("socket hang up"))
+    );
+    button.dispatch("click");
+    await flushPromises();
+
+    expect(harness.successBanners).toEqual([]);
+    expect(button.disabled).toBe(false);
+    expect(container.children[1].textContent).toBe(
+      "Could not create the environment. Try again."
+    );
+  });
+
+  it("does not fire a banner when the bypass resolves after its session was superseded", async () => {
+    const browser = setup();
+    browser.net.supportsAbort = false;
+    const { controller, harness } = controllerWithHarness(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        category: "permissions",
+        runId: "555"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    const button = browser.els[PROGRESS_IDS.verifyBypass].children[0];
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle("/api/bypass-verification", () => pending.promise);
+    button.dispatch("click");
+    await flushPromises();
+
+    // Supersede the tracking session before the bypass resolves.
+    controller?.trackProgress("staging", "aws");
+    await flushPromises();
+    pending.resolve(jsonResponse({ success: true }));
+    await flushPromises();
+
+    expect(harness.successBanners).toEqual([]);
+  });
+
+  it("swallows a stale bypass rejection from a superseded session", async () => {
+    const browser = setup();
+    browser.net.supportsAbort = false;
+    const { controller, harness } = controllerWithHarness(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        category: "permissions",
+        runId: "555"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    const container = browser.els[PROGRESS_IDS.verifyBypass];
+    const button = container.children[0];
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle("/api/bypass-verification", () => pending.promise);
+    button.dispatch("click");
+    await flushPromises();
+
+    controller?.trackProgress("staging", "aws");
+    await flushPromises();
+    pending.reject(new Error("socket hang up"));
+    await flushPromises();
+
+    expect(harness.successBanners).toEqual([]);
+    // Superseding the session clears the stale bypass offer; a late rejection
+    // from the abandoned request never writes an error into it.
+    expect(container.children).toHaveLength(0);
+  });
+
+  it("shows a default message when a failed bypass omits an error", async () => {
+    const browser = setup();
+    const { controller } = controllerWithHarness(browser);
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        category: "permissions",
+        runId: "555"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    const container = browser.els[PROGRESS_IDS.verifyBypass];
+    const button = container.children[0];
+    browser.net.handle("/api/bypass-verification", () =>
+      jsonResponse({}, false)
+    );
+    button.dispatch("click");
+    await flushPromises();
+
+    expect(container.children[1].textContent).toBe(
+      "Could not create the environment. Try again."
+    );
+  });
+
+  it("defaults the bypass success banner provider to azure", async () => {
+    const browser = setup();
+    const { controller, harness } = controllerWithHarness(browser);
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse(op({ currentStage: "verify", steps: [] }))
+    );
+    controller?.trackProgress("dev", "");
+    await flushPromises();
+    browser.net.handle(operationsUrl(), () =>
+      jsonResponse({ operation: null })
+    );
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        category: "permissions",
+        runId: "555"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    const button = browser.els[PROGRESS_IDS.verifyBypass].children[0];
+    browser.net.handle("/api/bypass-verification", () =>
+      jsonResponse({ success: true })
+    );
+    button.dispatch("click");
+    await flushPromises();
+
+    expect(harness.successBanners).toEqual([
+      { provider: "azure", environment: "dev" }
+    ]);
+  });
+
   it("ignores a stale verify-status response that resolves after its session was superseded", async () => {
     const browser = setup();
     browser.net.supportsAbort = false;
@@ -2065,6 +2631,28 @@ describe("failure card rendering", () => {
     const host = browser.els[PROGRESS_IDS.failureCommand];
     expect(host.style.display).toBe("none");
     expect(host.children.length).toBe(0);
+  });
+
+  it("does nothing when the host page omits the failure-command callout", () => {
+    const browser = setupWithout([PROGRESS_IDS.failureCommand]);
+    const controller = controllerFor(browser);
+
+    expect(() =>
+      controller?.renderProgress(
+        record({
+          terminalState: "failed",
+          failure: {
+            message: "boom",
+            remediation: {
+              id: "github-account-scopes",
+              params: { login: "pubuser", packages: "true" }
+            }
+          }
+        })
+      )
+    ).not.toThrow();
+
+    expect(browser.els[PROGRESS_IDS.failureCommand]).toBeUndefined();
   });
 
   it("clears the callout when the panel moves off a failed operation", () => {
@@ -4473,6 +5061,27 @@ describe("stale response ordering and operation identity", () => {
     );
   });
 
+  it("tolerates the reviewed toggle disappearing before a context change resolves", async () => {
+    const browser = setup();
+    await reviewDiagnosticIdentifiers(browser);
+    const pending = createDeferred<HttpResponse>();
+    browser.net.handle(CONTEXTUAL_DIAGNOSTIC_URL, () => pending.promise);
+
+    browser.els[DIAGNOSTIC_IDS.download].dispatch("click");
+    await flushPromises();
+
+    // A host re-render drops the reviewed toggle while the request is inflight.
+    browser.document.remove(DIAGNOSTIC_IDS.reviewedIdentifiers);
+    pending.resolve(
+      textResponse('{"code":"diagnostic-context-changed"}', false, 409)
+    );
+    await flushPromises();
+
+    expect(browser.els[DIAGNOSTIC_IDS.error].textContent).toContain(
+      "contextual identifiers changed"
+    );
+  });
+
   it("surfaces contextual response and host download failures", async () => {
     const responseFailure = setup();
     await reviewDiagnosticIdentifiers(responseFailure);
@@ -6166,7 +6775,7 @@ describe("acknowledging a finished deletion pass", () => {
         url: dismissUrl("op-1"),
         init: {
           method: "POST",
-          headers: { "X-Radius-Mutation-Nonce": "" },
+          headers: { "X-Radius-Mutation-Nonce": "browser-nonce" },
           signal: expect.anything()
         }
       }

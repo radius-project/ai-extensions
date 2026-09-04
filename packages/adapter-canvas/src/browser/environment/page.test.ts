@@ -678,6 +678,22 @@ describe("initializeEnvironmentPage", () => {
     );
   });
 
+  it("rejects an environment name with control characters", async () => {
+    const page = fixture();
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "dev\u0007";
+    page.elements["deploy-btn"].dispatch("click");
+
+    expect(page.elements["deploy-status"].textContent).toContain(
+      "control characters"
+    );
+    expect(
+      page.browser.net.calls.filter(
+        (call) => call.url === CREATE_ENVIRONMENT_OPERATION_PATH
+      )
+    ).toHaveLength(0);
+  });
+
   it("blocks creation when selected-account readiness has not passed", async () => {
     const page = fixture();
     page.browser.net.handle(GITHUB_ACCOUNT_ENDPOINT, () =>
