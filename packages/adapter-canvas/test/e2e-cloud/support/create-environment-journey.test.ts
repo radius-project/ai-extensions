@@ -717,6 +717,14 @@ describe("readOperationSnapshot", () => {
     ).toEqual({ state: "failed", terminal: true, error: "Azure said no." });
   });
 
+  it("treats a known terminal state projection as terminal", () => {
+    expect(
+      readOperationSnapshot({
+        operation: { state: "running", terminalState: " failed_partial " }
+      })
+    ).toEqual({ state: "running", terminal: true, error: "" });
+  });
+
   it("keeps a running operation non-terminal", () => {
     expect(readOperationSnapshot({ operation: { state: "running" } })).toEqual({
       state: "running",
@@ -743,6 +751,22 @@ describe("readOperationSnapshot", () => {
     expect(
       readOperationSnapshot({ operation: { state: "running", error: null } })
     ).toEqual({ state: "running", terminal: false, error: "" });
+  });
+
+  it("accepts a null terminal state as absent", () => {
+    expect(
+      readOperationSnapshot({
+        operation: { state: "running", terminalState: null }
+      })
+    ).toEqual({ state: "running", terminal: false, error: "" });
+  });
+
+  it("rejects an unknown terminal state projection", () => {
+    expect(() =>
+      readOperationSnapshot({
+        operation: { state: "running", terminalState: "mystery" }
+      })
+    ).toThrow(/operation.terminalState/);
   });
 
   it("treats a blank operation error as absent", () => {

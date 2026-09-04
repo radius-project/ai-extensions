@@ -626,10 +626,19 @@ export function readOperationSnapshot(payload: unknown): OperationSnapshot {
     typeof failure?.message === "string" && failure.message.trim() !== "" ?
       failure.message.trim()
     : rawOperationError;
-  const terminal =
-    (typeof operation.terminalState === "string" &&
-      operation.terminalState.trim() !== "") ||
-    TERMINAL_STATES.includes(state);
+  const terminalState =
+    typeof operation.terminalState === "string" ?
+      operation.terminalState.trim()
+    : "";
+  if (
+    operation.terminalState !== undefined &&
+    operation.terminalState !== null &&
+    !TERMINAL_STATES.includes(terminalState)
+  )
+    throw new Error(
+      'The operation status response carried an unknown "operation.terminalState".'
+    );
+  const terminal = terminalState !== "" || TERMINAL_STATES.includes(state);
   return {
     state,
     terminal,
