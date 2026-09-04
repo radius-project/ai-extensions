@@ -6,6 +6,7 @@ import {
   HEARTBEAT_PING_PATH,
   HEARTBEAT_RELOAD_RETRY_MS,
   HEARTBEAT_REQUEST_TIMEOUT_MS,
+  WORKSPACE_MODEL_CHANGED_EVENT,
   initializeHeartbeat
 } from "./heartbeat.js";
 import {
@@ -174,6 +175,101 @@ describe("heartbeat watchdog", () => {
 
     expect(browser.nav.reloads).toBe(0);
     expect(browser.overlay.style.display).toBe("none");
+  });
+
+  it("announces a workspace model revision only after it changes", async () => {
+    const browser = setup();
+    browser.document.add(new FakeElement("radius-graph-page-state"));
+    const revisions = [
+      { workspaceModelRevision: "model-a", workspaceModelChanged: false },
+      { workspaceModelRevision: "model-a", workspaceModelChanged: false },
+      {},
+      { workspaceModelRevision: "model-b", workspaceModelChanged: true }
+    ];
+    let announcements = 0;
+    browser.document.addEventListener(WORKSPACE_MODEL_CHANGED_EVENT, () => {
+      announcements++;
+    });
+    browser.net.handle(HEARTBEAT_PING_PATH, () =>
+      jsonResponse(revisions.shift())
+    );
+    initializeHeartbeat(browser.context);
+
+    await beat(browser.clock, 3);
+    expect(announcements).toBe(0);
+
+    await beat(browser.clock);
+    expect(announcements).toBe(1);
+    expect(browser.net.calls[0].init?.headers).toEqual({
+      "X-Radius-Workspace-Model": "1"
+    });
+  });
+
+  it("announces a model regenerated before the first heartbeat", async () => {
+    const browser = setup();
+    browser.document.add(new FakeElement("radius-graph-page-state"));
+    let announcements = 0;
+    browser.document.addEventListener(WORKSPACE_MODEL_CHANGED_EVENT, () => {
+      announcements++;
+    });
+    browser.net.handle(HEARTBEAT_PING_PATH, () =>
+      jsonResponse({
+        workspaceModelRevision: "model-b",
+        workspaceModelChanged: true
+      })
+    );
+    initializeHeartbeat(browser.context);
+
+    await beat(browser.clock, 2);
+
+    expect(announcements).toBe(1);
+  });
+
+  it("does not ask for a workspace model revision on a non-graph page", async () => {
+    const browser = setup();
+    let announcements = 0;
+    browser.document.addEventListener(WORKSPACE_MODEL_CHANGED_EVENT, () => {
+      announcements++;
+    });
+    // A server that is not asked for the revision answers the legacy body.
+    browser.net.handle(HEARTBEAT_PING_PATH, () =>
+      jsonResponse({ ok: true, instanceId: "panel-a" })
+    );
+    initializeHeartbeat(browser.context);
+
+    await beat(browser.clock, 2);
+
+    expect(browser.net.calls[0].init?.headers).toBeUndefined();
+    expect(announcements).toBe(0);
+  });
+
+  it("ignores a workspace model revision that lands after teardown", async () => {
+    const browser = setup();
+    browser.document.add(new FakeElement("radius-graph-page-state"));
+    let announcements = 0;
+    browser.document.addEventListener(WORKSPACE_MODEL_CHANGED_EVENT, () => {
+      announcements++;
+    });
+    const body = createDeferred<unknown>();
+    const response: HttpResponse = {
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve(""),
+      json: () => body.promise
+    };
+    browser.net.handle(HEARTBEAT_PING_PATH, () => response);
+    const teardown = initializeHeartbeat(browser.context);
+
+    browser.clock.tick(HEARTBEAT_INTERVAL_MS);
+    await flushPromises();
+    teardown();
+    body.resolve({
+      workspaceModelRevision: "model-b",
+      workspaceModelChanged: true
+    });
+    await flushPromises();
+
+    expect(announcements).toBe(0);
   });
 
   it("aborts a request at its deadline and clears the deadline after settlement", async () => {

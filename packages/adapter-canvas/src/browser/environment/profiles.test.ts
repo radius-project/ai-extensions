@@ -207,6 +207,7 @@ function makeDeps(overrides: Partial<CredentialProfilesPanelDeps> = {}): {
   }> = [];
   const deps: CredentialProfilesPanelDeps = {
     repo: "octo/cat",
+    selectableProviders: ["azure", "aws"],
     mutationNonce: "browser-nonce",
     environmentName: () => "dev",
     onProfileChange: (profile) => profileChanges.push(profile),
@@ -1016,13 +1017,47 @@ describe("credential profile combo menu", () => {
 });
 
 describe("loadProfiles", () => {
-  it("populates the combo and preselects a matching profile", async () => {
+  it("populates the combo and preselects a matching supported profile", async () => {
     const page = renderProfilesPage();
     page.browser.net.handle(
       `${CREDENTIAL_PROFILES_ENDPOINT}?repo=${encodeURIComponent("octo/cat")}`,
-      () => profilesResponse([AZURE_PROFILE, AWS_PROFILE])
+      () => profilesResponse([AZURE_PROFILE])
     );
-    const { deps, profileChanges, discoverCalls } = makeDeps();
+    const { deps, profileChanges, discoverCalls } = makeDeps({
+      selectableProviders: ["azure"]
+    });
+    const handle = initializeCredentialProfilesPanel(
+      page.browser.context,
+      deps
+    );
+
+    await handle?.loadProfiles("azure-prod");
+
+    expect(page.hiddenInput.value).toBe("azure-prod");
+    expect(page.valueEl.textContent).toBe("azure-prod (Azure)");
+    expect(page.optionsEl.children).toHaveLength(1);
+    expect(profileChanges.at(-1)).toEqual(AZURE_PROFILE);
+    expect(discoverCalls.at(-1)?.provider).toBe("azure");
+    expect(page.statusEl.style.display).toBe("");
+    expect(page.deployBtn.disabled).toBe(false);
+    expect(page.identityAzureEl.style.display).toBe("");
+    expect(page.identityAwsEl.style.display).toBe("none");
+  });
+
+  it("omits disabled and unknown providers and refuses to preselect them", async () => {
+    const page = renderProfilesPage();
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_ENDPOINT}?repo=${encodeURIComponent("octo/cat")}`,
+      () =>
+        profilesResponse([
+          AZURE_PROFILE,
+          AWS_PROFILE,
+          { name: "future-prod", provider: "future-cloud" }
+        ])
+    );
+    const { deps, profileChanges, discoverCalls } = makeDeps({
+      selectableProviders: ["azure"]
+    });
     const handle = initializeCredentialProfilesPanel(
       page.browser.context,
       deps
@@ -1030,21 +1065,60 @@ describe("loadProfiles", () => {
 
     await handle?.loadProfiles("aws-prod");
 
-    expect(page.hiddenInput.value).toBe("aws-prod");
-    expect(page.valueEl.textContent).toBe("aws-prod (AWS)");
+    expect(page.hiddenInput.value).toBe("");
+    expect(page.valueEl.textContent).toBe(PROFILE_PLACEHOLDER_TEXT);
     expect(page.emptyEl.style.display).toBe("none");
-    expect(page.optionsEl.children).toHaveLength(2);
-    expect(profileChanges.at(-1)).toEqual(AWS_PROFILE);
-    expect(discoverCalls.at(-1)).toEqual({
-      provider: "aws",
-      subscriptionId: "",
-      tenantId: ""
-    });
-    expect(page.statusEl.style.display).toBe("");
-    expect(page.deployBtn.disabled).toBe(false);
-    expect(page.awsRefreshBtn.disabled).toBe(false);
-    expect(page.identityAwsEl.style.display).toBe("");
-    expect(page.identityAzureEl.style.display).toBe("none");
+    expect(page.optionsEl.children).toHaveLength(1);
+    expect(page.optionsEl.children[0]?.textContent).toBe("azure-prod (Azure)");
+    expect(
+      page.optionsEl.children.some((child) =>
+        (child.textContent ?? "").includes("future-prod")
+      )
+    ).toBe(false);
+    expect(profileChanges.at(-1)).toBeNull();
+    expect(discoverCalls).toEqual([]);
+    expect(page.statusEl.style.display).toBe("none");
+    expect(page.deployBtn.disabled).toBe(true);
+    expect(page.awsRefreshBtn.disabled).toBe(true);
+  });
+
+  it("explains that existing profiles were filtered out when none are supported", async () => {
+    const page = renderProfilesPage();
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_ENDPOINT}?repo=${encodeURIComponent("octo/cat")}`,
+      () => profilesResponse([AWS_PROFILE])
+    );
+    const { deps } = makeDeps({ selectableProviders: ["azure"] });
+    const handle = initializeCredentialProfilesPanel(
+      page.browser.context,
+      deps
+    );
+
+    await handle?.loadProfiles();
+
+    expect(page.optionsEl.children).toHaveLength(0);
+    expect(page.emptyEl.style.display).toBe("");
+    expect(page.emptyEl.textContent).toBe(
+      "No supported credential profiles yet."
+    );
+  });
+
+  it("reports a genuinely empty repository without blaming provider support", async () => {
+    const page = renderProfilesPage();
+    page.browser.net.handle(
+      `${CREDENTIAL_PROFILES_ENDPOINT}?repo=${encodeURIComponent("octo/cat")}`,
+      () => profilesResponse([])
+    );
+    const { deps } = makeDeps({ selectableProviders: ["azure"] });
+    const handle = initializeCredentialProfilesPanel(
+      page.browser.context,
+      deps
+    );
+
+    await handle?.loadProfiles();
+
+    expect(page.emptyEl.style.display).toBe("");
+    expect(page.emptyEl.textContent).toBe("No credential profiles yet.");
   });
 
   it("falls back to the placeholder when the preselected name is not found", async () => {

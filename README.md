@@ -8,15 +8,13 @@ developers and platform engineers build and manage applications together.
 
 ## Install the plugin
 
-Radius Canvas runs only in the
-[GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app),
-so install the plugin from the app: open app settings, click **Plugins**, add the
-`radius-project/ai-extensions` marketplace, and install the `radius` plugin.
+The `radius` plugin is available in the [`github/awesome-copilot`](https://github.com/github/awesome-copilot) plugin catalog.
 
-The canvas extension is a compiled bundle that is not committed to `main`. CI builds it on every merge and publishes it — together with the skills and manifest — to generated `releases/*` branches, and the marketplace manifest points each channel at its matching artifact, so installing from the app pulls the skills and canvas automatically. See [`docs/architecture/plugin-packaging-and-publishing.md`](./docs/architecture/plugin-packaging-and-publishing.md) for how this works.
+The Radius canvas runs only in the [GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app). Open the app, select **Customize** in the side menu, and then select **Plugins**. Search for `radius` and install the plugin.
 
-See [`plugins/radius/README.md`](./plugins/radius/README.md) for what the plugin
-bundles and how to use it.
+Restart your Copilot session after installing so the skills and canvas become available. Use the plugin's three-dot menu to update or uninstall it.
+
+The Radius Canvas UI itself is only available via the [GitHub Copilot app](https://docs.github.com/en/copilot/concepts/agents/github-copilot-app). That being said, the Radius plugin bundles other AI tools that may be used independently of the Canvas. See [`plugins/radius/README.md`](./plugins/radius/README.md) for what the plugin bundles and how to use it.
 
 > **NOTE:** Radius Canvas is in preview. Send us your feedback:
 > [open an issue](https://github.com/radius-project/ai-extensions/issues/new/choose)
@@ -65,18 +63,7 @@ additional UI surfaces beyond the Copilot canvas in the future.
 
 ## Agentic skills
 
-The repository also ships a set of agentic skills under
-[`plugins/radius/skills/`](./plugins/radius/skills). Each skill tells the agent how and when
-to drive a part of the Radius workflow, and pairs with the matching canvas
-actions and tools:
-
-| Skill                                                                                               | What it does                                                                                                                                                                    |
-|-----------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| [`radius-app-bicep`](./plugins/radius/skills/radius-app-bicep/SKILL.md)                             | Analyze a repository and generate a Radius application definition that models the app's components and their dependencies.                                                      |
-| [`radius-app-graph`](./plugins/radius/skills/radius-app-graph/SKILL.md)                             | Build and visualize the Radius application graph for a repo, including single-branch and PR-diff modes.                                                                         |
-| [`radius-environment`](./plugins/radius/skills/radius-environment/SKILL.md)                         | Create and verify a Radius deploy environment for Azure, including the OIDC trust with GitHub Actions.                                                                          |
-| [`radius-deploy`](./plugins/radius/skills/radius-deploy/SKILL.md)                                   | Deploy a Radius application to a configured environment via the auto-generated GitHub Actions workflow.                                                                         |
-| [`radius-delete`](./plugins/radius/skills/radius-delete/SKILL.md)                                   | Delete a Radius application deployment via the auto-generated GitHub Actions workflow, or delete a deploy environment and clean up its cloud state.                             |
+The plugin also ships five agentic skills, in [`extensions/radius/skills/`](./extensions/radius/skills). Each one tells the agent how and when to drive a part of the Radius workflow — modeling, graphing, environments, deployment, and deletion — and pairs with the matching canvas actions and tools. See [`plugins/radius/README.md`](./plugins/radius/README.md) for what each skill does.
 
 ## Architecture
 
@@ -93,16 +80,7 @@ layout and development workflow.
 
 ## Getting started
 
-Build the extension bundle locally:
-
-```bash
-pnpm install
-pnpm build           # bundles the canvas extension -> plugins/radius/dist/
-```
-
-See [Contributing](./CONTRIBUTING.md) for prerequisites, the full development
-workflow, testing, and how to add compute platforms, canvas actions, or new UI
-adapters.
+See [Contributing](./CONTRIBUTING.md) for prerequisites, the repository layout, the build and test workflow, and how to add compute platforms, canvas actions, or new UI adapters.
 
 ## Getting help
 
@@ -125,7 +103,7 @@ guidelines and more, head over to the
 
 ## Releasing
 
-[Changesets](https://changesets.dev/) drives independent plugin versions and changelogs. Every merge to `main` refreshes each plugin's rolling `<plugin>@edge` channel. The **Release** workflow can prepare one plugin or every pending plugin; merging its scope-labelled PR validates the exact version diff, builds behind shared gates, publishes attested assets on zero-history `releases/<plugin>/v<version>` branches, and moves only that plugin's `<plugin>@latest` channel. GitHub immutable-release enforcement is an optional repository-variable switch. Follow the [release runbook](./docs/eng/RELEASE_RUNBOOK.md) to cut one, or see [`RELEASING.md`](./docs/eng/RELEASING.md) for the full lifecycle.
+[Changesets](https://changesets.dev/) drives independent plugin versions and changelogs. Every merge to `main` refreshes each plugin's rolling `<plugin>@edge` channel. The **Release** workflow can prepare one plugin or every pending plugin; merging its scope-labelled PR validates the exact version diff, builds behind shared gates, and publishes attested assets on a zero-history `releases/<plugin>/v<version>` branch tagged `<plugin>@<version>` — the one tag a stable release writes, and the tag its GitHub release is cut from. GitHub immutable-release enforcement is an optional repository-variable switch. Follow the [release runbook](./docs/eng/RELEASE_RUNBOOK.md) to cut one, or see [`RELEASING.md`](./docs/eng/RELEASING.md) for the full lifecycle.
 
 ## Code of conduct
 

@@ -33,8 +33,8 @@ export default defineConfig({
   // at 50 minutes, leaving ten minutes for teardown while credentials are valid.
   globalTimeout: 50 * 60 * 1000,
   expect: { timeout: 60_000 },
-  // Concurrent runs contend for one repository-scoped Entra application, which
-  // the product derives from the repository name alone.
+  // Serializes tests inside one process. Cross-process/cloud-run serialization
+  // is enforced by the repository-scoped lease acquired by the cloud fixture.
   workers: 1,
   retries: 0,
   fullyParallel: false,

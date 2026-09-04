@@ -1,0 +1,17 @@
+---
+resourceTypes:
+  - name: Radius.Data
+    repo: github.com/radius-project/resource-types-contrib
+    ref: d35ca390587661117a45a37bc2916f7aebf11428
+    tag: "Radius.Data/v0.1.0"
+recipePacks:
+  - name: kubernetes
+    repo: github.com/radius-project/resource-types-contrib
+    ref: d35ca390587661117a45a37bc2916f7aebf11428
+    tag: "recipe-pack/kubernetes/v0.1.0"
+  - name: azure
+    repo: github.com/radius-project/resource-types-contrib
+    ref: d35ca390587661117a45a37bc2916f7aebf11428
+    tag: "recipe-pack/azure/v0.1.0"
+defaultRegistration:
+  - Radius.Data/postgreSqlDatabases

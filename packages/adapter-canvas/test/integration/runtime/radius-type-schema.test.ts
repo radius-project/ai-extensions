@@ -9,7 +9,7 @@ const root = path.resolve(
 );
 const modulePath = path.join(
   root,
-  "plugins",
+  "extensions",
   "radius",
   "skills",
   "radius-app-bicep",

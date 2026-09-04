@@ -7,8 +7,8 @@ The short version, for whoever picks up a red **Cloud E2E** run. The design note
 A red run here is one of three completely different things, and they need three different responses:
 
 | Class                      | What it means                                                                           | Who fixes it                              |
-| -------------------------- | --------------------------------------------------------------------------------------- | ----------------------------------------- |
-| **Product regression**     | The product issued a command real Azure, Entra, or GitHub rejected                      | The author of the change                  |
+|----------------------------|-----------------------------------------------------------------------------------------|-------------------------------------------|
+| **Product regression**     | The product issued a command that real Azure, Entra, or GitHub rejected                 | The author of the change                  |
 | **Infrastructure failure** | The cloud, the identity, or the runner did not cooperate; the product is not implicated | Whoever is on call; often nobody - re-run |
 | **Leaked state**           | An earlier run did not clean up, so this one refused to start                           | Cleanup, not the product                  |
 
@@ -25,7 +25,7 @@ Open the run, open the failing step, and answer one question: **did the product'
 Then download the `cloud-e2e-diagnostics` artifact. It is uploaded on success as well as failure, so a passing run's artifact is the baseline you read the failing one against.
 
 | File                               | Answers                                                         |
-| ---------------------------------- | --------------------------------------------------------------- |
+|------------------------------------|-----------------------------------------------------------------|
 | `test-results/cloud/`              | The Playwright trace. The single most useful file here          |
 | `playwright-report-cloud/`         | The HTML report, if you would rather start there                |
 | `az-account.json`                  | Which tenant and subscription the run actually authenticated to |
@@ -39,10 +39,10 @@ That last one matters more than it looks. The product commits a deploy workflow 
 
 ## Product regression
 
-The thing the tier exists to catch: the product built a request real Azure, Entra, or GitHub rejected, and no hermetic test could have known.
+The thing the tier exists to catch: the product built a request that real Azure, Entra, or GitHub rejected, and no hermetic test could have known.
 
 | Symptom                                                                        | Likely cause                                                                    | First thing to do                                                                                                    |
-| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+|--------------------------------------------------------------------------------|---------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | Graph rejects the application or federated credential the product created      | A request shape changed - a field name, an audience, a subject claim            | Open the trace, find the request, compare it to the Graph API reference                                              |
 | The deploy workflow exists as a pull request rather than on the default branch | The App token lost `workflows: write`, so the product took its fallback path    | Check the `Create a GitHub App token` step; a missing permission fails there, a _narrowed installation_ does not     |
 | Role assignment succeeds but the deployment is denied                          | Scope or role definition changed                                                | `az role assignment list --scope /subscriptions/<sub>/resourceGroups/radtest-canvas-<uid>`                           |
@@ -66,7 +66,7 @@ The last of these is the failure mode with the most expensive false negative. A 
 The product is not implicated. Establish that, then decide whether to re-run or wait.
 
 | Symptom                                          | Cause                                                                         | What to do                                                                                                                                                                                                         |
-| ------------------------------------------------ | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+|--------------------------------------------------|-------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | AKS provisioning fails or times out              | Regional capacity, quota, or a transient ARM fault                            | Read the `az` error verbatim. Capacity and quota are different problems - quota needs a request, capacity needs a different region or patience                                                                     |
 | `az group create` rejects the location           | `AIEXT_CLOUD_E2E_AZURE_LOCATION` is set to something that is not a region     | The suite rejects a malformed value up front with a message naming it. Fix the variable                                                                                                                            |
 | A Graph read finds nothing that was just written | Entra propagation delay                                                       | Nothing. The product retries and the fixture polls. If it fails anyway, the bound is too tight - widen it, do not add a sleep                                                                                      |
