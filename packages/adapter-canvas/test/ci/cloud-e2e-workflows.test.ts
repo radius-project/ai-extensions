@@ -243,7 +243,7 @@ describe("cloud-e2e.yml", () => {
     });
   });
 
-  it("requests the workflow scope explicitly rather than discovering it is missing", async () => {
+  it("requests the workflow and deployment scopes explicitly rather than discovering they are missing", async () => {
     // A token silently missing `workflows` sends the product down its
     // pull-request fallback path, and the journey would pass without ever
     // having committed a workflow to the default branch. Asking for the
@@ -252,7 +252,8 @@ describe("cloud-e2e.yml", () => {
     const token = steps(workflow.jobs?.["cloud-e2e"]).find((step) =>
       step.uses?.startsWith("actions/create-github-app-token@")
     );
-    expect(token?.with?.["permission-actions"]).toBe("read");
+    expect(token?.with?.["permission-actions"]).toBe("write");
+    expect(token?.with?.["permission-deployments"]).toBe("read");
     expect(token?.with?.["permission-workflows"]).toBe("write");
     expect(token?.with?.["permission-environments"]).toBe("write");
   });
