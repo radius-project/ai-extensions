@@ -55,37 +55,25 @@ export async function fetchGitHubWithRetry(
   init: RequestInit,
   options: FetchGitHubWithRetryOptions = {}
 ): Promise<LiveGithubFetchResult> {
-  const fetchImpl: typeof fetch =
-    options.fetchImpl ?? ((input, requestInit) => fetch(input, requestInit));
+  const fetchImpl = options.fetchImpl ?? fetch;
   const retryDelaysMs = [...(options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS)];
   const delay = options.sleep ?? sleep;
-  const maxAttempts = retryDelaysMs.length + 1;
 
-  for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex += 1) {
-    const isFinalAttempt = attemptIndex === maxAttempts - 1;
+  for (const [attemptIndex, retryDelayMs] of retryDelaysMs.entries()) {
     try {
       const response = await fetchImpl(url, init);
-      if (
-        response.ok ||
-        !isTransientStatus(response.status) ||
-        isFinalAttempt
-      ) {
+      if (response.ok || !isTransientStatus(response.status)) {
         return { response, attempts: attemptIndex + 1 };
       }
-    } catch (error) {
-      if (isFinalAttempt) {
-        throw error;
-      }
+    } catch {
+      // Retry rejected fetches until the retry budget is exhausted.
     }
 
-    if (!isFinalAttempt) {
-      await delay(retryDelaysMs[attemptIndex]);
-    }
+    await delay(retryDelayMs);
   }
 
-  throw new Error(
-    "GitHub fetch retry loop exhausted unexpectedly after a stable retry budget"
-  );
+  const response = await fetchImpl(url, init);
+  return { response, attempts: retryDelaysMs.length + 1 };
 }
 
 // Fetch one file under a repo's `.github/extension/` tree as raw text through
