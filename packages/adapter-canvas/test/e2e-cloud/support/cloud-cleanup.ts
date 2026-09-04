@@ -89,6 +89,24 @@ export function selectExpiredEnvironments(
   return names;
 }
 
+export function selectTestResourceGroups(
+  payload: unknown,
+  prefix: string
+): string[] {
+  const groups: string[] = [];
+  for (const entry of requireArray(payload, "Azure resource groups")) {
+    const item = asRecord(entry);
+    const tags = asRecord(item?.tags);
+    if (
+      typeof item?.name === "string" &&
+      item.name.startsWith(prefix) &&
+      tags?.["radius-canvas-e2e"] === "true"
+    )
+      groups.push(item.name);
+  }
+  return groups;
+}
+
 export function selectExpiredFallbackPullRequests(
   payload: unknown,
   branchPrefix: string,

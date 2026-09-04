@@ -234,7 +234,7 @@ describe("createCloudFixture", () => {
       });
     });
 
-    it("tags the group so the subscription's purge job can reclaim a crashed run", async () => {
+    it("tags the group so scheduled cleanup can identify a crashed run's group", async () => {
       const { fake } = await createHarness();
 
       const create = fake.commands.calls[0];
@@ -247,7 +247,7 @@ describe("createCloudFixture", () => {
       expect(RESOURCE_GROUP.startsWith("radtest-")).toBe(true);
     });
 
-    it("formats creation time for the Radius purge workflow's integer comparison", () => {
+    it("formats creation time for cleanup's integer comparison", () => {
       const sixHoursAgo = Math.floor(NOW.getTime() / 1_000) - 6 * 60 * 60;
       const creationTime = radiusPurgeCreationTime(
         new Date(NOW.getTime() - 7 * 60 * 60 * 1_000)
@@ -1447,36 +1447,55 @@ describe("createCloudFixture", () => {
     });
 
     describe("assertFederatedCredentialAbsent", () => {
-      it("resolves once the credential is gone from the registration", async () => {
-        const { fixture } = await observedHarness([
-          { tool: "az", match: APP_LIST, respond: { stdout: APP_LIST_RESULT } },
+      it("queries the exact observed registration and resolves once the credential is gone", async () => {
+        const { fixture, fake } = await observedHarness([
           { tool: "az", match: FIC_LIST, respond: { stdout: "[]" } }
         ]);
 
         await expect(
           fixture.assertFederatedCredentialAbsent(SUBJECT)
         ).resolves.toBeUndefined();
-      });
-
-      it("treats a deleted registration as the strongest form of absence", async () => {
-        const { fixture, fake } = await observedHarness([
-          { tool: "az", match: APP_LIST, respond: { stdout: "[]" } }
-        ]);
-        const listCalls = () =>
+        expect(
           fake.commands
             .commandLines("az")
-            .filter((line) => line.includes("federated-credential")).length;
-        const before = listCalls();
+            .filter((line) => line.includes("ad app list"))
+        ).toHaveLength(1);
+        expect(fake.commands.commandLines("az")).toContain(
+          "ad app federated-credential list --id obj-1 --query [].{name:name,subject:subject} -o json"
+        );
+      });
+
+      it("polls the exact observed registration until the credential is gone", async () => {
+        const { fixture, fake } = await observedHarness([
+          {
+            tool: "az",
+            match: FIC_LIST,
+            respond: {
+              stdout: JSON.stringify([{ name: "fc", subject: SUBJECT }])
+            },
+            times: 1
+          },
+          { tool: "az", match: FIC_LIST, respond: { stdout: "[]" } }
+        ]);
 
         await expect(
           fixture.assertFederatedCredentialAbsent(SUBJECT)
         ).resolves.toBeUndefined();
-        expect(listCalls()).toBe(before);
+        expect(fake.waits).toEqual([1000]);
+      });
+
+      it("fails closed when the exact observed registration cannot be queried", async () => {
+        const { fixture } = await observedHarness([
+          failing("az", FIC_LIST, "Microsoft Graph is unavailable")
+        ]);
+
+        await expect(
+          fixture.assertFederatedCredentialAbsent(SUBJECT)
+        ).rejects.toThrow(/Microsoft Graph is unavailable/);
       });
 
       it("reports a credential the product failed to remove", async () => {
         const { fixture } = await observedHarness([
-          { tool: "az", match: APP_LIST, respond: { stdout: APP_LIST_RESULT } },
           {
             tool: "az",
             match: FIC_LIST,

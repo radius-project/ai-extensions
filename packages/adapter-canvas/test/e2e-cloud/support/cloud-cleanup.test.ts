@@ -3,7 +3,8 @@ import {
   selectExpiredDirectoryObjects,
   selectExpiredEnvironments,
   selectExpiredFallbackBranches,
-  selectExpiredFallbackPullRequests
+  selectExpiredFallbackPullRequests,
+  selectTestResourceGroups
 } from "./cloud-cleanup.js";
 
 const CUTOFF = "2026-08-31T12:00:00Z";
@@ -97,6 +98,61 @@ describe("selectExpiredEnvironments", () => {
       )
     ).toEqual([]);
     expect(() => selectExpiredEnvironments(null, "radtest-", CUTOFF)).toThrow(
+      "did not return a JSON array"
+    );
+  });
+});
+
+describe("selectTestResourceGroups", () => {
+  it("selects tagged resource groups with the fixture prefix without waiting for age", () => {
+    expect(
+      selectTestResourceGroups(
+        [
+          {
+            name: "radtest-canvas-old",
+            tags: {
+              "radius-canvas-e2e": "true"
+            }
+          },
+          {
+            name: "radtest-canvas-just-created",
+            tags: {
+              "radius-canvas-e2e": "true"
+            }
+          },
+          {
+            name: "radtest-canvas-untagged",
+            tags: {}
+          },
+          {
+            name: "radtest-other",
+            tags: {
+              "radius-canvas-e2e": "true"
+            }
+          }
+        ],
+        "radtest-canvas"
+      )
+    ).toEqual(["radtest-canvas-old", "radtest-canvas-just-created"]);
+  });
+
+  it("does not select untagged resource groups even with the fixture prefix", () => {
+    expect(
+      selectTestResourceGroups(
+        [
+          { name: "radtest-canvas-missing-tags" },
+          {
+            name: "radtest-canvas-wrong-tag",
+            tags: { "radius-canvas-e2e": "false" }
+          }
+        ],
+        "radtest-canvas"
+      )
+    ).toEqual([]);
+  });
+
+  it("rejects an unreadable listing", () => {
+    expect(() => selectTestResourceGroups({}, "radtest-canvas")).toThrow(
       "did not return a JSON array"
     );
   });

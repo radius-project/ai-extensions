@@ -200,8 +200,9 @@ export async function createCloudFixture(
   let workspacePath = "";
 
   try {
-    // `creationTime` plus the `radtest-` prefix is what lets the Radius purge
-    // job in this subscription reclaim the group if the runner dies outright.
+    // `creationTime` plus the fixture tag lets scheduled cleanup prove the group
+    // is ours and old enough. The `radtest-` prefix leaves Radius purge as the
+    // fallback safety net if this cleanup cannot run.
     expectSuccess(
       await commands.runAz([
         "group",
@@ -404,10 +405,9 @@ export async function createCloudFixture(
    * all until this run has seen the artifact for itself.
    */
   const observedPresent = new Set<string>();
+  const observedCredentialApps = new Map<string, AppRegistrationRecord>();
   const APP_REGISTRATION_KEY = "app-registration";
   const GITHUB_ENVIRONMENT_KEY = "github-environment";
-  const federatedCredentialKey = (subject: string) =>
-    `federated-credential:${subject}`;
   const roleAssignmentKey = (principalId: string) =>
     `role-assignment:${principalId.toLowerCase()}`;
 
@@ -417,6 +417,18 @@ export async function createCloudFixture(
       `Refusing to assert that ${description} is absent: this run never observed it present, so its absence ` +
         "would prove nothing about the operation under test — a product that never created it would pass " +
         "just as readily as one that correctly deleted it. Assert presence first."
+    );
+  };
+
+  const requireObservedCredentialApp = (
+    subject: string
+  ): AppRegistrationRecord => {
+    const app = observedCredentialApps.get(subject);
+    if (app) return app;
+    throw new Error(
+      `Refusing to assert that the federated credential for subject "${subject}" is absent: this run never ` +
+        "observed it present, so its absence would prove nothing about the operation under test — a product " +
+        "that never created it would pass just as readily as one that correctly deleted it. Assert presence first."
     );
   };
 
@@ -514,7 +526,7 @@ export async function createCloudFixture(
           );
         }
       });
-      observedPresent.add(federatedCredentialKey(subject));
+      observedCredentialApps.set(subject, app);
     },
 
     async assertRoleAssignmentExists(principalId) {
@@ -626,15 +638,7 @@ export async function createCloudFixture(
     },
 
     async assertFederatedCredentialAbsent(subject) {
-      requireObservedPresent(
-        federatedCredentialKey(subject),
-        `the federated credential for subject "${subject}"`
-      );
-      const apps = await listAppRegistrations(commands, expectedAppName);
-      // No application at all is the strongest form of the credential's
-      // absence, and is what a complete cloud cleanup would leave behind.
-      const app = apps[0];
-      if (!app) return;
+      const app = requireObservedCredentialApp(subject);
       let remaining: Array<{ name: string; subject: string }> = [];
       await pollForValue({
         ports,
