@@ -18,6 +18,7 @@ import { formatElapsed } from "../progress-format.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
 import { GRAPH_APP_BICEP_TIMEOUT_MESSAGE } from "../../graph-progress-contract.js";
+import { WORKSPACE_MODEL_CHANGED_EVENT } from "../heartbeat.js";
 import {
   GRAPH_PAGE_STATE_ID,
   GRAPH_PLAN_BLOCKED_TITLE,
@@ -38,6 +39,7 @@ interface FixtureOptions {
   withGuidance?: boolean;
   stateBranch?: string;
   followWorkspaceBranch?: boolean;
+  localSource?: boolean;
 }
 
 function fixture(options: FixtureOptions = {}) {
@@ -51,7 +53,8 @@ function fixture(options: FixtureOptions = {}) {
     withButton = true,
     withGuidance = true,
     stateBranch = "feature",
-    followWorkspaceBranch = false
+    followWorkspaceBranch = false,
+    localSource = true
   } = options;
   const browser = createFakeBrowser();
   const state = createFakeElement(GRAPH_PAGE_STATE_ID);
@@ -60,7 +63,7 @@ function fixture(options: FixtureOptions = {}) {
     branch: stateBranch,
     resources: loaded ? [{ id: "app/web" }] : [],
     loaded,
-    localSource: true,
+    localSource,
     followWorkspaceBranch
   });
   const app = createFakeSelect("graph-app");
@@ -195,8 +198,32 @@ describe("initializeGraphPage", () => {
       expect.any(Object)
     );
     expect(branch.listenerCount("change")).toBe(1);
+    expect(browser.document.listenerCount(WORKSPACE_MODEL_CHANGED_EVENT)).toBe(
+      1
+    );
     teardown();
     expect(branch.listenerCount()).toBe(0);
+    expect(browser.document.listenerCount(WORKSPACE_MODEL_CHANGED_EVENT)).toBe(
+      0
+    );
+  });
+
+  it("does not observe workspace model changes for a remote graph", async () => {
+    const { browser } = fixture({ loaded: true, localSource: false });
+    let calls = 0;
+    browser.net.handle("/api/load-graph", () => {
+      calls++;
+      return jsonResponse({
+        resources: [{ id: "app/remote" }],
+        fromWorkspace: false
+      });
+    });
+
+    initializeGraphPage(browser.context, globals());
+    await flushPromises();
+    browser.document.dispatch(WORKSPACE_MODEL_CHANGED_EVENT);
+
+    expect(calls).toBe(1);
   });
 
   it("disables Plan Deployment while a loaded graph is being refreshed", async () => {
@@ -1184,6 +1211,87 @@ describe("initializeGraphPage", () => {
     );
     expect(status?.textContent).toBe("Application graph ready.");
     expect(browser.nav.reloads).toBe(0);
+  });
+
+  it("refreshes a loaded workspace graph when the model revision changes", async () => {
+    const { browser } = fixture({ loaded: true });
+    const render = vi.fn();
+    let calls = 0;
+    browser.net.handle("/api/load-graph", () => {
+      calls++;
+      return jsonResponse({
+        resources: [{ id: calls === 1 ? "app/model-a" : "app/model-b" }],
+        fromWorkspace: true
+      });
+    });
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    browser.document.dispatch(WORKSPACE_MODEL_CHANGED_EVENT);
+    await flushPromises();
+
+    expect(calls).toBe(2);
+    expect(render).toHaveBeenLastCalledWith(
+      "graph-container",
+      [{ id: "app/model-b" }],
+      expect.objectContaining({ localSource: true })
+    );
+  });
+
+  it("reloads an in-session workspace graph when the model revision changes", async () => {
+    const { browser } = fixture({ loaded: false });
+    const render = vi.fn();
+    let calls = 0;
+    browser.net.handle("/api/load-graph", () => {
+      calls++;
+      return jsonResponse({
+        resources: [{ id: calls === 1 ? "app/model-a" : "app/model-b" }],
+        fromWorkspace: true
+      });
+    });
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    browser.document.dispatch(WORKSPACE_MODEL_CHANGED_EVENT);
+    await flushPromises();
+
+    expect(calls).toBe(2);
+    expect(render).toHaveBeenLastCalledWith(
+      "graph-container",
+      [{ id: "app/model-b" }],
+      expect.objectContaining({ localSource: true })
+    );
+  });
+
+  it("targets the selected branch when the model changes after a branch switch", async () => {
+    const { browser, branch } = fixture({ loaded: true });
+    const render = vi.fn();
+    browser.net.handle("/api/load-graph", () =>
+      jsonResponse({ resources: [{ id: "app/model" }], fromWorkspace: true })
+    );
+    initializeGraphPage(
+      browser.context,
+      globals({ radiusRenderGraph: render })
+    );
+    await flushPromises();
+
+    branch.value = "release";
+    branch.dispatch("change");
+    await flushPromises();
+
+    browser.document.dispatch(WORKSPACE_MODEL_CHANGED_EVENT);
+    await flushPromises();
+
+    const branches = browser.net.calls
+      .filter((call) => call.url === "/api/load-graph")
+      .map((call) => JSON.parse(String(call.init?.body)).branch);
+    expect(branches).toEqual(["feature", "release", "release"]);
   });
 
   it("keeps a pending branch listing current across loaded-graph retries", async () => {

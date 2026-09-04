@@ -105,6 +105,7 @@ function start(script: Partial<PipelineScript> = {}): Harness {
     toCanvasResources: (values) => values as CanvasGraphResource[],
     graphJsonPathFor: () => "",
     definitionHashFor: () => "hash-a",
+    modelRevisionFor: () => "model-a",
     discardStagedArtifacts: () => {}
   };
 
