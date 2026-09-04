@@ -115,7 +115,7 @@ describe(".github/extension release assets", () => {
     ["stable", "release.yml", "$SOURCE_SHA"]
   ])(
     "publishes the complete tree and validates the %s source",
-    (_channel, file, source) => {
+    (channel, file, source) => {
       const workflow = parseYaml(
         readFileSync(join(REPO_ROOT, ".github", "workflows", file), "utf8")
       );
@@ -129,6 +129,67 @@ describe(".github/extension release assets", () => {
 
       expect(commitScript).toContain('--path ".github/extension"');
       expect(validationScript).toContain(`--source "${source}"`);
+
+      // The complete install unit belongs only under plugins/<name>. Publishing
+      // the same tree under extensions/<name> creates nested extensions, skills,
+      // and workflows directories that are not release-root components.
+      expect(commitScript).not.toContain("PLUGIN_PUBLISH_DIR");
+      expect(commitScript).toContain('--path "$PLUGIN_DIST=$PLUGIN_DIR"');
+      expect(commitScript).toContain('--path "$MANIFEST"');
+      if (channel === "stable") {
+        expect(commitScript).toContain('--arg path "$PLUGIN_DIR"');
+        expect(commitScript).toContain(".source.path = $path");
+      }
     }
   );
+
+  it("re-baselines edge when a reachable source is no longer in main history", () => {
+    const workflow = parseYaml(
+      readFileSync(
+        join(REPO_ROOT, ".github", "workflows", "publish.yml"),
+        "utf8"
+      )
+    );
+    const publishScript = runScripts(workflow).find((script) =>
+      script.includes("Published edge source")
+    );
+
+    expect(publishScript).toContain(
+      'git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"'
+    );
+    expect(publishScript).toContain(
+      '! git merge-base --is-ancestor "$current_source" refs/remotes/origin/main'
+    );
+    expect(publishScript).toContain(
+      'if [ "$GITHUB_SHA" != "$(git rev-parse refs/remotes/origin/main)" ]; then'
+    );
+  });
+
+  it("uses the completed pre-canonical release as the verification cutover", () => {
+    const workflow = parseYaml(
+      readFileSync(
+        join(REPO_ROOT, ".github", "workflows", "release.yml"),
+        "utf8"
+      )
+    );
+    const completionScripts = runScripts(workflow).filter((script) =>
+      script.includes("verified-git.mjs verify-completion")
+    );
+    const previousReleaseScript = workflow.jobs.prepare.steps.find(
+      (step) => step.name === "Verify the previous release is complete"
+    ).run;
+    const cutover = 'if [ "${plugin}@${version}" = "radius@0.1.0" ]; then';
+
+    expect(completionScripts).toHaveLength(3);
+    expect(previousReleaseScript).toContain(cutover);
+    expect(previousReleaseScript).toContain(
+      "completion verification starts with its successor"
+    );
+    expect(previousReleaseScript.indexOf(cutover)).toBeLessThan(
+      previousReleaseScript.indexOf("verified-git.mjs verify-completion")
+    );
+    expect(previousReleaseScript).toMatch(
+      /if ! node scripts\/verified-git\.mjs verify-completion \\\n\s+--plugin "\$plugin" --version "\$version" >\/dev\/null 2>&1; then/u
+    );
+  });
 });

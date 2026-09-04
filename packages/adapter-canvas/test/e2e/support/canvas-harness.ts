@@ -287,6 +287,8 @@ export interface HarnessWorkspacePlan {
   readonly path: string;
   /** Fake mode scaffolds an empty `.radius`; a clone already carries one. */
   readonly createRadiusDirectory: boolean;
+  /** Fake mode needs a disposable Git repository; cloud mode uses its clone. */
+  readonly initializeGitRepository: boolean;
 }
 
 /**
@@ -342,13 +344,18 @@ export function resolveHarnessWorkspace(input: {
       throw new Error(
         `Cloud mode refuses to run against the checkout under test; workspacePath "${workspacePath}" overlaps "${repositoryRoot}". Clone the fixture repository to a disposable directory instead.`
       );
-    return { path: workspacePath, createRadiusDirectory: false };
+    return {
+      path: workspacePath,
+      createRadiusDirectory: false,
+      initializeGitRepository: false
+    };
   }
   if (input.workspacePath)
     throw new Error("workspacePath is only supported in cloud mode.");
   return {
     path: path.join(input.rootDir, "workspace"),
-    createRadiusDirectory: true
+    createRadiusDirectory: true,
+    initializeGitRepository: true
   };
 }
 
@@ -615,13 +622,16 @@ export function baseCanvasState(workspacePath: string): CanvasState {
   return {
     contextRepo: REPOSITORY,
     contextBranch: WORKTREE_BRANCH,
+    contextBranchSource: "workspace",
     workspacePath,
     workspaceRepo: REPOSITORY,
     workspaceBranch: WORKTREE_BRANCH,
     graphTargetRepo: REPOSITORY,
     graphBranch: WORKTREE_BRANCH,
+    graphFollowsWorkspaceBranch: true,
     plannedRepo: REPOSITORY,
     plannedBranch: WORKTREE_BRANCH,
+    plannedFollowsWorkspaceBranch: true,
     deployingRepo: REPOSITORY,
     deployingBranch: WORKTREE_BRANCH
   };
@@ -1303,6 +1313,30 @@ export class CanvasHarness {
         await fs.mkdir(path.join(workspacePath, ".radius"), {
           recursive: true
         });
+      if (workspace.initializeGitRepository) {
+        await fs.writeFile(path.join(workspacePath, ".gitkeep"), "", "utf8");
+        execFileSync("git", ["init", "--initial-branch", WORKTREE_BRANCH], {
+          cwd: workspacePath,
+          stdio: "pipe"
+        });
+        execFileSync("git", ["add", ".gitkeep"], {
+          cwd: workspacePath,
+          stdio: "pipe"
+        });
+        execFileSync(
+          "git",
+          [
+            "-c",
+            "user.name=Radius Tests",
+            "-c",
+            "user.email=radius-tests@example.invalid",
+            "commit",
+            "-m",
+            "Initialize fixture"
+          ],
+          { cwd: workspacePath, stdio: "pipe" }
+        );
+      }
       const useFakeCli = mode === "fake";
       const fakeScript = useFakeCli ? await writeFakeCli(fakeBin) : undefined;
       const scenarioPath = path.join(rootParent, "scenario.json");
@@ -1462,6 +1496,21 @@ export class CanvasHarness {
 
   get baseUrl(): string {
     return this.entry.baseUrl;
+  }
+
+  renameWorkspaceBranch(branch: string): void {
+    execFileSync("git", ["branch", "-m", branch], {
+      cwd: this.workspacePath,
+      stdio: "pipe"
+    });
+  }
+
+  currentWorkspaceBranch(): string {
+    return execFileSync("git", ["branch", "--show-current"], {
+      cwd: this.workspacePath,
+      encoding: "utf8",
+      stdio: "pipe"
+    }).trim();
   }
 
   async seedState(state: CanvasState): Promise<void> {

@@ -54,6 +54,7 @@ const productionHandlers = {
       isValidRepoSlug: () => false,
       isResourceGroupName: () => false,
       isAksClusterName: () => false,
+      isKubernetesNamespace: () => false,
       isUuid: () => false,
       buildStages: () => [],
       createOperation: () => ({ operationId: "", currentStage: null }),
@@ -249,7 +250,13 @@ const productionHandlers = {
   }),
   ...createGraphsPlanningStreamRoutes({
     readInstanceEntry: () => undefined,
-    defaultBranchForState: () => "main",
+    resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
+      Promise.resolve({
+        status: "resolved",
+        branch: requestedBranch,
+        followsWorkspaceBranch: false
+      }),
+    commitBranchResolution: () => true,
     prepareSourceRef: () => ({ token: "" }),
     commitSourceRef: () => true,
     isCurrentSourceRef: () => true,
@@ -280,6 +287,13 @@ const productionHandlers = {
   ...createGraphsPlanningWritesRoutes({
     workflows: createGraphPlanningWorkflows({
       readInstanceEntry: () => undefined,
+      resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
+        Promise.resolve({
+          status: "resolved",
+          branch: requestedBranch,
+          followsWorkspaceBranch: false
+        }),
+      commitBranchResolution: () => true,
       pipeline: createGraphPipeline({
         fetchBicepSelection: () =>
           Promise.resolve({
@@ -310,7 +324,6 @@ const productionHandlers = {
       prepareSourceRefResources: () => ({ view: "graph", token: "" }),
       setSourceRefResources: () => false,
       isCurrentSourceRefToken: () => false,
-      defaultBranchForState: () => "main",
       canReuseModeledGraph: () => false,
       addGraphProgress: () => false,
       beginPlannedGraphRequest: () => 1,
@@ -392,6 +405,11 @@ const productionHandlers = {
     getSelectedGitHubExecutor: () => successfulSelectedGhExecutor(),
     cliExec: () => ({ stdin: null }),
     readProcessEnv: () => ({}),
+    namespaceClaimsFor: () => ({
+      listEnvironmentNames: () => Promise.resolve({ ok: true, names: [] }),
+      readEnvironmentVariables: () =>
+        Promise.resolve({ ok: true, variables: {} })
+    }),
     isValidRepoSlug: () => false,
     getOperation: () => null,
     isStale: () => false,

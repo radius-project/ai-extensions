@@ -8,6 +8,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolvePluginRoot } from "./plugin-root.js";
 
 export interface CredentialProfile {
   [key: string]: unknown;
@@ -223,6 +224,7 @@ export interface CanvasState {
   graphResources?: CanvasGraphResource[] | null;
   graphTargetRepo?: string;
   graphBranch?: string;
+  graphFollowsWorkspaceBranch?: boolean;
   graphFromWorkspace?: boolean;
   graphLoaded?: boolean;
   // Each graph page owns an independent record. Navigating to Planned or Diff
@@ -234,6 +236,7 @@ export interface CanvasState {
   plannedProvider?: string;
   plannedResources?: CanvasGraphResource[] | null;
   plannedBranch?: string;
+  plannedFollowsWorkspaceBranch?: boolean;
   plannedEnvironment?: string;
   plannedDefinitionHash?: string;
   plannedRequestGeneration?: number;
@@ -249,6 +252,7 @@ export interface CanvasState {
   branchShas?: Record<string, string>;
   contextRepo?: string;
   contextBranch?: string;
+  contextBranchSource?: "workspace" | "explicit";
   workspacePath?: string;
   workspaceRepo?: string;
   workspaceBranch?: string;
@@ -295,6 +299,15 @@ export interface CanvasState {
   // deduplicate both targets.
   appBicepHandoffKeys?: Record<string, string>;
   appBicepHandoffKey?: string;
+  appModelAttemptGeneration?: number;
+  appModelAttemptTokens?: Record<string, string>;
+  appModelFailures?: Record<
+    string,
+    {
+      attemptToken: string;
+      error: string;
+    }
+  >;
   graphRepairAttempts?: Partial<
     Record<
       GraphProgressView,
@@ -378,7 +391,10 @@ export function resolveCredentialsFilePath(
   moduleDirectory = __dirname_ext
 ): string {
   const configured = environment.RADIUS_CREDENTIALS_FILE?.trim();
-  return configured || join(moduleDirectory, ".radius-credentials.json");
+  return (
+    configured ||
+    join(resolvePluginRoot(moduleDirectory), ".radius-credentials.json")
+  );
 }
 
 const CREDS_FILE = resolveCredentialsFilePath();

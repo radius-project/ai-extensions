@@ -220,8 +220,9 @@ export async function handleDeleteEnvironment(
     }
     // Deleting an environment is now an async operation (issue #303): it tears
     // down the Radius environment on the cluster, removes the per-environment
-    // federated credential, deletes the GitHub environment, and — when the app
-    // registration is left unused — prompts before deleting it. The work runs
+    // federated credential, deletes the GitHub environment and its dedicated
+    // GHCR state package, and records that the shared app registration remains.
+    // The work runs
     // in the background under the same OperationRecord + progress-panel model as
     // environment creation, so the route only starts it and returns 202.
     let target: {
@@ -389,13 +390,19 @@ const NAMESPACE_VARIABLES = [
 const AZURE_CONFIG_VARIABLES = {
   resourceGroup: ["AZURE_RESOURCE_GROUP"],
   cluster: ["AZURE_AKS_CLUSTER_NAME"],
-  namespace: NAMESPACE_VARIABLES
+  namespace: NAMESPACE_VARIABLES,
+  // The account the cluster name is scoped to. Reported so the wizard can tell
+  // two same-named clusters apart when it checks whether a namespace is already
+  // claimed, rather than refusing a legitimate environment on a name collision.
+  subscriptionId: ["AZURE_SUBSCRIPTION_ID"]
 } as const;
 const AWS_CONFIG_VARIABLES = {
   cluster: ["AWS_EKS_CLUSTER_NAME"],
   namespace: NAMESPACE_VARIABLES,
   vpcId: ["RADIUS_VPC_ID"],
-  subnetIds: ["RADIUS_SUBNET_IDS"]
+  subnetIds: ["RADIUS_SUBNET_IDS"],
+  accountId: ["AWS_ACCOUNT_ID"],
+  region: ["AWS_REGION"]
 } as const;
 
 // Overlays a synthetic "deleting" status onto the environment named by an

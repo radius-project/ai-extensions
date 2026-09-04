@@ -6,14 +6,24 @@
 // has a README and a `test:artifact` script. Adding such a directory is enough
 // for the release workflows to pick it up.
 //
+// Source is split the way github/awesome-copilot splits it: `plugins/<name>/`
+// carries the Agent Plugins manifest, `extensions/<name>/` carries the canvas
+// extension. The build assembles both into `.artifacts/<name>/`, which is
+// git-ignored and is published verbatim at `plugins/<name>/` on a release
+// branch — so the build never writes into a tracked source tree.
+//
 // Naming convention, applied uniformly so a second plugin can never collide
 // with the first:
 //
-//   <plugin>@<version>            source tag (Changesets creates this one)
-//   <plugin>/v<version>           artifact tag on the orphan install commit
+//   releases/<plugin>/edge        rolling prerelease branch, refreshed on every
+//                                 push to main
+//   <plugin>@edge                 tag on that branch's commit
 //   releases/<plugin>/v<version>  versioned orphan branch for that version
-//   releases/<plugin>/<channel>   rolling install branch (edge, latest)
-//   <plugin>@<channel>            rolling tag on that branch
+//   <plugin>@<version>            the one tag a stable release publishes, in
+//                                 Changesets' format, on that branch's commit
+//
+// A published branch and its tag always name the same orphan commit, so either
+// ref installs exactly the same tree.
 //
 // Usage:
 //   node scripts/plugins.mjs                    print every plugin name
@@ -29,7 +39,11 @@ import { fileURLToPath } from "node:url";
 export const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 const PLUGINS_DIR = "plugins";
-const CHANNELS = ["edge", "latest"];
+const EXTENSIONS_DIR = "extensions";
+const ARTIFACTS_DIR = ".artifacts";
+// A stable release is identified by its version, so edge is the only channel
+// with a rolling branch and tag.
+const CHANNELS = ["edge"];
 const PLUGIN_NAME = /^[a-z0-9][a-z0-9.-]*[a-z0-9]$|^[a-z0-9]$/;
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
@@ -44,10 +58,13 @@ function describe(name) {
   return {
     name,
     dir,
-    distDir: `${dir}/dist`,
-    packageFile: `${dir}/package.json`,
+    extensionDir: `${EXTENSIONS_DIR}/${name}`,
+    // Where the build assembles the plugin before publishing it at `dir`.
+    distDir: `${ARTIFACTS_DIR}/${name}`,
+    packageFile: `${EXTENSIONS_DIR}/${name}/package.json`,
     manifestFile: `${dir}/plugin.json`,
-    changelogFile: `${dir}/CHANGELOG.md`,
+    // Changesets writes the changelog beside the package it versions.
+    changelogFile: `${EXTENSIONS_DIR}/${name}/CHANGELOG.md`,
     readmeFile: `${dir}/README.md`
   };
 }
@@ -67,7 +84,9 @@ export function listPlugins() {
     const hasManifest = existsSync(join(repoRoot, plugin.manifestFile));
     if (!hasPackage && !hasManifest) continue;
     if (!hasPackage || !hasManifest) {
-      fail(`${plugin.dir} must contain both package.json and plugin.json`);
+      fail(
+        `a plugin needs both ${plugin.manifestFile} and ${plugin.packageFile}`
+      );
     }
     if (!existsSync(join(repoRoot, plugin.readmeFile))) {
       fail(`${plugin.dir} must contain README.md`);
@@ -161,12 +180,12 @@ export function pluginRefs(plugin, { version, channel } = {}) {
   const refs = {
     PLUGIN_NAME: plugin.name,
     PLUGIN_DIR: plugin.dir,
+    PLUGIN_EXTENSION_DIR: plugin.extensionDir,
     PLUGIN_DIST: plugin.distDir,
     PLUGIN_ARTIFACT: `plugin-dist-${plugin.name}`,
     PLUGIN_SBOM_ARTIFACT: `plugin-sbom-${plugin.name}`,
     PLUGIN_TARBALL: `${plugin.name}-plugin.tar.gz`,
-    PLUGIN_SBOM: `${plugin.name}-plugin.spdx.json`,
-    PLUGIN_AWESOME_COPILOT: `${plugin.name}-awesome-copilot.zip`
+    PLUGIN_SBOM: `${plugin.name}-plugin.spdx.json`
   };
   if (channel !== undefined && channel !== "") {
     if (!CHANNELS.includes(channel)) {
@@ -180,7 +199,6 @@ export function pluginRefs(plugin, { version, channel } = {}) {
       fail(`--version requires SemVer, got ${JSON.stringify(version)}`);
     }
     refs.PLUGIN_SOURCE_TAG = `${plugin.name}@${version}`;
-    refs.PLUGIN_ARTIFACT_TAG = `${plugin.name}/v${version}`;
     refs.PLUGIN_PINNED_BRANCH = `releases/${plugin.name}/v${version}`;
   }
   return refs;

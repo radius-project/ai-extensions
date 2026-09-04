@@ -167,7 +167,7 @@ importers:
         specifier: 'catalog:'
         version: 2.9.0
 
-  plugins/radius:
+  extensions/radius:
     dependencies:
       '@github/copilot-sdk':
         specifier: 'catalog:'
