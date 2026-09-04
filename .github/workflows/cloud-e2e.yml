@@ -96,7 +96,7 @@ jobs:
     # job first, the single most useful diagnostic for a run nobody can reproduce
     # locally is exactly what would be lost. The remaining headroom covers
     # dependency install, browser download, teardown, and artifact upload.
-    timeout-minutes: 210
+    timeout-minutes: 235
     permissions:
       contents: read # actions/checkout
       id-token: write # OIDC token exchanged for an Azure token by azure/login
@@ -239,12 +239,12 @@ jobs:
           # Published by wellknown so the region can move without a code change.
           # Empty leaves the fixture's own default in place.
           AIEXT_CLOUD_E2E_AZURE_LOCATION: ${{ vars.AIEXT_CLOUD_E2E_AZURE_LOCATION }}
+          AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          # Playwright renews the repository-scoped installation token before
-          # every serial stage and teardown. The private key remains only in this
           # Playwright captures and removes the private key from its environment
           # before starting Canvas or any CLI child command.
           CLOUD_E2E_BOT_CLIENT_ID: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
+          CLOUD_E2E_BOT_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
           CLOUD_E2E_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
         run: pnpm run test:cloud
 

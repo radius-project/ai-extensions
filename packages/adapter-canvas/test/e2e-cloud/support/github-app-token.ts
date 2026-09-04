@@ -1,137 +1,177 @@
-import { createPrivateKey, sign } from "node:crypto";
+import { sign } from "node:crypto";
 import { CLOUD_MINIMUM_REFRESHED_TOKEN_LIFETIME_MS } from "./cloud-timeout-budget.js";
 
-type GitHubApiRequest = (input: string, init: RequestInit) => Promise<Response>;
-
-export interface GitHubAppTokenOptions {
+export interface GitHubAppTokenConfig {
   readonly clientId: string;
+  readonly installationId: string;
   readonly privateKey: string;
   readonly repository: string;
-  readonly now?: () => Date;
-  readonly request?: GitHubApiRequest;
+  readonly apiUrl: string;
 }
 
-const API_ROOT = "https://api.github.com";
-const INSTALLATION_PERMISSIONS = {
-  actions: "read",
-  administration: "read",
-  contents: "write",
-  environments: "write",
-  pull_requests: "write",
-  variables: "write",
-  workflows: "write"
-} as const;
-
-function required(value: string, label: string): string {
-  if (value.trim() === "") throw new Error(`${label} is required.`);
-  return value;
+export interface GitHubAppTokenPorts {
+  readonly now: () => Date;
+  readonly request: (
+    url: string,
+    init: RequestInit
+  ) => Promise<Pick<Response, "ok" | "status" | "statusText" | "json">>;
+  readonly signJwt: (content: string, privateKey: string) => string;
 }
 
-function repositoryParts(repository: string): {
-  readonly owner: string;
-  readonly name: string;
-} {
-  const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(repository);
-  if (!match)
-    throw new Error("Fixture repository must be canonical owner/name.");
-  const [, owner = "", name = ""] = match;
-  return { owner, name };
+function requireValue(value: string | undefined, name: string): string {
+  const trimmed = value?.trim();
+  if (!trimmed)
+    throw new Error(
+      `${name} is required to refresh the cloud journey's GitHub App token.`
+    );
+  return trimmed;
+}
+
+export function readGitHubAppTokenConfig(
+  env: NodeJS.ProcessEnv = process.env
+): GitHubAppTokenConfig | null {
+  const configured = [
+    env.CLOUD_E2E_BOT_CLIENT_ID,
+    env.CLOUD_E2E_BOT_INSTALLATION_ID,
+    env.CLOUD_E2E_BOT_PRIVATE_KEY
+  ].some((value) => value?.trim());
+  if (!configured) return null;
+
+  const installationId = requireValue(
+    env.CLOUD_E2E_BOT_INSTALLATION_ID,
+    "CLOUD_E2E_BOT_INSTALLATION_ID"
+  );
+  if (!/^[1-9][0-9]*$/.test(installationId))
+    throw new Error(
+      "CLOUD_E2E_BOT_INSTALLATION_ID must be a positive integer."
+    );
+
+  const repository = requireValue(
+    env.AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY,
+    "AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY"
+  );
+  if (!/^[^/\s]+\/[^/\s]+$/.test(repository))
+    throw new Error(
+      "AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY must be an owner/name repository."
+    );
+
+  return {
+    clientId: requireValue(
+      env.CLOUD_E2E_BOT_CLIENT_ID,
+      "CLOUD_E2E_BOT_CLIENT_ID"
+    ),
+    installationId,
+    privateKey: requireValue(
+      env.CLOUD_E2E_BOT_PRIVATE_KEY,
+      "CLOUD_E2E_BOT_PRIVATE_KEY"
+    ).replace(/\\n/g, "\n"),
+    repository,
+    apiUrl: (env.GITHUB_API_URL?.trim() || "https://api.github.com").replace(
+      /\/+$/,
+      ""
+    )
+  };
+}
+
+export function takeGitHubAppTokenConfig(
+  env: NodeJS.ProcessEnv = process.env
+): GitHubAppTokenConfig | null {
+  try {
+    return readGitHubAppTokenConfig(env);
+  } finally {
+    delete env.CLOUD_E2E_BOT_PRIVATE_KEY;
+  }
 }
 
 function encodeJson(value: unknown): string {
-  return Buffer.from(JSON.stringify(value)).toString("base64url");
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
 }
 
-function createAppJwt(clientId: string, privateKey: string, now: Date): string {
-  const issuedAt = Math.floor(now.getTime() / 1000) - 60;
-  const unsigned = `${encodeJson({ alg: "RS256", typ: "JWT" })}.${encodeJson({
-    iat: issuedAt,
-    exp: issuedAt + 9 * 60,
-    iss: clientId
-  })}`;
-  return `${unsigned}.${sign(
-    "RSA-SHA256",
-    Buffer.from(unsigned),
-    createPrivateKey(privateKey)
-  ).toString("base64url")}`;
+export function createNodeGitHubAppTokenPorts(): GitHubAppTokenPorts {
+  return {
+    now: () => new Date(),
+    request: (url, init) => fetch(url, init),
+    signJwt: (content, privateKey) =>
+      sign("RSA-SHA256", Buffer.from(content), privateKey).toString("base64url")
+  };
 }
 
-async function readObject(
-  response: Response,
-  operation: string
-): Promise<Record<string, unknown>> {
+export async function mintGitHubAppToken(
+  config: GitHubAppTokenConfig,
+  ports: GitHubAppTokenPorts = createNodeGitHubAppTokenPorts()
+): Promise<string> {
+  const nowSeconds = Math.floor(ports.now().getTime() / 1000);
+  const unsignedJwt = [
+    encodeJson({ alg: "RS256", typ: "JWT" }),
+    encodeJson({
+      iat: nowSeconds - 60,
+      exp: nowSeconds + 9 * 60,
+      iss: config.clientId
+    })
+  ].join(".");
+  const jwt = `${unsignedJwt}.${ports.signJwt(unsignedJwt, config.privateKey)}`;
+  const repositoryName = config.repository.split("/")[1];
+  if (!repositoryName)
+    throw new Error(
+      "The GitHub App token repository must include an owner and name."
+    );
+
+  const response = await ports.request(
+    `${config.apiUrl}/app/installations/${config.installationId}/access_tokens`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${jwt}`,
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28"
+      },
+      body: JSON.stringify({
+        repositories: [repositoryName],
+        permissions: {
+          actions: "read",
+          administration: "read",
+          contents: "write",
+          environments: "write",
+          pull_requests: "write",
+          variables: "write",
+          workflows: "write"
+        }
+      })
+    }
+  );
   if (!response.ok)
     throw new Error(
-      `${operation} failed with HTTP ${response.status} ${response.statusText}.`
+      `GitHub App token refresh failed with HTTP ${response.status} ${response.statusText}.`
     );
-  const payload: unknown = await response.json();
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload))
-    throw new Error(`${operation} returned a malformed response.`);
-  return payload as Record<string, unknown>;
-}
 
-/**
- * Mints a fresh repository-scoped installation token before each serial stage.
- *
- * The private key is used only for the short-lived App JWT and is never passed
- * to a child command or included in an error message.
- */
-export async function renewGitHubAppInstallationToken(
-  options: GitHubAppTokenOptions
-): Promise<string> {
-  const clientId = required(options.clientId, "GitHub App client ID").trim();
-  const privateKey = required(options.privateKey, "GitHub App private key");
-  const { owner, name } = repositoryParts(options.repository);
-  const now = options.now ?? (() => new Date());
-  const request = options.request ?? fetch;
-  const jwt = createAppJwt(clientId, privateKey, now());
-  const headers = {
-    Accept: "application/vnd.github+json",
-    Authorization: `Bearer ${jwt}`,
-    "X-GitHub-Api-Version": "2022-11-28"
-  };
-
-  const installation = await readObject(
-    await request(`${API_ROOT}/repos/${owner}/${name}/installation`, {
-      headers
-    }),
-    "GitHub App installation lookup"
-  );
-  if (
-    typeof installation.id !== "number" ||
-    !Number.isSafeInteger(installation.id) ||
-    installation.id <= 0
-  )
+  const payload = (await response.json()) as unknown;
+  if (typeof payload !== "object" || payload === null)
     throw new Error(
-      "GitHub App installation lookup returned no valid installation id."
+      "GitHub App token refresh returned no token or expiration time."
     );
-
-  const tokenResponse = await readObject(
-    await request(
-      `${API_ROOT}/app/installations/${installation.id}/access_tokens`,
-      {
-        method: "POST",
-        headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          repositories: [name],
-          permissions: INSTALLATION_PERMISSIONS
-        })
-      }
-    ),
-    "GitHub App token renewal"
-  );
+  const token = "token" in payload ? payload.token : undefined;
+  const expiresAt = "expires_at" in payload ? payload.expires_at : undefined;
   if (
-    typeof tokenResponse.token !== "string" ||
-    tokenResponse.token.trim() === ""
-  )
-    throw new Error("GitHub App token renewal returned no token.");
-  if (
-    typeof tokenResponse.expires_at !== "string" ||
-    Date.parse(tokenResponse.expires_at) - now().getTime() <
+    typeof token !== "string" ||
+    token.trim() === "" ||
+    typeof expiresAt !== "string" ||
+    !Number.isFinite(Date.parse(expiresAt)) ||
+    Date.parse(expiresAt) - ports.now().getTime() <
       CLOUD_MINIMUM_REFRESHED_TOKEN_LIFETIME_MS
   )
     throw new Error(
-      "GitHub App token renewal returned a token with insufficient lifetime."
+      "GitHub App token refresh returned no usable unexpired token."
     );
-  return tokenResponse.token;
+  return token.trim();
+}
+
+export async function refreshProcessGitHubToken(
+  config: GitHubAppTokenConfig,
+  env: NodeJS.ProcessEnv = process.env,
+  ports?: GitHubAppTokenPorts
+): Promise<void> {
+  const token = await mintGitHubAppToken(config, ports);
+  env.GH_TOKEN = token;
+  env.GITHUB_TOKEN = token;
 }

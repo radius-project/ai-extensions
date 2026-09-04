@@ -54,6 +54,10 @@ import {
   DEPLOYMENT_TEST_TIMEOUT_MS
 } from "./support/cloud-timeout-budget.js";
 import {
+  refreshProcessGitHubToken,
+  takeGitHubAppTokenConfig
+} from "./support/github-app-token.js";
+import {
   classifyWorkflowPublication,
   cloudCanvasState,
   describeWorkflowPublication,
@@ -97,21 +101,16 @@ import {
 } from "./support/deploy-journey.js";
 import {
   describeUnprovisionedFixtureRepository,
-  FIXTURE_REPOSITORY,
   isFixtureRepositoryProvisioned,
   resolveFixtureLocation
 } from "./support/fixture-repository.js";
-import { renewGitHubAppInstallationToken } from "./support/github-app-token.js";
 
 const PROFILE_NAME = "cloud-e2e";
 const WORKFLOW_DIRECTORY = ".github/workflows";
 const KUBERNETES_NAMESPACE = "default";
 const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
 const githubToken = process.env.GH_TOKEN?.trim() ?? "";
-const githubAppClientId = process.env.CLOUD_E2E_BOT_CLIENT_ID ?? "";
-const githubAppPrivateKey = process.env.CLOUD_E2E_BOT_PRIVATE_KEY ?? "";
-delete process.env.CLOUD_E2E_BOT_CLIENT_ID;
-delete process.env.CLOUD_E2E_BOT_PRIVATE_KEY;
+const githubAppTokenConfig = takeGitHubAppTokenConfig();
 
 const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
 const gate = evaluateCreateEnvironmentGate({
@@ -120,8 +119,8 @@ const gate = evaluateCreateEnvironmentGate({
   unprovisionedReason: describeUnprovisionedFixtureRepository(),
   subscriptionId,
   githubToken,
-  githubAppClientId,
-  githubAppPrivateKey
+  githubAppClientId: githubAppTokenConfig?.clientId,
+  githubAppPrivateKey: githubAppTokenConfig?.privateKey
 });
 const skipReason =
   !gate.enabled && gate.disposition === "skip" ? gate.reason : "";
@@ -196,11 +195,11 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   let productOperationStarted = false;
 
   const refreshGitHubToken = async (): Promise<void> => {
-    process.env.GH_TOKEN = await renewGitHubAppInstallationToken({
-      clientId: githubAppClientId,
-      privateKey: githubAppPrivateKey,
-      repository: FIXTURE_REPOSITORY
-    });
+    if (!githubAppTokenConfig)
+      throw new Error(
+        "GitHub App refresh credentials are required for the cloud lifecycle journey."
+      );
+    await refreshProcessGitHubToken(githubAppTokenConfig);
   };
 
   test.beforeAll(async () => {
@@ -216,6 +215,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       githubRunId: process.env.GITHUB_RUN_ID,
       ports
     });
+    await refreshGitHubToken();
     // Turns every assertion below from an observation into a proof: none of the
     // artifacts asserted on existed before the product ran.
     await fixture.assertCleanSlate();
