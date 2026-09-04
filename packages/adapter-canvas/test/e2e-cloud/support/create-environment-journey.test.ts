@@ -22,12 +22,12 @@ import {
   REQUIRED_DEFAULT_BRANCH_WORKFLOWS,
   selectFallbackBranches,
   selectFallbackPullRequests,
-  VERIFY_WORKFLOW_PATH
+  VERIFY_WORKFLOW_PATH,
 } from "./create-environment-journey.js";
 
 const PROVISIONED = {
   fixtureProvisioned: true,
-  unprovisionedReason: "The fixture repository is provisioned."
+  unprovisionedReason: "The fixture repository is provisioned.",
 };
 
 describe("evaluateCreateEnvironmentGate", () => {
@@ -37,21 +37,21 @@ describe("evaluateCreateEnvironmentGate", () => {
         cloudE2eFlag: "1",
         ...PROVISIONED,
         subscriptionId: "sub-1",
-        githubToken: "ghs_token"
-      })
+        githubToken: "ghs_token",
+      }),
     ).toEqual({ enabled: true });
   });
 
   it.each([
     ["undefined", undefined],
     ["empty", ""],
-    ["whitespace", "   "]
+    ["whitespace", "   "],
   ])("skips when RADIUS_CLOUD_E2E is %s", (_label, flag) => {
     const gate = evaluateCreateEnvironmentGate({
       cloudE2eFlag: flag,
       ...PROVISIONED,
       subscriptionId: "sub-1",
-      githubToken: "ghs_token"
+      githubToken: "ghs_token",
     });
     expect(gate.enabled).toBe(false);
     expect(gate.enabled === false && gate.reason).toContain("RADIUS_CLOUD_E2E");
@@ -63,11 +63,11 @@ describe("evaluateCreateEnvironmentGate", () => {
       fixtureProvisioned: false,
       unprovisionedReason: "FIXTURE_BASELINE_SHA still holds a placeholder.",
       subscriptionId: "",
-      githubToken: ""
+      githubToken: "",
     });
     expect(gate).toEqual({
       enabled: false,
-      reason: "FIXTURE_BASELINE_SHA still holds a placeholder."
+      reason: "FIXTURE_BASELINE_SHA still holds a placeholder.",
     });
   });
 
@@ -75,10 +75,10 @@ describe("evaluateCreateEnvironmentGate", () => {
     const gate = evaluateCreateEnvironmentGate({
       cloudE2eFlag: "1",
       ...PROVISIONED,
-      githubToken: "ghs_token"
+      githubToken: "ghs_token",
     });
     expect(gate.enabled === false && gate.reason).toContain(
-      "AZURE_SUBSCRIPTION_ID"
+      "AZURE_SUBSCRIPTION_ID",
     );
   });
 
@@ -87,7 +87,7 @@ describe("evaluateCreateEnvironmentGate", () => {
       cloudE2eFlag: "1",
       ...PROVISIONED,
       subscriptionId: "sub-1",
-      githubToken: " "
+      githubToken: " ",
     });
     expect(gate.enabled === false && gate.reason).toContain("GH_TOKEN");
   });
@@ -98,7 +98,7 @@ describe("readAzureAccount", () => {
     id: " sub-1 ",
     name: "Fixture subscription",
     tenantId: "tenant-1",
-    user: { name: "runner@example.test", type: "user" }
+    user: { name: "runner@example.test", type: "user" },
   };
 
   it("narrows a signed-in user account", () => {
@@ -107,7 +107,7 @@ describe("readAzureAccount", () => {
       subscriptionId: "sub-1",
       subscriptionName: "Fixture subscription",
       principalName: "runner@example.test",
-      principalType: "user"
+      principalType: "user",
     });
   });
 
@@ -117,23 +117,23 @@ describe("readAzureAccount", () => {
         ...payload,
         user: {
           name: "00000000-0000-0000-0000-000000000001",
-          type: "servicePrincipal"
-        }
-      }).principalType
+          type: "servicePrincipal",
+        },
+      }).principalType,
     ).toBe("servicePrincipal");
   });
 
   it.each([
     ["null", null],
     ["an array", []],
-    ["a string", "not-json"]
+    ["a string", "not-json"],
   ])("rejects %s in place of an account object", (_label, value) => {
     expect(() => readAzureAccount(value)).toThrow(/no account object/);
   });
 
   it("rejects a payload with no user object", () => {
     expect(() => readAzureAccount({ ...payload, user: undefined })).toThrow(
-      /no "user" object/
+      /no "user" object/,
     );
   });
 
@@ -141,24 +141,24 @@ describe("readAzureAccount", () => {
     expect(() =>
       readAzureAccount({
         ...payload,
-        user: { ...payload.user, type: "managedIdentity" }
-      })
+        user: { ...payload.user, type: "managedIdentity" },
+      }),
     ).toThrow(/unrecognized principal type "managedIdentity"/);
   });
 
   it.each([
     ["tenantId", { tenantId: "  " }],
     ["id", { id: "" }],
-    ["name", { name: 7 }]
+    ["name", { name: 7 }],
   ])("rejects a missing %s", (field, override) => {
     expect(() => readAzureAccount({ ...payload, ...override })).toThrow(
-      new RegExp(`usable "${field}"`)
+      new RegExp(`usable "${field}"`),
     );
   });
 
   it("rejects a user with no name", () => {
     expect(() =>
-      readAzureAccount({ ...payload, user: { type: "user" } })
+      readAzureAccount({ ...payload, user: { type: "user" } }),
     ).toThrow(/usable "user.name"/);
   });
 });
@@ -166,7 +166,7 @@ describe("readAzureAccount", () => {
 describe("readOidcSubjectCustomization", () => {
   it("reads the default configuration", () => {
     expect(readOidcSubjectCustomization({ use_default: true })).toEqual({
-      useDefault: true
+      useDefault: true,
     });
   });
 
@@ -175,12 +175,12 @@ describe("readOidcSubjectCustomization", () => {
       readOidcSubjectCustomization({
         use_default: true,
         use_immutable_subject: true,
-        sub_claim_prefix: " repo:octo@1/app@2 "
-      })
+        sub_claim_prefix: " repo:octo@1/app@2 ",
+      }),
     ).toEqual({
       useDefault: true,
       useImmutableSubject: true,
-      subClaimPrefix: "repo:octo@1/app@2"
+      subClaimPrefix: "repo:octo@1/app@2",
     });
   });
 
@@ -189,20 +189,20 @@ describe("readOidcSubjectCustomization", () => {
       readOidcSubjectCustomization({
         use_default: false,
         use_immutable_subject: "yes",
-        sub_claim_prefix: "   "
-      })
+        sub_claim_prefix: "   ",
+      }),
     ).toEqual({ useDefault: false });
   });
 
   it("rejects a payload that is not an object", () => {
     expect(() => readOidcSubjectCustomization(null)).toThrow(
-      /could not be read as an object/
+      /could not be read as an object/,
     );
   });
 
   it("refuses to guess when use_default is absent", () => {
     expect(() => readOidcSubjectCustomization({})).toThrow(
-      /boolean "use_default"/
+      /boolean "use_default"/,
     );
   });
 });
@@ -211,7 +211,7 @@ describe("environmentSubjectSuffix", () => {
   it.each([
     ["radtest-abc", "environment:radtest-abc"],
     ["a:b:c", "environment:a%3Ab%3Ac"],
-    ["", "environment:"]
+    ["", "environment:"],
   ])("encodes %s", (name, expected) => {
     expect(environmentSubjectSuffix(name)).toBe(expected);
   });
@@ -222,21 +222,21 @@ describe("expectedFederatedCredentialSubjects", () => {
     fullName: "octo/app",
     ownerId: 111,
     repoId: 222,
-    environmentName: "radtest-abc"
+    environmentName: "radtest-abc",
   };
 
   it("requires both subject forms when GitHub has not declared immutable subjects", () => {
     expect(
       expectedFederatedCredentialSubjects({
         ...base,
-        customization: { useDefault: true }
-      })
+        customization: { useDefault: true },
+      }),
     ).toEqual({
       supported: true,
       required: [
         "repo:octo/app:environment:radtest-abc",
-        "repo:octo@111/app@222:environment:radtest-abc"
-      ]
+        "repo:octo@111/app@222:environment:radtest-abc",
+      ],
     });
   });
 
@@ -244,11 +244,11 @@ describe("expectedFederatedCredentialSubjects", () => {
     expect(
       expectedFederatedCredentialSubjects({
         ...base,
-        customization: { useDefault: true, useImmutableSubject: true }
-      })
+        customization: { useDefault: true, useImmutableSubject: true },
+      }),
     ).toEqual({
       supported: true,
-      required: ["repo:octo@111/app@222:environment:radtest-abc"]
+      required: ["repo:octo@111/app@222:environment:radtest-abc"],
     });
   });
 
@@ -259,12 +259,12 @@ describe("expectedFederatedCredentialSubjects", () => {
         customization: {
           useDefault: true,
           useImmutableSubject: true,
-          subClaimPrefix: "repo:renamed@111/moved@222"
-        }
-      })
+          subClaimPrefix: "repo:renamed@111/moved@222",
+        },
+      }),
     ).toEqual({
       supported: true,
-      required: ["repo:renamed@111/moved@222:environment:radtest-abc"]
+      required: ["repo:renamed@111/moved@222:environment:radtest-abc"],
     });
   });
 
@@ -275,12 +275,12 @@ describe("expectedFederatedCredentialSubjects", () => {
         customization: {
           useDefault: true,
           useImmutableSubject: true,
-          subClaimPrefix: "repo:octo/app"
-        }
-      })
+          subClaimPrefix: "repo:octo/app",
+        },
+      }),
     ).toEqual({
       supported: true,
-      required: ["repo:octo@111/app@222:environment:radtest-abc"]
+      required: ["repo:octo@111/app@222:environment:radtest-abc"],
     });
   });
 
@@ -291,12 +291,12 @@ describe("expectedFederatedCredentialSubjects", () => {
         customization: {
           useDefault: true,
           useImmutableSubject: true,
-          subClaimPrefix: "repository:renamed@111/moved@222"
-        }
-      })
+          subClaimPrefix: "repository:renamed@111/moved@222",
+        },
+      }),
     ).toEqual({
       supported: true,
-      required: ["repo:renamed@111/moved@222:environment:radtest-abc"]
+      required: ["repo:renamed@111/moved@222:environment:radtest-abc"],
     });
   });
 
@@ -305,11 +305,11 @@ describe("expectedFederatedCredentialSubjects", () => {
       ...base,
       ownerId: " 111 ",
       repoId: "222",
-      customization: { useDefault: true, useImmutableSubject: true }
+      customization: { useDefault: true, useImmutableSubject: true },
     });
     expect(result).toEqual({
       supported: true,
-      required: ["repo:octo@111/app@222:environment:radtest-abc"]
+      required: ["repo:octo@111/app@222:environment:radtest-abc"],
     });
   });
 
@@ -317,12 +317,12 @@ describe("expectedFederatedCredentialSubjects", () => {
     ["octo", "not an owner/repo"],
     ["octo/", "not an owner/repo"],
     ["/app", "not an owner/repo"],
-    ["octo/app/extra", "not an owner/repo"]
+    ["octo/app/extra", "not an owner/repo"],
   ])("refuses the malformed full name %s", (fullName, expected) => {
     const result = expectedFederatedCredentialSubjects({
       ...base,
       fullName,
-      customization: { useDefault: true }
+      customization: { useDefault: true },
     });
     expect(result.supported).toBe(false);
     if (!result.supported) expect(result.reason).toContain(expected);
@@ -331,11 +331,11 @@ describe("expectedFederatedCredentialSubjects", () => {
   it("refuses a repository that customizes its subject claims", () => {
     const result = expectedFederatedCredentialSubjects({
       ...base,
-      customization: { useDefault: false }
+      customization: { useDefault: false },
     });
     expect(result.supported).toBe(false);
     expect(result.supported === false && result.reason).toContain(
-      "customizes its OIDC subject claims"
+      "customizes its OIDC subject claims",
     );
   });
 
@@ -344,16 +344,16 @@ describe("expectedFederatedCredentialSubjects", () => {
     ["negative", -1],
     ["fractional", 1.5],
     ["non-numeric text", "abc"],
-    ["absent", undefined]
+    ["absent", undefined],
   ])("refuses a %s repository id", (_label, repoId) => {
     const result = expectedFederatedCredentialSubjects({
       ...base,
       repoId,
-      customization: { useDefault: true }
+      customization: { useDefault: true },
     });
     expect(result.supported).toBe(false);
     expect(result.supported === false && result.reason).toContain(
-      "positive numeric owner and repository ids"
+      "positive numeric owner and repository ids",
     );
   });
 });
@@ -365,14 +365,14 @@ describe("classifyWorkflowPublication", () => {
     const publication = classifyWorkflowPublication({
       defaultBranchPaths: [VERIFY_WORKFLOW_PATH, "README.md"],
       fallbackBranches: [],
-      openPullRequests: []
+      openPullRequests: [],
     });
     expect(publication).toEqual({
       outcome: "committed",
-      paths: [...REQUIRED_DEFAULT_BRANCH_WORKFLOWS]
+      paths: [...REQUIRED_DEFAULT_BRANCH_WORKFLOWS],
     });
     expect(describeWorkflowPublication(publication, context)).toContain(
-      "octo/app@main carries"
+      "octo/app@main carries",
     );
   });
 
@@ -380,12 +380,12 @@ describe("classifyWorkflowPublication", () => {
     const publication = classifyWorkflowPublication({
       defaultBranchPaths: [VERIFY_WORKFLOW_PATH],
       fallbackBranches: ["radius/setup-radtest-abc-workflows-1234"],
-      openPullRequests: [17]
+      openPullRequests: [17],
     });
     expect(publication).toEqual({
       outcome: "pull-request",
       branches: ["radius/setup-radtest-abc-workflows-1234"],
-      pullRequests: [17]
+      pullRequests: [17],
     });
     const message = describeWorkflowPublication(publication, context);
     expect(message).toContain("radius/setup-radtest-abc-workflows-1234");
@@ -397,10 +397,10 @@ describe("classifyWorkflowPublication", () => {
     const publication = classifyWorkflowPublication({
       defaultBranchPaths: [],
       fallbackBranches: ["radius/setup-radtest-abc-workflows-1234"],
-      openPullRequests: []
+      openPullRequests: [],
     });
     expect(describeWorkflowPublication(publication, context)).toContain(
-      "open pull requests none"
+      "open pull requests none",
     );
   });
 
@@ -408,14 +408,14 @@ describe("classifyWorkflowPublication", () => {
     const publication = classifyWorkflowPublication({
       defaultBranchPaths: ["README.md"],
       fallbackBranches: [],
-      openPullRequests: []
+      openPullRequests: [],
     });
     expect(publication).toEqual({
       outcome: "missing",
-      missingPaths: [VERIFY_WORKFLOW_PATH]
+      missingPaths: [VERIFY_WORKFLOW_PATH],
     });
     expect(describeWorkflowPublication(publication, context)).toContain(
-      "no pull-request fallback explains it"
+      "no pull-request fallback explains it",
     );
   });
 
@@ -425,11 +425,11 @@ describe("classifyWorkflowPublication", () => {
         defaultBranchPaths: [VERIFY_WORKFLOW_PATH],
         fallbackBranches: [],
         openPullRequests: [],
-        requiredPaths: [".github/workflows/run-rad-commands.yml"]
-      })
+        requiredPaths: [".github/workflows/run-rad-commands.yml"],
+      }),
     ).toEqual({
       outcome: "missing",
-      missingPaths: [".github/workflows/run-rad-commands.yml"]
+      missingPaths: [".github/workflows/run-rad-commands.yml"],
     });
   });
 });
@@ -441,18 +441,18 @@ describe("readEnvironmentVariables", () => {
         { name: "AZURE_CLIENT_ID", value: "app-1" },
         { name: "AZURE_LOCATION" },
         { name: 7, value: "ignored" },
-        "not-an-object"
-      ]
+        "not-an-object",
+      ],
     });
     expect([...variables]).toEqual([
       ["AZURE_CLIENT_ID", "app-1"],
-      ["AZURE_LOCATION", ""]
+      ["AZURE_LOCATION", ""],
     ]);
   });
 
   it("rejects a payload with no variables array", () => {
     expect(() => readEnvironmentVariables({ variables: {} })).toThrow(
-      /no "variables" array/
+      /no "variables" array/,
     );
   });
 });
@@ -464,7 +464,7 @@ describe("findEnvironmentIdentityProblems", () => {
     resourceGroup: "radtest-canvas-abc",
     cluster: "aks-abc",
     location: "westus3",
-    namespace: "default"
+    namespace: "default",
   };
   const complete = (clientId: string): ReadonlyMap<string, string> =>
     new Map([
@@ -474,7 +474,7 @@ describe("findEnvironmentIdentityProblems", () => {
       ["AZURE_RESOURCE_GROUP", expected.resourceGroup],
       ["AZURE_AKS_CLUSTER_NAME", expected.cluster],
       ["AZURE_LOCATION", expected.location],
-      ["KUBERNETES_NAMESPACE", expected.namespace]
+      ["KUBERNETES_NAMESPACE", expected.namespace],
     ]);
 
   it("accepts an environment wired to the created application", () => {
@@ -483,8 +483,8 @@ describe("findEnvironmentIdentityProblems", () => {
         variables: complete("APP-1"),
         createdAppId: "app-1",
         bootstrapClientId: "bootstrap-1",
-        expected
-      })
+        expected,
+      }),
     ).toEqual([]);
   });
 
@@ -497,11 +497,11 @@ describe("findEnvironmentIdentityProblems", () => {
       findEnvironmentIdentityProblems({
         variables,
         createdAppId: "app-1",
-        expected
-      })
+        expected,
+      }),
     ).toEqual([
       'AZURE_AKS_CLUSTER_NAME is "AKS-ABC"; expected "aks-abc".',
-      'KUBERNETES_NAMESPACE is "Default"; expected "default".'
+      'KUBERNETES_NAMESPACE is "Default"; expected "default".',
     ]);
   });
 
@@ -510,7 +510,7 @@ describe("findEnvironmentIdentityProblems", () => {
       variables: complete("bootstrap-1"),
       createdAppId: "app-1",
       bootstrapClientId: "BOOTSTRAP-1",
-      expected
+      expected,
     });
     expect(problems).toHaveLength(1);
     expect(problems[0]).toContain("is the bootstrap identity");
@@ -520,17 +520,17 @@ describe("findEnvironmentIdentityProblems", () => {
     const problems = findEnvironmentIdentityProblems({
       variables: complete("someone-else"),
       createdAppId: "app-1",
-      expected
+      expected,
     });
     expect(problems).toEqual([
-      'AZURE_CLIENT_ID is "someone-else" but the product created application "app-1".'
+      'AZURE_CLIENT_ID is "someone-else" but the product created application "app-1".',
     ]);
   });
 
   it.each([
     ["absent", undefined],
     ["empty", ""],
-    ["whitespace", "  "]
+    ["whitespace", "  "],
   ])("reports an %s client id", (_label, value) => {
     const variables = new Map(complete("app-1"));
     if (value === undefined) variables.delete("AZURE_CLIENT_ID");
@@ -538,7 +538,7 @@ describe("findEnvironmentIdentityProblems", () => {
     const problems = findEnvironmentIdentityProblems({
       variables,
       createdAppId: "app-1",
-      expected
+      expected,
     });
     expect(problems[0]).toContain("AZURE_CLIENT_ID is absent or empty");
   });
@@ -550,17 +550,17 @@ describe("findEnvironmentIdentityProblems", () => {
         ["AZURE_TENANT_ID", "other-tenant"],
         ["AZURE_SUBSCRIPTION_ID", expected.subscriptionId],
         ["AZURE_RESOURCE_GROUP", "someone-elses-group"],
-        ["AZURE_LOCATION", "eastus"]
+        ["AZURE_LOCATION", "eastus"],
       ]),
       createdAppId: "app-1",
-      expected
+      expected,
     });
     expect(problems).toEqual([
       'AZURE_TENANT_ID is "other-tenant"; expected "tenant-1".',
       'AZURE_RESOURCE_GROUP is "someone-elses-group"; expected "radtest-canvas-abc".',
       'AZURE_AKS_CLUSTER_NAME is absent; expected "aks-abc".',
       'AZURE_LOCATION is "eastus"; expected "westus3".',
-      'KUBERNETES_NAMESPACE is absent; expected "default".'
+      'KUBERNETES_NAMESPACE is absent; expected "default".',
     ]);
   });
 });
@@ -574,7 +574,7 @@ describe("readServicePrincipalObjectId", () => {
     ["a non-object", null],
     ["a missing id", {}],
     ["a blank id", { id: "  " }],
-    ["a non-string id", { id: 7 }]
+    ["a non-string id", { id: 7 }],
   ])("rejects %s", (_label, payload) => {
     expect(() => readServicePrincipalObjectId(payload)).toThrow(/usable "id"/);
   });
@@ -585,18 +585,18 @@ describe("readRepositoryIdentity", () => {
     expect(
       readRepositoryIdentity({
         id: 222,
-        owner: { id: 111 }
-      })
+        owner: { id: 111 },
+      }),
     ).toEqual({ ownerId: 111, repoId: 222 });
   });
 
   it.each([
     ["the owner id is absent", { id: 222 }],
     ["the repository id is a string", { id: "222", owner: { id: 111 } }],
-    ["the payload is not an object", null]
+    ["the payload is not an object", null],
   ])("rejects a payload where %s", (_label, payload) => {
     expect(() => readRepositoryIdentity(payload)).toThrow(
-      /numeric "owner.id" and "id"/
+      /numeric "owner.id" and "id"/,
     );
   });
 });
@@ -607,14 +607,14 @@ describe("readDirectoryPaths", () => {
       readDirectoryPaths([
         { path: ".github/workflows/radius-verify-credentials.yml" },
         { name: "no-path" },
-        "not-an-object"
-      ])
+        "not-an-object",
+      ]),
     ).toEqual([".github/workflows/radius-verify-credentials.yml"]);
   });
 
   it("refuses to read a non-array listing as an empty directory", () => {
     expect(() => readDirectoryPaths({ message: "Not Found" })).toThrow(
-      /did not return an array/
+      /did not return an array/,
     );
   });
 });
@@ -627,10 +627,10 @@ describe("selectFallbackBranches", () => {
           { name: "main" },
           { name: "radius/setup-radtest-abc-workflows-1234" },
           { name: "radius/setup-radtest-other-workflows-9999" },
-          { notAName: true }
+          { notAName: true },
         ],
-        "radtest-abc"
-      )
+        "radtest-abc",
+      ),
     ).toEqual(["radius/setup-radtest-abc-workflows-1234"]);
   });
 
@@ -639,16 +639,16 @@ describe("selectFallbackBranches", () => {
       selectFallbackBranches(
         [
           { ref: "refs/heads/radius/setup-radtest-abc-workflows-1234" },
-          { ref: "refs/heads/feature/other" }
+          { ref: "refs/heads/feature/other" },
         ],
-        "radtest-abc"
-      )
+        "radtest-abc",
+      ),
     ).toEqual(["radius/setup-radtest-abc-workflows-1234"]);
   });
 
   it("rejects a non-array listing", () => {
     expect(() => selectFallbackBranches(null, "radtest-abc")).toThrow(
-      /array of branches/
+      /array of branches/,
     );
   });
 });
@@ -661,18 +661,18 @@ describe("selectFallbackPullRequests", () => {
           {
             number: 17,
             title: "Anything at all",
-            head: { ref: "radius/setup-radtest-abc-workflows-1234" }
+            head: { ref: "radius/setup-radtest-abc-workflows-1234" },
           },
           { number: 18, head: { ref: "feature/other" } },
           {
             number: "19",
-            head: { ref: "radius/setup-radtest-abc-workflows-2" }
+            head: { ref: "radius/setup-radtest-abc-workflows-2" },
           },
           { head: { ref: "radius/setup-radtest-abc-workflows-3" } },
-          { number: 20 }
+          { number: 20 },
         ],
-        "radtest-abc"
-      )
+        "radtest-abc",
+      ),
     ).toEqual([17]);
   });
 
@@ -683,19 +683,19 @@ describe("selectFallbackPullRequests", () => {
           [
             {
               number: 17,
-              head: { ref: "radius/setup-radtest-abc-workflows-1234" }
-            }
+              head: { ref: "radius/setup-radtest-abc-workflows-1234" },
+            },
           ],
-          [{ number: 18, head: { ref: "feature/other" } }]
+          [{ number: 18, head: { ref: "feature/other" } }],
         ],
-        "radtest-abc"
-      )
+        "radtest-abc",
+      ),
     ).toEqual([17]);
   });
 
   it("rejects a non-array listing", () => {
     expect(() => selectFallbackPullRequests(undefined, "radtest-abc")).toThrow(
-      /array of pull requests/
+      /array of pull requests/,
     );
   });
 });
@@ -711,9 +711,9 @@ describe("readOperationSnapshot", () => {
         operation: {
           state: " failed ",
           terminalState: "failed",
-          failure: { message: "Azure said no." }
-        }
-      })
+          failure: { message: "Azure said no." },
+        },
+      }),
     ).toEqual({ state: "failed", terminal: true, error: "Azure said no." });
   });
 
@@ -721,7 +721,7 @@ describe("readOperationSnapshot", () => {
     expect(readOperationSnapshot({ operation: { state: "running" } })).toEqual({
       state: "running",
       terminal: false,
-      error: ""
+      error: "",
     });
   });
 
@@ -733,16 +733,22 @@ describe("readOperationSnapshot", () => {
     [
       "a non-string error",
       { operation: { state: "failed", error: 7 } },
-      /operation.error/
-    ]
+      /operation.error/,
+    ],
   ])("rejects %s", (_label, payload, expected) => {
     expect(() => readOperationSnapshot(payload)).toThrow(expected);
   });
 
   it("accepts a null error as absent", () => {
     expect(
-      readOperationSnapshot({ operation: { state: "running", error: null } })
+      readOperationSnapshot({ operation: { state: "running", error: null } }),
     ).toEqual({ state: "running", terminal: false, error: "" });
+  });
+
+  it("treats a blank operation error as absent", () => {
+    expect(
+      readOperationSnapshot({ operation: { state: "failed", error: "  " } }),
+    ).toEqual({ state: "failed", terminal: true, error: "" });
   });
 });
 
@@ -753,8 +759,8 @@ describe("readOperationHttpResponse", () => {
         ok: true,
         status: 200,
         statusText: "OK",
-        body: '{"operation":{"state":"running"}}'
-      })
+        body: '{"operation":{"state":"running"}}',
+      }),
     ).toEqual({ operation: { state: "running" } });
   });
 
@@ -764,10 +770,10 @@ describe("readOperationHttpResponse", () => {
         ok: false,
         status: 503,
         statusText: "Service Unavailable",
-        body: "setup worker unavailable"
-      })
+        body: "setup worker unavailable",
+      }),
     ).toThrow(
-      "The operation status request failed with HTTP 503 Service Unavailable: setup worker unavailable"
+      "The operation status request failed with HTTP 503 Service Unavailable: setup worker unavailable",
     );
   });
 
@@ -777,8 +783,8 @@ describe("readOperationHttpResponse", () => {
         ok: false,
         status: 500,
         statusText: "",
-        body: " "
-      })
+        body: " ",
+      }),
     ).toThrow("HTTP 500: <empty body>");
   });
 
@@ -788,10 +794,10 @@ describe("readOperationHttpResponse", () => {
         ok: true,
         status: 200,
         statusText: "OK",
-        body: "<html>not JSON</html>"
-      })
+        body: "<html>not JSON</html>",
+      }),
     ).toThrow(
-      /operation status request returned output that is not valid JSON/
+      /operation status request returned output that is not valid JSON/,
     );
   });
 });
@@ -805,7 +811,7 @@ describe("readOperationId", () => {
     ["a non-object response", null],
     ["a missing operation id", {}],
     ["a non-string operation id", { operationId: 7 }],
-    ["a blank operation id", { operationId: " " }]
+    ["a blank operation id", { operationId: " " }],
   ])("rejects %s", (_label, payload) => {
     expect(() => readOperationId(payload)).toThrow(/usable "operationId"/);
   });
@@ -818,13 +824,13 @@ describe("parseJsonPayload", () => {
 
   it("rejects an empty body", () => {
     expect(() => parseJsonPayload("  ", "the probe")).toThrow(
-      /returned no output/
+      /returned no output/,
     );
   });
 
   it("reports the parse failure with its context", () => {
     expect(() => parseJsonPayload("{oops", "the probe")).toThrow(
-      /the probe returned output that is not valid JSON/
+      /the probe returned output that is not valid JSON/,
     );
   });
 });
@@ -836,19 +842,22 @@ describe("readWorkflowDirectory", () => {
         {
           code: 0,
           stdout: JSON.stringify([{ path: VERIFY_WORKFLOW_PATH }]),
-          stderr: ""
+          stderr: "",
         },
-        "the workflow listing"
-      )
+        "the workflow listing",
+      ),
     ).toEqual([VERIFY_WORKFLOW_PATH]);
   });
 
   it.each([
     ["gh: Not Found (HTTP 404)", ""],
-    ["", "HTTP 404: Not Found"]
+    ["", "HTTP 404: Not Found"],
   ])("treats an absent directory as no workflows", (stderr, stdout) => {
     expect(
-      readWorkflowDirectory({ code: 1, stdout, stderr }, "the workflow listing")
+      readWorkflowDirectory(
+        { code: 1, stdout, stderr },
+        "the workflow listing",
+      ),
     ).toEqual([]);
   });
 
@@ -856,8 +865,8 @@ describe("readWorkflowDirectory", () => {
     expect(() =>
       readWorkflowDirectory(
         { code: 4, stdout: "", stderr: "gh: HTTP 500" },
-        "the workflow listing"
-      )
+        "the workflow listing",
+      ),
     ).toThrow(/failed with exit code 4: gh: HTTP 500/);
   });
 
@@ -865,8 +874,8 @@ describe("readWorkflowDirectory", () => {
     expect(() =>
       readWorkflowDirectory(
         { code: 1, stdout: "", stderr: "GraphQL: repository Not Found" },
-        "the workflow listing"
-      )
+        "the workflow listing",
+      ),
     ).toThrow(/failed with exit code 1: GraphQL: repository Not Found/);
   });
 
@@ -874,9 +883,18 @@ describe("readWorkflowDirectory", () => {
     expect(() =>
       readWorkflowDirectory(
         { code: 4, stdout: "server error", stderr: "" },
-        "the workflow listing"
-      )
+        "the workflow listing",
+      ),
     ).toThrow(/failed with exit code 4: server error/);
+  });
+
+  it("reports an explicit placeholder when a failure wrote no output", () => {
+    expect(() =>
+      readWorkflowDirectory(
+        { code: 4, stdout: "", stderr: "" },
+        "the workflow listing",
+      ),
+    ).toThrow(/failed with exit code 4: <no output>/);
   });
 });
 
@@ -886,8 +904,8 @@ describe("cloudCanvasState", () => {
       cloudCanvasState({
         repository: "octo/app",
         branch: "main",
-        workspacePath: "/tmp/clone"
-      })
+        workspacePath: "/tmp/clone",
+      }),
     ).toEqual({
       contextRepo: "octo/app",
       contextBranch: "main",
@@ -899,7 +917,7 @@ describe("cloudCanvasState", () => {
       plannedRepo: "octo/app",
       plannedBranch: "main",
       deployingRepo: "octo/app",
-      deployingBranch: "main"
+      deployingBranch: "main",
     });
   });
 });
