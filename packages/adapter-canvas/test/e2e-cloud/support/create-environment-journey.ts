@@ -620,11 +620,12 @@ export function readOperationSnapshot(payload: unknown): OperationSnapshot {
     );
   const state = operation.state.trim();
   const failure = asRecord(operation.failure);
+  const rawOperationError =
+    typeof operation.error === "string" ? operation.error.trim() : "";
   const error =
     typeof failure?.message === "string" && failure.message.trim() !== "" ?
       failure.message.trim()
-    : typeof operation.error === "string" ? operation.error
-    : "";
+    : rawOperationError;
   const terminal =
     (typeof operation.terminalState === "string" &&
       operation.terminalState.trim() !== "") ||
