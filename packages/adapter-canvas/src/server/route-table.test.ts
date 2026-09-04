@@ -39,6 +39,7 @@ const productionHandlers = {
   ...createLivenessSourceRoutes({
     getOpenSourceHandler: () => null,
     readInstanceState: () => undefined,
+    getWorkspaceModelRevision: () => Promise.resolve(null),
     toSafeRepoRelPath: (input) => String(input)
   }),
   ...createOperationsStatusRoutes(

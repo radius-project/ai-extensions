@@ -933,6 +933,55 @@ test.describe("Radius Canvas in Chromium", () => {
     ).toContainText("Application graph ready");
   });
 
+  test("refreshes an open graph after the workspace model is regenerated", async ({
+    page,
+    canvas
+  }) => {
+    let graphRequests = 0;
+    await page.route("**/api/load-graph", async (route) => {
+      graphRequests++;
+      if (graphRequests === 1) {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [
+            {
+              id: "app/regenerated",
+              name: "regenerated",
+              type: "Radius.Compute/containers",
+              connections: [],
+              outputResources: []
+            }
+          ],
+          fromWorkspace: true
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+    await expect(
+      page.locator("#graph-status, #graph-refresh-status")
+    ).toContainText("Application graph ready", { timeout: 15_000 });
+
+    await fs.appendFile(
+      path.join(canvas.workspacePath, ".radius", "app.bicep"),
+      "\n// regenerated model\n",
+      "utf8"
+    );
+    await expect
+      .poll(async () => {
+        await page.evaluate("window.dispatchEvent(new Event('focus'))");
+        return graphRequests;
+      })
+      .toBe(2);
+    await expect(page.locator(".rad-node")).toHaveCount(1);
+    await expect(page.locator(".rad-node")).toContainText("regenerated");
+  });
+
   test("reloads the graph when the server canonicalizes its branch", async ({
     page,
     canvas
