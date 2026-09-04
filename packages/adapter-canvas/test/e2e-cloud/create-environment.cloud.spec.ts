@@ -46,9 +46,12 @@ import {
 import {
   CREATE_OPERATION_TIMEOUT_MS,
   CREATE_TEST_TIMEOUT_MS,
+  DELETE_REFUSAL_TEST_TIMEOUT_MS,
   DELETE_OPERATION_TIMEOUT_MS,
   DELETE_POSTCONDITION_TIMEOUT_MS,
-  DELETE_TEST_TIMEOUT_MS
+  DELETE_TEST_TIMEOUT_MS,
+  DEPLOYMENT_OPERATION_TIMEOUT_MS,
+  DEPLOYMENT_TEST_TIMEOUT_MS
 } from "./support/cloud-timeout-budget.js";
 import {
   classifyWorkflowPublication,
@@ -94,26 +97,31 @@ import {
 } from "./support/deploy-journey.js";
 import {
   describeUnprovisionedFixtureRepository,
+  FIXTURE_REPOSITORY,
   isFixtureRepositoryProvisioned,
   resolveFixtureLocation
 } from "./support/fixture-repository.js";
+import { renewGitHubAppInstallationToken } from "./support/github-app-token.js";
 
 const PROFILE_NAME = "cloud-e2e";
 const WORKFLOW_DIRECTORY = ".github/workflows";
 const KUBERNETES_NAMESPACE = "default";
 const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
 const githubToken = process.env.GH_TOKEN?.trim() ?? "";
+const githubAppClientId = process.env.CLOUD_E2E_BOT_CLIENT_ID ?? "";
+const githubAppPrivateKey = process.env.CLOUD_E2E_BOT_PRIVATE_KEY ?? "";
+delete process.env.CLOUD_E2E_BOT_CLIENT_ID;
+delete process.env.CLOUD_E2E_BOT_PRIVATE_KEY;
 
-// Deployment controls and the expected live-environment refusal should surface
-// promptly; the workflow itself retains the full deployment operation budget.
 const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
-const DEPLOYMENT_TIMEOUT_MS = 45 * 60 * 1000;
 const gate = evaluateCreateEnvironmentGate({
   cloudE2eFlag: process.env.RADIUS_CLOUD_E2E,
   fixtureProvisioned: isFixtureRepositoryProvisioned(),
   unprovisionedReason: describeUnprovisionedFixtureRepository(),
   subscriptionId,
-  githubToken
+  githubToken,
+  githubAppClientId,
+  githubAppPrivateKey
 });
 const skipReason =
   !gate.enabled && gate.disposition === "skip" ? gate.reason : "";
@@ -187,6 +195,14 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   let deployedNamespace = "";
   let productOperationStarted = false;
 
+  const refreshGitHubToken = async (): Promise<void> => {
+    process.env.GH_TOKEN = await renewGitHubAppInstallationToken({
+      clientId: githubAppClientId,
+      privateKey: githubAppPrivateKey,
+      repository: FIXTURE_REPOSITORY
+    });
+  };
+
   test.beforeAll(async () => {
     if (!gate.enabled) throw new Error(gate.reason);
     fixture = await createCloudFixture({
@@ -205,11 +221,17 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     await fixture.assertCleanSlate();
   });
 
+  test.beforeEach(refreshGitHubToken);
+
   test.afterAll(async () => {
     const current = fixture;
     fixture = undefined;
     if (!current) return;
     await runCleanupSteps([
+      {
+        label: "renew GitHub App token for teardown",
+        run: refreshGitHubToken
+      },
       {
         label: "reclaim product-created artifacts",
         run: async () => {
@@ -460,7 +482,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   test("deploys the application through Canvas and proves it is running on AKS", async ({
     page
   }, testInfo) => {
-    testInfo.setTimeout(DEPLOYMENT_TIMEOUT_MS + 5 * 60 * 1000);
+    testInfo.setTimeout(DEPLOYMENT_TEST_TIMEOUT_MS);
     const cloud = fixture;
     if (!cloud) throw new Error("The cloud fixture was not created.");
 
@@ -531,7 +553,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
 
       await expect
         .poll(async () => (await snapshot()).terminal, {
-          timeout: DEPLOYMENT_TIMEOUT_MS,
+          timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
           intervals: [5_000]
         })
         .toBe(true);
@@ -585,7 +607,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   test("refuses to delete the environment while the deployment is live", async ({
     page
   }, testInfo) => {
-    testInfo.setTimeout(DELETE_TIMEOUT_MS + 5 * 60 * 1000);
+    testInfo.setTimeout(DELETE_REFUSAL_TEST_TIMEOUT_MS);
     const cloud = fixture;
     if (!cloud) throw new Error("The cloud fixture was not created.");
 
@@ -643,7 +665,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   test("deletes the deployment while preserving its environment and identity", async ({
     page
   }, testInfo) => {
-    testInfo.setTimeout(DEPLOYMENT_TIMEOUT_MS + 5 * 60 * 1000);
+    testInfo.setTimeout(DEPLOYMENT_TEST_TIMEOUT_MS);
     const cloud = fixture;
     const appBefore = appRegistration;
     if (!cloud) throw new Error("The cloud fixture was not created.");
@@ -714,7 +736,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
               cloud.environmentName
             ).present;
           },
-          { timeout: DEPLOYMENT_TIMEOUT_MS, intervals: [5_000] }
+          { timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS, intervals: [5_000] }
         )
         .toBe(false);
 

@@ -2233,6 +2233,11 @@ describe("createCloudFixture", () => {
 
       await fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE);
 
+      expect(
+        fake.commands.calls.find(
+          (call) => call.tool === "az" && call.args.includes("get-credentials")
+        )?.timeoutMs
+      ).toBe(30_000);
       const az = fake.commands
         .commandLines("az")
         .find((line) => line.includes("get-credentials"));
@@ -2243,6 +2248,34 @@ describe("createCloudFixture", () => {
       expect(fake.commands.commandLines("kubectl")[0]).toContain(
         `--kubeconfig ${KUBECONFIG}`
       );
+    });
+
+    it("does not start kubectl after credential retrieval exhausts the assertion deadline", async () => {
+      let current = NOW;
+      const { fixture, fake } = await createHarness(
+        [
+          credentials(() => {
+            current = new Date(NOW.getTime() + 2000);
+            return {};
+          })
+        ],
+        {
+          makeWorkspaceDir: (prefix) =>
+            Promise.resolve(prefix.includes("kube") ? KUBE_DIR : WORKSPACE),
+          readNow: () => current
+        },
+        { assertionTimeoutMs: 2000 }
+      );
+
+      await expect(
+        fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE)
+      ).rejects.toThrow(/exhausted its assertion deadline/);
+      expect(
+        fake.commands.calls.find(
+          (call) => call.tool === "az" && call.args.includes("get-credentials")
+        )?.timeoutMs
+      ).toBe(2000);
+      expect(fake.commands.commandLines("kubectl")).toEqual([]);
     });
 
     it("queries only the workloads Radius labelled for the application", async () => {

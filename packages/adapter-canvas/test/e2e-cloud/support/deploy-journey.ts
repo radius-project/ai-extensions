@@ -225,6 +225,15 @@ export function readDeploymentRows(payload: unknown): DeploymentRow[] {
         `The deployment listing carried a malformed entry at index ${index}; "app" and "environment" must be strings.`
       );
     if (
+      item.app === "" ||
+      item.app.trim() !== item.app ||
+      item.environment === "" ||
+      item.environment.trim() !== item.environment
+    )
+      throw new Error(
+        `The deployment listing carried a malformed entry at index ${index}; "app" and "environment" must be canonical non-empty strings.`
+      );
+    if (
       item.status !== undefined &&
       item.status !== null &&
       typeof item.status !== "string"

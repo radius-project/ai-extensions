@@ -331,6 +331,14 @@ describe("readDeploymentRows", () => {
     [["demo"], /must be an object/],
     [{ app: 1, environment: "radtest-env" }, /must be strings/],
     [{ app: "demo", environment: 2 }, /must be strings/],
+    [{ app: "", environment: "radtest-env" }, /canonical non-empty/],
+    [{ app: "   ", environment: "radtest-env" }, /canonical non-empty/],
+    [{ app: " demo", environment: "radtest-env" }, /canonical non-empty/],
+    [{ app: "demo ", environment: "radtest-env" }, /canonical non-empty/],
+    [{ app: "demo", environment: "" }, /canonical non-empty/],
+    [{ app: "demo", environment: "   " }, /canonical non-empty/],
+    [{ app: "demo", environment: " radtest-env" }, /canonical non-empty/],
+    [{ app: "demo", environment: "radtest-env " }, /canonical non-empty/],
     [{ app: "demo", environment: "radtest-env", status: 1 }, /"status"/],
     [{ app: "demo", environment: "radtest-env", runUrl: 1 }, /"runUrl"/]
   ])("rejects malformed deployment row %#", (entry, message) => {
