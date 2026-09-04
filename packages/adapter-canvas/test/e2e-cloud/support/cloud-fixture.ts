@@ -149,6 +149,7 @@ export interface CloudFixtureOptions {
   readonly baselineSha?: string;
   /** Node count for the discovery-target cluster. One is enough. */
   readonly nodeCount?: number;
+  readonly githubRunId?: string;
   readonly assertionTimeoutMs?: number;
   readonly assertionPollIntervalMs?: number;
 }
@@ -158,6 +159,9 @@ const DEFAULT_NODE_COUNT = 1;
 const CLUSTER_NODE_SIZE = "Standard_B2s";
 const DEFAULT_ASSERTION_TIMEOUT_MS = 30_000;
 const DEFAULT_ASSERTION_POLL_INTERVAL_MS = 1_000;
+// The product derives several artifact names from the repository, not the run.
+// Holding one external ref prevents separate invocations from sharing them.
+const REPOSITORY_LEASE_REF = "refs/heads/radius/cloud-e2e-lease";
 
 export function radiusPurgeCreationTime(value: Date): string {
   const milliseconds = value.getTime();
@@ -185,6 +189,11 @@ export async function createCloudFixture(
   const defaultBranch = options.defaultBranch ?? FIXTURE_REPO_DEFAULT_BRANCH;
   const baselineSha = options.baselineSha ?? FIXTURE_BASELINE_SHA;
   const nodeCount = options.nodeCount ?? DEFAULT_NODE_COUNT;
+  const tags = [
+    `creationTime=${radiusPurgeCreationTime(ports.now())}`,
+    "radius-canvas-e2e=true",
+    ...(options.githubRunId ? [`github-run-id=${options.githubRunId}`] : [])
+  ];
   const assertionTimeoutMs = requirePositiveNumber(
     options.assertionTimeoutMs ?? DEFAULT_ASSERTION_TIMEOUT_MS,
     "Assertion timeout"
@@ -205,9 +214,37 @@ export async function createCloudFixture(
   let workspacePath = "";
 
   try {
-    // `creationTime` plus the fixture tag lets scheduled cleanup prove the group
-    // is ours and old enough. The `radtest-` prefix leaves Radius purge as the
-    // fallback safety net if this cleanup cannot run.
+    expectSuccess(
+      await commands.runGh([
+        "api",
+        "--method",
+        "POST",
+        `repos/${repository}/git/refs`,
+        "-f",
+        `ref=${REPOSITORY_LEASE_REF}`,
+        "-f",
+        `sha=${baselineSha}`
+      ]),
+      `gh api create ${REPOSITORY_LEASE_REF}`
+    );
+    unwind.push({
+      describe: `release repository lease ${REPOSITORY_LEASE_REF}`,
+      run: async () => {
+        expectSuccess(
+          await commands.runGh([
+            "api",
+            "--method",
+            "DELETE",
+            `repos/${repository}/git/${REPOSITORY_LEASE_REF}`
+          ]),
+          `gh api delete ${REPOSITORY_LEASE_REF}`
+        );
+      }
+    });
+
+    // The fixture tag proves the group is ours; github-run-id limits immediate
+    // scheduled cleanup to CI-created groups. The creationTime/radtest pair
+    // leaves Radius purge as the fallback safety net if this cleanup cannot run.
     expectSuccess(
       await commands.runAz([
         "group",
@@ -219,8 +256,7 @@ export async function createCloudFixture(
         "--subscription",
         subscriptionId,
         "--tags",
-        `creationTime=${radiusPurgeCreationTime(ports.now())}`,
-        "radius-canvas-e2e=true",
+        ...tags,
         "--output",
         "none"
       ]),
@@ -303,7 +339,7 @@ export async function createCloudFixture(
   let disposed = false;
   let kubeconfigPath = "";
 
-  const clusterKubeconfig = async (): Promise<string> => {
+  const clusterKubeconfig = async (timeoutMs?: number): Promise<string> => {
     if (kubeconfigPath) return kubeconfigPath;
     const directory = await ports.makeWorkspaceDir(
       `radtest-canvas-kube-${uniqueId}`
@@ -314,20 +350,23 @@ export async function createCloudFixture(
     });
     const candidate = `${directory}/kubeconfig`;
     expectSuccess(
-      await commands.runAz([
-        "aks",
-        "get-credentials",
-        "--resource-group",
-        resourceGroup,
-        "--name",
-        clusterName,
-        "--subscription",
-        subscriptionId,
-        "--file",
-        candidate,
-        "--overwrite-existing",
-        "--only-show-errors"
-      ]),
+      await commands.runAz(
+        [
+          "aks",
+          "get-credentials",
+          "--resource-group",
+          resourceGroup,
+          "--name",
+          clusterName,
+          "--subscription",
+          subscriptionId,
+          "--file",
+          candidate,
+          "--overwrite-existing",
+          "--only-show-errors"
+        ],
+        timeoutMs
+      ),
       `az aks get-credentials ${clusterName}`
     );
     kubeconfigPath = candidate;
@@ -339,8 +378,14 @@ export async function createCloudFixture(
     namespace: string,
     timeoutMs?: number
   ): Promise<readonly KubernetesWorkload[] | "no-namespace"> => {
-    const kubeconfig = await clusterKubeconfig();
     const context = `kubectl get deployments -n ${namespace}`;
+    const deadline =
+      timeoutMs === undefined ? undefined : ports.now().getTime() + timeoutMs;
+    const kubeconfig = await clusterKubeconfig(timeoutMs);
+    const commandTimeoutMs =
+      deadline === undefined ? undefined : (
+        remainingCommandTimeout(deadline, ports.now, context)
+      );
     const result = await commands.runKubectl(
       [
         "--kubeconfig",
@@ -354,7 +399,7 @@ export async function createCloudFixture(
         "--output",
         "json"
       ],
-      timeoutMs
+      commandTimeoutMs
     );
     if (result.code !== 0) {
       if (isMissingNamespace(result)) return "no-namespace";
@@ -370,10 +415,16 @@ export async function createCloudFixture(
   const listApplicationResources = async (
     application: string,
     namespace: string,
-    timeoutMs?: number
+    timeoutMs: number
   ): Promise<readonly string[] | "no-namespace"> => {
-    const kubeconfig = await clusterKubeconfig();
     const context = `kubectl get deployments,pods -n ${namespace}`;
+    const deadline = ports.now().getTime() + timeoutMs;
+    const kubeconfig = await clusterKubeconfig(timeoutMs);
+    const commandTimeoutMs = remainingCommandTimeout(
+      deadline,
+      ports.now,
+      context
+    );
     const result = await commands.runKubectl(
       [
         "--kubeconfig",
@@ -387,7 +438,7 @@ export async function createCloudFixture(
         "--output",
         "json"
       ],
-      timeoutMs
+      commandTimeoutMs
     );
     if (result.code !== 0) {
       if (isMissingNamespace(result)) return "no-namespace";
@@ -1035,6 +1086,17 @@ async function pollForValue<T>(options: PollForValueOptions<T>): Promise<T> {
     if (remaining <= 0) throw new Error(options.timeoutMessage());
     await options.ports.wait(Math.min(options.intervalMs, remaining));
   }
+}
+
+function remainingCommandTimeout(
+  deadline: number,
+  now: () => Date,
+  context: string
+): number {
+  const remaining = deadline - now().getTime();
+  if (remaining <= 0)
+    throw new Error(`${context} exhausted its assertion deadline.`);
+  return remaining;
 }
 
 async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {

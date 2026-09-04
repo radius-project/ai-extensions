@@ -117,7 +117,7 @@ export function createFakeCloudCommands(
 
   return {
     port: {
-      runAz: (args) => run("az", args),
+      runAz: (args, timeoutMs) => run("az", args, undefined, timeoutMs),
       runGh: (args) => run("gh", args),
       runGit: (args, cwd) => run("git", args, cwd),
       runKubectl: (args, timeoutMs) =>
@@ -135,6 +135,7 @@ export interface FakeFixturePortsOptions {
   readonly stubs?: readonly FakeCommandStub[];
   readonly uniqueId?: string;
   readonly now?: Date;
+  readonly readNow?: () => Date;
   readonly workspaceDir?: string;
   readonly makeWorkspaceDir?: (prefix: string) => Promise<string>;
   readonly removeDir?: (dir: string) => Promise<void>;
@@ -179,7 +180,7 @@ export function createFakeFixturePorts(
           now = new Date(now.getTime() + milliseconds);
           return Promise.resolve();
         }),
-      now: () => new Date(now),
+      now: options.readNow ?? (() => new Date(now)),
       newUniqueId: () => uniqueId
     },
     commands,

@@ -16,6 +16,7 @@ import {
   STAGE_DELETE_RADIUS_ENV,
   STAGE_DELETE_CREDENTIAL,
   STAGE_DELETE_GITHUB_ENV,
+  STAGE_DELETE_STATE_PACKAGE,
   STAGE_REVIEW_APP_REGISTRATION
 } from "../../../src/operations.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
@@ -588,8 +589,12 @@ describe("the async delete route through its background runner", () => {
   }
 
   it("stops listing the environment once the runner tears it down", async () => {
-    const runnerFinished = deferred();
+    let runnerFinished = deferred();
     const azCommands: string[][] = [];
+    let packageFailure = false;
+    const operations: Parameters<
+      NonNullable<EnvironmentsDependencies["scheduleEnvironmentOperation"]>
+    >[1][] = [];
     // The scheduler is invoked only during the POST, after `start` returns, so
     // the deps can close over this ref and read the live harness by then.
     let harness: Harness;
@@ -614,8 +619,17 @@ describe("the async delete route through its background runner", () => {
       persistOperations: async () => {},
       logError: () => {},
       scheduleEnvironmentOperation: (_instanceId, op) => {
+        operations.push(op);
         void runEnvironmentDeletion(op as never, {
           deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
+          deleteStatePackage: async () => {
+            if (packageFailure) {
+              throw new Error(
+                "GitHub Packages rejected deletion. Run gh auth refresh --hostname github.com --scopes delete:packages."
+              );
+            }
+            return "deleted";
+          },
           withCredentialProvenanceLock: (work) => work(),
           runAz: async (args) => {
             azCommands.push(args);
@@ -722,6 +736,55 @@ describe("the async delete route through its background runner", () => {
     ]);
     expect(after.status).toBe(200);
     expect(names(after.body)).toEqual([]);
+    expect(operations[0]).toMatchObject({
+      stages: expect.arrayContaining([
+        expect.objectContaining({
+          id: STAGE_DELETE_STATE_PACKAGE,
+          state: "succeeded"
+        })
+      ])
+    });
+
+    // A missing destructive package scope is discovered only after the earlier
+    // teardown has converged. The route still exposes the resulting operation as
+    // a retryable partial failure while the removed GitHub environment stays out
+    // of the listing.
+    harness.setScript(listingScript("7\tdev"));
+    harness.invalidate(REPO);
+    expect(names((await harness.list()).body)).toEqual(["dev"]);
+    packageFailure = true;
+    runnerFinished = deferred();
+    const partialResponse = await fetch(
+      `${harness.baseUrl}/api/delete-environment`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo: REPO, environment: "dev" })
+      }
+    );
+    expect(partialResponse.status).toBe(202);
+    await runnerFinished.promise;
+    harness.setScript(listingScript(""));
+
+    const partial = operations[1];
+    expect(partial).toMatchObject({
+      state: "failed_partial",
+      failure: {
+        code: "state-package-delete-failed",
+        message: expect.stringContaining("delete:packages")
+      },
+      stages: expect.arrayContaining([
+        expect.objectContaining({
+          id: STAGE_DELETE_GITHUB_ENV,
+          state: "succeeded"
+        }),
+        expect.objectContaining({
+          id: STAGE_DELETE_STATE_PACKAGE,
+          state: "failed"
+        })
+      ])
+    });
+    expect(names((await harness.list()).body)).toEqual([]);
   });
 
   // The success case above proves a completed teardown drops the environment
@@ -764,6 +827,7 @@ describe("the async delete route through its background runner", () => {
         capturedOp = op as unknown as typeof capturedOp;
         void runEnvironmentDeletion(op as never, {
           deleteRadiusEnvironment: async () => ({ outcome: "deleted" }),
+          deleteStatePackage: async () => "deleted",
           withCredentialProvenanceLock: (work) => work(),
           runAz: async (args) => {
             const credential = {

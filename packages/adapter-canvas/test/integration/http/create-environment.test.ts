@@ -5,6 +5,7 @@ import { createCanvasServer } from "../../../src/server/create-canvas-server.js"
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import { createCreateEnvironmentRoutes } from "../../../src/server/routes/create-environment.js";
 import { isValidRepoSlug } from "../../../src/azure-oidc.js";
+import { createSelectedNamespaceClaimsPorts } from "../../../src/server/routes/create-environment-namespace-claims.js";
 import {
   buildVerifyWorkflowDispatchArgs,
   planCredentialVerification
@@ -83,10 +84,19 @@ interface Script {
     canonicalName: string;
     state: "created_candidate" | "reused";
   };
+  // The repository's existing namespace claims as the admission rung reads
+  // them, and the failure that must make it fail closed.
+  namespaceClaimants?: Record<string, Record<string, string>>;
+  namespaceClaimsFailure?: string;
+  noPinnedNamespaceAccount?: boolean;
 }
 
 interface Harness {
   baseUrl: string;
+  /** Claim reads that travelled the account pinned to the operation. */
+  selectedClaimCalls: string[];
+  /** Every ambient `cliExec` invocation, so a regression to it is observable. */
+  ambientCliCalls: string[];
   journal: string[];
   setJournalHook(hook: ((entry: string) => void) | null): void;
   ghCalls: string[];
@@ -329,6 +339,52 @@ function start(script: Script = {}): Harness {
     stderr: rule.result.stderr ?? "",
     ...(rule.result.timedOut ? { timedOut: true } : {})
   });
+  // The claim reads the namespace rung performs, answered as `gh` would. They
+  // are served through the same rule table as every other gh call so the read
+  // travels a real channel rather than a bespoke port fake.
+  const claimsGhRules = (): GhRule[] => {
+    if (script.namespaceClaimsFailure) {
+      return [
+        {
+          match: /^api --paginate \/repos\/[^ ]*\/environments/,
+          result: { code: 1, stderr: script.namespaceClaimsFailure }
+        }
+      ];
+    }
+    // A repository with no scripted claimants still has to answer the read: an
+    // unanswered call is a failure, and the rung fails closed on failures.
+    const claimants = script.namespaceClaimants ?? {};
+    const rules: GhRule[] = [
+      {
+        match:
+          /^api --paginate \/repos\/[^ ]*\/environments\?per_page=100 --jq/,
+        result: { code: 0, stdout: Object.keys(claimants).join("\n") }
+      }
+    ];
+    for (const [name, variables] of Object.entries(claimants)) {
+      rules.push({
+        // Production URL-encodes the environment name, so the rule has to match
+        // the encoded path. Matching the raw name would leave a call with an
+        // encodable character unscripted, making the harness less faithful than
+        // the code it is exercising.
+        match: new RegExp(
+          `^api --paginate /repos/[^ ]*/environments/${escapeRegExp(
+            encodeURIComponent(name)
+          )}/variables`
+        ),
+        result: {
+          code: 0,
+          stdout: Object.entries(variables)
+            .map(([key, value]) => `${key}\t${value}`)
+            .join("\n")
+        }
+      });
+    }
+    return rules;
+  };
+
+  const selectedClaimCalls: string[] = [];
+  const ambientCliCalls: string[] = [];
   const runGhArgs = (args: string[]): CreateEnvironmentCommandResult => {
     const key = args
       .map((arg) => (arg === TEMP_BODY_PATH ? `@${lastBodyBranch}` : arg))
@@ -379,7 +435,7 @@ function start(script: Script = {}): Harness {
         stderr: ""
       };
     }
-    for (const rule of script.gh ?? []) {
+    for (const rule of [...claimsGhRules(), ...(script.gh ?? [])]) {
       if (rule.match.test(key)) return resolveRule(rule);
     }
     const providerId =
@@ -420,6 +476,19 @@ function start(script: Script = {}): Harness {
       successfulSelectedGhExecutor({ run: async (args) => runGhArgs(args) }),
 
     // --- admission ---
+    // Wired the way `server.ts` wires it: the real ports over the GitHub account
+    // pinned to this operation, so the read under test is the production read
+    // rather than a restatement of it. Null when no account is pinned, which is
+    // what the rung must fail closed on.
+    namespaceClaimsFor: () =>
+      script.noPinnedNamespaceAccount ? null : (
+        createSelectedNamespaceClaimsPorts({
+          run: async (args: string[]) => {
+            selectedClaimCalls.push(args.join(" "));
+            return runGhArgs(args);
+          }
+        })
+      ),
     isValidRepoSlug,
     getOperation: (operationId) =>
       script.preparedEnvironment && operationId === operation.operationId ?
@@ -461,6 +530,7 @@ function start(script: Script = {}): Harness {
 
     // --- gh runner ---
     cliExec: (_command, args, _options, callback) => {
+      ambientCliCalls.push(args.join(" "));
       let result: CreateEnvironmentCommandResult;
       try {
         result = runGhArgs(args);
@@ -776,6 +846,8 @@ function start(script: Script = {}): Harness {
 
   return {
     baseUrl: "",
+    selectedClaimCalls,
+    ambientCliCalls,
     journal,
     setJournalHook: (hook) => {
       journalHook = hook;
@@ -812,6 +884,24 @@ async function post(
   });
 }
 
+/** Escapes a value used inside a `RegExp`, so a name is matched literally. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Every gh call except the namespace rung's read-only claim lookup. The rung
+ * reads GitHub before admitting, so an assertion that setup touched nothing has
+ * to exclude that read while still showing every other call, mutating or not.
+ */
+function ghCallsExcludingNamespaceClaimLookup(
+  calls: readonly string[]
+): string[] {
+  return calls.filter(
+    (call) => !/^api --paginate \/repos\/[^ ]*\/environments/.test(call)
+  );
+}
+
 describe("create-environment real-loopback HIT: the server-owned gate", () => {
   it("refuses a request that arrives without the server-owned token", async () => {
     const harness = start();
@@ -827,7 +917,7 @@ describe("create-environment real-loopback HIT: the server-owned gate", () => {
     });
     // Refused before the body is read and before any operation is touched.
     expect(harness.journal).toEqual([]);
-    expect(harness.ghCalls).toEqual([]);
+    expect(ghCallsExcludingNamespaceClaimLookup(harness.ghCalls)).toEqual([]);
   });
 
   it("serves the same request over the same socket once it carries the token", async () => {
@@ -876,6 +966,165 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
     });
   });
 
+  // The invariant the wizard's own check cannot carry. Both cases must refuse
+  // before any GitHub mutation, and the second must refuse precisely because
+  // the claims could not be read.
+  it("refuses 409 when another environment already holds the namespace", async () => {
+    const harness = start({
+      namespaceClaimants: {
+        dev: {
+          RADIUS_MANAGED: "true",
+          AZURE_CLIENT_ID: "client-1",
+          AZURE_SUBSCRIPTION_ID: "sub-1",
+          AZURE_AKS_CLUSTER_NAME: "aks-1",
+          KUBERNETES_NAMESPACE: "payments"
+        }
+      }
+    });
+
+    const response = await post({
+      repo: "octo/app",
+      environment: "prod",
+      provider: "azure",
+      subscriptionId: "sub-1",
+      cluster: "aks-1",
+      namespace: "payments"
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error:
+        'Namespace "payments" on cluster "aks-1" already belongs to environment "dev". Radius allows one environment per namespace, so choose a different namespace or deploy to "dev".',
+      code: "namespace-already-claimed",
+      environment: "dev"
+    });
+    // The safety property: refused before any GitHub mutation. The journal
+    // carries only the recovery record this request registered for itself.
+    expect(ghCallsExcludingNamespaceClaimLookup(harness.ghCalls)).toEqual([]);
+    expect(harness.journal).toEqual(["persist:1"]);
+  });
+
+  it("refuses 409 and changes nothing when the namespace claims cannot be read", async () => {
+    const harness = start({ namespaceClaimsFailure: "gh: forbidden" });
+
+    const response = await post({
+      repo: "octo/app",
+      environment: "prod",
+      provider: "azure",
+      subscriptionId: "sub-1",
+      cluster: "aks-1",
+      namespace: "payments"
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error:
+        "Radius created nothing because it could not confirm which namespaces octo/app's environments already use: gh: forbidden",
+      code: "namespace-claims-unavailable"
+    });
+    expect(ghCallsExcludingNamespaceClaimLookup(harness.ghCalls)).toEqual([]);
+    expect(harness.journal).toEqual(["persist:1"]);
+  });
+
+  // The read runs as the account pinned to the operation. Without one the
+  // claims cannot be established, so the request is refused rather than
+  // admitted on an ambient account's view of the repository.
+  // The scenario the review asked for: the ambient `gh` account cannot see the
+  // repository, and the account pinned to the operation can. Creation must
+  // proceed, because the claims are established through the pinned account.
+  it("establishes the claims through the pinned account, not the ambient one", async () => {
+    const harness = start({
+      namespaceClaimants: {
+        dev: {
+          RADIUS_MANAGED: "true",
+          AZURE_CLIENT_ID: "client-1",
+          AZURE_SUBSCRIPTION_ID: "sub-1",
+          AZURE_AKS_CLUSTER_NAME: "aks-1",
+          KUBERNETES_NAMESPACE: "orders"
+        }
+      }
+    });
+
+    const response = await post({
+      repo: "octo/app",
+      environment: "prod",
+      provider: "azure",
+      subscriptionId: "sub-1",
+      cluster: "aks-1",
+      namespace: "payments"
+    });
+
+    // Admitted: the namespace is free, which only the pinned account could show.
+    expect(response.status).not.toBe(409);
+    expect(harness.selectedClaimCalls).toEqual([
+      "api --paginate /repos/octo/app/environments?per_page=100 --jq .environments[].name",
+      'api --paginate /repos/octo/app/environments/dev/variables?per_page=100 --jq .variables[] | .name + "\\t" + (.value // "")'
+    ]);
+    // A regression to the ambient runner would show up here.
+    expect(
+      harness.ambientCliCalls.filter((call) =>
+        call.includes("/environments?per_page=100")
+      )
+    ).toEqual([]);
+  });
+
+  // An environment name that has to be URL-encoded still has to be read, and
+  // the harness has to script it the way production requests it. Without the
+  // encoding this call would go unscripted and the conflict would be missed.
+  it("refuses 409 for a holder whose name must be URL-encoded", async () => {
+    const harness = start({
+      namespaceClaimants: {
+        "team a/dev": {
+          RADIUS_MANAGED: "true",
+          AZURE_CLIENT_ID: "client-1",
+          AZURE_SUBSCRIPTION_ID: "sub-1",
+          AZURE_AKS_CLUSTER_NAME: "aks-1",
+          KUBERNETES_NAMESPACE: "payments"
+        }
+      }
+    });
+
+    const response = await post({
+      repo: "octo/app",
+      environment: "prod",
+      provider: "azure",
+      subscriptionId: "sub-1",
+      cluster: "aks-1",
+      namespace: "payments"
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      code: "namespace-already-claimed",
+      environment: "team a/dev"
+    });
+    // The read went out against the encoded path, exactly as production builds it.
+    expect(harness.selectedClaimCalls).toContain(
+      'api --paginate /repos/octo/app/environments/team%20a%2Fdev/variables?per_page=100 --jq .variables[] | .name + "\\t" + (.value // "")'
+    );
+  });
+
+  it("refuses 409 when no GitHub account is pinned to the operation", async () => {
+    const harness = start({ noPinnedNamespaceAccount: true });
+
+    const response = await post({
+      repo: "octo/app",
+      environment: "prod",
+      provider: "azure",
+      subscriptionId: "sub-1",
+      cluster: "aks-1",
+      namespace: "payments"
+    });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error:
+        "Radius created nothing because it could not confirm which namespaces octo/app's environments already use: the GitHub account pinned to this setup is unavailable.",
+      code: "namespace-claims-unavailable"
+    });
+    expect(ghCallsExcludingNamespaceClaimLookup(harness.ghCalls)).toEqual([]);
+  });
+
   it("answers the unhandled-error envelope when the body is not JSON", async () => {
     const harness = start();
 
@@ -885,7 +1134,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
     expect(await response.json()).toMatchObject({
       code: "create-environment-unhandled"
     });
-    expect(harness.ghCalls).toEqual([]);
+    expect(ghCallsExcludingNamespaceClaimLookup(harness.ghCalls)).toEqual([]);
   });
 
   it("refuses with the repo-admin message before touching GitHub", async () => {
@@ -900,7 +1149,7 @@ describe("create-environment real-loopback HIT: the refusal ladder on the wire",
       error: "You need admin on octo/app.",
       code: "repo-admin-required"
     });
-    expect(harness.ghCalls).toEqual([]);
+    expect(ghCallsExcludingNamespaceClaimLookup(harness.ghCalls)).toEqual([]);
   });
 
   it("refuses with the GHCR preflight verdict before bootstrapping the package", async () => {
@@ -1662,7 +1911,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       expect(
         harness.ghCalls.some((call) => call.startsWith("api --method PUT"))
       ).toBe(false);
-      expect(harness.ghCalls).toEqual([
+      expect(ghCallsExcludingNamespaceClaimLookup(harness.ghCalls)).toEqual([
         "api /repos/octo/app/environments/dev",
         "api /repos/octo/app"
       ]);
@@ -1696,7 +1945,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
       // a rollback will refuse to delete by name alone.
       providerId: null
     });
-    expect(harness.ghCalls).toEqual([
+    expect(ghCallsExcludingNamespaceClaimLookup(harness.ghCalls)).toEqual([
       "api /repos/octo/app/environments/dev",
       "api /repos/octo/app",
       "api --method PUT /repos/octo/app/environments/dev"
@@ -2816,7 +3065,7 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     expect(harness.journal).toContain(
       "diagnostic:operation-store-write-failed"
     );
-    expect(harness.ghCalls).toEqual([
+    expect(ghCallsExcludingNamespaceClaimLookup(harness.ghCalls)).toEqual([
       "api /repos/octo/app/environments/dev",
       "api /repos/octo/app",
       "api --method PUT /repos/octo/app/environments/dev"
@@ -2886,7 +3135,7 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
     expect(body.operation).toMatchObject({ terminalState: "cancelled" });
     // Nothing after the boundary ran: no GHCR bootstrap, no environment PUT,
     // no workflow commit, no verify dispatch.
-    expect(harness.ghCalls).toEqual([]);
+    expect(ghCallsExcludingNamespaceClaimLookup(harness.ghCalls)).toEqual([]);
     expect(harness.journal).not.toContain("preflightGhcrPackageWriteAccess");
     expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
   });

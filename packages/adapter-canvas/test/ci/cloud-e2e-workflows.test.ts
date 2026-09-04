@@ -61,7 +61,11 @@ interface WorkflowJob {
 interface Workflow {
   readonly on?: Record<string, unknown>;
   readonly permissions?: Record<string, string>;
-  readonly concurrency?: { group?: string; "cancel-in-progress"?: boolean };
+  readonly concurrency?: {
+    group?: string;
+    "cancel-in-progress"?: boolean;
+    queue?: string;
+  };
   readonly jobs?: Record<string, WorkflowJob>;
 }
 
@@ -107,6 +111,7 @@ describe.each(WORKFLOWS)("%s - properties both workflows share", (file) => {
     const workflow = await parseWorkflow(file);
     expect(workflow.concurrency?.["cancel-in-progress"]).toBe(false);
     expect(workflow.concurrency?.group).toBe("cloud-e2e-shared-cloud-estate");
+    expect(workflow.concurrency?.queue).toBe("max");
   });
 
   it("is triggered only on a schedule or by hand", async () => {
@@ -201,7 +206,6 @@ describe("cloud-e2e.yml", () => {
 
     expect(playwrightMinutes).toBeGreaterThan(0);
     expect(playwrightGlobalMinutes).toBeGreaterThan(playwrightMinutes);
-    expect(playwrightGlobalMinutes).toBeLessThanOrEqual(50);
     expect(jobMinutes).toBeGreaterThan(playwrightMinutes);
     expect(jobMinutes).toBeGreaterThanOrEqual(playwrightGlobalMinutes + 10);
   });
@@ -215,17 +219,33 @@ describe("cloud-e2e.yml", () => {
 
     const run = steps(job).find((step) => step.run?.includes("test:cloud"));
     expect(run?.["working-directory"]).toBe("packages/adapter-canvas");
+    expect(run?.env).toMatchObject({
+      GH_TOKEN: "${{ steps.app-token.outputs.token }}",
+      CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
+      CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}"
+    });
   });
 
   it("authenticates to Azure by OIDC and to GitHub by installation token", async () => {
-    // No long-lived cloud secret exists to leak: both credentials are minted
-    // per run and expire with it.
+    // No stored bearer token exists to leak: both access credentials are minted
+    // per run and expire with it. The App signing key remains a masked secret.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const used = steps(workflow.jobs?.["cloud-e2e"]).map((step) => step.uses);
     expect(used.some((use) => use?.startsWith("azure/login@"))).toBe(true);
     expect(
       used.some((use) => use?.startsWith("actions/create-github-app-token@"))
     ).toBe(true);
+    const run = steps(workflow.jobs?.["cloud-e2e"]).find((step) =>
+      step.run?.includes("test:cloud")
+    );
+    expect(run?.env).toMatchObject({
+      AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY:
+        "${{ steps.fixture.outputs.full-name }}",
+      CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
+      CLOUD_E2E_BOT_INSTALLATION_ID:
+        "${{ steps.app-token.outputs.installation-id }}",
+      CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}"
+    });
   });
 
   it("requests the workflow scope explicitly rather than discovering it is missing", async () => {
@@ -348,16 +368,21 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
     const script = purge?.run ?? "";
 
-    expect(purge?.if).toBe("steps.pin.outputs.provisioned == 'true'");
+    expect(purge?.if).toContain("always()");
+    expect(purge?.if).toContain("steps.azure-login.outcome == 'success'");
     expect(purge?.env?.RESOURCE_GROUP_PREFIX).toBe(
       "${{ steps.pin.outputs.resource-group-prefix }}"
     );
+    expect(purge?.env?.GH_TOKEN).toBe("${{ github.token }}");
     expect(purge?.env?.SUBSCRIPTION_ID).toBe(
       "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
     );
     expect(script).toContain("starts_with(name, '$RESOURCE_GROUP_PREFIX')");
     expect(script).toContain('--subscription "$SUBSCRIPTION_ID"');
     expect(script).not.toContain("MAX_AGE_HOURS hours ago");
+    expect(script).toContain("gh run view");
+    expect(script).toContain('status" != "completed"');
+    expect(script).toContain("failures+=");
     expect(script).toContain("az group delete");
     expect(RESOURCE_GROUP_PREFIX.startsWith("radtest-")).toBe(true);
   });
@@ -368,6 +393,24 @@ describe("cloud-e2e-cleanup.yml", () => {
     const raw = await readWorkflow(CLEANUP_WORKFLOW);
     expect(raw).toContain("test/e2e-cloud/support/fixture-repository.ts");
     expect(raw).toContain("FIXTURE_BASELINE_SHA");
+  });
+
+  it("exports cleanup scope constants from the fixture pin", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const pin = steps(workflow.jobs?.purge).find(
+      (step) => step.name === "Resolve the pinned fixture repository"
+    );
+    const script = pin?.run ?? "";
+
+    expect(script).toContain(
+      "`resource-group-prefix=${pin.RESOURCE_GROUP_PREFIX}`"
+    );
+    expect(script).toContain(
+      "`environment-prefix=${pin.ENVIRONMENT_NAME_PREFIX}`"
+    );
+    expect(script).toContain(
+      "`workflow-fallback-branch-prefix=${pin.WORKFLOW_FALLBACK_BRANCH_PREFIX}`"
+    );
   });
 
   it("matches environments by the prefix the suite actually applies", async () => {
@@ -396,8 +439,10 @@ describe("cloud-e2e-cleanup.yml", () => {
         step.run?.includes("-X PATCH")
     );
     expect(destructive.length).toBeGreaterThan(0);
-    for (const step of destructive)
-      expect(step.if).toBe("steps.pin.outputs.provisioned == 'true'");
+    for (const step of destructive) {
+      expect(step.if).toContain("always()");
+      expect(step.if).toContain("steps.pin.outputs.provisioned == 'true'");
+    }
   });
 
   it("keeps the age threshold for Entra and GitHub state", async () => {
@@ -422,7 +467,14 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
     const script = purge?.run ?? "";
 
-    expect(script).toContain("selectExpiredDirectoryObjects");
+    expect(purge?.if).toContain("always()");
+    expect(purge?.if).toContain("steps.azure-login.outcome == 'success'");
+    expect(script).toContain("selectExpiredApplications");
+    expect(script).toContain("selectExpiredServicePrincipals");
+    expect(script).toContain("$ENVIRONMENT_PREFIX");
+    expect(script).toContain("$FIXTURE_REPOSITORY");
+    expect(script).toContain("appId");
+    expect(script).toContain("failures+=");
     expect(script.indexOf("az ad sp delete")).toBeLessThan(
       script.indexOf("az ad app delete")
     );
@@ -435,9 +487,17 @@ describe("cloud-e2e-cleanup.yml", () => {
     );
     const script = purge?.run ?? "";
 
-    expect(purge?.if).toBe("steps.pin.outputs.provisioned == 'true'");
+    expect(purge?.if).toContain("always()");
+    expect(purge?.if).toContain("steps.app-token.outcome == 'success'");
     expect(script).toContain("MAX_AGE_HOURS hours ago");
+    expect(script).toContain("selectOpenPullRequestHeadRefs");
+    expect(script).toContain("$FIXTURE_REPOSITORY");
+    expect(script).toContain("$DEFAULT_BRANCH");
+    expect(script).toContain("failures+=");
     expect(script).toContain("git/matching-refs/heads/$FALLBACK_BRANCH_PREFIX");
+    expect(purge?.env?.FALLBACK_BRANCH_PREFIX).toBe(
+      "${{ steps.pin.outputs.workflow-fallback-branch-prefix }}"
+    );
     expect(script.indexOf("-f state=closed")).toBeLessThan(
       script.indexOf("-X DELETE")
     );

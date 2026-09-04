@@ -139,6 +139,12 @@ export interface HandoffMessage {
   displayPrompt: string;
 }
 
+export interface AppModelFailureReportContext {
+  readonly attemptToken: string;
+  readonly instanceId: string;
+  readonly branch: string;
+}
+
 // Prompt sent to the agent when a Radius graph canvas is opened but no
 // .radius/app.bicep exists on the branch. This half is agent-facing: it names
 // the skill and the graph's data source so recovery needs no extra round trip.
@@ -148,7 +154,8 @@ export function appBicepHandoffPrompt(
   repo: string,
   page = "graph",
   branches: Array<string | undefined> = [],
-  canvasInstanceId = RADIUS_CANVAS_INSTANCE_ID
+  canvasInstanceId = RADIUS_CANVAS_INSTANCE_ID,
+  failureReport?: AppModelFailureReportContext
 ): string {
   const where = repo ? ` for ${repo}` : "";
   const phrase = branchPhrase(branches);
@@ -167,7 +174,12 @@ export function appBicepHandoffPrompt(
       `Do not open another Radius canvas. The view at instanceId \`${canvasInstanceId}\` is already waiting and renders the model in place once it is available.`
     : `Once the model is available on the selected repo and branch, open the Radius ${page} view again so it loads.`,
     "",
-    RECIPE_PACK_NOTE
+    RECIPE_PACK_NOTE,
+    ...(failureReport ?
+      [
+        `If the radius-app-bicep skill classifies this attempt as a permanent failure and leaves .radius/app.bicep missing, call radius_report_modeling_failure with instanceId \`${failureReport.instanceId}\`, repo \`${repo}\`, branch \`${failureReport.branch}\`, attemptToken \`${failureReport.attemptToken}\`, and the actionable failure summary. Do not report transient failures, cancellations, or a run that wrote the model.`
+      ]
+    : [])
   ].join("\n");
 }
 
@@ -193,10 +205,17 @@ export function appBicepHandoffMessage(
   repo: string,
   page = "graph",
   branches: Array<string | undefined> = [],
-  canvasInstanceId = RADIUS_CANVAS_INSTANCE_ID
+  canvasInstanceId = RADIUS_CANVAS_INSTANCE_ID,
+  failureReport?: AppModelFailureReportContext
 ): HandoffMessage {
   return {
-    prompt: appBicepHandoffPrompt(repo, page, branches, canvasInstanceId),
+    prompt: appBicepHandoffPrompt(
+      repo,
+      page,
+      branches,
+      canvasInstanceId,
+      failureReport
+    ),
     displayPrompt: appBicepHandoffDisplayPrompt(repo, page, branches)
   };
 }

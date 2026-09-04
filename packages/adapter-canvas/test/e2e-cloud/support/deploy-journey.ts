@@ -19,6 +19,8 @@
 import {
   DELETE_APP_DISPATCHER_FILE,
   DELETE_AZURE_FILE,
+  DELETE_ENV_AZURE_FILE,
+  DELETE_ENV_DISPATCHER_FILE,
   DEPLOY_AZURE_FILE,
   DEPLOY_DISPATCHER_FILE
 } from "../../../src/infra.js";
@@ -45,7 +47,9 @@ export const REQUIRED_DELETE_WORKFLOWS: readonly string[] = [
 export const REQUIRED_LIFECYCLE_WORKFLOWS: readonly string[] = [
   ...REQUIRED_DEFAULT_BRANCH_WORKFLOWS,
   ...REQUIRED_DEPLOY_WORKFLOWS,
-  ...REQUIRED_DELETE_WORKFLOWS
+  ...REQUIRED_DELETE_WORKFLOWS,
+  DELETE_ENV_DISPATCHER_FILE,
+  DELETE_ENV_AZURE_FILE
 ];
 
 /**
@@ -219,6 +223,15 @@ export function readDeploymentRows(payload: unknown): DeploymentRow[] {
     if (typeof item.app !== "string" || typeof item.environment !== "string")
       throw new Error(
         `The deployment listing carried a malformed entry at index ${index}; "app" and "environment" must be strings.`
+      );
+    if (
+      item.app === "" ||
+      item.app.trim() !== item.app ||
+      item.environment === "" ||
+      item.environment.trim() !== item.environment
+    )
+      throw new Error(
+        `The deployment listing carried a malformed entry at index ${index}; "app" and "environment" must be canonical non-empty strings.`
       );
     if (
       item.status !== undefined &&

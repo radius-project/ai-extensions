@@ -4,6 +4,7 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import {
+  commitWorkspaceBranchResolution,
   resolveWorktreePath,
   parseRepoFromRemote,
   workspaceGraphJsonPath,
@@ -20,7 +21,9 @@ import {
   workspaceHeadCommit,
   uncommittedGeneratedPaths,
   workspaceSourceChangedSince,
-  workspaceModelRecoverable
+  workspaceModelRecoverable,
+  currentWorkspaceBranch,
+  resolveGraphBranchForRequest
 } from "./workspace.js";
 
 // The SDK sets session.workspacePath to the per-session STATE directory
@@ -37,6 +40,352 @@ describe("resolveWorktreePath", () => {
     // Only the real worktree is inside a git work tree.
     const probe = async (p: string) => p === WORKTREE;
     expect(await resolveWorktreePath(session, metadata, probe)).toBe(WORKTREE);
+  });
+
+  describe("resolveGraphBranchForRequest", () => {
+    const workspaceState = {
+      workspacePath: "C:\\worktrees\\app",
+      workspaceRepo: "acme/widgets",
+      workspaceBranch: "old-name",
+      contextRepo: "acme/widgets",
+      contextBranch: "old-name",
+      contextBranchSource: "workspace" as const
+    };
+
+    it("refreshes an implicit workspace selection after its branch is renamed", async () => {
+      const state = {
+        ...workspaceState,
+        graphTargetRepo: "acme/widgets",
+        graphBranch: "old-name",
+        graphFollowsWorkspaceBranch: true,
+        plannedRepo: "acme/widgets",
+        plannedBranch: "old-name",
+        plannedFollowsWorkspaceBranch: true
+      };
+
+      const resolution = await resolveGraphBranchForRequest(
+        state,
+        "acme/widgets",
+        "old-name",
+        true,
+        async () => "new-name"
+      );
+
+      expect(resolution).toEqual({
+        status: "resolved",
+        branch: "new-name",
+        followsWorkspaceBranch: true,
+        workspaceSnapshot: {
+          workspaceBranch: "old-name",
+          contextBranch: "old-name"
+        }
+      });
+      expect(state.workspaceBranch).toBe("old-name");
+      if (resolution.status !== "resolved") {
+        throw new Error("Expected a resolved workspace branch.");
+      }
+      expect(
+        commitWorkspaceBranchResolution(state, "acme/widgets", resolution)
+      ).toBe(true);
+      expect(state.workspaceBranch).toBe("new-name");
+      expect(state.contextBranch).toBe("new-name");
+      expect(state.graphBranch).toBe("new-name");
+      expect(state.plannedBranch).toBe("new-name");
+    });
+
+    it("does not let an older branch resolution overwrite newer state", async () => {
+      const state = { ...workspaceState };
+      let releaseOld!: () => void;
+      const oldRead = new Promise<string>((resolve) => {
+        releaseOld = () => resolve("old-name");
+      });
+      const oldResolutionPromise = resolveGraphBranchForRequest(
+        state,
+        "acme/widgets",
+        "old-name",
+        true,
+        () => oldRead
+      );
+      const newResolution = await resolveGraphBranchForRequest(
+        state,
+        "acme/widgets",
+        "old-name",
+        true,
+        async () => "new-name"
+      );
+      if (newResolution.status !== "resolved") {
+        throw new Error("Expected the newer workspace branch to resolve.");
+      }
+      expect(
+        commitWorkspaceBranchResolution(state, "acme/widgets", newResolution)
+      ).toBe(true);
+
+      releaseOld();
+      const oldResolution = await oldResolutionPromise;
+      if (oldResolution.status !== "resolved") {
+        throw new Error("Expected the older workspace branch to resolve.");
+      }
+      expect(
+        commitWorkspaceBranchResolution(state, "acme/widgets", oldResolution)
+      ).toBe(false);
+      expect(state.workspaceBranch).toBe("new-name");
+      expect(state.contextBranch).toBe("new-name");
+    });
+
+    it("does not rewrite an explicitly selected branch", async () => {
+      const state = {
+        ...workspaceState,
+        contextBranch: "release",
+        contextBranchSource: "explicit" as const
+      };
+      let reads = 0;
+
+      const resolution = await resolveGraphBranchForRequest(
+        state,
+        "acme/widgets",
+        "release",
+        undefined,
+        async () => {
+          reads++;
+          return "new-name";
+        }
+      );
+
+      expect(resolution).toEqual({
+        status: "resolved",
+        branch: "release",
+        followsWorkspaceBranch: false
+      });
+      if (resolution.status !== "resolved") {
+        throw new Error("Expected an explicit branch resolution.");
+      }
+      expect(
+        commitWorkspaceBranchResolution(state, "acme/widgets", resolution)
+      ).toBe(true);
+      expect(state.contextBranch).toBe("release");
+      expect(reads).toBe(0);
+    });
+
+    it("treats a branch-selector change as an explicit selection", async () => {
+      let reads = 0;
+
+      await expect(
+        resolveGraphBranchForRequest(
+          { ...workspaceState },
+          "acme/widgets",
+          "release",
+          undefined,
+          async () => {
+            reads++;
+            return "new-name";
+          }
+        )
+      ).resolves.toEqual({
+        status: "resolved",
+        branch: "release",
+        followsWorkspaceBranch: false
+      });
+      expect(reads).toBe(0);
+    });
+
+    it("preserves explicit intent when the selector returns to the original branch", async () => {
+      let reads = 0;
+
+      await expect(
+        resolveGraphBranchForRequest(
+          { ...workspaceState },
+          "acme/widgets",
+          "old-name",
+          false,
+          async () => {
+            reads++;
+            return "new-name";
+          }
+        )
+      ).resolves.toEqual({
+        status: "resolved",
+        branch: "old-name",
+        followsWorkspaceBranch: false
+      });
+      expect(reads).toBe(0);
+    });
+
+    it("does not use the worktree for another repository", async () => {
+      await expect(
+        resolveGraphBranchForRequest(
+          { ...workspaceState },
+          "other/repo",
+          "",
+          undefined,
+          async () => "new-name"
+        )
+      ).resolves.toEqual({
+        status: "resolved",
+        branch: "old-name",
+        followsWorkspaceBranch: false
+      });
+    });
+
+    it.each(["", "HEAD"])(
+      "reports an unavailable workspace branch for %j",
+      async (liveBranch) => {
+        await expect(
+          resolveGraphBranchForRequest(
+            { ...workspaceState },
+            "acme/widgets",
+            "",
+            undefined,
+            async () => liveBranch
+          )
+        ).resolves.toEqual({
+          status: "unavailable",
+          error:
+            "The workspace branch is unavailable. Reopen the Radius canvas after restoring the worktree branch."
+        });
+      }
+    );
+
+    it("reports an unavailable workspace branch when reading the worktree fails", async () => {
+      await expect(
+        resolveGraphBranchForRequest(
+          { ...workspaceState },
+          "acme/widgets",
+          "",
+          true,
+          async () => {
+            throw new Error("worktree moved");
+          }
+        )
+      ).resolves.toEqual({
+        status: "unavailable",
+        error:
+          "Radius could not read the current workspace branch. Retry after confirming the worktree is available."
+      });
+    });
+
+    it("preserves explicitly selected graph and planned branches during canonicalization", async () => {
+      const state = {
+        ...workspaceState,
+        graphTargetRepo: "acme/widgets",
+        graphBranch: "old-name",
+        graphFollowsWorkspaceBranch: false,
+        plannedRepo: "acme/widgets",
+        plannedBranch: "old-name",
+        plannedFollowsWorkspaceBranch: false
+      };
+
+      const resolution = await resolveGraphBranchForRequest(
+        state,
+        "acme/widgets",
+        "old-name",
+        true,
+        async () => "new-name"
+      );
+      if (resolution.status !== "resolved") {
+        throw new Error("Expected a resolved workspace branch.");
+      }
+      expect(
+        commitWorkspaceBranchResolution(state, "acme/widgets", resolution)
+      ).toBe(true);
+
+      expect(state.contextBranch).toBe("new-name");
+      expect(state.graphBranch).toBe("old-name");
+      expect(state.plannedBranch).toBe("old-name");
+    });
+
+    it.each([
+      {
+        name: "workspace context became explicit",
+        update: { contextBranchSource: "explicit" as const }
+      },
+      {
+        name: "workspace repository changed",
+        update: { workspaceRepo: "acme/other" }
+      },
+      {
+        name: "workspace branch changed",
+        update: { workspaceBranch: "newer-name" }
+      },
+      {
+        name: "context branch changed",
+        update: { contextBranch: "newer-name" }
+      }
+    ])("rejects a resolution after the $name", async ({ update }) => {
+      const state = { ...workspaceState };
+      const resolution = await resolveGraphBranchForRequest(
+        state,
+        "acme/widgets",
+        "old-name",
+        true,
+        async () => "new-name"
+      );
+      Object.assign(state, update);
+      if (resolution.status !== "resolved") {
+        throw new Error("Expected a resolved workspace branch.");
+      }
+
+      expect(
+        commitWorkspaceBranchResolution(state, "acme/widgets", resolution)
+      ).toBe(false);
+    });
+  });
+
+  describe("currentWorkspaceBranch", () => {
+    it("returns empty when no workspace path is available", async () => {
+      await expect(currentWorkspaceBranch("")).resolves.toBe("");
+    });
+
+    it("reads the checked-out branch from a worktree", async () => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rad-branch-"));
+      try {
+        execFileSync(
+          "git",
+          ["init", "--quiet", "--initial-branch", "live-branch"],
+          {
+            cwd: dir
+          }
+        );
+        await fs.writeFile(path.join(dir, "README.md"), "fixture\n");
+        execFileSync(
+          "git",
+          [
+            "-c",
+            "user.name=Radius Test",
+            "-c",
+            "user.email=radius@example.invalid",
+            "add",
+            "."
+          ],
+          { cwd: dir }
+        );
+        execFileSync(
+          "git",
+          [
+            "-c",
+            "user.name=Radius Test",
+            "-c",
+            "user.email=radius@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture"
+          ],
+          { cwd: dir }
+        );
+
+        await expect(currentWorkspaceBranch(dir)).resolves.toBe("live-branch");
+      } finally {
+        await fs.rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects when git cannot read the workspace branch", async () => {
+      await expect(
+        currentWorkspaceBranch(path.join(os.tmpdir(), "missing-worktree"))
+      ).rejects.toThrow(
+        "Radius could not read the current workspace branch. Retry after confirming the worktree is available."
+      );
+    });
   });
 
   it("never selects the session-state dir even when it is the only truthy session field", async () => {

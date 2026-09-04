@@ -189,8 +189,8 @@ function requireUniqueId(value: string): string {
 }
 
 /**
- * An Azure region token: lowercase letters, then optionally digits, as in
- * `westus3` or `eastus2euap`. Deliberately narrow. The value reaches
+ * An Azure region token: lowercase letters and digits, beginning with a letter,
+ * as in `westus3` or `eastus2euap`. Deliberately narrow. The value reaches
  * `az group create --location`, so anything unexpected should be rejected here
  * with a readable message rather than surfacing forty minutes later as an
  * opaque `az` failure that triages as an infrastructure fault.

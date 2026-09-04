@@ -136,6 +136,36 @@ describe("azure remediations", () => {
     expect(remediation.params).toEqual({ tenantId: TENANT });
   });
 
+  it("uses the closed discovery follow-up without changing the login command", () => {
+    const remediation = build("azure-cli-login", {
+      tenantId: TENANT,
+      nextStep: "refresh-discovery"
+    });
+
+    expect(remediation.params).toEqual({
+      tenantId: TENANT,
+      nextStep: "refresh-discovery"
+    });
+    expect(remediation.argv).toEqual([
+      ["az", "login", "--use-device-code", "--tenant", TENANT]
+    ]);
+    expect(remediation.followUp).toBe(
+      "After the login finishes, return to the Radius canvas and refresh resource discovery."
+    );
+  });
+
+  it.each(["verify-credentials", "run arbitrary text", 17])(
+    "drops an unsupported login follow-up value %j",
+    (nextStep) => {
+      const remediation = build("azure-cli-login", { nextStep });
+
+      expect(remediation.params).toEqual({});
+      expect(remediation.followUp).toBe(
+        "After the login finishes, return to the Radius canvas and click Verify Credentials again."
+      );
+    }
+  );
+
   it("keeps the install variant on the same login command", () => {
     const remediation = build("azure-cli-install", { tenantId: TENANT });
 
@@ -789,6 +819,22 @@ describe("remediationSessionMessage", () => {
     );
     expect(message.displayPrompt).toBe(
       "Signing in to Azure CLI so the Radius canvas can verify these Azure credentials."
+    );
+  });
+
+  it("describes the discovery-specific login boundary to the agent", () => {
+    const message = remediationSessionMessage(
+      build("azure-cli-login", { nextStep: "refresh-discovery" })
+    );
+
+    expect(message.prompt).toContain(
+      "The Radius canvas needs an active Azure CLI session before it can discover Azure resources."
+    );
+    expect(message.prompt).toContain(
+      "Then tell the user: After the login finishes, return to the Radius canvas and refresh resource discovery."
+    );
+    expect(message.displayPrompt).toBe(
+      "Signing in to Azure CLI so the Radius canvas can refresh Azure resource discovery."
     );
   });
 

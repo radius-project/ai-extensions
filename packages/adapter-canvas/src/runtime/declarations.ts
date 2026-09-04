@@ -202,7 +202,7 @@ export interface ToolDeclaration {
   parameters: Record<string, unknown>;
 }
 
-// The 6 tools, in their current order. Declarative shape only — see tools.ts
+// The 7 tools, in their current order. Declarative shape only — see tools.ts
 // for the handlers.
 export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
   {
@@ -217,6 +217,39 @@ export const RADIUS_TOOL_DECLARATIONS: readonly ToolDeclaration[] = deepFreeze([
           description: "Path to the repository to analyze"
         }
       }
+    }
+  },
+  {
+    name: "radius_report_modeling_failure",
+    description:
+      "Reports a permanent radius-app-bicep authoring failure to the Radius Canvas attempt that requested it. Use only when the Canvas handoff supplies the exact instance, repository, branch, and attempt token; never report transient failures, cancellations, or a run that wrote app.bicep.",
+    parameters: {
+      type: "object",
+      properties: {
+        instanceId: {
+          type: "string",
+          description: "Radius Canvas instance that requested modeling"
+        },
+        repo: {
+          type: "string",
+          description: "Repository supplied by the Canvas handoff"
+        },
+        branch: {
+          type: "string",
+          description: "Branch supplied by the Canvas handoff"
+        },
+        attemptToken: {
+          type: "string",
+          description: "Opaque attempt token supplied by the Canvas handoff"
+        },
+        error: {
+          type: "string",
+          description:
+            "Actionable permanent-failure summary without credentials or secrets",
+          maxLength: 4000
+        }
+      },
+      required: ["instanceId", "repo", "branch", "attemptToken", "error"]
     }
   },
   {

@@ -20,6 +20,7 @@ import {
   readServicePrincipalObjectId,
   readWorkflowDirectory,
   REQUIRED_DEFAULT_BRANCH_WORKFLOWS,
+  runCleanupSteps,
   selectFallbackBranches,
   selectFallbackPullRequests,
   VERIFY_WORKFLOW_PATH
@@ -27,8 +28,19 @@ import {
 
 const PROVISIONED = {
   fixtureProvisioned: true,
-  unprovisionedReason: "The fixture repository is provisioned."
+  unprovisionedReason: "The fixture repository is provisioned.",
+  githubAppClientId: "Iv1.example",
+  githubAppPrivateKey: "private-key"
 };
+
+async function captureError(work: Promise<unknown>): Promise<Error> {
+  try {
+    await work;
+  } catch (cause) {
+    return cause instanceof Error ? cause : new Error(String(cause));
+  }
+  throw new Error("Expected the operation to fail, but it resolved.");
+}
 
 describe("evaluateCreateEnvironmentGate", () => {
   it("enables the journey once the flag, fixture, subscription, and token are all present", () => {
@@ -54,10 +66,11 @@ describe("evaluateCreateEnvironmentGate", () => {
       githubToken: "ghs_token"
     });
     expect(gate.enabled).toBe(false);
+    expect(gate.enabled === false && gate.disposition).toBe("skip");
     expect(gate.enabled === false && gate.reason).toContain("RADIUS_CLOUD_E2E");
   });
 
-  it("reports the fixture repository's own reason before looking at credentials", () => {
+  it("fails preflight with the fixture repository's own reason before looking at credentials", () => {
     const gate = evaluateCreateEnvironmentGate({
       cloudE2eFlag: "1",
       fixtureProvisioned: false,
@@ -67,29 +80,47 @@ describe("evaluateCreateEnvironmentGate", () => {
     });
     expect(gate).toEqual({
       enabled: false,
+      disposition: "fail",
       reason: "FIXTURE_BASELINE_SHA still holds a placeholder."
     });
   });
 
-  it("skips without a subscription", () => {
+  it("fails preflight without a subscription after opt-in", () => {
     const gate = evaluateCreateEnvironmentGate({
       cloudE2eFlag: "1",
       ...PROVISIONED,
       githubToken: "ghs_token"
     });
+    expect(gate.enabled === false && gate.disposition).toBe("fail");
     expect(gate.enabled === false && gate.reason).toContain(
       "AZURE_SUBSCRIPTION_ID"
     );
   });
 
-  it("skips without a GitHub token", () => {
+  it("fails preflight without a GitHub token after opt-in", () => {
     const gate = evaluateCreateEnvironmentGate({
       cloudE2eFlag: "1",
       ...PROVISIONED,
       subscriptionId: "sub-1",
       githubToken: " "
     });
+    expect(gate.enabled === false && gate.disposition).toBe("fail");
     expect(gate.enabled === false && gate.reason).toContain("GH_TOKEN");
+  });
+
+  it.each([
+    ["client ID", { githubAppClientId: " " }, "CLOUD_E2E_BOT_CLIENT_ID"],
+    ["private key", { githubAppPrivateKey: "" }, "CLOUD_E2E_BOT_PRIVATE_KEY"]
+  ])("fails preflight without the GitHub App %s", (_label, patch, variable) => {
+    const gate = evaluateCreateEnvironmentGate({
+      cloudE2eFlag: "1",
+      ...PROVISIONED,
+      subscriptionId: "sub-1",
+      githubToken: "ghs_token",
+      ...patch
+    });
+    expect(gate.enabled === false && gate.disposition).toBe("fail");
+    expect(gate.enabled === false && gate.reason).toContain(variable);
   });
 });
 
@@ -717,6 +748,14 @@ describe("readOperationSnapshot", () => {
     ).toEqual({ state: "failed", terminal: true, error: "Azure said no." });
   });
 
+  it("treats a known terminal state projection as terminal", () => {
+    expect(
+      readOperationSnapshot({
+        operation: { state: "running", terminalState: " failed_partial " }
+      })
+    ).toEqual({ state: "running", terminal: true, error: "" });
+  });
+
   it("keeps a running operation non-terminal", () => {
     expect(readOperationSnapshot({ operation: { state: "running" } })).toEqual({
       state: "running",
@@ -743,6 +782,28 @@ describe("readOperationSnapshot", () => {
     expect(
       readOperationSnapshot({ operation: { state: "running", error: null } })
     ).toEqual({ state: "running", terminal: false, error: "" });
+  });
+
+  it("accepts a null terminal state as absent", () => {
+    expect(
+      readOperationSnapshot({
+        operation: { state: "running", terminalState: null }
+      })
+    ).toEqual({ state: "running", terminal: false, error: "" });
+  });
+
+  it("rejects an unknown terminal state projection", () => {
+    expect(() =>
+      readOperationSnapshot({
+        operation: { state: "running", terminalState: "mystery" }
+      })
+    ).toThrow(/operation.terminalState/);
+  });
+
+  it("treats a blank operation error as absent", () => {
+    expect(
+      readOperationSnapshot({ operation: { state: "failed", error: "  " } })
+    ).toEqual({ state: "failed", terminal: true, error: "" });
   });
 });
 
@@ -893,6 +954,15 @@ describe("readWorkflowDirectory", () => {
       )
     ).toThrow(/failed with exit code 4: server error/);
   });
+
+  it("reports an explicit placeholder when a failure wrote no output", () => {
+    expect(() =>
+      readWorkflowDirectory(
+        { code: 4, stdout: "", stderr: "" },
+        "the workflow listing"
+      )
+    ).toThrow(/failed with exit code 4: <no output>/);
+  });
 });
 
 describe("cloudCanvasState", () => {
@@ -916,5 +986,73 @@ describe("cloudCanvasState", () => {
       deployingRepo: "octo/app",
       deployingBranch: "main"
     });
+  });
+});
+
+describe("runCleanupSteps", () => {
+  it("runs every cleanup step in order", async () => {
+    const calls: string[] = [];
+
+    await runCleanupSteps([
+      { label: "first", run: async () => void calls.push("first") },
+      { label: "second", run: async () => void calls.push("second") }
+    ]);
+
+    expect(calls).toEqual(["first", "second"]);
+  });
+
+  it("reports cleanup failures with their labels", async () => {
+    await expect(
+      runCleanupSteps([
+        {
+          label: "dispose fixture",
+          run: () => Promise.reject(new Error("resource group locked"))
+        }
+      ])
+    ).rejects.toThrow(/dispose fixture: resource group locked/);
+  });
+
+  it("aggregates multiple cleanup failures", async () => {
+    const error = await captureError(
+      runCleanupSteps([
+        { label: "reclaim product", run: () => Promise.reject("denied") },
+        { label: "dispose fixture", run: () => Promise.reject("busy") }
+      ])
+    );
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(error.message).toBe(
+      "The create-environment journey cleanup failed."
+    );
+    expect(
+      (error as AggregateError).errors.map((entry) => String(entry))
+    ).toEqual([
+      "Error: reclaim product: denied",
+      "Error: dispose fixture: busy"
+    ]);
+  });
+
+  it("preserves the primary failure when cleanup also fails", async () => {
+    const primary = new Error("operation failed");
+    const error = await captureError(
+      runCleanupSteps(
+        [
+          {
+            label: "clean up harness",
+            run: () => Promise.reject(new Error("page closed"))
+          }
+        ],
+        primary
+      )
+    );
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(error.message).toBe(
+      "The create-environment journey failed and cleanup also failed."
+    );
+    expect((error as AggregateError).errors[0]).toBe(primary);
+    expect(String((error as AggregateError).errors[1])).toBe(
+      "Error: clean up harness: page closed"
+    );
   });
 });

@@ -31,31 +31,32 @@ import { browserEntryMarker } from "../../../src/browser/scripts.js";
 
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(TEST_DIR, "../../../../..");
-const DIST = join(REPO_ROOT, "plugins", "radius", "dist");
-const ARTIFACT = join(DIST, "extension.mjs");
+const DIST = join(REPO_ROOT, ".artifacts", "radius");
+const ARTIFACT_RELATIVE_PATH =
+  "com.github.copilot/extensions/radius/extension.mjs";
+const ARTIFACT = join(DIST, ...ARTIFACT_RELATIVE_PATH.split("/"));
 const SOURCE_MAP = `${ARTIFACT}.map`;
-const SOURCE_CHANGELOG = join(REPO_ROOT, "plugins", "radius", "CHANGELOG.md");
+const SOURCE_CHANGELOG = join(
+  REPO_ROOT,
+  "extensions",
+  "radius",
+  "CHANGELOG.md"
+);
 const SOURCE_SKILL = join(
   REPO_ROOT,
-  "plugins",
+  "extensions",
   "radius",
   "skills",
   "radius-app-bicep"
 );
 const DIST_SKILL = join(DIST, "skills", "radius-app-bicep");
 const SOURCE_CODE_REFERENCE = join(
-  REPO_ROOT,
-  "plugins",
-  "radius",
-  "skills",
-  "radius-app-graph",
+  SOURCE_SKILL,
   "references",
   "source-code-references.md"
 );
 const DIST_CODE_REFERENCE = join(
-  DIST,
-  "skills",
-  "radius-app-graph",
+  DIST_SKILL,
   "references",
   "source-code-references.md"
 );
@@ -132,15 +133,29 @@ function prepareBuildWorkspace(
 
   const sourcePlugin = join(REPO_ROOT, "plugins", "radius");
   const workspacePlugin = join(workspaceRoot, "plugins", "radius");
+  const sourceExtensionDir = join(REPO_ROOT, "extensions", "radius");
+  const workspaceExtensionDir = join(workspaceRoot, "extensions", "radius");
   mkdirSync(workspacePlugin, { recursive: true });
-  for (const entry of ["plugin.json", "package.json", "README.md"]) {
+  mkdirSync(workspaceExtensionDir, { recursive: true });
+  for (const entry of ["plugin.json", "README.md"]) {
     copyFileSync(join(sourcePlugin, entry), join(workspacePlugin, entry));
   }
-  cpSync(join(sourcePlugin, "skills"), join(workspacePlugin, "skills"), {
-    recursive: true
-  });
+  copyFileSync(
+    join(sourceExtensionDir, "package.json"),
+    join(workspaceExtensionDir, "package.json")
+  );
+  cpSync(
+    join(sourceExtensionDir, "skills"),
+    join(workspaceExtensionDir, "skills"),
+    { recursive: true }
+  );
+  cpSync(
+    join(sourceExtensionDir, "assets"),
+    join(workspaceExtensionDir, "assets"),
+    { recursive: true }
+  );
   if (missingAsset.length > 0) {
-    rmSync(join(workspacePlugin, "skills", ...missingAsset), {
+    rmSync(join(workspaceExtensionDir, "skills", ...missingAsset), {
       recursive: true
     });
   }
@@ -177,11 +192,12 @@ function assertCurrentArtifact(): void {
     ...filesUnder(join(REPO_ROOT, "packages", "core", "src")).filter(
       (path) => !path.endsWith(".test.ts")
     ),
-    join(REPO_ROOT, "plugins", "radius", "package.json"),
+    join(REPO_ROOT, "extensions", "radius", "package.json"),
     join(REPO_ROOT, "plugins", "radius", "plugin.json"),
     join(REPO_ROOT, "plugins", "radius", "README.md"),
     ...(existsSync(SOURCE_CHANGELOG) ? [SOURCE_CHANGELOG] : []),
-    ...filesUnder(join(REPO_ROOT, "plugins", "radius", "skills")),
+    ...filesUnder(join(REPO_ROOT, "extensions", "radius", "skills")),
+    ...filesUnder(join(REPO_ROOT, "extensions", "radius", "assets")),
     ...filesUnder(join(REPO_ROOT, ".github", "extension"))
   ];
   const newestInput = Math.max(
@@ -202,7 +218,7 @@ describe("P0-C built Radius extension artifact", () => {
 
   beforeAll(async () => {
     assertCurrentArtifact();
-    smoke = await runArtifactSmoke(ARTIFACT);
+    smoke = await runArtifactSmoke(ARTIFACT, 20_000, DIST);
   }, 30_000);
 
   it("registers the retained SDK surface exactly once and shuts down cleanly", () => {
@@ -289,18 +305,21 @@ describe("P0-C built Radius extension artifact", () => {
       readdirSync(DIST)
         .filter((name) => name.endsWith(".mjs"))
         .sort()
-    ).toEqual(["extension.mjs"]);
+    ).toEqual([]);
     const packagedPaths = [
       "package.json",
       "plugin.json",
       "README.md",
       "LICENSE",
       "THIRD-PARTY-NOTICES.txt",
+      "assets/preview.png",
+      ARTIFACT_RELATIVE_PATH,
+      `${ARTIFACT_RELATIVE_PATH}.map`,
       "skills/radius-app-bicep/SKILL.md",
       "skills/radius-app-bicep/references/custom-resource-types.md",
+      "skills/radius-app-bicep/references/source-code-references.md",
       "skills/radius-app-bicep/scripts/show-radius-type.mjs",
-      "skills/radius-app-bicep/scripts/validate-bicep.mjs",
-      "skills/radius-app-graph/references/source-code-references.md"
+      "skills/radius-app-bicep/scripts/validate-bicep.mjs"
     ];
     if (existsSync(SOURCE_CHANGELOG)) packagedPaths.push("CHANGELOG.md");
     for (const packagedPath of packagedPaths) {
@@ -349,7 +368,10 @@ describe("P0-C built Radius extension artifact", () => {
     }
 
     const sourcePackage = JSON.parse(
-      readFileSync(join(REPO_ROOT, "plugins", "radius", "package.json"), "utf8")
+      readFileSync(
+        join(REPO_ROOT, "extensions", "radius", "package.json"),
+        "utf8"
+      )
     ) as Record<string, unknown>;
     const builtPackage = JSON.parse(
       readFileSync(join(DIST, "package.json"), "utf8")
@@ -398,9 +420,9 @@ describe("P0-C built Radius extension artifact", () => {
     const builtPlugin = JSON.parse(
       readFileSync(join(DIST, "plugin.json"), "utf8")
     ) as Record<string, unknown>;
-    expect({ ...builtPlugin, version: sourcePlugin.version }).toEqual(
-      sourcePlugin
-    );
+    const expectedPlugin = structuredClone(sourcePlugin);
+    expectedPlugin.version = builtPlugin.version;
+    expect(builtPlugin).toEqual(expectedPlugin);
     // plugin.json is the manifest the host reads, so a published build must not
     // advertise a different version from the package it ships.
     expect(builtPlugin.version).toBe(builtPackage.version);
@@ -411,10 +433,10 @@ describe("P0-C built Radius extension artifact", () => {
       readFileSync(join(REPO_ROOT, "LICENSE"), "utf8")
     );
     for (const sourceSkill of filesUnder(
-      join(REPO_ROOT, "plugins", "radius", "skills")
+      join(REPO_ROOT, "extensions", "radius", "skills")
     )) {
       const relative = sourceSkill.slice(
-        join(REPO_ROOT, "plugins", "radius").length + 1
+        join(REPO_ROOT, "extensions", "radius").length + 1
       );
       if (
         relative.replaceAll("\\", "/") ===
@@ -486,6 +508,7 @@ describe("P0-C built Radius extension artifact", () => {
     const structureGuidance = readGuidance(
       "references/bicep-structure-rules.md"
     );
+    const secretsGuidance = readGuidance("references/secrets-handling.md");
     const runtimeGuidance = readGuidance("references/runtime-contract.md");
     const skillGuidance = readGuidance("SKILL.md");
     const redisExample = bicepBlocks.find(
@@ -500,16 +523,16 @@ describe("P0-C built Radius extension artifact", () => {
       "If the Redis Recipe declares `url` in `result.secrets`, the connection injects secret-backed `CONNECTION_REDIS_URL`"
     );
     expect(connectionGuidance).toContain(
-      "If compatibility cannot be proven, preserve or use the existing schema-supported wiring"
+      "If the supplied compatibility context does not explicitly establish support, preserve or use the existing schema-supported wiring"
     );
     expect(connectionGuidance).toContain(
       "Do not automatically rewrite an existing working `app.bicep`"
     );
     expect(connectionGuidance).toContain(
-      "Azure Container Instances (ACI) behavior is unchanged"
+      "Azure Container Instances (ACI) behavior is unchanged and must not use this Kubernetes projection"
     );
     expect(connectionGuidance).toContain(
-      "An explicit `env` entry wins when it has the same name as a generated connection variable"
+      "An explicit `env` entry wins over a generated variable with the same name"
     );
     expect(connectionGuidance).toContain(
       "Set `disableDefaultEnvVars: true` on a connection only when all generated variables from that connection must be suppressed"
@@ -517,28 +540,115 @@ describe("P0-C built Radius extension artifact", () => {
     expect(skillGuidance).toContain(
       "`postgresSecret` becomes `POSTGRESSECRET`"
     );
-    expect(skillGuidance).toContain("`rad version --output json`");
-    expect(skillGuidance).toContain(
-      "`rad recipe show <name> --resource-type <type> --output json`"
-    );
-    expect(skillGuidance).toContain(
-      "These signals do not automatically prove secret-connection projection"
-    );
-    for (const guidance of [connectionGuidance, runtimeGuidance]) {
-      expect(guidance).toContain("`rad version --output json`");
+    // This artifact-boundary test verifies the packaged semantic guidance only.
+    // The repo has no deterministic seam that executes the prompt-driven skill
+    // or evaluates its generated Bicep; https://github.com/radius-project/ai-extensions/issues/685 tracks that evaluation harness.
+    for (const guidance of [
+      skillGuidance,
+      connectionGuidance,
+      runtimeGuidance
+    ]) {
       expect(guidance).toContain(
-        "`rad recipe show <name> --resource-type <type> --output json`"
+        "Do not execute `rad`, fetch versions or Recipe metadata, or visit external links to discover compatibility"
       );
-      expect(guidance).toContain("known compatible control-plane version");
+      expect(guidance).not.toContain("rad version --output json");
+      expect(guidance).not.toContain("rad recipe show");
     }
-    expect(readGuidance("references/secrets-handling.md")).toContain(
-      "`CONNECTION_MYSQLSECRET_PASSWORD`"
+    expect(skillGuidance).toContain(
+      'the required managed `show-radius-type.mjs` result for `Radius.Compute/containers` has `recipe.status: "available"` and its returned `recipe.definition` identifies the Kubernetes Container Recipe'
     );
+    expect(connectionGuidance).toContain(
+      "Support is established when `recipe.status` is `available` and the returned `recipe.definition` identifies the Kubernetes Container Recipe"
+    );
+    expect(runtimeGuidance).toContain(
+      "For the managed-default profile, Recipe inspection means reading the complete `recipe.definition` already returned by the required `show-radius-type.mjs` batch"
+    );
+    expect(skillGuidance).toContain(
+      "The skill handoff itself and a resolved resource schema alone do not establish runtime projection support"
+    );
+    expect(connectionGuidance).toContain(
+      "The skill handoff itself and a resolved resource schema alone are insufficient"
+    );
+    expect(skillGuidance).toContain(
+      "If the Recipe is absent, unavailable, unresolved, or not the Kubernetes Container Recipe, preserve schema-supported `env`, `secretKeyRef`, `envFrom`, native variables, or equivalent explicit wiring"
+    );
+    expect(skillGuidance).toContain(
+      "`<CONNECTION>` is the uppercased connection map key without separator insertion"
+    );
+    expect(connectionGuidance).toContain(
+      "`<CONNECTION>` is the uppercased connection map key without separator insertion"
+    );
+    expect(skillGuidance).toContain(
+      "`<SECRETKEY>` is the uppercased authored Secret data key or Recipe `result.secrets` key"
+    );
+    expect(connectionGuidance).toContain(
+      "a secret suffix is the uppercased authored data key or Recipe `result.secrets` key"
+    );
+    expect(skillGuidance).toContain(
+      "The Kubernetes Container Recipe applies generated ordinary and secret-backed `CONNECTION_*` variables to both regular containers and init containers under the same precedence, disabling, and collision rules"
+    );
+    expect(connectionGuidance).toContain(
+      "Generated ordinary and secret-backed `CONNECTION_*` variables apply to both regular containers and init containers under the same precedence, disabling, and collision rules"
+    );
+    expect(skillGuidance).toContain(
+      "Do not migrate a working `app.bicep` without explicit user intent"
+    );
+    expect(connectionGuidance).toContain(
+      "Do not automatically rewrite an existing working `app.bicep`"
+    );
+    expect(skillGuidance).toContain(
+      "An authored `Radius.Security/secrets` connection uses `<secret>.id` and projects its declared data keys"
+    );
+    expect(connectionGuidance).toContain(
+      "A connection to an authored `Radius.Security/secrets` resource uses `<secret>.id` and projects its declared data keys"
+    );
+    expect(skillGuidance).toContain(
+      "A producer connection uses `<producer>.id` and may project ordinary properties plus keys declared by the Recipe in `result.secrets`"
+    );
+    expect(connectionGuidance).toContain(
+      "A connection to a producer uses `<producer>.id` and may project ordinary resource properties plus secret-backed keys declared by the Recipe in `result.secrets`"
+    );
+    for (const guidance of [skillGuidance, connectionGuidance]) {
+      expect(guidance).toContain(
+        "Automatic secret-backed `CONNECTION_*` projection is Kubernetes Container Recipe behavior only"
+      );
+      expect(guidance).toContain("<secret>.id");
+      expect(guidance).toContain("<producer>.id");
+      expect(guidance).toContain("`result.secrets`");
+      expect(guidance).toContain("`<producer>.properties.secrets.name`");
+      expect(guidance).toContain("`properties.secrets.id` does not exist");
+      expect(guidance).toContain(
+        "An explicit `env` entry wins over a generated variable"
+      );
+      expect(guidance).toContain(
+        "`disableDefaultEnvVars: true` suppresses all generated variables for that connection"
+      );
+      expect(guidance).toContain(
+        "When an ordinary projected property and a managed secret-derived value normalize to the same generated name, the managed secret value wins"
+      );
+      expect(guidance).toContain(
+        "When two secret-derived values normalize to the same generated name, fail rather than choose silently"
+      );
+      expect(guidance).not.toMatch(
+        /Normalized generated-name collisions fail|Generated names that collide after normalization fail/u
+      );
+      expect(guidance).toContain("Developer-owned credentials");
+      expect(guidance).toMatch(
+        /generated by a Recipe[\s\S]*`result\.secrets`/u
+      );
+      expect(guidance).toContain(
+        "Azure Container Instances (ACI) behavior is unchanged and must not use this Kubernetes projection"
+      );
+      expect(guidance).not.toMatch(
+        /github\.com\/radius-project\/(?:radius|resource-types-contrib)\/(?:pull|issues)\//u
+      );
+    }
+    expect(secretsGuidance).toContain("`CONNECTION_MYSQLSECRET_PASSWORD`");
     for (const guidance of [
       connectionGuidance,
       structureGuidance,
       runtimeGuidance,
-      readGuidance("references/secrets-handling.md")
+      secretsGuidance
     ]) {
       expect(guidance).toContain("`@secure()`");
       expect(guidance).toContain("`env.value`");
@@ -568,6 +678,214 @@ describe("P0-C built Radius extension artifact", () => {
     for (const block of bicepBlocks) {
       expect(block).not.toMatch(literalCredentialAssignment);
     }
+  });
+
+  it("packages fail-closed guidance for developer rad resolution failures", () => {
+    assertCurrentArtifact();
+    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
+    const graphGuidance = readFileSync(
+      join(DIST, "skills", "radius-app-graph", "SKILL.md"),
+      "utf8"
+    );
+
+    expect(skillGuidance).toMatch(
+      /show-radius-type\.mjs` fails while locating, querying, or validating.*stop the modeling run.*promote-app-model\.mjs.*--abort.*report the exact error/su
+    );
+    expect(skillGuidance).toMatch(
+      /missing binary.*invalid or incomplete version JSON.*noncanonical commit.*unsupported development, edge, or pull-request version/su
+    );
+    for (const guidance of [skillGuidance, graphGuidance]) {
+      expect(guidance).toMatch(
+        /never (?:download|install).*(?:rename|back up).*(?:delete|replace) a `rad` binary/isu
+      );
+      expect(guidance).toMatch(
+        /never change or unset `RADIUS_RAD_BINARY` or `RADIUS_RAD_SKIP_VERSION_CHECK`/iu
+      );
+      expect(guidance).toMatch(/never search.*PATH.*\.rad\/bin.*fallback/isu);
+    }
+  });
+
+  it("packages the schema-sensitivity credential contract, not a property-name rule", () => {
+    assertCurrentArtifact();
+    const readGuidance = (relativePath: string): string =>
+      readFileSync(join(DIST_SKILL, relativePath), "utf8");
+    const secretsGuidance = readGuidance("references/secrets-handling.md");
+    const structureGuidance = readGuidance(
+      "references/bicep-structure-rules.md"
+    );
+    const skillGuidance = readGuidance("SKILL.md");
+
+    for (const guidance of [
+      secretsGuidance,
+      structureGuidance,
+      skillGuidance
+    ]) {
+      expect(guidance).toContain("`x-radius-sensitive: true`");
+      expect(guidance).toContain("`Radius.Data/mySqlDatabases.password`");
+      expect(guidance).toContain("`Radius.Messaging/rabbitMQ.password`");
+      // The regressed guidance keyed the decision on the property's name, so a
+      // reference property named `password` was assigned the raw secure param.
+      expect(guidance).not.toMatch(/`secretName`[,:]? (?:create|author)/u);
+    }
+    expect(secretsGuidance).toContain(
+      "Decide each credential input from the schema, never from the property's name"
+    );
+    expect(structureGuidance).toContain(
+      "classified by sensitivity rather than by property name"
+    );
+    expect(skillGuidance).toContain(
+      "classified by sensitivity and never by property name"
+    );
+    expect(skillGuidance).toContain(
+      "classified from the schema rather than from the property's name"
+    );
+    expect(secretsGuidance).toContain(
+      "A property named `password` may be either kind, and a reference property may be named `password`, `passwordSecret`, or `secretName`"
+    );
+    expect(secretsGuidance).toContain(
+      "Never assign a `@secure()` parameter to a reference property"
+    );
+    expect(structureGuidance).toContain(
+      "never a `@secure() param` (`Radius.Messaging/rabbitMQ.password`"
+    );
+    expect(skillGuidance).toContain(
+      "no `@secure() param` is assigned to a reference property"
+    );
+
+    const bicepBlocks = filesUnder(DIST_SKILL)
+      .filter((path) => path.endsWith(".md"))
+      .flatMap((path) => [
+        ...readFileSync(path, "utf8").matchAll(
+          /```bicep\r?\n([\s\S]*?)\r?\n```/gu
+        )
+      ])
+      .map((match) => match[1]);
+    const rabbitmqExample = bicepBlocks.find((block) =>
+      block.includes("'Radius.Messaging/rabbitMQ@")
+    );
+    expect(rabbitmqExample).toBeDefined();
+    expect(rabbitmqExample).toMatch(/password:\s*rabbitmqCredentials\.id\b/u);
+    expect(rabbitmqExample).toContain(
+      "resource rabbitmqCredentials 'Radius.Security/secrets"
+    );
+    expect(rabbitmqExample).not.toMatch(
+      /^\s*password:\s*rabbitmqPassword\s*$/mu
+    );
+    // `username` is the administrator the broker is provisioned with, not a
+    // value copied from the application's existing deployment.
+    expect(rabbitmqExample).toMatch(
+      /username:\s*'myadmin'\s*\/\/ authored broker administrator/u
+    );
+    expect(rabbitmqExample).not.toMatch(/username:[^\n]*derived from source/u);
+    expect(secretsGuidance).toContain(
+      "Writing `password: rabbitmqPassword` here deploys a broken application"
+    );
+    expect(secretsGuidance).toContain(
+      "a password is not a lowercase RFC 1123 subdomain"
+    );
+
+    // The MySQL example must keep the opposite, inline form so both
+    // conventions ship side by side.
+    const mysqlExample = bicepBlocks.find((block) =>
+      block.includes("resource mysql 'Radius.Data/mySqlDatabases@")
+    );
+    expect(mysqlExample).toBeDefined();
+    expect(mysqlExample).toMatch(/^\s*password:\s*password\s*$/mu);
+  });
+
+  it("packages the exact-data-key contract for authored reference Secrets", () => {
+    assertCurrentArtifact();
+    const readGuidance = (relativePath: string): string =>
+      readFileSync(join(DIST_SKILL, relativePath), "utf8");
+    const secretsGuidance = readGuidance("references/secrets-handling.md");
+    const skillGuidance = readGuidance("SKILL.md");
+
+    expect(secretsGuidance).toContain(
+      "the authored Secret must expose the value under the exact data key the consuming schema names, matching case"
+    );
+    expect(secretsGuidance).toContain(
+      "Data keys are case-sensitive. Do not uppercase them by convention"
+    );
+    expect(secretsGuidance).toContain(
+      "do not assume the key matches the property name, the resource name, or the application's environment-variable name"
+    );
+    expect(secretsGuidance).toContain(
+      "Every `secretKeyRef.key` that reads the same authored Secret must use that same exact key"
+    );
+    expect(secretsGuidance).toContain(
+      "Read the required key from the consuming type's schema description"
+    );
+    expect(secretsGuidance).toContain(
+      "Authoring that data key as `PASSWORD` fails even though the Bicep compiles and the resource ID is correct"
+    );
+    expect(secretsGuidance).toContain("`CreateContainerConfigError`");
+    expect(skillGuidance).toContain(
+      "the exact case-sensitive data key the consuming schema names (`password`, not `PASSWORD`)"
+    );
+
+    const bicepBlocks = filesUnder(DIST_SKILL)
+      .filter((path) => path.endsWith(".md"))
+      .flatMap((path) => [
+        ...readFileSync(path, "utf8").matchAll(
+          /```bicep\r?\n([\s\S]*?)\r?\n```/gu
+        )
+      ])
+      .map((match) => match[1]);
+
+    // The authored Secret and every reader of it must agree on the exact
+    // lowercase key the rabbitMQ Recipe hardcodes.
+    const rabbitmqExample = bicepBlocks.find((block) =>
+      block.includes("'Radius.Messaging/rabbitMQ@")
+    );
+    expect(rabbitmqExample).toBeDefined();
+    expect(rabbitmqExample).toMatch(
+      /data:\s*\{\s*password:\s*\{\s*value:\s*rabbitmqPassword\s*\}/u
+    );
+    expect(rabbitmqExample).not.toContain("PASSWORD:");
+
+    const rabbitmqConsumer = bicepBlocks.find(
+      (block) =>
+        block.includes("secretName: rabbitmqCredentials.name") &&
+        block.includes("secretKeyRef")
+    );
+    expect(rabbitmqConsumer).toBeDefined();
+    expect(rabbitmqConsumer).toMatch(/key:\s*'password'/u);
+    expect(rabbitmqConsumer).not.toMatch(/key:\s*'PASSWORD'/u);
+  });
+
+  it("packages the staged type-sensitivity contract both credential scripts share", () => {
+    assertCurrentArtifact();
+    const resolverScript = readFileSync(
+      join(DIST_SKILL, "scripts", "show-radius-type.mjs"),
+      "utf8"
+    );
+    const checkerScript = readFileSync(
+      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
+      "utf8"
+    );
+    const skillGuidance = readFileSync(join(DIST_SKILL, "SKILL.md"), "utf8");
+
+    // The two scripts never import each other, so the staged file name is the
+    // whole of their contract. A build that packaged one side's name and not
+    // the other's would ship a checker that silently never finds the evidence.
+    for (const script of [resolverScript, checkerScript]) {
+      expect(script).toContain('"resolved-types.json"');
+      expect(script).toContain("contractVersion");
+    }
+    expect(checkerScript).toContain("secure-parameter-target");
+    expect(skillGuidance).toContain("resolved-types.json");
+
+    // The checker verifies where a credential is assigned, not the authored
+    // Secret's data key. Layer 1's data-key rule has no mechanical guard, so
+    // the guidance must not let "the checker enforces this" read as covering
+    // it — that false confidence is the failure mode this stack exists to fix.
+    const secretsGuidance = readFileSync(
+      join(DIST_SKILL, "references", "secrets-handling.md"),
+      "utf8"
+    );
+    expect(secretsGuidance).toContain(
+      "the data-key contract below is not verified by any check"
+    );
   });
 
   it("packages each page module exactly once", () => {
@@ -744,24 +1062,30 @@ describe("P0-C built Radius extension artifact", () => {
         stdio: "pipe"
       });
 
-      const managedFiles = [
-        "extension.mjs",
-        "extension.mjs.map",
-        "THIRD-PARTY-NOTICES.txt",
-        "package.json",
+      const managedFiles: Array<readonly [string, string]> = [
+        [ARTIFACT_RELATIVE_PATH, "extension.mjs"],
+        [`${ARTIFACT_RELATIVE_PATH}.map`, "extension.mjs.map"],
+        ["THIRD-PARTY-NOTICES.txt", "THIRD-PARTY-NOTICES.txt"],
         ...relativeFilesUnder(join(DIST, "workflows")).map(
-          (filePath) => `workflows/${filePath}`
+          (filePath) =>
+            [`workflows/${filePath}`, `workflows/${filePath}`] as const
         ),
         ...relativeFilesUnder(join(DIST, "skills")).map(
-          (filePath) => `skills/${filePath}`
+          (filePath) => [`skills/${filePath}`, `skills/${filePath}`] as const
         )
       ];
-      for (const managedFile of managedFiles) {
+      for (const [source, installed] of managedFiles) {
         expectMatchingFile(
-          join(DIST, ...managedFile.split("/")),
-          join(installDir, ...managedFile.split("/"))
+          join(DIST, ...source.split("/")),
+          join(installDir, ...installed.split("/"))
         );
       }
+      const builtPackage = JSON.parse(
+        readFileSync(join(DIST, "package.json"), "utf8")
+      ) as Record<string, unknown>;
+      expect(
+        JSON.parse(readFileSync(join(installDir, "package.json"), "utf8"))
+      ).toEqual({ ...builtPackage, main: "extension.mjs" });
       expect(readFileSync(unrelatedRootFile, "utf8")).toBe("keep root\n");
       expect(existsSync(staleWorkflow)).toBe(false);
       expect(existsSync(staleSkill)).toBe(false);
@@ -778,9 +1102,9 @@ describe("P0-C built Radius extension artifact", () => {
       expectedPath: "show-radius-type.mjs"
     },
     {
-      asset: "app-graph source reference",
+      asset: "source-reference guide",
       missingAsset: [
-        "radius-app-graph",
+        "radius-app-bicep",
         "references",
         "source-code-references.md"
       ],
@@ -823,6 +1147,45 @@ describe("P0-C built Radius extension artifact", () => {
       }
     }
   );
+
+  it.each([
+    ["Git is unavailable", true],
+    ["checkout metadata is invalid", false]
+  ])("preserves build output when %s", (_condition, hideGit) => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "radius-canvas-unverified-checkout-")
+    );
+    const sentinel = join(workspaceRoot, ".artifacts", "radius", "keep.txt");
+    try {
+      const buildDirectory = prepareBuildWorkspace(workspaceRoot);
+      mkdirSync(join(workspaceRoot, ".git"));
+      mkdirSync(dirname(sentinel), { recursive: true });
+      writeFileSync(sentinel, "keep\n");
+      const environment =
+        hideGit ?
+          Object.fromEntries(
+            Object.entries(process.env).filter(
+              ([name]) => name.toUpperCase() !== "PATH"
+            )
+          )
+        : { ...process.env };
+      if (hideGit) environment.PATH = join(workspaceRoot, "missing-bin");
+
+      const result = spawnSync(process.execPath, ["build.mjs"], {
+        cwd: buildDirectory,
+        encoding: "utf8",
+        env: { ...environment, RADIUS_SOURCE_REF: SOURCE_REF }
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("unable to verify tracked files");
+      expect(readFileSync(sentinel, "utf8")).toBe("keep\n");
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
 
   it("rejects a mutable source ref before building", () => {
     const workspaceRoot = mkdtempSync(
