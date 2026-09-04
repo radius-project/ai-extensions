@@ -385,8 +385,17 @@ function githubExpressionString(value: string): string {
 }
 
 function setupPushOperationMarker(workflow: string): string | null {
+  const operationInputPattern = VERIFY_OPERATION_INPUT.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&"
+  );
   const match = workflow.match(
-    /^run-name: Radius verify .+ \[\$\{\{ inputs\.radius_operation \|\| '((?:''|[^'])+)' \}\}\]$/mu
+    new RegExp(
+      "^run-name: Radius verify .+ \\[\\$\\{\\{ inputs\\." +
+        operationInputPattern +
+        " \\|\\| '((?:''|[^'])+)' \\}\\}\\]$",
+      "mu"
+    )
   );
   return match ? match[1].replaceAll("''", "'") : null;
 }
