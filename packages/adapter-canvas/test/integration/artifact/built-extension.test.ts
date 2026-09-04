@@ -42,6 +42,13 @@ const SOURCE_CHANGELOG = join(
   "radius",
   "CHANGELOG.md"
 );
+const SOURCE_PREVIEW = join(
+  REPO_ROOT,
+  "plugins",
+  "radius",
+  "assets",
+  "preview.png"
+);
 const SOURCE_SKILL = join(
   REPO_ROOT,
   "extensions",
@@ -149,11 +156,9 @@ function prepareBuildWorkspace(
     join(workspaceExtensionDir, "skills"),
     { recursive: true }
   );
-  cpSync(
-    join(sourceExtensionDir, "assets"),
-    join(workspaceExtensionDir, "assets"),
-    { recursive: true }
-  );
+  cpSync(join(sourcePlugin, "assets"), join(workspacePlugin, "assets"), {
+    recursive: true
+  });
   if (missingAsset.length > 0) {
     rmSync(join(workspaceExtensionDir, "skills", ...missingAsset), {
       recursive: true
@@ -325,6 +330,11 @@ describe("P0-C built Radius extension artifact", () => {
     for (const packagedPath of packagedPaths) {
       expect(existsSync(join(DIST, ...packagedPath.split("/")))).toBe(true);
     }
+    expect(
+      readFileSync(join(DIST, "assets", "preview.png")).equals(
+        readFileSync(SOURCE_PREVIEW)
+      )
+    ).toBe(true);
     const radiusTypeResolver = readFileSync(
       join(
         DIST,
