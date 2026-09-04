@@ -52,7 +52,7 @@
     "@playwright/test": "^1.62.1",
     "@types/node": "catalog:",
     "@vitest/coverage-v8": "catalog:",
-    "eslint": "^10.8.1",
+    "eslint": "^10.9.1",
     "globals": "^17.11.0",
     "markdown-table-formatter": "1.7.0",
     "markdownlint-cli2": "0.23.2",
