@@ -89,10 +89,13 @@ const githubToken = process.env.GH_TOKEN?.trim() ?? "";
 // reports as a product failure, so it must never be the first thing to give.
 const OPERATION_TIMEOUT_MS = 20 * 60 * 1000;
 
-// Deleting a free environment is one `gh api --method DELETE` behind a
-// confirmation dialog, so it is bounded far more tightly than creation. The
-// budget covers GitHub's own propagation rather than any product work.
-const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
+// The workflow-backed product deletion may legitimately run for 30 minutes
+// after dispatch and run discovery. Give the outer poll another minute so it
+// cannot expire first, then reserve the rest of the 45-minute test ceiling for
+// page setup, postconditions, Azure/Graph propagation, and harness cleanup.
+const DELETE_OPERATION_TIMEOUT_MS = 31 * 60 * 1000;
+const DELETE_POSTCONDITION_TIMEOUT_MS = 10 * 60 * 1000;
+const DELETE_TEST_TIMEOUT_MS = DELETE_OPERATION_TIMEOUT_MS + 15 * 60 * 1000;
 
 const gate = evaluateCreateEnvironmentGate({
   cloudE2eFlag: process.env.RADIUS_CLOUD_E2E,
@@ -444,7 +447,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   test("deletes the GitHub Environment it created", async ({
     page
   }, testInfo) => {
-    testInfo.setTimeout(DELETE_TIMEOUT_MS + 5 * 60 * 1000);
+    testInfo.setTimeout(DELETE_TEST_TIMEOUT_MS);
     const cloud = fixture;
     if (!cloud) throw new Error("The cloud fixture was not created.");
 
@@ -473,7 +476,9 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       const deleteButton = page.locator(
         `.js-delete-env[data-env="${cloud.environmentName}"]`
       );
-      await expect(deleteButton).toBeVisible({ timeout: DELETE_TIMEOUT_MS });
+      await expect(deleteButton).toBeVisible({
+        timeout: DELETE_POSTCONDITION_TIMEOUT_MS
+      });
       await deleteButton.click();
 
       await expect(page.locator("#env-confirm-title")).toHaveText(
@@ -524,7 +529,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
 
       await expect
         .poll(async () => (await snapshot()).terminal, {
-          timeout: DELETE_TIMEOUT_MS,
+          timeout: DELETE_OPERATION_TIMEOUT_MS,
           intervals: [5_000]
         })
         .toBe(true);
@@ -538,7 +543,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       // user-visible lifecycle rather than merely accepting the request.
       await expect(page.locator("#env-confirm-title")).toHaveText(
         "Environment deleted",
-        { timeout: DELETE_TIMEOUT_MS }
+        { timeout: DELETE_POSTCONDITION_TIMEOUT_MS }
       );
       await expect(page.locator("#env-confirm-message")).toContainText(
         `The environment "${cloud.environmentName}" was deleted.`
@@ -546,12 +551,14 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       const environmentTable = page.locator("#env-table-body");
       await expect(environmentTable).not.toContainText(
         "Loading environments…",
-        { timeout: DELETE_TIMEOUT_MS }
+        { timeout: DELETE_POSTCONDITION_TIMEOUT_MS }
       );
       await expect(environmentTable).not.toContainText(
         "Could not load environments."
       );
-      await expect(deleteButton).toHaveCount(0, { timeout: DELETE_TIMEOUT_MS });
+      await expect(deleteButton).toHaveCount(0, {
+        timeout: DELETE_POSTCONDITION_TIMEOUT_MS
+      });
 
       // The proof. GitHub is asked directly, and the fixture refuses to answer
       // unless stage one observed this same Environment present first.
