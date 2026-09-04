@@ -477,9 +477,10 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       );
       await page.locator("#env-confirm-ok").click();
       const response = await deleteResponse;
+      const payload = (await response.json()) as unknown;
       const problems = findDeleteEnvironmentSuccessProblems({
         status: response.status(),
-        payload: (await response.json()) as unknown,
+        payload,
         environmentName: cloud.environmentName
       });
       expect(
@@ -490,7 +491,53 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         )
       ).toEqual([]);
 
-      // The product's own report that it believes the environment is gone.
+      const operationId = readOperationId(payload);
+      const snapshot = async (): Promise<
+        ReturnType<typeof readOperationSnapshot>
+      > =>
+        readOperationSnapshot(
+          readOperationHttpResponse(
+            await page.evaluate(async (id) => {
+              const operationResponse = await fetch(`/api/operations/${id}`);
+              return {
+                ok: operationResponse.ok,
+                status: operationResponse.status,
+                statusText: operationResponse.statusText,
+                body: await operationResponse.text()
+              };
+            }, operationId)
+          )
+        );
+
+      await expect
+        .poll(async () => (await snapshot()).terminal, {
+          timeout: DELETE_TIMEOUT_MS,
+          intervals: [5_000]
+        })
+        .toBe(true);
+      const finished = await snapshot();
+      expect(
+        finished.state,
+        `The delete-environment operation ended ${finished.state}: ${finished.error || "no error was reported."}`
+      ).toBe("succeeded");
+
+      // The browser must also observe the terminal operation and complete the
+      // user-visible lifecycle rather than merely accepting the request.
+      await expect(page.locator("#env-confirm-title")).toHaveText(
+        "Environment deleted",
+        { timeout: DELETE_TIMEOUT_MS }
+      );
+      await expect(page.locator("#env-confirm-message")).toContainText(
+        `The environment "${cloud.environmentName}" was deleted.`
+      );
+      const environmentTable = page.locator("#env-table-body");
+      await expect(environmentTable).not.toContainText(
+        "Loading environments…",
+        { timeout: DELETE_TIMEOUT_MS }
+      );
+      await expect(environmentTable).not.toContainText(
+        "Could not load environments."
+      );
       await expect(deleteButton).toHaveCount(0, { timeout: DELETE_TIMEOUT_MS });
 
       // The proof. GitHub is asked directly, and the fixture refuses to answer
@@ -506,10 +553,28 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         throw new Error(
           "Stage one did not retain the Azure identity needed for deletion assertions."
         );
+      const expectedAppRegistration = appRegistration;
+      const expectedServicePrincipalId = servicePrincipalId;
       await expect(cloud.assertAppRegistrationExists()).resolves.toEqual(
-        appRegistration
+        expectedAppRegistration
       );
-      await cloud.assertRoleAssignmentExists(servicePrincipalId);
+      const retainedServicePrincipalId = readServicePrincipalObjectId(
+        await runAz(
+          ports.commands,
+          [
+            "ad",
+            "sp",
+            "show",
+            "--id",
+            expectedAppRegistration.appId,
+            "-o",
+            "json"
+          ],
+          `az ad sp show --id ${expectedAppRegistration.appId}`
+        )
+      );
+      expect(retainedServicePrincipalId).toBe(expectedServicePrincipalId);
+      await cloud.assertRoleAssignmentExists(retainedServicePrincipalId);
     } finally {
       await harness.cleanup();
     }
