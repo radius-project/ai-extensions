@@ -17,6 +17,7 @@ import {
   CREATE_OPERATION_TIMEOUT_MS,
   CREATE_TEST_TIMEOUT_MS,
   DELETE_OPERATION_TIMEOUT_MS,
+  DELETE_POSTCONDITION_TIMEOUT_MS,
   DELETE_TEST_TIMEOUT_MS,
   SERIAL_TEST_TIMEOUT_BUDGET_MS
 } from "./support/cloud-timeout-budget.js";
@@ -54,15 +55,20 @@ describe("the cloud Playwright config", () => {
     expect(cloudConfig.expect?.timeout).toBeGreaterThan(0);
   });
 
-  it("keeps serial stages below the suite and credential ceilings", () => {
+  it("budgets every sequential stage and leaves hook headroom", () => {
     const globalTimeout = cloudConfig.globalTimeout ?? 0;
 
     expect(CREATE_TEST_TIMEOUT_MS).toBeGreaterThan(CREATE_OPERATION_TIMEOUT_MS);
-    expect(DELETE_TEST_TIMEOUT_MS).toBeGreaterThan(DELETE_OPERATION_TIMEOUT_MS);
+    expect(DELETE_TEST_TIMEOUT_MS).toBeGreaterThanOrEqual(
+      DELETE_OPERATION_TIMEOUT_MS + 2 * DELETE_POSTCONDITION_TIMEOUT_MS
+    );
     expect(
       globalTimeout - SERIAL_TEST_TIMEOUT_BUDGET_MS
     ).toBeGreaterThanOrEqual(CLOUD_HOOK_TEARDOWN_HEADROOM_MS);
-    expect(SERIAL_TEST_TIMEOUT_BUDGET_MS).toBeLessThan(
+    expect(CREATE_TEST_TIMEOUT_MS).toBeLessThan(
+      CLOUD_INSTALLATION_TOKEN_LIFETIME_MS
+    );
+    expect(DELETE_TEST_TIMEOUT_MS).toBeLessThan(
       CLOUD_INSTALLATION_TOKEN_LIFETIME_MS
     );
   });

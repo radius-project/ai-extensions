@@ -52,6 +52,10 @@ import {
   DELETE_TEST_TIMEOUT_MS
 } from "./support/cloud-timeout-budget.js";
 import {
+  refreshProcessGitHubToken,
+  takeGitHubAppTokenConfig
+} from "./support/github-app-token.js";
+import {
   classifyWorkflowPublication,
   cloudCanvasState,
   describeWorkflowPublication,
@@ -89,6 +93,7 @@ const WORKFLOW_DIRECTORY = ".github/workflows";
 const KUBERNETES_NAMESPACE = "default";
 const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
 const githubToken = process.env.GH_TOKEN?.trim() ?? "";
+const githubAppTokenConfig = takeGitHubAppTokenConfig();
 
 const gate = evaluateCreateEnvironmentGate({
   cloudE2eFlag: process.env.RADIUS_CLOUD_E2E,
@@ -168,6 +173,10 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
 
   test.beforeAll(async () => {
     if (!gate.enabled) throw new Error(gate.reason);
+    if (!githubAppTokenConfig)
+      throw new Error(
+        "GitHub App refresh credentials are required for the cloud lifecycle journey."
+      );
     fixture = await createCloudFixture({
       subscriptionId,
       // CI publishes the region; locally it is absent and the fixture's own
@@ -179,6 +188,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       githubRunId: process.env.GITHUB_RUN_ID,
       ports
     });
+    await refreshProcessGitHubToken(githubAppTokenConfig);
     // Turns every assertion below from an observation into a proof: none of the
     // artifacts asserted on existed before the product ran.
     await fixture.assertCleanSlate();
@@ -189,6 +199,14 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     fixture = undefined;
     if (!current) return;
     await runCleanupSteps([
+      ...(githubAppTokenConfig ?
+        [
+          {
+            label: "refresh GitHub App token for cleanup",
+            run: () => refreshProcessGitHubToken(githubAppTokenConfig)
+          }
+        ]
+      : []),
       {
         label: "reclaim product-created artifacts",
         run: async () => {
@@ -440,6 +458,9 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     testInfo.setTimeout(DELETE_TEST_TIMEOUT_MS);
     const cloud = fixture;
     if (!cloud) throw new Error("The cloud fixture was not created.");
+    if (!githubAppTokenConfig)
+      throw new Error("GitHub App refresh credentials are unavailable.");
+    await refreshProcessGitHubToken(githubAppTokenConfig);
 
     const harness = await CanvasHarness.create({
       page,
