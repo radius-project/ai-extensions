@@ -505,7 +505,8 @@ export function createWorkflowFileCommitter(
       "--jq",
       ".sha"
     ]);
-    const sha = shaRes.code === 0 ? shaRes.stdout.trim() : "";
+    const sha =
+      shaRes.code === 0 || shaRes.code === "0" ? shaRes.stdout.trim() : "";
     const previousBlobKnown =
       sha !== "" ||
       /(?:HTTP\s+404|\bNot Found\b)/i.test(

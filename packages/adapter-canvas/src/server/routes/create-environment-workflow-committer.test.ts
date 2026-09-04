@@ -174,7 +174,7 @@ describe("committing a workflow file", () => {
       .update(bytes)
       .digest("hex");
     const h = harness({
-      runGh: [{ code: 0, stdout: blobSha }]
+      runGh: [{ code: "0", stdout: blobSha }]
     });
     const committer = createWorkflowFileCommitter(h.ports, target);
 
@@ -199,9 +199,9 @@ describe("committing a workflow file", () => {
     expect(h.tempWrites).toEqual([]);
   });
 
-  it("does not treat a string command code as proven rollback provenance", async () => {
+  it("does not trust stdout from a failed string command code", async () => {
     const h = harness({
-      runGh: [{ code: "0", stdout: "untrusted-blob" }],
+      runGh: [{ code: "ENOENT", stdout: "untrusted-blob" }],
       runGhWorkflow: [{ code: 0, stdout: PUT_RESPONSE }]
     });
 
