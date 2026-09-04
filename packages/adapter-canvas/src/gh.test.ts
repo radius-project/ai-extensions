@@ -1724,7 +1724,37 @@ describe.sequential("getGhPackageCredentials", () => {
     expect(await getGhPackageCredentials()).toEqual({
       token: "keyring-pub-token",
       username: "pubuser",
-      source: "keyring"
+      source: "keyring",
+      scopes: [
+        "repo",
+        "read:org",
+        "workflow",
+        "read:packages",
+        "write:packages"
+      ]
+    });
+  });
+
+  it("reloads a refreshed keyring token for a destructive retry", async () => {
+    const userTokens = { pubuser: "stale-package-token" };
+    const { getGhPackageCredentials } = await loadGh("linux", {
+      token: "injected-pub",
+      withToken: STATUS.tokenPubActive,
+      keyring: STATUS.keyringPubAndEmu,
+      userTokens
+    });
+
+    expect(await getGhPackageCredentials()).toMatchObject({
+      token: "stale-package-token",
+      username: "pubuser"
+    });
+    userTokens.pubuser = "refreshed-package-token";
+    expect(await getGhPackageCredentials()).toMatchObject({
+      token: "stale-package-token"
+    });
+    expect(await getGhPackageCredentials({ fresh: true })).toMatchObject({
+      token: "refreshed-package-token",
+      username: "pubuser"
     });
   });
 
@@ -1738,7 +1768,8 @@ describe.sequential("getGhPackageCredentials", () => {
     expect(await getGhPackageCredentials()).toEqual({
       token: "injected-solo",
       username: "tokuser",
-      source: "injected-token"
+      source: "injected-token",
+      scopes: ["repo", "read:org"]
     });
   });
 
@@ -1759,7 +1790,8 @@ describe.sequential("getGhPackageCredentials", () => {
     await expect(getGhPackageCredentials()).resolves.toEqual({
       token: "injected-pub",
       username: "pubuser",
-      source: "injected-token"
+      source: "injected-token",
+      scopes: ["repo", "read:org", "workflow"]
     });
     const tokenLookup = childProcess.execFile.mock.calls.find(
       ([, args]) => args[0] === "auth" && args[1] === "token"
@@ -1794,7 +1826,53 @@ describe.sequential("getGhPackageCredentials", () => {
     await expect(getGhPackageCredentials()).resolves.toEqual({
       token: "github-fallback-token",
       username: "tokuser",
-      source: "injected-token"
+      source: "injected-token",
+      scopes: ["repo", "read:org"]
+    });
+  });
+
+  it("discovers a repaired keyring credential after an injected-token failure", async () => {
+    const userTokens: Record<string, string> = {};
+    const gh = await loadGh("linux", {
+      token: "injected-solo",
+      withToken: STATUS.tokenNoWorkflow,
+      keyring: STATUS.empty,
+      userTokens
+    });
+
+    await expect(gh.getGhPackageCredentials()).resolves.toMatchObject({
+      source: "injected-token",
+      token: "injected-solo"
+    });
+
+    userTokens.tokuser = "repaired-keyring-token";
+    const originalExec = childProcess.execFile.getMockImplementation();
+    if (!originalExec) throw new Error("execFile mock is not configured");
+    childProcess.execFile.mockImplementation(
+      (file, args, options, callback) => {
+        if (
+          args?.[0] === "auth" &&
+          args?.[1] === "status" &&
+          !options?.env?.GH_TOKEN &&
+          !options?.env?.GITHUB_TOKEN
+        ) {
+          callback(
+            null,
+            STATUS.keyringPubFull.replaceAll("pubuser", "tokuser"),
+            ""
+          );
+          return { stdin: { end() {} } };
+        }
+        return originalExec(file, args, options, callback);
+      }
+    );
+
+    await expect(
+      gh.getGhPackageCredentials({ fresh: true })
+    ).resolves.toMatchObject({
+      source: "keyring",
+      token: "repaired-keyring-token",
+      username: "tokuser"
     });
   });
 

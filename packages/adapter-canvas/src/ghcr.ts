@@ -7,10 +7,13 @@ import {
   displayGhCommand,
   type GhCommandPresentation
 } from "./gh-command-display.js";
+import { GITHUB_API_VERSION } from "./azure-oidc.js";
 
 export interface GhCredentials {
   token: string;
   username: string;
+  source?: "keyring" | "injected-token";
+  scopes?: readonly string[];
 }
 
 interface HttpResponse {
@@ -95,6 +98,25 @@ export interface BootstrapGhcrOptions {
   now?: () => number;
 }
 
+export interface DeleteGhcrOptions {
+  targetRepository: string;
+  registry: string;
+  credentials?: GhCredentials;
+  runKeyringCommand?: (args: string[]) => Promise<string>;
+  fetchImpl?: FetchImplementation;
+  apiBaseUrl?: string;
+  sleep?: (milliseconds: number) => Promise<void>;
+  confirmationAttempts?: number;
+  ghCommandPresentation?: GhCommandPresentation;
+  requestTimeoutMs?: number;
+  deletionTimeoutMs?: number;
+  now?: () => number;
+}
+
+export type DeleteGhcrOutcome =
+  | { outcome: "deleted"; registry: string }
+  | { outcome: "not_found"; registry: string };
+
 class GhcrAuthError extends Error {
   readonly code = "GHCR_AUTH";
 }
@@ -141,8 +163,13 @@ export const BOOTSTRAP_CONTENT =
 const OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json";
 const OCI_EMPTY_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json";
 function packageAuthGuidance(
-  presentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+  presentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION,
+  scopes = "read:packages,write:packages",
+  credentialSource?: GhCredentials["source"]
 ): string {
+  if (credentialSource === "injected-token") {
+    return `The selected package credential comes from GH_TOKEN or GITHUB_TOKEN, so gh auth refresh cannot change it. Update that injected token to include ${scopes}, or remove it and sign in to the selected account with GitHub CLI. ${presentation.installationNote}`.trim();
+  }
   const switchCommand = displayGhCommand(presentation, [
     "auth",
     "switch",
@@ -157,7 +184,7 @@ function packageAuthGuidance(
     "--hostname",
     "github.com",
     "--scopes",
-    "read:packages,write:packages"
+    scopes
   ]);
   if (!switchCommand || !refreshCommand) return presentation.installationNote;
   return `In the terminal, make the selected account active with: ${switchCommand}. Then run: ${refreshCommand}. The first command changes your active GitHub CLI account if needed. ${presentation.installationNote}`.trim();
@@ -165,6 +192,7 @@ function packageAuthGuidance(
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 90_000;
+const DEFAULT_DELETION_TIMEOUT_MS = 30_000;
 const MAX_IDEMPOTENT_ATTEMPTS = 3;
 
 interface RequestContext {
@@ -173,6 +201,8 @@ interface RequestContext {
   now: () => number;
   deadline: number;
   requestTimeoutMs: number;
+  operation: "bootstrap" | "deletion";
+  credentialSource: GhCredentials["source"];
 }
 
 interface RequestOptions {
@@ -251,7 +281,9 @@ function remainingBudget(requests: RequestContext): number {
 function ensureBudget(requests: RequestContext): number {
   const remaining = remainingBudget(requests);
   if (remaining <= 0) {
-    throw new Error("GHCR bootstrap exceeded its overall elapsed-time budget.");
+    throw new Error(
+      `GHCR ${requests.operation} exceeded its overall elapsed-time budget.`
+    );
   }
   return remaining;
 }
@@ -282,7 +314,9 @@ async function sleepWithinBudget(
 ): Promise<void> {
   const remaining = ensureBudget(requests);
   if (milliseconds >= remaining) {
-    throw new Error("GHCR bootstrap exceeded its overall elapsed-time budget.");
+    throw new Error(
+      `GHCR ${requests.operation} exceeded its overall elapsed-time budget.`
+    );
   }
   await requests.sleep(milliseconds);
   ensureBudget(requests);
@@ -368,9 +402,17 @@ function validateLocation(
 
 function packageAuthError(
   message: string,
-  presentation: GhCommandPresentation
+  presentation: GhCommandPresentation,
+  scopes?: string,
+  credentialSource?: GhCredentials["source"]
 ): GhcrAuthError {
-  return new GhcrAuthError(`${message}. ${packageAuthGuidance(presentation)}`);
+  return new GhcrAuthError(
+    `${message}. ${packageAuthGuidance(presentation, scopes, credentialSource)}`
+  );
+}
+
+function githubAuthorization(token: string): string {
+  return ["Bearer", token].join(" ");
 }
 
 function parseBearerChallenge(
@@ -758,7 +800,7 @@ async function githubJson(
     headers: {
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${token}`,
-      "X-GitHub-Api-Version": "2026-03-10"
+      "X-GitHub-Api-Version": GITHUB_API_VERSION
     },
     redirect: "error"
   });
@@ -766,7 +808,11 @@ async function githubJson(
   if (response.status === 401 || response.status === 403) {
     throw packageAuthError(
       `GitHub Packages API rejected access (HTTP ${response.status})`,
-      ghCommandPresentation
+      ghCommandPresentation,
+      requests.operation === "deletion" ?
+        "read:packages,delete:packages"
+      : undefined,
+      requests.credentialSource
     );
   }
   if (!response.ok) {
@@ -937,17 +983,19 @@ export async function bootstrapGHCRStatePackage({
   ) {
     throw new Error("GHCR timeout values must be positive finite numbers.");
   }
+  const auth =
+    credentials || (await loadGhKeyringCredentials({ ghCommandPresentation }));
   const requests: RequestContext = {
     fetchImpl,
     sleep,
     now,
     deadline: now() + bootstrapTimeoutMs,
-    requestTimeoutMs
+    requestTimeoutMs,
+    operation: "bootstrap",
+    credentialSource: auth.source
   };
   const canonicalTargetRepository = targetRepository.toLowerCase();
   const parsed = parseRegistry(registry, registryOrigin);
-  const auth =
-    credentials || (await loadGhKeyringCredentials({ ghCommandPresentation }));
   const endpoint = await packageEndpoint({
     requests,
     apiBaseUrl: apiBaseUrl.replace(/\/+$/, ""),
@@ -1025,4 +1073,139 @@ export async function bootstrapGHCRStatePackage({
     bootstrapTag: BOOTSTRAP_TAG,
     visibility: metadata.visibility
   };
+}
+
+export async function deleteGHCRStatePackage({
+  targetRepository,
+  registry,
+  credentials,
+  runKeyringCommand,
+  fetchImpl = globalThis.fetch,
+  apiBaseUrl = "https://api.github.com",
+  sleep = (milliseconds) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  confirmationAttempts = 4,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  deletionTimeoutMs = DEFAULT_DELETION_TIMEOUT_MS,
+  now = Date.now,
+  ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
+}: DeleteGhcrOptions): Promise<DeleteGhcrOutcome> {
+  if (typeof fetchImpl !== "function") {
+    throw new Error("This Node.js runtime does not provide fetch.");
+  }
+  if (
+    !Number.isFinite(requestTimeoutMs) ||
+    requestTimeoutMs <= 0 ||
+    !Number.isFinite(deletionTimeoutMs) ||
+    deletionTimeoutMs <= 0 ||
+    !Number.isInteger(confirmationAttempts) ||
+    confirmationAttempts <= 0
+  ) {
+    throw new Error(
+      "GHCR timeout values and confirmation attempts must be positive finite numbers."
+    );
+  }
+
+  const auth =
+    credentials ||
+    (await loadGhKeyringCredentials({
+      runKeyringCommand,
+      ghCommandPresentation
+    }));
+  const requests: RequestContext = {
+    fetchImpl,
+    sleep,
+    now,
+    deadline: now() + deletionTimeoutMs,
+    requestTimeoutMs,
+    operation: "deletion",
+    credentialSource: auth.source
+  };
+  const parsed = parseRegistry(registry);
+  const endpoint = await packageEndpoint({
+    requests,
+    apiBaseUrl: apiBaseUrl.replace(/\/+$/, ""),
+    owner: parsed.owner,
+    packageName: parsed.packageName,
+    token: auth.token,
+    ghCommandPresentation
+  });
+  const existingValue = await githubJson(
+    requests,
+    endpoint,
+    auth.token,
+    true,
+    ghCommandPresentation
+  );
+  if (existingValue === GITHUB_NOT_FOUND) {
+    const scopes = auth.scopes || [];
+    if (!scopes.includes("read:packages")) {
+      throw packageAuthError(
+        "GitHub returned HTTP 404 for the state package, but the selected credential does not prove package read access",
+        ghCommandPresentation,
+        "read:packages",
+        auth.source
+      );
+    }
+    return { outcome: "not_found", registry };
+  }
+  validatePackage(
+    parsePackageMetadata(existingValue),
+    targetRepository.toLowerCase()
+  );
+
+  let deletionError: unknown = null;
+  try {
+    const response = await request(requests, endpoint, {
+      method: "DELETE",
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: githubAuthorization(auth.token),
+        "X-GitHub-Api-Version": GITHUB_API_VERSION
+      },
+      redirect: "error"
+    });
+    if (response.status === 401 || response.status === 403) {
+      throw packageAuthError(
+        `GitHub Packages API rejected package deletion (HTTP ${response.status})`,
+        ghCommandPresentation,
+        "delete:packages",
+        auth.source
+      );
+    }
+    if (!response.ok && response.status !== 404) {
+      deletionError = new Error(
+        `GitHub Packages deletion failed (HTTP ${response.status})${await responseDetail(response)}`
+      );
+    }
+  } catch (error) {
+    if (error instanceof GhcrAuthError) throw error;
+    deletionError = error;
+  }
+
+  for (let attempt = 0; attempt < confirmationAttempts; attempt++) {
+    const value = await githubJson(
+      requests,
+      endpoint,
+      auth.token,
+      true,
+      ghCommandPresentation
+    );
+    if (value === GITHUB_NOT_FOUND) {
+      return { outcome: "deleted", registry };
+    }
+    validatePackage(
+      parsePackageMetadata(value),
+      targetRepository.toLowerCase()
+    );
+    if (attempt + 1 < confirmationAttempts) {
+      await sleepWithinBudget(requests, Math.min(500 * 2 ** attempt, 4000));
+    }
+  }
+
+  const detail =
+    deletionError instanceof Error ? ` ${deletionError.message}` : "";
+  throw new Error(
+    `GHCR state package "${registry}" is still present after deletion.${detail}`.trim()
+  );
 }

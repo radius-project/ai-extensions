@@ -33,6 +33,8 @@ const COMMITS_PATH = `repos/${REPOSITORY}/commits/${BRANCH}`;
 const MATCHING_REFS_PATH = `repos/${REPOSITORY}/git/matching-refs/heads/radius/setup-`;
 const PULLS_PATH = `repos/${REPOSITORY}/pulls?state=open&per_page=100`;
 const DEFAULT_REF_PATH = `repos/${REPOSITORY}/git/refs/heads/${BRANCH}`;
+const LEASE_REF = "refs/heads/radius/cloud-e2e-lease";
+const LEASE_REF_PATH = `repos/${REPOSITORY}/git/${LEASE_REF}`;
 
 const pullPages = (...pages: readonly unknown[][]): string =>
   JSON.stringify(pages);
@@ -73,6 +75,16 @@ const ROLE_LIST: readonly string[] = ["role", "assignment", "list"];
  */
 function baselineStubs(): FakeCommandStub[] {
   return [
+    {
+      tool: "gh",
+      match: ["api", "--method", "POST", `repos/${REPOSITORY}/git/refs`],
+      respond: {}
+    },
+    {
+      tool: "gh",
+      match: ["api", "--method", "DELETE", LEASE_REF_PATH],
+      respond: {}
+    },
     { tool: "az", match: ["group", "create"], respond: {} },
     { tool: "az", match: ["aks", "create"], respond: {} },
     { tool: "az", match: ["group", "delete"], respond: {} },
@@ -223,6 +235,7 @@ describe("createCloudFixture", () => {
           "--node-count 1 --node-vm-size Standard_B2s --generate-ssh-keys --output none"
       ]);
       expect(fake.commands.commandLines("gh")).toEqual([
+        `api --method POST repos/${REPOSITORY}/git/refs -f ref=${LEASE_REF} -f sha=${BASELINE}`,
         `repo clone ${REPOSITORY} ${WORKSPACE}`
       ]);
       expect(fake.commands.calls.at(-1)).toEqual({
@@ -235,7 +248,10 @@ describe("createCloudFixture", () => {
     it("tags the group so scheduled cleanup can identify a crashed run's group", async () => {
       const { fake } = await createHarness();
 
-      const create = fake.commands.calls[0];
+      const create = fake.commands.calls.find(
+        (call) => call.tool === "az" && call.args.includes("create")
+      );
+      if (!create) throw new Error("Expected the resource group create call.");
       const creationTime = create.args.find((arg) =>
         arg.startsWith("creationTime=")
       );
@@ -249,7 +265,11 @@ describe("createCloudFixture", () => {
     it("tags CI-created groups with the owning GitHub Actions run id", async () => {
       const { fake } = await createHarness([], {}, { githubRunId: "123456" });
 
-      expect(fake.commands.calls[0].args).toContain("github-run-id=123456");
+      const create = fake.commands.calls.find(
+        (call) => call.tool === "az" && call.args.includes("create")
+      );
+      if (!create) throw new Error("Expected the resource group create call.");
+      expect(create.args).toContain("github-run-id=123456");
     });
 
     it("formats creation time for cleanup's integer comparison", () => {
@@ -280,7 +300,7 @@ describe("createCloudFixture", () => {
         "federated-credential create",
         "role assignment create",
         "--method PUT",
-        "--method POST"
+        `--method POST ${ENVIRONMENT_PATH}`
       ])
         expect(issued.some((line) => line.includes(forbidden))).toBe(false);
     });
@@ -313,7 +333,19 @@ describe("createCloudFixture", () => {
       const fake = createFakeFixturePorts({
         uniqueId: UNIQUE_ID,
         workspaceDir: WORKSPACE,
-        stubs: baselineStubs()
+        stubs: [
+          {
+            tool: "gh",
+            match: [
+              "api",
+              "--method",
+              "POST",
+              "repos/TODO-owner/TODO-repo/git/refs"
+            ],
+            respond: {}
+          },
+          ...baselineStubs()
+        ]
       });
       const fixture = await createCloudFixture({
         subscriptionId: SUBSCRIPTION,
@@ -334,6 +366,34 @@ describe("createCloudFixture", () => {
       expect(fake.commands.calls).toEqual([]);
     });
 
+    it("fails before provisioning when the repository lease is already held", async () => {
+      const { fake, attempt } = expectConstructionToFail([
+        failing(
+          "gh",
+          ["api", "--method", "POST", `repos/${REPOSITORY}/git/refs`],
+          "Reference already exists"
+        )
+      ]);
+
+      await expect(attempt).rejects.toThrow(/Reference already exists/);
+      expect(fake.commands.calls).toEqual([
+        {
+          tool: "gh",
+          args: [
+            "api",
+            "--method",
+            "POST",
+            `repos/${REPOSITORY}/git/refs`,
+            "-f",
+            `ref=${LEASE_REF}`,
+            "-f",
+            `sha=${BASELINE}`
+          ],
+          cwd: undefined
+        }
+      ]);
+    });
+
     it("fails fast when the resource group cannot be created", async () => {
       const { fake, attempt } = expectConstructionToFail([
         failing("az", ["group", "create"], "quota exceeded")
@@ -342,10 +402,13 @@ describe("createCloudFixture", () => {
       await expect(attempt).rejects.toThrow(
         /az group create .* failed with exit code 2: quota exceeded/
       );
-      // Nothing was created, so nothing may be torn down.
+      // Only the repository lease was created, so only that lease is released.
       expect(fake.commands.commandLines("az")).toEqual([
         expect.stringContaining("group create")
       ]);
+      expect(fake.commands.commandLines("gh").at(-1)).toBe(
+        `api --method DELETE ${LEASE_REF_PATH}`
+      );
       expect(fake.removed).toEqual([]);
     });
 
@@ -1710,7 +1773,8 @@ describe("createCloudFixture", () => {
           "--no-wait",
           "--output",
           "none"
-        ]
+        ],
+        ["api", "--method", "DELETE", LEASE_REF_PATH]
       ]);
     });
 
@@ -1724,7 +1788,11 @@ describe("createCloudFixture", () => {
         .slice(before)
         .map((call) => `${call.tool} ${call.args.join(" ")}`);
       expect(issued.some((line) => line.includes("ad app delete"))).toBe(false);
-      expect(issued.some((line) => line.includes("DELETE"))).toBe(false);
+      expect(
+        issued.some(
+          (line) => line.includes("DELETE") && !line.includes(LEASE_REF_PATH)
+        )
+      ).toBe(false);
       expect(issued.some((line) => line.includes("PATCH"))).toBe(false);
     });
 
@@ -1756,6 +1824,20 @@ describe("createCloudFixture", () => {
         `delete resource group ${RESOURCE_GROUP}`
       );
       expect(error.message).toContain("group is locked");
+    });
+
+    it("releases the repository-scoped lease after fixture-owned resources", async () => {
+      const { fixture, fake } = await createHarness();
+      const before = fake.commands.calls.length;
+
+      await fixture.dispose();
+
+      expect(fake.commands.calls.slice(before).at(-1)?.args).toEqual([
+        "api",
+        "--method",
+        "DELETE",
+        LEASE_REF_PATH
+      ]);
     });
 
     it("does not retry a failed teardown on a second call", async () => {

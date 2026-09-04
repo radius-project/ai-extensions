@@ -38,6 +38,7 @@ interface PlannedPageState {
   provider: string;
   resources: unknown[];
   localSource: boolean;
+  followWorkspaceBranch: boolean;
 }
 
 function parseState(context: BrowserContext): PlannedPageState {
@@ -48,7 +49,8 @@ function parseState(context: BrowserContext): PlannedPageState {
     environment: readString(state, "environment"),
     provider: readString(state, "provider") || "azure",
     resources: readArray(state, "resources"),
-    localSource: readBoolean(state, "localSource")
+    localSource: readBoolean(state, "localSource"),
+    followWorkspaceBranch: readBoolean(state, "followWorkspaceBranch")
   };
 }
 
@@ -78,6 +80,7 @@ export function initializePlannedGraphPage(
 ): BrowserTeardown {
   if (!context.dom.byId(PLANNED_GRAPH_STATE_ID)) return NOOP_TEARDOWN;
   const page = parseState(context);
+  let followWorkspaceBranch = page.followWorkspaceBranch;
   const plan = createPlanState();
   const providers: EnvironmentProviders = {};
   const renderGraph = requireBrowserFunction(globalScope, "radiusRenderGraph");
@@ -245,6 +248,7 @@ export function initializePlannedGraphPage(
         body: JSON.stringify({
           repo: page.repo,
           branch: selectedBranch,
+          followWorkspaceBranch,
           provider: selectedProvider,
           ...(selectedEnvironment ? { environment: selectedEnvironment } : {}),
           refresh,
@@ -255,6 +259,11 @@ export function initializePlannedGraphPage(
       .then((response) => response.json())
       .then((payload) => {
         if (!current()) return;
+        const resolvedBranch = readString(payload, "resolvedBranch");
+        if (resolvedBranch && resolvedBranch !== selectedBranch) {
+          context.nav.reload();
+          return;
+        }
         if (readBoolean(payload, "reload")) {
           context.nav.reload();
           return;
@@ -367,6 +376,7 @@ export function initializePlannedGraphPage(
   for (const selector of [app, branch, environment]) {
     if (!selector) continue;
     entry.on(selector, "change", () => {
+      if (selector === branch) followWorkspaceBranch = false;
       nextRequestRefresh = false;
       restartWait = true;
       queue();

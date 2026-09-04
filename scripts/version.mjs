@@ -2,19 +2,22 @@
 // plugin.
 //
 // `plugins/<name>/package.json` is that source: Changesets owns it (see
-// docs/eng/RELEASING.md) and nothing else may be hand-edited. These files are
+// docs/eng/RELEASING.md) and nothing else may be hand-edited. This file is
 // derived:
 //
 //   plugins/<name>/plugin.json      version                 (manifest Copilot reads)
-//   .github/plugin/marketplace.json plugins[<name>].version (catalog entry)
+//
+// The catalog entry in .github/plugin/marketplace.json is deliberately NOT
+// derived: a release leaves it alone, and each publish stamps the version into
+// the throwaway catalog copy it ships.
 //
 // The shared marketplace metadata.version is managed independently and plugin
 // version commands preserve it.
 //
 // The catalog on main is the manifest end users add. Each plugin entry's source
-// ref selects that plugin's default channel: `<name>@edge` now, and
-// `<name>@latest` after its stable launch. Edge publishes retarget and restamp
-// their throwaway catalog copy so the generated edge branch remains
+// ref selects what a plain `marketplace add` installs: `<name>@edge` now, and a
+// released `<name>@<version>` after its stable launch. Edge publishes retarget
+// and restamp their throwaway catalog copy so the generated edge branch remains
 // independently installable after that switch.
 //
 // Plugins version and release independently, so every per-plugin command takes
@@ -78,21 +81,26 @@ function sourceVersion(plugin) {
   return version;
 }
 
-function catalogEntry(marketplace, name, publishedRef) {
-  const entry = marketplace.json.plugins?.find((p) => p.name === name);
-  if (!entry) fail(`no "${name}" plugin entry in ${marketplace.file}`);
+function catalogEntry(marketplace, plugin, publishedRef) {
+  const entry = marketplace.json.plugins?.find((p) => p.name === plugin.name);
+  if (!entry) {
+    fail(`no "${plugin.name}" plugin entry in ${marketplace.file}`);
+  }
   if (publishedRef && (!entry.source || typeof entry.source !== "object")) {
     fail(
-      `"${name}" needs an object source for a channel publish in ${marketplace.file}`
+      `"${plugin.name}" needs an object source for a channel publish in ${marketplace.file}`
     );
   }
   return {
-    where: `${marketplace.file}#plugins[${name}].version`,
+    where: `${marketplace.file}#plugins[${plugin.name}].version`,
     doc: marketplace,
     get: () => entry.version,
     set: (v) => {
       entry.version = v;
-      if (publishedRef) entry.source.ref = publishedRef;
+      if (publishedRef) {
+        entry.source.ref = publishedRef;
+        entry.source.path = plugin.dir;
+      }
     }
   };
 }
@@ -100,27 +108,24 @@ function catalogEntry(marketplace, name, publishedRef) {
 /**
  * Every place a version is derived, as `{ where, doc, get, set, expected }`
  * records so `--check` and `--sync` cannot disagree about the set of files.
- * Covers all plugins at once, because they share one catalog.
+ * Covers all plugins at once.
  */
 function derivedTargets() {
   const plugins = listPlugins();
-  const marketplace = read(MARKETPLACE);
   const targets = [];
   const versions = new Map(
     plugins.map((plugin) => [plugin.name, sourceVersion(plugin)])
   );
 
   for (const plugin of plugins) {
-    const expected = versions.get(plugin.name);
     const manifest = read(plugin.manifestFile);
     targets.push({
       where: `${manifest.file}#version`,
       doc: manifest,
-      expected,
+      expected: versions.get(plugin.name),
       get: () => manifest.json.version,
       set: (v) => (manifest.json.version = v)
     });
-    targets.push({ ...catalogEntry(marketplace, plugin.name), expected });
   }
 
   return targets;
@@ -132,7 +137,7 @@ function edgeTargets(plugin, version) {
   const marketplace = read(MARKETPLACE);
   return [
     {
-      ...catalogEntry(marketplace, plugin.name, `${plugin.name}@edge`),
+      ...catalogEntry(marketplace, plugin, `${plugin.name}@edge`),
       expected: version
     }
   ];

@@ -37,7 +37,8 @@ function writeRepository(plugins) {
   for (const [dir, packaged] of Object.entries(plugins)) {
     mkdirSync(join(root, "plugins", dir), { recursive: true });
     if (packaged === null) continue;
-    writeJson(join(root, "plugins", dir, "package.json"), {
+    mkdirSync(join(root, "extensions", dir), { recursive: true });
+    writeJson(join(root, "extensions", dir, "package.json"), {
       name: packaged,
       version: "1.0.0",
       scripts: { "test:artifact": "echo tested" }
@@ -130,21 +131,20 @@ describe("scripts/plugins.mjs", () => {
         "--version",
         "2.1.0",
         "--channel",
-        "latest"
+        "edge"
       )
     ).toEqual({
       PLUGIN_NAME: "radius-aws",
       PLUGIN_DIR: "plugins/radius-aws",
-      PLUGIN_DIST: "plugins/radius-aws/dist",
+      PLUGIN_EXTENSION_DIR: "extensions/radius-aws",
+      PLUGIN_DIST: ".artifacts/radius-aws",
       PLUGIN_ARTIFACT: "plugin-dist-radius-aws",
       PLUGIN_SBOM_ARTIFACT: "plugin-sbom-radius-aws",
       PLUGIN_TARBALL: "radius-aws-plugin.tar.gz",
       PLUGIN_SBOM: "radius-aws-plugin.spdx.json",
-      PLUGIN_AWESOME_COPILOT: "radius-aws-awesome-copilot.zip",
-      PLUGIN_CHANNEL_BRANCH: "releases/radius-aws/latest",
-      PLUGIN_CHANNEL_TAG: "radius-aws@latest",
+      PLUGIN_CHANNEL_BRANCH: "releases/radius-aws/edge",
+      PLUGIN_CHANNEL_TAG: "radius-aws@edge",
       PLUGIN_SOURCE_TAG: "radius-aws@2.1.0",
-      PLUGIN_ARTIFACT_TAG: "radius-aws/v2.1.0",
       PLUGIN_PINNED_BRANCH: "releases/radius-aws/v2.1.0"
     });
   });
@@ -153,17 +153,12 @@ describe("scripts/plugins.mjs", () => {
     const root = writeRepository({ radius: "radius" });
     const assets = (version) => {
       const result = env(root, "--env", "radius", "--version", version);
-      return [
-        result.PLUGIN_TARBALL,
-        result.PLUGIN_SBOM,
-        result.PLUGIN_AWESOME_COPILOT
-      ];
+      return [result.PLUGIN_TARBALL, result.PLUGIN_SBOM];
     };
 
     expect(assets("1.2.0")).toEqual([
       "radius-plugin.tar.gz",
-      "radius-plugin.spdx.json",
-      "radius-awesome-copilot.zip"
+      "radius-plugin.spdx.json"
     ]);
     expect(assets("9.0.0")).toEqual(assets("1.2.0"));
   });
@@ -174,12 +169,12 @@ describe("scripts/plugins.mjs", () => {
     expect(Object.keys(env(root, "--env", "radius"))).toEqual([
       "PLUGIN_NAME",
       "PLUGIN_DIR",
+      "PLUGIN_EXTENSION_DIR",
       "PLUGIN_DIST",
       "PLUGIN_ARTIFACT",
       "PLUGIN_SBOM_ARTIFACT",
       "PLUGIN_TARBALL",
-      "PLUGIN_SBOM",
-      "PLUGIN_AWESOME_COPILOT"
+      "PLUGIN_SBOM"
     ]);
     expect(env(root, "--env", "radius", "--channel", "edge")).toMatchObject({
       PLUGIN_CHANNEL_BRANCH: "releases/radius/edge",
@@ -211,17 +206,19 @@ describe("scripts/plugins.mjs", () => {
     expect(result.stderr).toContain('no plugin named "nope"');
   });
 
-  it("rejects a channel it does not publish", () => {
+  // A stable release is identified by its version, so edge is the only rolling
+  // channel there is a name for.
+  it.each(["nightly", "latest"])("rejects the %s channel", (channel) => {
     const result = run(
       writeRepository({ radius: "radius" }),
       "--env",
       "radius",
       "--channel",
-      "nightly"
+      channel
     );
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("--channel must be one of edge, latest");
+    expect(result.stderr).toContain("--channel must be one of edge");
   });
 
   // Every ref name is built from the directory, so a package that disagrees
@@ -243,7 +240,7 @@ describe("scripts/plugins.mjs", () => {
     "rejects a plugin with a %s built-artifact smoke test",
     (_label, script) => {
       const root = writeRepository({ radius: "radius" });
-      writeJson(join(root, "plugins", "radius", "package.json"), {
+      writeJson(join(root, "extensions", "radius", "package.json"), {
         name: "radius",
         version: "1.0.0",
         ...(script === undefined ?
@@ -260,14 +257,17 @@ describe("scripts/plugins.mjs", () => {
 
   it("rejects a partial plugin instead of silently skipping it", () => {
     const root = writeRepository({ radius: null });
-    writeJson(join(root, "plugins", "radius", "package.json"), {
+    mkdirSync(join(root, "extensions", "radius"), { recursive: true });
+    writeJson(join(root, "extensions", "radius", "package.json"), {
       name: "radius",
       version: "1.0.0"
     });
 
     const result = run(root);
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("both package.json and plugin.json");
+    expect(result.stderr).toContain(
+      "needs both plugins/radius/plugin.json and extensions/radius/package.json"
+    );
   });
 
   it.each(["radius aws", "radius..aws", "radius--aws"])(

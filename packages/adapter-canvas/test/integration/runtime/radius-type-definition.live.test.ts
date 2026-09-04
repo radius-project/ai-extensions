@@ -20,7 +20,7 @@ const root = path.resolve(
 );
 const script = path.join(
   root,
-  "plugins",
+  "extensions",
   "radius",
   "skills",
   "radius-app-bicep",
@@ -57,6 +57,19 @@ describe.skipIf(!LIVE)("live generated Radius definition compatibility", () => {
       expect(
         contract.resources.map((resource: { type: string }) => resource.type)
       ).toEqual(representativeTypes);
+      const containers = contract.resources.find(
+        (resource: { type: string }) =>
+          resource.type === "Radius.Compute/containers"
+      );
+      expect(containers?.recipe).toMatchObject({
+        status: "available",
+        provenance: "managed-release-default",
+        recipePack: "azure",
+        repository: "radius-project/resource-types-contrib",
+        commit: expect.stringMatching(/^[0-9a-f]{40}$/u),
+        path: "recipe-packs/azure/aks-recipepack.bicep",
+        definition: expect.stringContaining("'Radius.Compute/containers':")
+      });
       for (const resource of contract.resources) {
         expect(resource.apiVersion).toMatch(/^\d{4}-\d{2}-\d{2}/u);
         expect(resource.schema).toMatchObject({

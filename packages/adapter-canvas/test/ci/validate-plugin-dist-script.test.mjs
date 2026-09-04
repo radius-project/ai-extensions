@@ -22,6 +22,7 @@ const SOURCE = "a".repeat(40);
 const OTHER_SOURCE = "b".repeat(40);
 const MANIFEST_SCHEMA =
   "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json";
+const CANVAS_ENTRY_POINT = "com.github.copilot/extensions/radius/extension.mjs";
 const schemaFetchResponses = new Map();
 let manifestSchemaResponse;
 const SCHEMA_FETCH_PRELOAD = [
@@ -60,8 +61,11 @@ function repository({
   const root = mkdtempSync(join(tmpdir(), "radius-dist-"));
   temporaryRepositories.push(root);
   const plugin = join(root, "plugins", pluginName);
-  const dist = join(plugin, "dist");
+  const extension = join(root, "extensions", pluginName);
+  const dist = join(root, ".artifacts", pluginName);
   mkdirSync(join(root, "scripts"));
+  mkdirSync(plugin, { recursive: true });
+  mkdirSync(extension, { recursive: true });
   mkdirSync(join(dist, "skills"), { recursive: true });
   for (const [name, source] of SCRIPTS) {
     copyFileSync(source, join(root, "scripts", name));
@@ -69,7 +73,7 @@ function repository({
   writeFileSync(join(root, "schema-fetch.mjs"), SCHEMA_FETCH_PRELOAD);
   configureSchemaFetch(root);
 
-  writeJson(join(plugin, "package.json"), {
+  writeJson(join(extension, "package.json"), {
     name: pluginName,
     version: "1.2.0",
     scripts: { "test:artifact": "echo tested" }
@@ -97,6 +101,31 @@ function repository({
   writeFileSync(join(dist, "extension.mjs"), "export {};\n");
   mkdirSync(join(dist, "workflows"));
   return { root, dist };
+}
+
+function canvasDist(dist) {
+  mkdirSync(join(dist, "assets"), { recursive: true });
+  writeFileSync(join(dist, "assets", "preview.png"), "png\n");
+  mkdirSync(join(dist, "com.github.copilot", "extensions", "radius"), {
+    recursive: true
+  });
+  writeFileSync(join(dist, ...CANVAS_ENTRY_POINT.split("/")), "export {};\n");
+  rmSync(join(dist, "extension.mjs"));
+}
+
+function canvasRepository(manifest = {}, packageJson = {}) {
+  const created = repository({
+    packageJson: { main: CANVAS_ENTRY_POINT, ...packageJson },
+    manifest: {
+      keywords: ["radius", "canvas"],
+      extensions: {
+        "com.github.copilot": { logo: "assets/preview.png" }
+      },
+      ...manifest
+    }
+  });
+  canvasDist(created.dist);
+  return created;
 }
 
 function run(root, ...args) {
@@ -325,7 +354,7 @@ describe("scripts/validate-plugin-dist.mjs", () => {
     ["a number", 7],
     ["an array", ["."]],
     ["null", null],
-    ["the legacy path string", "."]
+    ["a path string", "."]
   ])("rejects an extensions value that is %s", (_label, extensions) => {
     const result = run(repository({ manifest: { extensions } }).root);
 
@@ -378,6 +407,93 @@ describe("scripts/validate-plugin-dist.mjs", () => {
     });
 
     expect(run(root)).toMatchObject({ status: 0, stdout: "radius@1.2.0" });
+  });
+
+  describe("canvas contract", () => {
+    it("accepts the external canvas artifact contract", () => {
+      const { root } = canvasRepository();
+
+      expect(run(root)).toMatchObject({ status: 0, stdout: "radius@1.2.0" });
+    });
+
+    it.each([
+      [
+        "a top-level logo",
+        { logo: "assets/preview.png" },
+        "declares unknown fields: logo"
+      ],
+      [
+        "an extensions directory name",
+        { extensions: "extensions" },
+        "plugin.json#extensions must be an object"
+      ]
+    ])(
+      "holds a canvas plugin to the closed schema for %s",
+      (_label, manifest, message) => {
+        const { root } = canvasRepository(manifest);
+
+        const result = run(root);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(message);
+      }
+    );
+
+    it.each([
+      [
+        "a logo the gallery will not accept",
+        {
+          extensions: {
+            "com.github.copilot": { logo: "assets/logo.png" }
+          }
+        },
+        'plugin.json#extensions.com.github.copilot.logo must be "assets/preview.png"'
+      ],
+      [
+        "a missing Copilot namespace",
+        { extensions: {} },
+        'plugin.json#extensions.com.github.copilot.logo must be "assets/preview.png"'
+      ],
+      [
+        "a missing Copilot preview logo",
+        { extensions: { "com.github.copilot": {} } },
+        'plugin.json#extensions.com.github.copilot.logo must be "assets/preview.png"'
+      ]
+    ])("rejects %s", (_label, manifest, message) => {
+      const { root } = canvasRepository(manifest);
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(message);
+    });
+
+    it.each([
+      [
+        "assets/preview.png",
+        "plugin.json#extensions.com.github.copilot.logo does not exist"
+      ],
+      [CANVAS_ENTRY_POINT, "canvas entry point does not exist"]
+    ])("rejects a canvas plugin missing %s", (missing, message) => {
+      const { root, dist } = canvasRepository();
+      rmSync(join(dist, missing), { recursive: true, force: true });
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(message);
+    });
+
+    it("requires package.json to load the canonical canvas entry point", () => {
+      const { root } = canvasRepository({}, { main: "extension.mjs" });
+
+      const result = run(root);
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(
+        `package.json#main must be "${CANVAS_ENTRY_POINT}"`
+      );
+    });
   });
 
   it("rejects non-object extension namespace data", () => {

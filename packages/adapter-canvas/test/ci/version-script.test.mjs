@@ -19,7 +19,7 @@ const SCRIPTS = ["version.mjs", "plugins.mjs"].map((name) => [
 
 const MANIFEST = ".github/plugin/marketplace.json";
 const PLUGIN_MANIFEST = "plugins/radius/plugin.json";
-const SOURCE_OF_TRUTH = "plugins/radius/package.json";
+const SOURCE_OF_TRUTH = "extensions/radius/package.json";
 
 const RELEASED = "0.4.0";
 const SNAPSHOT = "0.5.0-edge-0b33186";
@@ -29,7 +29,7 @@ const temporaryRepositories = [];
 const objectSource = (ref, name = "radius") => ({
   source: "github",
   repo: "radius-project/ai-extensions",
-  path: `plugins/${name}/dist`,
+  path: `plugins/${name}`,
   ref
 });
 
@@ -50,7 +50,8 @@ function writeJson(file, value) {
 /** Adds a plugin directory the registry will discover. */
 function writePlugin(root, name, version = RELEASED) {
   mkdirSync(join(root, "plugins", name), { recursive: true });
-  writeJson(join(root, "plugins", name, "package.json"), {
+  mkdirSync(join(root, "extensions", name), { recursive: true });
+  writeJson(join(root, "extensions", name, "package.json"), {
     name,
     version,
     private: true,
@@ -65,7 +66,7 @@ function writePlugin(root, name, version = RELEASED) {
 }
 
 function writeChangelog(root, name, contents) {
-  writeFileSync(join(root, "plugins", name, "CHANGELOG.md"), contents);
+  writeFileSync(join(root, "extensions", name, "CHANGELOG.md"), contents);
 }
 
 function writeRepository(
@@ -183,7 +184,7 @@ describe("scripts/version.mjs across several plugins", () => {
       );
 
       expect(result.status).not.toBe(0);
-      expect(result.stderr).toContain("plugins/radius-aws/CHANGELOG.md");
+      expect(result.stderr).toContain("extensions/radius-aws/CHANGELOG.md");
       expect(result.stderr).toContain(message);
     }
   );
@@ -209,16 +210,18 @@ describe("scripts/version.mjs across several plugins", () => {
       runVersion(root, "--set", "0.5.0", "--plugin", "radius").status
     ).toBe(0);
 
-    const catalog = readJson(root, MANIFEST);
-    const entry = (name) => catalog.plugins.find((p) => p.name === name);
-    expect(entry("radius").version).toBe("0.5.0");
-    expect(entry("radius").source.ref).toBe("radius@latest");
-    expect(entry("radius-aws").version).toBe("1.2.0");
-    expect(entry("radius-aws").source.ref).toBe("radius-aws@latest");
     expect(readJson(root, "plugins/radius/plugin.json").version).toBe("0.5.0");
     expect(readJson(root, "plugins/radius-aws/plugin.json").version).toBe(
       "1.2.0"
     );
+
+    // A release leaves the catalog on main alone, entry and ref alike.
+    const catalog = readJson(root, MANIFEST);
+    const entry = (name) => catalog.plugins.find((p) => p.name === name);
+    expect(entry("radius").version).toBe("0.4.0");
+    expect(entry("radius").source.ref).toBe("radius@latest");
+    expect(entry("radius-aws").version).toBe("1.2.0");
+    expect(entry("radius-aws").source.ref).toBe("radius-aws@latest");
   });
 
   it("leaves the independently versioned marketplace metadata alone", () => {
@@ -299,6 +302,22 @@ describe("scripts/version.mjs across several plugins", () => {
     );
   });
 
+  // Each publish stamps the version into the throwaway catalog it ships, so a
+  // stale entry on main is not drift anything has to repair.
+  it("never writes a version into the catalog on main", () => {
+    const root = twoPlugins();
+    const stale = readJson(root, MANIFEST);
+    stale.plugins.find((p) => p.name === "radius-aws").version = "0.0.1";
+    writeJson(join(root, MANIFEST), stale);
+
+    expect(runVersion(root, "--check").status).toBe(0);
+    expect(runVersion(root, "--sync").status).toBe(0);
+    expect(
+      readJson(root, MANIFEST).plugins.find((p) => p.name === "radius-aws")
+        .version
+    ).toBe("0.0.1");
+  });
+
   it("rejects a plugin the repository does not ship", () => {
     const result = runVersion(twoPlugins(), "--plugin", "radius-gcp");
 
@@ -333,6 +352,20 @@ describe("scripts/version.mjs --set --channel edge", () => {
     const catalog = readJson(root, MANIFEST);
     expect(catalog.plugins[0].source.ref).toBe("radius@edge");
     expect(catalog.plugins[0].version).toBe(SNAPSHOT);
+  });
+
+  it("repairs a stale source path to the sole published plugin root", () => {
+    const source = objectSource("radius@edge");
+    source.path = "extensions/radius";
+    const root = writeRepository([catalogEntry(source)]);
+
+    expect(
+      runVersion(root, "--set", SNAPSHOT, "--channel", "edge").status
+    ).toBe(0);
+
+    expect(readJson(root, MANIFEST).plugins[0].source.path).toBe(
+      "plugins/radius"
+    );
   });
 
   it("leaves the plugin manifest, source of truth and catalog metadata alone", () => {
@@ -371,7 +404,7 @@ describe("scripts/version.mjs --set --channel edge", () => {
 });
 
 describe("scripts/version.mjs --set (stable)", () => {
-  it("derives every version without retargeting the catalog ref", () => {
+  it("derives every version without touching the catalog", () => {
     const root = writeRepository([catalogEntry(objectSource("radius@latest"))]);
 
     const result = runVersion(root, "--set", "0.5.0");
@@ -383,7 +416,7 @@ describe("scripts/version.mjs --set (stable)", () => {
 
     const catalog = readJson(root, MANIFEST);
     expect(catalog.metadata.version).toBe(RELEASED);
-    expect(catalog.plugins[0].version).toBe("0.5.0");
+    expect(catalog.plugins[0].version).toBe(RELEASED);
     expect(catalog.plugins[0].source.ref).toBe("radius@latest");
   });
 });

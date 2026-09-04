@@ -14,6 +14,7 @@ import {
 import { initializeDiscoveryPanel } from "./discovery.js";
 import { createEnvironmentConfirmDialog } from "./confirm-dialog.js";
 import {
+  findNamespaceConflict,
   initializeEnvironmentPane,
   isEnvironmentPaneController,
   type EnvironmentPaneController
@@ -26,10 +27,15 @@ import {
 import {
   initializeCredentialProfilesPanel,
   type CredentialProfile,
+  type CredentialProvider,
   type GithubReadiness
 } from "./profiles.js";
 import type { BrowserTeardown } from "../lifecycle.js";
 import type { AbortHandle, BrowserContext, DomInputElement } from "../ports.js";
+import {
+  KUBERNETES_NAMESPACE_ERROR,
+  isKubernetesNamespace
+} from "@radius-project/core/platforms";
 
 export const ENVIRONMENT_PAGE_ENTRY_KEY = "environment-page";
 export const CREATE_ENVIRONMENT_OPERATION_PATH = "/api/operations";
@@ -41,6 +47,10 @@ interface EnvironmentPageState {
   readonly activeSubtab: "credentials" | "environments";
   readonly mutationNonce: string;
   readonly ghCommandPresentation: GhCommandPresentation;
+}
+
+export interface EnvironmentPageOptions {
+  readonly selectableProviders?: readonly CredentialProvider[];
 }
 
 function parsePageState(context: BrowserContext): EnvironmentPageState {
@@ -107,7 +117,8 @@ function optimisticOperation(
 }
 
 export function initializeEnvironmentPage(
-  context: BrowserContext
+  context: BrowserContext,
+  options: EnvironmentPageOptions = {}
 ): BrowserTeardown {
   const newEnvironment = context.dom.byId("new-env-btn");
   const cancelEnvironment = context.dom.byId("cancel-env-btn");
@@ -121,6 +132,8 @@ export function initializeEnvironmentPage(
   const appNameInput = input(context, "az-app-name-input");
   const appIdInput = input(context, "az-selected-app-id");
   const formStatus = context.dom.byId("deploy-status");
+  const azureNamespaceError = context.dom.byId("azure-namespace-error");
+  const awsNamespaceError = context.dom.byId("aws-namespace-error");
   if (
     !context.dom.byId(ENVIRONMENT_PAGE_STATE_ID) ||
     !context.dom.byId("pane-environments") ||
@@ -136,7 +149,9 @@ export function initializeEnvironmentPage(
     !clientIdInput ||
     !appNameInput ||
     !appIdInput ||
-    !formStatus
+    !formStatus ||
+    !azureNamespaceError ||
+    !awsNamespaceError
   ) {
     return NOOP_TEARDOWN;
   }
@@ -146,7 +161,9 @@ export function initializeEnvironmentPage(
   const scope = beginEntry(context, ENVIRONMENT_PAGE_ENTRY_KEY);
   if (!scope) return NOOP_TEARDOWN;
 
-  const discovery = initializeDiscoveryPanel(context);
+  const discovery = initializeDiscoveryPanel(context, {
+    mutationNonce: state.mutationNonce
+  });
   let selectedProfile: CredentialProfile | null = null;
   let githubReadiness: GithubReadiness | null = null;
   let creating = false;
@@ -164,6 +181,7 @@ export function initializeEnvironmentPage(
 
   const profiles = initializeCredentialProfilesPanel(context, {
     repo: state.repo,
+    selectableProviders: options.selectableProviders ?? ["azure"],
     mutationNonce: state.mutationNonce,
     ghCommandPresentation: state.ghCommandPresentation,
     environmentName: () => environmentInput.value,
@@ -387,6 +405,34 @@ export function initializeEnvironmentPage(
     formStatus.style.display = "block";
   };
 
+  const clearNamespaceError = (provider: CredentialProvider): void => {
+    const error = provider === "aws" ? awsNamespaceError : azureNamespaceError;
+    error.hidden = true;
+    error.textContent = "";
+    context.dom
+      .selectById(`${provider}-namespace-select`)
+      ?.removeAttribute("aria-invalid");
+    context.dom
+      .inputById(`${provider}-namespace-custom`)
+      ?.removeAttribute("aria-invalid");
+  };
+
+  const showNamespaceError = (
+    provider: CredentialProvider,
+    focus = true
+  ): void => {
+    const error = provider === "aws" ? awsNamespaceError : azureNamespaceError;
+    error.textContent = KUBERNETES_NAMESPACE_ERROR;
+    error.hidden = false;
+    const select = context.dom.selectById(`${provider}-namespace-select`);
+    const custom = context.dom.inputById(`${provider}-namespace-custom`);
+    select?.setAttribute("aria-invalid", "true");
+    custom?.setAttribute("aria-invalid", "true");
+    if (focus) {
+      (select?.value === "__custom__" ? custom : select)?.focus();
+    }
+  };
+
   const failCreate = (message: string): void => {
     restoreCreateButton();
     operations.hideProgress();
@@ -427,7 +473,13 @@ export function initializeEnvironmentPage(
     const region = (selectedProfile.region ?? "").trim();
     const infrastructure = discovery.currentInfraSelection(provider);
     const cluster = (infrastructure.cluster ?? "").trim();
-    const namespace = (infrastructure.namespace ?? "").trim() || "default";
+    const selectedNamespace = infrastructure.namespace ?? "";
+    const namespaceSelect = context.dom.selectById(
+      `${provider}-namespace-select`
+    );
+    const namespace =
+      selectedNamespace ||
+      (namespaceSelect?.value === "__custom__" ? "" : "default");
     const resourceGroup = (infrastructure.resourceGroup ?? "").trim();
     if (provider === "azure" && resourceGroup === "") {
       showFormError("Please specify a resource group.");
@@ -441,6 +493,16 @@ export function initializeEnvironmentPage(
       );
       return;
     }
+    clearNamespaceError(provider);
+    if (!isKubernetesNamespace(namespace)) {
+      showNamespaceError(provider);
+      return;
+    }
+    // The profile's identity is validated before the namespace conflict check,
+    // because the check compares on it. A profile that cannot name its
+    // subscription or account makes two same-named clusters indistinguishable,
+    // and the check would report a collision when the real fault is the profile.
+    // That diagnosis is also unactionable: no namespace change fixes it.
     if (provider === "azure" && (subscriptionId === "" || tenantId === "")) {
       showFormError(
         "The selected profile needs both a tenant ID and subscription ID. Delete the profile and create it again with those values before creating the environment."
@@ -450,6 +512,24 @@ export function initializeEnvironmentPage(
     if (provider === "aws" && (accountId === "" || region === "")) {
       showFormError(
         "The selected profile needs both an account ID and region. Delete the profile and create it again with those values before creating the environment."
+      );
+      return;
+    }
+    const namespaceConflict = findNamespaceConflict(
+      environments.listedEnvironments(),
+      {
+        provider,
+        cluster,
+        namespace,
+        subscriptionId,
+        accountId,
+        region,
+        excludeEnvironment: environments.editingEnvironment()
+      }
+    );
+    if (namespaceConflict) {
+      showFormError(
+        `Namespace "${namespace}" on cluster "${cluster}" already belongs to environment "${namespaceConflict.name}". Radius allows one environment per namespace, so choose a different namespace or deploy to "${namespaceConflict.name}".`
       );
       return;
     }
@@ -576,6 +656,39 @@ export function initializeEnvironmentPage(
     credentials.startWizardCreation();
   });
   scope.on(createButton, "click", createEnvironment);
+  for (const provider of ["azure", "aws"] as const) {
+    const select = context.dom.selectById(`${provider}-namespace-select`);
+    const custom = context.dom.inputById(`${provider}-namespace-custom`);
+    const controls: ReadonlyArray<
+      readonly [
+        DomInputElement | null,
+        "change" | "input",
+        (control: DomInputElement) => void
+      ]
+    > = [
+      [select, "change", () => clearNamespaceError(provider)],
+      [
+        custom,
+        "input",
+        (control) => {
+          if (
+            select?.value === "__custom__" &&
+            control.value !== "" &&
+            !isKubernetesNamespace(control.value)
+          ) {
+            showNamespaceError(provider, false);
+            return;
+          }
+          clearNamespaceError(provider);
+        }
+      ]
+    ];
+    for (const [control, event, handler] of controls) {
+      if (control) {
+        scope.on(control, event, () => handler(control));
+      }
+    }
+  }
 
   if (state.activeSubtab === "credentials") {
     credentials.loadCredentialTable();
@@ -583,6 +696,13 @@ export function initializeEnvironmentPage(
     environments.loadEnvironmentTable();
   }
   if (queryValue(context.nav.search, "new") === "1") {
+    // The namespace guard can only refuse a duplicate against environments it
+    // has actually listed, and a deep link onto the credentials sub-tab opens
+    // the create form without ever loading them. Load them here so the form is
+    // never submittable against a listing that was never fetched.
+    if (state.activeSubtab === "credentials") {
+      environments.loadEnvironmentTable();
+    }
     environments.showEnvironmentForm({
       name: queryValue(context.nav.search, "name"),
       profile: queryValue(context.nav.search, "profile")

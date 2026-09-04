@@ -705,6 +705,7 @@ describe("resolveHarnessWorkspace", () => {
 
     expect(plan.path).toBe(path.join("/tmp", "root", "workspace"));
     expect(plan.createRadiusDirectory).toBe(true);
+    expect(plan.initializeGitRepository).toBe(true);
   });
 
   it("uses the clone unchanged in cloud mode", () => {
@@ -718,6 +719,7 @@ describe("resolveHarnessWorkspace", () => {
 
     expect(plan.path).toBe(clone);
     expect(plan.createRadiusDirectory).toBe(false);
+    expect(plan.initializeGitRepository).toBe(false);
   });
 
   it("rejects a workspace path in fake mode", () => {
