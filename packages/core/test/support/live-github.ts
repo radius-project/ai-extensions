@@ -25,9 +25,25 @@ export function githubApiHeaders(accept: string): Record<string, string> {
   return headers;
 }
 
+// Status codes worth a retry: GitHub-side/proxy hiccups (502/503/504) and
+// secondary-rate-limit throttling (429), none of which reflect a real
+// contract break in the fetched template.
+const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+const MAX_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 1_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // Fetch one file under a repo's `.github/extension/` tree as raw text through
 // the authenticated contents API. ai-extensions is internal, so its templates
 // are not reachable over anonymous raw.githubusercontent.com.
+//
+// GitHub's API occasionally returns a transient 502/503/504 (or a 429 under
+// secondary rate limiting) that has nothing to do with the workflow contract
+// under test; retry those a couple of times with a short backoff before
+// failing the test.
 export async function fetchExtensionFile(
   repo: string,
   dir: string,
@@ -35,11 +51,30 @@ export async function fetchExtensionFile(
   ref: string
 ): Promise<string> {
   const url = `https://api.github.com/repos/${repo}/contents/${dir}/${file}?ref=${encodeURIComponent(ref)}`;
-  const res = await fetch(url, {
-    headers: githubApiHeaders("application/vnd.github.raw")
-  });
-  if (!res.ok) {
-    throw new Error(`failed to fetch ${url}: ${res.status} ${res.statusText}`);
+  let lastError: Error = new Error(`failed to fetch ${url}`);
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        headers: githubApiHeaders("application/vnd.github.raw")
+      });
+    } catch (err) {
+      // Network-level failure (DNS, reset, timeout): always worth a retry.
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt === MAX_ATTEMPTS) throw lastError;
+      await delay(RETRY_DELAY_MS * attempt);
+      continue;
+    }
+    if (res.ok) {
+      return await res.text();
+    }
+    lastError = new Error(
+      `failed to fetch ${url}: ${res.status} ${res.statusText}`
+    );
+    if (!RETRYABLE_STATUSES.has(res.status) || attempt === MAX_ATTEMPTS) {
+      throw lastError;
+    }
+    await delay(RETRY_DELAY_MS * attempt);
   }
-  return res.text();
+  throw lastError;
 }
