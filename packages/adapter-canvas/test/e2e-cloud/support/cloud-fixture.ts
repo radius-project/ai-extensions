@@ -87,6 +87,7 @@ export interface CloudFixtureOptions {
   readonly baselineSha?: string;
   /** Node count for the discovery-target cluster. One is enough. */
   readonly nodeCount?: number;
+  readonly githubRunId?: string;
   readonly assertionTimeoutMs?: number;
   readonly assertionPollIntervalMs?: number;
 }
@@ -99,6 +100,13 @@ const DEFAULT_ASSERTION_POLL_INTERVAL_MS = 1_000;
 // The product derives several artifact names from the repository, not the run.
 // Holding one external ref prevents separate invocations from sharing them.
 const REPOSITORY_LEASE_REF = "refs/heads/radius/cloud-e2e-lease";
+
+export function radiusPurgeCreationTime(value: Date): string {
+  const milliseconds = value.getTime();
+  if (!Number.isFinite(milliseconds))
+    throw new Error("The cloud fixture creation time must be a valid date.");
+  return String(Math.floor(milliseconds / 1_000));
+}
 
 interface UnwindStep {
   readonly describe: string;
@@ -119,6 +127,11 @@ export async function createCloudFixture(
   const defaultBranch = options.defaultBranch ?? FIXTURE_REPO_DEFAULT_BRANCH;
   const baselineSha = options.baselineSha ?? FIXTURE_BASELINE_SHA;
   const nodeCount = options.nodeCount ?? DEFAULT_NODE_COUNT;
+  const tags = [
+    `creationTime=${radiusPurgeCreationTime(ports.now())}`,
+    "radius-canvas-e2e=true",
+    ...(options.githubRunId ? [`github-run-id=${options.githubRunId}`] : [])
+  ];
   const assertionTimeoutMs = requirePositiveNumber(
     options.assertionTimeoutMs ?? DEFAULT_ASSERTION_TIMEOUT_MS,
     "Assertion timeout"
@@ -167,8 +180,9 @@ export async function createCloudFixture(
       }
     });
 
-    // `creationTime` plus the `radtest-` prefix is what lets the Radius purge
-    // job in this subscription reclaim the group if the runner dies outright.
+    // The fixture tag proves the group is ours; github-run-id limits immediate
+    // scheduled cleanup to CI-created groups. The creationTime/radtest pair
+    // leaves Radius purge as the fallback safety net if this cleanup cannot run.
     expectSuccess(
       await commands.runAz([
         "group",
@@ -180,8 +194,7 @@ export async function createCloudFixture(
         "--subscription",
         subscriptionId,
         "--tags",
-        `creationTime=${ports.now().toISOString()}`,
-        "radius-canvas-e2e=true",
+        ...tags,
         "--output",
         "none"
       ]),

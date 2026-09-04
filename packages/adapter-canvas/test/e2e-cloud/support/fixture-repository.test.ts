@@ -3,6 +3,7 @@ import {
   appRegistrationName,
   clusterName,
   describeUnprovisionedFixtureRepository,
+  ENVIRONMENT_NAME_PREFIX,
   environmentName,
   findUnprovisionedFixtureFields,
   FIXTURE_BASELINE_SHA,
@@ -11,6 +12,7 @@ import {
   FIXTURE_REPOSITORY_PIN,
   isFixtureRepositoryProvisioned,
   RESOURCE_GROUP_PREFIX,
+  resolveFixtureLocation,
   resourceGroupName,
   resourceGroupScope,
   shortenUniqueId,
@@ -27,12 +29,19 @@ describe("pinned baseline constants", () => {
     expect(FIXTURE_REPOSITORY.split("/")).toHaveLength(2);
   });
 
-  it("uses a resource group prefix the Radius purge job already sweeps", () => {
+  it("uses a resource group prefix the Radius purge job still sweeps as a safety net", () => {
     expect(RESOURCE_GROUP_PREFIX.startsWith("radtest-")).toBe(true);
   });
 
   it("knows the branch prefix the product falls back to without workflow scope", () => {
     expect(WORKFLOW_FALLBACK_BRANCH_PREFIX).toBe("radius/setup-");
+  });
+
+  // The cleanup workflow deletes GitHub Environments matching this prefix, so
+  // it has to be the same string environmentName actually produces rather than
+  // a second copy that could drift into deleting the wrong things.
+  it("exports the environment prefix environmentName actually applies", () => {
+    expect(environmentName("abc123")).toBe(`${ENVIRONMENT_NAME_PREFIX}abc123`);
   });
 });
 
@@ -109,7 +118,7 @@ describe("findUnprovisionedFixtureFields", () => {
 });
 
 describe("run-scoped names", () => {
-  it("prefixes the resource group so the shared purge job reclaims it", () => {
+  it("prefixes the resource group so scheduled cleanup and the safety net can reclaim it", () => {
     expect(resourceGroupName("abc123")).toBe("radtest-canvas-abc123");
   });
 
@@ -189,5 +198,46 @@ describe("shortenUniqueId", () => {
     expect(() => shortenUniqueId(value)).toThrow(
       "must contain at least one alphanumeric character"
     );
+  });
+});
+
+describe("resolveFixtureLocation", () => {
+  it.each([
+    ["an absent variable", undefined],
+    ["an empty variable", ""],
+    ["a whitespace-only variable", "   "]
+  ])(
+    "leaves the fixture's own default in place for %s",
+    (_label, value: string | undefined) => {
+      // undefined, not "": az group create --location "" fails in a way that
+      // reads as an Azure fault rather than as an unset CI variable.
+      expect(resolveFixtureLocation(value)).toBeUndefined();
+    }
+  );
+
+  it("passes a region through unchanged", () => {
+    expect(resolveFixtureLocation("westus3")).toBe("westus3");
+  });
+
+  it("normalizes surrounding whitespace and casing", () => {
+    expect(resolveFixtureLocation("  WestUS3 ")).toBe("westus3");
+  });
+
+  it("accepts a region whose name ends in digits after letters", () => {
+    expect(resolveFixtureLocation("eastus2euap")).toBe("eastus2euap");
+  });
+
+  it.each([
+    ["a display name with a space", "West US 3"],
+    ["a value starting with a digit", "3westus"],
+    ["a value with punctuation", "west-us-3"]
+  ])("rejects %s rather than passing it to az", (_label, value) => {
+    expect(() => resolveFixtureLocation(value)).toThrow(
+      "must be an Azure region"
+    );
+  });
+
+  it("quotes the offending value so the failure names its own cause", () => {
+    expect(() => resolveFixtureLocation("West US 3")).toThrow('"West US 3"');
   });
 });

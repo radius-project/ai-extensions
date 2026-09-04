@@ -32,6 +32,10 @@ export default defineConfig({
   // workflows. The per-test budget has to outlast all of it, or a slow cloud
   // reports as a product failure.
   timeout: 45 * 60 * 1000,
+  // The GitHub job allows 90 minutes. Keep the entire serial suite below that
+  // ceiling so suite growth cannot let GitHub cancel an in-flight test before
+  // Playwright writes its trace.
+  globalTimeout: 75 * 60 * 1000,
   expect: { timeout: 60_000 },
   // Serializes tests inside one process. Cross-process/cloud-run serialization
   // is enforced by the repository-scoped lease acquired by the cloud fixture.
