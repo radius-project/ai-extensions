@@ -10,8 +10,8 @@ interface CleanupPullRequest {
 const ISO_INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
+  return typeof value === "object" && value !== null && !Array.isArray(value) ?
+      (value as Record<string, unknown>)
     : null;
 }
 
@@ -42,14 +42,14 @@ function expired(value: unknown, cutoff: number): boolean {
 
 function flattenPages(payload: unknown, context: string): unknown[] {
   return requireArray(payload, context).flatMap((page) =>
-    Array.isArray(page) ? page : [page],
+    Array.isArray(page) ? page : [page]
   );
 }
 
 export function selectExpiredDirectoryObjects(
   payload: unknown,
   displayName: string,
-  cutoff: string,
+  cutoff: string
 ): CleanupDirectoryObject[] {
   const cutoffMilliseconds = requireCutoff(cutoff);
   const candidates: CleanupDirectoryObject[] = [];
@@ -69,7 +69,7 @@ export function selectExpiredDirectoryObjects(
 export function selectExpiredEnvironments(
   payload: unknown,
   prefix: string,
-  cutoff: string,
+  cutoff: string
 ): string[] {
   const cutoffMilliseconds = requireCutoff(cutoff);
   const names: string[] = [];
@@ -91,7 +91,7 @@ export function selectExpiredEnvironments(
 
 export function selectTestResourceGroups(
   payload: unknown,
-  prefix: string,
+  prefix: string
 ): string[] {
   const groups: string[] = [];
   for (const entry of requireArray(payload, "Azure resource groups")) {
@@ -110,7 +110,7 @@ export function selectTestResourceGroups(
 export function selectExpiredFallbackPullRequests(
   payload: unknown,
   branchPrefix: string,
-  cutoff: string,
+  cutoff: string
 ): CleanupPullRequest[] {
   const cutoffMilliseconds = requireCutoff(cutoff);
   const pulls: CleanupPullRequest[] = [];
@@ -133,16 +133,16 @@ export function selectExpiredFallbackPullRequests(
 export function selectExpiredFallbackBranches(
   payload: unknown,
   branchPrefix: string,
-  cutoff: string,
+  cutoff: string
 ): string[] {
   const cutoffMilliseconds = requireCutoff(cutoff);
   const branches: string[] = [];
   for (const entry of flattenPages(payload, "GitHub fallback branches")) {
     const item = asRecord(entry);
     const ref =
-      typeof item?.ref === "string"
-        ? item.ref.replace(/^refs\/heads\//, "")
-        : "";
+      typeof item?.ref === "string" ?
+        item.ref.replace(/^refs\/heads\//, "")
+      : "";
     if (
       ref.startsWith(branchPrefix) &&
       expired(item?.created_at, cutoffMilliseconds)

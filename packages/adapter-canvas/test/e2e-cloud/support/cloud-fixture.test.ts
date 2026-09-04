@@ -3,12 +3,12 @@ import {
   createCloudFixture,
   radiusPurgeCreationTime,
   type CloudFixture,
-  type CloudFixtureOptions,
+  type CloudFixtureOptions
 } from "./cloud-fixture.js";
 import {
   createFakeFixturePorts,
   type FakeCommandStub,
-  type FakeFixturePorts,
+  type FakeFixturePorts
 } from "./fake-cloud-commands.js";
 
 const SUBSCRIPTION = "11111111-2222-3333-4444-555555555555";
@@ -39,7 +39,7 @@ const pullPages = (...pages: readonly unknown[][]): string =>
 
 const NOT_FOUND = {
   code: 1,
-  stderr: "gh: Not Found (HTTP 404)",
+  stderr: "gh: Not Found (HTTP 404)"
 } as const;
 
 const EXACT_NAME_FILTER = `displayName eq '${APP_NAME}'`;
@@ -48,20 +48,20 @@ const APP_LIST: readonly string[] = [
   "app",
   "list",
   "--filter",
-  EXACT_NAME_FILTER,
+  EXACT_NAME_FILTER
 ];
 const SP_LIST: readonly string[] = [
   "ad",
   "sp",
   "list",
   "--filter",
-  EXACT_NAME_FILTER,
+  EXACT_NAME_FILTER
 ];
 const FIC_LIST: readonly string[] = [
   "ad",
   "app",
   "federated-credential",
-  "list",
+  "list"
 ];
 const ROLE_LIST: readonly string[] = ["role", "assignment", "list"];
 
@@ -87,13 +87,13 @@ function baselineStubs(): FakeCommandStub[] {
     {
       tool: "gh",
       match: ["api", MATCHING_REFS_PATH],
-      respond: { stdout: "[]" },
+      respond: { stdout: "[]" }
     },
     {
       tool: "gh",
       match: ["api", PULLS_PATH],
-      respond: { stdout: pullPages([]) },
-    },
+      respond: { stdout: pullPages([]) }
+    }
   ];
 }
 
@@ -105,14 +105,14 @@ interface Harness {
 async function createHarness(
   overrides: readonly FakeCommandStub[] = [],
   portOptions: Parameters<typeof createFakeFixturePorts>[0] = {},
-  fixtureOptions: Partial<CloudFixtureOptions> = {},
+  fixtureOptions: Partial<CloudFixtureOptions> = {}
 ): Promise<Harness> {
   const fake = createFakeFixturePorts({
     uniqueId: UNIQUE_ID,
     workspaceDir: WORKSPACE,
     now: NOW,
     ...portOptions,
-    stubs: [...overrides, ...baselineStubs()],
+    stubs: [...overrides, ...baselineStubs()]
   });
   const fixture = await createCloudFixture({
     ...fixtureOptions,
@@ -120,28 +120,28 @@ async function createHarness(
     repository: REPOSITORY,
     defaultBranch: BRANCH,
     baselineSha: BASELINE,
-    ports: fake.ports,
+    ports: fake.ports
   });
   return { fixture, fake };
 }
 
 function expectConstructionToFail(
   overrides: readonly FakeCommandStub[],
-  portOptions: Parameters<typeof createFakeFixturePorts>[0] = {},
+  portOptions: Parameters<typeof createFakeFixturePorts>[0] = {}
 ): { fake: FakeFixturePorts; attempt: Promise<CloudFixture> } {
   const fake = createFakeFixturePorts({
     uniqueId: UNIQUE_ID,
     workspaceDir: WORKSPACE,
     now: NOW,
     ...portOptions,
-    stubs: [...overrides, ...baselineStubs()],
+    stubs: [...overrides, ...baselineStubs()]
   });
   const attempt = createCloudFixture({
     subscriptionId: SUBSCRIPTION,
     repository: REPOSITORY,
     defaultBranch: BRANCH,
     baselineSha: BASELINE,
-    ports: fake.ports,
+    ports: fake.ports
   });
   return { fake, attempt };
 }
@@ -149,7 +149,7 @@ function expectConstructionToFail(
 const failing = (
   tool: FakeCommandStub["tool"],
   match: readonly string[],
-  stderr: string,
+  stderr: string
 ): FakeCommandStub => ({ tool, match, respond: { code: 2, stderr } });
 
 /** Awaits a rejection and returns it, failing when the work unexpectedly succeeds. */
@@ -169,18 +169,18 @@ describe("createCloudFixture", () => {
       [
         "non-finite timeout",
         { assertionTimeoutMs: Number.POSITIVE_INFINITY },
-        "Assertion timeout",
+        "Assertion timeout"
       ],
       [
         "zero poll interval",
         { assertionPollIntervalMs: 0 },
-        "Assertion poll interval",
+        "Assertion poll interval"
       ],
       [
         "non-finite poll interval",
         { assertionPollIntervalMs: Number.NaN },
-        "Assertion poll interval",
-      ],
+        "Assertion poll interval"
+      ]
     ] as const)(
       "rejects a %s before issuing an external command",
       async (_label, fixtureOptions, expectedMessage) => {
@@ -193,13 +193,13 @@ describe("createCloudFixture", () => {
             defaultBranch: BRANCH,
             baselineSha: BASELINE,
             ports: fake.ports,
-            ...fixtureOptions,
-          }),
+            ...fixtureOptions
+          })
         ).rejects.toThrow(
-          `${expectedMessage} must be a positive finite number.`,
+          `${expectedMessage} must be a positive finite number.`
         );
         expect(fake.commands.calls).toEqual([]);
-      },
+      }
     );
 
     it("provisions the run's resource group, cluster, and pinned clone", async () => {
@@ -220,15 +220,15 @@ describe("createCloudFixture", () => {
         `group create --name ${RESOURCE_GROUP} --location westus3 --subscription ${SUBSCRIPTION} ` +
           `--tags creationTime=${radiusPurgeCreationTime(NOW)} radius-canvas-e2e=true --output none`,
         `aks create --resource-group ${RESOURCE_GROUP} --name ${CLUSTER} --subscription ${SUBSCRIPTION} ` +
-          "--node-count 1 --node-vm-size Standard_B2s --generate-ssh-keys --output none",
+          "--node-count 1 --node-vm-size Standard_B2s --generate-ssh-keys --output none"
       ]);
       expect(fake.commands.commandLines("gh")).toEqual([
-        `repo clone ${REPOSITORY} ${WORKSPACE}`,
+        `repo clone ${REPOSITORY} ${WORKSPACE}`
       ]);
       expect(fake.commands.calls.at(-1)).toEqual({
         tool: "git",
         args: ["reset", "--hard", BASELINE],
-        cwd: WORKSPACE,
+        cwd: WORKSPACE
       });
     });
 
@@ -237,7 +237,7 @@ describe("createCloudFixture", () => {
 
       const create = fake.commands.calls[0];
       const creationTime = create.args.find((arg) =>
-        arg.startsWith("creationTime="),
+        arg.startsWith("creationTime=")
       );
       expect(creationTime).toBe(`creationTime=${radiusPurgeCreationTime(NOW)}`);
       expect(Number.isInteger(Number(creationTime?.split("=")[1]))).toBe(true);
@@ -248,7 +248,7 @@ describe("createCloudFixture", () => {
     it("formats creation time for cleanup's integer comparison", () => {
       const sixHoursAgo = Math.floor(NOW.getTime() / 1_000) - 6 * 60 * 60;
       const creationTime = radiusPurgeCreationTime(
-        new Date(NOW.getTime() - 7 * 60 * 60 * 1_000),
+        new Date(NOW.getTime() - 7 * 60 * 60 * 1_000)
       );
 
       expect(Number(creationTime)).toBeLessThan(sixHoursAgo);
@@ -257,7 +257,7 @@ describe("createCloudFixture", () => {
 
     it("rejects an invalid creation time instead of writing an unusable purge tag", () => {
       expect(() => radiusPurgeCreationTime(new Date("invalid"))).toThrow(
-        "must be a valid date",
+        "must be a valid date"
       );
     });
 
@@ -265,7 +265,7 @@ describe("createCloudFixture", () => {
       const { fake } = await createHarness();
 
       const issued = fake.commands.calls.map(
-        (call) => `${call.tool} ${call.args.join(" ")}`,
+        (call) => `${call.tool} ${call.args.join(" ")}`
       );
       for (const forbidden of [
         "ad app create",
@@ -273,7 +273,7 @@ describe("createCloudFixture", () => {
         "federated-credential create",
         "role assignment create",
         "--method PUT",
-        "--method POST",
+        "--method POST"
       ])
         expect(issued.some((line) => line.includes(forbidden))).toBe(false);
     });
@@ -283,7 +283,7 @@ describe("createCloudFixture", () => {
         uniqueId: UNIQUE_ID,
         workspaceDir: WORKSPACE,
         now: NOW,
-        stubs: baselineStubs(),
+        stubs: baselineStubs()
       });
       const fixture = await createCloudFixture({
         subscriptionId: SUBSCRIPTION,
@@ -292,13 +292,13 @@ describe("createCloudFixture", () => {
         baselineSha: BASELINE,
         location: "northeurope",
         nodeCount: 3,
-        ports: fake.ports,
+        ports: fake.ports
       });
 
       expect(fixture.location).toBe("northeurope");
       expect(fake.commands.commandLines("az")[1]).toContain("--node-count 3");
       expect(fake.commands.commandLines("az")[0]).toContain(
-        "--location northeurope",
+        "--location northeurope"
       );
     });
 
@@ -306,11 +306,11 @@ describe("createCloudFixture", () => {
       const fake = createFakeFixturePorts({
         uniqueId: UNIQUE_ID,
         workspaceDir: WORKSPACE,
-        stubs: baselineStubs(),
+        stubs: baselineStubs()
       });
       const fixture = await createCloudFixture({
         subscriptionId: SUBSCRIPTION,
-        ports: fake.ports,
+        ports: fake.ports
       });
 
       expect(fixture.repository).toBe("TODO-owner/TODO-repo");
@@ -322,41 +322,41 @@ describe("createCloudFixture", () => {
       const fake = createFakeFixturePorts({ stubs: baselineStubs() });
 
       await expect(
-        createCloudFixture({ subscriptionId: "  ", ports: fake.ports }),
+        createCloudFixture({ subscriptionId: "  ", ports: fake.ports })
       ).rejects.toThrow(/subscription id is required/i);
       expect(fake.commands.calls).toEqual([]);
     });
 
     it("fails fast when the resource group cannot be created", async () => {
       const { fake, attempt } = expectConstructionToFail([
-        failing("az", ["group", "create"], "quota exceeded"),
+        failing("az", ["group", "create"], "quota exceeded")
       ]);
 
       await expect(attempt).rejects.toThrow(
-        /az group create .* failed with exit code 2: quota exceeded/,
+        /az group create .* failed with exit code 2: quota exceeded/
       );
       // Nothing was created, so nothing may be torn down.
       expect(fake.commands.commandLines("az")).toEqual([
-        expect.stringContaining("group create"),
+        expect.stringContaining("group create")
       ]);
       expect(fake.removed).toEqual([]);
     });
 
     it("tears down the resource group when the cluster cannot be created", async () => {
       const { fake, attempt } = expectConstructionToFail([
-        failing("az", ["aks", "create"], "SkuNotAvailable"),
+        failing("az", ["aks", "create"], "SkuNotAvailable")
       ]);
 
       await expect(attempt).rejects.toThrow(/SkuNotAvailable/);
       expect(fake.commands.commandLines("az").at(-1)).toContain(
-        `group delete --name ${RESOURCE_GROUP}`,
+        `group delete --name ${RESOURCE_GROUP}`
       );
       expect(fake.removed).toEqual([]);
     });
 
     it("tears down the resource group when the workspace directory cannot be made", async () => {
       const { fake, attempt } = expectConstructionToFail([], {
-        makeWorkspaceDir: () => Promise.reject(new Error("ENOSPC")),
+        makeWorkspaceDir: () => Promise.reject(new Error("ENOSPC"))
       });
 
       await expect(attempt).rejects.toThrow("ENOSPC");
@@ -366,7 +366,7 @@ describe("createCloudFixture", () => {
 
     it("removes the workspace and the resource group when the clone fails", async () => {
       const { fake, attempt } = expectConstructionToFail([
-        failing("gh", ["repo", "clone"], "repository not found"),
+        failing("gh", ["repo", "clone"], "repository not found")
       ]);
 
       await expect(attempt).rejects.toThrow(/repository not found/);
@@ -376,7 +376,7 @@ describe("createCloudFixture", () => {
 
     it("removes the workspace and the resource group when the baseline reset fails", async () => {
       const { fake, attempt } = expectConstructionToFail([
-        failing("git", ["reset", "--hard"], "unknown revision"),
+        failing("git", ["reset", "--hard"], "unknown revision")
       ]);
 
       await expect(attempt).rejects.toThrow(/unknown revision/);
@@ -388,9 +388,9 @@ describe("createCloudFixture", () => {
       const { attempt } = expectConstructionToFail(
         [
           failing("git", ["reset", "--hard"], "unknown revision"),
-          failing("az", ["group", "delete"], "group is locked"),
+          failing("az", ["group", "delete"], "group is locked")
         ],
-        { removeDir: () => Promise.reject(new Error("EBUSY")) },
+        { removeDir: () => Promise.reject(new Error("EBUSY")) }
       );
 
       const error = await captureError(attempt);
@@ -398,7 +398,7 @@ describe("createCloudFixture", () => {
       expect(error.message).toContain(`remove workspace ${WORKSPACE}`);
       expect(error.message).toContain("EBUSY");
       expect(error.message).toContain(
-        `delete resource group ${RESOURCE_GROUP}`,
+        `delete resource group ${RESOURCE_GROUP}`
       );
       expect(error.message).toContain("group is locked");
     });
@@ -416,17 +416,17 @@ describe("createCloudFixture", () => {
 
       const lines = fake.commands.commandLines("az");
       expect(lines).toContain(
-        `ad app list --filter ${EXACT_NAME_FILTER} --query [].{appId:appId,id:id,displayName:displayName} -o json`,
+        `ad app list --filter ${EXACT_NAME_FILTER} --query [].{appId:appId,id:id,displayName:displayName} -o json`
       );
       expect(lines).toContain(
-        `ad sp list --filter ${EXACT_NAME_FILTER} --query [].{id:id} -o json`,
+        `ad sp list --filter ${EXACT_NAME_FILTER} --query [].{id:id} -o json`
       );
       expect(lines.some((line) => line.includes("--display-name"))).toBe(false);
       expect(lines.some((line) => line.includes(`--scope ${SCOPE}`))).toBe(
-        true,
+        true
       );
       expect(fake.commands.commandLines("gh")).toContain(
-        `api --paginate --slurp ${PULLS_PATH}`,
+        `api --paginate --slurp ${PULLS_PATH}`
       );
     });
 
@@ -437,34 +437,34 @@ describe("createCloudFixture", () => {
           match: APP_LIST,
           respond: {
             stdout: JSON.stringify([
-              { appId: "app-1", id: "obj-1", displayName: APP_NAME },
-            ]),
-          },
-        },
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /app registration "radius-deploy-fixture-owner-fixture-repo" \(appId app-1, object obj-1\)/,
+        /app registration "radius-deploy-fixture-owner-fixture-repo" \(appId app-1, object obj-1\)/
       );
     });
 
     it("names leaked state as a previous run rather than a product regression", async () => {
       const { fixture } = await createHarness([
-        { tool: "az", match: SP_LIST, respond: { stdout: '[{"id":"sp-1"}]' } },
+        { tool: "az", match: SP_LIST, respond: { stdout: '[{"id":"sp-1"}]' } }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /Leaked state from a previous run, not a product regression/,
+        /Leaked state from a previous run, not a product regression/
       );
     });
 
     it("reports a leaked service principal", async () => {
       const { fixture } = await createHarness([
-        { tool: "az", match: SP_LIST, respond: { stdout: '[{"id":"sp-9"}]' } },
+        { tool: "az", match: SP_LIST, respond: { stdout: '[{"id":"sp-9"}]' } }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /service principal sp-9 for "radius-deploy-fixture-owner-fixture-repo"/,
+        /service principal sp-9 for "radius-deploy-fixture-owner-fixture-repo"/
       );
     });
 
@@ -475,9 +475,9 @@ describe("createCloudFixture", () => {
           match: APP_LIST,
           respond: {
             stdout: JSON.stringify([
-              { appId: "app-1", id: "obj-1", displayName: APP_NAME },
-            ]),
-          },
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
         },
         {
           tool: "az",
@@ -486,15 +486,15 @@ describe("createCloudFixture", () => {
             stdout: JSON.stringify([
               {
                 name: "gh-main",
-                subject: "repo:owner/repo:ref:refs/heads/main",
-              },
-            ]),
-          },
-        },
+                subject: "repo:owner/repo:ref:refs/heads/main"
+              }
+            ])
+          }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /federated credential "gh-main" \(subject "repo:owner\/repo:ref:refs\/heads\/main"\) on app app-1/,
+        /federated credential "gh-main" \(subject "repo:owner\/repo:ref:refs\/heads\/main"\) on app app-1/
       );
     });
 
@@ -505,7 +505,7 @@ describe("createCloudFixture", () => {
       expect(
         fake.commands
           .commandLines("az")
-          .some((line) => line.includes("federated-credential")),
+          .some((line) => line.includes("federated-credential"))
       ).toBe(false);
     });
 
@@ -516,19 +516,19 @@ describe("createCloudFixture", () => {
           match: ROLE_LIST,
           respond: {
             stdout: JSON.stringify([
-              { principalId: "sp-1", roleDefinitionName: "Contributor" },
-            ]),
-          },
-        },
+              { principalId: "sp-1", roleDefinitionName: "Contributor" }
+            ])
+          }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
         new RegExp(
           `role assignment "Contributor" for principal sp-1 at ${SCOPE.replace(
             /\//g,
-            "\\/",
-          )}`,
-        ),
+            "\\/"
+          )}`
+        )
       );
     });
 
@@ -537,12 +537,12 @@ describe("createCloudFixture", () => {
         {
           tool: "az",
           match: ROLE_LIST,
-          respond: { stdout: JSON.stringify([{ principalId: "sp-1" }]) },
-        },
+          respond: { stdout: JSON.stringify([{ principalId: "sp-1" }]) }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /role assignment "\(unnamed role\)" for principal sp-1/,
+        /role assignment "\(unnamed role\)" for principal sp-1/
       );
     });
 
@@ -551,12 +551,12 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", ENVIRONMENT_PATH],
-          respond: { stdout: '{"name":"radtest"}' },
-        },
+          respond: { stdout: '{"name":"radtest"}' }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        new RegExp(`GitHub environment "${ENVIRONMENT}" in ${REPOSITORY}`),
+        new RegExp(`GitHub environment "${ENVIRONMENT}" in ${REPOSITORY}`)
       );
     });
 
@@ -565,12 +565,12 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", ENVIRONMENT_PATH],
-          respond: { code: 1, stderr: "HTTP 401: Bad credentials" },
-        },
+          respond: { code: 1, stderr: "HTTP 401: Bad credentials" }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /Could not probe GitHub environment .* gh exited 1: HTTP 401: Bad credentials/,
+        /Could not probe GitHub environment .* gh exited 1: HTTP 401: Bad credentials/
       );
     });
 
@@ -581,13 +581,13 @@ describe("createCloudFixture", () => {
           match: ["api", ENVIRONMENT_PATH],
           respond: {
             code: 1,
-            stderr: `Command failed: gh api ${ENVIRONMENT_PATH}\n`,
-          },
-        },
+            stderr: `Command failed: gh api ${ENVIRONMENT_PATH}\n`
+          }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /Could not probe GitHub environment .* Command failed: gh api repos\//,
+        /Could not probe GitHub environment .* Command failed: gh api repos\//
       );
     });
 
@@ -596,12 +596,12 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", ENVIRONMENT_PATH],
-          respond: { code: 1, stdout: '{"message":"Server Error"}' },
-        },
+          respond: { code: 1, stdout: '{"message":"Server Error"}' }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /Could not probe GitHub environment .* gh exited 1: \{"message":"Server Error"\}/,
+        /Could not probe GitHub environment .* gh exited 1: \{"message":"Server Error"\}/
       );
     });
 
@@ -610,14 +610,14 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", COMMITS_PATH],
-          respond: { stdout: `${"b".repeat(40)}\n` },
-        },
+          respond: { stdout: `${"b".repeat(40)}\n` }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
         new RegExp(
-          `${REPOSITORY}@${BRANCH} is at ${"b".repeat(40)}, not the pinned baseline ${BASELINE}`,
-        ),
+          `${REPOSITORY}@${BRANCH} is at ${"b".repeat(40)}, not the pinned baseline ${BASELINE}`
+        )
       );
     });
 
@@ -626,8 +626,8 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", COMMITS_PATH],
-          respond: { stdout: `  ${BASELINE.toUpperCase()}\n` },
-        },
+          respond: { stdout: `  ${BASELINE.toUpperCase()}\n` }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
@@ -635,11 +635,11 @@ describe("createCloudFixture", () => {
 
     it("fails when the default branch head cannot be read at all", async () => {
       const { fixture } = await createHarness([
-        { tool: "gh", match: ["api", COMMITS_PATH], respond: { stdout: "  " } },
+        { tool: "gh", match: ["api", COMMITS_PATH], respond: { stdout: "  " } }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /returned no commit SHA/,
+        /returned no commit SHA/
       );
     });
 
@@ -653,14 +653,14 @@ describe("createCloudFixture", () => {
           match: ["api", MATCHING_REFS_PATH],
           respond: {
             stdout: JSON.stringify([
-              { ref: "refs/heads/radius/setup-radtest-abc-workflows-1a2b" },
-            ]),
-          },
-        },
+              { ref: "refs/heads/radius/setup-radtest-abc-workflows-1a2b" }
+            ])
+          }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /workflow fallback branch "radius\/setup-radtest-abc-workflows-1a2b"/,
+        /workflow fallback branch "radius\/setup-radtest-abc-workflows-1a2b"/
       );
     });
 
@@ -675,27 +675,27 @@ describe("createCloudFixture", () => {
                 {
                   number: 7,
                   title: "Add Radius workflows",
-                  head: { ref: "radius/setup-radtest-abc-workflows-1a2b" },
-                },
+                  head: { ref: "radius/setup-radtest-abc-workflows-1a2b" }
+                }
               ],
               [
                 {
                   number: 8,
                   title: "Second page",
-                  head: { ref: "radius/setup-second" },
-                },
-              ],
-            ),
-          },
-        },
+                  head: { ref: "radius/setup-second" }
+                }
+              ]
+            )
+          }
+        }
       ]);
 
       const error = await captureError(fixture.assertCleanSlate());
       expect(error.message).toMatch(
-        /open pull request #7 \("Add Radius workflows", head "radius\/setup-radtest-abc-workflows-1a2b"\)/,
+        /open pull request #7 \("Add Radius workflows", head "radius\/setup-radtest-abc-workflows-1a2b"\)/
       );
       expect(error.message).toMatch(
-        /open pull request #8 \("Second page", head "radius\/setup-second"\)/,
+        /open pull request #8 \("Second page", head "radius\/setup-second"\)/
       );
     });
 
@@ -704,30 +704,30 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", PULLS_PATH],
-          respond: { stdout: pullPages([{ number: 7 }]) },
-        },
+          respond: { stdout: pullPages([{ number: 7 }]) }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /open pull request #7 \("\(untitled\)", head "\(unknown\)"\)/,
+        /open pull request #7 \("\(untitled\)", head "\(unknown\)"\)/
       );
     });
 
     it.each([
       ["a missing number", undefined],
       ["a non-integer number", 1.5],
-      ["a non-positive number", 0],
+      ["a non-positive number", 0]
     ])("rejects an open pull request with %s", async (_label, number) => {
       const { fixture } = await createHarness([
         {
           tool: "gh",
           match: ["api", PULLS_PATH],
-          respond: { stdout: pullPages([{ number }]) },
-        },
+          respond: { stdout: pullPages([{ number }]) }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /open pull requests .* no usable "number"/,
+        /open pull requests .* no usable "number"/
       );
     });
 
@@ -736,12 +736,12 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", PULLS_PATH],
-          respond: { stdout: "" },
-        },
+          respond: { stdout: "" }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /open pull requests .* empty response instead of JSON/,
+        /open pull requests .* empty response instead of JSON/
       );
     });
 
@@ -750,12 +750,12 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", PULLS_PATH],
-          respond: { stdout: JSON.stringify([{ number: 7 }]) },
-        },
+          respond: { stdout: JSON.stringify([{ number: 7 }]) }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /open pull requests .* page 0 with JSON type "object"/,
+        /open pull requests .* page 0 with JSON type "object"/
       );
     });
 
@@ -766,46 +766,46 @@ describe("createCloudFixture", () => {
           match: APP_LIST,
           respond: {
             stdout: JSON.stringify([
-              { appId: "app-1", id: "obj-1", displayName: APP_NAME },
-            ]),
-          },
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
         },
         { tool: "az", match: SP_LIST, respond: { stdout: '[{"id":"sp-1"}]' } },
         {
           tool: "az",
           match: FIC_LIST,
-          respond: { stdout: '[{"name":"gh","subject":"repo:x:ref:y"}]' },
+          respond: { stdout: '[{"name":"gh","subject":"repo:x:ref:y"}]' }
         },
         {
           tool: "az",
           match: ROLE_LIST,
           respond: {
             stdout:
-              '[{"principalId":"sp-1","roleDefinitionName":"Contributor"}]',
-          },
+              '[{"principalId":"sp-1","roleDefinitionName":"Contributor"}]'
+          }
         },
         {
           tool: "gh",
           match: ["api", ENVIRONMENT_PATH],
-          respond: { stdout: "{}" },
+          respond: { stdout: "{}" }
         },
         {
           tool: "gh",
           match: ["api", COMMITS_PATH],
-          respond: { stdout: "c".repeat(40) },
+          respond: { stdout: "c".repeat(40) }
         },
         {
           tool: "gh",
           match: ["api", MATCHING_REFS_PATH],
-          respond: { stdout: '[{"ref":"refs/heads/radius/setup-x"}]' },
+          respond: { stdout: '[{"ref":"refs/heads/radius/setup-x"}]' }
         },
         {
           tool: "gh",
           match: ["api", PULLS_PATH],
           respond: {
-            stdout: pullPages([{ number: 3, title: "t", head: { ref: "r" } }]),
-          },
-        },
+            stdout: pullPages([{ number: 3, title: "t", head: { ref: "r" } }])
+          }
+        }
       ]);
 
       const error = await captureError(fixture.assertCleanSlate());
@@ -819,7 +819,7 @@ describe("createCloudFixture", () => {
         "GitHub environment",
         "not the pinned baseline",
         "workflow fallback branch",
-        "open pull request",
+        "open pull request"
       ])
         expect(error.message).toContain(fragment);
     });
@@ -827,61 +827,61 @@ describe("createCloudFixture", () => {
     it.each([
       ["app registration listing", "az", APP_LIST],
       ["service principal listing", "az", SP_LIST],
-      ["role assignment listing", "az", ROLE_LIST],
+      ["role assignment listing", "az", ROLE_LIST]
     ] as const)(
       "propagates a failing %s rather than reading it as absence",
       async (_label, tool, match) => {
         const { fixture } = await createHarness([
-          failing(tool, match, "AADSTS700016: token expired"),
+          failing(tool, match, "AADSTS700016: token expired")
         ]);
 
         await expect(fixture.assertCleanSlate()).rejects.toThrow(
-          /failed with exit code 2: AADSTS700016: token expired/,
+          /failed with exit code 2: AADSTS700016: token expired/
         );
-      },
+      }
     );
 
     it.each([
       ["az", APP_LIST],
       ["az", SP_LIST],
-      ["az", ROLE_LIST],
+      ["az", ROLE_LIST]
     ] as const)("rejects malformed JSON from %s %s", async (tool, match) => {
       const { fixture } = await createHarness([
-        { tool, match, respond: { stdout: "{not json" } },
+        { tool, match, respond: { stdout: "{not json" } }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /returned output that is not valid JSON/,
+        /returned output that is not valid JSON/
       );
     });
 
     it("rejects a JSON payload that is not an array", async () => {
       const { fixture } = await createHarness([
-        { tool: "az", match: APP_LIST, respond: { stdout: '{"appId":"x"}' } },
+        { tool: "az", match: APP_LIST, respond: { stdout: '{"appId":"x"}' } }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /returned a JSON object where a JSON array was expected/,
+        /returned a JSON object where a JSON array was expected/
       );
     });
 
     it("rejects a JSON null payload", async () => {
       const { fixture } = await createHarness([
-        { tool: "az", match: APP_LIST, respond: { stdout: "null" } },
+        { tool: "az", match: APP_LIST, respond: { stdout: "null" } }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /returned null where a JSON array was expected/,
+        /returned null where a JSON array was expected/
       );
     });
 
     it("rejects a non-object entry inside an otherwise valid array", async () => {
       const { fixture } = await createHarness([
-        { tool: "az", match: APP_LIST, respond: { stdout: '["app-1"]' } },
+        { tool: "az", match: APP_LIST, respond: { stdout: '["app-1"]' } }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /returned a non-object entry at index 0/,
+        /returned a non-object entry at index 0/
       );
     });
 
@@ -890,18 +890,18 @@ describe("createCloudFixture", () => {
         {
           tool: "az",
           match: APP_LIST,
-          respond: { stdout: '[{"appId":"app-1","displayName":"x"}]' },
-        },
+          respond: { stdout: '[{"appId":"app-1","displayName":"x"}]' }
+        }
       ]);
 
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
-        /entry at index 0 with no usable "id"/,
+        /entry at index 0 with no usable "id"/
       );
     });
 
     it("treats empty command output as an empty result", async () => {
       const { fixture } = await createHarness([
-        { tool: "az", match: APP_LIST, respond: { stdout: "" } },
+        { tool: "az", match: APP_LIST, respond: { stdout: "" } }
       ]);
 
       await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
@@ -916,16 +916,16 @@ describe("createCloudFixture", () => {
           match: APP_LIST,
           respond: {
             stdout: JSON.stringify([
-              { appId: "app-1", id: "obj-1", displayName: APP_NAME },
-            ]),
-          },
-        },
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
+        }
       ]);
 
       await expect(fixture.assertAppRegistrationExists()).resolves.toEqual({
         appId: "app-1",
         objectId: "obj-1",
-        displayName: APP_NAME,
+        displayName: APP_NAME
       });
     });
 
@@ -934,8 +934,8 @@ describe("createCloudFixture", () => {
 
       await expect(fixture.assertAppRegistrationExists()).rejects.toThrow(
         new RegExp(
-          `Timed out after 30000ms.*app registration named "${APP_NAME}"`,
-        ),
+          `Timed out after 30000ms.*app registration named "${APP_NAME}"`
+        )
       );
     });
 
@@ -947,14 +947,14 @@ describe("createCloudFixture", () => {
           match: APP_LIST,
           respond: {
             stdout: JSON.stringify([
-              { appId: "app-1", id: "obj-1", displayName: APP_NAME },
-            ]),
-          },
-        },
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
+        }
       ]);
 
       await expect(
-        fixture.assertAppRegistrationExists(),
+        fixture.assertAppRegistrationExists()
       ).resolves.toMatchObject({ appId: "app-1" });
       expect(fake.waits).toEqual([1000]);
     });
@@ -963,11 +963,11 @@ describe("createCloudFixture", () => {
       const { fixture, fake } = await createHarness(
         [],
         {},
-        { assertionTimeoutMs: 1500, assertionPollIntervalMs: 1000 },
+        { assertionTimeoutMs: 1500, assertionPollIntervalMs: 1000 }
       );
 
       await expect(fixture.assertAppRegistrationExists()).rejects.toThrow(
-        /Timed out after 1500ms/,
+        /Timed out after 1500ms/
       );
       expect(fake.waits).toEqual([1000, 500]);
     });
@@ -980,24 +980,24 @@ describe("createCloudFixture", () => {
           respond: {
             stdout: JSON.stringify([
               { appId: "app-1", id: "obj-1", displayName: APP_NAME },
-              { appId: "app-2", id: "obj-2", displayName: APP_NAME },
-            ]),
-          },
-        },
+              { appId: "app-2", id: "obj-2", displayName: APP_NAME }
+            ])
+          }
+        }
       ]);
 
       await expect(fixture.assertAppRegistrationExists()).rejects.toThrow(
-        /found 2 \(app-1, app-2\).*concurrent run against the same fixture repository/s,
+        /found 2 \(app-1, app-2\).*concurrent run against the same fixture repository/s
       );
     });
 
     it("propagates a failing lookup", async () => {
       const { fixture, fake } = await createHarness([
-        failing("az", APP_LIST, "not logged in"),
+        failing("az", APP_LIST, "not logged in")
       ]);
 
       await expect(fixture.assertAppRegistrationExists()).rejects.toThrow(
-        /not logged in/,
+        /not logged in/
       );
       expect(fake.waits).toEqual([]);
     });
@@ -1010,11 +1010,11 @@ describe("createCloudFixture", () => {
         match: APP_LIST,
         respond: {
           stdout: JSON.stringify([
-            { appId: "app-1", id: "obj-1", displayName: APP_NAME },
-          ]),
-        },
+            { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+          ])
+        }
       },
-      { tool: "az", match: FIC_LIST, respond: fic },
+      { tool: "az", match: FIC_LIST, respond: fic }
     ];
 
     const SUBJECT = "repo:fixture-owner/fixture-repo:environment:radtest-run";
@@ -1024,20 +1024,18 @@ describe("createCloudFixture", () => {
         withApp({
           stdout: JSON.stringify([
             { name: "other", subject: "repo:x:ref:refs/heads/main" },
-            { name: "env", subject: SUBJECT },
-          ]),
-        }),
+            { name: "env", subject: SUBJECT }
+          ])
+        })
       );
 
       await expect(
-        fixture.assertFederatedCredentialExists(SUBJECT),
+        fixture.assertFederatedCredentialExists(SUBJECT)
       ).resolves.toBeUndefined();
       expect(
         fake.commands
           .commandLines("az")
-          .some((line) =>
-            line.includes("federated-credential list --id obj-1"),
-          ),
+          .some((line) => line.includes("federated-credential list --id obj-1"))
       ).toBe(true);
     });
 
@@ -1048,33 +1046,33 @@ describe("createCloudFixture", () => {
           match: APP_LIST,
           respond: {
             stdout: JSON.stringify([
-              { appId: "app-1", id: "obj-1", displayName: APP_NAME },
-            ]),
-          },
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
         },
         { tool: "az", match: FIC_LIST, respond: { stdout: "[]" }, times: 1 },
         {
           tool: "az",
           match: FIC_LIST,
           respond: {
-            stdout: JSON.stringify([{ name: "env", subject: SUBJECT }]),
-          },
-        },
+            stdout: JSON.stringify([{ name: "env", subject: SUBJECT }])
+          }
+        }
       ]);
 
       await expect(
-        fixture.assertFederatedCredentialExists(SUBJECT),
+        fixture.assertFederatedCredentialExists(SUBJECT)
       ).resolves.toBeUndefined();
       expect(fake.waits).toEqual([1000]);
     });
 
     it("reports the subjects that do exist when the expected one does not", async () => {
       const { fixture } = await createHarness(
-        withApp({ stdout: '[{"name":"other","subject":"repo:x:ref:y"}]' }),
+        withApp({ stdout: '[{"name":"other","subject":"repo:x:ref:y"}]' })
       );
 
       await expect(
-        fixture.assertFederatedCredentialExists(SUBJECT),
+        fixture.assertFederatedCredentialExists(SUBJECT)
       ).rejects.toThrow(/Existing subjects: "repo:x:ref:y"\./);
     });
 
@@ -1082,15 +1080,15 @@ describe("createCloudFixture", () => {
       const { fixture } = await createHarness(
         withApp({
           stdout: JSON.stringify([
-            { name: "env", subject: SUBJECT.toUpperCase() },
-          ]),
-        }),
+            { name: "env", subject: SUBJECT.toUpperCase() }
+          ])
+        })
       );
 
       await expect(
-        fixture.assertFederatedCredentialExists(SUBJECT),
+        fixture.assertFederatedCredentialExists(SUBJECT)
       ).rejects.toThrow(
-        /differing only by letter casing exists .* Entra would reject a token/s,
+        /differing only by letter casing exists .* Entra would reject a token/s
       );
     });
 
@@ -1098,17 +1096,17 @@ describe("createCloudFixture", () => {
       const { fixture } = await createHarness(withApp({ stdout: "[]" }));
 
       await expect(
-        fixture.assertFederatedCredentialExists(SUBJECT),
+        fixture.assertFederatedCredentialExists(SUBJECT)
       ).rejects.toThrow(/carries no federated credentials at all/);
     });
 
     it("tolerates a flexible credential that reports no subject", async () => {
       const { fixture } = await createHarness(
-        withApp({ stdout: '[{"name":"flexible"}]' }),
+        withApp({ stdout: '[{"name":"flexible"}]' })
       );
 
       await expect(
-        fixture.assertFederatedCredentialExists(SUBJECT),
+        fixture.assertFederatedCredentialExists(SUBJECT)
       ).rejects.toThrow(/Existing subjects: ""\./);
     });
 
@@ -1116,7 +1114,7 @@ describe("createCloudFixture", () => {
       const { fixture } = await createHarness();
 
       await expect(
-        fixture.assertFederatedCredentialExists(SUBJECT),
+        fixture.assertFederatedCredentialExists(SUBJECT)
       ).rejects.toThrow(/Timed out after 30000ms.*app registration named/s);
     });
   });
@@ -1129,14 +1127,14 @@ describe("createCloudFixture", () => {
           match: ROLE_LIST,
           respond: {
             stdout: JSON.stringify([
-              { principalId: "SP-1", roleDefinitionName: "Contributor" },
-            ]),
-          },
-        },
+              { principalId: "SP-1", roleDefinitionName: "Contributor" }
+            ])
+          }
+        }
       ]);
 
       await expect(
-        fixture.assertRoleAssignmentExists("sp-1"),
+        fixture.assertRoleAssignmentExists("sp-1")
       ).resolves.toBeUndefined();
     });
 
@@ -1148,14 +1146,14 @@ describe("createCloudFixture", () => {
           match: ROLE_LIST,
           respond: {
             stdout: JSON.stringify([
-              { principalId: "sp-1", roleDefinitionName: "Contributor" },
-            ]),
-          },
-        },
+              { principalId: "sp-1", roleDefinitionName: "Contributor" }
+            ])
+          }
+        }
       ]);
 
       await expect(
-        fixture.assertRoleAssignmentExists("sp-1"),
+        fixture.assertRoleAssignmentExists("sp-1")
       ).resolves.toBeUndefined();
       expect(fake.waits).toEqual([1000]);
     });
@@ -1164,7 +1162,7 @@ describe("createCloudFixture", () => {
       const { fixture } = await createHarness();
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
-        /found no role assignments at all/,
+        /found no role assignments at all/
       );
     });
 
@@ -1176,24 +1174,24 @@ describe("createCloudFixture", () => {
           respond: {
             stdout: JSON.stringify([
               { principalId: "sp-2", roleDefinitionName: "Contributor" },
-              { principalId: "sp-2", roleDefinitionName: "AKS RBAC Admin" },
-            ]),
-          },
-        },
+              { principalId: "sp-2", roleDefinitionName: "AKS RBAC Admin" }
+            ])
+          }
+        }
       ]);
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
-        /only assignments for sp-2\./,
+        /only assignments for sp-2\./
       );
     });
 
     it("propagates a failing lookup", async () => {
       const { fixture } = await createHarness([
-        failing("az", ROLE_LIST, "AuthorizationFailed"),
+        failing("az", ROLE_LIST, "AuthorizationFailed")
       ]);
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
-        /AuthorizationFailed/,
+        /AuthorizationFailed/
       );
     });
   });
@@ -1204,12 +1202,12 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", ENVIRONMENT_PATH],
-          respond: { stdout: '{"name":"radtest"}' },
-        },
+          respond: { stdout: '{"name":"radtest"}' }
+        }
       ]);
 
       await expect(
-        fixture.assertGitHubEnvironmentExists(),
+        fixture.assertGitHubEnvironmentExists()
       ).resolves.toBeUndefined();
     });
 
@@ -1219,17 +1217,17 @@ describe("createCloudFixture", () => {
           tool: "gh",
           match: ["api", ENVIRONMENT_PATH],
           respond: NOT_FOUND,
-          times: 1,
+          times: 1
         },
         {
           tool: "gh",
           match: ["api", ENVIRONMENT_PATH],
-          respond: { stdout: '{"name":"radtest"}' },
-        },
+          respond: { stdout: '{"name":"radtest"}' }
+        }
       ]);
 
       await expect(
-        fixture.assertGitHubEnvironmentExists(),
+        fixture.assertGitHubEnvironmentExists()
       ).resolves.toBeUndefined();
       expect(fake.waits).toEqual([1000]);
     });
@@ -1239,8 +1237,8 @@ describe("createCloudFixture", () => {
 
       await expect(fixture.assertGitHubEnvironmentExists()).rejects.toThrow(
         new RegExp(
-          `Timed out after 30000ms.*GitHub Environment "${ENVIRONMENT}"`,
-        ),
+          `Timed out after 30000ms.*GitHub Environment "${ENVIRONMENT}"`
+        )
       );
     });
 
@@ -1249,12 +1247,12 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", ENVIRONMENT_PATH],
-          respond: { code: 1, stdout: "rate limit exceeded" },
-        },
+          respond: { code: 1, stdout: "rate limit exceeded" }
+        }
       ]);
 
       await expect(fixture.assertGitHubEnvironmentExists()).rejects.toThrow(
-        /Could not determine whether GitHub Environment .* gh exited 1: rate limit exceeded/,
+        /Could not determine whether GitHub Environment .* gh exited 1: rate limit exceeded/
       );
     });
   });
@@ -1264,13 +1262,13 @@ describe("createCloudFixture", () => {
       const { fixture, fake } = await createHarness();
 
       await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual(
-        [],
+        []
       );
       expect(
-        fake.commands.calls.some((call) => call.args.includes("DELETE")),
+        fake.commands.calls.some((call) => call.args.includes("DELETE"))
       ).toBe(false);
       expect(
-        fake.commands.calls.some((call) => call.args.includes("PATCH")),
+        fake.commands.calls.some((call) => call.args.includes("PATCH"))
       ).toBe(false);
     });
 
@@ -1279,7 +1277,7 @@ describe("createCloudFixture", () => {
         {
           tool: "az",
           match: SP_LIST,
-          respond: { stdout: '[{"id":"sp-1"}]' },
+          respond: { stdout: '[{"id":"sp-1"}]' }
         },
         { tool: "az", match: ["ad", "sp", "delete"], respond: {} },
         {
@@ -1287,25 +1285,25 @@ describe("createCloudFixture", () => {
           match: APP_LIST,
           respond: {
             stdout: JSON.stringify([
-              { appId: "app-1", id: "obj-1", displayName: APP_NAME },
-            ]),
-          },
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
         },
         { tool: "az", match: ["ad", "app", "delete"], respond: {} },
         {
           tool: "gh",
           match: ["api", ENVIRONMENT_PATH],
-          respond: { stdout: "{}" },
+          respond: { stdout: "{}" }
         },
         {
           tool: "gh",
           match: ["api", MATCHING_REFS_PATH],
-          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' },
+          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' }
         },
         {
           tool: "gh",
           match: ["api", COMMITS_PATH],
-          respond: { stdout: "d".repeat(40) },
+          respond: { stdout: "d".repeat(40) }
         },
         {
           tool: "gh",
@@ -1315,13 +1313,13 @@ describe("createCloudFixture", () => {
               {
                 number: 7,
                 title: "Add Radius workflows",
-                head: { ref: "radius/setup-a" },
-              },
-            ]),
-          },
+                head: { ref: "radius/setup-a" }
+              }
+            ])
+          }
         },
         { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} },
-        { tool: "gh", match: ["api", "--method", "PATCH"], respond: {} },
+        { tool: "gh", match: ["api", "--method", "PATCH"], respond: {} }
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
@@ -1330,36 +1328,36 @@ describe("createCloudFixture", () => {
         `GitHub environment ${ENVIRONMENT}`,
         "pull request #7",
         "branch radius/setup-a",
-        `${BRANCH} reset to ${BASELINE}`,
+        `${BRANCH} reset to ${BASELINE}`
       ]);
 
       const lines = fake.commands.commandLines("gh");
       expect(lines).toContain(`api --method DELETE ${ENVIRONMENT_PATH}`);
       expect(lines).toContain(
-        `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`,
+        `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
       );
       expect(lines).toContain(
-        `api --method PATCH repos/${REPOSITORY}/pulls/7 -f state=closed`,
+        `api --method PATCH repos/${REPOSITORY}/pulls/7 -f state=closed`
       );
       expect(lines).toContain(
-        `api --method PATCH ${DEFAULT_REF_PATH} -f sha=${BASELINE} -F force=true`,
+        `api --method PATCH ${DEFAULT_REF_PATH} -f sha=${BASELINE} -F force=true`
       );
       expect(
         lines.indexOf(
-          `api --method PATCH repos/${REPOSITORY}/pulls/7 -f state=closed`,
-        ),
+          `api --method PATCH repos/${REPOSITORY}/pulls/7 -f state=closed`
+        )
       ).toBeLessThan(
         lines.indexOf(
-          `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`,
-        ),
+          `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
+        )
       );
       // Service principals are removed explicitly so an orphan cannot survive
       // after its application is already gone.
       expect(fake.commands.commandLines("az")).toContain(
-        "ad sp delete --id sp-1 --output none",
+        "ad sp delete --id sp-1 --output none"
       );
       expect(fake.commands.commandLines("az")).toContain(
-        "ad app delete --id obj-1 --output none",
+        "ad app delete --id obj-1 --output none"
       );
     });
 
@@ -1368,16 +1366,16 @@ describe("createCloudFixture", () => {
         {
           tool: "az",
           match: SP_LIST,
-          respond: { stdout: '[{"id":"orphan-sp"}]' },
+          respond: { stdout: '[{"id":"orphan-sp"}]' }
         },
-        { tool: "az", match: ["ad", "sp", "delete"], respond: {} },
+        { tool: "az", match: ["ad", "sp", "delete"], respond: {} }
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
-        "service principal orphan-sp",
+        "service principal orphan-sp"
       ]);
       expect(fake.commands.commandLines("az")).toContain(
-        "ad sp delete --id orphan-sp --output none",
+        "ad sp delete --id orphan-sp --output none"
       );
     });
 
@@ -1391,23 +1389,23 @@ describe("createCloudFixture", () => {
               {
                 number: 9,
                 title: "Stale setup",
-                head: { ref: "radius/setup-deleted" },
-              },
-            ]),
-          },
+                head: { ref: "radius/setup-deleted" }
+              }
+            ])
+          }
         },
         {
           tool: "gh",
           match: ["api", "--method", "PATCH", `repos/${REPOSITORY}/pulls/9`],
-          respond: {},
-        },
+          respond: {}
+        }
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
-        "pull request #9",
+        "pull request #9"
       ]);
       expect(fake.commands.commandLines("gh")).toContain(
-        `api --method PATCH repos/${REPOSITORY}/pulls/9 -f state=closed`,
+        `api --method PATCH repos/${REPOSITORY}/pulls/9 -f state=closed`
       );
     });
 
@@ -1421,20 +1419,20 @@ describe("createCloudFixture", () => {
               {
                 number: 10,
                 title: "Human change",
-                head: { ref: "feature/human" },
-              },
-            ]),
-          },
-        },
+                head: { ref: "feature/human" }
+              }
+            ])
+          }
+        }
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual(
-        [],
+        []
       );
       expect(
         fake.commands
           .commandLines("gh")
-          .some((line) => line.includes("pulls/10")),
+          .some((line) => line.includes("pulls/10"))
       ).toBe(false);
     });
 
@@ -1443,7 +1441,7 @@ describe("createCloudFixture", () => {
 
       await fixture.reclaimLeakedProductArtifacts();
       expect(
-        fake.commands.commandLines("gh").some((line) => line.includes("PATCH")),
+        fake.commands.commandLines("gh").some((line) => line.includes("PATCH"))
       ).toBe(false);
     });
 
@@ -1455,26 +1453,26 @@ describe("createCloudFixture", () => {
           respond: {
             stdout: JSON.stringify([
               { appId: "app-1", id: "obj-1", displayName: APP_NAME },
-              { appId: "app-2", id: "obj-2", displayName: APP_NAME },
-            ]),
-          },
+              { appId: "app-2", id: "obj-2", displayName: APP_NAME }
+            ])
+          }
         },
         {
           tool: "az",
           match: ["ad", "app", "delete", "--id", "obj-1"],
-          respond: { code: 3, stderr: "Insufficient privileges" },
+          respond: { code: 3, stderr: "Insufficient privileges" }
         },
         { tool: "az", match: ["ad", "app", "delete"], respond: {} },
         {
           tool: "gh",
           match: ["api", MATCHING_REFS_PATH],
-          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' },
+          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' }
         },
         {
           tool: "gh",
           match: ["api", "--method", "DELETE"],
-          respond: { code: 1, stderr: "Reference does not exist" },
-        },
+          respond: { code: 1, stderr: "Reference does not exist" }
+        }
       ]);
 
       const error = await captureError(fixture.reclaimLeakedProductArtifacts());
@@ -1485,7 +1483,7 @@ describe("createCloudFixture", () => {
       expect(error.message).toContain("Reference does not exist");
       // The second application was still deleted despite the first failing.
       expect(error.message).toContain(
-        "Reclaimed before failing: app registration app-2.",
+        "Reclaimed before failing: app registration app-2."
       );
     });
 
@@ -1495,16 +1493,16 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", MATCHING_REFS_PATH],
-          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' },
+          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' }
         },
-        { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} },
+        { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} }
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /list app registrations: .*Graph unavailable/,
+        /list app registrations: .*Graph unavailable/
       );
       expect(fake.commands.commandLines("gh")).toContain(
-        `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`,
+        `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
       );
     });
 
@@ -1514,16 +1512,16 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", MATCHING_REFS_PATH],
-          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' },
+          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' }
         },
-        { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} },
+        { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} }
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /list service principals: .*Graph unavailable/,
+        /list service principals: .*Graph unavailable/
       );
       expect(fake.commands.commandLines("gh")).toContain(
-        `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`,
+        `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
       );
     });
 
@@ -1532,7 +1530,7 @@ describe("createCloudFixture", () => {
         {
           tool: "az",
           match: SP_LIST,
-          respond: { stdout: '[{"id":"sp-1"}]' },
+          respond: { stdout: '[{"id":"sp-1"}]' }
         },
         failing("az", ["ad", "sp", "delete"], "principal is locked"),
         {
@@ -1540,15 +1538,15 @@ describe("createCloudFixture", () => {
           match: APP_LIST,
           respond: {
             stdout: JSON.stringify([
-              { appId: "app-1", id: "obj-1", displayName: APP_NAME },
-            ]),
-          },
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
         },
-        { tool: "az", match: ["ad", "app", "delete"], respond: {} },
+        { tool: "az", match: ["ad", "app", "delete"], respond: {} }
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /service principal sp-1: .*principal is locked.*Reclaimed before failing: app registration app-1/s,
+        /service principal sp-1: .*principal is locked.*Reclaimed before failing: app registration app-1/s
       );
     });
 
@@ -1557,12 +1555,12 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", ENVIRONMENT_PATH],
-          respond: { code: 1, stderr: "HTTP 403: Forbidden" },
-        },
+          respond: { code: 1, stderr: "HTTP 403: Forbidden" }
+        }
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /probe GitHub environment .* gh exited 1: HTTP 403: Forbidden/,
+        /probe GitHub environment .* gh exited 1: HTTP 403: Forbidden/
       );
     });
 
@@ -1571,32 +1569,32 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", ENVIRONMENT_PATH],
-          respond: { code: 1, stdout: '{"message":"Bad gateway"}' },
-        },
+          respond: { code: 1, stdout: '{"message":"Bad gateway"}' }
+        }
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /probe GitHub environment .* gh exited 1: \{"message":"Bad gateway"\}/,
+        /probe GitHub environment .* gh exited 1: \{"message":"Bad gateway"\}/
       );
     });
 
     it("records a failing branch listing", async () => {
       const { fixture } = await createHarness([
-        failing("gh", ["api", MATCHING_REFS_PATH], "HTTP 500"),
+        failing("gh", ["api", MATCHING_REFS_PATH], "HTTP 500")
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /list workflow fallback branches: .*HTTP 500/,
+        /list workflow fallback branches: .*HTTP 500/
       );
     });
 
     it("records a failing pull-request listing", async () => {
       const { fixture } = await createHarness([
-        failing("gh", ["api", PULLS_PATH], "HTTP 500"),
+        failing("gh", ["api", PULLS_PATH], "HTTP 500")
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /list open pull requests: .*HTTP 500/,
+        /list open pull requests: .*HTTP 500/
       );
     });
 
@@ -1610,36 +1608,36 @@ describe("createCloudFixture", () => {
               {
                 number: 9,
                 title: "Stale setup",
-                head: { ref: "radius/setup-deleted" },
-              },
-            ]),
-          },
+                head: { ref: "radius/setup-deleted" }
+              }
+            ])
+          }
         },
         {
           tool: "gh",
           match: ["api", "--method", "PATCH", `repos/${REPOSITORY}/pulls/9`],
-          respond: { code: 1, stderr: "HTTP 403" },
+          respond: { code: 1, stderr: "HTTP 403" }
         },
         {
           tool: "gh",
           match: ["api", COMMITS_PATH],
-          respond: { stdout: "e".repeat(40) },
+          respond: { stdout: "e".repeat(40) }
         },
-        { tool: "gh", match: ["api", "--method", "PATCH"], respond: {} },
+        { tool: "gh", match: ["api", "--method", "PATCH"], respond: {} }
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /pull request #9: .*HTTP 403.*Reclaimed before failing: main reset/s,
+        /pull request #9: .*HTTP 403.*Reclaimed before failing: main reset/s
       );
     });
 
     it("records a failing default branch read", async () => {
       const { fixture } = await createHarness([
-        failing("gh", ["api", COMMITS_PATH], "HTTP 502"),
+        failing("gh", ["api", COMMITS_PATH], "HTTP 502")
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        new RegExp(`read ${BRANCH} head: .*HTTP 502`),
+        new RegExp(`read ${BRANCH} head: .*HTTP 502`)
       );
     });
 
@@ -1649,17 +1647,17 @@ describe("createCloudFixture", () => {
           tool: "gh",
           match: ["api", ENVIRONMENT_PATH],
           respond: { stdout: "{}" },
-          times: 1,
+          times: 1
         },
         {
           tool: "gh",
           match: ["api", "--method", "DELETE"],
-          respond: { code: 1, stderr: "HTTP 403" },
-        },
+          respond: { code: 1, stderr: "HTTP 403" }
+        }
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        new RegExp(`GitHub environment ${ENVIRONMENT}: .*HTTP 403`),
+        new RegExp(`GitHub environment ${ENVIRONMENT}: .*HTTP 403`)
       );
     });
 
@@ -1668,17 +1666,17 @@ describe("createCloudFixture", () => {
         {
           tool: "gh",
           match: ["api", COMMITS_PATH],
-          respond: { stdout: "e".repeat(40) },
+          respond: { stdout: "e".repeat(40) }
         },
         {
           tool: "gh",
           match: ["api", "--method", "PATCH"],
-          respond: { code: 1, stderr: "protected branch" },
-        },
+          respond: { code: 1, stderr: "protected branch" }
+        }
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /main reset to .*: .*protected branch/,
+        /main reset to .*: .*protected branch/
       );
     });
   });
@@ -1692,7 +1690,7 @@ describe("createCloudFixture", () => {
 
       expect(fake.removed).toEqual([WORKSPACE]);
       expect(
-        fake.commands.calls.slice(before).map((call) => call.args),
+        fake.commands.calls.slice(before).map((call) => call.args)
       ).toEqual([
         [
           "group",
@@ -1704,8 +1702,8 @@ describe("createCloudFixture", () => {
           "--yes",
           "--no-wait",
           "--output",
-          "none",
-        ],
+          "none"
+        ]
       ]);
     });
 
@@ -1737,25 +1735,25 @@ describe("createCloudFixture", () => {
     it("reports every teardown failure rather than only the first", async () => {
       const { fixture } = await createHarness(
         [failing("az", ["group", "delete"], "group is locked")],
-        { removeDir: () => Promise.reject(new Error("EBUSY: directory busy")) },
+        { removeDir: () => Promise.reject(new Error("EBUSY: directory busy")) }
       );
 
       const error = await captureError(fixture.dispose());
 
       expect(error.message).toContain(
-        `Cloud fixture teardown for ${RESOURCE_GROUP} did not complete`,
+        `Cloud fixture teardown for ${RESOURCE_GROUP} did not complete`
       );
       expect(error.message).toContain(`remove workspace ${WORKSPACE}`);
       expect(error.message).toContain("EBUSY: directory busy");
       expect(error.message).toContain(
-        `delete resource group ${RESOURCE_GROUP}`,
+        `delete resource group ${RESOURCE_GROUP}`
       );
       expect(error.message).toContain("group is locked");
     });
 
     it("does not retry a failed teardown on a second call", async () => {
       const { fixture, fake } = await createHarness([
-        failing("az", ["group", "delete"], "group is locked"),
+        failing("az", ["group", "delete"], "group is locked")
       ]);
 
       await expect(fixture.dispose()).rejects.toThrow(/group is locked/);
@@ -1766,7 +1764,7 @@ describe("createCloudFixture", () => {
 
     it("stringifies a non-Error teardown rejection", async () => {
       const { fixture } = await createHarness([], {
-        removeDir: () => Promise.reject("directory vanished"),
+        removeDir: () => Promise.reject("directory vanished")
       });
 
       await expect(fixture.dispose()).rejects.toThrow(/directory vanished/);
