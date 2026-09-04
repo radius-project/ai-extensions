@@ -726,6 +726,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         log: addBuildDetail
       });
       const definitionHash = pipeline.definitionHashFor(selection, staged);
+      const modelRevision = pipeline.modelRevisionFor(selection);
       if (state.graphBuildGeneration !== requestGeneration) {
         // Best-effort: a superseded request must still answer 409 even if the
         // temp directory cannot be removed.
@@ -748,6 +749,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         state.graphFollowsWorkspaceBranch =
           branchResolution.followsWorkspaceBranch;
         state.graphFromWorkspace = selection.fromWorkspace;
+        state.graphModelRevision = modelRevision;
         return withResolvedBranch(
           json(200, {
             reload: false,
@@ -814,6 +816,7 @@ export function createGraphPlanningWorkflows<TEntry extends GraphInstanceEntry>(
         state.activeGraphView = "graph";
         state.graphLoaded = true;
         state.graphDefinitionHash = definitionHash;
+        state.graphModelRevision = modelRevision;
       }
       addEvent(
         "rendering_graph",
