@@ -334,7 +334,7 @@ export async function createCloudFixture(
   let disposed = false;
   let kubeconfigPath = "";
 
-  const clusterKubeconfig = async (): Promise<string> => {
+  const clusterKubeconfig = async (timeoutMs?: number): Promise<string> => {
     if (kubeconfigPath) return kubeconfigPath;
     const directory = await ports.makeWorkspaceDir(
       `radtest-canvas-kube-${uniqueId}`
@@ -345,20 +345,23 @@ export async function createCloudFixture(
     });
     const candidate = `${directory}/kubeconfig`;
     expectSuccess(
-      await commands.runAz([
-        "aks",
-        "get-credentials",
-        "--resource-group",
-        resourceGroup,
-        "--name",
-        clusterName,
-        "--subscription",
-        subscriptionId,
-        "--file",
-        candidate,
-        "--overwrite-existing",
-        "--only-show-errors"
-      ]),
+      await commands.runAz(
+        [
+          "aks",
+          "get-credentials",
+          "--resource-group",
+          resourceGroup,
+          "--name",
+          clusterName,
+          "--subscription",
+          subscriptionId,
+          "--file",
+          candidate,
+          "--overwrite-existing",
+          "--only-show-errors"
+        ],
+        timeoutMs
+      ),
       `az aks get-credentials ${clusterName}`
     );
     kubeconfigPath = candidate;
@@ -370,8 +373,14 @@ export async function createCloudFixture(
     namespace: string,
     timeoutMs?: number
   ): Promise<readonly KubernetesWorkload[] | "no-namespace"> => {
-    const kubeconfig = await clusterKubeconfig();
     const context = `kubectl get deployments -n ${namespace}`;
+    const deadline =
+      timeoutMs === undefined ? undefined : ports.now().getTime() + timeoutMs;
+    const kubeconfig = await clusterKubeconfig(timeoutMs);
+    const commandTimeoutMs =
+      deadline === undefined ? undefined : (
+        remainingCommandTimeout(deadline, ports.now, context)
+      );
     const result = await commands.runKubectl(
       [
         "--kubeconfig",
@@ -385,7 +394,7 @@ export async function createCloudFixture(
         "--output",
         "json"
       ],
-      timeoutMs
+      commandTimeoutMs
     );
     if (result.code !== 0) {
       if (isMissingNamespace(result)) return "no-namespace";
@@ -401,10 +410,16 @@ export async function createCloudFixture(
   const listApplicationResources = async (
     application: string,
     namespace: string,
-    timeoutMs?: number
+    timeoutMs: number
   ): Promise<readonly string[] | "no-namespace"> => {
-    const kubeconfig = await clusterKubeconfig();
     const context = `kubectl get deployments,pods -n ${namespace}`;
+    const deadline = ports.now().getTime() + timeoutMs;
+    const kubeconfig = await clusterKubeconfig(timeoutMs);
+    const commandTimeoutMs = remainingCommandTimeout(
+      deadline,
+      ports.now,
+      context
+    );
     const result = await commands.runKubectl(
       [
         "--kubeconfig",
@@ -418,7 +433,7 @@ export async function createCloudFixture(
         "--output",
         "json"
       ],
-      timeoutMs
+      commandTimeoutMs
     );
     if (result.code !== 0) {
       if (isMissingNamespace(result)) return "no-namespace";
@@ -1033,6 +1048,17 @@ async function pollForValue<T>(options: PollForValueOptions<T>): Promise<T> {
     if (remaining <= 0) throw new Error(options.timeoutMessage());
     await options.ports.wait(Math.min(options.intervalMs, remaining));
   }
+}
+
+function remainingCommandTimeout(
+  deadline: number,
+  now: () => Date,
+  context: string
+): number {
+  const remaining = deadline - now().getTime();
+  if (remaining <= 0)
+    throw new Error(`${context} exhausted its assertion deadline.`);
+  return remaining;
 }
 
 async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {

@@ -1,6 +1,10 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "@playwright/test";
+import {
+  CLOUD_SUITE_TIMEOUT_MS,
+  DEPLOYMENT_OPERATION_TIMEOUT_MS
+} from "./test/e2e-cloud/support/cloud-timeout-budget.js";
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 
@@ -27,11 +31,10 @@ export default defineConfig({
   // still relies on the same server warm-up and Windows shim.
   globalSetup: "./test/e2e/global-setup.ts",
   globalTeardown: "./test/e2e/global-teardown.ts",
-  // No single stage may consume the installation token's full lifetime.
-  timeout: 45 * 60 * 1000,
-  // The GitHub App token expires after one hour. Stop the entire serial journey
-  // at 50 minutes, leaving ten minutes for teardown while credentials are valid.
-  globalTimeout: 50 * 60 * 1000,
+  // No single stage may consume the freshly renewed installation token's full
+  // lifetime. The serial suite receives the sum of every declared stage budget.
+  timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
+  globalTimeout: CLOUD_SUITE_TIMEOUT_MS,
   expect: { timeout: 60_000 },
   // Serializes tests inside one process. Cross-process/cloud-run serialization
   // is enforced by the repository-scoped lease acquired by the cloud fixture.

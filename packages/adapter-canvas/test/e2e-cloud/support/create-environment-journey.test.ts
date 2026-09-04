@@ -28,7 +28,9 @@ import {
 
 const PROVISIONED = {
   fixtureProvisioned: true,
-  unprovisionedReason: "The fixture repository is provisioned."
+  unprovisionedReason: "The fixture repository is provisioned.",
+  githubAppClientId: "Iv1.example",
+  githubAppPrivateKey: "private-key"
 };
 
 async function captureError(work: Promise<unknown>): Promise<Error> {
@@ -104,6 +106,21 @@ describe("evaluateCreateEnvironmentGate", () => {
     });
     expect(gate.enabled === false && gate.disposition).toBe("fail");
     expect(gate.enabled === false && gate.reason).toContain("GH_TOKEN");
+  });
+
+  it.each([
+    ["client ID", { githubAppClientId: " " }, "CLOUD_E2E_BOT_CLIENT_ID"],
+    ["private key", { githubAppPrivateKey: "" }, "CLOUD_E2E_BOT_PRIVATE_KEY"]
+  ])("fails preflight without the GitHub App %s", (_label, patch, variable) => {
+    const gate = evaluateCreateEnvironmentGate({
+      cloudE2eFlag: "1",
+      ...PROVISIONED,
+      subscriptionId: "sub-1",
+      githubToken: "ghs_token",
+      ...patch
+    });
+    expect(gate.enabled === false && gate.disposition).toBe("fail");
+    expect(gate.enabled === false && gate.reason).toContain(variable);
   });
 });
 

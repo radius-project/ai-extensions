@@ -33,7 +33,10 @@ export interface CloudCommandResult {
  * absent.
  */
 export interface CloudCommandPort {
-  runAz(args: readonly string[]): Promise<CloudCommandResult>;
+  runAz(
+    args: readonly string[],
+    timeoutMs?: number
+  ): Promise<CloudCommandResult>;
   runGh(args: readonly string[]): Promise<CloudCommandResult>;
   runGit(args: readonly string[], cwd: string): Promise<CloudCommandResult>;
   /**
@@ -180,8 +183,8 @@ export function isGitHubApiNotFound(result: CloudCommandResult): boolean {
 export function createNodeCloudFixturePorts(): CloudFixturePorts {
   return {
     commands: {
-      runAz: (args) =>
-        runTool("az", args, undefined, normalizeAzureCommandResult),
+      runAz: (args, timeoutMs) =>
+        runTool("az", args, undefined, normalizeAzureCommandResult, timeoutMs),
       runGh: (args) => runTool("gh", args),
       runGit: (args, cwd) => runTool("git", args, cwd),
       runKubectl: (args, timeoutMs) =>
