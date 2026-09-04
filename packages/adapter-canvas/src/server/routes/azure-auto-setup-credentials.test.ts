@@ -17,6 +17,7 @@ import type {
   AzureAutoSetupOperation,
   AzureAutoSetupWorkflow
 } from "./azure-auto-setup-types.js";
+import { deterministicProviderUuid } from "../services/provider-mutation-recovery.js";
 import { createAzureAutoSetupTestDependencies } from "../../../test/support/server/azure-auto-setup.js";
 
 const APP_ID = "33333333-3333-3333-3333-333333333333";
@@ -72,11 +73,18 @@ function harness(options: {
   tempRemove?: (path: string) => void;
   credentialShow?: AzureAutoSetupCommandResult;
   recordProvenance?: AzureAutoSetupCredentialInput["dependencies"]["operations"]["recordFederatedCredentialProvenance"];
+  onRoleAssignment?: AzureAutoSetupCredentialInput["dependencies"]["operations"]["recordCreatedRoleAssignment"];
 }) {
   const failures: Record<string, unknown>[] = [];
   const calls: string[] = [];
   const ficEntries: Array<Record<string, unknown>> = [];
   const recorded: Record<string, unknown>[] = [];
+  const recordedRoleAssignments: Array<{
+    assignmentId?: string;
+    role: string;
+    scope: string;
+    principalObjectId: string;
+  }> = [];
   const operation: AzureAutoSetupOperation = {
     operationId: "op-credentials",
     repo: "octo/app",
@@ -109,8 +117,11 @@ function harness(options: {
           calls.push(`provenance:${credential.origin}:${credential.name}`);
           ficEntries.push(credential as Record<string, unknown>);
         }),
-      recordCreatedRoleAssignment: (_operation, assignment) =>
-        calls.push(`role:${assignment.role}`)
+      recordCreatedRoleAssignment: (operation, assignment) => {
+        calls.push(`role:${assignment.role}`);
+        recordedRoleAssignments.push(assignment);
+        options.onRoleAssignment?.(operation, assignment);
+      }
     },
     sleep:
       options.sleep ??
@@ -191,7 +202,15 @@ function harness(options: {
     clusterResourceGroup: "rg-aks",
     clusterName: "aks-radius"
   };
-  return { calls, failures, ficEntries, recorded, input, workflow };
+  return {
+    calls,
+    failures,
+    ficEntries,
+    recorded,
+    recordedRoleAssignments,
+    input,
+    workflow
+  };
 }
 
 describe("Azure auto-setup credentials and roles service (SU-08)", () => {
@@ -868,14 +887,142 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
         ) {
           return result({ code: 1, stderr: "AuthorizationFailed" });
         }
+        if (
+          line.startsWith("role assignment create ") &&
+          line.includes("Locks Contributor")
+        ) {
+          return result();
+        }
         throw new Error(`unexpected az call: ${line}`);
       }
     });
     expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
     expect(test.calls).toContain("sleep:2000");
     expect(test.calls).toContain("role:Contributor");
-    expect(test.workflow.steps.at(-1)).toContain("AuthorizationFailed");
+    expect(test.calls).toContain("role:Locks Contributor");
+    expect(test.workflow.steps).toContain(
+      `⚠️ Could not assign the AKS RBAC Cluster Admin role automatically. If your cluster uses Azure RBAC for Kubernetes (the default for AKS Automatic) the deploy will fail at "Verify AKS Access". Grant it manually: az role assignment create --assignee-object-id ${OBJECT_ID} --assignee-principal-type ServicePrincipal --role "Azure Kubernetes Service RBAC Cluster Admin" --scope /subscriptions/${SUBSCRIPTION}/resourceGroups/rg-aks/providers/Microsoft.ContainerService/managedClusters/aks-radius\nDetails: AuthorizationFailed`
+    );
     expect(test.failures).toEqual([]);
+  });
+
+  it("warns without failing when Locks Contributor cannot be granted", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: JSON.stringify([existingCredential()]) });
+        }
+        if (
+          line.startsWith("role assignment create ") &&
+          line.includes("Locks Contributor")
+        ) {
+          return result({ code: 1, stderr: "AuthorizationFailed" });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+    expect(test.failures).toEqual([]);
+    expect(test.calls).toContain("role:Contributor");
+    expect(test.calls).toContain(
+      "role:Azure Kubernetes Service RBAC Cluster Admin"
+    );
+    expect(test.calls).not.toContain("role:Locks Contributor");
+    expect(test.calls.join("\n")).not.toContain("User Access Administrator");
+    expect(test.workflow.steps).toContain(
+      `⚠️ Could not assign the Locks Contributor role automatically. Applications whose recipes set a resource lock will fail to deploy, and existing locked resources will fail to delete with "AuthorizationFailed". Grant the least-privilege role manually: az role assignment create --assignee-object-id ${OBJECT_ID} --assignee-principal-type ServicePrincipal --role "Locks Contributor" --scope /subscriptions/${SUBSCRIPTION}/resourceGroups/rg-radius\nDetails: AuthorizationFailed`
+    );
+  });
+
+  it("grants and records Locks Contributor on the target resource group", async () => {
+    const test = harness({
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: JSON.stringify([existingCredential()]) });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+    const resourceGroupScope = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-radius`;
+    const assignmentId = deterministicProviderUuid(
+      `op-credentials\0${OBJECT_ID}\0Locks Contributor\0${resourceGroupScope}`
+    );
+    expect(test.calls).toContain(
+      `az:role assignment create --name ${assignmentId} --assignee-object-id ${OBJECT_ID} --assignee-principal-type ServicePrincipal --role Locks Contributor --scope ${resourceGroupScope} --subscription ${SUBSCRIPTION} --output none`
+    );
+    expect(test.recordedRoleAssignments).toContainEqual({
+      assignmentId,
+      role: "Locks Contributor",
+      scope: resourceGroupScope,
+      principalObjectId: OBJECT_ID
+    });
+    expect(test.workflow.steps).toContain(
+      "Assigning Locks Contributor on rg-radius for applications that manage resource locks..."
+    );
+    expect(test.calls.join("\n")).not.toContain("User Access Administrator");
+  });
+
+  it("stops before Locks Contributor without recording or warning", async () => {
+    const test = harness({
+      stopBoundary: async (boundary) =>
+        !boundary.startsWith("before-role-assignment:Locks Contributor"),
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: JSON.stringify([existingCredential()]) });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.failures).toEqual([]);
+    expect(test.calls).not.toContain("role:Locks Contributor");
+    expect(test.workflow.steps.join("\n")).not.toContain(
+      "Could not assign the Locks Contributor role"
+    );
+  });
+
+  it("fails closed when reconciliation requests rollback after recording Locks Contributor", async () => {
+    const test = harness({
+      onRoleAssignment: (operation, assignment) => {
+        if (assignment.role === "Locks Contributor") {
+          operation.providerRecovery = {
+            state: "rollback_pending",
+            guidance: null,
+            mutations: []
+          };
+        }
+      },
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: JSON.stringify([existingCredential()]) });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(false);
+    expect(test.calls).toContain("role:Locks Contributor");
+    expect(test.failures).toContainEqual(
+      expect.objectContaining({
+        status: 409,
+        code: "provider-rollback-pending",
+        error: expect.stringContaining(
+          "interrupted Locks Contributor role assignment"
+        )
+      })
+    );
   });
 
   it("stops on a genuine Contributor assignment failure without retrying", async () => {
@@ -1309,7 +1456,8 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
 
   it.each([
     ["Contributor", 4],
-    ["Azure Kubernetes Service RBAC Cluster Admin", 5]
+    ["Azure Kubernetes Service RBAC Cluster Admin", 5],
+    ["Locks Contributor", 6]
   ])(
     "stops when persistence cancels after recording %s",
     async (role, stopAt) => {
