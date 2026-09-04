@@ -16,7 +16,7 @@ import {
   radiusFormatResolvedTypeLabel,
   radiusFormatTypeLabel,
   radiusIsManagedClusterResource,
-  radiusResolveIcon,
+  radiusResolveIconSource,
   radiusSelectResolvedResource,
   srcLineFromRef,
   srcPathFromRef
@@ -108,6 +108,7 @@ export interface GraphNodeData {
   borderStyle?: string;
   bgColor: string;
   icon: string;
+  iconMonochrome?: boolean;
   nodeName: string;
   typeLabel: string;
   codeRef: string;
@@ -381,12 +382,14 @@ export function buildGraph(
         settings.baseBranch
       : settings.branch;
     const badgeKind = radiusDeployBadgeKind(resource.deployStatus);
+    const resourceIcon = radiusResolveIconSource(resource);
     pushNode(id, {
       borderColor: colors.border,
       borderWidth: 2.5,
       borderStyle: settings.plannedMode ? "dashed" : "solid",
       bgColor: colors.bg,
-      icon: radiusResolveIcon(resource),
+      icon: resourceIcon.src,
+      iconMonochrome: resourceIcon.monochrome,
       nodeName: resource.name || id,
       typeLabel: shortType,
       codeRef: resource.codeReference || "",
@@ -451,13 +454,15 @@ export function buildGraph(
         id + "/output/" + index + "/" + (output.name || `resource-${index}`);
       const outputLabel =
         output.displayType || output.type || output.name || "Resource";
+      const outputIcon = radiusResolveIconSource(output);
       pushNode(outputId, {
         // Output child nodes only appear in the modeled/diff graphs, so they
         // always render as neutral grey.
         borderColor: "var(--rad-edge-muted)",
         borderWidth: 2.5,
         bgColor: "var(--rad-bg-subtle)",
-        icon: radiusResolveIcon(output),
+        icon: outputIcon.src,
+        iconMonochrome: outputIcon.monochrome,
         nodeName: output.name || outputLabel,
         typeLabel: outputLabel,
         codeRef: "",

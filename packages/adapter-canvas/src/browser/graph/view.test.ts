@@ -198,6 +198,39 @@ describe("node card", () => {
     expect(findByClass(tree, "rad-node__icon")).toBeUndefined();
   });
 
+  it("paints a monochrome icon through a themed css mask, not an image", () => {
+    const { tree } = renderCard(
+      node({ icon: "data:image/svg+xml,%3Csvg%3E", iconMonochrome: true })
+    );
+    expect(findByClass(tree, "rad-node__icon")).toBeUndefined();
+    const masked = findByClass(
+      tree,
+      "rad-node__icon rad-node__icon--themed"
+    ) as RenderedElement;
+    expect(masked.type).toBe("span");
+    expect(props(masked)["aria-hidden"]).toBe("true");
+    expect(props(masked).src).toBeUndefined();
+    expect(props(masked).style).toEqual({
+      WebkitMaskImage: 'url("data:image/svg+xml,%3Csvg%3E")',
+      maskImage: 'url("data:image/svg+xml,%3Csvg%3E")'
+    });
+  });
+
+  it("keeps a hostile masked icon inside the css url token", () => {
+    const { tree } = renderCard(
+      node({
+        icon: 'data:image/svg+xml,a") ;background:red;--x:url("',
+        iconMonochrome: true
+      })
+    );
+    const masked = findByClass(tree, "rad-node__icon rad-node__icon--themed");
+    const style = props(masked).style as Record<string, string>;
+    expect(style.maskImage).toBe(
+      'url("data:image/svg+xml,a%22%29%20%3Bbackground:red%3B--x:url%28%22")'
+    );
+    expect(style.maskImage).not.toContain(";background");
+  });
+
   it("opts the interactive children out of the pane's drag, pan and key handling", () => {
     const { tree } = renderCard(node());
     // React Flow treats Space and Enter as node-selection keys and cancels the
