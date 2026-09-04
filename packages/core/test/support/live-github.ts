@@ -49,7 +49,7 @@ export function githubApiHeaders(accept: string): Record<string, string> {
 // failures are HTTP 408, HTTP 429, and 5xx responses; fetch rejections are
 // retried the same way and rethrown once the budget is exhausted. The number of
 // extra attempts equals `retryDelaysMs.length`, so the default budget is three
-// total attempts.
+// total attempts and an empty budget means one attempt with no retries.
 export async function fetchGitHubWithRetry(
   url: string,
   init: RequestInit,
@@ -57,7 +57,7 @@ export async function fetchGitHubWithRetry(
 ): Promise<LiveGithubFetchResult> {
   const fetchImpl: typeof fetch =
     options.fetchImpl ?? ((input, requestInit) => fetch(input, requestInit));
-  const retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
+  const retryDelaysMs = [...(options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS)];
   const delay = options.sleep ?? sleep;
   const maxAttempts = retryDelaysMs.length + 1;
 
@@ -83,7 +83,9 @@ export async function fetchGitHubWithRetry(
     }
   }
 
-  throw new Error("GitHub fetch retry loop exhausted without a result");
+  throw new Error(
+    "GitHub fetch retry loop exhausted unexpectedly after a stable retry budget"
+  );
 }
 
 // Fetch one file under a repo's `.github/extension/` tree as raw text through
