@@ -232,7 +232,7 @@ describe("createCloudFixture", () => {
       });
     });
 
-    it("tags the group so the subscription's purge job can reclaim a crashed run", async () => {
+    it("tags the group so scheduled cleanup can identify a crashed run's group", async () => {
       const { fake } = await createHarness();
 
       const create = fake.commands.calls[0];
@@ -245,7 +245,7 @@ describe("createCloudFixture", () => {
       expect(RESOURCE_GROUP.startsWith("radtest-")).toBe(true);
     });
 
-    it("formats creation time for the Radius purge workflow's integer comparison", () => {
+    it("formats creation time for cleanup's integer comparison", () => {
       const sixHoursAgo = Math.floor(NOW.getTime() / 1_000) - 6 * 60 * 60;
       const creationTime = radiusPurgeCreationTime(
         new Date(NOW.getTime() - 7 * 60 * 60 * 1_000)

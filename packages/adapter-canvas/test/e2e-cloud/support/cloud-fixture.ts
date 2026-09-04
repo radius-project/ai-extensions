@@ -163,8 +163,9 @@ export async function createCloudFixture(
   let workspacePath = "";
 
   try {
-    // `creationTime` plus the `radtest-` prefix is what lets the Radius purge
-    // job in this subscription reclaim the group if the runner dies outright.
+    // `creationTime` plus the fixture tag lets scheduled cleanup prove the group
+    // is ours and old enough. The `radtest-` prefix leaves Radius purge as the
+    // fallback safety net if this cleanup cannot run.
     expectSuccess(
       await commands.runAz([
         "group",
