@@ -13,7 +13,11 @@ import {
   createWorkflowScopeGhRunner,
   type WorkflowScopeGhRunnerPorts
 } from "./create-environment-gh-runner.js";
-import { createWorkflowFileCommitter } from "./create-environment-workflow-committer.js";
+import {
+  createWorkflowFileCommitter,
+  recordedSetupBranchCreate,
+  setupWorkflowBranchName
+} from "./create-environment-workflow-committer.js";
 import {
   settleProviderMutation,
   shouldStop,
@@ -50,12 +54,17 @@ import {
 } from "../services/provider-mutation-recovery.js";
 import { selectedEnvironmentReader } from "../services/github-environment.js";
 import { runVerificationDispatch } from "../services/verification-dispatch.js";
+import { discoverAutomaticVerificationRun } from "../services/automatic-verification-run.js";
 import {
+  automaticBranchVerificationPolicy,
+  automaticBranchVerificationPolicyMessage,
   describeVerificationDispatch,
   describePullRequestNextStep,
   describeMergeRequiredTerminal,
   type PullRequestNextStep
 } from "../../verification-plan.js";
+import type { WorkflowFileReadResult } from "../../verification-plan.js";
+import { LEGACY_DEPLOY_WORKFLOW_FILE } from "../../infra.js";
 
 // Seam 4 of the `POST /api/create-environment` slice: the seven-step use case.
 //
@@ -144,6 +153,12 @@ export interface CreateEnvironmentDependencies
     repo: string,
     executor?: SelectedGhExecutor
   ): Promise<string | null | undefined>;
+  fetchFileFromRepoResult(
+    repo: string,
+    path: string,
+    branch: string,
+    executor?: SelectedGhExecutor
+  ): Promise<WorkflowFileReadResult>;
   getBranchHeadSha(
     repo: string,
     branch: string,
@@ -204,7 +219,8 @@ export interface CreateEnvironmentDependencies
   // --- workflow generation and commit ---
   generateVerifyWorkflow(
     environment: string,
-    provider: string
+    provider: string,
+    setupPushOperationMarker?: string
   ): Promise<string>;
   generateDeployWorkflow(
     environment: string,
@@ -227,7 +243,8 @@ export interface CreateEnvironmentDependencies
   deleteLegacyDeployWorkflow(
     repo: string,
     executor?: SelectedGhExecutor,
-    beforeDelete?: () => Promise<boolean>
+    beforeDelete?: () => Promise<boolean>,
+    branch?: string
   ): Promise<boolean | "cancelled">;
   createPullRequestApi(
     repo: string,
@@ -249,6 +266,8 @@ export interface CreateEnvironmentDependencies
       path: string,
       branch: string
     ) => Promise<string | null | undefined>;
+    automaticPushEnabled?: boolean;
+    branchVerificationAllowed?: boolean;
   }): Promise<CredentialVerificationPlanResult>;
   fetchFileFromRepo(
     repo: string,
@@ -804,7 +823,87 @@ export async function handleCreateEnvironment(
     // This is the commit point. After it, a stop keeps the resources in place
     // rather than removing them, because the workflow files may already be
     // visible to the repository.
-    if (!(await stopBoundary("before-workflow-commit"))) return;
+    if (!(await stopBoundary("before-workflow-policy-read"))) return;
+    const [defaultVerify, defaultDispatcher, defaultLegacyDeploy] =
+      await Promise.all([
+        dependencies.fetchFileFromRepoResult(
+          targetRepo,
+          ".github/workflows/radius-verify-credentials.yml",
+          defaultBranch,
+          selectedExecutor
+        ),
+        dependencies.fetchFileFromRepoResult(
+          targetRepo,
+          ".github/workflows/run-rad-commands.yml",
+          defaultBranch,
+          selectedExecutor
+        ),
+        dependencies.fetchFileFromRepoResult(
+          targetRepo,
+          `.github/workflows/${LEGACY_DEPLOY_WORKFLOW_FILE}`,
+          defaultBranch,
+          selectedExecutor
+        )
+      ]);
+    const automaticPolicy = automaticBranchVerificationPolicy({
+      verify: defaultVerify,
+      dispatcher: defaultDispatcher,
+      legacyDeploy: defaultLegacyDeploy
+    });
+    const automaticPolicyMessage =
+      automaticBranchVerificationPolicyMessage(automaticPolicy);
+    if (credentialsComplete && automaticPolicyMessage)
+      steps.push(
+        `⚠️ Setup-branch credential verification is disabled: ${automaticPolicyMessage}`
+      );
+    const setupPushOperationMarker =
+      credentialsComplete && automaticPolicy.state === "enabled" ?
+        operation.operationId
+      : undefined;
+    const existingVerification =
+      (
+        operation.verification &&
+        typeof operation.verification === "object" &&
+        !Array.isArray(operation.verification)
+      ) ?
+        (operation.verification as Record<string, unknown>)
+      : null;
+    const existingAutomaticIdentity =
+      (
+        existingVerification?.event === "push" &&
+        existingVerification.operationMarker === operation.operationId &&
+        typeof existingVerification.ref === "string" &&
+        existingVerification.ref &&
+        Number.isFinite(Number(existingVerification.dispatchedAt))
+      ) ?
+        existingVerification
+      : null;
+    const automaticStartedAt =
+      existingAutomaticIdentity ?
+        Number(existingAutomaticIdentity.dispatchedAt)
+      : dependencies.now();
+    const automaticRef =
+      (existingAutomaticIdentity?.ref as string | undefined) ||
+      recordedSetupBranchCreate(operation, targetRepo)?.branch ||
+      setupWorkflowBranchName(
+        envName,
+        operation.operationId,
+        automaticStartedAt
+      );
+    if (setupPushOperationMarker && !existingVerification) {
+      operation.verification = {
+        dispatchedAt: automaticStartedAt,
+        workflow: dependencies.verifyWorkflowFile,
+        ref: automaticRef,
+        environment: envName,
+        event: "push",
+        operationMarker: setupPushOperationMarker,
+        baselineRunId: null,
+        runId: null,
+        runUrl: null
+      };
+    }
+    if (!(await checkpoint("before-workflow-commit"))) return;
 
     // Steps 3, 4 and 4b: publish the verify, deploy and delete workflow files.
     // `gate` is this use case's own `checkpoint`, passed in so the gates fire at
@@ -813,8 +912,16 @@ export async function handleCreateEnvironment(
     const published = await publishWorkflowFiles(
       {
         ghCommandPresentation: dependencies.ghCommandPresentation,
-        generateVerifyWorkflow: (environment, workflowProvider) =>
-          dependencies.generateVerifyWorkflow(environment, workflowProvider),
+        generateVerifyWorkflow: (
+          environment,
+          workflowProvider,
+          pushOperationMarker
+        ) =>
+          dependencies.generateVerifyWorkflow(
+            environment,
+            workflowProvider,
+            pushOperationMarker
+          ),
         generateDeployWorkflow: (environment, appFile) =>
           dependencies.generateDeployWorkflow(environment, appFile),
         generateDeleteWorkflow: (environment) =>
@@ -822,15 +929,31 @@ export async function handleCreateEnvironment(
         commitWorkflowFileSmart,
         recordCommittedWorkflowFile: (op, entry) =>
           dependencies.recordCommittedWorkflowFile(op, entry),
-        deleteLegacyDeployWorkflow: (repo) =>
-          unresolvedProviderMutations(operation).length > 0 ?
-            Promise.resolve(true)
-          : dependencies.deleteLegacyDeployWorkflow(
-              repo,
-              selectedExecutor,
-              () => stopBoundary("before-legacy-workflow-delete")
-            ),
-        usingPullRequestBranch: () => Boolean(committer.pullRequestState()),
+        deleteLegacyDeployWorkflow: async (repo, branch) => {
+          const legacyDelete =
+            unresolvedProviderMutations(operation).length > 0 ?
+              true
+            : await dependencies.deleteLegacyDeployWorkflow(
+                repo,
+                selectedExecutor,
+                () => stopBoundary("before-legacy-workflow-delete"),
+                branch
+              );
+          if (legacyDelete === "cancelled") return legacyDelete;
+          if (
+            automaticPolicy.state === "disabled" &&
+            (automaticPolicy.reason === "legacy-deploy-present" ||
+              automaticPolicy.reason === "legacy-deploy-unreadable") &&
+            legacyDelete !== true
+          ) {
+            throw new Error(
+              branch ?
+                `Radius could not remove the legacy deploy workflow from setup branch "${branch}", so it did not continue with verification.`
+              : "Radius could not remove the legacy deploy workflow from the default branch, so it did not continue with verification."
+            );
+          }
+          return legacyDelete;
+        },
         pullRequestBranch: prBranch,
         errorMessage: (error) => dependencies.errorMessage(error),
         pushStep: (message) => {
@@ -838,7 +961,14 @@ export async function handleCreateEnvironment(
         },
         gate: () => checkpoint("after-workflow-commit")
       },
-      { operation, targetRepo, envName, provider, defaultBranch }
+      {
+        operation,
+        targetRepo,
+        envName,
+        provider,
+        defaultBranch,
+        setupPushOperationMarker
+      }
     );
     if (published.outcome === "cancelled") return;
     if (published.outcome === "refused") {
@@ -1058,8 +1188,8 @@ export async function handleCreateEnvironment(
     // On the PR path this used to be an unconditional skip, which was right for
     // a first-time setup and wrong for every repository that already had the
     // workflows on its default branch. planCredentialVerification decides
-    // instead, and returns an empty pullRequestUrl when it dispatches so a
-    // merely informational PR is not mistaken for a blocking one.
+    // instead; actionRequired distinguishes blocking and informational pull
+    // requests without discarding the opened pull request's URL.
     let verifyRunUrl = "";
     let verifyRunId: string | number | null = null;
     let dispatchedAt = dependencies.now();
@@ -1070,22 +1200,15 @@ export async function handleCreateEnvironment(
       defaultBranch,
       prState: prState || null,
       pullRequestUrl,
+      automaticPushEnabled: Boolean(prState && setupPushOperationMarker),
+      branchVerificationAllowed:
+        automaticPolicy.state === "enabled" ||
+        automaticPolicy.reason === "verify-present",
       fetchFile: (repo, path, branch) =>
         dependencies.fetchFileFromRepo(repo, path, branch, selectedExecutor)
     });
-    pullRequestUrl = verifyPlan.pullRequestUrl;
-    if (prState && verifyPlan.shouldDispatch) {
-      // The pull request is informational when verification can run from the
-      // branch immediately. Preserve the pre-existing non-blocking projection
-      // after the earlier provenance checkpoint recorded the actual PR.
-      dependencies.recordCommitState(operation, {
-        mode: "pull_request",
-        branch: prState.branch,
-        baseBranch: prState.base,
-        pullRequestUrl: null
-      });
-    }
-    if (!verifyPlan.shouldDispatch) {
+    if (verifyPlan.pullRequestUrl) pullRequestUrl = verifyPlan.pullRequestUrl;
+    if (verifyPlan.trigger === "none") {
       verifySkipReason =
         verifyPlan.skipReason ||
         "Credential verification will run automatically once the workflows are on the default branch.";
@@ -1105,6 +1228,65 @@ export async function handleCreateEnvironment(
         "⏭️ Skipping credential verification — cloud credentials are not fully configured. " +
           missingCredNote
       );
+    } else if (verifyPlan.trigger === "push") {
+      verificationRef = verifyPlan.ref;
+      dispatchedAt = automaticStartedAt;
+      steps.push(
+        `Discovering credential verification started automatically on branch "${verificationRef}"...`
+      );
+      const automatic = await discoverAutomaticVerificationRun({
+        identity: {
+          repo: targetRepo,
+          workflow: dependencies.verifyWorkflowFile,
+          ref: verificationRef,
+          environment: envName,
+          operationMarker: operation.operationId,
+          startedAt: automaticStartedAt
+        },
+        listRuns: () =>
+          runGh([
+            "run",
+            "list",
+            "--workflow=" + dependencies.verifyWorkflowFile,
+            "--limit",
+            "10",
+            "--json",
+            "databaseId,createdAt,displayTitle,event,headBranch",
+            "--repo",
+            targetRepo
+          ]),
+        stopBoundary,
+        sleep: (milliseconds) => dependencies.sleep(milliseconds)
+      });
+      if (automatic.state === "cancelled") return;
+      if (automatic.state === "manual_required") {
+        terminalizeProviderManualRequired(operation, automatic.guidance);
+        await dependencies.persistOperations();
+        throw new ProviderMutationRecoveryError(
+          automatic.guidance,
+          "provider-mutation-manual-required"
+        );
+      }
+      verifyRunId = automatic.runId;
+      verifyRunUrl = automatic.runUrl;
+      steps.push("✅ Credential verification started automatically.");
+      steps.push("Verify run: " + verifyRunUrl);
+      operation.verification = {
+        ...((
+          operation.verification && typeof operation.verification === "object"
+        ) ?
+          operation.verification
+        : {}),
+        dispatchedAt,
+        workflow: dependencies.verifyWorkflowFile,
+        ref: verificationRef,
+        environment: envName,
+        event: "push",
+        operationMarker: operation.operationId,
+        baselineRunId: null,
+        runId: automatic.runId,
+        runUrl: automatic.runUrl
+      };
     } else {
       verificationRef = verifyPlan.ref;
       steps.push(
@@ -1165,7 +1347,7 @@ export async function handleCreateEnvironment(
               workflow: dependencies.verifyWorkflowFile,
               ref: identity.ref,
               environment: identity.environment,
-              event: "workflow_dispatch",
+              event: verifyPlan.trigger,
               operationMarker: identity.operationMarker,
               baselineRunId: identity.baselineRunId,
               runId: run?.runId ?? null,
@@ -1200,7 +1382,7 @@ export async function handleCreateEnvironment(
         );
       }
       if (dispatch.state === "accepted") {
-        steps.push("✅ Credentials verification dispatched.");
+        steps.push("✅ Credential verification dispatched.");
         verifyRunId = dispatch.runId;
         verifyRunUrl = dispatch.runUrl;
         steps.push("Verify run: " + verifyRunUrl);
@@ -1257,7 +1439,7 @@ export async function handleCreateEnvironment(
         dispatchedAt,
         workflow: dependencies.verifyWorkflowFile,
         ref: verificationRef,
-        event: "workflow_dispatch",
+        event: verifyPlan.trigger === "push" ? "push" : "workflow_dispatch",
         operationMarker:
           priorOperationMarker || (prState ? operation.operationId : null),
         baselineRunId,
@@ -1265,14 +1447,15 @@ export async function handleCreateEnvironment(
         runId: verifyRunId == null ? null : String(verifyRunId),
         runUrl: verifyRunUrl || null
       };
-      if (verifyPlan.shouldDispatch)
+      if (verifyPlan.trigger !== "none")
         dependencies.enterStage(operation, dependencies.stageVerify);
       // Record the commit identity, including any pull request, before the
       // safe-boundary check. A stop honored here must still be able to tell the
       // customer that the workflows were committed and where.
       if (!prState) {
         dependencies.recordCommitState(operation, {
-          mode: verifyPlan.shouldDispatch ? "default_branch" : "pull_request",
+          mode:
+            verifyPlan.trigger !== "none" ? "default_branch" : "pull_request",
           branch: defaultBranch,
           baseBranch: verifyPlan.defaultBranch || defaultBranch,
           pullRequestUrl: pullRequestUrl || null
@@ -1297,7 +1480,7 @@ export async function handleCreateEnvironment(
     // promises what the step just withdrew is the same contradiction one layer
     // up. The marker follows it too, an observation when verification is
     // already running and a prompt only when the customer owes an action.
-    const awaitingMerge = !verifyPlan.shouldDispatch;
+    const awaitingMerge = verifyPlan.trigger === "none";
     const awaitingCredentials = !credentialsComplete;
     const nextStepOutcome: PullRequestNextStep =
       awaitingMerge && awaitingCredentials ? "awaiting-merge-and-credentials"
@@ -1315,7 +1498,7 @@ export async function handleCreateEnvironment(
       else steps.push(`👉 ${nextStep}`);
     }
 
-    const actionRequired = !verifyPlan.shouldDispatch;
+    const actionRequired = verifyPlan.trigger === "none";
     dependencies.recordCleanupState(operation, { state: "not_needed" });
     if (actionRequired) {
       // The third terminal state, and the one the product kept getting wrong.

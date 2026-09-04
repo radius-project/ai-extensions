@@ -52,7 +52,7 @@ The check lives in the shared [`verify-ghcr-push`](actions/verify-ghcr-push/acti
 
 ### Trigger and permissions
 
-- **Trigger:** `workflow_dispatch` with a single `environment` input (the GitHub Environment name). The job binds to that environment via `environment: ${{ inputs.environment }}`.
+- **Triggers:** `workflow_dispatch` with an `environment` input (the GitHub Environment name), plus a constrained `push` trigger for changes to `.github/workflows/radius-verify-credentials.yml` on `radius/setup-**` branches during first-time protected-branch setup. The job binds to the selected environment via `environment: ${{ inputs.environment || '{{ENV}}' }}`.
 - **Permissions:** `id-token: write` (required for OIDC), `contents: read`, and `packages: write` (so the GHCR package push check tests the same token capability the deploy uses).
 
 ### Required environment variables
@@ -78,7 +78,7 @@ The run-rad-commands workflow Radius uses to run one or more `rad` CLI commands 
 
 To keep the two provider paths from duplicating the ~80% of steps they share, it ships as a unified dispatcher, two thin provider workflows, and shared composite actions:
 
-- **`run-rad-commands.yml`** — the unified **dispatcher** and the only file that is dispatched. It owns the dispatch contract (`workflow_dispatch` inputs and the `Radius - Verify Credentials` auto-trigger). A `detect` job binds the GitHub Environment, reads which provider variable is set (`AZURE_CLIENT_ID` / `AWS_ROLE_ARN`), and calls the matching provider workflow via `workflow_call` with `secrets: inherit`.
+- **`run-rad-commands.yml`** — the unified **dispatcher** and the only file that is dispatched. It owns the `workflow_dispatch` contract. A `detect` job binds the GitHub Environment, reads which provider variable is set (`AZURE_CLIENT_ID` / `AWS_ROLE_ARN`), and calls the matching provider workflow via `workflow_call` with `secrets: inherit`.
 - **`run-rad-commands-azure.yml`** — a reusable (`workflow_call`) workflow with only the Azure-specific steps: Azure OIDC login, AKS connection (`az aks get-credentials`), workload-identity credential registration, and the `azure-avm` recipe pack (Azure Verified Modules) downloaded from the immutable `resource-types-contrib` commit recorded in `deploy/manifest/defaults.yaml`. Its Kubernetes recipe sources are rewritten from upstream's floating aliases to the corresponding validated namespace commits before deployment.
 - **`run-rad-commands-aws.yml`** — a reusable (`workflow_call`) workflow with only the AWS-specific steps: AWS OIDC login, EKS connection (access entry + static token kubeconfig), IRSA credential registration, and the `aws-terraform` recipe pack. Every Terraform source uses its resource-type namespace's immutable catalog commit; the container image build recipe defaults to the Compute namespace commit.
 - **`actions/*`** — composite actions holding the provider-agnostic phases both provider workflows share: [`setup-control-plane`](actions/setup-control-plane/action.yml), [`load-contrib-catalog`](actions/load-contrib-catalog/action.yml), [`restore-state`](actions/restore-state/action.yml), [`apply-custom-recipe-packs`](actions/apply-custom-recipe-packs/action.yml), [`manage-routes-gateway`](actions/manage-routes-gateway/action.yml), [`run-rad-commands`](actions/run-rad-commands/action.yml), [`publish-deploy-status`](actions/publish-deploy-status/action.yml), [`delete-resource`](actions/delete-resource/action.yml), [`discard-deploy-status`](actions/discard-deploy-status/action.yml), and [`teardown`](actions/teardown/action.yml). The provider workflows reference them from `radius-project/ai-extensions` at a pinned ref (the `{{RADIUS_REF}}` placeholder the generator fills in), so the shared logic has a single reviewed home and is not copied into user repos. Third-party actions in these workflows are pinned to full commit SHAs (with a `# vX` comment); only the first-party Radius composite actions are referenced by ref.
@@ -140,8 +140,7 @@ The Azure and AWS deploy/delete provider workflows share one repository-wide rou
 GitHub Actions concurrency groups cannot coordinate runs in different repositories. Exactly one repository should own the managed lifecycle for a target cluster; repositories that share its Gateway must configure `RADIUS_ROUTES_GATEWAY_NAME=radius` and `RADIUS_ROUTES_GATEWAY_NAMESPACE=radius-system` as validation-only BYO infrastructure.
 
 - **Triggers:**
-  - `workflow_dispatch` with an `environment` input (the GitHub Environment name) plus optional `image` and `rad_commands` inputs. The `detect` job binds that environment via `environment: ${{ inputs.environment }}` to read the provider variables.
-  - `workflow_run` after the `Radius - Verify Credentials` workflow completes. The `detect` job runs only when the upstream verify run concluded `success`, so a successful credential check auto-triggers a deploy.
+  - `workflow_dispatch` with an `environment` input (the GitHub Environment name) plus optional `image` and `rad_commands` inputs. The `detect` job binds that environment via `environment: ${{ inputs.environment || '{{ENV}}' }}` to read the provider variables, falling back to the environment embedded when Radius generated the workflow.
 - **Inputs:**
 
   | Input          | Required | Description                                                                                                                                                                                                                                                                                                                                                                         |
@@ -176,7 +175,7 @@ This workflow also reads GitHub Actions **secrets** for image push and applicati
 
 ### Prerequisites
 
-- OIDC trust for the environment (federated credential on Azure, IAM role trust policy on AWS). Run the verify workflow first to confirm the environment is wired up correctly — a successful verify run also auto-triggers this workflow.
+- OIDC trust for the environment (federated credential on Azure, IAM role trust policy on AWS). Run the verify workflow first to confirm the environment is wired up correctly, then dispatch this workflow explicitly to deploy.
 - The target cluster (`AWS_EKS_CLUSTER_NAME` / `AZURE_AKS_CLUSTER_NAME`) must already exist and be reachable; the assumed identity needs cluster-admin-level access to it.
 - The application must define its app bicep file in the target repo.
 

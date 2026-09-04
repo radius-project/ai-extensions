@@ -40,6 +40,7 @@ import type {
   CreateEnvironmentOperation,
   GhcrPreflightResult
 } from "../../../src/server/routes/create-environment-types.js";
+import type { WorkflowFileReadResult } from "../../../src/verification-plan.js";
 
 let container: CanvasServerContainer | undefined;
 
@@ -69,6 +70,7 @@ interface Script {
   headSha?: string | null;
   createBranch?: { ok: boolean; stderr: string };
   files?: Record<string, string>;
+  fileReadResults?: Record<string, WorkflowFileReadResult>;
   azureCredential?: () => Record<string, unknown>;
   pullRequest?: {
     ok: boolean;
@@ -89,6 +91,7 @@ interface Script {
   namespaceClaimants?: Record<string, Record<string, string>>;
   namespaceClaimsFailure?: string;
   noPinnedNamespaceAccount?: boolean;
+  legacyDeleteResult?: boolean | "cancelled";
 }
 
 interface Harness {
@@ -425,8 +428,22 @@ function start(script: Script = {}): Harness {
                 databaseId: 4242,
                 createdAt: "2023-11-14T22:13:20.000Z",
                 displayTitle: "Radius verify dev [op-http]",
-                event: "workflow_dispatch",
-                headBranch: "main",
+                event:
+                  (
+                    operation.verification &&
+                    typeof operation.verification === "object" &&
+                    "event" in operation.verification
+                  ) ?
+                    operation.verification.event
+                  : "workflow_dispatch",
+                headBranch:
+                  (
+                    operation.verification &&
+                    typeof operation.verification === "object" &&
+                    "ref" in operation.verification
+                  ) ?
+                    operation.verification.ref
+                  : "main",
                 status: "queued",
                 url: "ignored"
               }
@@ -740,8 +757,15 @@ function start(script: Script = {}): Harness {
     optionalString: (value) => (typeof value === "string" ? value : ""),
 
     // --- workflow generation and commit ---
-    generateVerifyWorkflow: async (environment) => {
+    generateVerifyWorkflow: async (
+      environment,
+      _provider,
+      setupPushOperationMarker
+    ) => {
       journal.push(`generateVerifyWorkflow:${environment}`);
+      if (setupPushOperationMarker) {
+        journal.push(`setupPushOperationMarker:${setupPushOperationMarker}`);
+      }
       // Carries the operation marker production always injects, so the plan
       // reads marker support from a file shaped like the real one.
       return MARKED_VERIFY_WORKFLOW;
@@ -762,9 +786,19 @@ function start(script: Script = {}): Harness {
       committedFiles.push(committed);
       recordCommittedWorkflowFile(target, committed);
     },
-    deleteLegacyDeployWorkflow: async () => {
+    deleteLegacyDeployWorkflow: async (
+      _repo,
+      _executor,
+      beforeDelete,
+      branch
+    ) => {
       journal.push("deleteLegacyDeployWorkflow");
-      return true;
+      journal.push(`legacyDeployDeleteBranch:${branch || "default"}`);
+      if (script.legacyDeleteResult === "cancelled") {
+        operation.stopRequested = true;
+        if (beforeDelete && !(await beforeDelete())) return "cancelled";
+      }
+      return script.legacyDeleteResult ?? true;
     },
     createPullRequestApi: async () => {
       if (!script.pullRequest)
@@ -795,6 +829,15 @@ function start(script: Script = {}): Harness {
       ) ?
         MARKED_VERIFY_WORKFLOW
       : null),
+    fetchFileFromRepoResult: async (_repo, path) => {
+      journal.push(`fetchFileFromRepoResult:${path}`);
+      return (
+        script.fileReadResults?.[path] ??
+        (script.files && path in script.files ?
+          { content: script.files[path], error: null, status: 200 }
+        : { content: null, error: "HTTP 404: Not Found", status: 404 })
+      );
+    },
     buildVerifyWorkflowDispatchArgs,
     verifyWorkflowFile: "radius-verify-credentials.yml",
     stageVerify: STAGE_VERIFY,
@@ -1339,7 +1382,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     const response = await post({ repo: "octo/app", environment: "dev" });
     const payload = (await response.json()) as { steps: string[] };
 
-    expect(payload.steps).toContain("✅ Credentials verification dispatched.");
+    expect(payload.steps).toContain("✅ Credential verification dispatched.");
     const dispatchStep = payload.steps.find((step) =>
       step.includes('workflow "radius-verify-credentials.yml"')
     );
@@ -1353,7 +1396,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     );
     expect(
       payload.steps.filter(
-        (step) => step === "✅ Credentials verification dispatched."
+        (step) => step === "✅ Credential verification dispatched."
       )
     ).toHaveLength(1);
     expect(payload.steps).not.toEqual(
@@ -1363,7 +1406,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
         )
       ])
     );
-    expect(harness.steps).toContain("✅ Credentials verification dispatched.");
+    expect(harness.steps).toContain("✅ Credential verification dispatched.");
     expect(
       harness.ghCalls.find((call) => call.startsWith("workflow run "))
     ).toContain("--ref main");
@@ -2605,7 +2648,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     }
   };
 
-  it("opens a pull request and finishes action_required without dispatching", async () => {
+  it("discovers first-time setup verification without dispatching or waiting for merge", async () => {
     const harness = start(protectedScript);
 
     const response = await post({ repo: "octo/app" });
@@ -2613,40 +2656,179 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({
       success: true,
-      actionRequired: true,
+      actionRequired: false,
       pullRequestUrl: "https://github.com/octo/app/pull/7",
-      pullRequestBranch: "radius/setup-dev-workflows-op-http",
-      pullRequestBaseBranch: "main",
-      verifyRunUrl: ""
+      pullRequestBranch: null,
+      pullRequestBaseBranch: null,
+      verifyRunUrl: "https://github.com/octo/app/actions/runs/4242"
     });
     expect(
       harness.ghCalls.some((call) => call.startsWith("workflow run "))
     ).toBe(false);
-    expect(harness.commitStates).toEqual([
-      {
-        mode: "pull_request",
-        branch: "radius/setup-dev-workflows-op-http",
-        baseBranch: "main",
-        pullRequestUrl: "https://github.com/octo/app/pull/7"
+    expect(harness.commitStates.at(-1)).toEqual({
+      mode: "pull_request",
+      branch: "radius/setup-dev-workflows-op-http",
+      baseBranch: "main",
+      pullRequestUrl: "https://github.com/octo/app/pull/7"
+    });
+    expect(harness.journal).toContain("setupPushOperationMarker:op-http");
+    expect(harness.operation.verification).toMatchObject({
+      event: "push",
+      ref: "radius/setup-dev-workflows-op-http",
+      operationMarker: "op-http",
+      runId: "4242"
+    });
+    expect(harness.finished).toEqual([]);
+  });
+
+  it("preserves and reuses a persisted automatic verification identity", async () => {
+    const harness = start(protectedScript);
+    harness.operation.verification = {
+      dispatchedAt: 1699999990000,
+      workflow: "radius-verify-credentials.yml",
+      ref: "radius/setup-dev-workflows-op-http",
+      environment: "dev",
+      event: "push",
+      operationMarker: "op-http",
+      baselineRunId: null,
+      runId: null,
+      runUrl: null,
+      recoveryMarker: "preserved"
+    };
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(response.status).toBe(200);
+    expect(harness.operation.verification).toMatchObject({
+      dispatchedAt: 1699999990000,
+      ref: "radius/setup-dev-workflows-op-http",
+      event: "push",
+      operationMarker: "op-http",
+      runId: "4242",
+      recoveryMarker: "preserved"
+    });
+  });
+
+  it("keeps merge-required guidance when the default dispatcher has a legacy chain", async () => {
+    const harness = start({
+      ...protectedScript,
+      files: {
+        ".github/workflows/run-rad-commands.yml":
+          "on:\n  workflow_dispatch:\n  workflow_run:\njobs:\n"
       }
-    ]);
-    expect(harness.journal).toContain(`setStageState:${STAGE_VERIFY}:skipped`);
-    expect(harness.finished).toEqual([
-      {
-        state: "action_required",
-        options: {
-          terminal: {
-            reason: "pr-merge-required",
-            pullRequestUrl: "https://github.com/octo/app/pull/7",
-            branch: "radius/setup-dev-workflows-op-http",
-            baseBranch: "main",
-            userMessage:
-              "Merge the pull request to finish setup; credential verification and deploys run once it lands."
-          }
+    });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(await response.json()).toMatchObject({
+      actionRequired: true,
+      verifyRunUrl: ""
+    });
+    expect(harness.journal).not.toContain("setupPushOperationMarker:op-http");
+    expect(
+      harness.ghCalls.some((call) => call.startsWith("workflow run "))
+    ).toBe(false);
+    expect(harness.steps).toContain(
+      "⚠️ Setup-branch credential verification is disabled: The default branch's deploy dispatcher can still auto-run after credential verification."
+    );
+  });
+
+  it("does not start setup-branch verification while a legacy deploy workflow exists", async () => {
+    const harness = start({
+      ...protectedScript,
+      files: {
+        ".github/workflows/radius-verify-credentials.yml":
+          MARKED_VERIFY_WORKFLOW,
+        ".github/workflows/radius-deploy.yml":
+          "on:\n  workflow_run:\n    workflows: [Radius - Verify Credentials]\njobs:\n"
+      }
+    });
+
+    const response = await post({ repo: "octo/app" });
+
+    expect(await response.json()).toMatchObject({
+      actionRequired: true,
+      verifyRunUrl: ""
+    });
+    expect(harness.journal).not.toContain("setupPushOperationMarker:op-http");
+    expect(harness.journal).toContain(
+      "legacyDeployDeleteBranch:radius/setup-dev-workflows-op-http"
+    );
+    expect(harness.steps).toContain(
+      "⚠️ Setup-branch credential verification is disabled: The default branch still contains the legacy deploy workflow, which can auto-run after credential verification."
+    );
+  });
+
+  it("fails closed when a legacy deploy workflow cannot be checked or removed", async () => {
+    const harness = start({
+      ...protectedScript,
+      fileReadResults: {
+        ".github/workflows/radius-verify-credentials.yml": {
+          content: null,
+          error: "connection reset",
+          status: null
+        },
+        ".github/workflows/radius-deploy.yml": {
+          content: null,
+          error: "HTTP 403: Forbidden",
+          status: 403
         }
-      }
-    ]);
-    expect(harness.journal).toContain("persistBestEffort");
+      },
+      legacyDeleteResult: false
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(String(body.error)).toContain(
+      "could not remove the legacy deploy workflow"
+    );
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+  });
+
+  it("fails closed when legacy deploy removal fails on the default branch", async () => {
+    const harness = start({
+      files: {
+        ".github/workflows/radius-deploy.yml":
+          "on:\n  workflow_run:\n    workflows: [Radius - Verify Credentials]\njobs:\n"
+      },
+      legacyDeleteResult: false
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(String(body.error)).toContain(
+      "could not remove the legacy deploy workflow from the default branch"
+    );
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
+  });
+
+  it("preserves cancellation while removing an unsafe legacy deploy workflow", async () => {
+    const harness = start({
+      ...protectedScript,
+      files: {
+        ".github/workflows/radius-deploy.yml":
+          "on:\n  workflow_run:\n    workflows: [Radius - Verify Credentials]\njobs:\n"
+      },
+      legacyDeleteResult: "cancelled"
+    });
+
+    const response = await post({ repo: "octo/app" });
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      cancelled: true,
+      code: "operation-stopped",
+      boundary: "before-legacy-workflow-delete",
+      operationId: "op-http"
+    });
+    expect(body.operation).toMatchObject({ terminalState: "cancelled" });
+    expect(harness.failures).toEqual([]);
+    expect(harness.journal).not.toContain("dispatchVerifyWorkflow");
   });
 
   it("persists pull-request provenance before honoring Stop", async () => {
@@ -2726,12 +2908,15 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     ).toBe(false);
   });
 
-  it("skips deleting the legacy deploy workflow while commits go through a pull request", async () => {
+  it("deletes the legacy deploy workflow on the pull request branch", async () => {
     const harness = start(protectedScript);
 
     await post({ repo: "octo/app" });
 
-    expect(harness.journal).not.toContain("deleteLegacyDeployWorkflow");
+    expect(harness.journal).toContain("deleteLegacyDeployWorkflow");
+    expect(harness.journal).toContain(
+      "legacyDeployDeleteBranch:radius/setup-dev-workflows-op-http"
+    );
     expect(
       harness.committedFiles.every((file) => file.mode === "pull_request")
     ).toBe(true);
@@ -2750,7 +2935,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
 
     expect(await response.json()).toMatchObject({
       actionRequired: false,
-      pullRequestUrl: "",
+      pullRequestUrl: "https://github.com/octo/app/pull/7",
       pullRequestBranch: null
     });
     expect(harness.operation.verification).toMatchObject({
@@ -2768,7 +2953,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     ).toBe(true);
     expect(harness.commitStates.at(-1)).toMatchObject({
       mode: "pull_request",
-      pullRequestUrl: null
+      pullRequestUrl: "https://github.com/octo/app/pull/7"
     });
   });
 
@@ -2823,14 +3008,28 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     // The claim is only honest once the dispatch was accepted, so it must
     // follow it rather than predict it.
     expect(
-      harness.steps.indexOf("\u2705 Credentials verification dispatched.")
+      harness.steps.indexOf("\u2705 Credential verification dispatched.")
     ).toBeLessThan(
       harness.steps.findIndex((step) => step.includes("is running against"))
     );
   });
 
   it("prompts for the merge when it does not dispatch", async () => {
-    const harness = start(protectedScript);
+    const harness = start({
+      ...protectedScript,
+      fileReadResults: {
+        ".github/workflows/radius-verify-credentials.yml": {
+          content: null,
+          error: "HTTP 404: Not Found",
+          status: 404
+        },
+        ".github/workflows/run-rad-commands.yml": {
+          content: null,
+          error: "connection reset",
+          status: null
+        }
+      }
+    });
 
     const response = await post({ repo: "octo/app" });
 
@@ -2838,8 +3037,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(
       harness.steps.filter((step) => step.startsWith("\u{1F449}"))
     ).toEqual([
-      "\u{1F449} Merge the pull request above to finish setup; credential verification " +
-        'and deploys run once it lands on "main".'
+      '\u{1F449} Merge the pull request above to put the workflows on "main", then retry credential verification.'
     ]);
     expect(
       harness.steps.some((step) => step.includes("is running against"))
@@ -2847,6 +3045,9 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(
       harness.ghCalls.some((call) => call.startsWith("workflow run "))
     ).toBe(false);
+    expect(harness.steps).toContain(
+      "⚠️ Setup-branch credential verification is disabled: Radius could not safely inspect the default branch's deploy dispatcher for automatic triggers."
+    );
   });
 
   // Merging is not what unblocks this run: verification was skipped because the
@@ -2953,6 +3154,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     expect(
       harness.ghCalls.some((call) => call.startsWith("workflow run "))
     ).toBe(false);
+    expect(harness.journal).not.toContain("setupPushOperationMarker:op-http");
   });
 
   // A stop leaves the operation cancelled, so the guidance is deliberately not
@@ -3015,7 +3217,7 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     ).toBe(false);
   });
 
-  it("keeps the branch and asks the user to open the pull request manually when the API refuses", async () => {
+  it("still verifies on the setup branch when opening the pull request fails", async () => {
     const harness = start({
       ...protectedScript,
       pullRequest: { ok: false, stderr: "HTTP 422: already exists" }
@@ -3024,18 +3226,16 @@ describe("create-environment real-loopback HIT: the protected-branch path", () =
     const response = await post({ repo: "octo/app" });
 
     expect(await response.json()).toMatchObject({
-      actionRequired: true,
+      actionRequired: false,
       pullRequestUrl: "",
-      pullRequestBranch: "radius/setup-dev-workflows-op-http"
+      pullRequestBranch: null
     });
-    expect(harness.commitStates).toEqual([
-      {
-        mode: "pull_request",
-        branch: "radius/setup-dev-workflows-op-http",
-        baseBranch: "main",
-        pullRequestUrl: null
-      }
-    ]);
+    expect(harness.commitStates.at(-1)).toEqual({
+      mode: "pull_request",
+      branch: "radius/setup-dev-workflows-op-http",
+      baseBranch: "main",
+      pullRequestUrl: null
+    });
     expect(
       harness.steps.some((step) =>
         step.includes("could not open a pull request automatically")
@@ -3079,7 +3279,7 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
 
     expect(
       harness.journal.filter((entry) => entry === "checkpoint")
-    ).toHaveLength(10);
+    ).toHaveLength(11);
   });
 
   it("passes every safe boundary in order when no stop is recorded", async () => {
@@ -3102,6 +3302,7 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
       "stopBoundary:after-state-package-configuration",
       "stopBoundary:before-provider-configuration",
       "stopBoundary:after-provider-configuration",
+      "stopBoundary:before-workflow-policy-read",
       "stopBoundary:before-workflow-commit",
       "stopBoundary:before-workflow-provider-mutation",
       "stopBoundary:after-workflow-commit",
@@ -3144,20 +3345,33 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
   // reaches it. The property under test is the same every time: the write that
   // was already running completes, and nothing after the boundary starts.
   it.each([
-    { boundary: "before-workflow-commit", committed: false, dispatched: false },
+    {
+      boundary: "before-workflow-policy-read",
+      committed: false,
+      dispatched: false,
+      policyRead: false
+    },
+    {
+      boundary: "before-workflow-commit",
+      committed: false,
+      dispatched: false,
+      policyRead: true
+    },
     {
       boundary: "before-verification-dispatch",
       committed: true,
-      dispatched: false
+      dispatched: false,
+      policyRead: true
     },
     {
       boundary: "after-verification-dispatch",
       committed: true,
-      dispatched: true
+      dispatched: true,
+      policyRead: true
     }
   ])(
     "honors a stop that arrives as the run reaches the $boundary boundary",
-    async ({ boundary, committed, dispatched }) => {
+    async ({ boundary, committed, dispatched, policyRead }) => {
       const harness = start();
       harness.setJournalHook((entry) => {
         if (entry === `stopBoundary:${boundary}`)
@@ -3177,6 +3391,11 @@ describe("create-environment real-loopback HIT: the cancellation gates", () => {
       expect(harness.journal.includes("dispatchVerifyWorkflow")).toBe(
         dispatched
       );
+      expect(
+        harness.journal.some((entry) =>
+          entry.startsWith("fetchFileFromRepoResult:")
+        )
+      ).toBe(policyRead);
       // A stopped run never reports success.
       expect(body.success).toBeUndefined();
     }

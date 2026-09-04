@@ -126,6 +126,7 @@ export interface SelectedGhExecutor {
 export interface ContentResult {
   content: string | null;
   error: string | null;
+  status: number | null;
 }
 
 export interface ContentBytesTooLarge {
@@ -988,6 +989,20 @@ export async function selectedFetchFileFromRepo(
   path: string,
   branch = "main"
 ): Promise<string | null> {
+  return (await selectedFetchFileFromRepoResult(executor, repo, path, branch))
+    .content;
+}
+
+export async function selectedFetchFileFromRepoResult(
+  executor: SelectedGhExecutor,
+  repo: string,
+  path: string,
+  branch = "main"
+): Promise<{
+  content: string | null;
+  error: string | null;
+  status: number | null;
+}> {
   const result = await executor.run(
     [
       "api",
@@ -997,8 +1012,31 @@ export async function selectedFetchFileFromRepo(
     ],
     { timeout: 15000 }
   );
-  if (result.code !== 0 || !result.stdout.trim()) return null;
-  return Buffer.from(result.stdout.trim(), "base64").toString("utf8");
+  const statusMatch = result.stderr.match(/\bHTTP\s+(\d{3})\b/i);
+  const status =
+    result.code === 0 ? 200
+    : statusMatch ? Number(statusMatch[1])
+    : null;
+  if (result.code !== 0) {
+    return {
+      content: null,
+      error:
+        (result.stderr || result.stdout || "").trim() || "GitHub API failed.",
+      status
+    };
+  }
+  if (!result.stdout.trim()) {
+    return {
+      content: null,
+      error: "GitHub returned an empty repository file.",
+      status: 200
+    };
+  }
+  return {
+    content: Buffer.from(result.stdout.trim(), "base64").toString("utf8"),
+    error: null,
+    status: 200
+  };
 }
 
 export async function selectedGetDefaultBranch(
@@ -1460,22 +1498,33 @@ export function ghApiGetContentResult(
           const detail = redactGhCredentials(
             (stderr && stderr.trim()) || err.message || String(err)
           );
-          resolve({ content: null, error: detail.trim() });
+          const statusMatch = detail.match(/\bHTTP\s+(\d{3})\b/i);
+          resolve({
+            content: null,
+            error: detail.trim(),
+            status: statusMatch ? Number(statusMatch[1]) : null
+          });
           return;
         }
         if (!stdout || !stdout.trim()) {
-          resolve({ content: null, error: "empty response from gh api" });
+          resolve({
+            content: null,
+            error: "empty response from gh api",
+            status: 200
+          });
           return;
         }
         try {
           resolve({
             content: Buffer.from(stdout.trim(), "base64").toString("utf8"),
-            error: null
+            error: null,
+            status: 200
           });
         } catch (e) {
           resolve({
             content: null,
-            error: `failed to decode response: ${errorMessage(e)}`
+            error: `failed to decode response: ${errorMessage(e)}`,
+            status: 200
           });
         }
       }
@@ -1483,7 +1532,7 @@ export function ghApiGetContentResult(
   });
 }
 
-/** Repo-file variant of ghApiGetContentResult. Resolves `{ content, error }`. */
+/** Repo-file variant of ghApiGetContentResult. */
 export function fetchFileFromRepoResult(
   repo: string,
   path: string,

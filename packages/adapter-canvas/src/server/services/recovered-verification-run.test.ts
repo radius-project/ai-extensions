@@ -27,6 +27,7 @@ function identity(
     operationMarker: MARKER,
     dispatchedAt: DISPATCHED_AT,
     baselineRunId: 100,
+    event: "workflow_dispatch",
     ...overrides
   };
 }
@@ -111,7 +112,8 @@ describe("reading a restarted verification's dispatch identity", () => {
       environment: ENVIRONMENT,
       operationMarker: "",
       dispatchedAt: Number.NaN,
-      baselineRunId: null
+      baselineRunId: null,
+      event: "workflow_dispatch"
     });
   });
 
@@ -155,6 +157,16 @@ describe("recovering a verification run after a restart", () => {
       runId: "999",
       runUrl: `https://github.com/${REPO}/actions/runs/999`
     });
+  });
+
+  it("recovers an exact setup-branch push run from the persisted event", async () => {
+    const outcome = await recoverVerificationRun({
+      runId: null,
+      identity: identity({ event: "push" }),
+      listRuns: async () => listed([run({ event: "push" })])
+    });
+
+    expect(outcome).toMatchObject({ state: "discovered", runId: "101" });
   });
 
   it("hands off a legacy workflow that cannot expose a marker instead of waiting", async () => {

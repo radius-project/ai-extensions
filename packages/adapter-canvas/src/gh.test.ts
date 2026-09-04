@@ -1551,18 +1551,98 @@ describe.sequential("selected GitHub executor", () => {
     const executor = await gh.createSelectedGhExecutor("tokuser");
     childProcess.execFile.mockClear();
 
-    await gh.selectedFetchFileFromRepo(
-      executor,
-      "octo/app",
-      "app.bicep",
-      "main"
-    );
+    await expect(
+      gh.selectedFetchFileFromRepo(executor, "octo/app", "app.bicep", "main")
+    ).resolves.toBe("main");
+    await expect(
+      gh.selectedFetchFileFromRepoResult(
+        executor,
+        "octo/app",
+        "app.bicep",
+        "main"
+      )
+    ).resolves.toEqual({
+      content: "main",
+      error: null,
+      status: 200
+    });
     await gh.selectedGetDefaultBranch(executor, "octo/app");
     await gh.selectedGetBranchHeadSha(executor, "octo/app", "main");
 
     expect(
       childProcess.execFile.mock.calls.map(([, , options]) => options.timeout)
-    ).toEqual([15000, 15000, 15000, 15000]);
+    ).toEqual([15000, 15000, 15000, 15000, 15000]);
+  });
+
+  it("reports an explicit 404 for a missing selected-account repository file", async () => {
+    const missing = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      apiLogin: "tokuser",
+      commandResult: { error: "HTTP 404", stderr: "HTTP 404: Not Found" }
+    });
+    const missingExecutor = await missing.createSelectedGhExecutor("tokuser");
+
+    await expect(
+      missing.selectedFetchFileFromRepoResult(
+        missingExecutor,
+        "octo/app",
+        "missing.yml",
+        "main"
+      )
+    ).resolves.toMatchObject({ content: null, status: 404 });
+  });
+
+  it("fails closed on an empty selected-account repository file response", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      apiLogin: "tokuser",
+      commandResult: { stdout: "" }
+    });
+    const executor = await gh.createSelectedGhExecutor("tokuser");
+
+    await expect(
+      gh.selectedFetchFileFromRepoResult(
+        executor,
+        "octo/app",
+        "workflow.yml",
+        "main"
+      )
+    ).resolves.toEqual({
+      content: null,
+      error: "GitHub returned an empty repository file.",
+      status: 200
+    });
+  });
+
+  it("preserves success and failure status on default-account repository reads", async () => {
+    const success = await loadGh("linux", {
+      commandResult: { stdout: "bWFpbg==" }
+    });
+    await expect(
+      success.fetchFileFromRepoResult("octo/app", "workflow.yml", "main")
+    ).resolves.toEqual({
+      content: "main",
+      error: null,
+      status: 200
+    });
+
+    const denied = await loadGh("linux", {
+      commandResult: {
+        error: "HTTP 403",
+        stderr: "HTTP 403: Resource not accessible"
+      }
+    });
+    await expect(
+      denied.fetchFileFromRepoResult("octo/app", "workflow.yml", "main")
+    ).resolves.toEqual({
+      content: null,
+      error: "HTTP 403: Resource not accessible",
+      status: 403
+    });
   });
 });
 

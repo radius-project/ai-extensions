@@ -181,6 +181,7 @@ export interface CreateEnvironmentPullRequestResult {
 
 export interface CredentialVerificationPlanResult {
   shouldDispatch: boolean;
+  trigger: "workflow_dispatch" | "push" | "none";
   ref: string;
   defaultBranch: string;
   pullRequestUrl: string;

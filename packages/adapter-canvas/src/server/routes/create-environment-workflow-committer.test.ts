@@ -13,6 +13,7 @@ import {
   isProtectedBranchFailure,
   readWorkflowCommitProvenance,
   recordedSetupBranchCreate,
+  setupWorkflowBranchName,
   workflowContentDigest,
   type WorkflowFileCommitterPorts
 } from "./create-environment-workflow-committer.js";
@@ -22,6 +23,17 @@ interface GhCall {
   kind: "runGh" | "runGhWorkflow";
   args: string[];
 }
+
+describe("setup workflow branch identity", () => {
+  it("uses the persisted operation suffix and a clock fallback", () => {
+    expect(setupWorkflowBranchName("dev", "op_abcdef123456789", 99)).toBe(
+      "radius/setup-dev-workflows-abcdef123456"
+    );
+    expect(setupWorkflowBranchName("dev", "", 99)).toBe(
+      "radius/setup-dev-workflows-99"
+    );
+  });
+});
 
 interface Script {
   runGh?: Partial<CreateEnvironmentCommandResult>[];

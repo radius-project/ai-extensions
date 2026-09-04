@@ -2,6 +2,11 @@
 ---
 name: Radius - Verify Credentials
 on:
+  push:
+    branches:
+      - "radius/setup-**"
+    paths:
+      - ".github/workflows/radius-verify-credentials.yml"
   workflow_dispatch:
     inputs:
       environment:
@@ -19,7 +24,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    environment: ${{ inputs.environment }}
+    environment: ${{ inputs.environment || '{{ENV}}' }}
     steps:
       - name: Inspect GitHub OIDC token claims
         id: oidc_claims
@@ -179,6 +184,6 @@ jobs:
       - name: Summary
         run: |
           echo "## ✅ Credentials Verified" >> $GITHUB_STEP_SUMMARY
-          echo "Environment: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "Environment: ${{ inputs.environment || '{{ENV}}' }}" >> $GITHUB_STEP_SUMMARY
           echo "Provider: azure" >> $GITHUB_STEP_SUMMARY
           echo "GHCR package push: ${GHCR_PUSH_CHECK:-unknown}" >> $GITHUB_STEP_SUMMARY

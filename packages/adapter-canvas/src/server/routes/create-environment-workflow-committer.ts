@@ -70,6 +70,15 @@ export interface WorkflowFileCommitterTarget {
   envName: string;
 }
 
+export function setupWorkflowBranchName(
+  environment: string,
+  operationId: string,
+  now: number
+): string {
+  const suffix = operationId.replace(/^op_/, "").slice(0, 12) || String(now);
+  return `radius/setup-${environment}-workflows-${suffix}`;
+}
+
 export interface WorkflowFileCommitter {
   // The lazily created PR branch, or undefined while commits still go direct.
   pullRequestState(): PullRequestBranchState | undefined;
@@ -208,10 +217,6 @@ export function createWorkflowFileCommitter(
     const base = await ports.getDefaultBranch(target.targetRepo);
     if (!base)
       throw new Error("could not resolve the repository default branch");
-    const suffix =
-      ports.mutationRecovery?.operation.operationId
-        .replace(/^op_/, "")
-        .slice(0, 12) || String(ports.now());
     // The commit this branch was cut from is part of the mutation's identity
     // and is also what a later delete compares the branch head against. Reading
     // it fresh on every attempt would move that identity whenever the default
@@ -228,7 +233,12 @@ export function createWorkflowFileCommitter(
     if (!baseSha)
       throw new Error(`could not resolve head of base branch "${base}"`);
     const branch =
-      recorded?.branch || `radius/setup-${target.envName}-workflows-${suffix}`;
+      recorded?.branch ||
+      setupWorkflowBranchName(
+        target.envName,
+        ports.mutationRecovery?.operation.operationId || "",
+        ports.now()
+      );
     if (ports.mutationRecovery) {
       const mutationTarget = `${target.targetRepo}\0${branch}\0${baseSha}`;
       const recordedCreate = providerMutationRecord(

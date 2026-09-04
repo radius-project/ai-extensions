@@ -380,7 +380,8 @@ export async function runVerificationDispatch(
         dispatchedAt: identity.dispatchedAt,
         ref: identity.ref,
         environment: identity.environment,
-        operationMarker: identity.operationMarker
+        operationMarker: identity.operationMarker,
+        event: "workflow_dispatch"
       });
       if (exact.state === "applied") {
         const runUrl = `https://github.com/${input.repo}/actions/runs/${exact.runId}`;
