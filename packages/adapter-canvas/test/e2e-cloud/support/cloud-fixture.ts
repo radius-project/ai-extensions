@@ -94,9 +94,14 @@ export interface CloudFixture {
    * Waits until the app registration carries no credential for the subject.
    *
    * Unlike app-registration and role-assignment absence, this mirror validates
-   * product deletion of the environment-specific credential.
+   * product deletion of the environment-specific credential. When the parent
+   * registration is expected to survive, its exact object id remains required
+   * throughout the wait so a transient missing read cannot prove absence.
    */
-  assertFederatedCredentialAbsent(subject: string): Promise<void>;
+  assertFederatedCredentialAbsent(
+    subject: string,
+    expectedAppRegistration?: AppRegistrationRecord
+  ): Promise<void>;
   /**
    * Waits until no role assignment for the principal remains in scope.
    *
@@ -617,32 +622,54 @@ export async function createCloudFixture(
       });
     },
 
-    async assertFederatedCredentialAbsent(subject) {
+    async assertFederatedCredentialAbsent(subject, expectedAppRegistration) {
       requireObservedPresent(
         federatedCredentialKey(subject),
         `the federated credential for subject "${subject}"`
       );
-      const apps = await listAppRegistrations(commands, expectedAppName);
-      // No application at all is the strongest form of the credential's
-      // absence, and is what a complete cloud cleanup would leave behind.
-      const app = apps[0];
-      if (!app) return;
+      let app: AppRegistrationRecord | undefined;
+      let appIdForTimeout = expectedAppRegistration?.appId ?? expectedAppName;
       let remaining: Array<{ name: string; subject: string }> = [];
       await pollForValue({
         ports,
         timeoutMs: assertionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
         probe: async () => {
-          remaining = await listFederatedCredentials(commands, app.objectId);
+          const apps = await listAppRegistrations(commands, expectedAppName);
+          app =
+            expectedAppRegistration ?
+              apps.find(
+                (candidate) =>
+                  candidate.objectId === expectedAppRegistration.objectId
+              )
+            : apps[0];
+          // Cleanup may delete the parent registration. The environment journey
+          // instead requires its retained parent to remain observable.
+          if (!app) return expectedAppRegistration ? undefined : true;
+          appIdForTimeout = expectedAppRegistration?.appId ?? app.appId;
+          remaining = await listFederatedCredentials(
+            commands,
+            expectedAppRegistration?.objectId ?? app.objectId
+          );
           return (
               remaining.some((credential) => credential.subject === subject)
             ) ?
               undefined
             : true;
         },
-        timeoutMessage: () =>
-          `Timed out after ${assertionTimeoutMs}ms waiting for app registration ${app.appId} to drop its ` +
-          `federated credential for subject "${subject}"; it still carries ${remaining.length} credential(s).`
+        timeoutMessage: () => {
+          if (expectedAppRegistration && !app)
+            return (
+              `Timed out after ${assertionTimeoutMs}ms waiting for retained app registration ` +
+              `${expectedAppRegistration.appId} (${expectedAppRegistration.objectId}) to remain observable ` +
+              `while checking federated credential subject "${subject}".`
+            );
+          return (
+            `Timed out after ${assertionTimeoutMs}ms waiting for app registration ` +
+            `${appIdForTimeout} to drop its ` +
+            `federated credential for subject "${subject}"; it still carries ${remaining.length} credential(s).`
+          );
+        }
       });
     },
 

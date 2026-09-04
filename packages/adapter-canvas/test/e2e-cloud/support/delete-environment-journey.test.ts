@@ -40,7 +40,11 @@ describe("assertEnvironmentDeletionIdentityOutcome", () => {
   function recordingAssertions(
     options: {
       readonly failAt?: string;
-      readonly replaceOnAppCall?: number;
+      readonly appReplacement?: {
+        readonly call: number;
+        readonly appId?: string;
+        readonly objectId?: string;
+      };
     } = {}
   ): {
     readonly assertions: Assertions;
@@ -59,16 +63,18 @@ describe("assertEnvironmentDeletionIdentityOutcome", () => {
         assertAppRegistrationExists: async () => {
           appCalls += 1;
           await record(`app-registration:present:${appCalls}`);
-          return appCalls === options.replaceOnAppCall ?
+          return appCalls === options.appReplacement?.call ?
               {
                 ...APP,
-                appId: "replacement-app",
-                objectId: "replacement-object"
+                appId: options.appReplacement.appId ?? APP.appId,
+                objectId: options.appReplacement.objectId ?? APP.objectId
               }
             : APP;
         },
-        assertFederatedCredentialAbsent: (subject) =>
-          record(`federated-credential:absent:${subject}`),
+        assertFederatedCredentialAbsent: (subject, expectedApp) =>
+          record(
+            `federated-credential:absent:${subject}:${expectedApp?.objectId ?? "unscoped"}`
+          ),
         assertRoleAssignmentExists: (principalId) =>
           record(`role-assignment:present:${principalId}`)
       },
@@ -89,8 +95,8 @@ describe("assertEnvironmentDeletionIdentityOutcome", () => {
 
     expect(calls).toEqual([
       "app-registration:present:1",
-      `federated-credential:absent:${SUBJECTS[0]}`,
-      `federated-credential:absent:${SUBJECTS[1]}`,
+      `federated-credential:absent:${SUBJECTS[0]}:${APP.objectId}`,
+      `federated-credential:absent:${SUBJECTS[1]}:${APP.objectId}`,
       `role-assignment:present:${PRINCIPAL_ID}`,
       "app-registration:present:2"
     ]);
@@ -104,10 +110,10 @@ describe("assertEnvironmentDeletionIdentityOutcome", () => {
     ],
     [
       "federated credential",
-      `federated-credential:absent:${SUBJECTS[0]}`,
+      `federated-credential:absent:${SUBJECTS[0]}:${APP.objectId}`,
       [
         "app-registration:present:1",
-        `federated-credential:absent:${SUBJECTS[0]}`
+        `federated-credential:absent:${SUBJECTS[0]}:${APP.objectId}`
       ]
     ],
     [
@@ -115,8 +121,8 @@ describe("assertEnvironmentDeletionIdentityOutcome", () => {
       `role-assignment:present:${PRINCIPAL_ID}`,
       [
         "app-registration:present:1",
-        `federated-credential:absent:${SUBJECTS[0]}`,
-        `federated-credential:absent:${SUBJECTS[1]}`,
+        `federated-credential:absent:${SUBJECTS[0]}:${APP.objectId}`,
+        `federated-credential:absent:${SUBJECTS[1]}:${APP.objectId}`,
         `role-assignment:present:${PRINCIPAL_ID}`
       ]
     ],
@@ -125,8 +131,8 @@ describe("assertEnvironmentDeletionIdentityOutcome", () => {
       "app-registration:present:2",
       [
         "app-registration:present:1",
-        `federated-credential:absent:${SUBJECTS[0]}`,
-        `federated-credential:absent:${SUBJECTS[1]}`,
+        `federated-credential:absent:${SUBJECTS[0]}:${APP.objectId}`,
+        `federated-credential:absent:${SUBJECTS[1]}:${APP.objectId}`,
         `role-assignment:present:${PRINCIPAL_ID}`,
         "app-registration:present:2"
       ]
@@ -148,23 +154,27 @@ describe("assertEnvironmentDeletionIdentityOutcome", () => {
     }
   );
 
-  it.each([1, 2])(
-    "rejects an app identity replacement at check %i",
-    async (replaceOnAppCall) => {
-      const { assertions } = recordingAssertions({ replaceOnAppCall });
+  it.each([
+    ["initial app id", 1, { appId: "replacement-app" }],
+    ["initial object id", 1, { objectId: "replacement-object" }],
+    ["final app id", 2, { appId: "replacement-app" }],
+    ["final object id", 2, { objectId: "replacement-object" }]
+  ] as const)("rejects an %s mismatch", async (_label, call, replacement) => {
+    const { assertions } = recordingAssertions({
+      appReplacement: { call, ...replacement }
+    });
 
-      await expect(
-        assertEnvironmentDeletionIdentityOutcome({
-          assertions,
-          expectedAppRegistration: APP,
-          federatedSubjects: SUBJECTS,
-          principalId: PRINCIPAL_ID
-        })
-      ).rejects.toThrow(
-        /Expected app registration app-1 \(object-1\).*replacement-app \(replacement-object\)/
-      );
-    }
-  );
+    await expect(
+      assertEnvironmentDeletionIdentityOutcome({
+        assertions,
+        expectedAppRegistration: APP,
+        federatedSubjects: SUBJECTS,
+        principalId: PRINCIPAL_ID
+      })
+    ).rejects.toThrow(
+      /Expected app registration app-1 \(object-1\).*but found/
+    );
+  });
 });
 
 describe("findDeleteEnvironmentSuccessProblems", () => {

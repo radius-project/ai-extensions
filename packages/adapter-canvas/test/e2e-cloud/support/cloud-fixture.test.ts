@@ -10,6 +10,7 @@ import {
   type FakeCommandStub,
   type FakeFixturePorts
 } from "./fake-cloud-commands.js";
+import { assertEnvironmentDeletionIdentityOutcome } from "./delete-environment-journey.js";
 
 const SUBSCRIPTION = "11111111-2222-3333-4444-555555555555";
 const REPOSITORY = "fixture-owner/fixture-repo";
@@ -1472,6 +1473,110 @@ describe("createCloudFixture", () => {
           fixture.assertFederatedCredentialAbsent(SUBJECT)
         ).resolves.toBeUndefined();
         expect(listCalls()).toBe(before);
+      });
+
+      it("retries a temporarily missing retained registration before checking its credential", async () => {
+        const retainedApp = {
+          appId: "app-1",
+          objectId: "obj-1",
+          displayName: APP_NAME
+        } as const;
+        const role = {
+          stdout: JSON.stringify([
+            { principalId: "sp-1", roleDefinitionName: "Contributor" }
+          ])
+        };
+        const { fixture, fake } = await observedHarness([
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: { stdout: APP_LIST_RESULT },
+            times: 1
+          },
+          { tool: "az", match: APP_LIST, respond: { stdout: "[]" }, times: 1 },
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: { stdout: APP_LIST_RESULT },
+            times: 1
+          },
+          {
+            tool: "az",
+            match: FIC_LIST,
+            respond: { stdout: "[]" },
+            times: 1
+          },
+          { tool: "az", match: ROLE_LIST, respond: role, times: 1 },
+          { tool: "az", match: APP_LIST, respond: { stdout: APP_LIST_RESULT } }
+        ]);
+        const callsBefore = fake.commands.calls.length;
+
+        await assertEnvironmentDeletionIdentityOutcome({
+          assertions: fixture,
+          expectedAppRegistration: retainedApp,
+          federatedSubjects: [SUBJECT],
+          principalId: "sp-1"
+        });
+
+        expect(fake.waits).toEqual([1000]);
+        expect(
+          fake.commands.calls
+            .slice(callsBefore)
+            .map((call) => `${call.tool} ${call.args.join(" ")}`)
+        ).toEqual([
+          expect.stringContaining(`az ${APP_LIST.join(" ")}`),
+          expect.stringContaining(`az ${APP_LIST.join(" ")}`),
+          expect.stringContaining(`az ${APP_LIST.join(" ")}`),
+          expect.stringContaining("federated-credential list --id obj-1"),
+          expect.stringContaining("az role assignment list"),
+          expect.stringContaining(`az ${APP_LIST.join(" ")}`)
+        ]);
+      });
+
+      it("fails closed when the retained registration cannot be observed", async () => {
+        const { fixture, fake } = await observedHarness();
+        const credentialCallsBefore = fake.commands
+          .commandLines("az")
+          .filter((line) => line.includes("federated-credential list")).length;
+
+        await expect(
+          fixture.assertFederatedCredentialAbsent(SUBJECT, {
+            appId: "app-1",
+            objectId: "obj-1",
+            displayName: APP_NAME
+          })
+        ).rejects.toThrow(
+          /retained app registration app-1 \(obj-1\) to remain observable/
+        );
+        expect(fake.waits).toHaveLength(30);
+        expect(
+          fake.commands
+            .commandLines("az")
+            .filter((line) => line.includes("federated-credential list"))
+        ).toHaveLength(credentialCallsBefore);
+      });
+
+      it("reports a credential left on the retained registration", async () => {
+        const { fixture } = await observedHarness([
+          { tool: "az", match: APP_LIST, respond: { stdout: APP_LIST_RESULT } },
+          {
+            tool: "az",
+            match: FIC_LIST,
+            respond: {
+              stdout: JSON.stringify([{ name: "fc", subject: SUBJECT }])
+            }
+          }
+        ]);
+
+        await expect(
+          fixture.assertFederatedCredentialAbsent(SUBJECT, {
+            appId: "app-1",
+            objectId: "obj-1",
+            displayName: APP_NAME
+          })
+        ).rejects.toThrow(
+          /app registration app-1 to drop its federated credential.*still carries 1 credential/
+        );
       });
 
       it("reports a credential the product failed to remove", async () => {

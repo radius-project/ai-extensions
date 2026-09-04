@@ -46,7 +46,10 @@ export async function assertEnvironmentDeletionIdentityOutcome(
 
   await assertExpectedAppRegistration();
   for (const subject of identity.federatedSubjects)
-    await identity.assertions.assertFederatedCredentialAbsent(subject);
+    await identity.assertions.assertFederatedCredentialAbsent(
+      subject,
+      identity.expectedAppRegistration
+    );
   await identity.assertions.assertRoleAssignmentExists(identity.principalId);
   await assertExpectedAppRegistration();
 }
