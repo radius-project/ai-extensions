@@ -78,9 +78,11 @@ import {
   findDeleteEnvironmentRefusalProblems,
   findDeployedApplicationProblems,
   findSurvivingArtifactProblems,
+  REQUIRED_LIFECYCLE_WORKFLOWS,
   readApplicationNames,
   readDeploymentRows,
   readDeployStatusSnapshot,
+  repositoryListingPath,
   requireSingleApplication
 } from "./support/deploy-journey.js";
 import {
@@ -430,7 +432,8 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
             "gh api the repository's open pull requests"
           ),
           cloud.environmentName
-        )
+        ),
+        requiredPaths: REQUIRED_LIFECYCLE_WORKFLOWS
       });
       expect(
         publication.outcome,
@@ -470,11 +473,15 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       await page.goto(`${harness.baseUrl}/?page=deploying`);
       await page.waitForLoadState("domcontentloaded");
 
+      const applicationListingPath = repositoryListingPath(
+        "/api/list-applications",
+        cloud.repository
+      );
       const applications = readApplicationNames(
-        await page.evaluate(async () => {
-          const response = await fetch("/api/list-applications");
+        await page.evaluate(async (path) => {
+          const response = await fetch(path);
           return (await response.json()) as unknown;
-        })
+        }, applicationListingPath)
       );
       deployedApplication = requireSingleApplication(applications);
       deployedNamespace = applicationNamespace(
@@ -542,11 +549,16 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         )
       ).toEqual([]);
 
+      const deploymentListingPath = repositoryListingPath(
+        "/api/list-deployments",
+        cloud.repository,
+        true
+      );
       const rows = readDeploymentRows(
-        await page.evaluate(async () => {
-          const response = await fetch("/api/list-deployments?fresh=1");
+        await page.evaluate(async (path) => {
+          const response = await fetch(path);
           return (await response.json()) as unknown;
-        })
+        }, deploymentListingPath)
       );
       expect(
         classifyDeploymentPresence(
@@ -674,10 +686,17 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         .poll(
           async () => {
             const rows = readDeploymentRows(
-              await page.evaluate(async () => {
-                const response = await fetch("/api/list-deployments?fresh=1");
-                return (await response.json()) as unknown;
-              })
+              await page.evaluate(
+                async (path) => {
+                  const response = await fetch(path);
+                  return (await response.json()) as unknown;
+                },
+                repositoryListingPath(
+                  "/api/list-deployments",
+                  cloud.repository,
+                  true
+                )
+              )
             );
             return classifyDeploymentPresence(
               rows,
@@ -701,6 +720,14 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
           "The product-created service principal was not observed."
         );
       await cloud.assertRoleAssignmentExists(servicePrincipalId);
+      const principalAfter = readServicePrincipalObjectId(
+        await runAz(
+          ports.commands,
+          ["ad", "sp", "show", "--id", appBefore.appId, "-o", "json"],
+          `az ad sp show --id ${appBefore.appId} after deployment deletion`
+        )
+      );
+      expect(principalAfter).toBe(servicePrincipalId);
       const appAfter = await cloud.assertAppRegistrationExists();
       const variables = readEnvironmentVariables(
         await runGh(

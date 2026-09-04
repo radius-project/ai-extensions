@@ -27,15 +27,11 @@ export default defineConfig({
   // still relies on the same server warm-up and Windows shim.
   globalSetup: "./test/e2e/global-setup.ts",
   globalTeardown: "./test/e2e/global-teardown.ts",
-  // One journey provisions an Entra application, a service principal, two
-  // federated credentials, a role assignment, a GitHub Environment, and its
-  // workflows. The per-test budget has to outlast all of it, or a slow cloud
-  // reports as a product failure.
+  // No single stage may consume the installation token's full lifetime.
   timeout: 45 * 60 * 1000,
-  // The GitHub job allows 90 minutes. Keep the entire serial suite below that
-  // ceiling so suite growth cannot let GitHub cancel an in-flight test before
-  // Playwright writes its trace.
-  globalTimeout: 75 * 60 * 1000,
+  // The GitHub App token expires after one hour. Stop the entire serial journey
+  // at 50 minutes, leaving ten minutes for teardown while credentials are valid.
+  globalTimeout: 50 * 60 * 1000,
   expect: { timeout: 60_000 },
   // Concurrent runs contend for one repository-scoped Entra application, which
   // the product derives from the repository name alone.

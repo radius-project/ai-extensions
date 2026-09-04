@@ -179,6 +179,16 @@ describe("createFakeCloudCommands", () => {
     ]);
   });
 
+  it("records the per-probe kubectl timeout", async () => {
+    const fake = createFakeCloudCommands([
+      { tool: "kubectl", match: ["get", "deployments"], respond: {} }
+    ]);
+
+    await fake.port.runKubectl(["get", "deployments"], 30_000);
+
+    expect(fake.calls[0]?.timeoutMs).toBe(30_000);
+  });
+
   it("copies the argv so a caller cannot mutate the recording", async () => {
     const fake = createFakeCloudCommands([
       { tool: "az", match: ["version"], respond: {} }
