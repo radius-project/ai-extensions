@@ -2393,6 +2393,26 @@ describe("deploy flow", () => {
     expect(page.deployBtn.disabled).toBe(false);
   });
 
+  it("runs the cloud-auth-drift failure flow with no progress-modal chrome present", async () => {
+    const page = fixture({ withProgressModal: false });
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "failed",
+        errorKind: "cloud-auth-drift",
+        error: "authentication failed before any resource was deployed",
+        handoff: { pending: false, state: "idle" }
+      })
+    );
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+    expect(page.deployBtn.disabled).toBe(false);
+  });
+
   it("runs the generic failure flow with no progress-modal chrome present", async () => {
     const page = fixture({ withProgressModal: false });
     init(page);

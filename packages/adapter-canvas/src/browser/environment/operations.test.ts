@@ -2140,6 +2140,43 @@ describe("verify status polling", () => {
     expect(browser.els[PROGRESS_IDS.panel].style.display).toBe("none");
   });
 
+  it("sends an empty mutation nonce header when the page was served without one", async () => {
+    // The bypass POST always sets the nonce header; when the controller was
+    // initialized without a mutationNonce it falls back to an empty string
+    // (which the server then rejects) rather than omitting the header. This
+    // exercises that `|| ""` fallback branch.
+    const browser = setup();
+    const harness = createDeps();
+    const controller = controllerFor(browser, { deps: harness.deps });
+    await primeVerifyPoll(browser, controller);
+    browser.net.handle(verifyUrl(REPO, "dev", "op-1"), () =>
+      jsonResponse({
+        state: "failed",
+        error: "Actions run failed",
+        category: "permissions",
+        runId: "555"
+      })
+    );
+    await tickClock(browser.clock, 1500);
+
+    const container = browser.els[PROGRESS_IDS.verifyBypass];
+    const button = container.children[0];
+    browser.net.handle("/api/bypass-verification", () =>
+      jsonResponse({ success: true })
+    );
+    button.dispatch("click");
+    await flushPromises();
+
+    const bypassCall = browser.net.calls.find(
+      (call) => call.url === "/api/bypass-verification"
+    );
+    expect(
+      (bypassCall?.init?.headers as Record<string, string>)?.[
+        "X-Radius-Mutation-Nonce"
+      ]
+    ).toBe("");
+  });
+
   it("ignores a click on a bypass button left over from a superseded session", async () => {
     const browser = setup();
     const { controller, harness } = controllerWithHarness(browser);
