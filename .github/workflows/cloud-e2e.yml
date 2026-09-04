@@ -217,9 +217,10 @@ jobs:
           private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
           owner: ${{ steps.fixture.outputs.owner }}
           repositories: ${{ steps.fixture.outputs.name }}
-          permission-actions: read
+          permission-actions: write
           permission-administration: read
           permission-contents: write
+          permission-deployments: read
           permission-environments: write
           permission-pull-requests: write
           permission-variables: write
