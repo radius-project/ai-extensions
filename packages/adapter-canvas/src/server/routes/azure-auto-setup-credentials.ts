@@ -1208,7 +1208,7 @@ export async function configureAzureAutoSetupCredentials({
     `${operation.operationId}\0${servicePrincipalObjectId}\0Locks Contributor\0${contributorScope}`
   );
   steps.push(
-    `Assigning Locks Contributor on ${resourceGroup} (required to manage resource locks)...`
+    `Assigning Locks Contributor on ${resourceGroup} for applications that manage resource locks...`
   );
   const locksContributor = await assignRole(
     {

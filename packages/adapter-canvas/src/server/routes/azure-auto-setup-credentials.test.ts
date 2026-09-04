@@ -967,6 +967,9 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
       scope: resourceGroupScope,
       principalObjectId: OBJECT_ID
     });
+    expect(test.workflow.steps).toContain(
+      "Assigning Locks Contributor on rg-radius for applications that manage resource locks..."
+    );
     expect(test.calls.join("\n")).not.toContain("User Access Administrator");
   });
 
