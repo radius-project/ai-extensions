@@ -184,6 +184,7 @@ Thumbs.db
 # Playwright failure-only diagnostics (Phase 6 Chromium gate)
 test-results/
 playwright-report/
+playwright-report-cloud/
 playwright-visual-report/
 .playwright/
 
