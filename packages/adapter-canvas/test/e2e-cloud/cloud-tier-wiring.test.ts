@@ -11,6 +11,15 @@ import { describe, expect, it } from "vitest";
 import cloudConfig from "../../playwright.cloud.config.js";
 import chromiumConfig from "../../playwright.config.js";
 import vitestConfig from "../../vitest.config.js";
+import {
+  CLOUD_HOOK_TEARDOWN_HEADROOM_MS,
+  CLOUD_INSTALLATION_TOKEN_LIFETIME_MS,
+  CREATE_OPERATION_TIMEOUT_MS,
+  CREATE_TEST_TIMEOUT_MS,
+  DELETE_OPERATION_TIMEOUT_MS,
+  DELETE_TEST_TIMEOUT_MS,
+  SERIAL_TEST_TIMEOUT_BUDGET_MS
+} from "./support/cloud-timeout-budget.js";
 
 const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -43,6 +52,19 @@ describe("the cloud Playwright config", () => {
     expect(cloudConfig.timeout).toBeGreaterThan(chromiumTimeout);
     expect(cloudConfig.timeout).toBeGreaterThanOrEqual(30 * 60 * 1000);
     expect(cloudConfig.expect?.timeout).toBeGreaterThan(0);
+  });
+
+  it("keeps serial stages below the suite and credential ceilings", () => {
+    const globalTimeout = cloudConfig.globalTimeout ?? 0;
+
+    expect(CREATE_TEST_TIMEOUT_MS).toBeGreaterThan(CREATE_OPERATION_TIMEOUT_MS);
+    expect(DELETE_TEST_TIMEOUT_MS).toBeGreaterThan(DELETE_OPERATION_TIMEOUT_MS);
+    expect(
+      globalTimeout - SERIAL_TEST_TIMEOUT_BUDGET_MS
+    ).toBeGreaterThanOrEqual(CLOUD_HOOK_TEARDOWN_HEADROOM_MS);
+    expect(SERIAL_TEST_TIMEOUT_BUDGET_MS).toBeLessThan(
+      CLOUD_INSTALLATION_TOKEN_LIFETIME_MS
+    );
   });
 
   it("keeps its output apart so neither tier erases the other's traces", () => {
