@@ -75,7 +75,7 @@ export interface FixtureRepositoryPin {
 export const FIXTURE_REPOSITORY_PIN: FixtureRepositoryPin = {
   owner: FIXTURE_REPO_OWNER,
   name: FIXTURE_REPO_NAME,
-  baselineSha: FIXTURE_BASELINE_SHA,
+  baselineSha: FIXTURE_BASELINE_SHA
 };
 
 /**
@@ -88,7 +88,7 @@ export const FIXTURE_REPOSITORY_PIN: FixtureRepositoryPin = {
  * to prevent.
  */
 export function findUnprovisionedFixtureFields(
-  pin: FixtureRepositoryPin = FIXTURE_REPOSITORY_PIN,
+  pin: FixtureRepositoryPin = FIXTURE_REPOSITORY_PIN
 ): string[] {
   const missing: string[] = [];
   if (PLACEHOLDER_PATTERN.test(pin.owner)) missing.push("FIXTURE_REPO_OWNER");
@@ -105,18 +105,18 @@ export function findUnprovisionedFixtureFields(
  * placeholder must never be able to produce a green cloud result.
  */
 export function isFixtureRepositoryProvisioned(
-  pin: FixtureRepositoryPin = FIXTURE_REPOSITORY_PIN,
+  pin: FixtureRepositoryPin = FIXTURE_REPOSITORY_PIN
 ): boolean {
   return findUnprovisionedFixtureFields(pin).length === 0;
 }
 
 /** Explains, in a skip message, exactly what is still missing. */
 export function describeUnprovisionedFixtureRepository(
-  pin: FixtureRepositoryPin = FIXTURE_REPOSITORY_PIN,
+  pin: FixtureRepositoryPin = FIXTURE_REPOSITORY_PIN
 ): string {
   const missing = findUnprovisionedFixtureFields(pin);
-  return missing.length === 0
-    ? "The fixture repository is provisioned."
+  return missing.length === 0 ?
+      "The fixture repository is provisioned."
     : `The fixture repository is not provisioned yet: ${missing.join(", ")} still hold placeholder values in test/e2e-cloud/support/fixture-repository.ts.`;
 }
 
@@ -164,7 +164,7 @@ export function appRegistrationName(repository = FIXTURE_REPOSITORY): string {
 /** The resource-group scope the product assigns `Contributor` at. */
 export function resourceGroupScope(
   subscriptionId: string,
-  resourceGroup: string,
+  resourceGroup: string
 ): string {
   return `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`;
 }
@@ -177,7 +177,7 @@ export function shortenUniqueId(value: string): string {
   const normalized = value.toLowerCase().replace(/[^a-z0-9]/g, "");
   if (!normalized)
     throw new Error(
-      `A run unique id must contain at least one alphanumeric character; received "${value}".`,
+      `A run unique id must contain at least one alphanumeric character; received "${value}".`
     );
   return normalized.slice(0, 12);
 }
@@ -207,13 +207,13 @@ const AZURE_REGION_PATTERN = /^[a-z]+[a-z0-9]*$/;
  * a way that looks nothing like a missing variable.
  */
 export function resolveFixtureLocation(
-  value: string | undefined,
+  value: string | undefined
 ): string | undefined {
   const normalized = (value ?? "").trim().toLowerCase();
   if (!normalized) return undefined;
   if (!AZURE_REGION_PATTERN.test(normalized))
     throw new Error(
-      `AIEXT_CLOUD_E2E_AZURE_LOCATION must be an Azure region such as "westus3"; received "${value}".`,
+      `AIEXT_CLOUD_E2E_AZURE_LOCATION must be an Azure region such as "westus3"; received "${value}".`
     );
   return normalized;
 }

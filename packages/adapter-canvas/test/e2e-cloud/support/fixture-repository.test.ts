@@ -16,7 +16,7 @@ import {
   resourceGroupName,
   resourceGroupScope,
   shortenUniqueId,
-  WORKFLOW_FALLBACK_BRANCH_PREFIX,
+  WORKFLOW_FALLBACK_BRANCH_PREFIX
 } from "./fixture-repository.js";
 
 describe("pinned baseline constants", () => {
@@ -68,35 +68,35 @@ describe("findUnprovisionedFixtureFields", () => {
   const provisioned = {
     owner: "radius-project",
     name: "canvas-e2e-fixture",
-    baselineSha: "a".repeat(40),
+    baselineSha: "a".repeat(40)
   };
 
   it("reports nothing missing once every constant is real", () => {
     expect(findUnprovisionedFixtureFields(provisioned)).toEqual([]);
     expect(isFixtureRepositoryProvisioned(provisioned)).toBe(true);
     expect(describeUnprovisionedFixtureRepository(provisioned)).toBe(
-      "The fixture repository is provisioned.",
+      "The fixture repository is provisioned."
     );
   });
 
   it.each([
     [{ ...provisioned, owner: "TODO-owner" }, ["FIXTURE_REPO_OWNER"]],
     [{ ...provisioned, name: "TODO-repo" }, ["FIXTURE_REPO_NAME"]],
-    [{ ...provisioned, baselineSha: "0".repeat(40) }, ["FIXTURE_BASELINE_SHA"]],
+    [{ ...provisioned, baselineSha: "0".repeat(40) }, ["FIXTURE_BASELINE_SHA"]]
   ] as const)(
     "reports only the field still holding a placeholder",
     (pin, expected) => {
       expect(findUnprovisionedFixtureFields(pin)).toEqual([...expected]);
       expect(isFixtureRepositoryProvisioned(pin)).toBe(false);
-    },
+    }
   );
 
   it("does not mistake a real SHA that merely starts with zeros", () => {
     expect(
       findUnprovisionedFixtureFields({
         ...provisioned,
-        baselineSha: `00000${"b".repeat(35)}`,
-      }),
+        baselineSha: `00000${"b".repeat(35)}`
+      })
     ).toEqual([]);
   });
 
@@ -104,14 +104,14 @@ describe("findUnprovisionedFixtureFields", () => {
     expect(
       findUnprovisionedFixtureFields({
         ...provisioned,
-        owner: "not-a-TODO-owner",
-      }),
+        owner: "not-a-TODO-owner"
+      })
     ).toEqual([]);
   });
 
   it("defaults to the module's own pinned constants", () => {
     expect(findUnprovisionedFixtureFields()).toEqual(
-      findUnprovisionedFixtureFields(FIXTURE_REPOSITORY_PIN),
+      findUnprovisionedFixtureFields(FIXTURE_REPOSITORY_PIN)
     );
     expect(FIXTURE_REPOSITORY_PIN.baselineSha).toBe(FIXTURE_BASELINE_SHA);
   });
@@ -130,17 +130,17 @@ describe("run-scoped names", () => {
   it.each([
     ["the resource group", resourceGroupName],
     ["the cluster", clusterName],
-    ["the environment", environmentName],
+    ["the environment", environmentName]
   ])("gives two runs different names for %s", (_label, name) => {
     expect(name("run-one")).not.toBe(name("run-two"));
   });
 
   it.each([
     ["an empty id", ""],
-    ["a whitespace-only id", "   "],
+    ["a whitespace-only id", "   "]
   ])("refuses to name a resource from %s", (_label, value) => {
     expect(() => resourceGroupName(value)).toThrow(
-      "A run unique id is required",
+      "A run unique id is required"
     );
     expect(() => clusterName(value)).toThrow("A run unique id is required");
     expect(() => environmentName(value)).toThrow("A run unique id is required");
@@ -148,7 +148,7 @@ describe("run-scoped names", () => {
 
   it("builds the resource-group scope the product assigns Contributor at", () => {
     expect(resourceGroupScope("sub-1", "radtest-canvas-abc")).toBe(
-      "/subscriptions/sub-1/resourceGroups/radtest-canvas-abc",
+      "/subscriptions/sub-1/resourceGroups/radtest-canvas-abc"
     );
   });
 });
@@ -163,13 +163,13 @@ describe("appRegistrationName", () => {
     // the first occurrence only. Matching that exactly matters: a name built
     // differently would look for an app registration the product never created.
     expect(appRegistrationName("octo/app/extra")).toBe(
-      "radius-deploy-octo-app/extra",
+      "radius-deploy-octo-app/extra"
     );
   });
 
   it("is not run-scoped, so concurrent runs share one name", () => {
     expect(appRegistrationName("octo/app")).toBe(
-      appRegistrationName("octo/app"),
+      appRegistrationName("octo/app")
     );
   });
 
@@ -193,10 +193,10 @@ describe("shortenUniqueId", () => {
 
   it.each([
     ["an empty value", ""],
-    ["punctuation only", "----"],
+    ["punctuation only", "----"]
   ])("refuses %s, which would produce an unnamed resource", (_label, value) => {
     expect(() => shortenUniqueId(value)).toThrow(
-      "must contain at least one alphanumeric character",
+      "must contain at least one alphanumeric character"
     );
   });
 });
@@ -205,14 +205,14 @@ describe("resolveFixtureLocation", () => {
   it.each([
     ["an absent variable", undefined],
     ["an empty variable", ""],
-    ["a whitespace-only variable", "   "],
+    ["a whitespace-only variable", "   "]
   ])(
     "leaves the fixture's own default in place for %s",
     (_label, value: string | undefined) => {
       // undefined, not "": az group create --location "" fails in a way that
       // reads as an Azure fault rather than as an unset CI variable.
       expect(resolveFixtureLocation(value)).toBeUndefined();
-    },
+    }
   );
 
   it("passes a region through unchanged", () => {
@@ -230,10 +230,10 @@ describe("resolveFixtureLocation", () => {
   it.each([
     ["a display name with a space", "West US 3"],
     ["a value starting with a digit", "3westus"],
-    ["a value with punctuation", "west-us-3"],
+    ["a value with punctuation", "west-us-3"]
   ])("rejects %s rather than passing it to az", (_label, value) => {
     expect(() => resolveFixtureLocation(value)).toThrow(
-      "must be an Azure region",
+      "must be an Azure region"
     );
   });
 
