@@ -22,8 +22,10 @@ import {
   GRAPH_PAGE_STATE_ID,
   GRAPH_PLAN_BLOCKED_TITLE,
   GRAPH_PROGRESS_MS,
-  GRAPH_RETRY_MS,
+  GRAPH_RETRY_MAX_MS,
+  GRAPH_RETRY_SCHEDULE_MS,
   GRAPH_STALE_RETRY_MS,
+  graphRetryDelayMs,
   initializeGraphPage
 } from "./graph-page.js";
 
@@ -588,7 +590,7 @@ describe("initializeGraphPage", () => {
       })
     );
     await flushPromises();
-    browser.clock.tick(GRAPH_RETRY_MS);
+    browser.clock.tick(GRAPH_RETRY_MAX_MS);
     await flushPromises();
 
     expect(browser.nav.reloads).toBe(0);
@@ -723,7 +725,7 @@ describe("initializeGraphPage", () => {
     // manual branch-change load happened, not an extra retry-triggered load.
     expect(calls).toBe(2);
 
-    browser.clock.tick(GRAPH_RETRY_MS);
+    browser.clock.tick(GRAPH_RETRY_MAX_MS);
     await flushPromises();
     expect(calls).toBe(3);
     expect(bodies[0]).toContain('"restartWait":true');
@@ -745,7 +747,7 @@ describe("initializeGraphPage", () => {
     await flushPromises();
     const generating = status?.textContent;
 
-    browser.clock.tick(GRAPH_RETRY_MS);
+    browser.clock.tick(GRAPH_RETRY_MAX_MS);
     await flushPromises();
 
     expect(calls).toBe(2);
@@ -775,6 +777,142 @@ describe("initializeGraphPage", () => {
     await flushPromises();
     expect(calls).toBe(2);
     expect(browser.nav.reloads).toBe(0);
+  });
+
+  // Copilot usually finishes authoring the model within the first few seconds.
+  // The wait between polls therefore starts short and only lengthens for a
+  // genuinely slow modeling run, so the common case does not pay the worst
+  // case's idle time.
+  describe("app.bicep wait backoff", () => {
+    it("schedules each attempt at its position in the backoff schedule", () => {
+      expect(
+        GRAPH_RETRY_SCHEDULE_MS.map((_, attempt) => graphRetryDelayMs(attempt))
+      ).toEqual([...GRAPH_RETRY_SCHEDULE_MS]);
+    });
+
+    it("holds at the last schedule entry once the schedule is exhausted", () => {
+      expect(graphRetryDelayMs(GRAPH_RETRY_SCHEDULE_MS.length)).toBe(
+        GRAPH_RETRY_MAX_MS
+      );
+      expect(graphRetryDelayMs(10_000)).toBe(GRAPH_RETRY_MAX_MS);
+    });
+
+    it.each([
+      ["a negative attempt", -1],
+      ["a fractional attempt", 0.9],
+      ["a non-finite attempt", Number.NaN]
+    ])("falls back to the first delay for %s", (_label, attempt) => {
+      expect(graphRetryDelayMs(attempt)).toBe(GRAPH_RETRY_SCHEDULE_MS[0]);
+    });
+
+    it("polls again within the first schedule step rather than the longest one", async () => {
+      const { browser } = fixture({ loaded: false });
+      let calls = 0;
+      browser.net.handle("/api/load-graph", () => {
+        calls++;
+        return jsonResponse({ needsAppBicep: true });
+      });
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+      expect(calls).toBe(1);
+
+      browser.clock.tick(GRAPH_RETRY_SCHEDULE_MS[0] - 1);
+      await flushPromises();
+      expect(calls).toBe(1);
+
+      browser.clock.tick(1);
+      await flushPromises();
+      expect(calls).toBe(2);
+    });
+
+    it("lengthens the wait with each successive retry of the same wait", async () => {
+      const { browser } = fixture({ loaded: false });
+      let calls = 0;
+      browser.net.handle("/api/load-graph", () => {
+        calls++;
+        return jsonResponse({ needsAppBicep: true });
+      });
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      for (const [index, delay] of GRAPH_RETRY_SCHEDULE_MS.entries()) {
+        browser.clock.tick(delay - 1);
+        await flushPromises();
+        expect(calls).toBe(index + 1);
+
+        browser.clock.tick(1);
+        await flushPromises();
+        expect(calls).toBe(index + 2);
+      }
+
+      // Past the end of the schedule the wait holds steady instead of growing.
+      browser.clock.tick(GRAPH_RETRY_MAX_MS - 1);
+      await flushPromises();
+      expect(calls).toBe(GRAPH_RETRY_SCHEDULE_MS.length + 1);
+
+      browser.clock.tick(1);
+      await flushPromises();
+      expect(calls).toBe(GRAPH_RETRY_SCHEDULE_MS.length + 2);
+    });
+
+    it("restarts the backoff when a fresh request starts a new wait", async () => {
+      const { browser, branch } = fixture({ loaded: false });
+      let calls = 0;
+      browser.net.handle("/api/load-graph", () => {
+        calls++;
+        return jsonResponse({ needsAppBicep: true });
+      });
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+
+      browser.clock.tick(GRAPH_RETRY_SCHEDULE_MS[0]);
+      await flushPromises();
+      browser.clock.tick(GRAPH_RETRY_SCHEDULE_MS[1]);
+      await flushPromises();
+      expect(calls).toBe(3);
+
+      branch.dispatch("change");
+      await flushPromises();
+      expect(calls).toBe(4);
+
+      // The new wait is its own sequence, so it must not inherit the previous
+      // one's longer delay.
+      browser.clock.tick(GRAPH_RETRY_SCHEDULE_MS[0] - 1);
+      await flushPromises();
+      expect(calls).toBe(4);
+
+      browser.clock.tick(1);
+      await flushPromises();
+      expect(calls).toBe(5);
+    });
+
+    it("backs off the preloaded graph refresh on the same schedule", async () => {
+      const { browser } = fixture({ loaded: true });
+      let calls = 0;
+      browser.net.handle("/api/load-graph", () => {
+        calls++;
+        return jsonResponse({ needsAppBicep: true });
+      });
+      initializeGraphPage(browser.context, globals());
+      await flushPromises();
+      expect(calls).toBe(1);
+
+      browser.clock.tick(GRAPH_RETRY_SCHEDULE_MS[0] - 1);
+      await flushPromises();
+      expect(calls).toBe(1);
+
+      browser.clock.tick(1);
+      await flushPromises();
+      expect(calls).toBe(2);
+
+      browser.clock.tick(GRAPH_RETRY_SCHEDULE_MS[1] - 1);
+      await flushPromises();
+      expect(calls).toBe(2);
+
+      browser.clock.tick(1);
+      await flushPromises();
+      expect(calls).toBe(3);
+    });
   });
 
   it("surfaces a load error message returned by the server", async () => {
@@ -1146,7 +1284,7 @@ describe("initializeGraphPage", () => {
     await flushPromises();
 
     expect(status?.textContent).toContain("rebuilding the application graph");
-    browser.clock.tick(GRAPH_RETRY_MS);
+    browser.clock.tick(GRAPH_RETRY_MAX_MS);
     await flushPromises();
 
     expect(calls).toBe(2);
@@ -1173,7 +1311,7 @@ describe("initializeGraphPage", () => {
     );
     await flushPromises();
 
-    browser.clock.tick(GRAPH_RETRY_MS);
+    browser.clock.tick(GRAPH_RETRY_MAX_MS);
     await flushPromises();
 
     expect(calls).toBe(2);
@@ -1200,7 +1338,7 @@ describe("initializeGraphPage", () => {
     initializeGraphPage(browser.context, globals());
     await flushPromises();
 
-    browser.clock.tick(GRAPH_RETRY_MS);
+    browser.clock.tick(GRAPH_RETRY_MAX_MS);
     await flushPromises();
     branches.resolve(
       jsonResponse({
@@ -1239,7 +1377,7 @@ describe("initializeGraphPage", () => {
     );
     await flushPromises();
 
-    browser.clock.tick(GRAPH_RETRY_MS);
+    browser.clock.tick(GRAPH_RETRY_MAX_MS);
     await flushPromises();
 
     // The page owns no clock of its own: it waits until the server stops
@@ -1475,7 +1613,7 @@ describe("initializeGraphPage", () => {
 
     // Cleared programmatically (no "change" event), unlike a user edit.
     branch.value = "";
-    browser.clock.tick(GRAPH_RETRY_MS);
+    browser.clock.tick(GRAPH_RETRY_MAX_MS);
     await flushPromises();
 
     expect(calls).toBe(2);
@@ -1768,13 +1906,13 @@ describe("initializeGraphPage", () => {
         `${GRAPH_STAGE_LABELS.creating_model}:running`
       ]);
 
-      browser.clock.tick(GRAPH_RETRY_MS);
+      browser.clock.tick(GRAPH_RETRY_MAX_MS);
       await flushPromises();
 
       // The retry reuses the running panel, so the clock reflects the whole
       // wait rather than restarting at zero on every poll.
       expect(graphProgressElapsed(progressHost)).toBe(
-        formatElapsed(GRAPH_RETRY_MS)
+        formatElapsed(GRAPH_RETRY_MAX_MS)
       );
       expect(stageText(progressHost)).toEqual([
         `${GRAPH_STAGE_LABELS.checking_model}:succeeded`,
@@ -1804,11 +1942,11 @@ describe("initializeGraphPage", () => {
       await flushPromises();
 
       for (let attempt = 0; attempt < 2; attempt++) {
-        browser.clock.tick(GRAPH_RETRY_MS);
+        browser.clock.tick(GRAPH_RETRY_MAX_MS);
         await flushPromises();
       }
       const settled = calls;
-      browser.clock.tick(GRAPH_RETRY_MS * 5);
+      browser.clock.tick(GRAPH_RETRY_MAX_MS * 5);
       await flushPromises();
 
       expect(settled).toBe(3);
@@ -1841,7 +1979,7 @@ describe("initializeGraphPage", () => {
       await flushPromises();
 
       for (let attempt = 0; attempt < 200; attempt++) {
-        browser.clock.tick(GRAPH_RETRY_MS);
+        browser.clock.tick(GRAPH_RETRY_MAX_MS);
         await flushPromises();
       }
 
@@ -1866,7 +2004,7 @@ describe("initializeGraphPage", () => {
       );
       await flushPromises();
 
-      browser.clock.tick(GRAPH_RETRY_MS * 5);
+      browser.clock.tick(GRAPH_RETRY_MAX_MS * 5);
       await flushPromises();
 
       expect(calls).toBe(1);

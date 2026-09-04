@@ -24,7 +24,7 @@ import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environme
 // Bound to the production constants so the retry cadence is exercised at the
 // value the compiled browser bundle actually schedules, not a copy of it.
 import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
-import { GRAPH_RETRY_MS } from "../../src/browser/pages/graph-page.js";
+import { GRAPH_RETRY_MAX_MS } from "../../src/browser/pages/graph-page.js";
 import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
@@ -1094,7 +1094,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#graph-guidance")).toBeHidden();
     await expect(page.locator("#deploy-app-btn")).toBeDisabled();
     await expect(page.locator("#progress-steps")).toHaveCount(0);
-    await page.clock.fastForward(GRAPH_RETRY_MS * 2);
+    await page.clock.fastForward(GRAPH_RETRY_MAX_MS * 2);
     expect(requests).toBe(1);
   });
 
