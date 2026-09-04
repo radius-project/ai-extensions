@@ -1565,7 +1565,38 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(namespace).not.toContainText("default");
     await expect(namespace).not.toContainText("selected-team");
     await namespace.selectOption("__custom__");
-    await expect(page.locator("#azure-namespace-custom")).toBeVisible();
+    const customNamespace = page.locator("#azure-namespace-custom");
+    await expect(customNamespace).toBeVisible();
+
+    let operationPosts = 0;
+    await page.route("**/api/operations", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      operationPosts += 1;
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ operationId: "unexpected" })
+      });
+    });
+    await page.locator("#env-name-input").fill("production");
+    await customNamespace.fill("Todo-app-3");
+
+    const namespaceError = page.locator("#azure-namespace-error");
+    await expect(namespaceError).toHaveText(
+      "Kubernetes namespace must be 1-63 lowercase letters, numbers, or hyphens and must start and end with a letter or number."
+    );
+    await expect(namespaceError).toBeVisible();
+    await expect(customNamespace).toHaveAttribute("aria-invalid", "true");
+    await expect(customNamespace).toBeFocused();
+    expect(operationPosts).toBe(0);
+    await expectNoWcagViolations(page);
+
+    await customNamespace.fill("todo-app-3");
+    await expect(namespaceError).toBeHidden();
+    await expect(customNamespace).not.toHaveAttribute("aria-invalid", "true");
   });
 
   test("turns Azure MFA discovery failure into a tenant-scoped login callout", async ({
