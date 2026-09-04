@@ -55,7 +55,8 @@ export async function fetchGitHubWithRetry(
   init: RequestInit,
   options: FetchGitHubWithRetryOptions = {}
 ): Promise<LiveGithubFetchResult> {
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl: typeof fetch =
+    options.fetchImpl ?? ((input, requestInit) => fetch(input, requestInit));
   const retryDelaysMs = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
   const delay = options.sleep ?? sleep;
   const maxAttempts = retryDelaysMs.length + 1;

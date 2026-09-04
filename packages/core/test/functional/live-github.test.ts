@@ -7,40 +7,47 @@ import {
 const noDelay = async (): Promise<void> => {};
 
 describe("live GitHub test support", () => {
-  it("retries transient GitHub responses before returning a successful response", async () => {
-    let calls = 0;
-    const delays: number[] = [];
-    const responses = [
-      new Response("try again", {
-        status: 500,
-        statusText: "Internal Server Error"
-      }),
-      new Response("contents")
-    ];
-    const fetchImpl: typeof fetch = async () => {
-      calls += 1;
-      return responses[calls - 1];
-    };
+  it.each([
+    { status: 408, statusText: "Request Timeout" },
+    { status: 429, statusText: "Too Many Requests" },
+    { status: 500, statusText: "Internal Server Error" }
+  ])(
+    "retries transient GitHub $status responses before returning a successful response",
+    async ({ status, statusText }) => {
+      let calls = 0;
+      const delays: number[] = [];
+      const responses = [
+        new Response("try again", {
+          status,
+          statusText
+        }),
+        new Response("contents")
+      ];
+      const fetchImpl: typeof fetch = async () => {
+        calls += 1;
+        return responses[calls - 1];
+      };
 
-    const result = await fetchGitHubWithRetry(
-      "https://api.github.com/test",
-      {
-        headers: {}
-      },
-      {
-        fetchImpl,
-        sleep: async (milliseconds) => {
-          delays.push(milliseconds);
+      const result = await fetchGitHubWithRetry(
+        "https://api.github.com/test",
+        {
+          headers: {}
         },
-        retryDelaysMs: [5, 10]
-      }
-    );
+        {
+          fetchImpl,
+          sleep: async (milliseconds) => {
+            delays.push(milliseconds);
+          },
+          retryDelaysMs: [5, 10]
+        }
+      );
 
-    expect(await result.response.text()).toBe("contents");
-    expect(result.attempts).toBe(2);
-    expect(calls).toBe(2);
-    expect(delays).toEqual([5]);
-  });
+      expect(await result.response.text()).toBe("contents");
+      expect(result.attempts).toBe(2);
+      expect(calls).toBe(2);
+      expect(delays).toEqual([5]);
+    }
+  );
 
   it("does not retry permanent GitHub content fetch responses", async () => {
     let calls = 0;
@@ -87,7 +94,6 @@ describe("live GitHub test support", () => {
       }
     );
     expect(result.response.status).toBe(404);
-    expect(result.attempts).toBe(1);
     expect(result.attempts).toBe(1);
   });
 
