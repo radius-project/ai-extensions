@@ -1182,8 +1182,8 @@ export async function configureAzureAutoSetupCredentials({
     steps.push(
       "⚠️ Could not assign the AKS RBAC Cluster Admin role automatically. " +
         'If your cluster uses Azure RBAC for Kubernetes (the default for AKS Automatic) the deploy will fail at "Verify AKS Access". ' +
-        `Grant it manually: az role assignment create --assignee-object-id ${servicePrincipalObjectId} --assignee-principal-type ServicePrincipal --role "Azure Kubernetes Service RBAC Cluster Admin" --scope ${clusterScope}. ` +
-        "Details: " +
+        `Grant it manually: az role assignment create --assignee-object-id ${servicePrincipalObjectId} --assignee-principal-type ServicePrincipal --role "Azure Kubernetes Service RBAC Cluster Admin" --scope ${clusterScope}` +
+        "\nDetails: " +
         clusterRole.stderr
     );
   }

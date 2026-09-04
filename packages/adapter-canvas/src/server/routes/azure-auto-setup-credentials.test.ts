@@ -900,13 +900,9 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     expect(test.calls).toContain("sleep:2000");
     expect(test.calls).toContain("role:Contributor");
     expect(test.calls).toContain("role:Locks Contributor");
-    expect(
-      test.workflow.steps.some(
-        (step) =>
-          step.includes("Could not assign the AKS RBAC Cluster Admin role") &&
-          step.includes("AuthorizationFailed")
-      )
-    ).toBe(true);
+    expect(test.workflow.steps).toContain(
+      `⚠️ Could not assign the AKS RBAC Cluster Admin role automatically. If your cluster uses Azure RBAC for Kubernetes (the default for AKS Automatic) the deploy will fail at "Verify AKS Access". Grant it manually: az role assignment create --assignee-object-id ${OBJECT_ID} --assignee-principal-type ServicePrincipal --role "Azure Kubernetes Service RBAC Cluster Admin" --scope /subscriptions/${SUBSCRIPTION}/resourceGroups/rg-aks/providers/Microsoft.ContainerService/managedClusters/aks-radius\nDetails: AuthorizationFailed`
+    );
     expect(test.failures).toEqual([]);
   });
 
