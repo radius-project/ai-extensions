@@ -89,14 +89,14 @@ jobs:
     # not `az`, `gh`, or `kubectl`, and cloud mode runs the real ones - the
     # whole point of the tier. Browsers are installed explicitly below instead.
     runs-on: ubuntu-24.04
-    # Strictly greater than Playwright's 45-minute per-test timeout and 75-minute
+    # Strictly greater than Playwright's 55-minute per-test timeout and 110-minute
     # global timeout in packages/adapter-canvas/playwright.cloud.config.ts. The
     # ordering is the requirement: Playwright must be the thing that gives up
     # first, because it writes the trace on the way out. If GitHub cancelled the
     # job first, the single most useful diagnostic for a run nobody can reproduce
     # locally is exactly what would be lost. The remaining headroom covers
     # dependency install, browser download, teardown, and artifact upload.
-    timeout-minutes: 90
+    timeout-minutes: 125
     permissions:
       contents: read # actions/checkout
       id-token: write # OIDC token exchanged for an Azure token by azure/login
@@ -217,9 +217,10 @@ jobs:
           private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
           owner: ${{ steps.fixture.outputs.owner }}
           repositories: ${{ steps.fixture.outputs.name }}
-          permission-actions: read
+          permission-actions: write
           permission-administration: read
           permission-contents: write
+          permission-deployments: read
           permission-environments: write
           permission-pull-requests: write
           permission-variables: write
@@ -239,7 +240,11 @@ jobs:
           # Published by wellknown so the region can move without a code change.
           # Empty leaves the fixture's own default in place.
           AIEXT_CLOUD_E2E_AZURE_LOCATION: ${{ vars.AIEXT_CLOUD_E2E_AZURE_LOCATION }}
+          AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CLOUD_E2E_BOT_CLIENT_ID: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
+          CLOUD_E2E_BOT_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
+          CLOUD_E2E_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
         run: pnpm run test:cloud
 
       # Collected on success as well as failure, and never allowed to fail the

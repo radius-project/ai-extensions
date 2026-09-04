@@ -7,6 +7,7 @@ import {
   createNodeCloudFixturePorts,
   describeError,
   expectSuccess,
+  isGitHubApiNotFound,
   normalizeAzureCommandResult,
   normalizeCommandResult,
   parseJsonArray,
@@ -61,30 +62,30 @@ describe("normalizeCommandResult", () => {
     });
   });
 
-  it("preserves real stderr instead of prepending the callback message", () => {
+  it("does not replace captured stderr with the spawn diagnostic", () => {
     expect(
       normalizeCommandResult(
-        { code: 1, message: "Command failed: gh api repository" },
+        { code: 1, message: "command failed" },
         "",
-        "gh: Not Found (HTTP 404)"
+        "specific stderr"
       )
     ).toEqual({
       code: 1,
       stdout: "",
-      stderr: "gh: Not Found (HTTP 404)"
+      stderr: "specific stderr"
     });
   });
 
-  it("does not inject the callback message when stdout carries the diagnostic", () => {
+  it("does not move an error message into stderr when stdout has output", () => {
     expect(
       normalizeCommandResult(
-        { code: 1, message: "Command failed: az account show" },
-        "ERROR: run az login",
+        { code: 1, message: "command failed" },
+        "specific stdout",
         ""
       )
     ).toEqual({
       code: 1,
-      stdout: "ERROR: run az login",
+      stdout: "specific stdout",
       stderr: ""
     });
   });
@@ -150,6 +151,37 @@ describe("normalizeCommandResult", () => {
         stderr: ""
       });
     });
+  });
+});
+
+describe("isGitHubApiNotFound", () => {
+  it.each([
+    [
+      "the standard stderr form",
+      { code: 1, stderr: "gh: Not Found (HTTP 404)" }
+    ],
+    ["the stdout status form", { code: 1, stdout: "HTTP 404: Not Found" }],
+    [
+      "a 404 line after another diagnostic",
+      { code: 1, stderr: "request failed\ngh: Not Found (HTTP 404)" }
+    ]
+  ])("recognizes %s", (_label, output) => {
+    expect(isGitHubApiNotFound(result(output))).toBe(true);
+  });
+
+  it.each([
+    ["a successful body", { code: 0, stdout: "HTTP 404: historical result" }],
+    [
+      "a bare phrase",
+      { code: 1, stderr: "Not Found while resolving hostname" }
+    ],
+    ["a different status", { code: 1, stderr: "gh: Not Found (HTTP 403)" }],
+    [
+      "an embedded status",
+      { code: 1, stderr: "request failed after HTTP 404: retry exhausted" }
+    ]
+  ])("rejects %s", (_label, output) => {
+    expect(isGitHubApiNotFound(result(output))).toBe(false);
   });
 });
 
