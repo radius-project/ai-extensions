@@ -161,9 +161,13 @@ export function classifyVerifyFailure(
 
   // 4. A post-login credential / subscription check failed. Reaching the
   //    provider and being refused is a permissions gap (4.4); not reaching it is
-  //    unreachable (4.5); anything else is generic.
+  //    unreachable (4.5); anything else is generic. Reachability wins when both
+  //    appear, mirroring the cluster-step branch below: a log carrying both a
+  //    timeout and an authorization line is far more likely a transient outage
+  //    than a genuine RBAC gap, and mislabeling it "permissions" would invite
+  //    the user to bypass a problem they cannot actually fix.
   if (matchesStep(failedSteps, CREDENTIAL_STEP)) {
-    if (hasReachability && !hasAuthorization) {
+    if (hasReachability) {
       return { category: "cloud-unreachable", component: "cloud provider" };
     }
     if (hasAuthorization) {

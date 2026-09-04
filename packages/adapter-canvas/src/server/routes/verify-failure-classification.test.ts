@@ -176,6 +176,22 @@ describe("classifyVerifyFailure", () => {
     expect(result.category).toBe("cluster-unreachable");
   });
 
+  it("prefers cloud-unreachable over authorization when a credential check log carries both signals", () => {
+    // The ambiguous-but-realistic case: a post-login credential/subscription
+    // step whose log shows both an authorization line and a reachability
+    // failure. Reachability wins (matching the cluster-step precedence) so a
+    // transient outage is not mislabeled as a permissions gap the user is asked
+    // to bypass.
+    const result = classifyVerifyFailure(
+      input({
+        failedSteps: [{ name: "Verify Azure Credentials" }],
+        log: "AccessDenied earlier, then connection timed out contacting management.azure.com"
+      })
+    );
+    expect(result.category).toBe("cloud-unreachable");
+    expect(result.component).toBe("cloud provider");
+  });
+
   it("tolerates a step with no name", () => {
     const result = classifyVerifyFailure(
       input({ failedSteps: [{ conclusion: "failure" }], log: "" })
