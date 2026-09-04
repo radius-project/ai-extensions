@@ -9,8 +9,8 @@
 //   Dangerous: a `pull_request_target` trigger would hand fork-authored code an
 //   Azure identity; a missing repository guard would let a fork spend our
 //   subscription quota; a floating action tag would let an upstream compromise
-//   reach a job holding cloud credentials; a resource-group sweep would put a
-//   second deleter on a subscription we share.
+//   reach a job holding cloud credentials; an untagged resource-group sweep
+//   would delete something the suite did not create.
 //
 //   Silently inert: a workflow that never invokes `test:cloud`, or never sets
 //   the environment variable that switches the suite on, still reports success.
@@ -28,12 +28,12 @@ import cloudConfig from "../../playwright.cloud.config.js";
 import { redactCredentials } from "../../src/credential-redaction.js";
 import {
   ENVIRONMENT_NAME_PREFIX,
-  RESOURCE_GROUP_PREFIX
+  RESOURCE_GROUP_PREFIX,
 } from "../e2e-cloud/support/fixture-repository.js";
 
 const REPOSITORY_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  "../../../.."
+  "../../../..",
 );
 const RUN_WORKFLOW = "cloud-e2e.yml";
 const CLEANUP_WORKFLOW = "cloud-e2e-cleanup.yml";
@@ -68,7 +68,7 @@ interface Workflow {
 async function readWorkflow(file: string): Promise<string> {
   return readFile(
     path.join(REPOSITORY_ROOT, ".github/workflows", file),
-    "utf8"
+    "utf8",
   );
 }
 
@@ -89,7 +89,7 @@ describe.each(WORKFLOWS)("%s - properties both workflows share", (file) => {
     // is the cheaper of the two to reason about. Neither alone is convincing.
     const [raw, workflow] = await Promise.all([
       readWorkflow(file),
-      parseWorkflow(file)
+      parseWorkflow(file),
     ]);
     expect(Object.keys(workflow.on ?? {})).not.toContain("pull_request_target");
     expect(raw).not.toMatch(/pull_request_target\s*:/);
@@ -113,7 +113,7 @@ describe.each(WORKFLOWS)("%s - properties both workflows share", (file) => {
     const workflow = await parseWorkflow(file);
     expect(Object.keys(workflow.on ?? {}).sort()).toEqual([
       "schedule",
-      "workflow_dispatch"
+      "workflow_dispatch",
     ]);
   });
 
@@ -145,11 +145,11 @@ describe.each(WORKFLOWS)("%s - properties both workflows share", (file) => {
     expect(workflow.permissions?.["id-token"]).toBeUndefined();
 
     const withOidc = Object.values(workflow.jobs ?? {}).filter(
-      (job) => job.permissions?.["id-token"] === "write"
+      (job) => job.permissions?.["id-token"] === "write",
     );
     expect(withOidc).toHaveLength(1);
     expect(
-      steps(withOidc[0]).some((step) => step.uses?.startsWith("azure/login@"))
+      steps(withOidc[0]).some((step) => step.uses?.startsWith("azure/login@")),
     ).toBe(true);
   });
 
@@ -168,7 +168,7 @@ describe.each(WORKFLOWS)("%s - properties both workflows share", (file) => {
     expect(
       steps(notify)
         .map((step) => step.run)
-        .join("\n")
+        .join("\n"),
     ).toContain("gh issue create");
   });
 });
@@ -223,7 +223,7 @@ describe("cloud-e2e.yml", () => {
     const used = steps(workflow.jobs?.["cloud-e2e"]).map((step) => step.uses);
     expect(used.some((use) => use?.startsWith("azure/login@"))).toBe(true);
     expect(
-      used.some((use) => use?.startsWith("actions/create-github-app-token@"))
+      used.some((use) => use?.startsWith("actions/create-github-app-token@")),
     ).toBe(true);
   });
 
@@ -234,7 +234,7 @@ describe("cloud-e2e.yml", () => {
     // permission turns that into a loud failure at token-request time.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const token = steps(workflow.jobs?.["cloud-e2e"]).find((step) =>
-      step.uses?.startsWith("actions/create-github-app-token@")
+      step.uses?.startsWith("actions/create-github-app-token@"),
     );
     expect(token?.with?.["permission-actions"]).toBe("read");
     expect(token?.with?.["permission-workflows"]).toBe("write");
@@ -248,13 +248,13 @@ describe("cloud-e2e.yml", () => {
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const jobSteps = steps(workflow.jobs?.["cloud-e2e"]);
     const collect = jobSteps.find(
-      (step) => step.name === "Collect az and gh diagnostics"
+      (step) => step.name === "Collect az and gh diagnostics",
     );
     const stage = jobSteps.find(
-      (step) => step.name === "Stage Playwright traces and report"
+      (step) => step.name === "Stage Playwright traces and report",
     );
     const upload = jobSteps.find((step) =>
-      step.uses?.startsWith("actions/upload-artifact@")
+      step.uses?.startsWith("actions/upload-artifact@"),
     );
     expect(collect?.run).toContain('out="$RUNNER_TEMP/cloud-e2e-artifact"');
     expect(collect?.run).toContain("redactCredentials");
@@ -262,7 +262,7 @@ describe("cloud-e2e.yml", () => {
     expect(stage?.if).toContain("always()");
     expect(stage?.run).toContain("packages/adapter-canvas/test-results/cloud");
     expect(stage?.run).toContain(
-      "packages/adapter-canvas/playwright-report-cloud"
+      "packages/adapter-canvas/playwright-report-cloud",
     );
     expect(upload?.if).toBe("always()");
     expect(upload?.with?.path).toBe("${{ runner.temp }}/cloud-e2e-artifact");
@@ -272,7 +272,7 @@ describe("cloud-e2e.yml", () => {
     const jwt =
       "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJmaXh0dXJlIn0.fixture_signature";
     expect(redactCredentials(`az failed: ${jwt}`)).toBe(
-      "az failed: [REDACTED]"
+      "az failed: [REDACTED]",
     );
   });
 
@@ -281,7 +281,7 @@ describe("cloud-e2e.yml", () => {
     // repository, so its failure is invisible in this job's log.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const diagnostics = steps(workflow.jobs?.["cloud-e2e"]).find(
-      (step) => step.name === "Collect az and gh diagnostics"
+      (step) => step.name === "Collect az and gh diagnostics",
     );
     expect(diagnostics?.if).toContain("always()");
     expect(diagnostics?.run).toContain("--log-failed");
@@ -317,7 +317,7 @@ describe("cloud-e2e.yml", () => {
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const names = steps(workflow.jobs?.["cloud-e2e"]).map((step) => step.name);
     expect(names.indexOf("Resolve the fixture repository")).toBeLessThan(
-      names.indexOf("Install dependencies")
+      names.indexOf("Install dependencies"),
     );
   });
 
@@ -325,26 +325,39 @@ describe("cloud-e2e.yml", () => {
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const verify = steps(workflow.jobs?.["cloud-e2e"]).find(
       (step) =>
-        step.name === "Verify the published fixture repository matches the pin"
+        step.name === "Verify the published fixture repository matches the pin",
     );
 
     expect(verify?.if).toContain("steps.fixture.outputs.configured == 'true'");
     expect(verify?.run).toContain(
-      "test/e2e-cloud/support/fixture-repository.ts"
+      "test/e2e-cloud/support/fixture-repository.ts",
     );
     expect(verify?.run).toContain("Refusing to run against an ambiguous scope");
   });
 });
 
 describe("cloud-e2e-cleanup.yml", () => {
-  it("deletes no resource groups, because a job we do not own already does", async () => {
-    // Radius's own purge deletes `^radtest-` groups older than six hours twice
-    // daily in this subscription, and RESOURCE_GROUP_PREFIX is named to sit
-    // inside that net. A second deleter on a shared subscription is a hazard,
-    // not a belt-and-braces improvement. Asserted so the apparent gap is not
-    // "fixed" by someone who has not read the comment above it.
-    const raw = await readWorkflow(CLEANUP_WORKFLOW);
-    expect(raw).not.toMatch(/az\s+group\s+delete/);
+  it("deletes only tagged stale resource groups the suite creates", async () => {
+    // The shared Radius purge job remains a safety net, but this workflow owns
+    // test leaks first. The fixture tag is what stops a prefix match from
+    // becoming a broad subscription sweep.
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge).find((step) =>
+      step.run?.includes("selectExpiredResourceGroups"),
+    );
+    const script = purge?.run ?? "";
+
+    expect(purge?.if).toBe("steps.pin.outputs.provisioned == 'true'");
+    expect(purge?.env?.RESOURCE_GROUP_PREFIX).toBe(
+      "${{ steps.pin.outputs.resource-group-prefix }}",
+    );
+    expect(purge?.env?.SUBSCRIPTION_ID).toBe(
+      "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
+    );
+    expect(script).toContain("starts_with(name, '$RESOURCE_GROUP_PREFIX')");
+    expect(script).toContain('--subscription "$SUBSCRIPTION_ID"');
+    expect(script).toContain("MAX_AGE_HOURS hours ago");
+    expect(script).toContain("az group delete");
     expect(RESOURCE_GROUP_PREFIX.startsWith("radtest-")).toBe(true);
   });
 
@@ -361,10 +374,10 @@ describe("cloud-e2e-cleanup.yml", () => {
     // prefix nothing uses - or, worse, one something else does.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const purge = steps(workflow.jobs?.purge).find(
-      (step) => step.env?.ENVIRONMENT_PREFIX !== undefined
+      (step) => step.env?.ENVIRONMENT_PREFIX !== undefined,
     );
     expect(purge?.env?.ENVIRONMENT_PREFIX).toBe(
-      "${{ steps.pin.outputs.environment-prefix }}"
+      "${{ steps.pin.outputs.environment-prefix }}",
     );
     expect(ENVIRONMENT_NAME_PREFIX).toBe("radtest-");
   });
@@ -376,9 +389,10 @@ describe("cloud-e2e-cleanup.yml", () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const destructive = steps(workflow.jobs?.purge).filter(
       (step) =>
+        step.run?.includes("az group delete") ||
         step.run?.includes("az ad app delete") ||
         step.run?.includes("-X DELETE") ||
-        step.run?.includes("-X PATCH")
+        step.run?.includes("-X PATCH"),
     );
     expect(destructive.length).toBeGreaterThan(0);
     for (const step of destructive)
@@ -395,7 +409,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     for (const step of steps(job).filter(
       (candidate) =>
         candidate.run?.includes("az ad app delete") ||
-        candidate.run?.includes("-X DELETE")
+        candidate.run?.includes("-X DELETE"),
     ))
       expect(step.run).toContain("MAX_AGE_HOURS hours ago");
   });
@@ -403,20 +417,20 @@ describe("cloud-e2e-cleanup.yml", () => {
   it("deletes age-eligible service principals before applications", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const purge = steps(workflow.jobs?.purge).find((step) =>
-      step.run?.includes("az ad sp delete")
+      step.run?.includes("az ad sp delete"),
     );
     const script = purge?.run ?? "";
 
     expect(script).toContain("selectExpiredDirectoryObjects");
     expect(script.indexOf("az ad sp delete")).toBeLessThan(
-      script.indexOf("az ad app delete")
+      script.indexOf("az ad app delete"),
     );
   });
 
   it("closes old fallback pull requests before deleting their exact head refs", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const purge = steps(workflow.jobs?.purge).find((step) =>
-      step.run?.includes("selectExpiredFallbackPullRequests")
+      step.run?.includes("selectExpiredFallbackPullRequests"),
     );
     const script = purge?.run ?? "";
 
@@ -424,14 +438,14 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain("MAX_AGE_HOURS hours ago");
     expect(script).toContain("git/matching-refs/heads/$FALLBACK_BRANCH_PREFIX");
     expect(script.indexOf("-f state=closed")).toBeLessThan(
-      script.indexOf("-X DELETE")
+      script.indexOf("-X DELETE"),
     );
   });
 
   it("selects stale environments through the fail-closed timestamp helper", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const purge = steps(workflow.jobs?.purge).find((step) =>
-      step.run?.includes("selectExpiredEnvironments")
+      step.run?.includes("selectExpiredEnvironments"),
     );
 
     expect(purge?.run).toContain("expired-environments.json");
