@@ -202,7 +202,7 @@ function assertCurrentArtifact(): void {
     join(REPO_ROOT, "plugins", "radius", "README.md"),
     ...(existsSync(SOURCE_CHANGELOG) ? [SOURCE_CHANGELOG] : []),
     ...filesUnder(join(REPO_ROOT, "extensions", "radius", "skills")),
-    ...filesUnder(join(REPO_ROOT, "extensions", "radius", "assets")),
+    ...filesUnder(join(REPO_ROOT, "plugins", "radius", "assets")),
     ...filesUnder(join(REPO_ROOT, ".github", "extension"))
   ];
   const newestInput = Math.max(
