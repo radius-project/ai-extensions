@@ -937,7 +937,7 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     expect(test.calls).not.toContain("role:Locks Contributor");
     expect(test.calls.join("\n")).not.toContain("User Access Administrator");
     expect(test.workflow.steps).toContain(
-      `⚠️ Could not assign the Locks Contributor role automatically. Applications whose recipes set a resource lock will fail to deploy, and existing locked resources will fail to delete with "AuthorizationFailed". Grant the least-privilege role manually: az role assignment create --assignee-object-id ${OBJECT_ID} --assignee-principal-type ServicePrincipal --role "Locks Contributor" --scope /subscriptions/${SUBSCRIPTION}/resourceGroups/rg-radius. Details: AuthorizationFailed`
+      `⚠️ Could not assign the Locks Contributor role automatically. Applications whose recipes set a resource lock will fail to deploy, and existing locked resources will fail to delete with "AuthorizationFailed". Grant the least-privilege role manually: az role assignment create --assignee-object-id ${OBJECT_ID} --assignee-principal-type ServicePrincipal --role "Locks Contributor" --scope /subscriptions/${SUBSCRIPTION}/resourceGroups/rg-radius\nDetails: AuthorizationFailed`
     );
   });
 

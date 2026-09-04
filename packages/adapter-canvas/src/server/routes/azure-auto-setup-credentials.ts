@@ -1243,8 +1243,8 @@ export async function configureAzureAutoSetupCredentials({
       "⚠️ Could not assign the Locks Contributor role automatically. " +
         "Applications whose recipes set a resource lock will fail to deploy, and " +
         'existing locked resources will fail to delete with "AuthorizationFailed". ' +
-        `Grant the least-privilege role manually: az role assignment create --assignee-object-id ${servicePrincipalObjectId} --assignee-principal-type ServicePrincipal --role "Locks Contributor" --scope ${contributorScope}. ` +
-        "Details: " +
+        `Grant the least-privilege role manually: az role assignment create --assignee-object-id ${servicePrincipalObjectId} --assignee-principal-type ServicePrincipal --role "Locks Contributor" --scope ${contributorScope}` +
+        "\nDetails: " +
         locksContributor.stderr
     );
   }

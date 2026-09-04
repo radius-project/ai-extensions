@@ -191,15 +191,19 @@ describe("canvas pages over real loopback HTTP", () => {
     expect(response.body).toContain('id="azure-namespace-custom"');
   });
 
-  it("serves the least-privilege Azure role description", async () => {
+  it("serves accurate required and best-effort Azure role descriptions", async () => {
     resetState({ contextRepo: "octo/app" });
 
     const response = await get("/?page=environment");
 
-    expect(response.body).toContain("<strong>Contributor</strong>");
-    expect(response.body).toContain("<strong>Locks Contributor</strong>");
     expect(response.body).toContain(
-      "<strong>Azure Kubernetes Service RBAC Cluster Admin</strong>"
+      "granted <strong>Contributor</strong> on the selected resource group"
+    );
+    expect(response.body).toContain(
+      "attempts to grant <strong>Locks Contributor</strong>"
+    );
+    expect(response.body).toContain(
+      "if either optional assignment fails, setup continues with a warning and remediation command"
     );
     expect(response.body).not.toContain("User Access Administrator");
   });
