@@ -84,7 +84,9 @@ const REQUIRED_INPUTS = [
   "deploy-branch-select",
   "az-client-id",
   "az-app-name-input",
-  "az-selected-app-id"
+  "az-selected-app-id",
+  "azure-namespace-custom",
+  "aws-namespace-custom"
 ] as const;
 
 const REQUIRED_SELECTS = [
@@ -165,7 +167,9 @@ const REQUIRED_ELEMENTS = [
   "env-confirm-usage-label",
   "env-confirm-usage-list",
   "env-confirm-ok",
-  "env-confirm-cancel"
+  "env-confirm-cancel",
+  "azure-namespace-error",
+  "aws-namespace-error"
 ] as const;
 
 function fixture(
@@ -197,10 +201,14 @@ function fixture(
   for (const id of REQUIRED_ELEMENTS) {
     if (!omitted.has(id)) add(createFakeElement(id));
   }
+  elements["azure-namespace-error"].hidden = true;
+  elements["aws-namespace-error"].hidden = true;
   for (const id of REQUIRED_INPUTS) {
     if (!omitted.has(id)) add(createFakeInput(id));
   }
-  for (const id of REQUIRED_SELECTS) add(createFakeSelect(id));
+  for (const id of REQUIRED_SELECTS) {
+    if (!omitted.has(id)) add(createFakeSelect(id));
+  }
   const setValue = (id: string, value: string): void => {
     const element = browser.context.dom.inputById(id);
     if (!element) throw new Error(`Missing fixture input "${id}".`);
@@ -375,6 +383,18 @@ describe("initializeEnvironmentPage", () => {
     teardown();
     expect(page.browser.bindings.has(ENVIRONMENT_PAGE_ENTRY_KEY)).toBe(false);
     expect(page.browser.clock.pending).toBe(0);
+  });
+
+  it("initializes when optional namespace controls are absent", () => {
+    const page = fixture({
+      omit: ["azure-namespace-select", "aws-namespace-custom"]
+    });
+
+    const teardown = initializeEnvironmentPage(page.browser.context);
+
+    expect(page.browser.bindings.has(ENVIRONMENT_PAGE_ENTRY_KEY)).toBe(true);
+    teardown();
+    expect(page.browser.bindings.has(ENVIRONMENT_PAGE_ENTRY_KEY)).toBe(false);
   });
 
   it("survives a malformed escape in the query string and stays rebindable", async () => {
@@ -778,6 +798,78 @@ describe("initializeEnvironmentPage", () => {
     expect(page.elements["deploy-status"].textContent).toBe(
       "Please specify an EKS cluster."
     );
+  });
+
+  it.each(["azure", "aws"] as const)(
+    "shows an invalid custom %s namespace inline while typing",
+    async (provider) => {
+      const page = fixture();
+      await openWithProfile(page, provider);
+      pageInput(page, "env-name-input").value = "prod";
+      if (provider === "azure") {
+        pageInput(page, "azure-rg-select").value = "app-rg";
+        pageInput(page, "azure-cluster-select").value = "aks-1";
+      } else {
+        pageInput(page, "aws-cluster-select").value = "eks-1";
+      }
+      const select = pageInput(page, `${provider}-namespace-select`);
+      const custom = pageInput(page, `${provider}-namespace-custom`);
+      select.value = "__custom__";
+      custom.value = "Todo-app-3";
+      page.elements[`${provider}-namespace-custom`].dispatch("input");
+
+      const error = page.elements[`${provider}-namespace-error`];
+      expect(error.hidden).toBe(false);
+      expect(error.textContent).toBe(
+        "Kubernetes namespace must be 1-63 lowercase letters, numbers, or hyphens and must start and end with a letter or number."
+      );
+      expect(select.getAttribute("aria-invalid")).toBe("true");
+      expect(custom.getAttribute("aria-invalid")).toBe("true");
+      expect(page.elements[`${provider}-namespace-custom`].focusCount).toBe(0);
+      expect(
+        page.browser.net.calls.filter(
+          (call) => call.url === CREATE_ENVIRONMENT_OPERATION_PATH
+        )
+      ).toHaveLength(0);
+
+      custom.value = "";
+      page.elements[`${provider}-namespace-custom`].dispatch("input");
+      expect(error.hidden).toBe(true);
+      expect(custom.getAttribute("aria-invalid")).toBeNull();
+
+      custom.value = "Todo-app-3";
+      page.elements[`${provider}-namespace-custom`].dispatch("input");
+      select.value = "default";
+      page.elements[`${provider}-namespace-select`].dispatch("change");
+      expect(error.hidden).toBe(true);
+      expect(select.getAttribute("aria-invalid")).toBeNull();
+
+      select.value = "__custom__";
+      custom.value = "todo-app-3";
+      page.elements[`${provider}-namespace-custom`].dispatch("input");
+      expect(error.hidden).toBe(true);
+      expect(error.textContent).toBe("");
+      expect(select.getAttribute("aria-invalid")).toBeNull();
+      expect(custom.getAttribute("aria-invalid")).toBeNull();
+    }
+  );
+
+  it("rejects an empty custom namespace on submission", async () => {
+    const page = fixture();
+    await openWithProfile(page, "azure");
+    pageInput(page, "env-name-input").value = "prod";
+    pageInput(page, "azure-rg-select").value = "app-rg";
+    pageInput(page, "azure-cluster-select").value = "aks-1";
+    const select = pageInput(page, "azure-namespace-select");
+    const custom = pageInput(page, "azure-namespace-custom");
+    select.value = "__custom__";
+    custom.value = "";
+
+    page.elements["deploy-btn"].dispatch("click");
+
+    expect(page.elements["azure-namespace-error"].hidden).toBe(false);
+    expect(custom.getAttribute("aria-invalid")).toBe("true");
+    expect(page.elements["azure-namespace-custom"].focusCount).toBe(1);
   });
 
   // Radius binds one environment to one namespace, and nothing before the

@@ -19,6 +19,7 @@ import {
   deployStatusKeys,
   fetchBicepFromRepo,
   fetchRecipePack,
+  isKubernetesNamespace,
   mergeDeployedGraphMetadata,
   projectDeployedGraph,
   resolveRecipeOutputs,
@@ -714,6 +715,24 @@ const livenessSourceRoutes = createLivenessSourceRoutes({
   getOpenSourceHandler: () => openSourceHandler,
   readInstanceState: (instanceId) =>
     canvasServer.instances.get(instanceId)?.state,
+  getWorkspaceModelRevision: async (instanceId) => {
+    const state = canvasServer.instances.get(instanceId)?.state;
+    if (
+      !state?.graphFromWorkspace ||
+      !state.graphTargetRepo ||
+      !state.graphBranch
+    ) {
+      return null;
+    }
+    const model = await resolveWorkspaceBicep(
+      state,
+      state.graphTargetRepo,
+      state.graphBranch
+    );
+    // Model content only: the revision must not move when a staged-artifact
+    // fingerprint changes, or every stage would look like a model edit.
+    return model ? graphDefinitionHash(model.content, "") : null;
+  },
   toSafeRepoRelPath
 });
 
@@ -760,6 +779,7 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     isValidRepoSlug,
     isResourceGroupName,
     isAksClusterName,
+    isKubernetesNamespace,
     isUuid,
     buildStages,
     createOperation,

@@ -8,6 +8,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolvePluginRoot } from "./plugin-root.js";
 
 export interface CredentialProfile {
   [key: string]: unknown;
@@ -290,6 +291,7 @@ export interface CanvasState {
   pendingSourceRefs?: PendingSourceRef[];
   page?: string;
   graphDefinitionHash?: string;
+  graphModelRevision?: string;
   graphBuildGeneration?: number;
   progressMessages?: string[];
   canvasInstanceId?: string;
@@ -391,7 +393,10 @@ export function resolveCredentialsFilePath(
   moduleDirectory = __dirname_ext
 ): string {
   const configured = environment.RADIUS_CREDENTIALS_FILE?.trim();
-  return configured || join(moduleDirectory, ".radius-credentials.json");
+  return (
+    configured ||
+    join(resolvePluginRoot(moduleDirectory), ".radius-credentials.json")
+  );
 }
 
 const CREDS_FILE = resolveCredentialsFilePath();
