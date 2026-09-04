@@ -44,6 +44,13 @@ import {
   type CloudFixture
 } from "./support/cloud-fixture.js";
 import {
+  CREATE_OPERATION_TIMEOUT_MS,
+  CREATE_TEST_TIMEOUT_MS,
+  DELETE_OPERATION_TIMEOUT_MS,
+  DELETE_POSTCONDITION_TIMEOUT_MS,
+  DELETE_TEST_TIMEOUT_MS
+} from "./support/cloud-timeout-budget.js";
+import {
   classifyWorkflowPublication,
   cloudCanvasState,
   describeWorkflowPublication,
@@ -97,25 +104,10 @@ const KUBERNETES_NAMESPACE = "default";
 const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
 const githubToken = process.env.GH_TOKEN?.trim() ?? "";
 
-// Creating an environment provisions an Entra application, a service principal,
-// two federated credentials, a role assignment, a GitHub Environment and its
-// workflows. Twenty minutes is generous rather than optimistic: a timeout here
-// reports as a product failure, so it must never be the first thing to give.
-const OPERATION_TIMEOUT_MS = 20 * 60 * 1000;
-
 // Deployment controls and the expected live-environment refusal should surface
 // promptly; the workflow itself retains the full deployment operation budget.
 const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
 const DEPLOYMENT_TIMEOUT_MS = 45 * 60 * 1000;
-
-// The workflow-backed product deletion may legitimately run for 30 minutes
-// after dispatch and run discovery. Give the outer poll another minute so it
-// cannot expire first, then reserve the rest of the 45-minute test ceiling for
-// page setup, postconditions, Azure/Graph propagation, and harness cleanup.
-const DELETE_OPERATION_TIMEOUT_MS = 31 * 60 * 1000;
-const DELETE_POSTCONDITION_TIMEOUT_MS = 10 * 60 * 1000;
-const DELETE_TEST_TIMEOUT_MS = DELETE_OPERATION_TIMEOUT_MS + 15 * 60 * 1000;
-
 const gate = evaluateCreateEnvironmentGate({
   cloudE2eFlag: process.env.RADIUS_CLOUD_E2E,
   fixtureProvisioned: isFixtureRepositoryProvisioned(),
@@ -236,7 +228,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   test("creates the Azure identity, the GitHub Environment, and the workflows", async ({
     page
   }, testInfo) => {
-    testInfo.setTimeout(OPERATION_TIMEOUT_MS + 10 * 60 * 1000);
+    testInfo.setTimeout(CREATE_TEST_TIMEOUT_MS);
     const cloud = fixture;
     if (!cloud) throw new Error("The cloud fixture was not created.");
 
@@ -333,7 +325,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
 
       await expect
         .poll(async () => (await snapshot()).terminal, {
-          timeout: OPERATION_TIMEOUT_MS,
+          timeout: CREATE_OPERATION_TIMEOUT_MS,
           intervals: [5_000]
         })
         .toBe(true);
