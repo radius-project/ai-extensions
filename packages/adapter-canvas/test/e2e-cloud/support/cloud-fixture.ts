@@ -205,8 +205,9 @@ export async function createCloudFixture(
   let workspacePath = "";
 
   try {
-    // `creationTime` plus the `radtest-` prefix is what lets the Radius purge
-    // job in this subscription reclaim the group if the runner dies outright.
+    // `creationTime` plus the fixture tag lets scheduled cleanup prove the group
+    // is ours and old enough. The `radtest-` prefix leaves Radius purge as the
+    // fallback safety net if this cleanup cannot run.
     expectSuccess(
       await commands.runAz([
         "group",
@@ -335,22 +336,26 @@ export async function createCloudFixture(
 
   const listWorkloads = async (
     application: string,
-    namespace: string
+    namespace: string,
+    timeoutMs?: number
   ): Promise<readonly KubernetesWorkload[] | "no-namespace"> => {
     const kubeconfig = await clusterKubeconfig();
     const context = `kubectl get deployments -n ${namespace}`;
-    const result = await commands.runKubectl([
-      "--kubeconfig",
-      kubeconfig,
-      "get",
-      "deployments",
-      "--namespace",
-      namespace,
-      "--selector",
-      radiusApplicationSelector(application),
-      "--output",
-      "json"
-    ]);
+    const result = await commands.runKubectl(
+      [
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "deployments",
+        "--namespace",
+        namespace,
+        "--selector",
+        radiusApplicationSelector(application),
+        "--output",
+        "json"
+      ],
+      timeoutMs
+    );
     if (result.code !== 0) {
       if (isMissingNamespace(result)) return "no-namespace";
       throw new Error(
@@ -364,22 +369,26 @@ export async function createCloudFixture(
 
   const listApplicationResources = async (
     application: string,
-    namespace: string
+    namespace: string,
+    timeoutMs?: number
   ): Promise<readonly string[] | "no-namespace"> => {
     const kubeconfig = await clusterKubeconfig();
     const context = `kubectl get deployments,pods -n ${namespace}`;
-    const result = await commands.runKubectl([
-      "--kubeconfig",
-      kubeconfig,
-      "get",
-      "deployments,pods",
-      "--namespace",
-      namespace,
-      "--selector",
-      radiusApplicationSelector(application),
-      "--output",
-      "json"
-    ]);
+    const result = await commands.runKubectl(
+      [
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "deployments,pods",
+        "--namespace",
+        namespace,
+        "--selector",
+        radiusApplicationSelector(application),
+        "--output",
+        "json"
+      ],
+      timeoutMs
+    );
     if (result.code !== 0) {
       if (isMissingNamespace(result)) return "no-namespace";
       throw new Error(
@@ -401,10 +410,9 @@ export async function createCloudFixture(
    * all until this run has seen the artifact for itself.
    */
   const observedPresent = new Set<string>();
+  const observedCredentialApps = new Map<string, AppRegistrationRecord>();
   const APP_REGISTRATION_KEY = "app-registration";
   const GITHUB_ENVIRONMENT_KEY = "github-environment";
-  const federatedCredentialKey = (subject: string) =>
-    `federated-credential:${subject}`;
   const roleAssignmentKey = (principalId: string) =>
     `role-assignment:${principalId.toLowerCase()}`;
 
@@ -414,6 +422,18 @@ export async function createCloudFixture(
       `Refusing to assert that ${description} is absent: this run never observed it present, so its absence ` +
         "would prove nothing about the operation under test — a product that never created it would pass " +
         "just as readily as one that correctly deleted it. Assert presence first."
+    );
+  };
+
+  const requireObservedCredentialApp = (
+    subject: string
+  ): AppRegistrationRecord => {
+    const app = observedCredentialApps.get(subject);
+    if (app) return app;
+    throw new Error(
+      `Refusing to assert that the federated credential for subject "${subject}" is absent: this run never ` +
+        "observed it present, so its absence would prove nothing about the operation under test — a product " +
+        "that never created it would pass just as readily as one that correctly deleted it. Assert presence first."
     );
   };
 
@@ -511,7 +531,7 @@ export async function createCloudFixture(
           );
         }
       });
-      observedPresent.add(federatedCredentialKey(subject));
+      observedCredentialApps.set(subject, app);
     },
 
     async assertRoleAssignmentExists(principalId) {
@@ -623,10 +643,17 @@ export async function createCloudFixture(
     },
 
     async assertFederatedCredentialAbsent(subject, expectedAppRegistration) {
-      requireObservedPresent(
-        federatedCredentialKey(subject),
-        `the federated credential for subject "${subject}"`
-      );
+      const observedApp = requireObservedCredentialApp(subject);
+      if (
+        expectedAppRegistration &&
+        (observedApp.appId !== expectedAppRegistration.appId ||
+          observedApp.objectId !== expectedAppRegistration.objectId)
+      )
+        throw new Error(
+          `Refusing to check federated credential subject "${subject}" against app registration ` +
+            `${expectedAppRegistration.appId} (${expectedAppRegistration.objectId}): this run observed it on ` +
+            `${observedApp.appId} (${observedApp.objectId}).`
+        );
       let app: AppRegistrationRecord | undefined;
       let appIdForTimeout = expectedAppRegistration?.appId ?? expectedAppName;
       let remaining: Array<{ name: string; subject: string }> = [];
@@ -635,22 +662,18 @@ export async function createCloudFixture(
         timeoutMs: assertionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
         probe: async () => {
-          const apps = await listAppRegistrations(commands, expectedAppName);
-          app =
-            expectedAppRegistration ?
-              apps.find(
-                (candidate) =>
-                  candidate.objectId === expectedAppRegistration.objectId
-              )
-            : apps[0];
-          // Cleanup may delete the parent registration. The environment journey
-          // instead requires its retained parent to remain observable.
-          if (!app) return expectedAppRegistration ? undefined : true;
-          appIdForTimeout = expectedAppRegistration?.appId ?? app.appId;
-          remaining = await listFederatedCredentials(
-            commands,
-            expectedAppRegistration?.objectId ?? app.objectId
-          );
+          if (expectedAppRegistration) {
+            const apps = await listAppRegistrations(commands, expectedAppName);
+            app = apps.find(
+              (candidate) =>
+                candidate.objectId === expectedAppRegistration.objectId
+            );
+            if (!app) return undefined;
+          } else {
+            app = observedApp;
+          }
+          appIdForTimeout = app.appId;
+          remaining = await listFederatedCredentials(commands, app.objectId);
           return (
               remaining.some((credential) => credential.subject === subject)
             ) ?
@@ -731,8 +754,8 @@ export async function createCloudFixture(
         ports,
         timeoutMs: assertionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
-        probe: async () => {
-          lastSeen = await listWorkloads(application, namespace);
+        probe: async (remainingMs) => {
+          lastSeen = await listWorkloads(application, namespace, remainingMs);
           if (lastSeen === "no-namespace" || lastSeen.length === 0)
             return undefined;
           if (lastSeen.some((workload) => workload.availableReplicas < 1))
@@ -762,10 +785,11 @@ export async function createCloudFixture(
         ports,
         timeoutMs: assertionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
-        probe: async () => {
+        probe: async (remainingMs) => {
           const resources = await listApplicationResources(
             application,
-            namespace
+            namespace,
+            remainingMs
           );
           if (resources === "no-namespace") return true;
           lastSeen = resources;
@@ -996,14 +1020,16 @@ interface PollForValueOptions<T> {
   readonly ports: Pick<CloudFixturePorts, "now" | "wait">;
   readonly timeoutMs: number;
   readonly intervalMs: number;
-  readonly probe: () => Promise<T | undefined>;
+  readonly probe: (remainingMs: number) => Promise<T | undefined>;
   readonly timeoutMessage: () => string;
 }
 
 async function pollForValue<T>(options: PollForValueOptions<T>): Promise<T> {
   const deadline = options.ports.now().getTime() + options.timeoutMs;
   while (true) {
-    const value = await options.probe();
+    const remainingBeforeProbe = deadline - options.ports.now().getTime();
+    if (remainingBeforeProbe <= 0) throw new Error(options.timeoutMessage());
+    const value = await options.probe(remainingBeforeProbe);
     if (value !== undefined) return value;
     const remaining = deadline - options.ports.now().getTime();
     if (remaining <= 0) throw new Error(options.timeoutMessage());

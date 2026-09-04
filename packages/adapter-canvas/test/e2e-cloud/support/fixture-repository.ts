@@ -42,10 +42,10 @@ export const FIXTURE_REPOSITORY = `${FIXTURE_REPO_OWNER}/${FIXTURE_REPO_NAME}`;
 export const FIXTURE_RADIUS_DIRECTORY = ".radius";
 
 /**
- * The Radius purge job in the shared subscription deletes resource groups
- * matching `^radtest-` that are older than six hours. Matching an existing
- * prefix rather than adding a new one makes that job our safety net for a
- * crashed runner without an upstream change.
+ * The scheduled Cloud E2E cleanup workflow deletes tagged groups with this
+ * prefix first. The shared Radius purge job also deletes `^radtest-` groups
+ * older than six hours, so this prefix keeps that job as the fallback safety net
+ * when our own cleanup cannot run.
  */
 export const RESOURCE_GROUP_PREFIX = "radtest-canvas";
 

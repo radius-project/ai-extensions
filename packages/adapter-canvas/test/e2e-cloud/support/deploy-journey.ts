@@ -22,6 +22,7 @@ import {
   DEPLOY_AZURE_FILE,
   DEPLOY_DISPATCHER_FILE
 } from "../../../src/infra.js";
+import { REQUIRED_DEFAULT_BRANCH_WORKFLOWS } from "./create-environment-journey.js";
 
 /**
  * Workflow files `/api/deploy` must publish before it can dispatch.
@@ -38,6 +39,13 @@ export const REQUIRED_DEPLOY_WORKFLOWS: readonly string[] = [
 export const REQUIRED_DELETE_WORKFLOWS: readonly string[] = [
   DELETE_APP_DISPATCHER_FILE,
   DELETE_AZURE_FILE
+];
+
+/** Every workflow the complete lifecycle requires before its first dispatch. */
+export const REQUIRED_LIFECYCLE_WORKFLOWS: readonly string[] = [
+  ...REQUIRED_DEFAULT_BRANCH_WORKFLOWS,
+  ...REQUIRED_DEPLOY_WORKFLOWS,
+  ...REQUIRED_DELETE_WORKFLOWS
 ];
 
 /**
@@ -90,6 +98,15 @@ export const TERMINAL_DEPLOY_STATES: readonly string[] = ["complete", "failed"];
 /** The one terminal state that means the application was deployed. */
 export const SUCCESSFUL_DEPLOY_STATE = "complete";
 
+/** Builds a repository-scoped Canvas listing route without losing query flags. */
+export function repositoryListingPath(
+  route: "/api/list-applications" | "/api/list-deployments",
+  repository: string,
+  fresh = false
+): string {
+  return `${route}?repo=${encodeURIComponent(repository)}${fresh ? "&fresh=1" : ""}`;
+}
+
 export interface DeployStatusSnapshot {
   readonly status: string;
   readonly terminal: boolean;
@@ -139,16 +156,21 @@ export function readDeployStatusSnapshot(
  */
 export function readApplicationNames(payload: unknown): string[] {
   const record = asRecord(payload);
+  rejectEndpointError(record, "application listing");
   const list = record?.applications;
   if (!Array.isArray(list))
     throw new Error(
       'The application listing carried no "applications" array, so the deploy target cannot be named.'
     );
   const names: string[] = [];
-  for (const entry of list) {
+  for (const [index, entry] of list.entries()) {
     const item = asRecord(entry);
     const name = item?.name;
-    if (typeof name === "string" && name.trim() !== "") names.push(name.trim());
+    if (typeof name !== "string" || name.trim() === "")
+      throw new Error(
+        `The application listing carried a malformed entry at index ${index}; every entry must have a usable "name".`
+      );
+    names.push(name.trim());
   }
   return names;
 }
@@ -180,6 +202,7 @@ export interface DeploymentRow {
 /** Narrows `/api/list-deployments`. */
 export function readDeploymentRows(payload: unknown): DeploymentRow[] {
   const record = asRecord(payload);
+  rejectEndpointError(record, "deployment listing");
   const list = record?.deployments;
   if (!Array.isArray(list))
     throw new Error(
@@ -187,11 +210,32 @@ export function readDeploymentRows(payload: unknown): DeploymentRow[] {
         "mistaken for an empty one, because an empty one is how stage three proves the deployment is gone."
     );
   const rows: DeploymentRow[] = [];
-  for (const entry of list) {
+  for (const [index, entry] of list.entries()) {
     const item = asRecord(entry);
-    if (!item) continue;
+    if (!item)
+      throw new Error(
+        `The deployment listing carried a malformed entry at index ${index}; every entry must be an object.`
+      );
     if (typeof item.app !== "string" || typeof item.environment !== "string")
-      continue;
+      throw new Error(
+        `The deployment listing carried a malformed entry at index ${index}; "app" and "environment" must be strings.`
+      );
+    if (
+      item.status !== undefined &&
+      item.status !== null &&
+      typeof item.status !== "string"
+    )
+      throw new Error(
+        `The deployment listing carried a malformed "status" at index ${index}.`
+      );
+    if (
+      item.runUrl !== undefined &&
+      item.runUrl !== null &&
+      typeof item.runUrl !== "string"
+    )
+      throw new Error(
+        `The deployment listing carried a malformed "runUrl" at index ${index}.`
+      );
     rows.push({
       app: item.app,
       environment: item.environment,
@@ -517,12 +561,15 @@ export function findSurvivingArtifactProblems(
   else
     for (const name of REQUIRED_ENVIRONMENT_VARIABLES) {
       const expected = input.expectedVariables.get(name);
-      const value = input.variables.get(name);
       if (expected === undefined)
         problems.push(
           `Stage one did not record environment variable ${name}, so its survival cannot be proved.`
         );
-      else if (value === undefined)
+    }
+  if (input.environmentExists)
+    for (const [name, expected] of input.expectedVariables) {
+      const value = input.variables.get(name);
+      if (value === undefined)
         problems.push(
           `Environment variable ${name} was removed by the delete; the environment can no longer deploy.`
         );
@@ -601,6 +648,17 @@ function optionalText(value: unknown, field: string): string {
       `The deploy status response carried a non-string "${field}".`
     );
   return value;
+}
+
+function rejectEndpointError(
+  record: Record<string, unknown> | undefined,
+  endpoint: string
+): void {
+  const error = record?.error;
+  if (error === undefined || error === null || error === "") return;
+  if (typeof error !== "string")
+    throw new Error(`The ${endpoint} carried a non-string "error".`);
+  throw new Error(`The ${endpoint} failed: ${error}`);
 }
 
 function optionalStringArray(value: unknown, field: string): readonly string[] {

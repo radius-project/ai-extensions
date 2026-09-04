@@ -29,7 +29,7 @@ describe("pinned baseline constants", () => {
     expect(FIXTURE_REPOSITORY.split("/")).toHaveLength(2);
   });
 
-  it("uses a resource group prefix the Radius purge job already sweeps", () => {
+  it("uses a resource group prefix the Radius purge job still sweeps as a safety net", () => {
     expect(RESOURCE_GROUP_PREFIX.startsWith("radtest-")).toBe(true);
   });
 
@@ -118,7 +118,7 @@ describe("findUnprovisionedFixtureFields", () => {
 });
 
 describe("run-scoped names", () => {
-  it("prefixes the resource group so the shared purge job reclaims it", () => {
+  it("prefixes the resource group so scheduled cleanup and the safety net can reclaim it", () => {
     expect(resourceGroupName("abc123")).toBe("radtest-canvas-abc123");
   });
 

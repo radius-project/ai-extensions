@@ -9,8 +9,8 @@
 //   Dangerous: a `pull_request_target` trigger would hand fork-authored code an
 //   Azure identity; a missing repository guard would let a fork spend our
 //   subscription quota; a floating action tag would let an upstream compromise
-//   reach a job holding cloud credentials; a resource-group sweep would put a
-//   second deleter on a subscription we share.
+//   reach a job holding cloud credentials; an untagged resource-group sweep
+//   would delete something the suite did not create.
 //
 //   Silently inert: a workflow that never invokes `test:cloud`, or never sets
 //   the environment variable that switches the suite on, still reports success.
@@ -201,8 +201,9 @@ describe("cloud-e2e.yml", () => {
 
     expect(playwrightMinutes).toBeGreaterThan(0);
     expect(playwrightGlobalMinutes).toBeGreaterThan(playwrightMinutes);
+    expect(playwrightGlobalMinutes).toBeLessThanOrEqual(50);
     expect(jobMinutes).toBeGreaterThan(playwrightMinutes);
-    expect(jobMinutes).toBeGreaterThan(playwrightGlobalMinutes);
+    expect(jobMinutes).toBeGreaterThanOrEqual(playwrightGlobalMinutes + 10);
   });
 
   it("switches the suite on and runs it", async () => {
@@ -337,14 +338,27 @@ describe("cloud-e2e.yml", () => {
 });
 
 describe("cloud-e2e-cleanup.yml", () => {
-  it("deletes no resource groups, because a job we do not own already does", async () => {
-    // Radius's own purge deletes `^radtest-` groups older than six hours twice
-    // daily in this subscription, and RESOURCE_GROUP_PREFIX is named to sit
-    // inside that net. A second deleter on a shared subscription is a hazard,
-    // not a belt-and-braces improvement. Asserted so the apparent gap is not
-    // "fixed" by someone who has not read the comment above it.
-    const raw = await readWorkflow(CLEANUP_WORKFLOW);
-    expect(raw).not.toMatch(/az\s+group\s+delete/);
+  it("deletes tagged resource groups the suite creates without waiting for age", async () => {
+    // The shared Radius purge job remains a safety net, but this workflow owns
+    // test leaks first. The fixture tag is what stops a prefix match from
+    // becoming a broad subscription sweep.
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge).find((step) =>
+      step.run?.includes("selectTestResourceGroups")
+    );
+    const script = purge?.run ?? "";
+
+    expect(purge?.if).toBe("steps.pin.outputs.provisioned == 'true'");
+    expect(purge?.env?.RESOURCE_GROUP_PREFIX).toBe(
+      "${{ steps.pin.outputs.resource-group-prefix }}"
+    );
+    expect(purge?.env?.SUBSCRIPTION_ID).toBe(
+      "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
+    );
+    expect(script).toContain("starts_with(name, '$RESOURCE_GROUP_PREFIX')");
+    expect(script).toContain('--subscription "$SUBSCRIPTION_ID"');
+    expect(script).not.toContain("MAX_AGE_HOURS hours ago");
+    expect(script).toContain("az group delete");
     expect(RESOURCE_GROUP_PREFIX.startsWith("radtest-")).toBe(true);
   });
 
@@ -376,6 +390,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const destructive = steps(workflow.jobs?.purge).filter(
       (step) =>
+        step.run?.includes("az group delete") ||
         step.run?.includes("az ad app delete") ||
         step.run?.includes("-X DELETE") ||
         step.run?.includes("-X PATCH")
@@ -385,7 +400,7 @@ describe("cloud-e2e-cleanup.yml", () => {
       expect(step.if).toBe("steps.pin.outputs.provisioned == 'true'");
   });
 
-  it("only deletes state older than the age threshold", async () => {
+  it("keeps the age threshold for Entra and GitHub state", async () => {
     // Without a provable age a purge cannot tell leaked state from a run in
     // progress, and the shared concurrency group is only half that guarantee.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);

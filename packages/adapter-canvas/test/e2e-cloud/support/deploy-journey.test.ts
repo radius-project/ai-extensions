@@ -6,6 +6,7 @@ import {
   DEPLOY_AZURE_FILE,
   DEPLOY_DISPATCHER_FILE
 } from "../../../src/infra.js";
+import { REQUIRED_DEFAULT_BRANCH_WORKFLOWS } from "./create-environment-journey.js";
 import {
   applicationNamespace,
   classifyDeploymentPresence,
@@ -24,7 +25,9 @@ import {
   REQUIRED_DELETE_WORKFLOWS,
   REQUIRED_DEPLOY_WORKFLOWS,
   REQUIRED_ENVIRONMENT_VARIABLES,
+  REQUIRED_LIFECYCLE_WORKFLOWS,
   REQUIRED_STATE_VARIABLES,
+  repositoryListingPath,
   requireSingleApplication,
   SUCCESSFUL_DEPLOY_STATE,
   TERMINAL_DEPLOY_STATES,
@@ -73,6 +76,11 @@ describe("required workflow and variable inventories", () => {
     expect(REQUIRED_DELETE_WORKFLOWS).toEqual([
       DELETE_APP_DISPATCHER_FILE,
       DELETE_AZURE_FILE
+    ]);
+    expect(REQUIRED_LIFECYCLE_WORKFLOWS).toEqual([
+      ...REQUIRED_DEFAULT_BRANCH_WORKFLOWS,
+      ...REQUIRED_DEPLOY_WORKFLOWS,
+      ...REQUIRED_DELETE_WORKFLOWS
     ]);
   });
 
@@ -232,12 +240,28 @@ describe("readApplicationNames", () => {
     ).toEqual(["demo"]);
   });
 
-  it("skips entries that cannot name an application", () => {
-    expect(
+  it.each([null, "demo", { name: 4 }, { name: "  " }, {}])(
+    "rejects a malformed application entry %#",
+    (entry) => {
+      expect(() => readApplicationNames({ applications: [entry] })).toThrow(
+        /malformed entry at index 0/
+      );
+    }
+  );
+
+  it("rejects an endpoint error instead of accepting a guessed application", () => {
+    expect(() =>
       readApplicationNames({
-        applications: [null, "demo", { name: 4 }, { name: "  " }, {}]
+        applications: [{ name: "guessed-repository-name" }],
+        error: "app.bicep could not be read"
       })
-    ).toEqual([]);
+    ).toThrow(/application listing failed: app\.bicep could not be read/);
+  });
+
+  it("rejects a malformed endpoint error", () => {
+    expect(() =>
+      readApplicationNames({ applications: [], error: { message: "failed" } })
+    ).toThrow(/non-string "error"/);
   });
 
   it.each([
@@ -297,19 +321,33 @@ describe("readDeploymentRows", () => {
     expect(readDeploymentRows({ deployments: [] })).toEqual([]);
   });
 
-  it("skips entries that cannot identify an application and environment", () => {
-    const rows = readDeploymentRows({
-      deployments: [
-        null,
-        "demo",
-        ["demo"],
-        { app: 1, environment: "radtest-env" },
-        { app: "demo", environment: 2 },
-        { app: "demo", environment: "radtest-env" }
-      ]
-    });
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.app).toBe("demo");
+  it.each([
+    [null, /must be an object/],
+    ["demo", /must be an object/],
+    [["demo"], /must be an object/],
+    [{ app: 1, environment: "radtest-env" }, /must be strings/],
+    [{ app: "demo", environment: 2 }, /must be strings/],
+    [{ app: "demo", environment: "radtest-env", status: 1 }, /"status"/],
+    [{ app: "demo", environment: "radtest-env", runUrl: 1 }, /"runUrl"/]
+  ])("rejects malformed deployment row %#", (entry, message) => {
+    expect(() => readDeploymentRows({ deployments: [entry] })).toThrow(
+      message as RegExp
+    );
+  });
+
+  it("rejects an endpoint error instead of proving false absence", () => {
+    expect(() =>
+      readDeploymentRows({
+        deployments: [],
+        error: "GitHub deployments are unavailable"
+      })
+    ).toThrow(/deployment listing failed: GitHub deployments are unavailable/);
+  });
+
+  it("rejects a malformed endpoint error", () => {
+    expect(() =>
+      readDeploymentRows({ deployments: [], error: { message: "failed" } })
+    ).toThrow(/non-string "error"/);
   });
 
   it.each([
@@ -320,6 +358,20 @@ describe("readDeploymentRows", () => {
     expect(() => readDeploymentRows(payload)).toThrow(
       /carried no "deployments" array/
     );
+  });
+});
+
+describe("repositoryListingPath", () => {
+  it("scopes application discovery to the encoded repository", () => {
+    expect(
+      repositoryListingPath("/api/list-applications", "owner/repo name")
+    ).toBe("/api/list-applications?repo=owner%2Frepo%20name");
+  });
+
+  it("preserves the fresh deployment flag with repository scope", () => {
+    expect(
+      repositoryListingPath("/api/list-deployments", "owner/repo", true)
+    ).toBe("/api/list-deployments?repo=owner%2Frepo&fresh=1");
   });
 });
 
@@ -746,6 +798,35 @@ describe("findSurvivingArtifactProblems", () => {
     ).toEqual([
       "Environment variable AZURE_AKS_CLUSTER_NAME changed across the delete; the surviving environment no longer " +
         "matches the configuration stage one proved."
+    ]);
+  });
+
+  it("reports removal of a captured product variable outside the required inventory", () => {
+    const expectedVariables = new Map(survivingInput().expectedVariables);
+    expectedVariables.set("RADIUS_MANAGED", "true");
+    expect(
+      findSurvivingArtifactProblems(
+        survivingInput({
+          expectedVariables,
+          variables: survivingInput().variables
+        })
+      )
+    ).toEqual([
+      "Environment variable RADIUS_MANAGED was removed by the delete; the environment can no longer deploy."
+    ]);
+  });
+
+  it("reports changes to a captured product variable outside the required inventory", () => {
+    const expectedVariables = new Map(survivingInput().expectedVariables);
+    const variables = new Map(survivingInput().variables);
+    expectedVariables.set("RADIUS_CREDENTIAL_PROFILE", "cloud-e2e");
+    variables.set("RADIUS_CREDENTIAL_PROFILE", "other");
+    expect(
+      findSurvivingArtifactProblems(
+        survivingInput({ expectedVariables, variables })
+      )
+    ).toEqual([
+      "Environment variable RADIUS_CREDENTIAL_PROFILE changed across the delete; the surviving environment no longer matches the configuration stage one proved."
     ]);
   });
 

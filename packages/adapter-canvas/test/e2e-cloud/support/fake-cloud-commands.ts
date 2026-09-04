@@ -18,6 +18,7 @@ export interface RecordedCommand {
   readonly tool: CloudTool;
   readonly args: readonly string[];
   readonly cwd?: string;
+  readonly timeoutMs?: number;
 }
 
 export interface FakeCommandStub {
@@ -74,9 +75,15 @@ export function createFakeCloudCommands(
   const run = (
     tool: CloudTool,
     args: readonly string[],
-    cwd?: string
+    cwd?: string,
+    timeoutMs?: number
   ): Promise<CloudCommandResult> => {
-    calls.push({ tool, args: [...args], cwd });
+    calls.push({
+      tool,
+      args: [...args],
+      ...(cwd === undefined ? {} : { cwd }),
+      ...(timeoutMs === undefined ? {} : { timeoutMs })
+    });
     const entry = remaining.find(
       (candidate) =>
         candidate.left > 0 &&
@@ -113,7 +120,8 @@ export function createFakeCloudCommands(
       runAz: (args) => run("az", args),
       runGh: (args) => run("gh", args),
       runGit: (args, cwd) => run("git", args, cwd),
-      runKubectl: (args) => run("kubectl", args)
+      runKubectl: (args, timeoutMs) =>
+        run("kubectl", args, undefined, timeoutMs)
     },
     calls,
     commandLines: (tool) =>
