@@ -421,6 +421,41 @@ describe("createNodeCloudFixturePorts", () => {
     }
   }, 30_000);
 
+  it("terminates kubectl when its per-probe deadline expires", async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), "radtest-kubectl-timeout-")
+    );
+    const marker = path.join(directory, "leaked.txt");
+    const executable = path.join(
+      directory,
+      process.platform === "win32" ? "kubectl.exe" : "kubectl"
+    );
+    const priorPath = process.env.PATH;
+    try {
+      if (process.platform === "win32")
+        await fs.copyFile(process.execPath, executable);
+      else await fs.symlink(process.execPath, executable);
+      process.env.PATH = `${directory}${path.delimiter}${priorPath ?? ""}`;
+
+      const ports = createNodeCloudFixturePorts();
+      const outcome = await ports.commands.runKubectl(
+        [
+          "--eval",
+          'setTimeout(() => require("node:fs").writeFileSync(process.argv[1], "leaked"), 500)',
+          marker
+        ],
+        100
+      );
+
+      expect(outcome.code).not.toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      await expect(fs.stat(marker)).rejects.toThrow();
+    } finally {
+      process.env.PATH = priorPath;
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("redacts Azure output through the real runAz port wiring", async () => {
     const token = "fake-azure-token-for-port-test";
     const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-az-"));

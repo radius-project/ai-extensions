@@ -42,7 +42,10 @@ export interface CloudCommandPort {
    * Requiring callers to pass `--kubeconfig <path>` prevents an inherited
    * KUBECONFIG from redirecting the journey to a developer's personal cluster.
    */
-  runKubectl(args: readonly string[]): Promise<CloudCommandResult>;
+  runKubectl(
+    args: readonly string[],
+    timeoutMs?: number
+  ): Promise<CloudCommandResult>;
 }
 
 export interface CloudFixturePorts {
@@ -76,7 +79,8 @@ function runTool(
     error: { code?: string | number | null } | null,
     stdout: string | undefined,
     stderr: string | undefined
-  ) => CloudCommandResult = normalizeCommandResult
+  ) => CloudCommandResult = normalizeCommandResult,
+  timeoutMs = COMMAND_TIMEOUT_MS
 ): Promise<CloudCommandResult> {
   return new Promise((resolve) => {
     const child = cliExec(
@@ -84,7 +88,7 @@ function runTool(
       [...args],
       {
         cwd,
-        timeout: COMMAND_TIMEOUT_MS,
+        timeout: timeoutMs,
         maxBuffer: MAX_OUTPUT_BYTES,
         windowsHide: true
       },
@@ -180,7 +184,8 @@ export function createNodeCloudFixturePorts(): CloudFixturePorts {
         runTool("az", args, undefined, normalizeAzureCommandResult),
       runGh: (args) => runTool("gh", args),
       runGit: (args, cwd) => runTool("git", args, cwd),
-      runKubectl: (args) => runTool("kubectl", args)
+      runKubectl: (args, timeoutMs) =>
+        runTool("kubectl", args, undefined, normalizeCommandResult, timeoutMs)
     },
     makeWorkspaceDir: (prefix) =>
       fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`)),

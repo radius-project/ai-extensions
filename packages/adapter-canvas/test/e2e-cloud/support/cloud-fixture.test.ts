@@ -2383,8 +2383,8 @@ describe("createCloudFixture", () => {
       expect(fake.waits).toEqual([1000]);
     });
 
-    it("names a workload that never becomes ready", async () => {
-      const { fixture } = await clusterHarness(
+    it("bounds every readiness probe by the remaining assertion time", async () => {
+      const { fixture, fake } = await clusterHarness(
         [
           credentials(),
           listing({ stdout: workloadsJson(["demo-frontend", 0]) })
@@ -2397,6 +2397,11 @@ describe("createCloudFixture", () => {
       ).rejects.toThrow(
         /"demo-frontend" has 0 available replica\(s\) of 1 desired/
       );
+      expect(
+        fake.commands.calls
+          .filter((call) => call.tool === "kubectl")
+          .map((call) => call.timeoutMs)
+      ).toEqual([2000, 1000]);
     });
 
     it("reports a namespace that never appeared as the deploy never reaching the cluster", async () => {
@@ -2521,8 +2526,8 @@ describe("createCloudFixture", () => {
       expect(fake.waits).toEqual([1000]);
     });
 
-    it("names the workloads a delete failed to remove", async () => {
-      const { fixture } = await clusterHarness(
+    it("bounds every absence probe and stops before starting one past the deadline", async () => {
+      const { fixture, fake } = await clusterHarness(
         [
           credentials(),
           resourceListing({
@@ -2540,6 +2545,11 @@ describe("createCloudFixture", () => {
       ).rejects.toThrow(
         /2 workload resource\(s\) remain: "Deployment\/demo-frontend", "Pod\/demo-backend-abc"/
       );
+      expect(
+        fake.commands.calls
+          .filter((call) => call.tool === "kubectl")
+          .map((call) => call.timeoutMs)
+      ).toEqual([2000, 1000]);
     });
 
     it("does not accept an orphaned application pod as workload absence", async () => {

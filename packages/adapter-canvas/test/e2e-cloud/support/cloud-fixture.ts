@@ -367,22 +367,26 @@ export async function createCloudFixture(
 
   const listWorkloads = async (
     application: string,
-    namespace: string
+    namespace: string,
+    timeoutMs?: number
   ): Promise<readonly KubernetesWorkload[] | "no-namespace"> => {
     const kubeconfig = await clusterKubeconfig();
     const context = `kubectl get deployments -n ${namespace}`;
-    const result = await commands.runKubectl([
-      "--kubeconfig",
-      kubeconfig,
-      "get",
-      "deployments",
-      "--namespace",
-      namespace,
-      "--selector",
-      radiusApplicationSelector(application),
-      "--output",
-      "json"
-    ]);
+    const result = await commands.runKubectl(
+      [
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "deployments",
+        "--namespace",
+        namespace,
+        "--selector",
+        radiusApplicationSelector(application),
+        "--output",
+        "json"
+      ],
+      timeoutMs
+    );
     if (result.code !== 0) {
       if (isMissingNamespace(result)) return "no-namespace";
       throw new Error(
@@ -396,22 +400,26 @@ export async function createCloudFixture(
 
   const listApplicationResources = async (
     application: string,
-    namespace: string
+    namespace: string,
+    timeoutMs?: number
   ): Promise<readonly string[] | "no-namespace"> => {
     const kubeconfig = await clusterKubeconfig();
     const context = `kubectl get deployments,pods -n ${namespace}`;
-    const result = await commands.runKubectl([
-      "--kubeconfig",
-      kubeconfig,
-      "get",
-      "deployments,pods",
-      "--namespace",
-      namespace,
-      "--selector",
-      radiusApplicationSelector(application),
-      "--output",
-      "json"
-    ]);
+    const result = await commands.runKubectl(
+      [
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "deployments,pods",
+        "--namespace",
+        namespace,
+        "--selector",
+        radiusApplicationSelector(application),
+        "--output",
+        "json"
+      ],
+      timeoutMs
+    );
     if (result.code !== 0) {
       if (isMissingNamespace(result)) return "no-namespace";
       throw new Error(
@@ -744,8 +752,8 @@ export async function createCloudFixture(
         ports,
         timeoutMs: assertionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
-        probe: async () => {
-          lastSeen = await listWorkloads(application, namespace);
+        probe: async (remainingMs) => {
+          lastSeen = await listWorkloads(application, namespace, remainingMs);
           if (lastSeen === "no-namespace" || lastSeen.length === 0)
             return undefined;
           if (lastSeen.some((workload) => workload.availableReplicas < 1))
@@ -775,10 +783,11 @@ export async function createCloudFixture(
         ports,
         timeoutMs: assertionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
-        probe: async () => {
+        probe: async (remainingMs) => {
           const resources = await listApplicationResources(
             application,
-            namespace
+            namespace,
+            remainingMs
           );
           if (resources === "no-namespace") return true;
           lastSeen = resources;
@@ -1009,14 +1018,16 @@ interface PollForValueOptions<T> {
   readonly ports: Pick<CloudFixturePorts, "now" | "wait">;
   readonly timeoutMs: number;
   readonly intervalMs: number;
-  readonly probe: () => Promise<T | undefined>;
+  readonly probe: (remainingMs: number) => Promise<T | undefined>;
   readonly timeoutMessage: () => string;
 }
 
 async function pollForValue<T>(options: PollForValueOptions<T>): Promise<T> {
   const deadline = options.ports.now().getTime() + options.timeoutMs;
   while (true) {
-    const value = await options.probe();
+    const remainingBeforeProbe = deadline - options.ports.now().getTime();
+    if (remainingBeforeProbe <= 0) throw new Error(options.timeoutMessage());
+    const value = await options.probe(remainingBeforeProbe);
     if (value !== undefined) return value;
     const remaining = deadline - options.ports.now().getTime();
     if (remaining <= 0) throw new Error(options.timeoutMessage());

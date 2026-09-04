@@ -206,8 +206,9 @@ describe("cloud-e2e.yml", () => {
 
     expect(playwrightMinutes).toBeGreaterThan(0);
     expect(playwrightGlobalMinutes).toBeGreaterThan(playwrightMinutes);
+    expect(playwrightGlobalMinutes).toBeLessThanOrEqual(50);
     expect(jobMinutes).toBeGreaterThan(playwrightMinutes);
-    expect(jobMinutes).toBeGreaterThan(playwrightGlobalMinutes);
+    expect(jobMinutes).toBeGreaterThanOrEqual(playwrightGlobalMinutes + 10);
   });
 
   it("switches the suite on and runs it", async () => {
