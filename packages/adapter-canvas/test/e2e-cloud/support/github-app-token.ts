@@ -129,9 +129,10 @@ export async function mintGitHubAppToken(
       body: JSON.stringify({
         repositories: [repositoryName],
         permissions: {
-          actions: "read",
+          actions: "write",
           administration: "read",
           contents: "write",
+          deployments: "read",
           environments: "write",
           pull_requests: "write",
           variables: "write",
