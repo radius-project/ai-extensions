@@ -45,6 +45,11 @@ export function githubApiHeaders(accept: string): Record<string, string> {
   return headers;
 }
 
+// Retry one GitHub API request across the provided retry budget. Transient
+// failures are HTTP 408, HTTP 429, and 5xx responses; fetch rejections are
+// retried the same way and rethrown once the budget is exhausted. The number of
+// extra attempts equals `retryDelaysMs.length`, so the default budget is three
+// total attempts.
 export async function fetchGitHubWithRetry(
   url: string,
   init: RequestInit,
@@ -95,7 +100,7 @@ export async function fetchExtensionFile(
   if (!res.ok) {
     const attemptSummary = attempts === 1 ? "" : ` after ${attempts} attempts`;
     throw new Error(
-      `failed to fetch ${url}: ${res.status} ${res.statusText}${attemptSummary}`
+      `failed to fetch ${url}${attemptSummary}: ${res.status} ${res.statusText}`
     );
   }
   return res.text();

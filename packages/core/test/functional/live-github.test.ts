@@ -114,7 +114,7 @@ describe("live GitHub test support", () => {
         }
       )
     ).rejects.toThrow(
-      "failed to fetch https://api.github.com/repos/owner/repo/contents/.github/extension/delete-aws.yml?ref=sha%20with%20slash: 500 Internal Server Error after 3 attempts"
+      "failed to fetch https://api.github.com/repos/owner/repo/contents/.github/extension/delete-aws.yml?ref=sha%20with%20slash after 3 attempts: 500 Internal Server Error"
     );
     expect(calls).toBe(3);
   });
