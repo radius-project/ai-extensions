@@ -4,6 +4,7 @@
 // process-spawning surface besides the deploy monitor and infra modules.
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -1547,7 +1548,7 @@ export const github = {
   getDefaultBranch: (repo: string) => getDefaultBranch(repo)
 };
 
-// Look up a file's blob SHA on a branch; resolves '' when the file is absent.
+// Look up a file's blob SHA on a branch; resolves "" when the file is absent.
 function getRepoFileSha(
   repo: string,
   path: string,
@@ -1566,10 +1567,18 @@ function getRepoFileSha(
   });
 }
 
+function gitBlobSha(content: string): string {
+  const bytes = Buffer.from(content, "utf8");
+  return createHash("sha1")
+    .update(`blob ${bytes.length}\0`)
+    .update(bytes)
+    .digest("hex");
+}
+
 // Create or update a single UTF-8 text file on a repo branch via the GitHub
-// contents API. Reuses the existing blob SHA so a re-commit is an update rather
-// than a rejected create. The commit body is fed over stdin (never argv) so the
-// base64 payload can't collide with shell/CLI parsing. Rejects on failure.
+// contents API. Identical content is a no-op; drift reuses the existing blob SHA
+// so the write is an update rather than a rejected create. The commit body is
+// fed over stdin (never argv) so the base64 payload cannot collide with parsing.
 export async function commitFileToRepo(
   repo: string,
   path: string,
@@ -1579,6 +1588,7 @@ export async function commitFileToRepo(
   timeout = 30000
 ): Promise<boolean> {
   const sha = await getRepoFileSha(repo, path, branch);
+  if (sha && sha === gitBlobSha(content)) return false;
   const body = JSON.stringify({
     message,
     content: Buffer.from(content, "utf8").toString("base64"),

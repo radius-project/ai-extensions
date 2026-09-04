@@ -331,6 +331,7 @@ function publisherRecorder(script: PublisherScript = {}) {
       return (
         script.commits?.[path] ?? {
           ok: true,
+          changed: true,
           viaPr: script.viaPr ?? false,
           commitSha: `commit-${commitCalls.length}`,
           blobSha: `blob-${commitCalls.length}`,
@@ -437,7 +438,7 @@ describe("publishWorkflowFiles", () => {
     // later refuses to roll the file back automatically.
     const recorder = publisherRecorder({
       commits: {
-        [VERIFY_WORKFLOW_PATH]: { ok: true, viaPr: false }
+        [VERIFY_WORKFLOW_PATH]: { ok: true, changed: true, viaPr: false }
       }
     });
 
@@ -453,6 +454,40 @@ describe("publishWorkflowFiles", () => {
       previousBlobSha: null,
       previousBlobKnown: false
     });
+  });
+
+  it("does not record workflows that were already up to date", async () => {
+    const recorder = publisherRecorder({
+      commits: {
+        [VERIFY_WORKFLOW_PATH]: {
+          ok: true,
+          changed: false,
+          viaPr: false
+        },
+        ".github/workflows/run-rad-commands.yml": {
+          ok: true,
+          changed: false,
+          viaPr: false
+        },
+        ".github/workflows/radius-delete.yml": {
+          ok: true,
+          changed: false,
+          viaPr: false
+        }
+      }
+    });
+
+    await expect(
+      publishWorkflowFiles(recorder.ports, recorder.target)
+    ).resolves.toEqual({ outcome: "published" });
+    expect(recorder.committed).toEqual([]);
+    expect(recorder.gateCount()).toBe(4);
+    expect(recorder.steps).toContain("✅ Verify workflow already up to date.");
+    expect(recorder.steps).toContain("✅ Deploy workflows already up to date.");
+    expect(recorder.steps).toContain("✅ Delete workflows already up to date.");
+    expect(recorder.steps).not.toContain("✅ Verify workflow committed.");
+    expect(recorder.steps).not.toContain("✅ Deploy workflows committed.");
+    expect(recorder.steps).not.toContain("✅ Delete workflows committed.");
   });
 
   it("records the pull-request branch when the commits fell back to one", async () => {
@@ -474,6 +509,7 @@ describe("publishWorkflowFiles", () => {
       commits: {
         [VERIFY_WORKFLOW_PATH]: {
           ok: false,
+          changed: false,
           stderr: "protected branch",
           viaPr: false
         }
@@ -501,6 +537,7 @@ describe("publishWorkflowFiles", () => {
       commits: {
         [VERIFY_WORKFLOW_PATH]: {
           ok: false,
+          changed: false,
           stderr: "protected branch",
           viaPr: false
         }
@@ -517,6 +554,7 @@ describe("publishWorkflowFiles", () => {
       commits: {
         ".github/workflows/run-rad-commands.yml": {
           ok: false,
+          changed: false,
           stderr: "",
           viaPr: false
         }
@@ -539,6 +577,7 @@ describe("publishWorkflowFiles", () => {
       commits: {
         ".github/workflows/radius-verify-credentials.yml": {
           ok: false,
+          changed: false,
           cancelled: true,
           stderr: "stopped",
           viaPr: false
@@ -597,7 +636,13 @@ describe("publishWorkflowFiles", () => {
 
   it("reports an empty gh error when the verify refusal carried no stderr", async () => {
     const recorder = publisherRecorder({
-      commits: { [VERIFY_WORKFLOW_PATH]: { ok: false, viaPr: false } }
+      commits: {
+        [VERIFY_WORKFLOW_PATH]: {
+          ok: false,
+          changed: false,
+          viaPr: false
+        }
+      }
     });
 
     const result = await publishWorkflowFiles(recorder.ports, recorder.target);
@@ -610,6 +655,7 @@ describe("publishWorkflowFiles", () => {
       commits: {
         ".github/workflows/radius-delete.yml": {
           ok: false,
+          changed: false,
           stderr: "HTTP 404",
           viaPr: false
         }
@@ -622,6 +668,12 @@ describe("publishWorkflowFiles", () => {
     expect(recorder.steps).toContain(
       "⚠️ Could not commit delete workflow radius-delete.yml: HTTP 404"
     );
+    expect(recorder.steps).toContain(
+      "⚠️ Delete workflow checks completed with warnings."
+    );
+    expect(recorder.steps).not.toContain(
+      "✅ Delete workflows already up to date."
+    );
     // A refused delete commit is not recorded, but its completed write attempt
     // still consumes a gate before any later mutation can begin.
     expect(recorder.committed).toHaveLength(2);
@@ -633,6 +685,7 @@ describe("publishWorkflowFiles", () => {
       commits: {
         ".github/workflows/radius-delete.yml": {
           ok: false,
+          changed: false,
           viaPr: false
         }
       }

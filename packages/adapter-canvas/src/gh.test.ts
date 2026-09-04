@@ -929,6 +929,106 @@ describe.sequential("cliExec", () => {
   });
 });
 
+describe.sequential("commitFileToRepo", () => {
+  beforeEach(() => {
+    childProcess.execFile.mockReset();
+    childProcess.execFileSync.mockReset();
+  });
+
+  afterEach(() => {
+    restorePlatform();
+  });
+
+  it("commits missing files", async () => {
+    const { commitFileToRepo } = await loadGh("linux");
+    let requestBody = "";
+    childProcess.execFile.mockImplementation((_file, args, _opts, callback) => {
+      const readingFile = !args?.includes("--method");
+      callback(
+        readingFile ? new Error("not found") : null,
+        "",
+        readingFile ? "HTTP 404: Not Found" : ""
+      );
+      return {
+        stdin: {
+          end(value?: string) {
+            if (value) requestBody = value;
+          }
+        }
+      };
+    });
+
+    await expect(
+      commitFileToRepo(
+        "octo/app",
+        ".github/workflows/radius.yml",
+        "on: workflow_dispatch",
+        "main",
+        "Update Radius workflow"
+      )
+    ).resolves.toBe(true);
+
+    expect(JSON.parse(requestBody)).toEqual({
+      message: "Update Radius workflow",
+      content: Buffer.from("on: workflow_dispatch").toString("base64"),
+      branch: "main"
+    });
+  });
+
+  it("does not commit a workflow whose content already matches", async () => {
+    const { commitFileToRepo } = await loadGh("linux");
+    const content = "on: workflow_dispatch";
+    const sha = "0ed39ed01473b7fb142b9b1d2fb06bb03b7791b2";
+    childProcess.execFile.mockImplementation(
+      (_file, _args, _opts, callback) => {
+        callback(null, sha, "");
+        return { stdin: { end: vi.fn() } };
+      }
+    );
+
+    await expect(
+      commitFileToRepo(
+        "octo/app",
+        ".github/workflows/radius.yml",
+        content,
+        "main",
+        "Update Radius workflow"
+      )
+    ).resolves.toBe(false);
+    expect(childProcess.execFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("updates a workflow when its existing content has drifted", async () => {
+    const { commitFileToRepo } = await loadGh("linux");
+    let requestBody = "";
+    childProcess.execFile.mockImplementation((_file, args, _opts, callback) => {
+      if (!args?.includes("--method")) {
+        callback(null, "existing-sha", "");
+      } else {
+        callback(null, "", "");
+      }
+      return {
+        stdin: {
+          end(value?: string) {
+            if (value) requestBody = value;
+          }
+        }
+      };
+    });
+
+    await expect(
+      commitFileToRepo(
+        "octo/app",
+        ".github/workflows/radius.yml",
+        "current",
+        "main",
+        "Update Radius workflow"
+      )
+    ).resolves.toBe(true);
+    expect(JSON.parse(requestBody)).toMatchObject({ sha: "existing-sha" });
+  });
+});
+
 describe.sequential("ghApiJson", () => {
   beforeEach(() => {
     childProcess.execFile.mockReset();

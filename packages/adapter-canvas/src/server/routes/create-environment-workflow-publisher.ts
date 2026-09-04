@@ -347,7 +347,7 @@ export async function publishWorkflowFiles(
   });
 
   // Step 3: Commit the verify-credentials workflow
-  ports.pushStep("Committing verify-credentials workflow...");
+  ports.pushStep("Checking verify-credentials workflow...");
   const verifyWorkflow = await ports.generateVerifyWorkflow(envName, provider);
   const verifyContent = Buffer.from(verifyWorkflow).toString("base64");
 
@@ -373,17 +373,24 @@ export async function publishWorkflowFiles(
       ghError: verifyCommit.stderr || ""
     };
   }
-  ports.pushStep("✅ Verify workflow committed.");
-  ports.recordCommittedWorkflowFile(
-    operation,
-    commitRecord(VERIFY_WORKFLOW_PATH, verifyCommit)
-  );
+  if (verifyCommit.changed) {
+    ports.pushStep("✅ Verify workflow committed.");
+  } else {
+    ports.pushStep("✅ Verify workflow already up to date.");
+  }
+  if (verifyCommit.changed) {
+    ports.recordCommittedWorkflowFile(
+      operation,
+      commitRecord(VERIFY_WORKFLOW_PATH, verifyCommit)
+    );
+  }
   if (!(await ports.gate())) return { outcome: "cancelled" };
 
   // Step 4: Also commit the deploy workflows (dispatcher + both provider
   // workflows). The dispatcher references both provider files by path, so all
   // three must exist in the target repo.
-  ports.pushStep("Committing deploy workflows...");
+  ports.pushStep("Checking deploy workflows...");
+  let deployChanges = 0;
   const deployWorkflows = await ports.generateDeployWorkflow(
     envName,
     ".radius/app.bicep"
@@ -415,10 +422,13 @@ export async function publishWorkflowFiles(
         ghError: deployCommit.stderr || ""
       };
     }
-    ports.recordCommittedWorkflowFile(
-      operation,
-      commitRecord(deployPath, deployCommit)
-    );
+    if (deployCommit.changed) {
+      deployChanges += 1;
+      ports.recordCommittedWorkflowFile(
+        operation,
+        commitRecord(deployPath, deployCommit)
+      );
+    }
     if (!(await ports.gate())) return { outcome: "cancelled" };
   }
   // Best-effort: remove the legacy monolithic deploy workflow so it does not
@@ -434,14 +444,20 @@ export async function publishWorkflowFiles(
     }
     if (!(await ports.gate())) return { outcome: "cancelled" };
   }
-  ports.pushStep("✅ Deploy workflows committed.");
+  if (deployChanges > 0) {
+    ports.pushStep("✅ Deploy workflows committed.");
+  } else {
+    ports.pushStep("✅ Deploy workflows already up to date.");
+  }
 
   // Step 4b: Commit the application-delete workflows (dispatcher + Azure
   // provider workflow) so the Delete Deployment button can dispatch `rad app
   // delete`. Only Azure workflows are generated and committed; the AWS provider
   // file is never produced.
-  ports.pushStep("Committing delete workflows...");
+  ports.pushStep("Checking delete workflows...");
   try {
+    let deleteChanges = 0;
+    let deleteFailures = 0;
     const deleteWorkflows = await ports.generateDeleteWorkflow(envName);
     for (const [fileName, content] of Object.entries(deleteWorkflows)) {
       const delContent = Buffer.from(content).toString("base64");
@@ -458,23 +474,30 @@ export async function publishWorkflowFiles(
       if (delCommit.cancelled) return { outcome: "cancelled" };
 
       if (!delCommit.ok) {
+        deleteFailures += 1;
         ports.pushStep(
           "⚠️ Could not commit delete workflow " +
             fileName +
             ": " +
             ((delCommit.stderr || "").trim() || "GitHub API request failed.")
         );
-        if (!(await ports.gate())) return { outcome: "cancelled" };
       }
-      if (delCommit.ok) {
+      if (delCommit.ok && delCommit.changed) {
+        deleteChanges += 1;
         ports.recordCommittedWorkflowFile(
           operation,
           commitRecord(delPath, delCommit)
         );
-        if (!(await ports.gate())) return { outcome: "cancelled" };
       }
+      if (!(await ports.gate())) return { outcome: "cancelled" };
     }
-    ports.pushStep("✅ Delete workflows committed.");
+    if (deleteFailures > 0) {
+      ports.pushStep("⚠️ Delete workflow checks completed with warnings.");
+    } else if (deleteChanges > 0) {
+      ports.pushStep("✅ Delete workflows committed.");
+    } else {
+      ports.pushStep("✅ Delete workflows already up to date.");
+    }
   } catch (delErr) {
     if (delErr instanceof ProviderMutationRecoveryError) throw delErr;
     // Delete workflows are non-critical to environment creation, so surface the
