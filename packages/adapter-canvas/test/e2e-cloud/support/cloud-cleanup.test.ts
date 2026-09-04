@@ -4,14 +4,12 @@ import {
   selectExpiredEnvironments,
   selectExpiredFallbackBranches,
   selectExpiredFallbackPullRequests,
-  selectExpiredResourceGroups,
+  selectTestResourceGroups,
 } from "./cloud-cleanup.js";
 
 const CUTOFF = "2026-08-31T12:00:00Z";
 const OLD = "2026-08-31T05:59:59Z";
 const NEW = "2026-08-31T12:00:00Z";
-const OLD_EPOCH_SECONDS = "1788155999";
-const NEW_EPOCH_SECONDS = "1788177600";
 const APP = "radius-deploy-fixture-owner-fixture-repo";
 const BRANCH_PREFIX = "radius/setup-";
 
@@ -105,72 +103,58 @@ describe("selectExpiredEnvironments", () => {
   });
 });
 
-describe("selectExpiredResourceGroups", () => {
-  it("selects only tagged old resource groups with the fixture prefix", () => {
+describe("selectTestResourceGroups", () => {
+  it("selects tagged resource groups with the fixture prefix without waiting for age", () => {
     expect(
-      selectExpiredResourceGroups(
+      selectTestResourceGroups(
         [
           {
             name: "radtest-canvas-old",
             tags: {
-              creationTime: OLD_EPOCH_SECONDS,
               "radius-canvas-e2e": "true",
             },
           },
           {
-            name: "radtest-canvas-new",
+            name: "radtest-canvas-just-created",
             tags: {
-              creationTime: NEW_EPOCH_SECONDS,
               "radius-canvas-e2e": "true",
             },
           },
           {
             name: "radtest-canvas-untagged",
-            tags: { creationTime: OLD_EPOCH_SECONDS },
+            tags: {},
           },
           {
             name: "radtest-other",
             tags: {
-              creationTime: OLD_EPOCH_SECONDS,
               "radius-canvas-e2e": "true",
             },
           },
         ],
         "radtest-canvas",
-        CUTOFF,
       ),
-    ).toEqual([{ name: "radtest-canvas-old" }]);
+    ).toEqual(["radtest-canvas-old", "radtest-canvas-just-created"]);
   });
 
-  it.each([
-    ["missing", {}],
-    ["null", { creationTime: null }],
-    ["malformed", { creationTime: "not-a-number" }],
-  ])(
-    "does not select a resource group with %s creation data",
-    (_label, tags) => {
-      expect(
-        selectExpiredResourceGroups(
-          [
-            {
-              name: "radtest-canvas-unsafe",
-              tags: { ...tags, "radius-canvas-e2e": "true" },
-            },
-          ],
-          "radtest-canvas",
-          CUTOFF,
-        ),
-      ).toEqual([]);
-    },
-  );
+  it("does not select untagged resource groups even with the fixture prefix", () => {
+    expect(
+      selectTestResourceGroups(
+        [
+          { name: "radtest-canvas-missing-tags" },
+          {
+            name: "radtest-canvas-wrong-tag",
+            tags: { "radius-canvas-e2e": "false" },
+          },
+        ],
+        "radtest-canvas",
+      ),
+    ).toEqual([]);
+  });
 
-  it("rejects an unreadable listing or invalid cutoff", () => {
-    expect(() =>
-      selectExpiredResourceGroups({}, "radtest-canvas", CUTOFF),
-    ).toThrow("did not return a JSON array");
-    expect(() =>
-      selectExpiredResourceGroups([], "radtest-canvas", "invalid"),
-    ).toThrow("not a valid UTC timestamp");
+  it("rejects an unreadable listing", () => {
+    expect(() => selectTestResourceGroups({}, "radtest-canvas")).toThrow(
+      "did not return a JSON array",
+    );
   });
 });
 

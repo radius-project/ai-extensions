@@ -7,10 +7,6 @@ interface CleanupPullRequest {
   readonly headRef: string;
 }
 
-interface CleanupResourceGroup {
-  readonly name: string;
-}
-
 const ISO_INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -42,12 +38,6 @@ function parseInstant(value: unknown): number | null {
 function expired(value: unknown, cutoff: number): boolean {
   const milliseconds = parseInstant(value);
   return milliseconds !== null && milliseconds < cutoff;
-}
-
-function expiredEpochSeconds(value: unknown, cutoff: number): boolean {
-  if (typeof value !== "string" || !/^\d+$/.test(value)) return false;
-  const milliseconds = Number(value) * 1_000;
-  return Number.isFinite(milliseconds) && milliseconds < cutoff;
 }
 
 function flattenPages(payload: unknown, context: string): unknown[] {
@@ -99,23 +89,20 @@ export function selectExpiredEnvironments(
   return names;
 }
 
-export function selectExpiredResourceGroups(
+export function selectTestResourceGroups(
   payload: unknown,
   prefix: string,
-  cutoff: string,
-): CleanupResourceGroup[] {
-  const cutoffMilliseconds = requireCutoff(cutoff);
-  const groups: CleanupResourceGroup[] = [];
+): string[] {
+  const groups: string[] = [];
   for (const entry of requireArray(payload, "Azure resource groups")) {
     const item = asRecord(entry);
     const tags = asRecord(item?.tags);
     if (
       typeof item?.name === "string" &&
       item.name.startsWith(prefix) &&
-      tags?.["radius-canvas-e2e"] === "true" &&
-      expiredEpochSeconds(tags.creationTime, cutoffMilliseconds)
+      tags?.["radius-canvas-e2e"] === "true"
     )
-      groups.push({ name: item.name });
+      groups.push(item.name);
   }
   return groups;
 }
