@@ -330,7 +330,7 @@ describe("P0-C built Radius extension artifact", () => {
     for (const packagedPath of packagedPaths) {
       expect(existsSync(join(DIST, ...packagedPath.split("/")))).toBe(true);
     }
-expectMatchingFile(SOURCE_PREVIEW, join(DIST, "assets", "preview.png"));
+    expectMatchingFile(SOURCE_PREVIEW, join(DIST, "assets", "preview.png"));
     const radiusTypeResolver = readFileSync(
       join(
         DIST,
