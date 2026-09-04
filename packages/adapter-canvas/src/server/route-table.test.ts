@@ -39,6 +39,7 @@ const productionHandlers = {
   ...createLivenessSourceRoutes({
     getOpenSourceHandler: () => null,
     readInstanceState: () => undefined,
+    getWorkspaceModelRevision: () => Promise.resolve(null),
     toSafeRepoRelPath: (input) => String(input)
   }),
   ...createOperationsStatusRoutes(
@@ -54,6 +55,7 @@ const productionHandlers = {
       isValidRepoSlug: () => false,
       isResourceGroupName: () => false,
       isAksClusterName: () => false,
+      isKubernetesNamespace: () => false,
       isUuid: () => false,
       buildStages: () => [],
       createOperation: () => ({ operationId: "", currentStage: null }),

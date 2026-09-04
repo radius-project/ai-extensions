@@ -160,6 +160,7 @@ function createDependencies(
     isAksClusterName: () => {
       throw new Error("isAksClusterName not stubbed");
     },
+    isKubernetesNamespace: () => true,
     isUuid: () => {
       throw new Error("isUuid not stubbed");
     },
@@ -909,6 +910,75 @@ describe("handleCreateOperation (POST /api/operations)", () => {
     });
   });
 
+  it.each(["Todo-app-3", "todo_app", "todo app", "-todo", "todo-"])(
+    "rejects invalid Kubernetes namespace %j before touching provider guards",
+    async (namespace) => {
+      const seen: string[] = [];
+      const recording = await runCreate(
+        JSON.stringify({ repo: "octo/app", namespace }),
+        createDependencies({
+          isValidRepoSlug: () => true,
+          isKubernetesNamespace: (value) => {
+            seen.push(value);
+            return false;
+          }
+        })
+      );
+
+      expect(seen).toEqual([namespace]);
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toEqual({
+        error:
+          "Kubernetes namespace must be 1-63 lowercase letters, numbers, or hyphens and must start and end with a letter or number.",
+        code: "invalid-kubernetes-namespace"
+      });
+    }
+  );
+
+  it.each([{ namespace: "" }, {}])(
+    "resolves an implicit namespace to default before validation",
+    async (input) => {
+      const seen: string[] = [];
+      const recording = await runCreate(
+        JSON.stringify({ repo: "octo/app", ...input }),
+        createDependencies({
+          isValidRepoSlug: () => true,
+          isKubernetesNamespace: (value) => {
+            seen.push(value);
+            return true;
+          },
+          isResourceGroupName: () => false
+        })
+      );
+
+      expect(seen).toEqual(["default"]);
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toMatchObject({
+        code: "invalid-azure-operation-input"
+      });
+    }
+  );
+
+  it.each([123, true, ["prod"], { name: "prod" }])(
+    "rejects a non-string namespace %j without calling the validator",
+    async (namespace) => {
+      const recording = await runCreate(
+        JSON.stringify({ repo: "octo/app", namespace }),
+        createDependencies({
+          isValidRepoSlug: () => true,
+          isKubernetesNamespace: () => {
+            throw new Error("validator should not receive malformed input");
+          }
+        })
+      );
+
+      expect(recording.status).toBe(400);
+      expect(JSON.parse(recording.body)).toMatchObject({
+        code: "invalid-kubernetes-namespace"
+      });
+    }
+  );
+
   it.each([
     ["resourceGroup", { isResourceGroupName: () => false }],
     ["cluster", { isAksClusterName: () => false }],
@@ -1133,13 +1203,14 @@ describe("handleCreateOperation (POST /api/operations)", () => {
     const resume = op.resumeRequest as {
       needsAzureCredentials: boolean;
       azure: { tenantId: string };
-      environment: { tenantId: string; provider: string };
+      environment: { tenantId: string; provider: string; namespace: string };
     };
     // The azure block is deep-cloned, not shared, so a later mutation of one
     // cannot leak into the other.
     expect(resume.azure).not.toBe((op.request as { azure: unknown }).azure);
     expect(resume.azure.tenantId).toBe("t-1");
     expect(resume.environment.provider).toBe("azure");
+    expect(resume.environment.namespace).toBe("default");
   });
 
   it("carries every supplied optional field into the azure resumeRequest environment", async () => {

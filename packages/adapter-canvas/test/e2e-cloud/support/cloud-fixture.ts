@@ -96,6 +96,9 @@ const DEFAULT_NODE_COUNT = 1;
 const CLUSTER_NODE_SIZE = "Standard_B2s";
 const DEFAULT_ASSERTION_TIMEOUT_MS = 30_000;
 const DEFAULT_ASSERTION_POLL_INTERVAL_MS = 1_000;
+// The product derives several artifact names from the repository, not the run.
+// Holding one external ref prevents separate invocations from sharing them.
+const REPOSITORY_LEASE_REF = "refs/heads/radius/cloud-e2e-lease";
 
 interface UnwindStep {
   readonly describe: string;
@@ -136,6 +139,34 @@ export async function createCloudFixture(
   let workspacePath = "";
 
   try {
+    expectSuccess(
+      await commands.runGh([
+        "api",
+        "--method",
+        "POST",
+        `repos/${repository}/git/refs`,
+        "-f",
+        `ref=${REPOSITORY_LEASE_REF}`,
+        "-f",
+        `sha=${baselineSha}`
+      ]),
+      `gh api create ${REPOSITORY_LEASE_REF}`
+    );
+    unwind.push({
+      describe: `release repository lease ${REPOSITORY_LEASE_REF}`,
+      run: async () => {
+        expectSuccess(
+          await commands.runGh([
+            "api",
+            "--method",
+            "DELETE",
+            `repos/${repository}/git/${REPOSITORY_LEASE_REF}`
+          ]),
+          `gh api delete ${REPOSITORY_LEASE_REF}`
+        );
+      }
+    });
+
     // `creationTime` plus the `radtest-` prefix is what lets the Radius purge
     // job in this subscription reclaim the group if the runner dies outright.
     expectSuccess(
