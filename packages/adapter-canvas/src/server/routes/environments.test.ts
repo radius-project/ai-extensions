@@ -9,7 +9,9 @@ import { successfulSelectedGhExecutor } from "../../../test/support/server/selec
 import type { SelectedGhExecutor } from "../../gh.js";
 import { createCanvasServer } from "../create-canvas-server.js";
 import { createRequestContext } from "../request-context.js";
+import type { CanvasRequestContext } from "../request-context.js";
 import { createRequestHandler } from "../create-request-handler.js";
+import { validateBrowserMutationRequest } from "../browser-mutation.js";
 import { type ServerRoute } from "../route-table.js";
 import {
   createEnvironmentsRoutes,
@@ -199,7 +201,10 @@ function cliFake(script: CliScript, misses: string[] = []) {
 }
 
 function createControlledEnvironmentServer(
-  overrides: Partial<EnvironmentsDependencies>
+  overrides: Partial<EnvironmentsDependencies>,
+  options: {
+    validateBrowserMutation?: (context: CanvasRequestContext) => boolean;
+  } = {}
 ) {
   const routes = createTestRouteTable(
     createEnvironmentsRoutes(deps(overrides))
@@ -212,7 +217,8 @@ function createControlledEnvironmentServer(
         instances,
         routes,
         markActivity,
-        validateBrowserMutation: () => true,
+        validateBrowserMutation:
+          options.validateBrowserMutation ?? (() => true),
         handleUnmatchedRequest: (_request, response) => {
           response.writeHead(404);
           response.end("unmatched");
@@ -3046,7 +3052,7 @@ describe("environments — real loopback", () => {
     }
   });
 
-  it("records a verification bypass over controlled HTTP", async () => {
+  it("records a verification bypass over controlled HTTP with a valid mutation nonce", async () => {
     const run = vi.fn(((args: readonly string[]) =>
       args[0] === "api" ?
         Promise.resolve({ code: 0, stdout: "RADIUS_MANAGED", stderr: "" })
@@ -3056,32 +3062,57 @@ describe("environments — real loopback", () => {
           stderr: ""
         })) as SelectedGhExecutor["run"]);
     const envListCacheDelete = vi.fn();
-    const container = createControlledEnvironmentServer({
-      envListCacheDelete,
-      getOperation: () => ({
-        repo: "octo/app",
-        environment: "dev",
-        context: { githubLogin: "octocat" },
-        verification: { runId: "555" }
-      }),
-      getSelectedGitHubExecutor: () => successfulSelectedGhExecutor({ run }),
-      hasCompleteVerificationIdentity: () => true,
-      getRunDetail: () =>
-        Promise.resolve({
-          status: "completed",
-          conclusion: "failure",
-          steps: [{ name: "Verify AKS Access", conclusion: "failure" }]
+    // Wire the real nonce validator (not the `() => true` stub) so this test
+    // actually proves the route's nonce-required security contract: the request
+    // succeeds only because it carries the correct nonce and same-origin
+    // headers, and would fail if that validation were broken or removed.
+    const nonce = "controlled-bypass-nonce";
+    let serverBaseUrl = "";
+    const container = createControlledEnvironmentServer(
+      {
+        envListCacheDelete,
+        getOperation: () => ({
+          repo: "octo/app",
+          environment: "dev",
+          context: { githubLogin: "octocat" },
+          verification: { runId: "555" }
         }),
-      fetchRunLog: () =>
-        Promise.resolve("Error from server (Forbidden): cannot list resource"),
-      extractGitHubActionsStepLog: () => "",
-      explainOidcEnterpriseClaim: () => "",
-      explainNoSubscriptions: () => ""
-    });
+        getSelectedGitHubExecutor: () => successfulSelectedGhExecutor({ run }),
+        hasCompleteVerificationIdentity: () => true,
+        getRunDetail: () =>
+          Promise.resolve({
+            status: "completed",
+            conclusion: "failure",
+            steps: [{ name: "Verify AKS Access", conclusion: "failure" }]
+          }),
+        fetchRunLog: () =>
+          Promise.resolve(
+            "Error from server (Forbidden): cannot list resource"
+          ),
+        extractGitHubActionsStepLog: () => "",
+        explainOidcEnterpriseClaim: () => "",
+        explainNoSubscriptions: () => ""
+      },
+      {
+        validateBrowserMutation: (context) =>
+          validateBrowserMutationRequest({
+            request: context.request,
+            baseUrl: serverBaseUrl,
+            nonce
+          })
+      }
+    );
     try {
       const controlled = await container.getOrCreate("bypass-verification");
+      serverBaseUrl = controlled.baseUrl;
+      const origin = new URL(serverBaseUrl).origin;
       const res = await fetch(controlled.baseUrl + "/api/bypass-verification", {
         method: "POST",
+        headers: {
+          origin,
+          "sec-fetch-site": "same-origin",
+          "x-radius-mutation-nonce": nonce
+        },
         body: JSON.stringify({
           repo: "octo/app",
           environment: "dev",
@@ -3110,6 +3141,66 @@ describe("environments — real loopback", () => {
         { timeout: 20000 }
       );
       expect(envListCacheDelete).toHaveBeenCalledWith("octo/app");
+    } finally {
+      await container.stopAll();
+    }
+  });
+
+  it("rejects a bypass-verification POST that omits the mutation nonce with 403", async () => {
+    // The security contract: `/api/bypass-verification` is `nonce-required`, so
+    // a request missing the `X-Radius-Mutation-Nonce` header (or same-origin
+    // headers) is refused before the handler runs — no executor is touched and
+    // no bypass variable is written.
+    const run = vi.fn((() =>
+      Promise.resolve({
+        code: 0,
+        stdout: "",
+        stderr: ""
+      })) as SelectedGhExecutor["run"]);
+    const envListCacheDelete = vi.fn();
+    const nonce = "controlled-bypass-nonce";
+    let serverBaseUrl = "";
+    const container = createControlledEnvironmentServer(
+      {
+        envListCacheDelete,
+        getOperation: () => ({
+          repo: "octo/app",
+          environment: "dev",
+          context: { githubLogin: "octocat" },
+          verification: { runId: "555" }
+        }),
+        getSelectedGitHubExecutor: () => successfulSelectedGhExecutor({ run }),
+        hasCompleteVerificationIdentity: () => true
+      },
+      {
+        validateBrowserMutation: (context) =>
+          validateBrowserMutationRequest({
+            request: context.request,
+            baseUrl: serverBaseUrl,
+            nonce
+          })
+      }
+    );
+    try {
+      const controlled = await container.getOrCreate("bypass-verification");
+      serverBaseUrl = controlled.baseUrl;
+      const res = await fetch(controlled.baseUrl + "/api/bypass-verification", {
+        method: "POST",
+        body: JSON.stringify({
+          repo: "octo/app",
+          environment: "dev",
+          operationId: "op1",
+          runId: "555"
+        })
+      });
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({
+        error: "This browser mutation request is not trusted.",
+        code: "browser-mutation-validation-failed"
+      });
+      expect(run).not.toHaveBeenCalled();
+      expect(envListCacheDelete).not.toHaveBeenCalled();
     } finally {
       await container.stopAll();
     }
