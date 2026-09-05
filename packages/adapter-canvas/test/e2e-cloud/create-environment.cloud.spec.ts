@@ -186,13 +186,13 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   test.skip(!gate.enabled && gate.disposition === "skip", skipReason);
 
   let fixture: CloudFixture | undefined;
+  let productOperationStarted = false;
   let federatedSubjects: readonly string[] = [];
   let appRegistration: AppRegistrationRecord | undefined;
   let servicePrincipalId: string | undefined;
   let createdVariables: ReadonlyMap<string, string> = new Map();
   let deployedApplication = "";
   let deployedNamespace = "";
-  let productOperationStarted = false;
 
   const refreshGitHubToken = async (): Promise<void> => {
     if (!githubAppTokenConfig)
@@ -236,10 +236,14 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         label: "reclaim product-created artifacts",
         run: async () => {
           if (!productOperationStarted) return;
+          // The final stage deletes the GitHub Environment and its per-environment
+          // credentials. Reclamation then removes the intentionally retained shared
+          // app registration and role assignment; after an interrupted run it also
+          // removes any environment state the product did not reach.
           const reclaimed = await current.reclaimLeakedProductArtifacts();
           if (reclaimed.length > 0)
             console.info(
-              `Cleaned up this stage-one run's product-created artifacts: ${reclaimed.join(", ")}.`
+              `Cleaned up this run's product-created artifacts: ${reclaimed.join(", ")}.`
             );
         }
       },
@@ -816,7 +820,6 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       initialPage: "environment"
     });
 
-    let primaryError: unknown;
     try {
       await harness.seedState(
         cloudCanvasState({
@@ -953,14 +956,8 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       );
       expect(retainedServicePrincipalId).toBe(expectedServicePrincipalId);
       await cloud.assertRoleAssignmentExists(retainedServicePrincipalId);
-    } catch (error) {
-      primaryError = error;
-      throw error;
     } finally {
-      await runCleanupSteps(
-        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
-        primaryError
-      );
+      await harness.cleanup();
     }
   });
 });

@@ -155,9 +155,10 @@ describe("mintGitHubAppToken", () => {
     expect(JSON.parse(String(init.body))).toEqual({
       repositories: ["cloud-fixture"],
       permissions: {
-        actions: "read",
+        actions: "write",
         administration: "read",
         contents: "write",
+        deployments: "read",
         environments: "write",
         pull_requests: "write",
         variables: "write",

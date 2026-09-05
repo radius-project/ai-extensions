@@ -81,7 +81,7 @@ export function createFakeCloudCommands(
     calls.push({
       tool,
       args: [...args],
-      ...(cwd === undefined ? {} : { cwd }),
+      cwd,
       ...(timeoutMs === undefined ? {} : { timeoutMs })
     });
     const entry = remaining.find(
