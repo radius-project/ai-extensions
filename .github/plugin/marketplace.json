@@ -1,0 +1,40 @@
+{
+  "name": "radius-plugins",
+  "metadata": {
+    "description": "Radius plugins for the GitHub Copilot app and CLI. Model, visualize, and deploy applications with Radius.",
+    "version": "0.1.0"
+  },
+  "owner": {
+    "name": "Radius",
+    "email": "radiuscoreteam@service.microsoft.com"
+  },
+  "plugins": [
+    {
+      "name": "radius",
+      "source": {
+        "source": "github",
+        "repo": "radius-project/ai-extensions",
+        "path": "plugins/radius",
+        "ref": "radius@edge"
+      },
+      "description": "Model, visualize, and deploy applications with Radius from the GitHub Copilot app and CLI.",
+      "author": {
+        "name": "Radius",
+        "url": "https://github.com/radius-project"
+      },
+      "version": "0.1.2-edge-d434a8f",
+      "repository": "https://github.com/radius-project/ai-extensions",
+      "homepage": "https://radapp.io",
+      "license": "Apache-2.0",
+      "keywords": [
+        "radius",
+        "radapp",
+        "app-modeling",
+        "bicep",
+        "application-graph",
+        "deploy",
+        "canvas"
+      ]
+    }
+  ]
+}
