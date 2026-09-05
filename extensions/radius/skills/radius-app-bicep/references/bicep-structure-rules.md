@@ -281,7 +281,7 @@ Do not infer from the language alone. Go is not automatically safe (`CGO_ENABLED
 
 ```bicep
 resource mysqlDb 'Radius.Data/mySqlDatabases@2025-08-01-preview' = {
-  name: 'mysql'
+  name: 'todo-list-app-mysql'
   properties: {
     environment: environment
     application: app.id
@@ -300,6 +300,7 @@ Rules:
   - plain, non-sensitive `string` property whose schema description identifies it as the resource ID of a `Radius.Security/secrets` resource: create or reuse that Secret and assign `<secret>.id`, never a `@secure() param` (`Radius.Messaging/rabbitMQ.password`, and likewise a property named `passwordSecret` or `secretName`); assigning the raw credential makes it the Kubernetes Secret name the Recipe looks up and fails the deployment
   - schema has neither: do not invent credentials; inspect the recipe outputs and application auth requirements
 - Symbolic name is engine/instance-derived (`mysqlDb`), NOT fixed — so multiple data stores never collide
+- The `name` value starts with the application name (`'todo-list-app-mysql'`), because a Recipe derives the provisioned cloud resource's name from a resource ID that identifies the resource but not its application — see [Backing-resource names are application-scoped](../SKILL.md#backing-resource-names-are-application-scoped). Connection keys stay engine-derived, so the generated `CONNECTION_*` variables do not change with it
 - Developer-facing props (`database`, `version`, `size`, `topic`, `queue`, `container`) are derived from source — do NOT hardcode; only set properties the schema defines
 - Do NOT set readOnly properties (`host`, `port`, `connectionString`) — these are recipe outputs
 - A nonsecret read-only output such as `host`, `port`, or `endpoint` may be referenced for app-native wiring only when the exact schema declares it and the selected Recipe explicitly maps it. Schema presence alone is insufficient; use a provider-fixed literal only with proof from the concrete provider contract

@@ -579,6 +579,142 @@ function checkSourceCodeReferences(
   return failed;
 }
 
+// A Recipe provisions backing infrastructure under a name it derives from the
+// Radius resource ID, and that ID -- `/planes/radius/<plane>/resourcegroups/
+// <group>/providers/<type>/<name>` -- identifies the resource but not the
+// application that owns it. The Azure Recipe Pack hashes it into `pgsql-<hash>`,
+// `mysql-<hash>`, `amr-<hash>`, `st<hash>` and so on, so two applications
+// deployed into the same resource group and Azure scope that both call their
+// store `postgres` resolve to one shared server. The second deploy adopts the
+// first application's server and reports success, while Azure ignores the
+// administrator login it asked for -- that login can only be set at creation --
+// so its workloads then fail to authenticate. Deleting either application
+// destroys the other's data.
+//
+// The application name is the one part of that ID an application model
+// controls, so requiring it as a prefix is what makes the provisioned name
+// unique per application. Only the backing-service namespaces are checked:
+// their resources are the ones a Recipe provisions under a globally unique
+// cloud name, whereas `Radius.Compute/*` workloads, `Radius.Security/secrets`
+// and volumes are named inside the application's own Kubernetes namespace and
+// cannot collide this way.
+const BACKING_RESOURCE_NAMESPACES = [
+  "Radius.AI/",
+  "Radius.Data/",
+  "Radius.Messaging/",
+  "Radius.Storage/"
+];
+
+// A Radius extension resource carries its Radius name at `properties.name`;
+// `resources.<symbol>.name` is the ARM symbolic-name slot and is absent here.
+function radiusResourceName(resource, template, parameterValues) {
+  const name = resolveTemplateString(
+    resource?.properties?.name,
+    template,
+    parameterValues
+  );
+  return typeof name === "string" && !name.startsWith("[") ? name.trim() : "";
+}
+
+function declaredApplicationName(template, parameterValues) {
+  for (const resource of Object.values(template.resources ?? {})) {
+    if (
+      typeof resource?.type === "string" &&
+      resource.type.startsWith("Radius.Core/applications@")
+    ) {
+      const name = radiusResourceName(resource, template, parameterValues);
+      if (name !== "") {
+        return name;
+      }
+    }
+  }
+  return "";
+}
+
+// Case-insensitive because the hash lowercases the resource ID before hashing
+// it, so `Postgres` and `postgres` are the same cloud resource. Accepting a name
+// equal to the application is deliberate: it is already unique per application,
+// and this check rejects only what it can show is unsafe.
+function isApplicationScoped(name, application) {
+  const scope = application.toLowerCase();
+  const candidate = name.toLowerCase();
+  return candidate === scope || candidate.startsWith(`${scope}-`);
+}
+
+function checkBackingResourceNames(
+  template,
+  app,
+  parentPath = "",
+  parameterValues = new Map(),
+  outerApplication = ""
+) {
+  // A nested module that declares its own application is a different
+  // application, so a local declaration wins over the one passed down.
+  const application =
+    declaredApplicationName(template, parameterValues) || outerApplication;
+  let failed = false;
+  for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
+    const resourcePath = parentPath ? `${parentPath}.${symbol}` : symbol;
+    if (resource?.type === "Microsoft.Resources/deployments") {
+      const nestedTemplate = resource?.properties?.template;
+      if (
+        nestedTemplate !== null &&
+        typeof nestedTemplate === "object" &&
+        !Array.isArray(nestedTemplate)
+      ) {
+        const nestedParameterValues = new Map();
+        for (const [name, argument] of Object.entries(
+          resource?.properties?.parameters ?? {}
+        )) {
+          nestedParameterValues.set(
+            name,
+            resolveTemplateString(argument?.value, template, parameterValues)
+          );
+        }
+        if (
+          checkBackingResourceNames(
+            nestedTemplate,
+            app,
+            resourcePath,
+            nestedParameterValues,
+            application
+          )
+        ) {
+          failed = true;
+        }
+      }
+      continue;
+    }
+
+    if (
+      typeof resource?.type !== "string" ||
+      !BACKING_RESOURCE_NAMESPACES.some((namespace) =>
+        resource.type.startsWith(namespace)
+      )
+    ) {
+      continue;
+    }
+
+    // Nothing to compare against. A model whose application name or resource
+    // name does not resolve to a literal cannot be judged from the compiled
+    // template, and inventing a scope would reject models this check cannot
+    // show are unsafe.
+    const name = radiusResourceName(resource, template, parameterValues);
+    if (application === "" || name === "") {
+      continue;
+    }
+    if (isApplicationScoped(name, application)) {
+      continue;
+    }
+
+    report(
+      `${app}: error backing-resource-name-scope: ${resourcePath}.name: ${JSON.stringify(name)} is not scoped to application ${JSON.stringify(application)}. A Recipe derives the provisioned cloud resource's name from this resource's ID, which carries no application identity, so every application using this name resolves to the same cloud resource — adopting its data and destroying it on delete. Give it a name that starts with ${JSON.stringify(`${application}-`)}, such as ${JSON.stringify(`${application}-${name}`)}.`
+    );
+    failed = true;
+  }
+  return failed;
+}
+
 // Kubernetes substitutes `$(NAME)` in a container environment value only from
 // variables earlier in the container's environment list, and the containers
 // recipe builds that list with `items()`, which sorts by key. So authoring
@@ -1019,6 +1155,7 @@ function check(app, staged) {
 
   const invalidBuildSource = checkContainerImageBuildSources(template, app);
   const invalidSourceReference = checkSourceCodeReferences(template, app);
+  const unscopedBackingResource = checkBackingResourceNames(template, app);
   const unresolvedRuntimeVariable = checkRuntimeVariableExpansion(
     template,
     app
@@ -1032,6 +1169,7 @@ function check(app, staged) {
       compilerFindings.some(isFailure) ||
         invalidBuildSource ||
         invalidSourceReference ||
+        unscopedBackingResource ||
         unresolvedRuntimeVariable ||
         misplacedSecureParameter
     ) ?
