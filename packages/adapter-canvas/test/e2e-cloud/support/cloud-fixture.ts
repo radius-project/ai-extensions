@@ -19,9 +19,9 @@
 import {
   describeError,
   expectSuccess,
+  isGitHubApiNotFound,
   parseJsonArray,
   type CloudCommandPort,
-  type CloudCommandResult,
   type CloudFixturePorts
 } from "./cloud-command-port.js";
 import {
@@ -64,6 +64,31 @@ export interface CloudFixture {
   assertFederatedCredentialExists(subject: string): Promise<void>;
   assertRoleAssignmentExists(principalId: string): Promise<void>;
   assertGitHubEnvironmentExists(): Promise<void>;
+  /**
+   * Waits until the GitHub Environment is gone.
+   *
+   * The mirror of `assertGitHubEnvironmentExists`, and the pair is the point:
+   * stage one proves the product creates the Environment, stage two proves it
+   * removes it. Absence on its own would prove nothing, so this refuses to
+   * answer until presence was established first.
+   */
+  assertGitHubEnvironmentAbsent(): Promise<void>;
+  /**
+   * Waits until no app registration with the product's name remains.
+   *
+   * Not called by any stage yet. `handleDeleteEnvironment` deletes the GitHub
+   * Environment and nothing else, so the Entra application, its federated
+   * credentials and its role assignment are orphaned today. Asserting that
+   * leak as expected behaviour would encode a bug as a contract and invert the
+   * day it is fixed, so this and the two mirrors below wait for PR #398,
+   * "Clean up cloud state on environment deletion", to make cloud cleanup the
+   * product's actual behaviour.
+   */
+  assertAppRegistrationAbsent(): Promise<void>;
+  /** Waits until the app registration carries no credential for the subject. */
+  assertFederatedCredentialAbsent(subject: string): Promise<void>;
+  /** Waits until no role assignment for the principal remains in scope. */
+  assertRoleAssignmentAbsent(principalId: string): Promise<void>;
   /**
    * Best-effort removal of product-created state left behind by this run.
    *
@@ -276,6 +301,43 @@ export async function createCloudFixture(
 
   let disposed = false;
 
+  /**
+   * Artifacts this run has independently observed in place.
+   *
+   * An absence assertion is vacuous unless presence came first. A helper that
+   * merely fails to find something cannot tell "the product deleted it" from
+   * "the product never created it", and read the second way a broken create
+   * silently becomes a passing delete. The mirrors below refuse to answer at
+   * all until this run has seen the artifact for itself.
+   */
+  const observedPresent = new Set<string>();
+  const observedCredentialApps = new Map<string, AppRegistrationRecord>();
+  const APP_REGISTRATION_KEY = "app-registration";
+  const GITHUB_ENVIRONMENT_KEY = "github-environment";
+  const roleAssignmentKey = (principalId: string) =>
+    `role-assignment:${principalId.toLowerCase()}`;
+
+  const requireObservedPresent = (key: string, description: string): void => {
+    if (observedPresent.has(key)) return;
+    throw new Error(
+      `Refusing to assert that ${description} is absent: this run never observed it present, so its absence ` +
+        "would prove nothing about the operation under test — a product that never created it would pass " +
+        "just as readily as one that correctly deleted it. Assert presence first."
+    );
+  };
+
+  const requireObservedCredentialApp = (
+    subject: string
+  ): AppRegistrationRecord => {
+    const app = observedCredentialApps.get(subject);
+    if (app) return app;
+    throw new Error(
+      `Refusing to assert that the federated credential for subject "${subject}" is absent: this run never ` +
+        "observed it present, so its absence would prove nothing about the operation under test — a product " +
+        "that never created it would pass just as readily as one that correctly deleted it. Assert presence first."
+    );
+  };
+
   const fixture: CloudFixture = {
     uniqueId,
     resourceGroup,
@@ -309,7 +371,7 @@ export async function createCloudFixture(
     },
 
     async assertAppRegistrationExists() {
-      return pollForValue({
+      const app = await pollForValue({
         ports,
         timeoutMs: assertionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
@@ -326,6 +388,8 @@ export async function createCloudFixture(
         timeoutMessage: () =>
           `Timed out after ${assertionTimeoutMs}ms waiting for the product to create an app registration named "${expectedAppName}".`
       });
+      observedPresent.add(APP_REGISTRATION_KEY);
+      return app;
     },
 
     async assertFederatedCredentialExists(subject) {
@@ -368,6 +432,7 @@ export async function createCloudFixture(
           );
         }
       });
+      observedCredentialApps.set(subject, app);
     },
 
     async assertRoleAssignmentExists(principalId) {
@@ -402,6 +467,7 @@ export async function createCloudFixture(
               )
             ].join(", ")}.`)
       });
+      observedPresent.add(roleAssignmentKey(principalId));
     },
 
     async assertGitHubEnvironmentExists() {
@@ -415,7 +481,7 @@ export async function createCloudFixture(
             `repos/${repository}/environments/${environmentName}`
           ]);
           if (probe.code === 0) return true;
-          if (isNotFound(probe)) return undefined;
+          if (isGitHubApiNotFound(probe)) return undefined;
           throw new Error(
             `Could not determine whether GitHub Environment "${environmentName}" exists in ${repository}: ` +
               `gh exited ${probe.code}: ${(probe.stderr || probe.stdout).trim()}`
@@ -424,6 +490,103 @@ export async function createCloudFixture(
         timeoutMessage: () =>
           `Timed out after ${assertionTimeoutMs}ms waiting for the product to create ` +
           `GitHub Environment "${environmentName}" in ${repository}.`
+      });
+      observedPresent.add(GITHUB_ENVIRONMENT_KEY);
+    },
+
+    async assertGitHubEnvironmentAbsent() {
+      requireObservedPresent(
+        GITHUB_ENVIRONMENT_KEY,
+        `GitHub Environment "${environmentName}" in ${repository}`
+      );
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          const probe = await commands.runGh([
+            "api",
+            `repos/${repository}/environments/${environmentName}`
+          ]);
+          if (isGitHubApiNotFound(probe)) return true;
+          if (probe.code === 0) return undefined;
+          throw new Error(
+            `Could not determine whether GitHub Environment "${environmentName}" still exists in ${repository}: ` +
+              `gh exited ${probe.code}: ${(probe.stderr || probe.stdout).trim()}`
+          );
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for the product to delete ` +
+          `GitHub Environment "${environmentName}" from ${repository}; it still exists.`
+      });
+    },
+
+    async assertAppRegistrationAbsent() {
+      requireObservedPresent(
+        APP_REGISTRATION_KEY,
+        `app registration "${expectedAppName}"`
+      );
+      let found: AppRegistrationRecord[] = [];
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          found = [...(await listAppRegistrations(commands, expectedAppName))];
+          return found.length === 0 ? true : undefined;
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for app registration "${expectedAppName}" to be ` +
+          `deleted; ${found.length} still exist(s) (${found
+            .map((app) => app.appId)
+            .join(", ")}).`
+      });
+    },
+
+    async assertFederatedCredentialAbsent(subject) {
+      const app = requireObservedCredentialApp(subject);
+      let remaining: Array<{ name: string; subject: string }> = [];
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          remaining = await listFederatedCredentials(commands, app.objectId);
+          return (
+              remaining.some((credential) => credential.subject === subject)
+            ) ?
+              undefined
+            : true;
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for app registration ${app.appId} to drop its ` +
+          `federated credential for subject "${subject}"; it still carries ${remaining.length} credential(s).`
+      });
+    },
+
+    async assertRoleAssignmentAbsent(principalId) {
+      requireObservedPresent(
+        roleAssignmentKey(principalId),
+        `the role assignment for principal ${principalId} at or below ${scope}`
+      );
+      let remaining: Array<{
+        principalId: string;
+        roleDefinitionName: string;
+      }> = [];
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async () => {
+          remaining = (await listRoleAssignments(commands, scope)).filter(
+            (assignment) =>
+              assignment.principalId.toLowerCase() === principalId.toLowerCase()
+          );
+          return remaining.length === 0 ? true : undefined;
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for the role assignment(s) for principal ` +
+          `${principalId} at or below ${scope} to be removed; ${remaining.length} remain(s).`
       });
     },
 
@@ -508,7 +671,7 @@ export async function createCloudFixture(
             `gh api DELETE environments/${environmentName}`
           );
         });
-      else if (!isNotFound(environment))
+      else if (!isGitHubApiNotFound(environment))
         failures.push(
           `probe GitHub environment ${environmentName}: gh exited ${environment.code}: ${(
             environment.stderr || environment.stdout
@@ -706,7 +869,7 @@ async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
     findings.push(
       `GitHub environment "${input.environmentName}" in ${repository}`
     );
-  else if (!isNotFound(environment))
+  else if (!isGitHubApiNotFound(environment))
     throw new Error(
       `Could not probe GitHub environment "${input.environmentName}" in ${repository}: ` +
         `gh exited ${environment.code}: ${(environment.stderr || environment.stdout).trim()}`
@@ -952,16 +1115,6 @@ async function readDefaultBranchSha(
       `gh api commits/${branch} in ${repository} returned no commit SHA.`
     );
   return sha;
-}
-
-/**
- * Whether a `gh api` failure means the resource is absent.
- *
- * Anything else — an expired token, a rate limit, a network failure — must not
- * be read as absence, because "absent" is the answer that lets a run proceed.
- */
-function isNotFound(result: CloudCommandResult): boolean {
-  return /HTTP 404|Not Found/i.test(`${result.stderr}\n${result.stdout}`);
 }
 
 function sameSha(left: string, right: string): boolean {

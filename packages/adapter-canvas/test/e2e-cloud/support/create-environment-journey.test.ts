@@ -896,6 +896,21 @@ describe("readWorkflowDirectory", () => {
     ).toEqual([]);
   });
 
+  it("does not read an unrelated Not Found phrase as an absent directory", () => {
+    expect(() =>
+      readWorkflowDirectory(
+        {
+          code: 1,
+          stdout: "",
+          stderr: "Not Found while resolving the configured GitHub host"
+        },
+        "the workflow listing"
+      )
+    ).toThrow(
+      /the workflow listing failed with exit code 1: Not Found while resolving/
+    );
+  });
+
   it("raises any other failure instead of reading it as an empty directory", () => {
     expect(() =>
       readWorkflowDirectory(
