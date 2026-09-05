@@ -38,6 +38,19 @@ describe("selectExpiredDirectoryObjects", () => {
         CUTOFF
       )
     ).toEqual([{ id: "old" }]);
+
+  it("accepts fractional-second timestamps (up to 7 digits)", () => {
+    expect(
+      selectExpiredDirectoryObjects(
+        [{
+          id: "fractional",
+          displayName: APP,
+          createdDateTime: "2026-08-31T05:59:59.1234567Z"
+        }],
+        APP,
+        CUTOFF
+      )
+    ).toEqual([{ id: "fractional" }]);
   });
 
   it.each([
