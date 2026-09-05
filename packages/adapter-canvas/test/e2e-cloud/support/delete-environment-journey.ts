@@ -5,20 +5,25 @@
 // infrastructure. These are checked by `delete-environment-journey.test.ts` on
 // every pull request instead.
 
-import type { AppRegistrationRecord, CloudFixture } from "./cloud-fixture.js";
+import type {
+  AppRegistrationRecord,
+  CloudFixture,
+  RoleAssignmentRecord
+} from "./cloud-fixture.js";
 
 type IdentityDeletionAssertions = Pick<
   CloudFixture,
   | "assertAppRegistrationExists"
   | "assertFederatedCredentialAbsent"
-  | "assertRoleAssignmentExists"
+  | "assertRoleAssignmentsExist"
 >;
 
 export interface DeletedEnvironmentIdentity {
   readonly assertions: IdentityDeletionAssertions;
+  readonly assertServicePrincipalExists: () => Promise<void>;
   readonly expectedAppRegistration: AppRegistrationRecord;
+  readonly expectedRoleAssignments: readonly RoleAssignmentRecord[];
   readonly federatedSubjects: readonly string[];
-  readonly principalId: string;
 }
 
 /**
@@ -50,7 +55,10 @@ export async function assertEnvironmentDeletionIdentityOutcome(
       subject,
       identity.expectedAppRegistration
     );
-  await identity.assertions.assertRoleAssignmentExists(identity.principalId);
+  await identity.assertServicePrincipalExists();
+  await identity.assertions.assertRoleAssignmentsExist(
+    identity.expectedRoleAssignments
+  );
   await assertExpectedAppRegistration();
 }
 

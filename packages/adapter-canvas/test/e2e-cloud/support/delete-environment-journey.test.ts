@@ -18,6 +18,21 @@ const APP = {
   objectId: "object-1",
   displayName: "radius-deploy-fixture"
 } as const;
+const ROLE_ASSIGNMENTS = [
+  {
+    id: "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Authorization/roleAssignments/contributor",
+    principalId: PRINCIPAL_ID,
+    roleDefinitionName: "Contributor",
+    scope: "/subscriptions/sub/resourceGroups/rg"
+  },
+  {
+    id: "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/aks/providers/Microsoft.Authorization/roleAssignments/cluster-admin",
+    principalId: PRINCIPAL_ID,
+    roleDefinitionName: "Azure Kubernetes Service RBAC Cluster Admin",
+    scope:
+      "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/aks"
+  }
+] as const;
 
 function outcome(
   status: number,
@@ -48,6 +63,7 @@ describe("assertEnvironmentDeletionIdentityOutcome", () => {
     } = {}
   ): {
     readonly assertions: Assertions;
+    readonly assertServicePrincipalExists: () => Promise<void>;
     readonly calls: string[];
     readonly failure: Error;
   } {
@@ -75,29 +91,39 @@ describe("assertEnvironmentDeletionIdentityOutcome", () => {
           record(
             `federated-credential:absent:${subject}:${expectedApp?.objectId ?? "unscoped"}`
           ),
-        assertRoleAssignmentExists: (principalId) =>
-          record(`role-assignment:present:${principalId}`)
+        assertRoleAssignmentsExist: (assignments) =>
+          record(
+            `role-assignments:present:${assignments
+              .map((assignment) => assignment.id)
+              .join(",")}`
+          )
       },
+      assertServicePrincipalExists: () => record("service-principal:present"),
       calls,
       failure
     };
   }
 
   it("checks the app registration, each credential, then the role assignment", async () => {
-    const { assertions, calls } = recordingAssertions();
+    const { assertions, assertServicePrincipalExists, calls } =
+      recordingAssertions();
 
     await assertEnvironmentDeletionIdentityOutcome({
       assertions,
+      assertServicePrincipalExists,
       expectedAppRegistration: APP,
-      federatedSubjects: SUBJECTS,
-      principalId: PRINCIPAL_ID
+      expectedRoleAssignments: ROLE_ASSIGNMENTS,
+      federatedSubjects: SUBJECTS
     });
 
     expect(calls).toEqual([
       "app-registration:present:1",
       `federated-credential:absent:${SUBJECTS[0]}:${APP.objectId}`,
       `federated-credential:absent:${SUBJECTS[1]}:${APP.objectId}`,
-      `role-assignment:present:${PRINCIPAL_ID}`,
+      "service-principal:present",
+      `role-assignments:present:${ROLE_ASSIGNMENTS.map(
+        (assignment) => assignment.id
+      ).join(",")}`,
       "app-registration:present:2"
     ]);
   });
@@ -117,13 +143,28 @@ describe("assertEnvironmentDeletionIdentityOutcome", () => {
       ]
     ],
     [
-      "role assignment",
-      `role-assignment:present:${PRINCIPAL_ID}`,
+      "service principal",
+      "service-principal:present",
       [
         "app-registration:present:1",
         `federated-credential:absent:${SUBJECTS[0]}:${APP.objectId}`,
         `federated-credential:absent:${SUBJECTS[1]}:${APP.objectId}`,
-        `role-assignment:present:${PRINCIPAL_ID}`
+        "service-principal:present"
+      ]
+    ],
+    [
+      "role assignment",
+      `role-assignments:present:${ROLE_ASSIGNMENTS.map(
+        (assignment) => assignment.id
+      ).join(",")}`,
+      [
+        "app-registration:present:1",
+        `federated-credential:absent:${SUBJECTS[0]}:${APP.objectId}`,
+        `federated-credential:absent:${SUBJECTS[1]}:${APP.objectId}`,
+        "service-principal:present",
+        `role-assignments:present:${ROLE_ASSIGNMENTS.map(
+          (assignment) => assignment.id
+        ).join(",")}`
       ]
     ],
     [
@@ -133,21 +174,26 @@ describe("assertEnvironmentDeletionIdentityOutcome", () => {
         "app-registration:present:1",
         `federated-credential:absent:${SUBJECTS[0]}:${APP.objectId}`,
         `federated-credential:absent:${SUBJECTS[1]}:${APP.objectId}`,
-        `role-assignment:present:${PRINCIPAL_ID}`,
+        "service-principal:present",
+        `role-assignments:present:${ROLE_ASSIGNMENTS.map(
+          (assignment) => assignment.id
+        ).join(",")}`,
         "app-registration:present:2"
       ]
     ]
   ])(
     "preserves the %s failure and skips later identity assertions",
     async (_label, failAt, expectedCalls) => {
-      const { assertions, calls, failure } = recordingAssertions({ failAt });
+      const { assertions, assertServicePrincipalExists, calls, failure } =
+        recordingAssertions({ failAt });
 
       await expect(
         assertEnvironmentDeletionIdentityOutcome({
           assertions,
+          assertServicePrincipalExists,
           expectedAppRegistration: APP,
-          federatedSubjects: SUBJECTS,
-          principalId: PRINCIPAL_ID
+          expectedRoleAssignments: ROLE_ASSIGNMENTS,
+          federatedSubjects: SUBJECTS
         })
       ).rejects.toBe(failure);
       expect(calls).toEqual(expectedCalls);
@@ -160,16 +206,17 @@ describe("assertEnvironmentDeletionIdentityOutcome", () => {
     ["final app id", 2, { appId: "replacement-app" }],
     ["final object id", 2, { objectId: "replacement-object" }]
   ] as const)("rejects an %s mismatch", async (_label, call, replacement) => {
-    const { assertions } = recordingAssertions({
+    const { assertions, assertServicePrincipalExists } = recordingAssertions({
       appReplacement: { call, ...replacement }
     });
 
     await expect(
       assertEnvironmentDeletionIdentityOutcome({
         assertions,
+        assertServicePrincipalExists,
         expectedAppRegistration: APP,
-        federatedSubjects: SUBJECTS,
-        principalId: PRINCIPAL_ID
+        expectedRoleAssignments: ROLE_ASSIGNMENTS,
+        federatedSubjects: SUBJECTS
       })
     ).rejects.toThrow(
       /Expected app registration app-1 \(object-1\).*but found/

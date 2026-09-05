@@ -100,6 +100,7 @@ jobs:
     permissions:
       contents: read # actions/checkout
       id-token: write # OIDC token exchanged for an Azure token by azure/login
+      packages: write # native workflow token manages the fixture's GHCR state package
     env:
       # Turns the suite on. Without it the journey skips rather than fails, so
       # an ordinary `pnpm test` is never broken by absent credentials.
@@ -244,6 +245,8 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # Playwright captures and removes the private key from its environment
           # before starting Canvas or any CLI child command.
+          GH_PACKAGES_TOKEN: ${{ github.token }}
+          GH_PACKAGES_USER: ${{ github.actor }}
           CLOUD_E2E_BOT_CLIENT_ID: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
           CLOUD_E2E_BOT_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
           CLOUD_E2E_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}

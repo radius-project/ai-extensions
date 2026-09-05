@@ -3,7 +3,8 @@ import {
   createCloudFixture,
   radiusPurgeCreationTime,
   type CloudFixture,
-  type CloudFixtureOptions
+  type CloudFixtureOptions,
+  type RoleAssignmentRecord
 } from "./cloud-fixture.js";
 import {
   createFakeFixturePorts,
@@ -28,6 +29,7 @@ const RESOURCE_GROUP = `radtest-canvas-${UNIQUE_ID}`;
 const CLUSTER = `aks-${UNIQUE_ID}`;
 const ENVIRONMENT = `radtest-${UNIQUE_ID}`;
 const SCOPE = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RESOURCE_GROUP}`;
+const CLUSTER_SCOPE = `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`;
 const APP_NAME = "radius-deploy-fixture-owner-fixture-repo";
 
 // Spelled out rather than rebuilt from the fixture's own helpers, so a change to
@@ -40,6 +42,12 @@ const PULLS_PATH = `repos/${REPOSITORY}/pulls?state=open&per_page=100`;
 const DEFAULT_REF_PATH = `repos/${REPOSITORY}/git/refs/heads/${BRANCH}`;
 const LEASE_REF = "refs/heads/radius/cloud-e2e-lease";
 const LEASE_REF_PATH = `repos/${REPOSITORY}/git/${LEASE_REF}`;
+const STATE_PACKAGE =
+  "ghcr.io/fixture-owner/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
+const PACKAGE_PATH =
+  "orgs/fixture-owner/packages/container/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
+const USER_PACKAGE_PATH =
+  "users/fixture-owner/packages/container/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
 
 const pullPages = (...pages: readonly unknown[][]): string =>
   JSON.stringify(pages);
@@ -71,6 +79,24 @@ const FIC_LIST: readonly string[] = [
   "list"
 ];
 const ROLE_LIST: readonly string[] = ["role", "assignment", "list"];
+
+function roleAssignment(
+  principalId = "sp-1",
+  roleDefinitionName = "Contributor",
+  id = `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/assignment-1`,
+  scope = SCOPE
+): RoleAssignmentRecord {
+  return { id, principalId, roleDefinitionName, scope };
+}
+
+function clusterRoleAssignment(principalId = "sp-1"): RoleAssignmentRecord {
+  return roleAssignment(
+    principalId,
+    "Azure Kubernetes Service RBAC Cluster Admin",
+    "assignment-cluster",
+    CLUSTER_SCOPE
+  );
+}
 
 /**
  * Every command a healthy run issues, all answering "clean".
@@ -115,6 +141,16 @@ function baselineStubs(): FakeCommandStub[] {
     { tool: "az", match: FIC_LIST, respond: { stdout: "[]" } },
     { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" } },
     { tool: "gh", match: ["api", ENVIRONMENT_PATH], respond: NOT_FOUND },
+    {
+      tool: "gh-package",
+      match: ["api", "users/fixture-owner", "--jq", ".type"],
+      respond: { stdout: "Organization" }
+    },
+    {
+      tool: "gh-package",
+      match: ["api", PACKAGE_PATH],
+      respond: NOT_FOUND
+    },
     { tool: "gh", match: ["api", COMMITS_PATH], respond: { stdout: BASELINE } },
     {
       tool: "gh",
@@ -708,9 +744,7 @@ describe("createCloudFixture", () => {
           tool: "az",
           match: ROLE_LIST,
           respond: {
-            stdout: JSON.stringify([
-              { principalId: "sp-1", roleDefinitionName: "Contributor" }
-            ])
+            stdout: JSON.stringify([roleAssignment()])
           }
         }
       ]);
@@ -730,7 +764,15 @@ describe("createCloudFixture", () => {
         {
           tool: "az",
           match: ROLE_LIST,
-          respond: { stdout: JSON.stringify([{ principalId: "sp-1" }]) }
+          respond: {
+            stdout: JSON.stringify([
+              {
+                id: "assignment-1",
+                principalId: "sp-1",
+                scope: SCOPE
+              }
+            ])
+          }
         }
       ]);
 
@@ -751,6 +793,86 @@ describe("createCloudFixture", () => {
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
         new RegExp(`GitHub environment "${ENVIRONMENT}" in ${REPOSITORY}`)
       );
+    });
+
+    it("reports a leaked GHCR state package", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "private",
+              repository: { full_name: REPOSITORY }
+            })
+          }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        `GHCR state package "${STATE_PACKAGE}" (private visibility, linked to "${REPOSITORY}")`
+      );
+    });
+
+    it("fails when the GHCR state package cannot be probed", async () => {
+      const { fixture } = await createHarness([
+        failing("gh-package", ["api", PACKAGE_PATH], "HTTP 403")
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        /read GHCR package .*HTTP 403/
+      );
+    });
+
+    it("uses the user package endpoint for a user-owned fixture repository", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", "users/fixture-owner", "--jq", ".type"],
+          respond: { stdout: "User" },
+          times: 1
+        },
+        {
+          tool: "gh-package",
+          match: ["api", USER_PACKAGE_PATH],
+          respond: NOT_FOUND
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
+      expect(fake.commands.commandLines("gh-package")).toContain(
+        `api ${USER_PACKAGE_PATH}`
+      );
+    });
+
+    it("rejects an unsupported package-owner type", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", "users/fixture-owner", "--jq", ".type"],
+          respond: { stdout: "Enterprise" },
+          times: 1
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        /unsupported type "Enterprise"/
+      );
+    });
+
+    it.each([
+      ["invalid JSON", "{not-json", /returned invalid JSON/],
+      ["a non-object response", "[]", /returned a non-object response/]
+    ])("rejects %s from the package API", async (_label, stdout, expected) => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: { stdout }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(expected);
     });
 
     it("refuses to read a non-404 environment probe failure as absence", async () => {
@@ -973,8 +1095,7 @@ describe("createCloudFixture", () => {
           tool: "az",
           match: ROLE_LIST,
           respond: {
-            stdout:
-              '[{"principalId":"sp-1","roleDefinitionName":"Contributor"}]'
+            stdout: JSON.stringify([roleAssignment()])
           }
         },
         {
@@ -1313,41 +1434,51 @@ describe("createCloudFixture", () => {
   });
 
   describe("assertRoleAssignmentExists", () => {
-    it("resolves when the principal holds an assignment in the group", async () => {
+    it("resolves when the principal holds assignments at both required scopes", async () => {
       const { fixture } = await createHarness([
         {
           tool: "az",
-          match: ROLE_LIST,
+          match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([
-              { principalId: "SP-1", roleDefinitionName: "Contributor" }
-            ])
+            stdout: JSON.stringify([roleAssignment("SP-1")])
+          }
+        },
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([clusterRoleAssignment("SP-1")])
           }
         }
       ]);
 
-      await expect(
-        fixture.assertRoleAssignmentExists("sp-1")
-      ).resolves.toBeUndefined();
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
+        [roleAssignment("SP-1"), clusterRoleAssignment("SP-1")]
+      );
     });
 
     it("polls until the role assignment becomes visible", async () => {
       const { fixture, fake } = await createHarness([
-        { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" }, times: 1 },
+        { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" }, times: 2 },
         {
           tool: "az",
-          match: ROLE_LIST,
+          match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([
-              { principalId: "sp-1", roleDefinitionName: "Contributor" }
-            ])
+            stdout: JSON.stringify([roleAssignment()])
+          }
+        },
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([clusterRoleAssignment()])
           }
         }
       ]);
 
-      await expect(
-        fixture.assertRoleAssignmentExists("sp-1")
-      ).resolves.toBeUndefined();
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
+        [roleAssignment(), clusterRoleAssignment()]
+      );
       expect(fake.waits).toEqual([1000]);
     });
 
@@ -1366,8 +1497,13 @@ describe("createCloudFixture", () => {
           match: ROLE_LIST,
           respond: {
             stdout: JSON.stringify([
-              { principalId: "sp-2", roleDefinitionName: "Contributor" },
-              { principalId: "sp-2", roleDefinitionName: "AKS RBAC Admin" }
+              roleAssignment("sp-2", "Contributor", "assignment-sp2"),
+              roleAssignment(
+                "sp-2",
+                "AKS RBAC Admin",
+                `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/assignment-2`,
+                `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`
+              )
             ])
           }
         }
@@ -1386,6 +1522,150 @@ describe("createCloudFixture", () => {
       await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
         /AuthorizationFailed/
       );
+    });
+
+    it("rejects an assignment without its stable identity and scope", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: ROLE_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { principalId: "sp-1", roleDefinitionName: "Contributor" }
+            ])
+          }
+        }
+      ]);
+
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
+        /no usable "id"/
+      );
+    });
+
+    it("captures assignments from the resource group and exact cluster scope", async () => {
+      const contributor = roleAssignment();
+      const clusterAdmin = clusterRoleAssignment();
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", SCOPE],
+          respond: { stdout: JSON.stringify([contributor]) }
+        },
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: { stdout: JSON.stringify([clusterAdmin]) }
+        }
+      ]);
+
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
+        [contributor, clusterAdmin]
+      );
+    });
+
+    it("waits until the principal has an assignment at both required scopes", async () => {
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SCOPE],
+            respond: { stdout: JSON.stringify([roleAssignment()]) }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+            respond: { stdout: "[]" }
+          }
+        ],
+        {},
+        { assertionTimeoutMs: 2_000, assertionPollIntervalMs: 1_000 }
+      );
+
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
+        new RegExp(`missing ${CLUSTER_SCOPE.replace(/\//g, "\\/")}`)
+      );
+    });
+  });
+
+  describe("assertRoleAssignmentsExist", () => {
+    it("requires every captured assignment identity, role, and scope", async () => {
+      const expected = [
+        roleAssignment(),
+        roleAssignment(
+          "sp-1",
+          "Azure Kubernetes Service RBAC Cluster Admin",
+          `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/assignment-2`,
+          `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`
+        )
+      ];
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: ROLE_LIST,
+          respond: { stdout: JSON.stringify(expected) }
+        }
+      ]);
+
+      await expect(
+        fixture.assertRoleAssignmentsExist(expected)
+      ).resolves.toBeUndefined();
+    });
+
+    it("rejects an empty captured inventory", async () => {
+      const { fixture } = await createHarness();
+
+      await expect(fixture.assertRoleAssignmentsExist([])).rejects.toThrow(
+        /empty role-assignment inventory/
+      );
+    });
+
+    it.each([
+      [
+        "assignment id",
+        roleAssignment(
+          "sp-1",
+          "Contributor",
+          `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/replacement`
+        )
+      ],
+      ["role", roleAssignment("sp-1", "Reader")],
+      [
+        "scope",
+        roleAssignment(
+          "sp-1",
+          "Contributor",
+          `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/assignment-1`,
+          `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`
+        )
+      ],
+      ["principal", roleAssignment("sp-2")]
+    ])("rejects a replacement with a different %s", async (_label, actual) => {
+      const expected = roleAssignment();
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ROLE_LIST,
+            respond: { stdout: JSON.stringify([actual]) }
+          }
+        ],
+        {},
+        { assertionTimeoutMs: 2_000, assertionPollIntervalMs: 1_000 }
+      );
+
+      await expect(
+        fixture.assertRoleAssignmentsExist([expected])
+      ).rejects.toThrow(/missing .*assignment-1/);
+    });
+
+    it("propagates a failing survival lookup", async () => {
+      const { fixture } = await createHarness([
+        failing("az", ROLE_LIST, "AuthorizationFailed")
+      ]);
+
+      await expect(
+        fixture.assertRoleAssignmentsExist([roleAssignment()])
+      ).rejects.toThrow(/AuthorizationFailed/);
     });
   });
 
@@ -1472,11 +1752,17 @@ describe("createCloudFixture", () => {
         },
         {
           tool: "az",
-          match: ROLE_LIST,
+          match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([
-              { principalId: "sp-1", roleDefinitionName: "Contributor" }
-            ])
+            stdout: JSON.stringify([roleAssignment()])
+          },
+          times: 1
+        },
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([clusterRoleAssignment()])
           },
           times: 1
         },
@@ -1517,7 +1803,7 @@ describe("createCloudFixture", () => {
         [
           "a role assignment",
           (fixture: CloudFixture) => fixture.assertRoleAssignmentAbsent("sp-1"),
-          /role assignment for principal sp-1/
+          /role assignment inventory for principal sp-1/
         ]
       ])(
         "for %s, because a product that never created it would pass too",
@@ -1685,17 +1971,37 @@ describe("createCloudFixture", () => {
         ).rejects.toThrow(/Microsoft Graph is unavailable/);
       });
 
+      it.each([
+        ["app id", { appId: "different-app", objectId: "obj-1" }],
+        ["object id", { appId: "app-1", objectId: "different-object" }]
+      ])(
+        "rejects a retained registration whose %s differs from the observed credential parent",
+        async (_label, expected) => {
+          const { fixture, fake } = await observedHarness();
+          const callsBefore = fake.commands.calls.length;
+
+          await expect(
+            fixture.assertFederatedCredentialAbsent(SUBJECT, {
+              ...expected,
+              displayName: APP_NAME
+            })
+          ).rejects.toThrow(
+            /Refusing to check federated credential subject .* this run observed it on app-1 \(obj-1\)/
+          );
+          expect(fake.commands.calls).toHaveLength(callsBefore);
+        }
+      );
+
       it("retries a temporarily missing retained registration before checking its credential", async () => {
         const retainedApp = {
           appId: "app-1",
           objectId: "obj-1",
           displayName: APP_NAME
         } as const;
-        const role = {
-          stdout: JSON.stringify([
-            { principalId: "sp-1", roleDefinitionName: "Contributor" }
-          ])
-        };
+        const expectedRoleAssignments = [
+          roleAssignment(),
+          clusterRoleAssignment()
+        ];
         const { fixture, fake } = await observedHarness([
           {
             tool: "az",
@@ -1716,16 +2022,28 @@ describe("createCloudFixture", () => {
             respond: { stdout: "[]" },
             times: 1
           },
-          { tool: "az", match: ROLE_LIST, respond: role, times: 1 },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SCOPE],
+            respond: { stdout: JSON.stringify([roleAssignment()]) },
+            times: 1
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+            respond: { stdout: JSON.stringify([clusterRoleAssignment()]) },
+            times: 1
+          },
           { tool: "az", match: APP_LIST, respond: { stdout: APP_LIST_RESULT } }
         ]);
         const callsBefore = fake.commands.calls.length;
 
         await assertEnvironmentDeletionIdentityOutcome({
           assertions: fixture,
+          assertServicePrincipalExists: () => Promise.resolve(),
           expectedAppRegistration: retainedApp,
-          federatedSubjects: [SUBJECT],
-          principalId: "sp-1"
+          expectedRoleAssignments,
+          federatedSubjects: [SUBJECT]
         });
 
         expect(fake.waits).toEqual([1000]);
@@ -1738,7 +2056,10 @@ describe("createCloudFixture", () => {
           expect.stringContaining(`az ${APP_LIST.join(" ")}`),
           expect.stringContaining(`az ${APP_LIST.join(" ")}`),
           expect.stringContaining("federated-credential list --id obj-1"),
-          expect.stringContaining("az role assignment list"),
+          expect.stringContaining(`az role assignment list --scope ${SCOPE}`),
+          expect.stringContaining(
+            `az role assignment list --scope ${CLUSTER_SCOPE}`
+          ),
           expect.stringContaining(`az ${APP_LIST.join(" ")}`)
         ]);
       });
@@ -1824,7 +2145,7 @@ describe("createCloudFixture", () => {
             match: ROLE_LIST,
             respond: {
               stdout: JSON.stringify([
-                { principalId: "sp-2", roleDefinitionName: "Contributor" }
+                roleAssignment("sp-2", "Contributor", "assignment-sp2")
               ])
             }
           }
@@ -1841,9 +2162,7 @@ describe("createCloudFixture", () => {
             tool: "az",
             match: ROLE_LIST,
             respond: {
-              stdout: JSON.stringify([
-                { principalId: "SP-1", roleDefinitionName: "Contributor" }
-              ])
+              stdout: JSON.stringify([roleAssignment("SP-1")])
             }
           }
         ]);
@@ -1916,6 +2235,22 @@ describe("createCloudFixture", () => {
             ])
           }
         },
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "private",
+              repository: { full_name: REPOSITORY }
+            })
+          },
+          times: 1
+        },
+        {
+          tool: "gh-package",
+          match: ["api", "--method", "DELETE", PACKAGE_PATH],
+          respond: {}
+        },
         { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} },
         { tool: "gh", match: ["api", "--method", "PATCH"], respond: {} }
       ]);
@@ -1924,6 +2259,7 @@ describe("createCloudFixture", () => {
         "service principal sp-1",
         "app registration app-1",
         `GitHub environment ${ENVIRONMENT}`,
+        `GHCR state package ${STATE_PACKAGE}`,
         "pull request #7",
         "branch radius/setup-a",
         `${BRANCH} reset to ${BASELINE}`
@@ -1931,6 +2267,9 @@ describe("createCloudFixture", () => {
 
       const lines = fake.commands.commandLines("gh");
       expect(lines).toContain(`api --method DELETE ${ENVIRONMENT_PATH}`);
+      expect(fake.commands.commandLines("gh-package")).toContain(
+        `api --method DELETE ${PACKAGE_PATH}`
+      );
       expect(lines).toContain(
         `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
       );
@@ -2173,6 +2512,109 @@ describe("createCloudFixture", () => {
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
         /probe GitHub environment .* gh exited 1: \{"message":"Bad gateway"\}/
+      );
+    });
+
+    it("refuses to delete a package that is not private or internal", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "public",
+              repository: { full_name: REPOSITORY }
+            })
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /refuse GHCR state package .* visibility is "public"/
+      );
+      expect(
+        fake.commands
+          .commandLines("gh-package")
+          .some((line) => line.includes("--method DELETE"))
+      ).toBe(false);
+    });
+
+    it("refuses to delete a package linked to another repository", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "private",
+              repository: { full_name: "other/repository" }
+            })
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /linked to "other\/repository", not "fixture-owner\/fixture-repo"/
+      );
+    });
+
+    it("refuses to delete a package with no repository link", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({ visibility: "private" })
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /it is not linked to "fixture-owner\/fixture-repo"/
+      );
+    });
+
+    it("records a failing GHCR state package deletion", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "internal",
+              repository: { full_name: REPOSITORY }
+            })
+          },
+          times: 1
+        },
+        failing(
+          "gh-package",
+          ["api", "--method", "DELETE", PACKAGE_PATH],
+          "HTTP 403"
+        )
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /GHCR state package .*HTTP 403/
+      );
+    });
+
+    it("records an unreadable GHCR state package probe and continues cleanup", async () => {
+      const { fixture, fake } = await createHarness([
+        failing("gh-package", ["api", PACKAGE_PATH], "HTTP 502"),
+        {
+          tool: "gh",
+          match: ["api", MATCHING_REFS_PATH],
+          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' }
+        },
+        { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /probe GHCR state package .*HTTP 502.*Reclaimed before failing: branch radius\/setup-a/s
+      );
+      expect(fake.commands.commandLines("gh")).toContain(
+        `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
       );
     });
 

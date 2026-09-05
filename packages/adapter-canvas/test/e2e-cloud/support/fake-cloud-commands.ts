@@ -11,7 +11,7 @@ import type {
   CloudFixturePorts
 } from "./cloud-command-port.js";
 
-export type CloudTool = "az" | "gh" | "git" | "kubectl";
+export type CloudTool = "az" | "gh" | "gh-package" | "git" | "kubectl";
 
 /** A recorded invocation, for asserting what the fixture actually ran. */
 export interface RecordedCommand {
@@ -119,6 +119,7 @@ export function createFakeCloudCommands(
     port: {
       runAz: (args, timeoutMs) => run("az", args, undefined, timeoutMs),
       runGh: (args) => run("gh", args),
+      runGhPackage: (args) => run("gh-package", args),
       runGit: (args, cwd) => run("git", args, cwd),
       runKubectl: (args, timeoutMs) =>
         run("kubectl", args, undefined, timeoutMs)

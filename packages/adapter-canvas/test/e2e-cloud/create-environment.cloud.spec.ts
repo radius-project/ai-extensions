@@ -44,7 +44,8 @@ import {
 import {
   type AppRegistrationRecord,
   createCloudFixture,
-  type CloudFixture
+  type CloudFixture,
+  type RoleAssignmentRecord
 } from "./support/cloud-fixture.js";
 import {
   CREATE_OPERATION_TIMEOUT_MS,
@@ -121,6 +122,8 @@ const WORKFLOW_DIRECTORY = ".github/workflows";
 const KUBERNETES_NAMESPACE = "default";
 const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
 const githubToken = process.env.GH_TOKEN?.trim() ?? "";
+const githubPackagesToken = process.env.GH_PACKAGES_TOKEN?.trim() ?? "";
+const githubPackagesUser = process.env.GH_PACKAGES_USER?.trim() ?? "";
 const githubAppTokenConfig = takeGitHubAppTokenConfig();
 
 const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -138,7 +141,9 @@ const gate = evaluateCreateEnvironmentGate({
 const skipReason =
   !gate.enabled && gate.disposition === "skip" ? gate.reason : "";
 
-const ports: CloudFixturePorts = createNodeCloudFixturePorts();
+const ports: CloudFixturePorts = createNodeCloudFixturePorts({
+  packageToken: githubPackagesToken
+});
 
 async function runGh(
   commands: CloudCommandPort,
@@ -298,6 +303,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   let federatedSubjects: readonly string[] = [];
   let appRegistration: AppRegistrationRecord | undefined;
   let servicePrincipalId: string | undefined;
+  let roleAssignments: readonly RoleAssignmentRecord[] = [];
   let createdVariables: ReadonlyMap<string, string> = new Map();
   let deployedApplication = "";
   let deployedNamespace = "";
@@ -314,6 +320,14 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
 
   test.beforeAll(async () => {
     if (!gate.enabled) throw new Error(gate.reason);
+    if (!githubPackagesToken)
+      throw new Error(
+        "GH_PACKAGES_TOKEN is required for the cloud lifecycle journey."
+      );
+    if (!githubPackagesUser)
+      throw new Error(
+        "GH_PACKAGES_USER is required for the cloud lifecycle journey."
+      );
     fixture = await createCloudFixture({
       subscriptionId,
       // CI publishes the region; locally it is absent and the fixture's own
@@ -531,7 +545,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         )
       );
       servicePrincipalId = principalId;
-      await cloud.assertRoleAssignmentExists(principalId);
+      roleAssignments = await cloud.assertRoleAssignmentExists(principalId);
 
       await cloud.assertGitHubEnvironmentExists();
       const variables = readEnvironmentVariables(
@@ -958,7 +972,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         throw new Error(
           "The product-created service principal was not observed."
         );
-      await cloud.assertRoleAssignmentExists(servicePrincipalId);
+      await cloud.assertRoleAssignmentsExist(roleAssignments);
       const principalAfter = readServicePrincipalObjectId(
         await runAz(
           ports.commands,
@@ -1144,9 +1158,19 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       await cloud.assertGitHubEnvironmentAbsent();
       await assertEnvironmentDeletionIdentityOutcome({
         assertions: cloud,
+        assertServicePrincipalExists: async () => {
+          const retainedServicePrincipalId = readServicePrincipalObjectId(
+            await runAz(
+              ports.commands,
+              ["ad", "sp", "show", "--id", appBefore.appId, "-o", "json"],
+              `az ad sp show --id ${appBefore.appId}`
+            )
+          );
+          expect(retainedServicePrincipalId).toBe(principalId);
+        },
         expectedAppRegistration: appBefore,
-        federatedSubjects,
-        principalId
+        expectedRoleAssignments: roleAssignments,
+        federatedSubjects
       });
     } catch (error) {
       primaryError = error;

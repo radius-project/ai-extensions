@@ -5,12 +5,14 @@ import { promises as fs } from "node:fs";
 import {
   CloudCommandError,
   createRefreshingAzureCommandRunner,
+  createGitHubPackageCommandEnvironment,
   createNodeCloudFixturePorts,
   describeError,
   expectSuccess,
   isGitHubApiNotFound,
   normalizeAzureCommandResult,
   normalizeCommandResult,
+  normalizeGitHubPackageCommandResult,
   parseJsonArray,
   parseJsonObject,
   type CloudCommandResult
@@ -351,6 +353,66 @@ describe("parseJsonObject", () => {
 });
 
 describe("createNodeCloudFixturePorts", () => {
+  it("isolates package commands onto the dedicated token", () => {
+    expect(
+      createGitHubPackageCommandEnvironment(" package-token ", {
+        GH_TOKEN: "app-token",
+        GITHUB_TOKEN: "stale-token",
+        PATH: "/tools"
+      })
+    ).toEqual({
+      GH_TOKEN: "package-token",
+      GITHUB_TOKEN: "package-token",
+      PATH: "/tools"
+    });
+  });
+
+  it.each([undefined, "", "   "])(
+    "rejects a missing package command token represented by %j",
+    (packageToken) => {
+      expect(
+        createGitHubPackageCommandEnvironment(packageToken, {})
+      ).toBeNull();
+    }
+  );
+
+  it("fails package commands explicitly when no package token was supplied", async () => {
+    await expect(
+      createNodeCloudFixturePorts().commands.runGhPackage(["api", "user"])
+    ).resolves.toEqual({
+      code: 1,
+      stdout: "",
+      stderr:
+        "GH_PACKAGES_TOKEN is required for cloud fixture package operations."
+    });
+  });
+
+  it("runs package commands through the real gh executable with a dedicated token", async () => {
+    const outcome = await createNodeCloudFixturePorts({
+      packageToken: "package-token-for-version-probe"
+    }).commands.runGhPackage(["--version"]);
+
+    expect(outcome.code).toBe(0);
+    expect(outcome.stdout).toMatch(/^gh version /);
+    expect(outcome.stdout).not.toContain("package-token-for-version-probe");
+  });
+
+  it("redacts the dedicated package token from command output", () => {
+    const token = "dedicated-package-token";
+    expect(
+      normalizeGitHubPackageCommandResult(
+        { code: 1 },
+        `stdout ${token}`,
+        `stderr ${token}`,
+        token
+      )
+    ).toEqual({
+      code: 1,
+      stdout: "stdout [REDACTED]",
+      stderr: "stderr [REDACTED]"
+    });
+  });
+
   it("creates and removes a workspace directory under the system temp root", async () => {
     const ports = createNodeCloudFixturePorts();
 
@@ -414,6 +476,146 @@ describe("createNodeCloudFixturePorts", () => {
         ["aks", "get-credentials"],
         30_000
       );
+    });
+
+    it("shares one timeout budget across renewal and the requested command", async () => {
+      let now = 0;
+      const calls: Array<{
+        args: readonly string[];
+        timeoutMs: number | undefined;
+      }> = [];
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: successfulFetch(),
+        runCommand: (args, timeoutMs) => {
+          calls.push({ args, timeoutMs });
+          now += 10;
+          return Promise.resolve(result({}));
+        }
+      });
+
+      now = 100;
+      await expect(run(["group", "list"], 30)).resolves.toMatchObject({
+        code: 0
+      });
+      expect(calls.map(({ args, timeoutMs }) => [args[0], timeoutMs])).toEqual([
+        ["login", 30],
+        ["account", 20],
+        ["group", 10]
+      ]);
+    });
+
+    it.each([
+      [5_000, 5_000],
+      [30_000, 20_000]
+    ])(
+      "bounds the OIDC request by a %ims command budget at %ims",
+      async (timeoutMs, expectedSignalTimeoutMs) => {
+        let now = 0;
+        const timeout = vi
+          .spyOn(AbortSignal, "timeout")
+          .mockReturnValue(new AbortController().signal);
+        const run = createRefreshingAzureCommandRunner({
+          env: AZURE_ENV,
+          now: () => now,
+          refreshIntervalMs: 100,
+          fetch: successfulFetch(),
+          runCommand: () => Promise.resolve(result({}))
+        });
+
+        now = 100;
+        await run(["group", "list"], timeoutMs);
+
+        expect(timeout).toHaveBeenCalledWith(expectedSignalTimeoutMs);
+        timeout.mockRestore();
+      }
+    );
+
+    it("does not request an OIDC assertion after the command deadline", async () => {
+      let now = 0;
+      const fetchImpl = successfulFetch();
+      const runCommand = vi.fn((_: readonly string[]) =>
+        Promise.resolve(result({}))
+      );
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: fetchImpl,
+        runCommand
+      });
+
+      now = 100;
+      await expect(run(["group", "list"], 0)).resolves.toMatchObject({
+        code: 1,
+        stderr: expect.stringMatching(/refresh.*exhausted its timeout/i)
+      });
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
+    it("does not start another command after renewal exhausts the timeout", async () => {
+      let now = 0;
+      const runCommand = vi.fn((_: readonly string[]) => {
+        now += 31;
+        return Promise.resolve(result({}));
+      });
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: successfulFetch(),
+        runCommand
+      });
+
+      now = 100;
+      await expect(run(["group", "list"], 30)).resolves.toMatchObject({
+        code: 1,
+        stderr: expect.stringMatching(/exhausted its timeout/)
+      });
+      expect(runCommand).toHaveBeenCalledOnce();
+    });
+
+    it("does not start the requested command when renewal consumes the timeout", async () => {
+      let now = 0;
+      const runCommand = vi.fn((_: readonly string[]) => {
+        now += 10;
+        return Promise.resolve(result({}));
+      });
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: successfulFetch(),
+        runCommand
+      });
+
+      now = 100;
+      await expect(run(["group", "list"], 20)).resolves.toMatchObject({
+        code: 1,
+        stderr: expect.stringMatching(/exhausted its timeout/)
+      });
+      expect(runCommand).toHaveBeenCalledTimes(2);
+      expect(runCommand.mock.calls.map(([args]) => args[0])).toEqual([
+        "login",
+        "account"
+      ]);
+    });
+
+    it("labels requested-command deadline exhaustion separately from refresh failure", async () => {
+      const runCommand = vi.fn(() => Promise.resolve(result({})));
+      const run = createRefreshingAzureCommandRunner({
+        env: {},
+        runCommand
+      });
+
+      await expect(run(["group", "list"], 0)).resolves.toMatchObject({
+        code: 1,
+        stderr: expect.stringMatching(/^Azure command failed:/)
+      });
+      expect(runCommand).not.toHaveBeenCalled();
     });
 
     it("preserves an existing local Azure CLI session when Actions OIDC is unavailable", async () => {
@@ -575,6 +777,49 @@ describe("createNodeCloudFixturePorts", () => {
         ["group", "list"],
         ["account", "show"]
       ]);
+    });
+
+    it("bounds a caller waiting on another command's unbounded renewal", async () => {
+      vi.useFakeTimers();
+      let now = 0;
+      let resolveFetch: ((response: Response) => void) | undefined;
+      const fetchImpl = vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFetch = resolve;
+          })
+      );
+      const runCommand = vi.fn((_: readonly string[]) =>
+        Promise.resolve(result({}))
+      );
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: fetchImpl,
+        runCommand
+      });
+
+      try {
+        now = 100;
+        const unbounded = run(["group", "list"]);
+        const bounded = run(["group", "show"], 10);
+        await vi.advanceTimersByTimeAsync(10);
+        await expect(bounded).resolves.toMatchObject({
+          code: 1,
+          stderr: expect.stringMatching(/awaiting credential refresh/)
+        });
+
+        resolveFetch?.(
+          new Response(JSON.stringify({ value: "header.payload.signature" }))
+        );
+        await expect(unbounded).resolves.toMatchObject({ code: 0 });
+        expect(
+          runCommand.mock.calls.filter(([args]) => args[1] === "show")
+        ).toHaveLength(0);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it.each([
