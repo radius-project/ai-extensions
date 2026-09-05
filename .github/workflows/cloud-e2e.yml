@@ -1,0 +1,386 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+---
+name: Cloud E2E
+
+# The twelfth test layer, and the only one that touches a real cloud. It runs
+# `pnpm test:cloud` against real Microsoft Graph, real Azure Resource Manager,
+# and real GitHub, so it proves the thing every hermetic layer structurally
+# cannot: that the commands the product issues are *accepted*.
+#
+# See docs/eng/CLOUD_E2E_RUNBOOK.md before triaging a failure. A red run here is
+# one of three completely different things - a product regression, an
+# infrastructure failure, or leaked state from an earlier run - and treating
+# them as one destroys the signal this tier exists to provide.
+#
+# THIS WORKFLOW HAS NEVER EXECUTED. Five prerequisites are outstanding, none of
+# them in this repository:
+#
+#   1. radius-project/wellknown#134 (the Terraform that publishes the identity
+#      and the variables below) is open and unmerged.
+#   2. A tenant admin must consent to Graph `AppRoleAssignment.ReadWrite.All`,
+#      or that Terraform apply fails `Authorization_RequestDenied`.
+#   3. The publishing GitHub App must be installed on this repository. Terraform
+#      cannot install an App, so that half is manual.
+#   4. The dedicated Cloud E2E GitHub App must be created, installed only on the
+#      fixture repository, and its client id and private key stored here as
+#      `CLOUD_E2E_BOT_CLIENT_ID` and `CLOUD_E2E_BOT_PRIVATE_KEY`.
+#   5. The fixture repository does not exist. `FIXTURE_BASELINE_SHA` in
+#      packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts is
+#      still forty zeros, which makes the suite skip rather than pass hollowly.
+#
+# While the fixture variable is unpublished, the run stops after checkout with a
+# specific notice. If the variable lands before the source pin, the suite's own
+# gate skips at `pnpm test:cloud` and names the placeholder fields.
+
+on:
+  # Deliberately NOT `pull_request_target`, and deliberately NOT `merge_group`.
+  #
+  # `pull_request_target` would run fork-authored code with access to the Azure
+  # identity and the GitHub App token. Radius accepts that risk upstream because
+  # its cloud tests gate its pull requests; ours do not, so omitting the trigger
+  # removes the fork supply-chain risk entirely rather than mitigating it.
+  #
+  # `merge_group` is a closer call, and is deferred rather than rejected. The
+  # design note defers it deliberately for the same reason: a `merge_group` run
+  # makes the merge queue - and therefore every merge - depend on Azure and
+  # Entra being available. Adding it later is a one-line change once the tier
+  # has a track record; removing it after the queue has wedged is an incident.
+  schedule:
+    # 04:23 UTC, once daily. Offset from the other scheduled workflows so they
+    # do not contend, and single rather than repeated because each run
+    # provisions an AKS cluster that dominates the tier's cost.
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+# Serialized, and never cancelled.
+#
+# `cancel-in-progress: false` is a correctness rule here, unlike the `true` in
+# canvas-functional.yml. Two independent reasons:
+#
+#   1. The run is destructive. Cancelling mid-flight strands a resource group,
+#      an AKS cluster, an Entra application, and a GitHub Environment, turning
+#      one flake into a leaked-state failure on every subsequent run.
+#   2. The Entra application the product creates is scoped to the repository
+#      alone - `radius-deploy-${fullName.replace("/", "-")}` in
+#      src/server/routes/azure-auto-setup-application.ts - with no per-run
+#      uniqueness. Two concurrent runs would contend for one Entra object, and
+#      the clean-slate probe of the second would see the first's application.
+#
+# The group is a literal string, not `${{ github.ref }}`, and is shared with
+# cloud-e2e-cleanup.yml. Both facts matter: runs on different refs still contend
+# for the same repository-scoped Entra object, and cleanup must never delete
+# state a live run is depending on.
+concurrency:
+  group: cloud-e2e-shared-cloud-estate
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  cloud-e2e:
+    name: Create-environment journey against real cloud
+    # Scheduled workflows keep running in forks that enable Actions. Without
+    # this guard a fork would spend the Radius test subscription's quota and
+    # contend for the same fixture repository.
+    if: github.repository == 'radius-project/ai-extensions'
+    # A plain runner rather than the `mcr.microsoft.com/playwright` container
+    # build.yml uses for the Chromium tier. That container ships browsers but
+    # not `az`, `gh`, or `kubectl`, and cloud mode runs the real ones - the
+    # whole point of the tier. Browsers are installed explicitly below instead.
+    runs-on: ubuntu-24.04
+    # Strictly greater than Playwright's 45-minute per-test timeout and 75-minute
+    # global timeout in packages/adapter-canvas/playwright.cloud.config.ts. The
+    # ordering is the requirement: Playwright must be the thing that gives up
+    # first, because it writes the trace on the way out. If GitHub cancelled the
+    # job first, the single most useful diagnostic for a run nobody can reproduce
+    # locally is exactly what would be lost. The remaining headroom covers
+    # dependency install, browser download, teardown, and artifact upload.
+    timeout-minutes: 90
+    permissions:
+      contents: read # actions/checkout
+      id-token: write # OIDC token exchanged for an Azure token by azure/login
+    env:
+      # Turns the suite on. Without it the journey skips rather than fails, so
+      # an ordinary `pnpm test` is never broken by absent credentials.
+      RADIUS_CLOUD_E2E: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Split once, here, so every later step agrees on what the variable means.
+      # It holds a full `owner/name`, matching FIXTURE_REPOSITORY in
+      # test/e2e-cloud/support/fixture-repository.ts, but the App token action
+      # wants bare repository names.
+      #
+      # An unset variable means the upstream Terraform has not been applied yet,
+      # which is today's state. That skips the cloud steps rather than failing
+      # them: this workflow is scheduled, and a job that fails every night for a
+      # reason nobody in this repository can fix trains people to ignore the
+      # alert that is supposed to mean something. It mirrors the
+      # skip-without-credentials convention live-tests.yml already uses. A value
+      # that is set but malformed does fail, because that is a real mistake.
+      - name: Resolve the fixture repository
+        id: fixture
+        env:
+          FIXTURE_REPOSITORY: ${{ vars.AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${FIXTURE_REPOSITORY:-}" ]]; then
+            echo "configured=false" >>"$GITHUB_OUTPUT"
+            reason="AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY is not published yet, so there is no fixture repository to run against. Skipping. See docs/eng/CLOUD_E2E_RUNBOOK.md, \"It has never run\"."
+            echo "::notice::$reason"
+            echo "$reason" >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [[ ! "$FIXTURE_REPOSITORY" =~ ^[^/]+/[^/]+$ ]]; then
+            echo "::error::AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY must be owner/name; got '$FIXTURE_REPOSITORY'."
+            exit 1
+          fi
+          {
+            echo "configured=true"
+            echo "full-name=$FIXTURE_REPOSITORY"
+            echo "owner=${FIXTURE_REPOSITORY%%/*}"
+            echo "name=${FIXTURE_REPOSITORY##*/}"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Install pnpm
+        if: steps.fixture.outputs.configured == 'true'
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node.js
+        if: steps.fixture.outputs.configured == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      # The variable scopes the installation token, while the suite clones the
+      # source-pinned repository. Refuse a mismatch before authenticating so the
+      # two trust boundaries cannot quietly point at different repositories.
+      - name: Verify the published fixture repository matches the pin
+        if: steps.fixture.outputs.configured == 'true'
+        env:
+          PUBLISHED: ${{ steps.fixture.outputs.full-name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            const pin = await import(
+              "./packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts"
+            );
+            if (process.env.PUBLISHED !== pin.FIXTURE_REPOSITORY) {
+              console.error(
+                `::error::AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY is "${process.env.PUBLISHED}" but the suite is pinned to "${pin.FIXTURE_REPOSITORY}". Refusing to run against an ambiguous scope.`
+              );
+              process.exit(1);
+            }
+          '
+
+      - name: Install dependencies
+        if: steps.fixture.outputs.configured == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Install the Chromium browser
+        if: steps.fixture.outputs.configured == 'true'
+        run: pnpm exec playwright install --with-deps chromium
+
+      # No stored Azure secret exists. The runner's OIDC token is exchanged for
+      # an Azure token scoped to the dedicated bootstrap identity, which holds
+      # subscription Contributor, RBAC administration, and Graph
+      # `Application.ReadWrite.OwnedBy` - and is federated on this repository's
+      # default branch only, so no pull request can mint a token for it.
+      - name: Sign in to Azure
+        if: steps.fixture.outputs.configured == 'true'
+        uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # A short-lived installation token, the pattern release.yml already uses,
+      # rather than a stored PAT. Every permission is requested explicitly: the
+      # token request fails outright if the installation does not carry one,
+      # which is the loud version of the failure mode the design records - a
+      # token silently missing `workflows` scope sends the product down its
+      # pull-request fallback path, and the journey would pass without ever
+      # having committed a workflow to the default branch.
+      - name: Create a GitHub App token for the fixture repository
+        id: app-token
+        if: steps.fixture.outputs.configured == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
+          owner: ${{ steps.fixture.outputs.owner }}
+          repositories: ${{ steps.fixture.outputs.name }}
+          permission-actions: read
+          permission-administration: read
+          permission-contents: write
+          permission-environments: write
+          permission-pull-requests: write
+          permission-variables: write
+          permission-workflows: write
+
+      - name: Run the cloud create-environment journey
+        if: steps.fixture.outputs.configured == 'true'
+        working-directory: packages/adapter-canvas
+        env:
+          # azure/login does not export these to later steps, and the journey
+          # reads them directly: the subscription to provision the per-run group
+          # and cluster in, and the bootstrap client id that the journey asserts
+          # never leaked into the fixture repository's Environment.
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          # Published by wellknown so the region can move without a code change.
+          # Empty leaves the fixture's own default in place.
+          AIEXT_CLOUD_E2E_AZURE_LOCATION: ${{ vars.AIEXT_CLOUD_E2E_AZURE_LOCATION }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: pnpm run test:cloud
+
+      - name: Create a fresh read-only GitHub App token for diagnostics
+        id: diagnostics-token
+        if: always() && steps.fixture.outputs.configured == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
+          owner: ${{ steps.fixture.outputs.owner }}
+          repositories: ${{ steps.fixture.outputs.name }}
+          permission-actions: read
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+
+      # Collected on success as well as failure, and never allowed to fail the
+      # job: a diagnostics step that breaks the run it is diagnosing is worse
+      # than no diagnostics. `az` output here is deliberately identifier-level
+      # only - no credentials, no secret values.
+      - name: Collect az and gh diagnostics
+        if: always() && steps.fixture.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ steps.diagnostics-token.outputs.token }}
+          FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
+          RESOURCE_GROUP_PREFIX: radtest-canvas
+        shell: bash
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/cloud-e2e-artifact"
+          mkdir -p "$out"
+
+          redact_azure() {
+            node --input-type=module -e '
+              import { redactCredentials } from "./packages/adapter-canvas/src/credential-redaction.ts";
+              let input = "";
+              for await (const chunk of process.stdin) input += chunk;
+              process.stdout.write(redactCredentials(input, [
+                process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+                process.env.ARM_ACCESS_TOKEN,
+                process.env.ARM_CLIENT_SECRET,
+                process.env.ARM_OIDC_TOKEN,
+                process.env.AZURE_ACCESS_TOKEN,
+                process.env.AZURE_CLIENT_SECRET,
+                process.env.AZURE_FEDERATED_TOKEN,
+                process.env.AZURE_PASSWORD
+              ]));
+            '
+          }
+
+          az version 2>&1 | redact_azure >"$out/az-version.json" || true
+          az account show --query '{tenantId:tenantId,subscriptionId:id,type:user.type}' \
+            2>&1 | redact_azure >"$out/az-account.json" || true
+          az group list --query "[?starts_with(name, '$RESOURCE_GROUP_PREFIX')].{name:name,location:location,tags:tags}" \
+            2>&1 | redact_azure >"$out/az-leftover-resource-groups.json" || true
+          az ad app list --filter "startswith(displayName, 'radius-deploy-')" \
+            --query '[].{appId:appId,displayName:displayName,createdDateTime:createdDateTime}' \
+            2>&1 | redact_azure >"$out/az-leftover-applications.json" || true
+
+          gh --version >"$out/gh-version.txt" 2>&1 || true
+          if [[ -n "${FIXTURE_REPOSITORY:-}" ]]; then
+            repo="$FIXTURE_REPOSITORY"
+            gh api "repos/$repo/environments" >"$out/gh-environments.json" 2>&1 || true
+            gh api "repos/$repo/branches" >"$out/gh-branches.json" 2>&1 || true
+            gh api "repos/$repo/pulls?state=open" >"$out/gh-open-pull-requests.json" 2>&1 || true
+
+            # The failing workflow's logs. Anything the product committed and
+            # dispatched into the fixture repository runs there, not here, so
+            # its failure is invisible in this job's own log.
+            gh run list --repo "$repo" --limit 20 --json databaseId,name,conclusion,createdAt \
+              >"$out/gh-fixture-runs.json" 2>&1 || true
+            for id in $(jq -r '.[] | select(.conclusion == "failure") | .databaseId' \
+              "$out/gh-fixture-runs.json" 2>/dev/null || true); do
+              gh run view "$id" --repo "$repo" --log-failed \
+                >"$out/gh-fixture-run-$id.log" 2>&1 || true
+            done
+          else
+            echo "AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY is unset; no fixture repository to inspect." \
+              >"$out/gh-fixture-repository.txt"
+          fi
+
+      - name: Stage Playwright traces and report
+        if: always() && steps.fixture.outputs.configured == 'true'
+        shell: bash
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/cloud-e2e-artifact"
+          mkdir -p "$out/test-results"
+          if [[ -d packages/adapter-canvas/test-results/cloud ]]; then
+            cp -R packages/adapter-canvas/test-results/cloud "$out/test-results/cloud"
+          fi
+          if [[ -d packages/adapter-canvas/playwright-report-cloud ]]; then
+            cp -R packages/adapter-canvas/playwright-report-cloud "$out/playwright-report-cloud"
+          fi
+
+      - name: Upload traces, reports, and cloud diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloud-e2e-diagnostics
+          path: ${{ runner.temp }}/cloud-e2e-artifact
+          if-no-files-found: warn
+          retention-days: 14
+
+  notify-scheduled-result:
+    name: Scheduled cloud alert
+    # An overnight failure that nobody sees is the same as no test at all.
+    if: ${{ always() && github.event_name == 'schedule' && github.repository == 'radius-project/ai-extensions' }}
+    needs:
+      - cloud-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Report or clear scheduled failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: cloud-e2e=${{ needs.cloud-e2e.result }}
+          SCHEDULE_FAILED: ${{ needs.cloud-e2e.result != 'success' }}
+        shell: bash
+        run: |
+          title="Cloud E2E scheduled failure"
+          issue_number="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search "\"$title\" in:title" \
+            --json number \
+            --jq '.[0].number // empty')"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+          if [[ "$SCHEDULE_FAILED" == "true" ]]; then
+            body="The scheduled Cloud E2E workflow failed: $RESULT. Run: $run_url. Triage with docs/eng/CLOUD_E2E_RUNBOOK.md, which separates the three failure classes - product regression, infrastructure failure, and leaked state - because they need different responses."
+            if [[ -n "$issue_number" ]]; then
+              gh issue comment "$issue_number" --repo "$GITHUB_REPOSITORY" --body "$body"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+            fi
+          elif [[ -n "$issue_number" ]]; then
+            gh issue close "$issue_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --comment "The scheduled Cloud E2E workflow recovered. Run: $run_url"
+          fi

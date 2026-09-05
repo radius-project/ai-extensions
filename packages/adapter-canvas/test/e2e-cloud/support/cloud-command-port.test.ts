@@ -1,16 +1,26 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import {
   CloudCommandError,
+  createRefreshingAzureCommandRunner,
   createNodeCloudFixturePorts,
   describeError,
   expectSuccess,
+  normalizeAzureCommandResult,
   normalizeCommandResult,
   parseJsonArray,
   type CloudCommandResult
 } from "./cloud-command-port.js";
+
+const AZURE_ENV: NodeJS.ProcessEnv = {
+  ACTIONS_ID_TOKEN_REQUEST_TOKEN: "request-token",
+  ACTIONS_ID_TOKEN_REQUEST_URL: "https://oidc.example/token?job=1",
+  AZURE_CLIENT_ID: "client-id",
+  AZURE_TENANT_ID: "tenant-id",
+  AZURE_SUBSCRIPTION_ID: "subscription-id"
+};
 
 function result(overrides: Partial<CloudCommandResult>): CloudCommandResult {
   return { code: 0, stdout: "", stderr: "", ...overrides };
@@ -112,6 +122,42 @@ describe("normalizeCommandResult", () => {
       code: 0,
       stdout: "",
       stderr: ""
+    });
+  });
+
+  describe("normalizeAzureCommandResult", () => {
+    it("redacts injected and token-shaped credentials from both streams", () => {
+      const opaque = "opaque-federated-token";
+      const jwt =
+        "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJmaXh0dXJlIn0.fixture_signature";
+
+      expect(
+        normalizeAzureCommandResult(
+          { code: 1 },
+          `accessToken=${opaque}`,
+          `failure: ${jwt}`,
+          { AZURE_FEDERATED_TOKEN: opaque }
+        )
+      ).toEqual({
+        code: 1,
+        stdout: "accessToken=[REDACTED]",
+        stderr: "failure: [REDACTED]"
+      });
+    });
+
+    it("preserves non-secret Azure output", () => {
+      expect(
+        normalizeAzureCommandResult(
+          null,
+          '{"subscriptionId":"00000000-0000-0000-0000-000000000001"}',
+          undefined,
+          {}
+        )
+      ).toEqual({
+        code: 0,
+        stdout: '{"subscriptionId":"00000000-0000-0000-0000-000000000001"}',
+        stderr: ""
+      });
     });
   });
 });
@@ -243,6 +289,357 @@ describe("createNodeCloudFixturePorts", () => {
     await expect(fs.stat(dir)).rejects.toThrow();
   });
 
+  describe("createRefreshingAzureCommandRunner", () => {
+    function successfulFetch(
+      assertion = "header.payload.signature"
+    ): typeof fetch {
+      return vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ value: assertion }), { status: 200 })
+        )
+      );
+    }
+
+    it("uses the initial azure/login session before the refresh boundary", async () => {
+      let now = 0;
+      const calls: string[][] = [];
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: successfulFetch(),
+        runCommand: (args) => {
+          calls.push([...args]);
+          return Promise.resolve(result({ stdout: "ok" }));
+        }
+      });
+
+      now = 99;
+      await expect(run(["group", "list"])).resolves.toMatchObject({ code: 0 });
+      expect(calls).toEqual([["group", "list"]]);
+    });
+
+    it("preserves an existing local Azure CLI session when Actions OIDC is unavailable", async () => {
+      let now = 0;
+      const runCommand = vi.fn((_: readonly string[]) =>
+        Promise.resolve(result({ stdout: "local" }))
+      );
+      const run = createRefreshingAzureCommandRunner({
+        env: {},
+        now: () => now,
+        refreshIntervalMs: 100,
+        runCommand
+      });
+
+      now = 101;
+      await expect(run(["group", "list"])).resolves.toMatchObject({
+        code: 0,
+        stdout: "local"
+      });
+      expect(runCommand).toHaveBeenCalledWith(["group", "list"]);
+    });
+
+    it("ignores whitespace-only Actions OIDC state for a local Azure CLI session", async () => {
+      let now = 0;
+      const runCommand = vi.fn((_: readonly string[]) =>
+        Promise.resolve(result({ stdout: "local" }))
+      );
+      const run = createRefreshingAzureCommandRunner({
+        env: {
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: " ",
+          ACTIONS_ID_TOKEN_REQUEST_URL: " "
+        },
+        now: () => now,
+        refreshIntervalMs: 100,
+        runCommand
+      });
+
+      now = 100;
+      await expect(run(["group", "list"])).resolves.toMatchObject({
+        code: 0,
+        stdout: "local"
+      });
+      expect(runCommand).toHaveBeenCalledOnce();
+    });
+
+    it("renews with a fresh assertion at the boundary before running the command", async () => {
+      let now = 1_000;
+      const calls: string[][] = [];
+      const fetchImpl = successfulFetch();
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: fetchImpl,
+        runCommand: (args) => {
+          calls.push([...args]);
+          return Promise.resolve(result({}));
+        }
+      });
+
+      now += 100;
+      await run(["group", "list"]);
+
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(fetchImpl).toHaveBeenCalledWith(
+        new URL(
+          "https://oidc.example/token?job=1&audience=api%3A%2F%2FAzureADTokenExchange"
+        ),
+        expect.objectContaining({
+          headers: { Authorization: "bearer request-token" }
+        })
+      );
+      expect(calls).toEqual([
+        [
+          "login",
+          "--service-principal",
+          "--username",
+          "client-id",
+          "--tenant",
+          "tenant-id",
+          "--federated-token",
+          "header.payload.signature",
+          "--output",
+          "none"
+        ],
+        ["account", "set", "--subscription", "subscription-id"],
+        ["group", "list"]
+      ]);
+    });
+
+    it("requests a new assertion for each renewal window", async () => {
+      let now = 0;
+      let assertion = 0;
+      const fetchImpl = vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({ value: `header.payload.signature${++assertion}` }),
+            { status: 200 }
+          )
+        )
+      );
+      const calls: string[][] = [];
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: fetchImpl,
+        runCommand: (args) => {
+          calls.push([...args]);
+          return Promise.resolve(result({}));
+        }
+      });
+
+      now = 100;
+      await run(["group", "list"]);
+      now = 200;
+      await run(["group", "show"]);
+
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(
+        calls
+          .filter((args) => args[0] === "login")
+          .map((args) => args[args.indexOf("--federated-token") + 1])
+      ).toEqual(["header.payload.signature1", "header.payload.signature2"]);
+    });
+
+    it("shares one renewal across concurrent Azure commands", async () => {
+      let now = 0;
+      let resolveFetch: ((response: Response) => void) | undefined;
+      const fetchImpl = vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFetch = resolve;
+          })
+      );
+      const calls: string[][] = [];
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: fetchImpl,
+        runCommand: (args) => {
+          calls.push([...args]);
+          return Promise.resolve(result({}));
+        }
+      });
+
+      now = 100;
+      const first = run(["group", "list"]);
+      const second = run(["account", "show"]);
+      resolveFetch?.(
+        new Response(JSON.stringify({ value: "header.payload.signature" }))
+      );
+      await Promise.all([first, second]);
+
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(calls.filter((args) => args[0] === "login")).toHaveLength(1);
+      expect(calls.slice(-2)).toEqual([
+        ["group", "list"],
+        ["account", "show"]
+      ]);
+    });
+
+    it.each([
+      [
+        "missing Azure identity",
+        { ...AZURE_ENV, AZURE_CLIENT_ID: "" },
+        successfulFetch(),
+        /AZURE_CLIENT_ID/
+      ],
+      [
+        "missing GitHub OIDC request state",
+        { ...AZURE_ENV, ACTIONS_ID_TOKEN_REQUEST_URL: "" },
+        successfulFetch(),
+        /OIDC request URL and token/
+      ],
+      [
+        "a rejected assertion request",
+        AZURE_ENV,
+        vi.fn(() => Promise.reject(new Error("request unavailable"))),
+        /request unavailable/
+      ],
+      [
+        "an unsuccessful assertion response",
+        AZURE_ENV,
+        vi.fn(() => Promise.resolve(new Response("", { status: 503 }))),
+        /HTTP 503/
+      ],
+      [
+        "invalid assertion JSON",
+        AZURE_ENV,
+        vi.fn(() => Promise.resolve(new Response("{", { status: 200 }))),
+        /JSON/
+      ],
+      [
+        "a malformed assertion response",
+        AZURE_ENV,
+        vi.fn(() => Promise.resolve(new Response("{}", { status: 200 }))),
+        /did not contain a token/
+      ]
+    ])(
+      "fails closed without running the requested command for %s",
+      async (_label, env, fetchImpl, expected) => {
+        let now = 0;
+        const runCommand = vi.fn(() => Promise.resolve(result({})));
+        const run = createRefreshingAzureCommandRunner({
+          env,
+          now: () => now,
+          refreshIntervalMs: 100,
+          fetch: fetchImpl,
+          runCommand
+        });
+
+        now = 100;
+        const outcome = await run(["group", "list"]);
+
+        expect(outcome.code).toBe(1);
+        expect(outcome.stderr).toMatch(expected);
+        expect(runCommand).not.toHaveBeenCalled();
+      }
+    );
+
+    it("stops before the requested command when login or subscription selection fails", async () => {
+      let now = 0;
+      const runCommand = vi
+        .fn((_: readonly string[]) => Promise.resolve(result({})))
+        .mockResolvedValueOnce(result({}))
+        .mockResolvedValueOnce(
+          result({ code: 1, stderr: "subscription denied" })
+        );
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: successfulFetch(),
+        runCommand
+      });
+
+      now = 100;
+      await expect(run(["group", "list"])).resolves.toMatchObject({
+        code: 1,
+        stderr: "subscription denied"
+      });
+      expect(runCommand).toHaveBeenCalledTimes(2);
+    });
+
+    it("stops immediately when renewed Azure login fails", async () => {
+      let now = 0;
+      const runCommand = vi.fn((_: readonly string[]) =>
+        Promise.resolve(result({ code: 1, stderr: "login denied" }))
+      );
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: successfulFetch(),
+        runCommand
+      });
+
+      now = 100;
+      await expect(run(["group", "list"])).resolves.toMatchObject({
+        code: 1,
+        stderr: "login denied"
+      });
+      expect(runCommand).toHaveBeenCalledOnce();
+    });
+
+    it("retries renewal after a failed attempt", async () => {
+      let now = 0;
+      const fetchImpl = successfulFetch();
+      const runCommand = vi
+        .fn((_: readonly string[]) => Promise.resolve(result({})))
+        .mockResolvedValueOnce(
+          result({ code: 1, stderr: "temporary failure" })
+        );
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: fetchImpl,
+        runCommand
+      });
+
+      now = 100;
+      await expect(run(["group", "list"])).resolves.toMatchObject({ code: 1 });
+      await expect(run(["group", "list"])).resolves.toMatchObject({ code: 0 });
+
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      expect(runCommand).toHaveBeenCalledTimes(4);
+    });
+
+    it("redacts OIDC request credentials from refresh failures", async () => {
+      let now = 0;
+      const fetchImpl = vi.fn(() =>
+        Promise.reject(
+          new Error(
+            `request rejected for ${AZURE_ENV.ACTIONS_ID_TOKEN_REQUEST_TOKEN}`
+          )
+        )
+      );
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: fetchImpl,
+        runCommand: () => Promise.resolve(result({}))
+      });
+
+      now = 100;
+      const outcome = await run(["group", "list"]);
+
+      expect(outcome.stderr).toContain("[REDACTED]");
+      expect(outcome.stderr).not.toContain("request-token");
+    });
+
+    it("rejects a non-positive or non-finite refresh interval", () => {
+      for (const refreshIntervalMs of [0, -1, Number.POSITIVE_INFINITY])
+        expect(() =>
+          createRefreshingAzureCommandRunner({ refreshIntervalMs })
+        ).toThrow("must be positive and finite");
+    });
+  });
+
   it("removes a directory that is already gone without failing", async () => {
     const ports = createNodeCloudFixturePorts();
     const dir = await ports.makeWorkspaceDir("radtest-canvas-unit");
@@ -303,4 +700,94 @@ describe("createNodeCloudFixturePorts", () => {
       expect(typeof outcome.stderr).toBe("string");
     }
   }, 30_000);
+
+  it("redacts Azure output through the real runAz port wiring", async () => {
+    const token = "fake-azure-token-for-port-test";
+    const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-az-"));
+    const originalPath = process.env.PATH;
+    const originalPathExt = process.env.PATHEXT;
+    const originalToken = process.env.AZURE_FEDERATED_TOKEN;
+
+    await fs.writeFile(
+      path.join(fakeBin, "az"),
+      [
+        "#!/bin/sh",
+        'printf "accessToken=%s\\n" "$AZURE_FEDERATED_TOKEN"',
+        'printf "failure: %s\\n" "$AZURE_FEDERATED_TOKEN" >&2',
+        "exit 7",
+        ""
+      ].join("\n")
+    );
+    await fs.chmod(path.join(fakeBin, "az"), 0o755);
+    await fs.writeFile(
+      path.join(fakeBin, "az.cmd"),
+      [
+        "@echo off",
+        "echo accessToken=%AZURE_FEDERATED_TOKEN%",
+        "echo failure: %AZURE_FEDERATED_TOKEN% 1>&2",
+        "exit /b 7",
+        ""
+      ].join("\r\n")
+    );
+
+    try {
+      process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
+      process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+      process.env.AZURE_FEDERATED_TOKEN = token;
+
+      const result = await createNodeCloudFixturePorts().commands.runAz([
+        "--version"
+      ]);
+
+      expect(result.code).toBe(7);
+      expect(result.stdout).toContain("accessToken=[REDACTED]");
+      expect(result.stdout).not.toContain(token);
+      expect(result.stderr).toContain("failure: [REDACTED]");
+      expect(result.stderr).not.toContain(token);
+
+      const injectedToken = "injected-azure-token-for-port-test";
+      await fs.writeFile(
+        path.join(fakeBin, "az"),
+        [
+          "#!/bin/sh",
+          `printf "accessToken=${injectedToken}\\n"`,
+          `printf "failure: ${injectedToken}\\n" >&2`,
+          "exit 7",
+          ""
+        ].join("\n")
+      );
+      await fs.writeFile(
+        path.join(fakeBin, "az.cmd"),
+        [
+          "@echo off",
+          `echo accessToken=${injectedToken}`,
+          `echo failure: ${injectedToken} 1>&2`,
+          "exit /b 7",
+          ""
+        ].join("\r\n")
+      );
+      delete process.env.AZURE_FEDERATED_TOKEN;
+
+      const injectedResult = await createRefreshingAzureCommandRunner({
+        env: {
+          ...process.env,
+          AZURE_FEDERATED_TOKEN: injectedToken
+        }
+      })(["--version"]);
+
+      expect(injectedResult.code).toBe(7);
+      expect(injectedResult.stdout).toContain("accessToken=[REDACTED]");
+      expect(injectedResult.stdout).not.toContain(injectedToken);
+      expect(injectedResult.stderr).toContain("failure: [REDACTED]");
+      expect(injectedResult.stderr).not.toContain(injectedToken);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (originalPathExt === undefined) delete process.env.PATHEXT;
+      else process.env.PATHEXT = originalPathExt;
+      if (originalToken === undefined) delete process.env.AZURE_FEDERATED_TOKEN;
+      else process.env.AZURE_FEDERATED_TOKEN = originalToken;
+      await fs.rm(fakeBin, { recursive: true, force: true });
+    }
+  });
 });
