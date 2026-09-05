@@ -210,6 +210,10 @@ describe("mintGitHubAppToken", () => {
     [
       "an expired token",
       { token: "ghs_expired", expires_at: "2026-09-04T19:59:59Z" }
+    ],
+    [
+      "a token without enough stage lifetime",
+      { token: "ghs_short", expires_at: "2026-09-04T20:58:59Z" }
     ]
   ])("rejects %s response", async (_name, payload) => {
     await expect(

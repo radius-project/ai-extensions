@@ -1,10 +1,10 @@
 // The seam between the cloud fixture and the outside world.
 //
-// Nothing in `test/e2e-cloud/` calls `execFile` directly. Every `az`, `gh`, and
-// `git` invocation goes through a port, so each branch of the fixture — a
-// missing resource, a failed command, malformed output, a partially built
-// fixture — is provable on a machine with no Azure or GitHub credentials at
-// all. The real run passes `createNodeCloudFixturePorts()`; this is not a
+// Nothing in `test/e2e-cloud/` calls `execFile` directly. Every `az`, `gh`,
+// `git`, and `kubectl` invocation goes through a port, so each branch of the
+// fixture — a missing resource, a failed command, malformed output, a partially
+// built fixture — is provable on a machine with no Azure or GitHub credentials
+// at all. The real run passes `createNodeCloudFixturePorts()`; this is not a
 // test-only hook.
 //
 // The result shape and the "resolve for a non-zero exit rather than reject"
@@ -33,9 +33,22 @@ export interface CloudCommandResult {
  * absent.
  */
 export interface CloudCommandPort {
-  runAz(args: readonly string[]): Promise<CloudCommandResult>;
+  runAz(
+    args: readonly string[],
+    timeoutMs?: number
+  ): Promise<CloudCommandResult>;
   runGh(args: readonly string[]): Promise<CloudCommandResult>;
   runGit(args: readonly string[], cwd: string): Promise<CloudCommandResult>;
+  /**
+   * Queries a Kubernetes cluster using an explicit kubeconfig argv.
+   *
+   * Requiring callers to pass `--kubeconfig <path>` prevents an inherited
+   * KUBECONFIG from redirecting the journey to a developer's personal cluster.
+   */
+  runKubectl(
+    args: readonly string[],
+    timeoutMs?: number
+  ): Promise<CloudCommandResult>;
 }
 
 export interface CloudFixturePorts {
@@ -69,7 +82,8 @@ function runTool(
     error: { code?: string | number | null } | null,
     stdout: string | undefined,
     stderr: string | undefined
-  ) => CloudCommandResult = normalizeCommandResult
+  ) => CloudCommandResult = normalizeCommandResult,
+  timeoutMs = COMMAND_TIMEOUT_MS
 ): Promise<CloudCommandResult> {
   return new Promise((resolve) => {
     const child = cliExec(
@@ -77,7 +91,7 @@ function runTool(
       [...args],
       {
         cwd,
-        timeout: COMMAND_TIMEOUT_MS,
+        timeout: timeoutMs,
         maxBuffer: MAX_OUTPUT_BYTES,
         windowsHide: true
       },
@@ -169,10 +183,12 @@ export function isGitHubApiNotFound(result: CloudCommandResult): boolean {
 export function createNodeCloudFixturePorts(): CloudFixturePorts {
   return {
     commands: {
-      runAz: (args) =>
-        runTool("az", args, undefined, normalizeAzureCommandResult),
+      runAz: (args, timeoutMs) =>
+        runTool("az", args, undefined, normalizeAzureCommandResult, timeoutMs),
       runGh: (args) => runTool("gh", args),
-      runGit: (args, cwd) => runTool("git", args, cwd)
+      runGit: (args, cwd) => runTool("git", args, cwd),
+      runKubectl: (args, timeoutMs) =>
+        runTool("kubectl", args, undefined, normalizeCommandResult, timeoutMs)
     },
     makeWorkspaceDir: (prefix) =>
       fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`)),
@@ -252,7 +268,37 @@ export function parseJsonArray(
 
 function describeJsonKind(value: unknown): string {
   if (value === null) return "null";
+  if (Array.isArray(value)) return "a JSON array";
   return `a JSON ${typeof value}`;
+}
+
+/**
+ * Parses a successful command's stdout as a JSON object.
+ *
+ * Empty, malformed, and non-object output fail closed because an empty object
+ * could otherwise be mistaken for a successfully deleted cluster workload.
+ */
+export function parseJsonObject(
+  result: CloudCommandResult,
+  context: string
+): Record<string, unknown> {
+  expectSuccess(result, context);
+  const text = result.stdout.trim();
+  if (!text) throw new Error(`${context} returned no output to parse as JSON.`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(
+      `${context} returned output that is not valid JSON: ${describeError(error)}`,
+      { cause: error }
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error(
+      `${context} returned ${describeJsonKind(parsed)} where a JSON object was expected.`
+    );
+  return parsed as Record<string, unknown>;
 }
 
 /**

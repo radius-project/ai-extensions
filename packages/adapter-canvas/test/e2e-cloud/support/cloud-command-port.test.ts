@@ -11,6 +11,7 @@ import {
   normalizeAzureCommandResult,
   normalizeCommandResult,
   parseJsonArray,
+  parseJsonObject,
   type CloudCommandResult
 } from "./cloud-command-port.js";
 
@@ -295,6 +296,51 @@ describe("parseJsonArray", () => {
   );
 });
 
+describe("parseJsonObject", () => {
+  const context = "kubectl get deployments -n radius-demo";
+
+  it("parses a JSON object from stdout", () => {
+    expect(
+      parseJsonObject(
+        result({ stdout: '{"items":[{"kind":"Deployment"}]}' }),
+        context
+      )
+    ).toEqual({ items: [{ kind: "Deployment" }] });
+  });
+
+  it("propagates command failures before parsing output", () => {
+    expect(() =>
+      parseJsonObject(
+        result({ code: 1, stderr: "Unable to connect to the server" }),
+        context
+      )
+    ).toThrow(`${context} failed with exit code 1: Unable to connect`);
+  });
+
+  it.each(["", "  \n "])("rejects empty output %j", (stdout) => {
+    expect(() => parseJsonObject(result({ stdout }), context)).toThrow(
+      `${context} returned no output to parse as JSON.`
+    );
+  });
+
+  it("rejects malformed JSON", () => {
+    expect(() =>
+      parseJsonObject(result({ stdout: "{not json" }), context)
+    ).toThrow(/returned output that is not valid JSON/);
+  });
+
+  it.each([
+    ["an array", "[]", "a JSON array"],
+    ["a string", '"nope"', "a JSON string"],
+    ["a number", "12", "a JSON number"],
+    ["null", "null", "null"]
+  ])("rejects %s", (_label, stdout, description) => {
+    expect(() => parseJsonObject(result({ stdout }), context)).toThrow(
+      `${context} returned ${description} where a JSON object was expected.`
+    );
+  });
+});
+
 describe("createNodeCloudFixturePorts", () => {
   it("creates and removes a workspace directory under the system temp root", async () => {
     const ports = createNodeCloudFixturePorts();
@@ -360,18 +406,55 @@ describe("createNodeCloudFixturePorts", () => {
     expect(ok.stdout.trim()).toBe("true");
   });
 
-  it("exposes az and gh runners that resolve rather than reject when the tool is absent", async () => {
+  it("exposes cloud runners that resolve rather than reject when a tool is absent", async () => {
     const ports = createNodeCloudFixturePorts();
 
-    // No Azure or GitHub CLI is assumed here. Whether the tool exists or not,
-    // the contract under test is the same: the port resolves with a result.
-    for (const run of [ports.commands.runAz, ports.commands.runGh]) {
+    for (const run of [
+      ports.commands.runAz,
+      ports.commands.runGh,
+      ports.commands.runKubectl
+    ]) {
       const outcome = await run(["--version"]);
       expect(typeof outcome.code).toBe("number");
       expect(typeof outcome.stdout).toBe("string");
       expect(typeof outcome.stderr).toBe("string");
     }
   }, 30_000);
+
+  it("terminates kubectl when its per-probe deadline expires", async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), "radtest-kubectl-timeout-")
+    );
+    const marker = path.join(directory, "leaked.txt");
+    const executable = path.join(
+      directory,
+      process.platform === "win32" ? "kubectl.exe" : "kubectl"
+    );
+    const priorPath = process.env.PATH;
+    try {
+      if (process.platform === "win32")
+        await fs.copyFile(process.execPath, executable);
+      else await fs.symlink(process.execPath, executable);
+      process.env.PATH = `${directory}${path.delimiter}${priorPath ?? ""}`;
+
+      const ports = createNodeCloudFixturePorts();
+      const outcome = await ports.commands.runKubectl(
+        [
+          "--eval",
+          'setTimeout(() => require("node:fs").writeFileSync(process.argv[1], "leaked"), 500)',
+          marker
+        ],
+        100
+      );
+
+      expect(outcome.code).not.toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      await expect(fs.stat(marker)).rejects.toThrow();
+    } finally {
+      process.env.PATH = priorPath;
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
 
   it("redacts Azure output through the real runAz port wiring", async () => {
     const token = "fake-azure-token-for-port-test";
