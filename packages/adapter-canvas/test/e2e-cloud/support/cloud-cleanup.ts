@@ -22,7 +22,7 @@ interface CleanupResourceGroup {
 }
 
 const ISO_INSTANT_PATTERN =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,7}))?Z$/;
 const GENERATED_FALLBACK_BRANCH_PATTERN =
   /^radius\/setup-[a-z0-9][a-z0-9-]*-workflows-\d+$/;
 const RADIUS_MANAGED_APP_TAG = "radius-managed";
@@ -53,6 +53,7 @@ function parseInstant(value: unknown): number | null {
   const match = ISO_INSTANT_PATTERN.exec(value);
   if (!match) return null;
   const [, year, month, day, hour, minute, second, millisecond = "0"] = match;
+  const millisecondValue = Number(millisecond.padEnd(3, "0").slice(0, 3));
   const milliseconds = Date.UTC(
     Number(year),
     Number(month) - 1,
@@ -60,7 +61,7 @@ function parseInstant(value: unknown): number | null {
     Number(hour),
     Number(minute),
     Number(second),
-    Number(millisecond.padEnd(3, "0"))
+    millisecondValue
   );
   const parsed = new Date(milliseconds);
   if (
@@ -70,7 +71,7 @@ function parseInstant(value: unknown): number | null {
     parsed.getUTCHours() !== Number(hour) ||
     parsed.getUTCMinutes() !== Number(minute) ||
     parsed.getUTCSeconds() !== Number(second) ||
-    parsed.getUTCMilliseconds() !== Number(millisecond.padEnd(3, "0"))
+    parsed.getUTCMilliseconds() !== millisecondValue
   )
     return null;
   return Number.isFinite(milliseconds) ? milliseconds : null;
