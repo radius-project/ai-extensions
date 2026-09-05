@@ -811,9 +811,6 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     testInfo.setTimeout(DELETE_TEST_TIMEOUT_MS);
     const cloud = fixture;
     if (!cloud) throw new Error("The cloud fixture was not created.");
-    if (!githubAppTokenConfig)
-      throw new Error("GitHub App refresh credentials are unavailable.");
-    await refreshProcessGitHubToken(githubAppTokenConfig);
 
     const harness = await CanvasHarness.create({
       page,

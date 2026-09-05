@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "@playwright/test";
 import {
   CLOUD_SUITE_TIMEOUT_MS,
-  DEPLOYMENT_OPERATION_TIMEOUT_MS
+  DELETE_TEST_TIMEOUT_MS
 } from "./test/e2e-cloud/support/cloud-timeout-budget.js";
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -33,7 +33,7 @@ export default defineConfig({
   globalTeardown: "./test/e2e/global-teardown.ts",
   // No single stage may consume the freshly renewed installation token's full
   // lifetime. The serial suite receives the sum of every declared stage budget.
-  timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
+  timeout: DELETE_TEST_TIMEOUT_MS,
   globalTimeout: CLOUD_SUITE_TIMEOUT_MS,
   expect: { timeout: 60_000 },
   // Serializes tests inside one process. Cross-process/cloud-run serialization
