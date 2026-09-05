@@ -242,6 +242,21 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: pnpm run test:cloud
 
+      - name: Create a fresh read-only GitHub App token for diagnostics
+        id: diagnostics-token
+        if: always() && steps.fixture.outputs.configured == 'true'
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
+          owner: ${{ steps.fixture.outputs.owner }}
+          repositories: ${{ steps.fixture.outputs.name }}
+          permission-actions: read
+          permission-administration: read
+          permission-contents: read
+          permission-pull-requests: read
+
       # Collected on success as well as failure, and never allowed to fail the
       # job: a diagnostics step that breaks the run it is diagnosing is worse
       # than no diagnostics. `az` output here is deliberately identifier-level
@@ -249,7 +264,7 @@ jobs:
       - name: Collect az and gh diagnostics
         if: always() && steps.fixture.outputs.configured == 'true'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.diagnostics-token.outputs.token }}
           FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
           RESOURCE_GROUP_PREFIX: radtest-canvas
         shell: bash

@@ -2,6 +2,9 @@ import { describe, it, expect } from "vitest";
 import {
   appRegistrationName,
   clusterName,
+  cloudE2ELeaseCommitMessage,
+  CLOUD_E2E_LEASE_OWNER_PREFIX,
+  CLOUD_E2E_LEASE_REF,
   describeUnprovisionedFixtureRepository,
   ENVIRONMENT_NAME_PREFIX,
   environmentName,
@@ -11,6 +14,7 @@ import {
   FIXTURE_REPOSITORY,
   FIXTURE_REPOSITORY_PIN,
   isFixtureRepositoryProvisioned,
+  parseCloudE2ELeaseOwnerRunId,
   RESOURCE_GROUP_PREFIX,
   resolveFixtureLocation,
   resourceGroupName,
@@ -37,11 +41,44 @@ describe("pinned baseline constants", () => {
     expect(WORKFLOW_FALLBACK_BRANCH_PREFIX).toBe("radius/setup-");
   });
 
+  it("exports the repository-scoped lease ref used by runs and cleanup", () => {
+    expect(CLOUD_E2E_LEASE_REF).toBe("refs/heads/radius/cloud-e2e-lease");
+  });
+
   // The cleanup workflow deletes GitHub Environments matching this prefix, so
   // it has to be the same string environmentName actually produces rather than
   // a second copy that could drift into deleting the wrong things.
   it("exports the environment prefix environmentName actually applies", () => {
     expect(environmentName("abc123")).toBe(`${ENVIRONMENT_NAME_PREFIX}abc123`);
+  });
+
+  describe("cloud E2E lease ownership", () => {
+    it("round-trips a GitHub Actions run id through the lease commit message", () => {
+      const message = cloudE2ELeaseCommitMessage(" 123456 ");
+
+      expect(message).toBe(
+        `Radius Cloud E2E lease\n\n${CLOUD_E2E_LEASE_OWNER_PREFIX}123456`
+      );
+      expect(parseCloudE2ELeaseOwnerRunId(message)).toBe("123456");
+    });
+
+    it.each(["", "0", "-1", "local", "12.5"])(
+      "rejects an unverifiable run id %j",
+      (runId) => {
+        expect(() => cloudE2ELeaseCommitMessage(runId)).toThrow(
+          "must be a positive integer"
+        );
+      }
+    );
+
+    it.each([
+      ["a non-string message", null],
+      ["a message without an owner field", "ordinary commit"],
+      ["a zero owner", `${CLOUD_E2E_LEASE_OWNER_PREFIX}0`],
+      ["a non-numeric owner", `${CLOUD_E2E_LEASE_OWNER_PREFIX}local`]
+    ])("fails closed for %s", (_label, message) => {
+      expect(parseCloudE2ELeaseOwnerRunId(message)).toBeNull();
+    });
   });
 });
 

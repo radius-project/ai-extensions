@@ -15,6 +15,8 @@ const SUBSCRIPTION = "11111111-2222-3333-4444-555555555555";
 const REPOSITORY = "fixture-owner/fixture-repo";
 const BRANCH = "main";
 const BASELINE = "a".repeat(40);
+const BASELINE_TREE = "b".repeat(40);
+const LEASE_COMMIT = "c".repeat(40);
 const UNIQUE_ID = "run0000000a";
 const WORKSPACE = "/tmp/radtest-workspace";
 const NOW = new Date("2026-08-29T12:34:56.000Z");
@@ -85,6 +87,21 @@ function baselineStubs(): FakeCommandStub[] {
       match: ["api", "--method", "DELETE", LEASE_REF_PATH],
       respond: {}
     },
+    {
+      tool: "gh",
+      match: ["api", `repos/${REPOSITORY}/git/commits/${BASELINE}`],
+      respond: { stdout: BASELINE_TREE }
+    },
+    {
+      tool: "gh",
+      match: ["api", "--method", "POST", `repos/${REPOSITORY}/git/commits`],
+      respond: { stdout: LEASE_COMMIT }
+    },
+    {
+      tool: "gh",
+      match: ["api", "--method", "PATCH", LEASE_REF_PATH],
+      respond: {}
+    },
     { tool: "az", match: ["group", "create"], respond: {} },
     { tool: "az", match: ["aks", "create"], respond: {} },
     { tool: "az", match: ["group", "delete"], respond: {} },
@@ -139,7 +156,8 @@ async function createHarness(
 
 function expectConstructionToFail(
   overrides: readonly FakeCommandStub[],
-  portOptions: Parameters<typeof createFakeFixturePorts>[0] = {}
+  portOptions: Parameters<typeof createFakeFixturePorts>[0] = {},
+  fixtureOptions: Partial<CloudFixtureOptions> = {}
 ): { fake: FakeFixturePorts; attempt: Promise<CloudFixture> } {
   const fake = createFakeFixturePorts({
     uniqueId: UNIQUE_ID,
@@ -149,6 +167,7 @@ function expectConstructionToFail(
     stubs: [...overrides, ...baselineStubs()]
   });
   const attempt = createCloudFixture({
+    ...fixtureOptions,
     subscriptionId: SUBSCRIPTION,
     repository: REPOSITORY,
     defaultBranch: BRANCH,
@@ -270,7 +289,96 @@ describe("createCloudFixture", () => {
       );
       if (!create) throw new Error("Expected the resource group create call.");
       expect(create.args).toContain("github-run-id=123456");
+      expect(fake.commands.commandLines("gh").slice(0, 4)).toEqual([
+        `api --method POST repos/${REPOSITORY}/git/refs -f ref=${LEASE_REF} -f sha=${BASELINE}`,
+        `api repos/${REPOSITORY}/git/commits/${BASELINE} --jq .tree.sha`,
+        `api --method POST repos/${REPOSITORY}/git/commits -f message=Radius Cloud E2E lease\n\ncloud-e2e-owner-run-id:123456 -f tree=${BASELINE_TREE} -F parents[]=${BASELINE} --jq .sha`,
+        `api --method PATCH ${LEASE_REF_PATH} -f sha=${LEASE_COMMIT}`
+      ]);
     });
+
+    it.each(["", "0", "local", "12.5"])(
+      "rejects unverifiable GitHub Actions run id %j before acquiring the lease",
+      async (githubRunId) => {
+        const fake = createFakeFixturePorts({ stubs: baselineStubs() });
+
+        await expect(
+          createCloudFixture({
+            subscriptionId: SUBSCRIPTION,
+            repository: REPOSITORY,
+            defaultBranch: BRANCH,
+            baselineSha: BASELINE,
+            githubRunId,
+            ports: fake.ports
+          })
+        ).rejects.toThrow("must be a positive integer");
+        expect(fake.commands.calls).toEqual([]);
+      }
+    );
+
+    it("releases the lease when its owner marker cannot be created", async () => {
+      const { fake, attempt } = expectConstructionToFail(
+        [
+          {
+            tool: "gh",
+            match: [
+              "api",
+              "--method",
+              "POST",
+              `repos/${REPOSITORY}/git/commits`
+            ],
+            respond: { code: 1, stderr: "commit rejected" }
+          }
+        ],
+        {},
+        { githubRunId: "123456" }
+      );
+
+      await expect(attempt).rejects.toThrow(/commit rejected/);
+      expect(fake.commands.commandLines("gh").at(-1)).toBe(
+        `api --method DELETE ${LEASE_REF_PATH}`
+      );
+    });
+
+    it.each([
+      [
+        "baseline tree lookup",
+        {
+          tool: "gh" as const,
+          match: ["api", `repos/${REPOSITORY}/git/commits/${BASELINE}`],
+          respond: { stdout: "not-an-object-id" }
+        },
+        "baseline tree lookup returned an invalid Git object id"
+      ],
+      [
+        "marker commit response",
+        {
+          tool: "gh" as const,
+          match: ["api", "--method", "POST", `repos/${REPOSITORY}/git/commits`],
+          respond: { stdout: "not-an-object-id" }
+        },
+        "lease marker creation returned an invalid Git object id"
+      ],
+      [
+        "marker ref update",
+        failing("gh", ["api", "--method", "PATCH", LEASE_REF_PATH], "conflict"),
+        "conflict"
+      ]
+    ])(
+      "releases the lease after an invalid %s",
+      async (_label, override, expected) => {
+        const { fake, attempt } = expectConstructionToFail(
+          [override],
+          {},
+          { githubRunId: "123456" }
+        );
+
+        await expect(attempt).rejects.toThrow(expected);
+        expect(fake.commands.commandLines("gh").at(-1)).toBe(
+          `api --method DELETE ${LEASE_REF_PATH}`
+        );
+      }
+    );
 
     it("formats creation time for cleanup's integer comparison", () => {
       const sixHoursAgo = Math.floor(NOW.getTime() / 1_000) - 6 * 60 * 60;

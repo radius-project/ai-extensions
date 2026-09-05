@@ -38,15 +38,18 @@ describe("selectExpiredDirectoryObjects", () => {
         CUTOFF
       )
     ).toEqual([{ id: "old" }]);
+  });
 
   it("accepts fractional-second timestamps (up to 7 digits)", () => {
     expect(
       selectExpiredDirectoryObjects(
-        [{
-          id: "fractional",
-          displayName: APP,
-          createdDateTime: "2026-08-31T05:59:59.1234567Z"
-        }],
+        [
+          {
+            id: "fractional",
+            displayName: APP,
+            createdDateTime: "2026-08-31T05:59:59.1234567Z"
+          }
+        ],
         APP,
         CUTOFF
       )
@@ -57,7 +60,8 @@ describe("selectExpiredDirectoryObjects", () => {
     ["missing", undefined],
     ["null", null],
     ["malformed", "yesterday"],
-    ["calendar-invalid", "2026-02-30T05:00:00Z"]
+    ["calendar-invalid", "2026-02-30T05:00:00Z"],
+    ["excess fractional precision", "2026-08-31T05:59:59.12345678Z"]
   ])("fails closed when createdDateTime is %s", (_label, createdDateTime) => {
     expect(
       selectExpiredDirectoryObjects(

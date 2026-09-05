@@ -44,6 +44,7 @@ interface WorkflowStep {
   readonly uses?: string;
   readonly run?: string;
   readonly if?: string;
+  readonly "continue-on-error"?: boolean;
   readonly "working-directory"?: string;
   readonly env?: Record<string, string>;
   readonly with?: Record<string, unknown>;
@@ -293,6 +294,41 @@ describe("cloud-e2e.yml", () => {
     expect(diagnostics?.run).toContain("az group list");
   });
 
+  it("mints a fresh least-privilege installation token immediately before diagnostics", async () => {
+    const workflow = await parseWorkflow(RUN_WORKFLOW);
+    const jobSteps = steps(workflow.jobs?.["cloud-e2e"]);
+    const tokenIndex = jobSteps.findIndex(
+      (step) =>
+        step.name ===
+        "Create a fresh read-only GitHub App token for diagnostics"
+    );
+    const diagnosticsIndex = jobSteps.findIndex(
+      (step) => step.name === "Collect az and gh diagnostics"
+    );
+    const token = jobSteps[tokenIndex];
+    const diagnostics = jobSteps[diagnosticsIndex];
+
+    expect(tokenIndex).toBeGreaterThan(0);
+    expect(diagnosticsIndex).toBe(tokenIndex + 1);
+    expect(token?.uses).toMatch(/^actions\/create-github-app-token@/);
+    expect(token?.if).toContain("always()");
+    expect(token?.["continue-on-error"]).toBe(true);
+    expect(token?.with).toMatchObject({
+      "permission-actions": "read",
+      "permission-administration": "read",
+      "permission-contents": "read",
+      "permission-pull-requests": "read"
+    });
+    expect(
+      Object.keys(token?.with ?? {}).filter((key) =>
+        key.startsWith("permission-")
+      )
+    ).not.toContain("permission-workflows");
+    expect(diagnostics?.env?.GH_TOKEN).toBe(
+      "${{ steps.diagnostics-token.outputs.token }}"
+    );
+  });
+
   it("skips rather than fails while the fixture repository is unpublished", async () => {
     // This is scheduled, and the variable it needs is published by Terraform
     // that has not been applied. A job that fails every night for a reason
@@ -395,6 +431,34 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain(
       "`workflow-fallback-branch-prefix=${pin.WORKFLOW_FALLBACK_BRANCH_PREFIX}`"
     );
+    expect(script).toContain("`lease-ref=${pin.CLOUD_E2E_LEASE_REF}`");
+  });
+
+  it("resets the fixture only while holding the shared lease", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const reset = steps(workflow.jobs?.purge).find(
+      (step) =>
+        step.name === "Reset the fixture default branch under the shared lease"
+    );
+    const script = reset?.run ?? "";
+
+    expect(reset?.env?.LEASE_REF).toBe("${{ steps.pin.outputs.lease-ref }}");
+    expect(reset?.env?.SOURCE_GH_TOKEN).toBe("${{ github.token }}");
+    expect(script).toContain("parseCloudE2ELeaseOwnerRunId");
+    expect(script).toContain("node --input-type=module -e");
+    expect(script).not.toContain("<<'NODE'");
+    expect(script).toContain('owner_status" != "completed"');
+    expect(script).toContain("no verifiable GitHub Actions owner");
+    expect(script).toContain("Could not verify workflow run");
+    expect(script).toContain("was acquired concurrently");
+    expect(script).toContain(
+      "changed while cleanup was establishing ownership"
+    );
+    expect(script).toContain("changed before release");
+    expect(script).toContain('gh api -X DELETE "$lease_write_path"');
+    expect(script.indexOf("gh api -X PATCH")).toBeLessThan(
+      script.indexOf('gh api -X DELETE "$lease_write_path"')
+    );
   });
 
   it("matches environments by the prefix the suite actually applies", async () => {
@@ -436,11 +500,15 @@ describe("cloud-e2e-cleanup.yml", () => {
     const job = workflow.jobs?.purge;
     expect(job?.env?.MAX_AGE_HOURS).toBe("6");
 
-    for (const step of steps(job).filter(
+    const ageGatedDestructiveSteps = steps(job).filter(
       (candidate) =>
-        candidate.run?.includes("az ad app delete") ||
-        candidate.run?.includes("-X DELETE")
-    ))
+        (candidate.run?.includes("az ad app delete") ||
+          candidate.run?.includes("-X DELETE")) &&
+        candidate.name !==
+          "Reset the fixture default branch under the shared lease"
+    );
+    expect(ageGatedDestructiveSteps).toHaveLength(3);
+    for (const step of ageGatedDestructiveSteps)
       expect(step.run).toContain("MAX_AGE_HOURS hours ago");
   });
 

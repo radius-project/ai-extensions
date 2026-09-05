@@ -104,6 +104,7 @@ jobs:
               `resource-group-prefix=${pin.RESOURCE_GROUP_PREFIX}`,
               `environment-prefix=${pin.ENVIRONMENT_NAME_PREFIX}`,
               `workflow-fallback-branch-prefix=${pin.WORKFLOW_FALLBACK_BRANCH_PREFIX}`,
+              `lease-ref=${pin.CLOUD_E2E_LEASE_REF}`,
               `reason=${pin.describeUnprovisionedFixtureRepository()}`
             ];
             await import("node:fs").then(({ appendFileSync }) =>
@@ -492,35 +493,126 @@ jobs:
             exit 1
           fi
 
-      # The fixture repository is deliberately mutable: a run commits the
-      # product's workflows to it. Resetting to the pinned baseline is what
-      # makes the next run's `assertCleanSlate()` mean something, and what stops
-      # a half-finished run from being mistaken for a product regression the
-      # following night.
-      - name: Reset the fixture default branch to the pinned baseline
+      # The lease is the repository-scoped mutex used by both CI and local runs.
+      # Cleanup may use an abandoned lease only after its recorded Actions owner
+      # is provably complete. A local or malformed owner is unverifiable and is
+      # deliberately left intact. When no lease exists, cleanup acquires its own
+      # before touching the mutable default branch.
+      - name: Reset the fixture default branch under the shared lease
         if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outcome != 'failure' && steps.app-token.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SOURCE_GH_TOKEN: ${{ github.token }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
           DEFAULT_BRANCH: ${{ steps.pin.outputs.default-branch }}
           BASELINE_SHA: ${{ steps.pin.outputs.baseline-sha }}
+          LEASE_REF: ${{ steps.pin.outputs.lease-ref }}
         shell: bash
         run: |
           set -euo pipefail
+          lease_read_path="repos/$FIXTURE_REPOSITORY/git/ref/${LEASE_REF#refs/}"
+          lease_write_path="repos/$FIXTURE_REPOSITORY/git/$LEASE_REF"
+          lease_error="$RUNNER_TEMP/cloud-e2e-lease-error.txt"
+          held_lease_sha=""
+
+          if held_lease_sha="$(gh api "$lease_read_path" --jq .object.sha 2>"$lease_error")"; then
+            if ! lease_message="$(gh api \
+                "repos/$FIXTURE_REPOSITORY/git/commits/$held_lease_sha" \
+                --jq .message)"; then
+              echo "::error::Could not read the owner marker for $LEASE_REF; leaving the lease and fixture branch intact."
+              exit 1
+            fi
+            owner_run_id="$(
+              LEASE_MESSAGE="$lease_message" node --input-type=module -e '
+                const pin = await import(
+                  "./packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts"
+                );
+                process.stdout.write(
+                  pin.parseCloudE2ELeaseOwnerRunId(process.env.LEASE_MESSAGE) ?? ""
+                );
+              '
+            )"
+            if [[ -z "$owner_run_id" ]]; then
+              echo "::warning::$LEASE_REF has no verifiable GitHub Actions owner; leaving the lease and fixture branch intact."
+              exit 0
+            fi
+            if ! owner_status="$(
+              GH_TOKEN="$SOURCE_GH_TOKEN" gh run view "$owner_run_id" \
+                --repo "$GITHUB_REPOSITORY" --json status --jq .status
+            )"; then
+              echo "::error::Could not verify workflow run $owner_run_id for $LEASE_REF; leaving the lease and fixture branch intact."
+              exit 1
+            fi
+            if [[ "$owner_status" != "completed" ]]; then
+              echo "Leaving $LEASE_REF and the fixture branch intact because owner run $owner_run_id is $owner_status."
+              exit 0
+            fi
+            echo "Reclaiming $LEASE_REF from completed owner run $owner_run_id."
+          else
+            if ! grep -q "HTTP 404" "$lease_error"; then
+              cat "$lease_error" >&2
+              echo "::error::Could not establish whether $LEASE_REF exists; leaving the fixture branch intact."
+              exit 1
+            fi
+
+            tree_sha="$(gh api \
+              "repos/$FIXTURE_REPOSITORY/git/commits/$BASELINE_SHA" \
+              --jq .tree.sha)"
+            lease_message="$(
+              GITHUB_RUN_ID="$GITHUB_RUN_ID" node --input-type=module -e '
+                const pin = await import(
+                  "./packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts"
+                );
+                process.stdout.write(
+                  pin.cloudE2ELeaseCommitMessage(process.env.GITHUB_RUN_ID)
+                );
+              '
+            )"
+            held_lease_sha="$(gh api --method POST \
+              "repos/$FIXTURE_REPOSITORY/git/commits" \
+              -f "message=$lease_message" \
+              -f "tree=$tree_sha" \
+              -F "parents[]=$BASELINE_SHA" \
+              --jq .sha)"
+            if ! gh api --method POST "repos/$FIXTURE_REPOSITORY/git/refs" \
+                -f "ref=$LEASE_REF" -f "sha=$held_lease_sha" >/dev/null; then
+              if gh api "$lease_read_path" >/dev/null 2>&1; then
+                echo "::warning::$LEASE_REF was acquired concurrently; leaving the fixture branch intact."
+                exit 0
+              fi
+              echo "::error::Could not acquire $LEASE_REF and could not verify a concurrent owner."
+              exit 1
+            fi
+            echo "Acquired $LEASE_REF for cleanup run $GITHUB_RUN_ID."
+          fi
+
+          verify_lease_sha="$(gh api "$lease_read_path" --jq .object.sha)"
+          if [[ "$verify_lease_sha" != "$held_lease_sha" ]]; then
+            echo "::error::$LEASE_REF changed while cleanup was establishing ownership; leaving the fixture branch intact."
+            exit 1
+          fi
+
           ref="repos/$FIXTURE_REPOSITORY/git/ref/heads/$DEFAULT_BRANCH"
           current="$(gh api "$ref" --jq .object.sha)"
 
-          if [[ "$current" == "$BASELINE_SHA" ]]; then
+          if [[ "$current" != "$BASELINE_SHA" ]]; then
+            # Force is required and is the point: a stopped run leaves real
+            # commits on the branch, and the baseline is the only state the next
+            # run is allowed to start from.
+            gh api -X PATCH "repos/$FIXTURE_REPOSITORY/git/refs/heads/$DEFAULT_BRANCH" \
+              -f "sha=$BASELINE_SHA" -F force=true >/dev/null
+            echo "- Fixture \`$DEFAULT_BRANCH\` reset from \`$current\` to the pinned baseline" >>"$GITHUB_STEP_SUMMARY"
+          else
             echo "- Fixture \`$DEFAULT_BRANCH\` already at the pinned baseline" >>"$GITHUB_STEP_SUMMARY"
-            exit 0
           fi
 
-          # Force is required and is the point: a run leaves real commits on the
-          # branch, and the baseline is the only state the suite is allowed to
-          # start from.
-          gh api -X PATCH "repos/$FIXTURE_REPOSITORY/git/refs/heads/$DEFAULT_BRANCH" \
-            -f "sha=$BASELINE_SHA" -F force=true >/dev/null
-          echo "- Fixture \`$DEFAULT_BRANCH\` reset from \`$current\` to the pinned baseline" >>"$GITHUB_STEP_SUMMARY"
+          verify_lease_sha="$(gh api "$lease_read_path" --jq .object.sha)"
+          if [[ "$verify_lease_sha" != "$held_lease_sha" ]]; then
+            echo "::error::$LEASE_REF changed before release; leaving the new owner intact."
+            exit 1
+          fi
+          gh api -X DELETE "$lease_write_path"
+          echo "- Repository lease \`$LEASE_REF\` released" >>"$GITHUB_STEP_SUMMARY"
 
   notify-scheduled-result:
     name: Scheduled cleanup alert

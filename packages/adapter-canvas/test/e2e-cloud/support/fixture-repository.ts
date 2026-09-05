@@ -52,6 +52,12 @@ export const RESOURCE_GROUP_PREFIX = "radtest-canvas";
 /** Branch prefix the product uses when it lacks `workflow` token scope. */
 export const WORKFLOW_FALLBACK_BRANCH_PREFIX = "radius/setup-";
 
+/** Repository-scoped mutex shared by cloud runs and scheduled cleanup. */
+export const CLOUD_E2E_LEASE_REF = "refs/heads/radius/cloud-e2e-lease";
+
+/** Commit-message field that binds a held lease to its GitHub Actions run. */
+export const CLOUD_E2E_LEASE_OWNER_PREFIX = "cloud-e2e-owner-run-id:";
+
 /**
  * Prefix every per-run GitHub Environment name carries.
  *
@@ -77,6 +83,27 @@ export const FIXTURE_REPOSITORY_PIN: FixtureRepositoryPin = {
   name: FIXTURE_REPO_NAME,
   baselineSha: FIXTURE_BASELINE_SHA
 };
+
+export function cloudE2ELeaseCommitMessage(githubRunId: string): string {
+  const normalized = githubRunId.trim();
+  if (!/^[1-9]\d*$/.test(normalized))
+    throw new Error(
+      `A GitHub Actions run id must be a positive integer; received "${githubRunId}".`
+    );
+  return `Radius Cloud E2E lease\n\n${CLOUD_E2E_LEASE_OWNER_PREFIX}${normalized}`;
+}
+
+export function parseCloudE2ELeaseOwnerRunId(
+  commitMessage: unknown
+): string | null {
+  if (typeof commitMessage !== "string") return null;
+  const ownerLine = commitMessage
+    .split(/\r?\n/)
+    .find((line) => line.startsWith(CLOUD_E2E_LEASE_OWNER_PREFIX));
+  if (!ownerLine) return null;
+  const runId = ownerLine.slice(CLOUD_E2E_LEASE_OWNER_PREFIX.length).trim();
+  return /^[1-9]\d*$/.test(runId) ? runId : null;
+}
 
 /**
  * Which of the pinned constants still hold placeholder values.
