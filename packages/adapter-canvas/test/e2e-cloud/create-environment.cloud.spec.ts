@@ -1,4 +1,5 @@
-// Stage one of the cloud journey: creating an environment for real.
+// The cloud journey's environment lifecycle: creating an environment for real,
+// then deleting it.
 //
 // Everything below runs against a real Azure subscription and a real GitHub
 // repository. Nothing is faked, which is the point — the fake-CLI suite already
@@ -13,15 +14,27 @@
 //    executing assertions.
 // 2. **It contains no logic.** Every decision — the skip gate, the expected
 //    federated-credential subjects, which workflow publication path was taken,
-//    whether the GitHub Environment names the right identity — lives in
-//    `support/create-environment-journey.ts` behind unit tests, because a rule
+//    whether the GitHub Environment names the right identity, whether a delete
+//    actually succeeded — lives in `support/create-environment-journey.ts` or
+//    `support/delete-environment-journey.ts` behind unit tests, because a rule
 //    written here could only ever be checked by a nightly run against real
 //    infrastructure.
 //
-// Stage one only: create. Deploy and delete are later stages and are not
-// started here, so this file never destroys anything the product made — the
-// fixture's own reclamation does that, after the assertions.
+// The stages are ordered and share one fixture, so the describe runs serially:
+// stage two deletes what stage one created, and a stage-one failure must skip
+// stage two rather than delete an environment that was never built. Deploying an
+// application, and deleting that deployment, are a separate lifecycle and are not
+// started here.
+//
+// Stage two proves the inverse of stage one, which is the only reason either
+// means much: the same Environment the product created is the one it removes.
+// Absence on its own would prove nothing — a product that never created the
+// Environment would satisfy it just as readily — so the fixture refuses to make
+// an absence assertion until this run has observed the artifact present.
+import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
+import { createFileCredentialProvenanceStore } from "../../src/credential-provenance-store.js";
+import { configureCredentialProvenanceStore } from "../../src/credential-provenance.js";
 import { CanvasHarness } from "../e2e/support/canvas-harness.js";
 import {
   createNodeCloudFixturePorts,
@@ -31,8 +44,20 @@ import {
 } from "./support/cloud-command-port.js";
 import {
   createCloudFixture,
+  type AppRegistrationRecord,
   type CloudFixture
 } from "./support/cloud-fixture.js";
+import {
+  CREATE_OPERATION_TIMEOUT_MS,
+  CREATE_TEST_TIMEOUT_MS,
+  DELETE_OPERATION_TIMEOUT_MS,
+  DELETE_POSTCONDITION_TIMEOUT_MS,
+  DELETE_TEST_TIMEOUT_MS
+} from "./support/cloud-timeout-budget.js";
+import {
+  refreshProcessGitHubToken,
+  takeGitHubAppTokenConfig
+} from "./support/github-app-token.js";
 import {
   classifyWorkflowPublication,
   cloudCanvasState,
@@ -56,6 +81,11 @@ import {
   workflowFallbackBranchPrefix
 } from "./support/create-environment-journey.js";
 import {
+  DELETE_ENVIRONMENT_PATH,
+  describeProblems,
+  findDeleteEnvironmentSuccessProblems
+} from "./support/delete-environment-journey.js";
+import {
   describeUnprovisionedFixtureRepository,
   isFixtureRepositoryProvisioned,
   resolveFixtureLocation
@@ -66,12 +96,7 @@ const WORKFLOW_DIRECTORY = ".github/workflows";
 const KUBERNETES_NAMESPACE = "default";
 const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
 const githubToken = process.env.GH_TOKEN?.trim() ?? "";
-
-// Creating an environment provisions an Entra application, a service principal,
-// two federated credentials, a role assignment, a GitHub Environment and its
-// workflows. Twenty minutes is generous rather than optimistic: a timeout here
-// reports as a product failure, so it must never be the first thing to give.
-const OPERATION_TIMEOUT_MS = 20 * 60 * 1000;
+const githubAppTokenConfig = takeGitHubAppTokenConfig();
 
 const gate = evaluateCreateEnvironmentGate({
   cloudE2eFlag: process.env.RADIUS_CLOUD_E2E,
@@ -139,15 +164,22 @@ async function createCredentialProfile(
   await expect(page.locator("#cred-landing")).toBeVisible();
 }
 
-test.describe("Radius Canvas creates an environment against real cloud", () => {
+test.describe("Radius Canvas manages an environment's lifecycle against real cloud", () => {
   test.describe.configure({ mode: "serial" });
   test.skip(!gate.enabled && gate.disposition === "skip", skipReason);
 
   let fixture: CloudFixture | undefined;
   let productOperationStarted = false;
+  let federatedSubjects: readonly string[] = [];
+  let appRegistration: AppRegistrationRecord | undefined;
+  let servicePrincipalId: string | undefined;
 
   test.beforeAll(async () => {
     if (!gate.enabled) throw new Error(gate.reason);
+    if (!githubAppTokenConfig)
+      throw new Error(
+        "GitHub App refresh credentials are required for the cloud lifecycle journey."
+      );
     fixture = await createCloudFixture({
       subscriptionId,
       // CI publishes the region; locally it is absent and the fixture's own
@@ -159,6 +191,21 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
       githubRunId: process.env.GITHUB_RUN_ID,
       ports
     });
+    // CanvasHarness loads the server directly rather than the extension
+    // composition root. Install one durable store inside the disposable clone's
+    // git directory so every serial harness sees the same ownership records
+    // without touching the developer's user-global store.
+    await configureCredentialProvenanceStore(
+      createFileCredentialProvenanceStore({
+        directory: path.join(
+          fixture.workspacePath,
+          ".git",
+          "radius-cloud-e2e",
+          "credential-provenance"
+        )
+      })
+    );
+    await refreshProcessGitHubToken(githubAppTokenConfig);
     // Turns every assertion below from an observation into a proof: none of the
     // artifacts asserted on existed before the product ran.
     await fixture.assertCleanSlate();
@@ -169,14 +216,26 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
     fixture = undefined;
     if (!current) return;
     await runCleanupSteps([
+      ...(githubAppTokenConfig ?
+        [
+          {
+            label: "refresh GitHub App token for cleanup",
+            run: () => refreshProcessGitHubToken(githubAppTokenConfig)
+          }
+        ]
+      : []),
       {
         label: "reclaim product-created artifacts",
         run: async () => {
           if (!productOperationStarted) return;
+          // Stage two deletes the GitHub Environment, so on a complete run this
+          // reclaims only the intentionally retained shared app registration
+          // and role assignment. If stage two failed, it also reclaims any
+          // environment-specific state the product did not remove.
           const reclaimed = await current.reclaimLeakedProductArtifacts();
           if (reclaimed.length > 0)
             console.info(
-              `Cleaned up this stage-one run's product-created artifacts: ${reclaimed.join(", ")}.`
+              `Cleaned up this run's product-created artifacts: ${reclaimed.join(", ")}.`
             );
         }
       },
@@ -187,7 +246,7 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
   test("creates the Azure identity, the GitHub Environment, and the workflows", async ({
     page
   }, testInfo) => {
-    testInfo.setTimeout(OPERATION_TIMEOUT_MS + 10 * 60 * 1000);
+    testInfo.setTimeout(CREATE_TEST_TIMEOUT_MS);
     const cloud = fixture;
     if (!cloud) throw new Error("The cloud fixture was not created.");
 
@@ -284,7 +343,7 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
 
       await expect
         .poll(async () => (await snapshot()).terminal, {
-          timeout: OPERATION_TIMEOUT_MS,
+          timeout: CREATE_OPERATION_TIMEOUT_MS,
           intervals: [5_000]
         })
         .toBe(true);
@@ -295,6 +354,7 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
       ).toBe("succeeded");
 
       const app = await cloud.assertAppRegistrationExists();
+      appRegistration = app;
 
       const identity = readRepositoryIdentity(
         await runGh(
@@ -322,7 +382,7 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
         subjects.supported ? "" : subjects.reason
       ).toBe(true);
       if (subjects.supported)
-        for (const subject of subjects.required)
+        for (const subject of (federatedSubjects = subjects.required))
           await cloud.assertFederatedCredentialExists(subject);
 
       const principalId = readServicePrincipalObjectId(
@@ -332,6 +392,7 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
           `az ad sp show --id ${app.appId}`
         )
       );
+      servicePrincipalId = principalId;
       await cloud.assertRoleAssignmentExists(principalId);
 
       await cloud.assertGitHubEnvironmentExists();
@@ -409,6 +470,165 @@ test.describe("Radius Canvas creates an environment against real cloud", () => {
         [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
         primaryError
       );
+    }
+  });
+
+  test("deletes the GitHub Environment it created", async ({
+    page
+  }, testInfo) => {
+    testInfo.setTimeout(DELETE_TEST_TIMEOUT_MS);
+    const cloud = fixture;
+    if (!cloud) throw new Error("The cloud fixture was not created.");
+    if (!githubAppTokenConfig)
+      throw new Error("GitHub App refresh credentials are unavailable.");
+    await refreshProcessGitHubToken(githubAppTokenConfig);
+
+    const harness = await CanvasHarness.create({
+      page,
+      title: "cloud-delete-environment",
+      mode: "cloud",
+      workspacePath: cloud.workspacePath,
+      initialPage: "environment"
+    });
+
+    try {
+      await harness.seedState(
+        cloudCanvasState({
+          repository: cloud.repository,
+          branch: cloud.defaultBranch,
+          workspacePath: cloud.workspacePath
+        })
+      );
+      await page.goto(`${harness.baseUrl}/?page=environment`);
+      await page.waitForLoadState("domcontentloaded");
+
+      // The row has to come from the product's own `/api/list-environments`.
+      // Posting the delete directly would prove the route works while leaving
+      // an environment the page cannot even see undeleted.
+      const deleteButton = page.locator(
+        `.js-delete-env[data-env="${cloud.environmentName}"]`
+      );
+      await expect(deleteButton).toBeVisible({
+        timeout: DELETE_POSTCONDITION_TIMEOUT_MS
+      });
+      await deleteButton.click();
+
+      await expect(page.locator("#env-confirm-title")).toHaveText(
+        "Delete environment?"
+      );
+      await expect(page.locator("#env-confirm-message")).toContainText(
+        cloud.environmentName
+      );
+
+      const deleteResponse = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === DELETE_ENVIRONMENT_PATH &&
+          response.request().method() === "POST"
+      );
+      await page.locator("#env-confirm-ok").click();
+      const response = await deleteResponse;
+      const payload = (await response.json()) as unknown;
+      const problems = findDeleteEnvironmentSuccessProblems({
+        status: response.status(),
+        payload,
+        environmentName: cloud.environmentName
+      });
+      expect(
+        problems,
+        describeProblems(
+          problems,
+          "The product refused to delete a free environment:"
+        )
+      ).toEqual([]);
+
+      const operationId = readOperationId(payload);
+      const snapshot = async (): Promise<
+        ReturnType<typeof readOperationSnapshot>
+      > =>
+        readOperationSnapshot(
+          readOperationHttpResponse(
+            await page.evaluate(async (id) => {
+              const operationResponse = await fetch(`/api/operations/${id}`);
+              return {
+                ok: operationResponse.ok,
+                status: operationResponse.status,
+                statusText: operationResponse.statusText,
+                body: await operationResponse.text()
+              };
+            }, operationId)
+          )
+        );
+
+      await expect
+        .poll(async () => (await snapshot()).terminal, {
+          timeout: DELETE_OPERATION_TIMEOUT_MS,
+          intervals: [5_000]
+        })
+        .toBe(true);
+      const finished = await snapshot();
+      expect(
+        finished.state,
+        `The delete-environment operation ended ${finished.state}: ${finished.error || "no error was reported."}`
+      ).toBe("succeeded");
+
+      // The browser must also observe the terminal operation and complete the
+      // user-visible lifecycle rather than merely accepting the request.
+      await expect(page.locator("#env-confirm-title")).toHaveText(
+        "Environment deleted",
+        { timeout: DELETE_POSTCONDITION_TIMEOUT_MS }
+      );
+      await expect(page.locator("#env-confirm-message")).toContainText(
+        `The environment "${cloud.environmentName}" was deleted.`
+      );
+      const environmentTable = page.locator("#env-table-body");
+      await expect(environmentTable).not.toContainText(
+        "Loading environments…",
+        { timeout: DELETE_POSTCONDITION_TIMEOUT_MS }
+      );
+      await expect(environmentTable).not.toContainText(
+        "Could not load environments."
+      );
+      await expect(deleteButton).toHaveCount(0, {
+        timeout: DELETE_POSTCONDITION_TIMEOUT_MS
+      });
+
+      // The proof. GitHub is asked directly, and the fixture refuses to answer
+      // unless stage one observed this same Environment present first.
+      await cloud.assertGitHubEnvironmentAbsent();
+      for (const subject of federatedSubjects)
+        await cloud.assertFederatedCredentialAbsent(subject);
+
+      // The app registration and role assignment can be shared, so #398 retains
+      // them deliberately. Re-read both so deleting the shared identity cannot
+      // pass merely because deleting the app also made its credentials absent.
+      if (!appRegistration || !servicePrincipalId)
+        throw new Error(
+          "Stage one did not retain the Azure identity needed for deletion assertions."
+        );
+      const expectedAppRegistration = appRegistration;
+      const expectedServicePrincipalId = servicePrincipalId;
+      await expect(cloud.assertAppRegistrationExists()).resolves.toEqual(
+        expectedAppRegistration
+      );
+      const retainedServicePrincipalId = readServicePrincipalObjectId(
+        await runAz(
+          ports.commands,
+          [
+            "ad",
+            "sp",
+            "show",
+            "--id",
+            expectedAppRegistration.appId,
+            "-o",
+            "json"
+          ],
+          `az ad sp show --id ${expectedAppRegistration.appId}`
+        )
+      );
+      expect(retainedServicePrincipalId).toBe(expectedServicePrincipalId);
+      await cloud.assertRoleAssignmentExists(retainedServicePrincipalId);
+    } finally {
+      await harness.cleanup();
     }
   });
 });
