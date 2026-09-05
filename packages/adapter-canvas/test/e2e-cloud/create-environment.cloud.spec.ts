@@ -491,6 +491,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       initialPage: "environment"
     });
 
+    let primaryError: unknown;
     try {
       await harness.seedState(
         cloudCanvasState({
@@ -627,8 +628,14 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       );
       expect(retainedServicePrincipalId).toBe(expectedServicePrincipalId);
       await cloud.assertRoleAssignmentExists(retainedServicePrincipalId);
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
-      await harness.cleanup();
+      await runCleanupSteps(
+        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
+        primaryError
+      );
     }
   });
 });
