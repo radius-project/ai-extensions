@@ -66,7 +66,7 @@ function runTool(
   args: readonly string[],
   cwd?: string,
   normalize: (
-    error: { code?: string | number | null } | null,
+    error: { code?: string | number | null; message?: string } | null,
     stdout: string | undefined,
     stderr: string | undefined
   ) => CloudCommandResult = normalizeCommandResult
@@ -106,7 +106,7 @@ export function redactAzureCredentials(
 }
 
 export function normalizeAzureCommandResult(
-  error: { code?: string | number | null } | null,
+  error: { code?: string | number | null; message?: string } | null,
   stdout: string | undefined,
   stderr: string | undefined,
   env: NodeJS.ProcessEnv = process.env
@@ -142,6 +142,23 @@ export function normalizeCommandResult(
         error?.message || ""
       : normalizedStderr
   };
+}
+
+/**
+ * Whether a failed `gh api` call carries GitHub CLI's HTTP 404 diagnostic.
+ *
+ * A bare "Not Found" is not enough: DNS, configuration, and wrapper failures
+ * can contain those words without proving that GitHub answered for the
+ * requested resource. Successful commands cannot report absence either, even
+ * when their response body happens to mention an earlier HTTP 404.
+ */
+export function isGitHubApiNotFound(result: CloudCommandResult): boolean {
+  if (result.code === 0) return false;
+  return `${result.stderr}\n${result.stdout}`
+    .split(/\r?\n/)
+    .some((line) =>
+      /^(?:gh:\s.*\(HTTP 404\)|HTTP 404(?::.*)?)$/i.test(line.trim())
+    );
 }
 
 /**
