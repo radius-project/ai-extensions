@@ -76,18 +76,19 @@ export interface CloudFixture {
   /**
    * Waits until no app registration with the product's name remains.
    *
-   * Not called by any stage yet. `handleDeleteEnvironment` deletes the GitHub
-   * Environment and nothing else, so the Entra application, its federated
-   * credentials and its role assignment are orphaned today. Asserting that
-   * leak as expected behaviour would encode a bug as a contract and invert the
-   * day it is fixed, so this and the two mirrors below wait for PR #398,
-   * "Clean up cloud state on environment deletion", to make cloud cleanup the
-   * product's actual behaviour.
+   * Not called by the lifecycle journey because the repository-scoped
+   * application is shared by multiple environments and is intentionally
+   * retained after one environment is deleted.
    */
   assertAppRegistrationAbsent(): Promise<void>;
-  /** Waits until the app registration carries no credential for the subject. */
+  /** Waits until the deleted environment's credential is removed. */
   assertFederatedCredentialAbsent(subject: string): Promise<void>;
-  /** Waits until no role assignment for the principal remains in scope. */
+  /**
+   * Waits until no role assignment for the principal remains in scope.
+   *
+   * Not called by the lifecycle journey because the assignment belongs to the
+   * shared application and is intentionally retained.
+   */
   assertRoleAssignmentAbsent(principalId: string): Promise<void>;
   /**
    * Best-effort removal of product-created state left behind by this run.
