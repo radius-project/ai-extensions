@@ -22,7 +22,7 @@ interface CleanupResourceGroup {
 }
 
 const ISO_INSTANT_PATTERN =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,7}))?Z$/;
 const GENERATED_FALLBACK_BRANCH_PATTERN =
   /^radius\/setup-[a-z0-9][a-z0-9-]*-workflows-\d+$/;
 const RADIUS_MANAGED_APP_TAG = "radius-managed";
