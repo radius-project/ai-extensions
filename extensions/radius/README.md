@@ -8,7 +8,3 @@ The Radius canvas extension for the GitHub Copilot app. It ships inside the [`ra
 - **Modeling.** Generates and repairs the `.radius/app.bicep` definition from the repository's contents.
 - **Environments.** Creates an AWS or Azure deploy environment together with the OIDC trust GitHub Actions needs, then verifies it.
 - **Deployments.** Deploys and deletes applications through the generated GitHub Actions workflows, and reports progress on the canvas.
-
-## Assets
-
-- `assets/preview.png` — primary gallery image required by the [Awesome Copilot canvas-extension guide](https://github.com/github/awesome-copilot/blob/main/CONTRIBUTING.md#adding-canvas-extensions).
