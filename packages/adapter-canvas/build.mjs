@@ -84,14 +84,14 @@ const radiusTypeResolver = join(
 );
 
 // Tracked source the assembled plugin is built from, keyed by the directory that
-// owns it: the manifest is plugin source, everything else is extension source.
-// node_modules is a pnpm workspace symlink and never shipped.
+// owns it: discovery metadata and assets are plugin source; runtime files are
+// extension source. node_modules is a pnpm workspace symlink and never shipped.
 const pluginSources = [
   [pluginDir, "plugin.json"],
   [pluginDir, "README.md"],
+  [pluginDir, "assets"],
   [extensionDir, "package.json"],
-  [extensionDir, "skills"],
-  [extensionDir, "assets"]
+  [extensionDir, "skills"]
 ];
 
 // CHANGELOG.md is written by `changeset version`, so it exists in a release
