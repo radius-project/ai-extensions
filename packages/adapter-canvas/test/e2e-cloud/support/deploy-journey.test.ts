@@ -12,10 +12,12 @@ import { REQUIRED_DEFAULT_BRANCH_WORKFLOWS } from "./create-environment-journey.
 import {
   applicationNamespace,
   classifyDeploymentPresence,
+  DELETE_DEPLOYMENT_WORKFLOW,
   describeDeployFailure,
   describeProblems,
   findDeleteEnvironmentRefusalProblems,
   findDeployedApplicationProblems,
+  findNewWorkflowRunId,
   findSurvivingArtifactProblems,
   RADIUS_APPLICATION_LABEL,
   radiusApplicationSelector,
@@ -24,12 +26,17 @@ import {
   readDeployStatusSnapshot,
   readKubernetesResourceNames,
   readKubernetesWorkloads,
+  readOptionalDispatchedWorkflowRunId,
+  readWorkflowRunIds,
+  readWorkflowRunStatus,
+  quiesceOwnedWorkflowRuns,
   REQUIRED_DELETE_WORKFLOWS,
   REQUIRED_DEPLOY_WORKFLOWS,
   REQUIRED_ENVIRONMENT_VARIABLES,
   REQUIRED_LIFECYCLE_WORKFLOWS,
   REQUIRED_STATE_VARIABLES,
   repositoryListingPath,
+  requireWorkflowRunId,
   requireSingleApplication,
   SUCCESSFUL_DEPLOY_STATE,
   TERMINAL_DEPLOY_STATES,
@@ -107,6 +114,171 @@ describe("required workflow and variable inventories", () => {
   });
 });
 
+describe("workflow run ownership", () => {
+  it("extracts a run id only from the fixture repository", () => {
+    expect(
+      requireWorkflowRunId(
+        "https://github.com/acme/fixture/actions/runs/123",
+        "acme/fixture"
+      )
+    ).toBe("123");
+  });
+
+  it.each([
+    ["", /did not report/],
+    ["https://github.com/other/fixture/actions/runs/123", /did not report/],
+    ["https://github.com/acme/fixture/actions/runs/0", /invalid/],
+    ["https://github.com/acme/fixture/actions/runs/123/jobs/1", /invalid/]
+  ])("rejects unsafe workflow run URL %j", (url, error) => {
+    expect(() => requireWorkflowRunId(url, "acme/fixture")).toThrow(error);
+  });
+
+  it.each([
+    "completed",
+    "in_progress",
+    "pending",
+    "queued",
+    "requested",
+    "waiting"
+  ] as const)("reads the workflow run status %s", (status) => {
+    expect(readWorkflowRunStatus({ status: ` ${status} ` })).toBe(status);
+  });
+
+  it("reads an optional best-effort dispatch run URL", () => {
+    expect(
+      readOptionalDispatchedWorkflowRunId(
+        { success: true, runUrl: "" },
+        "acme/fixture"
+      )
+    ).toBeUndefined();
+    expect(
+      readOptionalDispatchedWorkflowRunId({ success: true }, "acme/fixture")
+    ).toBeUndefined();
+    expect(
+      readOptionalDispatchedWorkflowRunId(
+        { runUrl: "https://github.com/acme/fixture/actions/runs/456" },
+        "acme/fixture"
+      )
+    ).toBe("456");
+  });
+
+  it.each([null, [], { runUrl: 456 }])(
+    "rejects malformed optional dispatch response %#",
+    (payload) => {
+      expect(() =>
+        readOptionalDispatchedWorkflowRunId(payload, "acme/fixture")
+      ).toThrow();
+    }
+  );
+
+  it.each([null, {}, { status: 3 }, { status: " " }])(
+    "rejects malformed workflow status %#",
+    (payload) => {
+      expect(() => readWorkflowRunStatus(payload)).toThrow(/no usable status/);
+    }
+  );
+
+  it("rejects an unknown workflow run status", () => {
+    expect(() => readWorkflowRunStatus({ status: "mysterious" })).toThrow(
+      /unknown status/
+    );
+  });
+
+  it("reads exact positive workflow run database ids", () => {
+    expect(
+      readWorkflowRunIds([{ databaseId: 11 }, { databaseId: 12 }])
+    ).toEqual(new Set(["11", "12"]));
+  });
+
+  it.each([
+    null,
+    {},
+    [null],
+    [{}],
+    [{ databaseId: 0 }],
+    [{ databaseId: -1 }],
+    [{ databaseId: 1.5 }],
+    [{ databaseId: "11" }]
+  ])("rejects malformed workflow run listing %#", (payload) => {
+    expect(() => readWorkflowRunIds(payload)).toThrow();
+  });
+
+  it("finds the only run added after dispatch", () => {
+    expect(findNewWorkflowRunId(new Set(["10"]), new Set(["12", "10"]))).toBe(
+      "12"
+    );
+    expect(
+      findNewWorkflowRunId(new Set(["10"]), new Set(["10"]))
+    ).toBeUndefined();
+  });
+
+  it("rejects ambiguous concurrent workflow dispatches", () => {
+    expect(() =>
+      findNewWorkflowRunId(new Set(["10"]), new Set(["12", "11", "10"]))
+    ).toThrow(/cannot prove/);
+  });
+
+  it("exposes the exact delete dispatcher used for run discovery", () => {
+    expect(DELETE_DEPLOYMENT_WORKFLOW).toBe(DELETE_APP_DISPATCHER_FILE);
+  });
+
+  it("cancels active owned runs and waits for completion", async () => {
+    const calls: string[] = [];
+    await quiesceOwnedWorkflowRuns(new Set(["11", "12"]), {
+      readStatus: async (runId) =>
+        runId === "11" ? "completed" : "in_progress",
+      cancel: async (runId) => {
+        calls.push(`cancel:${runId}`);
+      },
+      waitUntilCompleted: async (runId) => {
+        calls.push(`wait:${runId}`);
+      }
+    });
+    expect(calls).toEqual(["cancel:12", "wait:12"]);
+  });
+
+  it("accepts a cancellation race only after confirming completion", async () => {
+    let reads = 0;
+    await expect(
+      quiesceOwnedWorkflowRuns(new Set(["13"]), {
+        readStatus: async () => (++reads === 1 ? "in_progress" : "completed"),
+        cancel: async () => {
+          throw new Error("already completed");
+        },
+        waitUntilCompleted: async () => {
+          throw new Error("must not wait after confirmed completion");
+        }
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it("propagates cancellation failure while the workflow remains active", async () => {
+    const cancellation = new Error("cancellation denied");
+    await expect(
+      quiesceOwnedWorkflowRuns(new Set(["14"]), {
+        readStatus: async () => "in_progress",
+        cancel: async () => {
+          throw cancellation;
+        },
+        waitUntilCompleted: async () => undefined
+      })
+    ).rejects.toBe(cancellation);
+  });
+
+  it("propagates failure to confirm terminal completion", async () => {
+    const timeout = new Error("workflow remained active");
+    await expect(
+      quiesceOwnedWorkflowRuns(new Set(["15"]), {
+        readStatus: async () => "queued",
+        cancel: async () => undefined,
+        waitUntilCompleted: async () => {
+          throw timeout;
+        }
+      })
+    ).rejects.toBe(timeout);
+  });
+});
+
 describe("readDeployStatusSnapshot", () => {
   it("reports a completed deploy as terminal and successful", () => {
     const snapshot = readDeployStatusSnapshot({
@@ -114,6 +286,7 @@ describe("readDeployStatusSnapshot", () => {
       active: false,
       deployRunUrl: "https://github.com/acme/fixture/actions/runs/1"
     });
+
     expect(snapshot).toEqual({
       status: "complete",
       terminal: true,

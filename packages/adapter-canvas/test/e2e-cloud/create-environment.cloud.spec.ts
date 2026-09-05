@@ -90,16 +90,23 @@ import {
 import {
   applicationNamespace,
   classifyDeploymentPresence,
+  DELETE_DEPLOYMENT_WORKFLOW,
   describeDeployFailure,
   describeProblems as describeDeploymentProblems,
   findDeleteEnvironmentRefusalProblems,
   findDeployedApplicationProblems,
+  findNewWorkflowRunId,
   findSurvivingArtifactProblems,
   REQUIRED_LIFECYCLE_WORKFLOWS,
   readApplicationNames,
   readDeploymentRows,
   readDeployStatusSnapshot,
+  readOptionalDispatchedWorkflowRunId,
+  readWorkflowRunIds,
+  readWorkflowRunStatus,
+  quiesceOwnedWorkflowRuns,
   repositoryListingPath,
+  requireWorkflowRunId,
   requireSingleApplication
 } from "./support/deploy-journey.js";
 import {
@@ -116,6 +123,8 @@ const githubToken = process.env.GH_TOKEN?.trim() ?? "";
 const githubAppTokenConfig = takeGitHubAppTokenConfig();
 
 const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
+const WORKFLOW_QUIESCENCE_TIMEOUT_MS = 10 * 60 * 1000;
+const WORKFLOW_DISCOVERY_TIMEOUT_MS = 2 * 60 * 1000;
 const gate = evaluateCreateEnvironmentGate({
   cloudE2eFlag: process.env.RADIUS_CLOUD_E2E,
   fixtureProvisioned: isFixtureRepositoryProvisioned(),
@@ -150,6 +159,101 @@ async function runAz(
     expectSuccess(await commands.runAz(args), context).stdout,
     context
   );
+}
+
+async function waitForOwnedWorkflowRuns(
+  commands: CloudCommandPort,
+  repository: string,
+  runIds: ReadonlySet<string>
+): Promise<void> {
+  const deadline = Date.now() + WORKFLOW_QUIESCENCE_TIMEOUT_MS;
+  const status = async (runId: string) =>
+    readWorkflowRunStatus(
+      await runGh(
+        commands,
+        ["run", "view", runId, "--repo", repository, "--json", "status"],
+        `gh run view ${runId}`
+      )
+    );
+
+  await quiesceOwnedWorkflowRuns(runIds, {
+    readStatus: status,
+    cancel: async (runId) => {
+      expectSuccess(
+        await commands.runGh([
+          "api",
+          "--method",
+          "POST",
+          `repos/${repository}/actions/runs/${runId}/cancel`
+        ]),
+        `gh api cancel workflow run ${runId}`
+      );
+    },
+    waitUntilCompleted: async (runId) => {
+      await expect
+        .poll(() => status(runId), {
+          timeout: Math.max(1, deadline - Date.now()),
+          intervals: [5_000]
+        })
+        .toBe("completed");
+    }
+  });
+}
+
+async function listWorkflowRunIds(
+  commands: CloudCommandPort,
+  repository: string,
+  workflow: string
+): Promise<ReadonlySet<string>> {
+  return readWorkflowRunIds(
+    await runGh(
+      commands,
+      [
+        "run",
+        "list",
+        "--repo",
+        repository,
+        "--workflow",
+        workflow,
+        "--event",
+        "workflow_dispatch",
+        "--limit",
+        "100",
+        "--json",
+        "databaseId"
+      ],
+      `gh run list ${workflow}`
+    )
+  );
+}
+
+async function discoverNewWorkflowRunId(
+  commands: CloudCommandPort,
+  repository: string,
+  workflow: string,
+  before: ReadonlySet<string>
+): Promise<string> {
+  let runId: string | undefined;
+  await expect
+    .poll(
+      async () => {
+        runId = findNewWorkflowRunId(
+          before,
+          await listWorkflowRunIds(commands, repository, workflow)
+        );
+        return runId;
+      },
+      {
+        timeout: WORKFLOW_DISCOVERY_TIMEOUT_MS,
+        intervals: [2_000]
+      }
+    )
+    .not.toBeUndefined();
+  if (!runId)
+    throw new Error(
+      `The ${workflow} dispatch did not produce a discoverable workflow run.`
+    );
+  return runId;
 }
 
 /**
@@ -196,6 +300,8 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   let createdVariables: ReadonlyMap<string, string> = new Map();
   let deployedApplication = "";
   let deployedNamespace = "";
+  const ownedWorkflowRunIds = new Set<string>();
+  let untrackedWorkflowDispatch = false;
 
   const refreshGitHubToken = async (): Promise<void> => {
     if (!githubAppTokenConfig)
@@ -244,11 +350,17 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     const current = fixture;
     fixture = undefined;
     if (!current) return;
+    await refreshGitHubToken();
+    if (untrackedWorkflowDispatch)
+      throw new Error(
+        "A lifecycle workflow was dispatched without a trustworthy run id; leaving fixture state and its lease intact."
+      );
+    await waitForOwnedWorkflowRuns(
+      ports.commands,
+      current.repository,
+      ownedWorkflowRunIds
+    );
     await runCleanupSteps([
-      {
-        label: "renew GitHub App token for teardown",
-        run: refreshGitHubToken
-      },
       {
         label: "reclaim product-created artifacts",
         run: async () => {
@@ -514,6 +626,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       workspacePath: cloud.workspacePath,
       initialPage: "deploying"
     });
+    let primaryError: unknown;
 
     try {
       await harness.seedState(
@@ -559,6 +672,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       );
       const deployButton = page.locator("#deploy-now-btn:not([disabled])");
       await expect(deployButton).toHaveText("Deploy");
+      untrackedWorkflowDispatch = true;
       await deployButton.click();
       expect((await deployResponse).ok()).toBe(true);
 
@@ -571,14 +685,40 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
             return (await response.json()) as unknown;
           })
         );
+      const trackedSnapshot = async (): Promise<
+        ReturnType<typeof readDeployStatusSnapshot>
+      > => {
+        const current = await snapshot();
+        if (current.runUrl) {
+          try {
+            ownedWorkflowRunIds.add(
+              requireWorkflowRunId(current.runUrl, cloud.repository)
+            );
+            untrackedWorkflowDispatch = false;
+          } catch (error) {
+            untrackedWorkflowDispatch = true;
+            throw error;
+          }
+        }
+        return current;
+      };
 
       await expect
-        .poll(async () => (await snapshot()).terminal, {
+        .poll(async () => (await trackedSnapshot()).terminal, {
           timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
           intervals: [5_000]
         })
         .toBe(true);
-      const finished = await snapshot();
+      const finished = await trackedSnapshot();
+      try {
+        ownedWorkflowRunIds.add(
+          requireWorkflowRunId(finished.runUrl, cloud.repository)
+        );
+        untrackedWorkflowDispatch = false;
+      } catch (error) {
+        untrackedWorkflowDispatch = true;
+        throw error;
+      }
       expect(
         finished.succeeded,
         describeDeployFailure(finished, finished.logs)
@@ -620,8 +760,14 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
           cloud.environmentName
         ).present
       ).toBe(true);
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
-      await harness.cleanup();
+      await runCleanupSteps(
+        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
+        primaryError
+      );
     }
   });
 
@@ -639,6 +785,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       workspacePath: cloud.workspacePath,
       initialPage: "environment"
     });
+    let primaryError: unknown;
 
     try {
       await harness.seedState(
@@ -678,8 +825,18 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
           problems
         )
       ).toEqual([]);
+      await cloud.assertApplicationWorkloadsPresent(
+        deployedApplication,
+        deployedNamespace
+      );
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
-      await harness.cleanup();
+      await runCleanupSteps(
+        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
+        primaryError
+      );
     }
   });
 
@@ -700,6 +857,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       workspacePath: cloud.workspacePath,
       initialPage: "deploying"
     });
+    let primaryError: unknown;
 
     try {
       await harness.seedState(
@@ -726,14 +884,41 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       await page
         .locator("#del-confirm-input")
         .fill(`${deployedApplication}/${cloud.environmentName}`);
+      const runsBefore = await listWorkflowRunIds(
+        ports.commands,
+        cloud.repository,
+        DELETE_DEPLOYMENT_WORKFLOW
+      );
 
       const deleteResponse = page.waitForResponse(
         (response) =>
           new URL(response.url()).pathname === "/api/delete-deployment" &&
           response.request().method() === "POST"
       );
+      untrackedWorkflowDispatch = true;
       await page.locator("#del-confirm-btn").click();
-      expect((await deleteResponse).ok()).toBe(true);
+      const response = await deleteResponse;
+      const payload = (await response.json()) as unknown;
+      expect(response.ok()).toBe(true);
+      try {
+        const reportedRunId = readOptionalDispatchedWorkflowRunId(
+          payload,
+          cloud.repository
+        );
+        ownedWorkflowRunIds.add(
+          reportedRunId ??
+            (await discoverNewWorkflowRunId(
+              ports.commands,
+              cloud.repository,
+              DELETE_DEPLOYMENT_WORKFLOW,
+              runsBefore
+            ))
+        );
+        untrackedWorkflowDispatch = false;
+      } catch (error) {
+        untrackedWorkflowDispatch = true;
+        throw error;
+      }
 
       await expect
         .poll(
@@ -817,8 +1002,14 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       await page.reload();
       await page.waitForLoadState("domcontentloaded");
       await expect(deleteButton).toHaveCount(0);
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
-      await harness.cleanup();
+      await runCleanupSteps(
+        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
+        primaryError
+      );
     }
   });
 

@@ -43,6 +43,9 @@ export const REQUIRED_DELETE_WORKFLOWS: readonly string[] = [
   DELETE_AZURE_FILE
 ];
 
+/** The workflow whose exact run must settle before fixture reclamation. */
+export const DELETE_DEPLOYMENT_WORKFLOW = DELETE_APP_DISPATCHER_FILE;
+
 /** Every workflow the complete lifecycle requires before its first dispatch. */
 export const REQUIRED_LIFECYCLE_WORKFLOWS: readonly string[] = [
   ...REQUIRED_DEFAULT_BRANCH_WORKFLOWS,
@@ -266,6 +269,126 @@ export type DeploymentPresence =
       readonly status: string;
       readonly runUrl: string;
     };
+
+/** Extracts an owned Actions run id without accepting another repository. */
+export function requireWorkflowRunId(
+  runUrl: string,
+  repository: string
+): string {
+  const expectedPrefix = `https://github.com/${repository}/actions/runs/`;
+  if (!runUrl.startsWith(expectedPrefix))
+    throw new Error(
+      `The lifecycle operation did not report a workflow run in ${repository}.`
+    );
+  const runId = runUrl.slice(expectedPrefix.length);
+  if (!/^[1-9][0-9]*$/.test(runId))
+    throw new Error(
+      `The lifecycle operation reported an invalid workflow run URL: ${runUrl}`
+    );
+  return runId;
+}
+
+/** Reads the route's best-effort run URL without weakening malformed-value checks. */
+export function readOptionalDispatchedWorkflowRunId(
+  payload: unknown,
+  repository: string
+): string | undefined {
+  const record = asRecord(payload);
+  if (!record)
+    throw new Error("The lifecycle dispatch response was not a JSON object.");
+  if (record.runUrl === undefined || record.runUrl === "") return undefined;
+  if (typeof record.runUrl !== "string")
+    throw new Error(
+      "The lifecycle dispatch response carried a malformed workflow run URL."
+    );
+  return requireWorkflowRunId(record.runUrl, repository);
+}
+
+/** Narrows `gh run list --json databaseId` for exact pre-dispatch snapshots. */
+export function readWorkflowRunIds(payload: unknown): ReadonlySet<string> {
+  if (!Array.isArray(payload))
+    throw new Error("The workflow run listing was not a JSON array.");
+  const ids = new Set<string>();
+  for (const [index, value] of payload.entries()) {
+    const record = asRecord(value);
+    const id = record?.databaseId;
+    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0)
+      throw new Error(
+        `The workflow run listing carried an invalid database id at index ${index}.`
+      );
+    ids.add(String(id));
+  }
+  return ids;
+}
+
+/** Returns the only post-dispatch run, refusing ambiguous concurrent dispatches. */
+export function findNewWorkflowRunId(
+  before: ReadonlySet<string>,
+  after: ReadonlySet<string>
+): string | undefined {
+  const added = [...after].filter((runId) => !before.has(runId));
+  if (added.length > 1)
+    throw new Error(
+      `Workflow run discovery found ${added.length} new runs and cannot prove which one this journey owns.`
+    );
+  return added[0];
+}
+
+/** Narrows `gh run view --json status` before teardown trusts it. */
+export type WorkflowRunStatus =
+  "completed" | "in_progress" | "pending" | "queued" | "requested" | "waiting";
+
+const WORKFLOW_RUN_STATUSES: readonly WorkflowRunStatus[] = [
+  "completed",
+  "in_progress",
+  "pending",
+  "queued",
+  "requested",
+  "waiting"
+];
+
+export function readWorkflowRunStatus(payload: unknown): WorkflowRunStatus {
+  const record = asRecord(payload);
+  const status = record?.status;
+  if (typeof status !== "string" || status.trim() === "")
+    throw new Error(
+      "The workflow run status response carried no usable status."
+    );
+  const trimmed = status.trim();
+  if (!WORKFLOW_RUN_STATUSES.includes(trimmed as WorkflowRunStatus))
+    throw new Error(
+      `The workflow run status response carried an unknown status: ${trimmed}`
+    );
+  return trimmed as WorkflowRunStatus;
+}
+
+export interface WorkflowRunControlPort {
+  readonly readStatus: (runId: string) => Promise<WorkflowRunStatus>;
+  readonly cancel: (runId: string) => Promise<void>;
+  readonly waitUntilCompleted: (runId: string) => Promise<void>;
+}
+
+/**
+ * Stops every workflow this journey owns before destructive fixture cleanup.
+ *
+ * A cancellation can race with natural completion. Only that confirmed terminal
+ * state permits cleanup to continue after the cancellation request fails.
+ */
+export async function quiesceOwnedWorkflowRuns(
+  runIds: ReadonlySet<string>,
+  port: WorkflowRunControlPort
+): Promise<void> {
+  for (const runId of runIds) {
+    if ((await port.readStatus(runId)) === "completed") continue;
+    try {
+      await port.cancel(runId);
+    } catch (error) {
+      if ((await port.readStatus(runId)) !== "completed") throw error;
+      continue;
+    }
+    await port.waitUntilCompleted(runId);
+  }
+}
 
 /**
  * Whether the listing still carries a row for one application and environment.
