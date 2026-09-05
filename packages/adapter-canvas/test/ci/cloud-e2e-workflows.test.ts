@@ -207,7 +207,7 @@ describe("cloud-e2e.yml", () => {
     expect(playwrightMinutes).toBeGreaterThan(0);
     expect(playwrightGlobalMinutes).toBeGreaterThan(playwrightMinutes);
     expect(jobMinutes).toBeGreaterThan(playwrightMinutes);
-    expect(jobMinutes).toBeGreaterThan(playwrightGlobalMinutes);
+    expect(jobMinutes).toBeGreaterThanOrEqual(playwrightGlobalMinutes + 10);
   });
 
   it("switches the suite on and runs it", async () => {
@@ -219,11 +219,16 @@ describe("cloud-e2e.yml", () => {
 
     const run = steps(job).find((step) => step.run?.includes("test:cloud"));
     expect(run?.["working-directory"]).toBe("packages/adapter-canvas");
+    expect(run?.env).toMatchObject({
+      GH_TOKEN: "${{ steps.app-token.outputs.token }}",
+      CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
+      CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}"
+    });
   });
 
   it("authenticates to Azure by OIDC and to GitHub by installation token", async () => {
-    // No long-lived cloud secret exists to leak: both credentials are minted
-    // per run and expire with it.
+    // No stored bearer token exists to leak: both access credentials are minted
+    // per run and expire with it. The App signing key remains a masked secret.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const used = steps(workflow.jobs?.["cloud-e2e"]).map((step) => step.uses);
     expect(used.some((use) => use?.startsWith("azure/login@"))).toBe(true);
