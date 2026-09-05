@@ -27,6 +27,8 @@ import {
 import {
   appRegistrationName,
   clusterName as buildClusterName,
+  cloudE2ELeaseCommitMessage,
+  CLOUD_E2E_LEASE_REF,
   environmentName as buildEnvironmentName,
   FIXTURE_BASELINE_SHA,
   FIXTURE_REPO_DEFAULT_BRANCH,
@@ -87,6 +89,7 @@ export interface CloudFixtureOptions {
   readonly baselineSha?: string;
   /** Node count for the discovery-target cluster. One is enough. */
   readonly nodeCount?: number;
+  readonly githubRunId?: string;
   readonly assertionTimeoutMs?: number;
   readonly assertionPollIntervalMs?: number;
 }
@@ -96,9 +99,20 @@ const DEFAULT_NODE_COUNT = 1;
 const CLUSTER_NODE_SIZE = "Standard_B2s";
 const DEFAULT_ASSERTION_TIMEOUT_MS = 30_000;
 const DEFAULT_ASSERTION_POLL_INTERVAL_MS = 1_000;
-// The product derives several artifact names from the repository, not the run.
-// Holding one external ref prevents separate invocations from sharing them.
-const REPOSITORY_LEASE_REF = "refs/heads/radius/cloud-e2e-lease";
+
+function requireGitObjectId(value: string, context: string): string {
+  const normalized = value.trim();
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(normalized))
+    throw new Error(`${context} returned an invalid Git object id.`);
+  return normalized;
+}
+
+export function radiusPurgeCreationTime(value: Date): string {
+  const milliseconds = value.getTime();
+  if (!Number.isFinite(milliseconds))
+    throw new Error("The cloud fixture creation time must be a valid date.");
+  return String(Math.floor(milliseconds / 1_000));
+}
 
 interface UnwindStep {
   readonly describe: string;
@@ -119,6 +133,16 @@ export async function createCloudFixture(
   const defaultBranch = options.defaultBranch ?? FIXTURE_REPO_DEFAULT_BRANCH;
   const baselineSha = options.baselineSha ?? FIXTURE_BASELINE_SHA;
   const nodeCount = options.nodeCount ?? DEFAULT_NODE_COUNT;
+  const githubRunId = options.githubRunId?.trim() || undefined;
+  const leaseMessage =
+    githubRunId === undefined ? undefined : (
+      cloudE2ELeaseCommitMessage(githubRunId)
+    );
+  const tags = [
+    `creationTime=${radiusPurgeCreationTime(ports.now())}`,
+    "radius-canvas-e2e=true",
+    ...(githubRunId ? [`github-run-id=${githubRunId}`] : [])
+  ];
   const assertionTimeoutMs = requirePositiveNumber(
     options.assertionTimeoutMs ?? DEFAULT_ASSERTION_TIMEOUT_MS,
     "Assertion timeout"
@@ -146,29 +170,76 @@ export async function createCloudFixture(
         "POST",
         `repos/${repository}/git/refs`,
         "-f",
-        `ref=${REPOSITORY_LEASE_REF}`,
+        `ref=${CLOUD_E2E_LEASE_REF}`,
         "-f",
         `sha=${baselineSha}`
       ]),
-      `gh api create ${REPOSITORY_LEASE_REF}`
+      `gh api create ${CLOUD_E2E_LEASE_REF}`
     );
     unwind.push({
-      describe: `release repository lease ${REPOSITORY_LEASE_REF}`,
+      describe: `release repository lease ${CLOUD_E2E_LEASE_REF}`,
       run: async () => {
         expectSuccess(
           await commands.runGh([
             "api",
             "--method",
             "DELETE",
-            `repos/${repository}/git/${REPOSITORY_LEASE_REF}`
+            `repos/${repository}/git/${CLOUD_E2E_LEASE_REF}`
           ]),
-          `gh api delete ${REPOSITORY_LEASE_REF}`
+          `gh api delete ${CLOUD_E2E_LEASE_REF}`
         );
       }
     });
 
-    // `creationTime` plus the `radtest-` prefix is what lets the Radius purge
-    // job in this subscription reclaim the group if the runner dies outright.
+    if (leaseMessage) {
+      const treeSha = requireGitObjectId(
+        expectSuccess(
+          await commands.runGh([
+            "api",
+            `repos/${repository}/git/commits/${baselineSha}`,
+            "--jq",
+            ".tree.sha"
+          ]),
+          `gh api read baseline tree ${baselineSha}`
+        ).stdout,
+        "The fixture baseline tree lookup"
+      );
+      const leaseCommitSha = requireGitObjectId(
+        expectSuccess(
+          await commands.runGh([
+            "api",
+            "--method",
+            "POST",
+            `repos/${repository}/git/commits`,
+            "-f",
+            `message=${leaseMessage}`,
+            "-f",
+            `tree=${treeSha}`,
+            "-F",
+            `parents[]=${baselineSha}`,
+            "--jq",
+            ".sha"
+          ]),
+          `gh api create lease marker for workflow run ${githubRunId}`
+        ).stdout,
+        "The fixture lease marker creation"
+      );
+      expectSuccess(
+        await commands.runGh([
+          "api",
+          "--method",
+          "PATCH",
+          `repos/${repository}/git/${CLOUD_E2E_LEASE_REF}`,
+          "-f",
+          `sha=${leaseCommitSha}`
+        ]),
+        `gh api mark ${CLOUD_E2E_LEASE_REF} for workflow run ${githubRunId}`
+      );
+    }
+
+    // The fixture tag proves the group is ours; github-run-id limits immediate
+    // scheduled cleanup to CI-created groups. The creationTime/radtest pair
+    // leaves Radius purge as the fallback safety net if this cleanup cannot run.
     expectSuccess(
       await commands.runAz([
         "group",
@@ -180,8 +251,7 @@ export async function createCloudFixture(
         "--subscription",
         subscriptionId,
         "--tags",
-        `creationTime=${ports.now().toISOString()}`,
-        "radius-canvas-e2e=true",
+        ...tags,
         "--output",
         "none"
       ]),
