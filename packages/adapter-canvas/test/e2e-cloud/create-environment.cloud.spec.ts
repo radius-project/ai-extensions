@@ -30,7 +30,10 @@
 // Absence on its own would prove nothing — a product that never created the
 // Environment would satisfy it just as readily — so the fixture refuses to make
 // an absence assertion until this run has observed the artifact present.
+import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
+import { createFileCredentialProvenanceStore } from "../../src/credential-provenance-store.js";
+import { configureCredentialProvenanceStore } from "../../src/credential-provenance.js";
 import { CanvasHarness } from "../e2e/support/canvas-harness.js";
 import {
   createNodeCloudFixturePorts,
@@ -215,6 +218,20 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       githubRunId: process.env.GITHUB_RUN_ID,
       ports
     });
+    // CanvasHarness loads the server directly rather than the extension
+    // composition root. Install one durable store inside the disposable clone's
+    // git directory so every serial harness sees the same ownership records
+    // without touching the developer's user-global store.
+    await configureCredentialProvenanceStore(
+      createFileCredentialProvenanceStore({
+        directory: path.join(
+          fixture.workspacePath,
+          ".git",
+          "radius-cloud-e2e",
+          "credential-provenance"
+        )
+      })
+    );
     await refreshGitHubToken();
     // Turns every assertion below from an observation into a proof: none of the
     // artifacts asserted on existed before the product ran.
@@ -820,6 +837,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       initialPage: "environment"
     });
 
+    let primaryError: unknown;
     try {
       await harness.seedState(
         cloudCanvasState({
@@ -956,8 +974,14 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       );
       expect(retainedServicePrincipalId).toBe(expectedServicePrincipalId);
       await cloud.assertRoleAssignmentExists(retainedServicePrincipalId);
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
-      await harness.cleanup();
+      await runCleanupSteps(
+        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
+        primaryError
+      );
     }
   });
 });
