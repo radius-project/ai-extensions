@@ -3,7 +3,8 @@ import {
   createCloudFixture,
   radiusPurgeCreationTime,
   type CloudFixture,
-  type CloudFixtureOptions
+  type CloudFixtureOptions,
+  type RoleAssignmentRecord
 } from "./cloud-fixture.js";
 import {
   createFakeFixturePorts,
@@ -27,6 +28,7 @@ const RESOURCE_GROUP = `radtest-canvas-${UNIQUE_ID}`;
 const CLUSTER = `aks-${UNIQUE_ID}`;
 const ENVIRONMENT = `radtest-${UNIQUE_ID}`;
 const SCOPE = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RESOURCE_GROUP}`;
+const CLUSTER_SCOPE = `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`;
 const APP_NAME = "radius-deploy-fixture-owner-fixture-repo";
 
 // Spelled out rather than rebuilt from the fixture's own helpers, so a change to
@@ -70,6 +72,24 @@ const FIC_LIST: readonly string[] = [
   "list"
 ];
 const ROLE_LIST: readonly string[] = ["role", "assignment", "list"];
+
+function roleAssignment(
+  principalId = "sp-1",
+  roleDefinitionName = "Contributor",
+  id = `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/assignment-1`,
+  scope = SCOPE
+): RoleAssignmentRecord {
+  return { id, principalId, roleDefinitionName, scope };
+}
+
+function clusterRoleAssignment(principalId = "sp-1"): RoleAssignmentRecord {
+  return roleAssignment(
+    principalId,
+    "Azure Kubernetes Service RBAC Cluster Admin",
+    "assignment-cluster",
+    CLUSTER_SCOPE
+  );
+}
 
 /**
  * Every command a healthy run issues, all answering "clean".
@@ -707,9 +727,7 @@ describe("createCloudFixture", () => {
           tool: "az",
           match: ROLE_LIST,
           respond: {
-            stdout: JSON.stringify([
-              { principalId: "sp-1", roleDefinitionName: "Contributor" }
-            ])
+            stdout: JSON.stringify([roleAssignment()])
           }
         }
       ]);
@@ -729,7 +747,15 @@ describe("createCloudFixture", () => {
         {
           tool: "az",
           match: ROLE_LIST,
-          respond: { stdout: JSON.stringify([{ principalId: "sp-1" }]) }
+          respond: {
+            stdout: JSON.stringify([
+              {
+                id: "assignment-1",
+                principalId: "sp-1",
+                scope: SCOPE
+              }
+            ])
+          }
         }
       ]);
 
@@ -972,8 +998,7 @@ describe("createCloudFixture", () => {
           tool: "az",
           match: ROLE_LIST,
           respond: {
-            stdout:
-              '[{"principalId":"sp-1","roleDefinitionName":"Contributor"}]'
+            stdout: JSON.stringify([roleAssignment()])
           }
         },
         {
@@ -1312,41 +1337,51 @@ describe("createCloudFixture", () => {
   });
 
   describe("assertRoleAssignmentExists", () => {
-    it("resolves when the principal holds an assignment in the group", async () => {
+    it("resolves when the principal holds assignments at both required scopes", async () => {
       const { fixture } = await createHarness([
         {
           tool: "az",
-          match: ROLE_LIST,
+          match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([
-              { principalId: "SP-1", roleDefinitionName: "Contributor" }
-            ])
+            stdout: JSON.stringify([roleAssignment("SP-1")])
+          }
+        },
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([clusterRoleAssignment("SP-1")])
           }
         }
       ]);
 
-      await expect(
-        fixture.assertRoleAssignmentExists("sp-1")
-      ).resolves.toBeUndefined();
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
+        [roleAssignment("SP-1"), clusterRoleAssignment("SP-1")]
+      );
     });
 
     it("polls until the role assignment becomes visible", async () => {
       const { fixture, fake } = await createHarness([
-        { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" }, times: 1 },
+        { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" }, times: 2 },
         {
           tool: "az",
-          match: ROLE_LIST,
+          match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([
-              { principalId: "sp-1", roleDefinitionName: "Contributor" }
-            ])
+            stdout: JSON.stringify([roleAssignment()])
+          }
+        },
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([clusterRoleAssignment()])
           }
         }
       ]);
 
-      await expect(
-        fixture.assertRoleAssignmentExists("sp-1")
-      ).resolves.toBeUndefined();
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
+        [roleAssignment(), clusterRoleAssignment()]
+      );
       expect(fake.waits).toEqual([1000]);
     });
 
@@ -1365,8 +1400,13 @@ describe("createCloudFixture", () => {
           match: ROLE_LIST,
           respond: {
             stdout: JSON.stringify([
-              { principalId: "sp-2", roleDefinitionName: "Contributor" },
-              { principalId: "sp-2", roleDefinitionName: "AKS RBAC Admin" }
+              roleAssignment("sp-2", "Contributor", "assignment-sp2"),
+              roleAssignment(
+                "sp-2",
+                "AKS RBAC Admin",
+                `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/assignment-2`,
+                `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`
+              )
             ])
           }
         }
@@ -1385,6 +1425,150 @@ describe("createCloudFixture", () => {
       await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
         /AuthorizationFailed/
       );
+    });
+
+    it("rejects an assignment without its stable identity and scope", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: ROLE_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { principalId: "sp-1", roleDefinitionName: "Contributor" }
+            ])
+          }
+        }
+      ]);
+
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
+        /no usable "id"/
+      );
+    });
+
+    it("captures assignments from the resource group and exact cluster scope", async () => {
+      const contributor = roleAssignment();
+      const clusterAdmin = clusterRoleAssignment();
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", SCOPE],
+          respond: { stdout: JSON.stringify([contributor]) }
+        },
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: { stdout: JSON.stringify([clusterAdmin]) }
+        }
+      ]);
+
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
+        [contributor, clusterAdmin]
+      );
+    });
+
+    it("waits until the principal has an assignment at both required scopes", async () => {
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SCOPE],
+            respond: { stdout: JSON.stringify([roleAssignment()]) }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+            respond: { stdout: "[]" }
+          }
+        ],
+        {},
+        { assertionTimeoutMs: 2_000, assertionPollIntervalMs: 1_000 }
+      );
+
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
+        new RegExp(`missing ${CLUSTER_SCOPE.replace(/\//g, "\\/")}`)
+      );
+    });
+  });
+
+  describe("assertRoleAssignmentsExist", () => {
+    it("requires every captured assignment identity, role, and scope", async () => {
+      const expected = [
+        roleAssignment(),
+        roleAssignment(
+          "sp-1",
+          "Azure Kubernetes Service RBAC Cluster Admin",
+          `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/assignment-2`,
+          `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`
+        )
+      ];
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: ROLE_LIST,
+          respond: { stdout: JSON.stringify(expected) }
+        }
+      ]);
+
+      await expect(
+        fixture.assertRoleAssignmentsExist(expected)
+      ).resolves.toBeUndefined();
+    });
+
+    it("rejects an empty captured inventory", async () => {
+      const { fixture } = await createHarness();
+
+      await expect(fixture.assertRoleAssignmentsExist([])).rejects.toThrow(
+        /empty role-assignment inventory/
+      );
+    });
+
+    it.each([
+      [
+        "assignment id",
+        roleAssignment(
+          "sp-1",
+          "Contributor",
+          `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/replacement`
+        )
+      ],
+      ["role", roleAssignment("sp-1", "Reader")],
+      [
+        "scope",
+        roleAssignment(
+          "sp-1",
+          "Contributor",
+          `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/assignment-1`,
+          `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`
+        )
+      ],
+      ["principal", roleAssignment("sp-2")]
+    ])("rejects a replacement with a different %s", async (_label, actual) => {
+      const expected = roleAssignment();
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ROLE_LIST,
+            respond: { stdout: JSON.stringify([actual]) }
+          }
+        ],
+        {},
+        { assertionTimeoutMs: 2_000, assertionPollIntervalMs: 1_000 }
+      );
+
+      await expect(
+        fixture.assertRoleAssignmentsExist([expected])
+      ).rejects.toThrow(/missing .*assignment-1/);
+    });
+
+    it("propagates a failing survival lookup", async () => {
+      const { fixture } = await createHarness([
+        failing("az", ROLE_LIST, "AuthorizationFailed")
+      ]);
+
+      await expect(
+        fixture.assertRoleAssignmentsExist([roleAssignment()])
+      ).rejects.toThrow(/AuthorizationFailed/);
     });
   });
 
@@ -1471,11 +1655,17 @@ describe("createCloudFixture", () => {
         },
         {
           tool: "az",
-          match: ROLE_LIST,
+          match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([
-              { principalId: "sp-1", roleDefinitionName: "Contributor" }
-            ])
+            stdout: JSON.stringify([roleAssignment()])
+          },
+          times: 1
+        },
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([clusterRoleAssignment()])
           },
           times: 1
         },
@@ -1516,7 +1706,7 @@ describe("createCloudFixture", () => {
         [
           "a role assignment",
           (fixture: CloudFixture) => fixture.assertRoleAssignmentAbsent("sp-1"),
-          /role assignment for principal sp-1/
+          /role assignment inventory for principal sp-1/
         ]
       ])(
         "for %s, because a product that never created it would pass too",
@@ -1719,7 +1909,7 @@ describe("createCloudFixture", () => {
             match: ROLE_LIST,
             respond: {
               stdout: JSON.stringify([
-                { principalId: "sp-2", roleDefinitionName: "Contributor" }
+                roleAssignment("sp-2", "Contributor", "assignment-sp2")
               ])
             }
           }
@@ -1736,9 +1926,7 @@ describe("createCloudFixture", () => {
             tool: "az",
             match: ROLE_LIST,
             respond: {
-              stdout: JSON.stringify([
-                { principalId: "SP-1", roleDefinitionName: "Contributor" }
-              ])
+              stdout: JSON.stringify([roleAssignment("SP-1")])
             }
           }
         ]);

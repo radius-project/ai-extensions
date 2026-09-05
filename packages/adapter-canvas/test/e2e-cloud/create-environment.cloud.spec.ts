@@ -44,7 +44,8 @@ import {
 import {
   type AppRegistrationRecord,
   createCloudFixture,
-  type CloudFixture
+  type CloudFixture,
+  type RoleAssignmentRecord
 } from "./support/cloud-fixture.js";
 import {
   CREATE_OPERATION_TIMEOUT_MS,
@@ -297,6 +298,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   let federatedSubjects: readonly string[] = [];
   let appRegistration: AppRegistrationRecord | undefined;
   let servicePrincipalId: string | undefined;
+  let roleAssignments: readonly RoleAssignmentRecord[] = [];
   let createdVariables: ReadonlyMap<string, string> = new Map();
   let deployedApplication = "";
   let deployedNamespace = "";
@@ -530,7 +532,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         )
       );
       servicePrincipalId = principalId;
-      await cloud.assertRoleAssignmentExists(principalId);
+      roleAssignments = await cloud.assertRoleAssignmentExists(principalId);
 
       await cloud.assertGitHubEnvironmentExists();
       const variables = readEnvironmentVariables(
@@ -957,7 +959,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         throw new Error(
           "The product-created service principal was not observed."
         );
-      await cloud.assertRoleAssignmentExists(servicePrincipalId);
+      await cloud.assertRoleAssignmentsExist(roleAssignments);
       const principalAfter = readServicePrincipalObjectId(
         await runAz(
           ports.commands,
@@ -1164,7 +1166,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         )
       );
       expect(retainedServicePrincipalId).toBe(expectedServicePrincipalId);
-      await cloud.assertRoleAssignmentExists(retainedServicePrincipalId);
+      await cloud.assertRoleAssignmentsExist(roleAssignments);
     } catch (error) {
       primaryError = error;
       throw error;

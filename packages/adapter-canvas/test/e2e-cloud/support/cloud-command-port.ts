@@ -132,9 +132,24 @@ function refreshFailure(
   };
 }
 
+function commandFailure(
+  error: unknown,
+  env: NodeJS.ProcessEnv
+): CloudCommandResult {
+  return {
+    code: 1,
+    stdout: "",
+    stderr: `Azure command failed: ${redactAzureCredentials(
+      describeError(error),
+      env
+    )}`
+  };
+}
+
 async function requestAzureIdentityAssertion(
   env: NodeJS.ProcessEnv,
-  fetchImpl: typeof fetch
+  fetchImpl: typeof fetch,
+  timeoutMs?: number
 ): Promise<string> {
   const requestUrl = env.ACTIONS_ID_TOKEN_REQUEST_URL?.trim();
   const requestToken = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN?.trim();
@@ -147,7 +162,7 @@ async function requestAzureIdentityAssertion(
   url.searchParams.set("audience", AZURE_OIDC_AUDIENCE);
   const response = await fetchImpl(url, {
     headers: { Authorization: `bearer ${requestToken}` },
-    signal: AbortSignal.timeout(20_000)
+    signal: AbortSignal.timeout(Math.min(timeoutMs ?? 20_000, 20_000))
   });
   if (!response.ok)
     throw new Error(
@@ -199,7 +214,30 @@ export function createRefreshingAzureCommandRunner(
   let refreshedAt = now();
   let pendingRefresh: Promise<CloudCommandResult | null> | undefined;
 
-  const refresh = async (): Promise<CloudCommandResult | null> => {
+  const remainingTimeout = (
+    deadline: number | undefined
+  ): number | undefined => {
+    if (deadline === undefined) return undefined;
+    const remaining = deadline - now();
+    if (remaining <= 0)
+      throw new Error(
+        "The Azure command exhausted its timeout while refreshing credentials."
+      );
+    return remaining;
+  };
+  const runBeforeDeadline = (
+    args: readonly string[],
+    deadline: number | undefined
+  ): Promise<CloudCommandResult> => {
+    const remaining = remainingTimeout(deadline);
+    return remaining === undefined ?
+        runCommand(args)
+      : runCommand(args, remaining);
+  };
+
+  const refresh = async (
+    deadline: number | undefined
+  ): Promise<CloudCommandResult | null> => {
     const clientId = env.AZURE_CLIENT_ID?.trim();
     const tenantId = env.AZURE_TENANT_ID?.trim();
     const subscriptionId = env.AZURE_SUBSCRIPTION_ID?.trim();
@@ -211,48 +249,83 @@ export function createRefreshingAzureCommandRunner(
         env
       );
 
-    let assertion: string;
     try {
-      assertion = await requestAzureIdentityAssertion(env, fetchImpl);
+      const assertion = await requestAzureIdentityAssertion(
+        env,
+        fetchImpl,
+        remainingTimeout(deadline)
+      );
+      const login = await runBeforeDeadline(
+        [
+          "login",
+          "--service-principal",
+          "--username",
+          clientId,
+          "--tenant",
+          tenantId,
+          "--federated-token",
+          assertion,
+          "--output",
+          "none"
+        ],
+        deadline
+      );
+      if (login.code !== 0) return login;
+      const select = await runBeforeDeadline(
+        ["account", "set", "--subscription", subscriptionId],
+        deadline
+      );
+      if (select.code !== 0) return select;
+      refreshedAt = now();
+      return null;
     } catch (error) {
       return refreshFailure(error, env);
     }
-
-    const login = await runCommand([
-      "login",
-      "--service-principal",
-      "--username",
-      clientId,
-      "--tenant",
-      tenantId,
-      "--federated-token",
-      assertion,
-      "--output",
-      "none"
-    ]);
-    if (login.code !== 0) return login;
-    const select = await runCommand([
-      "account",
-      "set",
-      "--subscription",
-      subscriptionId
-    ]);
-    if (select.code !== 0) return select;
-    refreshedAt = now();
-    return null;
+  };
+  const awaitRefreshBeforeDeadline = (
+    refreshPromise: Promise<CloudCommandResult | null>,
+    deadline: number | undefined
+  ): Promise<CloudCommandResult | null> => {
+    const remaining = remainingTimeout(deadline);
+    if (remaining === undefined) return refreshPromise;
+    const signal = AbortSignal.timeout(remaining);
+    const timeout = new Promise<CloudCommandResult>((resolve) => {
+      signal.addEventListener(
+        "abort",
+        () =>
+          resolve(
+            refreshFailure(
+              new Error(
+                "The Azure command exhausted its timeout while awaiting credential refresh."
+              ),
+              env
+            )
+          ),
+        { once: true }
+      );
+    });
+    return Promise.race([refreshPromise, timeout]);
   };
 
   return async (args, timeoutMs) => {
+    const deadline = timeoutMs === undefined ? undefined : now() + timeoutMs;
     if (oidcRefreshConfigured && now() - refreshedAt >= refreshIntervalMs) {
-      pendingRefresh ??= refresh().finally(() => {
+      pendingRefresh ??= refresh(deadline).finally(() => {
         pendingRefresh = undefined;
       });
-      const failure = await pendingRefresh;
+      let failure: CloudCommandResult | null;
+      try {
+        failure = await awaitRefreshBeforeDeadline(pendingRefresh, deadline);
+      } catch (error) {
+        return refreshFailure(error, env);
+      }
       if (failure) return failure;
     }
-    return timeoutMs === undefined ?
-        runCommand(args)
-      : runCommand(args, timeoutMs);
+    try {
+      return await runBeforeDeadline(args, deadline);
+    } catch (error) {
+      return commandFailure(error, env);
+    }
   };
 }
 
