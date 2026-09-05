@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createCloudFixture,
+  radiusPurgeCreationTime,
   type CloudFixture,
   type CloudFixtureOptions
 } from "./cloud-fixture.js";
@@ -229,7 +230,7 @@ describe("createCloudFixture", () => {
 
       expect(fake.commands.commandLines("az")).toEqual([
         `group create --name ${RESOURCE_GROUP} --location westus3 --subscription ${SUBSCRIPTION} ` +
-          `--tags creationTime=${NOW.toISOString()} radius-canvas-e2e=true --output none`,
+          `--tags creationTime=${radiusPurgeCreationTime(NOW)} radius-canvas-e2e=true --output none`,
         `aks create --resource-group ${RESOURCE_GROUP} --name ${CLUSTER} --subscription ${SUBSCRIPTION} ` +
           "--node-count 1 --node-vm-size Standard_B2s --generate-ssh-keys --output none"
       ]);
@@ -244,16 +245,47 @@ describe("createCloudFixture", () => {
       });
     });
 
-    it("tags the group so the subscription's purge job can reclaim a crashed run", async () => {
+    it("tags the group so scheduled cleanup can identify a crashed run's group", async () => {
       const { fake } = await createHarness();
 
       const create = fake.commands.calls.find(
         (call) => call.tool === "az" && call.args.includes("create")
       );
       if (!create) throw new Error("Expected the resource group create call.");
-      expect(create.args).toContain(`creationTime=${NOW.toISOString()}`);
+      const creationTime = create.args.find((arg) =>
+        arg.startsWith("creationTime=")
+      );
+      expect(creationTime).toBe(`creationTime=${radiusPurgeCreationTime(NOW)}`);
+      expect(Number.isInteger(Number(creationTime?.split("=")[1]))).toBe(true);
       expect(create.args).toContain(RESOURCE_GROUP);
       expect(RESOURCE_GROUP.startsWith("radtest-")).toBe(true);
+      expect(create.args).not.toContain("github-run-id=123456");
+    });
+
+    it("tags CI-created groups with the owning GitHub Actions run id", async () => {
+      const { fake } = await createHarness([], {}, { githubRunId: "123456" });
+
+      const create = fake.commands.calls.find(
+        (call) => call.tool === "az" && call.args.includes("create")
+      );
+      if (!create) throw new Error("Expected the resource group create call.");
+      expect(create.args).toContain("github-run-id=123456");
+    });
+
+    it("formats creation time for cleanup's integer comparison", () => {
+      const sixHoursAgo = Math.floor(NOW.getTime() / 1_000) - 6 * 60 * 60;
+      const creationTime = radiusPurgeCreationTime(
+        new Date(NOW.getTime() - 7 * 60 * 60 * 1_000)
+      );
+
+      expect(Number(creationTime)).toBeLessThan(sixHoursAgo);
+      expect(creationTime).toMatch(/^\d+$/);
+    });
+
+    it("rejects an invalid creation time instead of writing an unusable purge tag", () => {
+      expect(() => radiusPurgeCreationTime(new Date("invalid"))).toThrow(
+        "must be a valid date"
+      );
     });
 
     it("creates nothing the product is responsible for creating", async () => {
