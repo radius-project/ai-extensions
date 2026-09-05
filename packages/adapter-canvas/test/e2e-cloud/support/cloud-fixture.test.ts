@@ -265,7 +265,11 @@ describe("createCloudFixture", () => {
     it("tags CI-created groups with the owning GitHub Actions run id", async () => {
       const { fake } = await createHarness([], {}, { githubRunId: "123456" });
 
-      expect(fake.commands.calls[0].args).toContain("github-run-id=123456");
+      const create = fake.commands.calls.find(
+        (call) => call.tool === "az" && call.args.includes("create")
+      );
+      if (!create) throw new Error("Expected the resource group create call.");
+      expect(create.args).toContain("github-run-id=123456");
     });
 
     it("formats creation time for cleanup's integer comparison", () => {
