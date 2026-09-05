@@ -16,6 +16,7 @@
 //
 // Every external call goes through an injected port, so each branch below is
 // provable without an Azure or GitHub credential.
+import { stateRegistryForEnvironment } from "@radius-project/core";
 import {
   describeError,
   expectSuccess,
@@ -229,6 +230,7 @@ export async function createCloudFixture(
   const clusterScope = `${scope}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
   const roleAssignmentScopes = [scope, clusterScope];
   const expectedAppName = appRegistrationName(repository);
+  const statePackage = stateRegistryForEnvironment(repository, environmentName);
 
   const unwind: UnwindStep[] = [];
   let workspacePath = "";
@@ -574,7 +576,8 @@ export async function createCloudFixture(
         baselineSha,
         environmentName,
         expectedAppName,
-        roleAssignmentScopes
+        roleAssignmentScopes,
+        statePackage
       });
       if (findings.length === 0) return;
       throw new Error(
@@ -1013,6 +1016,40 @@ export async function createCloudFixture(
           ).trim()}`
         );
 
+      const packageRecord = await readStatePackage(
+        commands,
+        repository,
+        statePackage
+      ).catch((error: unknown) => {
+        failures.push(
+          `probe GHCR state package ${statePackage}: ${describeError(error)}`
+        );
+        return null;
+      });
+      if (packageRecord) {
+        const packageSafetyError = validateStatePackageForDeletion(
+          packageRecord,
+          repository
+        );
+        if (packageSafetyError) {
+          failures.push(
+            `refuse GHCR state package ${statePackage}: ${packageSafetyError}`
+          );
+        } else {
+          await attempt(`GHCR state package ${statePackage}`, async () => {
+            expectSuccess(
+              await commands.runGhPackage([
+                "api",
+                "--method",
+                "DELETE",
+                packageRecord.apiPath
+              ]),
+              `gh api DELETE ${packageRecord.apiPath}`
+            );
+          });
+        }
+      }
+
       // Close pull requests before removing their head branches so cleanup does
       // not rely on GitHub implicitly changing pull-request state.
       const pulls = await listOpenPullRequests(commands, repository).catch(
@@ -1135,6 +1172,13 @@ interface LeakProbeInput {
   readonly environmentName: string;
   readonly expectedAppName: string;
   readonly roleAssignmentScopes: readonly string[];
+  readonly statePackage: string;
+}
+
+interface StatePackageRecord {
+  readonly apiPath: string;
+  readonly visibility: string;
+  readonly linkedRepository: string;
 }
 
 interface PollForValueOptions<T> {
@@ -1223,6 +1267,17 @@ async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
         `gh exited ${environment.code}: ${(environment.stderr || environment.stdout).trim()}`
     );
 
+  const statePackage = await readStatePackage(
+    commands,
+    repository,
+    input.statePackage
+  );
+  if (statePackage)
+    findings.push(
+      `GHCR state package "${input.statePackage}" (${statePackage.visibility || "unknown"} visibility, linked to ` +
+        `"${statePackage.linkedRepository || "(no repository)"}")`
+    );
+
   const head = await readDefaultBranchSha(
     commands,
     repository,
@@ -1248,6 +1303,80 @@ async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
     );
 
   return findings;
+}
+
+async function readStatePackage(
+  commands: CloudCommandPort,
+  repository: string,
+  registry: string
+): Promise<StatePackageRecord | null> {
+  const owner = repository.slice(0, repository.indexOf("/"));
+  const packageName = registry.slice(registry.lastIndexOf("/") + 1);
+
+  const ownerType = expectSuccess(
+    await commands.runGhPackage(["api", `users/${owner}`, "--jq", ".type"]),
+    `gh api read account type for ${owner}`
+  ).stdout.trim();
+  const scope =
+    ownerType === "Organization" ? "orgs"
+    : ownerType === "User" ? "users"
+    : null;
+  if (!scope)
+    throw new Error(
+      `GitHub account "${owner}" returned unsupported type "${ownerType || "(empty)"}".`
+    );
+
+  const apiPath = `${scope}/${owner}/packages/container/${encodeURIComponent(packageName)}`;
+  const result = await commands.runGhPackage(["api", apiPath]);
+  if (isGitHubApiNotFound(result)) return null;
+  expectSuccess(result, `gh api read GHCR package ${registry}`);
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new Error(
+      `gh api read GHCR package ${registry} returned invalid JSON: ${describeError(error)}`,
+      { cause: error }
+    );
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload))
+    throw new Error(
+      `gh api read GHCR package ${registry} returned a non-object response.`
+    );
+  const record = payload as Record<string, unknown>;
+  const linkedRepository =
+    (
+      record.repository &&
+      typeof record.repository === "object" &&
+      !Array.isArray(record.repository) &&
+      typeof (record.repository as Record<string, unknown>).full_name ===
+        "string"
+    ) ?
+      String((record.repository as Record<string, unknown>).full_name).trim()
+    : "";
+  return {
+    apiPath,
+    visibility:
+      typeof record.visibility === "string" ? record.visibility.trim() : "",
+    linkedRepository
+  };
+}
+
+function validateStatePackageForDeletion(
+  statePackage: StatePackageRecord,
+  repository: string
+): string | null {
+  if (
+    statePackage.visibility !== "private" &&
+    statePackage.visibility !== "internal"
+  )
+    return `visibility is "${statePackage.visibility || "unknown"}", not private or internal`;
+  if (statePackage.linkedRepository.toLowerCase() !== repository.toLowerCase())
+    return statePackage.linkedRepository ?
+        `it is linked to "${statePackage.linkedRepository}", not "${repository}"`
+      : `it is not linked to "${repository}"`;
+  return null;
 }
 
 async function listAppRegistrations(

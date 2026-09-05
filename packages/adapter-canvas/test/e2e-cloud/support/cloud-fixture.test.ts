@@ -41,6 +41,12 @@ const PULLS_PATH = `repos/${REPOSITORY}/pulls?state=open&per_page=100`;
 const DEFAULT_REF_PATH = `repos/${REPOSITORY}/git/refs/heads/${BRANCH}`;
 const LEASE_REF = "refs/heads/radius/cloud-e2e-lease";
 const LEASE_REF_PATH = `repos/${REPOSITORY}/git/${LEASE_REF}`;
+const STATE_PACKAGE =
+  "ghcr.io/fixture-owner/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
+const PACKAGE_PATH =
+  "orgs/fixture-owner/packages/container/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
+const USER_PACKAGE_PATH =
+  "users/fixture-owner/packages/container/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
 
 const pullPages = (...pages: readonly unknown[][]): string =>
   JSON.stringify(pages);
@@ -134,6 +140,16 @@ function baselineStubs(): FakeCommandStub[] {
     { tool: "az", match: FIC_LIST, respond: { stdout: "[]" } },
     { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" } },
     { tool: "gh", match: ["api", ENVIRONMENT_PATH], respond: NOT_FOUND },
+    {
+      tool: "gh-package",
+      match: ["api", "users/fixture-owner", "--jq", ".type"],
+      respond: { stdout: "Organization" }
+    },
+    {
+      tool: "gh-package",
+      match: ["api", PACKAGE_PATH],
+      respond: NOT_FOUND
+    },
     { tool: "gh", match: ["api", COMMITS_PATH], respond: { stdout: BASELINE } },
     {
       tool: "gh",
@@ -776,6 +792,86 @@ describe("createCloudFixture", () => {
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
         new RegExp(`GitHub environment "${ENVIRONMENT}" in ${REPOSITORY}`)
       );
+    });
+
+    it("reports a leaked GHCR state package", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "private",
+              repository: { full_name: REPOSITORY }
+            })
+          }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        `GHCR state package "${STATE_PACKAGE}" (private visibility, linked to "${REPOSITORY}")`
+      );
+    });
+
+    it("fails when the GHCR state package cannot be probed", async () => {
+      const { fixture } = await createHarness([
+        failing("gh-package", ["api", PACKAGE_PATH], "HTTP 403")
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        /read GHCR package .*HTTP 403/
+      );
+    });
+
+    it("uses the user package endpoint for a user-owned fixture repository", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", "users/fixture-owner", "--jq", ".type"],
+          respond: { stdout: "User" },
+          times: 1
+        },
+        {
+          tool: "gh-package",
+          match: ["api", USER_PACKAGE_PATH],
+          respond: NOT_FOUND
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
+      expect(fake.commands.commandLines("gh-package")).toContain(
+        `api ${USER_PACKAGE_PATH}`
+      );
+    });
+
+    it("rejects an unsupported package-owner type", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", "users/fixture-owner", "--jq", ".type"],
+          respond: { stdout: "Enterprise" },
+          times: 1
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        /unsupported type "Enterprise"/
+      );
+    });
+
+    it.each([
+      ["invalid JSON", "{not-json", /returned invalid JSON/],
+      ["a non-object response", "[]", /returned a non-object response/]
+    ])("rejects %s from the package API", async (_label, stdout, expected) => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: { stdout }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(expected);
     });
 
     it("refuses to read a non-404 environment probe failure as absence", async () => {
@@ -1999,6 +2095,22 @@ describe("createCloudFixture", () => {
             ])
           }
         },
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "private",
+              repository: { full_name: REPOSITORY }
+            })
+          },
+          times: 1
+        },
+        {
+          tool: "gh-package",
+          match: ["api", "--method", "DELETE", PACKAGE_PATH],
+          respond: {}
+        },
         { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} },
         { tool: "gh", match: ["api", "--method", "PATCH"], respond: {} }
       ]);
@@ -2007,6 +2119,7 @@ describe("createCloudFixture", () => {
         "service principal sp-1",
         "app registration app-1",
         `GitHub environment ${ENVIRONMENT}`,
+        `GHCR state package ${STATE_PACKAGE}`,
         "pull request #7",
         "branch radius/setup-a",
         `${BRANCH} reset to ${BASELINE}`
@@ -2014,6 +2127,9 @@ describe("createCloudFixture", () => {
 
       const lines = fake.commands.commandLines("gh");
       expect(lines).toContain(`api --method DELETE ${ENVIRONMENT_PATH}`);
+      expect(fake.commands.commandLines("gh-package")).toContain(
+        `api --method DELETE ${PACKAGE_PATH}`
+      );
       expect(lines).toContain(
         `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
       );
@@ -2256,6 +2372,109 @@ describe("createCloudFixture", () => {
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
         /probe GitHub environment .* gh exited 1: \{"message":"Bad gateway"\}/
+      );
+    });
+
+    it("refuses to delete a package that is not private or internal", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "public",
+              repository: { full_name: REPOSITORY }
+            })
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /refuse GHCR state package .* visibility is "public"/
+      );
+      expect(
+        fake.commands
+          .commandLines("gh-package")
+          .some((line) => line.includes("--method DELETE"))
+      ).toBe(false);
+    });
+
+    it("refuses to delete a package linked to another repository", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "private",
+              repository: { full_name: "other/repository" }
+            })
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /linked to "other\/repository", not "fixture-owner\/fixture-repo"/
+      );
+    });
+
+    it("refuses to delete a package with no repository link", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({ visibility: "private" })
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /it is not linked to "fixture-owner\/fixture-repo"/
+      );
+    });
+
+    it("records a failing GHCR state package deletion", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "internal",
+              repository: { full_name: REPOSITORY }
+            })
+          },
+          times: 1
+        },
+        failing(
+          "gh-package",
+          ["api", "--method", "DELETE", PACKAGE_PATH],
+          "HTTP 403"
+        )
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /GHCR state package .*HTTP 403/
+      );
+    });
+
+    it("records an unreadable GHCR state package probe and continues cleanup", async () => {
+      const { fixture, fake } = await createHarness([
+        failing("gh-package", ["api", PACKAGE_PATH], "HTTP 502"),
+        {
+          tool: "gh",
+          match: ["api", MATCHING_REFS_PATH],
+          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' }
+        },
+        { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /probe GHCR state package .*HTTP 502.*Reclaimed before failing: branch radius\/setup-a/s
+      );
+      expect(fake.commands.commandLines("gh")).toContain(
+        `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
       );
     });
 

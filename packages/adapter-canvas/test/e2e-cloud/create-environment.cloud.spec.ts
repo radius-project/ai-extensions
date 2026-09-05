@@ -121,6 +121,8 @@ const WORKFLOW_DIRECTORY = ".github/workflows";
 const KUBERNETES_NAMESPACE = "default";
 const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
 const githubToken = process.env.GH_TOKEN?.trim() ?? "";
+const githubPackagesToken = process.env.GH_PACKAGES_TOKEN?.trim() ?? "";
+const githubPackagesUser = process.env.GH_PACKAGES_USER?.trim() ?? "";
 const githubAppTokenConfig = takeGitHubAppTokenConfig();
 
 const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -138,7 +140,9 @@ const gate = evaluateCreateEnvironmentGate({
 const skipReason =
   !gate.enabled && gate.disposition === "skip" ? gate.reason : "";
 
-const ports: CloudFixturePorts = createNodeCloudFixturePorts();
+const ports: CloudFixturePorts = createNodeCloudFixturePorts({
+  packageToken: githubPackagesToken
+});
 
 async function runGh(
   commands: CloudCommandPort,
@@ -315,6 +319,14 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
 
   test.beforeAll(async () => {
     if (!gate.enabled) throw new Error(gate.reason);
+    if (!githubPackagesToken)
+      throw new Error(
+        "GH_PACKAGES_TOKEN is required for the cloud lifecycle journey."
+      );
+    if (!githubPackagesUser)
+      throw new Error(
+        "GH_PACKAGES_USER is required for the cloud lifecycle journey."
+      );
     fixture = await createCloudFixture({
       subscriptionId,
       // CI publishes the region; locally it is absent and the fixture's own
