@@ -240,8 +240,11 @@ describe("cloud-e2e.yml", () => {
       CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
       CLOUD_E2E_BOT_INSTALLATION_ID:
         "${{ steps.app-token.outputs.installation-id }}",
-      CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}"
+      CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}",
+      GH_PACKAGES_TOKEN: "${{ github.token }}",
+      GH_PACKAGES_USER: "${{ github.actor }}"
     });
+    expect(workflow.jobs?.["cloud-e2e"]?.permissions?.packages).toBe("write");
   });
 
   it("requests the workflow and deployment scopes explicitly rather than discovering they are missing", async () => {

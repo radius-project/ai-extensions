@@ -5,12 +5,14 @@ import { promises as fs } from "node:fs";
 import {
   CloudCommandError,
   createRefreshingAzureCommandRunner,
+  createGitHubPackageCommandEnvironment,
   createNodeCloudFixturePorts,
   describeError,
   expectSuccess,
   isGitHubApiNotFound,
   normalizeAzureCommandResult,
   normalizeCommandResult,
+  normalizeGitHubPackageCommandResult,
   parseJsonArray,
   type CloudCommandResult
 } from "./cloud-command-port.js";
@@ -305,6 +307,66 @@ describe("parseJsonArray", () => {
 });
 
 describe("createNodeCloudFixturePorts", () => {
+  it("isolates package commands onto the dedicated token", () => {
+    expect(
+      createGitHubPackageCommandEnvironment(" package-token ", {
+        GH_TOKEN: "app-token",
+        GITHUB_TOKEN: "stale-token",
+        PATH: "/tools"
+      })
+    ).toEqual({
+      GH_TOKEN: "package-token",
+      GITHUB_TOKEN: "package-token",
+      PATH: "/tools"
+    });
+  });
+
+  it.each([undefined, "", "   "])(
+    "rejects a missing package command token represented by %j",
+    (packageToken) => {
+      expect(
+        createGitHubPackageCommandEnvironment(packageToken, {})
+      ).toBeNull();
+    }
+  );
+
+  it("fails package commands explicitly when no package token was supplied", async () => {
+    await expect(
+      createNodeCloudFixturePorts().commands.runGhPackage(["api", "user"])
+    ).resolves.toEqual({
+      code: 1,
+      stdout: "",
+      stderr:
+        "GH_PACKAGES_TOKEN is required for cloud fixture package operations."
+    });
+  });
+
+  it("runs package commands through the real gh executable with a dedicated token", async () => {
+    const outcome = await createNodeCloudFixturePorts({
+      packageToken: "package-token-for-version-probe"
+    }).commands.runGhPackage(["--version"]);
+
+    expect(outcome.code).toBe(0);
+    expect(outcome.stdout).toMatch(/^gh version /);
+    expect(outcome.stdout).not.toContain("package-token-for-version-probe");
+  });
+
+  it("redacts the dedicated package token from command output", () => {
+    const token = "dedicated-package-token";
+    expect(
+      normalizeGitHubPackageCommandResult(
+        { code: 1 },
+        `stdout ${token}`,
+        `stderr ${token}`,
+        token
+      )
+    ).toEqual({
+      code: 1,
+      stdout: "stdout [REDACTED]",
+      stderr: "stderr [REDACTED]"
+    });
+  });
+
   it("creates and removes a workspace directory under the system temp root", async () => {
     const ports = createNodeCloudFixturePorts();
 

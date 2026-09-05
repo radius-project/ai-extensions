@@ -35,6 +35,7 @@ export interface CloudCommandResult {
 export interface CloudCommandPort {
   runAz(args: readonly string[]): Promise<CloudCommandResult>;
   runGh(args: readonly string[]): Promise<CloudCommandResult>;
+  runGhPackage(args: readonly string[]): Promise<CloudCommandResult>;
   runGit(args: readonly string[], cwd: string): Promise<CloudCommandResult>;
 }
 
@@ -71,7 +72,8 @@ function runTool(
     error: { code?: string | number | null } | null,
     stdout: string | undefined,
     stderr: string | undefined
-  ) => CloudCommandResult = normalizeCommandResult
+  ) => CloudCommandResult = normalizeCommandResult,
+  env?: NodeJS.ProcessEnv
 ): Promise<CloudCommandResult> {
   return new Promise((resolve) => {
     const child = cliExec(
@@ -79,6 +81,7 @@ function runTool(
       [...args],
       {
         cwd,
+        env,
         timeout: COMMAND_TIMEOUT_MS,
         maxBuffer: MAX_OUTPUT_BYTES,
         windowsHide: true
@@ -309,12 +312,39 @@ export function isGitHubApiNotFound(result: CloudCommandResult): boolean {
  * so the code a credentialed run exercises but this suite cannot is as small as
  * it can be made.
  */
-export function createNodeCloudFixturePorts(): CloudFixturePorts {
+export function createNodeCloudFixturePorts(
+  options: { readonly packageToken?: string } = {}
+): CloudFixturePorts {
   const runAz = createRefreshingAzureCommandRunner();
+  const packageEnv = createGitHubPackageCommandEnvironment(
+    options.packageToken
+  );
   return {
     commands: {
       runAz,
       runGh: (args) => runTool("gh", args),
+      runGhPackage: (args) => {
+        if (!packageEnv)
+          return Promise.resolve({
+            code: 1,
+            stdout: "",
+            stderr:
+              "GH_PACKAGES_TOKEN is required for cloud fixture package operations."
+          });
+        return runTool(
+          "gh",
+          args,
+          undefined,
+          (error, stdout, stderr) =>
+            normalizeGitHubPackageCommandResult(
+              error,
+              stdout,
+              stderr,
+              packageEnv.GH_TOKEN
+            ),
+          packageEnv
+        );
+      },
       runGit: (args, cwd) => runTool("git", args, cwd)
     },
     makeWorkspaceDir: (prefix) =>
@@ -324,6 +354,38 @@ export function createNodeCloudFixturePorts(): CloudFixturePorts {
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     now: () => new Date(),
     newUniqueId: () => randomUUID()
+  };
+}
+
+export function createGitHubPackageCommandEnvironment(
+  packageToken: string | undefined,
+  env: NodeJS.ProcessEnv = process.env
+):
+  | (NodeJS.ProcessEnv & {
+      readonly GH_TOKEN: string;
+      readonly GITHUB_TOKEN: string;
+    })
+  | null {
+  const token = packageToken?.trim();
+  if (!token) return null;
+  return {
+    ...env,
+    GH_TOKEN: token,
+    GITHUB_TOKEN: token
+  };
+}
+
+export function normalizeGitHubPackageCommandResult(
+  error: { code?: string | number | null } | null,
+  stdout: string | undefined,
+  stderr: string | undefined,
+  packageToken: string
+): CloudCommandResult {
+  const result = normalizeCommandResult(error, stdout, stderr);
+  return {
+    ...result,
+    stdout: redactCredentials(result.stdout, [packageToken]),
+    stderr: redactCredentials(result.stderr, [packageToken])
   };
 }
 
