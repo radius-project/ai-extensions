@@ -339,6 +339,29 @@ describe("createNodeCloudFixturePorts", () => {
       expect(runCommand).toHaveBeenCalledWith(["group", "list"]);
     });
 
+    it("ignores whitespace-only Actions OIDC state for a local Azure CLI session", async () => {
+      let now = 0;
+      const runCommand = vi.fn((_: readonly string[]) =>
+        Promise.resolve(result({ stdout: "local" }))
+      );
+      const run = createRefreshingAzureCommandRunner({
+        env: {
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: " ",
+          ACTIONS_ID_TOKEN_REQUEST_URL: " "
+        },
+        now: () => now,
+        refreshIntervalMs: 100,
+        runCommand
+      });
+
+      now = 100;
+      await expect(run(["group", "list"])).resolves.toMatchObject({
+        code: 0,
+        stdout: "local"
+      });
+      expect(runCommand).toHaveBeenCalledOnce();
+    });
+
     it("renews with a fresh assertion at the boundary before running the command", async () => {
       let now = 1_000;
       const calls: string[][] = [];
@@ -721,6 +744,42 @@ describe("createNodeCloudFixturePorts", () => {
       expect(result.stdout).not.toContain(token);
       expect(result.stderr).toContain("failure: [REDACTED]");
       expect(result.stderr).not.toContain(token);
+
+      const injectedToken = "injected-azure-token-for-port-test";
+      await fs.writeFile(
+        path.join(fakeBin, "az"),
+        [
+          "#!/bin/sh",
+          `printf "accessToken=${injectedToken}\\n"`,
+          `printf "failure: ${injectedToken}\\n" >&2`,
+          "exit 7",
+          ""
+        ].join("\n")
+      );
+      await fs.writeFile(
+        path.join(fakeBin, "az.cmd"),
+        [
+          "@echo off",
+          `echo accessToken=${injectedToken}`,
+          `echo failure: ${injectedToken} 1>&2`,
+          "exit /b 7",
+          ""
+        ].join("\r\n")
+      );
+      delete process.env.AZURE_FEDERATED_TOKEN;
+
+      const injectedResult = await createRefreshingAzureCommandRunner({
+        env: {
+          ...process.env,
+          AZURE_FEDERATED_TOKEN: injectedToken
+        }
+      })(["--version"]);
+
+      expect(injectedResult.code).toBe(7);
+      expect(injectedResult.stdout).toContain("accessToken=[REDACTED]");
+      expect(injectedResult.stdout).not.toContain(injectedToken);
+      expect(injectedResult.stderr).toContain("failure: [REDACTED]");
+      expect(injectedResult.stderr).not.toContain(injectedToken);
     } finally {
       if (originalPath === undefined) delete process.env.PATH;
       else process.env.PATH = originalPath;

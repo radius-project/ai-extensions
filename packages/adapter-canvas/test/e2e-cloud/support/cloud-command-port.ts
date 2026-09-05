@@ -166,9 +166,13 @@ export function createRefreshingAzureCommandRunner(
     );
   const runCommand =
     options.runCommand ??
-    ((args) => runTool("az", args, undefined, normalizeAzureCommandResult));
+    ((args) =>
+      runTool("az", args, undefined, (error, stdout, stderr) =>
+        normalizeAzureCommandResult(error, stdout, stderr, env)
+      ));
   const oidcRefreshConfigured = Boolean(
-    env.ACTIONS_ID_TOKEN_REQUEST_URL || env.ACTIONS_ID_TOKEN_REQUEST_TOKEN
+    env.ACTIONS_ID_TOKEN_REQUEST_URL?.trim() ||
+    env.ACTIONS_ID_TOKEN_REQUEST_TOKEN?.trim()
   );
   let refreshedAt = now();
   let pendingRefresh: Promise<CloudCommandResult | null> | undefined;

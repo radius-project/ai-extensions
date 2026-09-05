@@ -282,7 +282,7 @@ describe("createCloudFixture", () => {
     });
 
     it("tags CI-created groups with the owning GitHub Actions run id", async () => {
-      const { fake } = await createHarness([], {}, { githubRunId: "123456" });
+      const { fake } = await createHarness([], {}, { githubRunId: " 123456 " });
 
       const create = fake.commands.calls.find(
         (call) => call.tool === "az" && call.args.includes("create")
@@ -297,7 +297,19 @@ describe("createCloudFixture", () => {
       ]);
     });
 
-    it.each(["", "0", "local", "12.5"])(
+    it("treats a blank GitHub Actions run id as a local run", async () => {
+      const { fake } = await createHarness([], {}, { githubRunId: "   " });
+
+      expect(fake.commands.commandLines("gh")).toEqual([
+        `api --method POST repos/${REPOSITORY}/git/refs -f ref=${LEASE_REF} -f sha=${BASELINE}`,
+        `repo clone ${REPOSITORY} ${WORKSPACE}`
+      ]);
+      expect(fake.commands.commandLines("az")[0]).not.toContain(
+        "github-run-id="
+      );
+    });
+
+    it.each(["0", "local", "12.5"])(
       "rejects unverifiable GitHub Actions run id %j before acquiring the lease",
       async (githubRunId) => {
         const fake = createFakeFixturePorts({ stubs: baselineStubs() });

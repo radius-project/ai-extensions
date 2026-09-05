@@ -133,14 +133,15 @@ export async function createCloudFixture(
   const defaultBranch = options.defaultBranch ?? FIXTURE_REPO_DEFAULT_BRANCH;
   const baselineSha = options.baselineSha ?? FIXTURE_BASELINE_SHA;
   const nodeCount = options.nodeCount ?? DEFAULT_NODE_COUNT;
+  const githubRunId = options.githubRunId?.trim() || undefined;
   const leaseMessage =
-    options.githubRunId === undefined ?
-      undefined
-    : cloudE2ELeaseCommitMessage(options.githubRunId);
+    githubRunId === undefined ? undefined : (
+      cloudE2ELeaseCommitMessage(githubRunId)
+    );
   const tags = [
     `creationTime=${radiusPurgeCreationTime(ports.now())}`,
     "radius-canvas-e2e=true",
-    ...(options.githubRunId ? [`github-run-id=${options.githubRunId}`] : [])
+    ...(githubRunId ? [`github-run-id=${githubRunId}`] : [])
   ];
   const assertionTimeoutMs = requirePositiveNumber(
     options.assertionTimeoutMs ?? DEFAULT_ASSERTION_TIMEOUT_MS,
@@ -219,7 +220,7 @@ export async function createCloudFixture(
             "--jq",
             ".sha"
           ]),
-          `gh api create lease marker for workflow run ${options.githubRunId}`
+          `gh api create lease marker for workflow run ${githubRunId}`
         ).stdout,
         "The fixture lease marker creation"
       );
@@ -232,7 +233,7 @@ export async function createCloudFixture(
           "-f",
           `sha=${leaseCommitSha}`
         ]),
-        `gh api mark ${CLOUD_E2E_LEASE_REF} for workflow run ${options.githubRunId}`
+        `gh api mark ${CLOUD_E2E_LEASE_REF} for workflow run ${githubRunId}`
       );
     }
 
