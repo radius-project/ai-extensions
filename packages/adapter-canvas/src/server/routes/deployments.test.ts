@@ -587,6 +587,55 @@ describe("deployments routes (SU-06)", () => {
       ]);
     });
 
+    it("projects deployed graph state before serializing the status response", () => {
+      const sentinel = "fixture-private-field";
+      const state: CanvasState = {
+        deployedGraph: [
+          {
+            id: "safe",
+            name: "safe",
+            type: "Radius.Data/redisCaches",
+            properties: { privateField: sentinel }
+          }
+        ]
+      };
+      const { recording, context: ctx } = context("GET", "/api/deploy-status");
+
+      handleDeployStatus(ctx, statusDependencies(state));
+
+      const payload = JSON.parse(recording.body);
+      expect(payload.deployedGraph).toEqual([
+        {
+          id: "safe",
+          name: "safe",
+          type: "Radius.Data/redisCaches",
+          connections: [],
+          outputResources: []
+        }
+      ]);
+      expect(recording.body).not.toContain(sentinel);
+    });
+
+    it("fails closed on unsafe legacy deployed graph state", () => {
+      const sentinel = "fixture-private-field";
+      const state: CanvasState = {
+        deployedGraph: [
+          {
+            id: "unsafe",
+            name: "unsafe",
+            type: "Radius.Security/secrets",
+            properties: { data: { privateField: sentinel } }
+          }
+        ]
+      };
+      const { recording, context: ctx } = context("GET", "/api/deploy-status");
+
+      handleDeployStatus(ctx, statusDependencies(state));
+
+      expect(JSON.parse(recording.body).deployedGraph).toBeNull();
+      expect(recording.body).not.toContain(sentinel);
+    });
+
     it("falls back to the planned resources when a deploy has not started", () => {
       const state: CanvasState = {
         deployingResources: null,

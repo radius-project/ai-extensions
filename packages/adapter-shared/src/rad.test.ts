@@ -738,6 +738,7 @@ describe("runRadAppGraph artifact completion", () => {
   let bin: string;
   let prevNodeOptions: string | undefined;
   let prevScenario: string | undefined;
+  let prevGraph: string | undefined;
   let bicepBackup: Buffer | null;
   let bicepMode: number | null;
   let prevBinary: string | undefined;
@@ -755,7 +756,7 @@ describe("runRadAppGraph artifact completion", () => {
         'if (process.argv[1]?.endsWith("app")) {',
         '  fs.writeFileSync("app-graph.json", "{");',
         "  setTimeout(() => {",
-        '    fs.writeFileSync("app-graph.json", JSON.stringify({ resources: [] }));',
+        '    fs.writeFileSync("app-graph.json", process.env.FAKE_RAD_GRAPH || JSON.stringify({ resources: [] }));',
         '    if (process.env.FAKE_RAD_SCENARIO === "failure") {',
         '      process.stderr.write("late graph diagnostic");',
         "      process.exit(3);",
@@ -774,6 +775,8 @@ describe("runRadAppGraph artifact completion", () => {
       prevNodeOptions ? `${prevNodeOptions} ${preloadOption}` : preloadOption;
     prevScenario = process.env.FAKE_RAD_SCENARIO;
     delete process.env.FAKE_RAD_SCENARIO;
+    prevGraph = process.env.FAKE_RAD_GRAPH;
+    delete process.env.FAKE_RAD_GRAPH;
     if (fs.existsSync(MANAGED_BICEP_PATH)) {
       bicepBackup = fs.readFileSync(MANAGED_BICEP_PATH);
       bicepMode = fs.statSync(MANAGED_BICEP_PATH).mode;
@@ -797,6 +800,8 @@ describe("runRadAppGraph artifact completion", () => {
     else process.env.NODE_OPTIONS = prevNodeOptions;
     if (prevScenario === undefined) delete process.env.FAKE_RAD_SCENARIO;
     else process.env.FAKE_RAD_SCENARIO = prevScenario;
+    if (prevGraph === undefined) delete process.env.FAKE_RAD_GRAPH;
+    else process.env.FAKE_RAD_GRAPH = prevGraph;
     fs.rmSync(binDir, { recursive: true, force: true });
     fs.rmSync(MANAGED_BICEP_PATH, { force: true });
     if (bicepBackup) {
@@ -843,6 +848,133 @@ describe("runRadAppGraph artifact completion", () => {
         stderr: "late graph diagnostic"
       })
     });
+  }, 10000);
+
+  it("persists and returns only safety-projected graph metadata", async () => {
+    const sentinel = "fixture-plaintext-value";
+    const iconHash = `sha256:${"e".repeat(64)}`;
+    const unreferencedIconHash = `sha256:${"f".repeat(64)}`;
+    process.env.FAKE_RAD_GRAPH = JSON.stringify({
+      resources: [
+        {
+          id: "container",
+          name: "container",
+          type: "Radius.Compute/containers",
+          diffHash: `sha256:${"a".repeat(64)}`,
+          iconHash,
+          properties: {
+            codeReference: "src/index.ts#L1",
+            token: sentinel
+          },
+          connections: [
+            {
+              id: "database",
+              direction: "Outbound",
+              kind: "Connection",
+              properties: { password: sentinel }
+            }
+          ],
+          outputResources: [
+            {
+              id: "provider/output",
+              type: "Provider/type",
+              properties: { password: sentinel }
+            }
+          ]
+        }
+      ],
+      icons: {
+        [iconHash]: "<svg>safe</svg>",
+        [unreferencedIconHash]: sentinel,
+        "not-a-hash": sentinel,
+        __proto__: sentinel
+      }
+    });
+    const bicepFile = path.join(binDir, "app.bicep");
+    const saved = path.join(binDir, ".radius", "app-graph.json");
+    fs.writeFileSync(bicepFile, "resource app {}");
+
+    const result = await runRadAppGraph(bicepFile, {
+      radPath: bin,
+      saveGraphJsonTo: saved
+    });
+
+    const serialized = JSON.stringify(result);
+    const persisted = fs.readFileSync(saved, "utf8");
+    expect(serialized).not.toContain(sentinel);
+    expect(persisted).not.toContain(sentinel);
+    expect(result).toMatchObject({
+      resources: [
+        {
+          properties: { codeReference: "src/index.ts#L1" },
+          connections: [
+            {
+              id: "database",
+              direction: "Outbound",
+              kind: "Connection"
+            }
+          ],
+          outputResources: [{ id: "provider/output", type: "Provider/type" }]
+        }
+      ],
+      icons: { [iconHash]: "<svg>safe</svg>" }
+    });
+    if (
+      !result ||
+      typeof result !== "object" ||
+      !("icons" in result) ||
+      !result.icons ||
+      typeof result.icons !== "object"
+    ) {
+      throw new Error("projected graph did not retain its referenced icon map");
+    }
+    expect(Object.getPrototypeOf(result.icons)).toBeNull();
+  }, 10000);
+
+  it("refuses graph-visible Secret data before saving the workspace artifact", async () => {
+    const sentinel = "fixture-plaintext-value";
+    process.env.FAKE_RAD_GRAPH = JSON.stringify({
+      resources: [
+        {
+          id: "secret",
+          name: "app-secret",
+          type: "Radius.Security/secrets",
+          properties: { data: { password: sentinel } }
+        }
+      ]
+    });
+    const bicepFile = path.join(binDir, "app.bicep");
+    const saved = path.join(binDir, ".radius", "app-graph.json");
+    fs.writeFileSync(bicepFile, "resource app {}");
+
+    const failure = await runRadAppGraph(bicepFile, {
+      radPath: bin,
+      saveGraphJsonTo: saved
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).not.toContain(sentinel);
+    expect(fs.existsSync(saved)).toBe(false);
+  }, 10000);
+
+  it("does not expose malformed graph content through the parse failure", async () => {
+    const sentinel = "fixture-plaintext-value";
+    process.env.FAKE_RAD_GRAPH = `{"password":${sentinel}`;
+    const bicepFile = path.join(binDir, "app.bicep");
+    const saved = path.join(binDir, ".radius", "app-graph.json");
+    fs.writeFileSync(bicepFile, "resource app {}");
+
+    const failure = await runRadAppGraph(bicepFile, {
+      radPath: bin,
+      saveGraphJsonTo: saved
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain(
+      "rad app graph produced invalid graph JSON"
+    );
+    expect((failure as Error).message).not.toContain(sentinel);
+    expect(fs.existsSync(saved)).toBe(false);
   }, 10000);
 });
 

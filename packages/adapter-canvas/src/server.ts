@@ -22,6 +22,7 @@ import {
   isKubernetesNamespace,
   mergeDeployedGraphMetadata,
   projectDeployedGraph,
+  projectSafeApplicationGraph,
   resolveRecipeOutputs,
   DEFAULT_STATE_ARCHIVE,
   OCI_STATE_BACKEND,
@@ -3213,6 +3214,8 @@ const deployDispatchService = createDeployDispatchService({
 });
 
 const deployOutcomeService = createDeployOutcomeService({
+  projectSafeGraphResources: (graph) =>
+    canvasGraphResources(projectSafeApplicationGraph(graph).resources),
   settleDeployStatuses,
   fetchRunLog,
   extractGitHubActionsStepLog,

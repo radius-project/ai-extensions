@@ -12,6 +12,185 @@ import { addInboundConnections } from "./model.js";
 
 const DIFF_HASH_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const DEFINITION_KEY_SEPARATOR = "\u0000";
+const SECRET_RESOURCE_TYPE = "radius.security/secrets";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function copyString(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+  key: string
+): void {
+  if (typeof source[key] === "string") target[key] = source[key];
+}
+
+function copyNumber(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+  key: string
+): void {
+  if (typeof source[key] === "number") target[key] = source[key];
+}
+
+function containsGraphVisibleSecretData(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (Array.isArray(value)) return value.some(containsGraphVisibleSecretData);
+  if (isRecord(value)) {
+    return Object.values(value).some(containsGraphVisibleSecretData);
+  }
+  return true;
+}
+
+function assertSecretDataIsRedacted(resource: Record<string, unknown>): void {
+  const type =
+    typeof resource.type === "string" ?
+      resource.type.split("@")[0].toLowerCase()
+    : "";
+  if (type !== SECRET_RESOURCE_TYPE) return;
+  const properties = isRecord(resource.properties) ? resource.properties : null;
+  if (!properties || !containsGraphVisibleSecretData(properties.data)) return;
+  const name =
+    typeof resource.name === "string" && resource.name ?
+      ` "${resource.name}"`
+    : "";
+  throw new Error(
+    `Canvas refused to save or render Secret resource${name} because its graph data was not redacted. Supply Secret data through secure inputs or schema-supported references; do not place plaintext values in the application model.`
+  );
+}
+
+export function projectGraphOutputMetadata(
+  value: unknown
+): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  assertSecretDataIsRedacted(value);
+  const projected: Record<string, unknown> = {};
+  for (const key of [
+    "id",
+    "name",
+    "type",
+    "displayType",
+    "provider",
+    "apiVersion",
+    "deployStatus",
+    "portalUrl",
+    "icon"
+  ]) {
+    copyString(projected, value, key);
+  }
+  if (
+    typeof value.iconHash === "string" &&
+    DIFF_HASH_PATTERN.test(value.iconHash)
+  ) {
+    projected.iconHash = value.iconHash;
+  }
+  return projected;
+}
+
+export function projectGraphConnectionMetadata(
+  value: unknown
+): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  const projected: Record<string, unknown> = {};
+  for (const key of ["id", "name", "direction", "kind", "diffStatus"]) {
+    copyString(projected, value, key);
+  }
+  return projected;
+}
+
+export function projectGraphResourceMetadata(
+  value: unknown
+): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  assertSecretDataIsRedacted(value);
+  const projected: Record<string, unknown> = {};
+  for (const key of [
+    "id",
+    "name",
+    "type",
+    "displayType",
+    "provisioningState",
+    "diffHash",
+    "diffStatus",
+    "deployStatus",
+    "deployMessage",
+    "portalUrl",
+    "codeReference",
+    "definitionFile",
+    "icon"
+  ]) {
+    copyString(projected, value, key);
+  }
+  if (
+    typeof value.iconHash === "string" &&
+    DIFF_HASH_PATTERN.test(value.iconHash)
+  ) {
+    projected.iconHash = value.iconHash;
+  }
+  copyNumber(projected, value, "definitionLine");
+
+  const properties = isRecord(value.properties) ? value.properties : null;
+  if (properties && typeof properties.codeReference === "string") {
+    projected.properties = { codeReference: properties.codeReference };
+  }
+  projected.connections =
+    Array.isArray(value.connections) ?
+      value.connections
+        .map(projectGraphConnectionMetadata)
+        .filter((entry) => entry !== null)
+    : [];
+  projected.outputResources =
+    Array.isArray(value.outputResources) ?
+      value.outputResources
+        .map(projectGraphOutputMetadata)
+        .filter((entry) => entry !== null)
+    : [];
+  return projected;
+}
+
+export interface SafeApplicationGraph {
+  resources: Record<string, unknown>[];
+  icons?: Record<string, string>;
+}
+
+export function projectSafeApplicationGraph(
+  appGraph: unknown
+): SafeApplicationGraph {
+  const sourceResources =
+    Array.isArray(appGraph) ? appGraph
+    : isRecord(appGraph) && Array.isArray(appGraph.resources) ?
+      appGraph.resources
+    : [];
+  const resources = sourceResources
+    .map(projectGraphResourceMetadata)
+    .filter((entry) => entry !== null);
+  if (!isRecord(appGraph) || !isRecord(appGraph.icons)) return { resources };
+  const referencedIconHashes = new Set<string>();
+  for (const resource of resources) {
+    if (typeof resource.iconHash === "string") {
+      referencedIconHashes.add(resource.iconHash);
+    }
+    const outputs =
+      Array.isArray(resource.outputResources) ? resource.outputResources : [];
+    for (const output of outputs) {
+      if (isRecord(output) && typeof output.iconHash === "string") {
+        referencedIconHashes.add(output.iconHash);
+      }
+    }
+  }
+  const icons = Object.create(null) as Record<string, string>;
+  for (const [key, value] of Object.entries(appGraph.icons)) {
+    if (
+      DIFF_HASH_PATTERN.test(key) &&
+      referencedIconHashes.has(key) &&
+      typeof value === "string"
+    ) {
+      icons[key] = value;
+    }
+  }
+  return { resources, icons };
+}
 
 function definitionKey(type: string, name: string): string {
   return `${type}${DEFINITION_KEY_SEPARATOR}${name}`;
@@ -32,16 +211,8 @@ export function applicationGraphToResources(
   definitionFile = ".radius/app.bicep",
   definitionContent = ""
 ): any[] {
-  const icons =
-    (
-      !Array.isArray(appGraph) &&
-      appGraph &&
-      appGraph.icons &&
-      typeof appGraph.icons === "object" &&
-      !Array.isArray(appGraph.icons)
-    ) ?
-      appGraph.icons
-    : {};
+  const safeGraph = projectSafeApplicationGraph(appGraph);
+  const icons = safeGraph.icons ?? {};
 
   const resolveIcon = (resource: any): string => {
     if (typeof resource?.icon === "string" && resource.icon)
@@ -51,49 +222,49 @@ export function applicationGraphToResources(
         icons[hash]
       : "";
   };
-  const raw =
-    Array.isArray(appGraph) ? appGraph
-    : appGraph && Array.isArray(appGraph.resources) ? appGraph.resources
-    : [];
+  const raw = safeGraph.resources;
   const definitionLines = findResourceDefinitionLines(definitionContent);
 
   const resources: any[] = [];
   for (const r of raw) {
-    if (!r || typeof r !== "object") continue;
-    const id = r.id || "";
-    const type = r.type || "";
+    const id = typeof r.id === "string" ? r.id : "";
+    const name = typeof r.name === "string" ? r.name : "";
+    const type = typeof r.type === "string" ? r.type : "";
     if (!id || !type) continue;
 
     // Keep only outbound edges; inbound edges are rebuilt below and the full
     // connection list is sorted deterministically inside addInboundConnections,
     // so the shape is stable regardless of rad's edge ordering.
     const connections: any[] = [];
-    for (const c of Array.isArray(r.connections) ? r.connections : []) {
+    for (const c of r.connections as Record<string, unknown>[]) {
       if (!c || !c.id) continue;
       if ((c.direction || "Outbound") !== "Outbound") continue;
-      connections.push({ id: c.id, direction: "Outbound" });
+      connections.push({
+        id: c.id,
+        direction: "Outbound",
+        ...(typeof c.kind === "string" ? { kind: c.kind } : {})
+      });
     }
 
     resources.push({
       id,
-      name: r.name || "",
+      name,
       type,
       provisioningState: r.provisioningState || "NotSpecified",
       connections,
-      outputResources:
-        Array.isArray(r.outputResources) ?
-          r.outputResources.map((output: any) => ({
-            ...output,
-            icon: resolveIcon(output)
-          }))
-        : [],
-      diffHash: validateDiffHash(r.diffHash, r.name || id),
+      outputResources: (r.outputResources as Record<string, unknown>[]).map(
+        (output) => ({
+          ...output,
+          icon: resolveIcon(output)
+        })
+      ),
+      diffHash: validateDiffHash(r.diffHash, name || id),
       definitionFile,
       definitionLine:
         typeof r.definitionLine === "number" && r.definitionLine > 0 ?
           r.definitionLine
-        : (definitionLines.get(definitionKey(type, r.name || "")) ??
-          definitionLines.get(r.name) ??
+        : (definitionLines.get(definitionKey(type, name)) ??
+          definitionLines.get(name) ??
           definitionLines.get(definitionKey(type, id.split("/").pop() || "")) ??
           definitionLines.get(id.split("/").pop() || "") ??
           0),
@@ -103,7 +274,7 @@ export function applicationGraphToResources(
       // source links silently disappear even though app.bicep and app-graph.json
       // carry them.
       codeReference:
-        (r.properties &&
+        (isRecord(r.properties) &&
           typeof r.properties.codeReference === "string" &&
           r.properties.codeReference) ||
         (typeof r.codeReference === "string" && r.codeReference) ||

@@ -33,6 +33,7 @@ export interface DeployOutcomeStatusReader {
 }
 
 export interface DeployOutcomeDependencies {
+  projectSafeGraphResources(graph: unknown): CanvasGraphResource[];
   settleDeployStatuses(
     resources: CanvasGraphResource[],
     conclusion: string | null | undefined
@@ -73,6 +74,7 @@ export interface DeployOutcomeService {
 }
 
 const REQUIRED_DEPENDENCIES: readonly (keyof DeployOutcomeDependencies)[] = [
+  "projectSafeGraphResources",
   "settleDeployStatuses",
   "fetchRunLog",
   "extractGitHubActionsStepLog",
@@ -106,8 +108,14 @@ export function createDeployOutcomeService(
       // Permission failures will not resolve by retrying.
       if (gr.status === "auth") break;
       if (gr.graph) {
-        deployed = gr.graph;
-        break;
+        try {
+          deployed = dependencies.projectSafeGraphResources(gr.graph);
+          break;
+        } catch {
+          // Treat an unsafe producer artifact as malformed without retaining or
+          // repeating any of its data in shared state or user-facing diagnostics.
+          graphStatus = "malformed";
+        }
       }
       if (g < 2) await dependencies.sleep(5000);
     }

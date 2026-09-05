@@ -12,6 +12,8 @@ function dependencies(
   overrides: Partial<DeployOutcomeDependencies> = {}
 ): DeployOutcomeDependencies {
   return {
+    projectSafeGraphResources: (graph) =>
+      Array.isArray(graph) ? (graph as CanvasGraphResource[]) : [],
     settleDeployStatuses: () => {},
     fetchRunLog: () => Promise.resolve(null),
     extractGitHubActionsStepLog: () => "",
@@ -87,6 +89,7 @@ function outcomeRequest(overrides: Partial<DeployOutcomeRequest> = {}): {
 
 describe("deploy outcome construction", () => {
   it.each([
+    "projectSafeGraphResources",
     "settleDeployStatuses",
     "fetchRunLog",
     "extractGitHubActionsStepLog",
@@ -115,6 +118,7 @@ describe("deploy outcome on success", () => {
       statusReader: statusReader([{ graph: [{ id: "r1" }], status: "ok" }]),
       deployStepStartedAt: 1_700_000_000_000
     });
+
     const settled: unknown[] = [];
     const service = createDeployOutcomeService(
       dependencies({
@@ -148,6 +152,54 @@ describe("deploy outcome on success", () => {
     );
     expect(logs).toContain(
       "Click on deployed resources to view them in the Azure Portal."
+    );
+  });
+
+  it("projects a published graph before saving it in shared state", async () => {
+    const sentinel = "fixture-private-field";
+    const { request, state } = outcomeRequest({
+      statusReader: statusReader([
+        {
+          graph: [{ id: "r1", properties: { privateField: sentinel } }],
+          status: "ok"
+        }
+      ])
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        projectSafeGraphResources: () => [{ id: "r1" }]
+      })
+    );
+
+    await service.settle(request);
+
+    expect(state.deployedGraph).toEqual([{ id: "r1" }]);
+    expect(JSON.stringify(state)).not.toContain(sentinel);
+  });
+
+  it("treats an unsafe published graph as malformed without retaining its value", async () => {
+    const sentinel = "fixture-private-field";
+    const { request, logs, state } = outcomeRequest({
+      statusReader: statusReader([
+        { graph: [{ id: "unsafe" }], status: "ok" },
+        { graph: [{ id: "unsafe" }], status: "ok" },
+        { graph: [{ id: "unsafe" }], status: "ok" }
+      ])
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        projectSafeGraphResources: () => {
+          throw new Error(`unsafe graph: ${sentinel}`);
+        }
+      })
+    );
+
+    await service.settle(request);
+
+    expect(state.deployedGraph).toBeUndefined();
+    expect(JSON.stringify({ logs, state })).not.toContain(sentinel);
+    expect(logs).toContain(
+      "  ⚠ The deploy status artifact was found but could not be parsed. Continuing."
     );
   });
 
