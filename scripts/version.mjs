@@ -81,21 +81,26 @@ function sourceVersion(plugin) {
   return version;
 }
 
-function catalogEntry(marketplace, name, publishedRef) {
-  const entry = marketplace.json.plugins?.find((p) => p.name === name);
-  if (!entry) fail(`no "${name}" plugin entry in ${marketplace.file}`);
+function catalogEntry(marketplace, plugin, publishedRef) {
+  const entry = marketplace.json.plugins?.find((p) => p.name === plugin.name);
+  if (!entry) {
+    fail(`no "${plugin.name}" plugin entry in ${marketplace.file}`);
+  }
   if (publishedRef && (!entry.source || typeof entry.source !== "object")) {
     fail(
-      `"${name}" needs an object source for a channel publish in ${marketplace.file}`
+      `"${plugin.name}" needs an object source for a channel publish in ${marketplace.file}`
     );
   }
   return {
-    where: `${marketplace.file}#plugins[${name}].version`,
+    where: `${marketplace.file}#plugins[${plugin.name}].version`,
     doc: marketplace,
     get: () => entry.version,
     set: (v) => {
       entry.version = v;
-      if (publishedRef) entry.source.ref = publishedRef;
+      if (publishedRef) {
+        entry.source.ref = publishedRef;
+        entry.source.path = plugin.dir;
+      }
     }
   };
 }
@@ -132,7 +137,7 @@ function edgeTargets(plugin, version) {
   const marketplace = read(MARKETPLACE);
   return [
     {
-      ...catalogEntry(marketplace, plugin.name, `${plugin.name}@edge`),
+      ...catalogEntry(marketplace, plugin, `${plugin.name}@edge`),
       expected: version
     }
   ];

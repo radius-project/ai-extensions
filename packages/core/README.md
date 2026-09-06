@@ -4,7 +4,7 @@ Radius Canvas is the application-modeling and deployment product for the GitHub 
 
 ## Layout
 
-```
+```text
 packages/core/      UI-agnostic core (this package). No SDK, no HTTP, no DOM.
   src/
     graph/                    Bicep -> application graph build + diff (pure).
@@ -25,7 +25,7 @@ packages/adapter-canvas/      The Copilot-canvas UI adapter (thin).
     infra.mjs                 OIDC / workflow / portal wrappers over the core.
     gh.mjs                    Shell + GitHub API port primitives.
     shared.mjs               escapeHtml + shared credential state.
-  build.mjs                   esbuild bundle -> plugins/radius/dist/.
+  build.mjs                   esbuild bundle -> .artifacts/radius/.
 ```
 
 ### The dependency rule
@@ -102,7 +102,7 @@ shared and UI-agnostic, lift it into `packages/core` first.
 
 ```bash
 pnpm --filter @radius-project/core typecheck
-pnpm build:canvas     # esbuild -> plugins/radius/dist/
+pnpm build:canvas     # esbuild -> .artifacts/radius/
 ```
 
 ## Testing

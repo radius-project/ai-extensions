@@ -8,7 +8,7 @@ const {
   validateAzureRecipePack
 } = await import(
   new URL(
-    "plugins/radius/skills/radius-app-bicep/scripts/radius-recipe-pack.mjs",
+    "extensions/radius/skills/radius-app-bicep/scripts/radius-recipe-pack.mjs",
     repositoryRoot
   ).href
 );

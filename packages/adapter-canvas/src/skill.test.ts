@@ -11,10 +11,17 @@ const MODULE_DIR = path.join(
   "src"
 );
 const HOME_DIR = path.join(path.parse(process.cwd()).root, "home", "radius");
+const PLUGIN_ROOT = path.join(path.parse(process.cwd()).root, "plugin");
+const CANONICAL_MODULE_DIR = path.join(
+  PLUGIN_ROOT,
+  "com.github.copilot",
+  "extensions",
+  "radius"
+);
 const REQUIRED_FILES = [
   "SKILL.md",
   path.join("scripts", "validate-bicep.mjs"),
-  path.join("..", "radius-app-graph", "references", "source-code-references.md")
+  path.join("references", "source-code-references.md")
 ];
 const INSTRUCTION =
   "Continue with the loaded skill. If it is unavailable, read SKILL.md from skillBase. Substitute skillBase for <loaded-skill-base>. Substitute skillVersion for <loaded-skill-version> only when skillVersion is present; otherwise leave <loaded-skill-version> unchanged so the skill omits the flag.";
@@ -23,7 +30,7 @@ const CANDIDATES = {
   installed: path.join(MODULE_DIR, "skills", "radius-app-bicep"),
   source: path.resolve(
     MODULE_DIR,
-    "../../../plugins/radius/skills/radius-app-bicep"
+    "../../../extensions/radius/skills/radius-app-bicep"
   ),
   repaired: path.join(
     HOME_DIR,
@@ -42,7 +49,8 @@ function requiredPaths(candidate: string): string[] {
 
 function createSkill(
   presentFiles: ReadonlyArray<string>,
-  skillVersion = "1.2.3"
+  skillVersion = "1.2.3",
+  moduleDir = MODULE_DIR
 ) {
   const present = new Set(presentFiles);
   const pathExists = vi.fn((filePath: string) => present.has(filePath));
@@ -51,7 +59,7 @@ function createSkill(
     pathExists,
     generatorVersion,
     skill: createRadiusAppBicepSkill({
-      moduleDir: MODULE_DIR,
+      moduleDir,
       homeDir: HOME_DIR,
       pathExists,
       generatorVersion
@@ -64,10 +72,21 @@ function parseHandoff(value: string): Record<string, unknown> {
 }
 
 describe("radiusAppBicepSkill", () => {
+  it("resolves packaged skills from the canonical bundle directory", () => {
+    const packaged = path.join(PLUGIN_ROOT, "skills", "radius-app-bicep");
+    const { skill } = createSkill(
+      requiredPaths(packaged),
+      "1.2.3",
+      CANONICAL_MODULE_DIR
+    );
+
+    expect(parseHandoff(skill("/workspace")).skillBase).toBe(packaged);
+  });
+
   it("uses the complete source-checkout skill in the development runtime", () => {
     const expected = path.resolve(
       path.dirname(fileURLToPath(import.meta.url)),
-      "../../../plugins/radius/skills/radius-app-bicep"
+      "../../../extensions/radius/skills/radius-app-bicep"
     );
 
     expect(parseHandoff(radiusAppBicepSkill("/workspace")).skillBase).toBe(

@@ -9,6 +9,7 @@ import type {
   DeleteConflictRequest
 } from "../services/delete-conflict.js";
 import { shouldRetryWithKeyringCredential } from "../services/workflow-credential-fallback.js";
+import { discardDeployedApplicationState } from "../services/deployed-view-state.js";
 import { DELETE_FAILED_STATUS } from "../services/delete-conflict.js";
 import { DELETE_APP_DISPATCHER_FILE, DELETE_AZURE_FILE } from "../../infra.js";
 import {
@@ -809,6 +810,12 @@ export async function handleDeleteDeployment(
     // A delete is now in flight, so the cached listing is stale — drop it so the
     // next poll reflects the "Deleting…" state immediately.
     dependencies.deployListCache.delete(repo);
+    // The delete run removes the deploy-status artifact for exactly this
+    // environment and application, which is what stops other sessions rendering
+    // the deleted deployment. This session also holds its own copy of that
+    // deploy, so retire it here or the Deployed view keeps showing "Last
+    // deployment" from state no artifact read can override.
+    discardDeployedApplicationState(entry.state, { environment, application });
     respond(200, { success: true, runUrl, forced: force });
   } catch (e) {
     releaseReservation();

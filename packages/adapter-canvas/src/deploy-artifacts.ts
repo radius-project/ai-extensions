@@ -857,6 +857,10 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
   let acceptedSequence = -1;
   let lastGood: ReadResult | null = null;
   const inspectedArtifacts = new Map<number, ReadResult>();
+  // A run-scoped read follows one in-flight deployment through its rotating
+  // live slots; a repo-wide read looks for the newest terminal artifact and is
+  // not tied to any run.
+  const isRunScoped = Number.isFinite(Number(runId)) && Number(runId) > 0;
 
   const empty = (status: ReaderStatus, error: unknown = null): ReadResult => ({
     status,
@@ -885,13 +889,11 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     if (candidates.length === 0) return empty("missing");
 
     const expectedRunId = Number(runId);
-    const hasExpectedRunId =
-      Number.isFinite(expectedRunId) && expectedRunId > 0;
     // A repo-wide read is not scoped to any run, and `sequence` restarts at 1
     // for every run. Live-slot artifacts must therefore be excluded from that
     // path — otherwise a cancelled run's higher-sequenced slot could beat a
     // newer completed run's fixed-name terminal artifact.
-    if (!hasExpectedRunId) {
+    if (!isRunScoped) {
       candidates = candidates.filter((a) => !isLiveSlotArtifactName(a.name));
       if (candidates.length === 0) return empty("missing");
     }
@@ -907,11 +909,18 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     }
 
     let sawMalformed = false;
+    // A candidate that could not be read proves nothing about whether this
+    // deployment still exists, so it must not be reported as an absence: the
+    // reader retires its cached graph on a repo-wide "missing", and doing that
+    // for a transient download failure would blank a perfectly valid Deployed
+    // view. Tracked separately from `sawMalformed`, which describes an artifact
+    // that *was* read and turned out to be unusable.
+    let sawUnreadable = false;
     let exactMatch: ReadResult | null = null;
     let envOnlyMatch: ReadResult | null = null;
     for (const artifact of candidates) {
       let result =
-        hasExpectedRunId ? inspectedArtifacts.get(artifact.id) : undefined;
+        isRunScoped ? inspectedArtifacts.get(artifact.id) : undefined;
       if (!result) {
         let files: ArtifactFiles | null;
         try {
@@ -919,15 +928,19 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
         } catch (e) {
           if (errorCode(e) === "GH_ARTIFACT_AUTH") return empty("auth", e);
           // A single unreadable artifact should not hide an older readable one.
+          sawUnreadable = true;
           continue;
         }
-        if (!files) continue;
+        if (!files) {
+          sawUnreadable = true;
+          continue;
+        }
         const progress = parseDeployProgressArtifact(
           files[DEPLOY_STATUS_FILES.progress]
         );
         if (!progress) {
           sawMalformed = true;
-          if (hasExpectedRunId)
+          if (isRunScoped)
             inspectedArtifacts.set(artifact.id, empty("malformed"));
           continue;
         }
@@ -942,7 +955,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
           artifact,
           error: null
         };
-        if (hasExpectedRunId) inspectedArtifacts.set(artifact.id, result);
+        if (isRunScoped) inspectedArtifacts.set(artifact.id, result);
       }
       const progress = result.progress;
       if (!progress) {
@@ -952,7 +965,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       // Confirm identity from the payload rather than from the derived name.
       if (!confirmArtifactIdentity(progress, { environment })) continue;
       if (
-        hasExpectedRunId &&
+        isRunScoped &&
         progress.runId !== undefined &&
         progress.runId !== expectedRunId
       )
@@ -965,7 +978,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
         if (!exactMatch) {
           exactMatch = result;
         } else if (
-          hasExpectedRunId &&
+          isRunScoped &&
           progress.sequence > (exactMatch.progress?.sequence ?? -1)
         ) {
           exactMatch = result;
@@ -982,7 +995,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       if (!envOnlyMatch) {
         envOnlyMatch = result;
       } else if (
-        hasExpectedRunId &&
+        isRunScoped &&
         progress.sequence > (envOnlyMatch.progress?.sequence ?? -1)
       ) {
         envOnlyMatch = result;
@@ -990,7 +1003,15 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     }
     if (exactMatch) return exactMatch;
     if (envOnlyMatch) return envOnlyMatch;
-    return empty(sawMalformed ? "malformed" : "missing");
+    // "missing" is reserved for a confirmed absence: GitHub listed this
+    // deployment's artifacts and none of them describe it. Candidates that
+    // could not be downloaded are reported as an error instead, so a transient
+    // failure never looks like a deletion.
+    return empty(
+      sawMalformed ? "malformed"
+      : sawUnreadable ? "error"
+      : "missing"
+    );
   }
 
   // read - fetch (cached, single-flight) and enforce monotonic sequencing.
@@ -1029,6 +1050,19 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
           acceptedSequence = result.progress.sequence;
           lastGood = result;
         }
+      } else if (result.status === "missing" && !isRunScoped) {
+        // GitHub answered and this deployment has no artifact. Retire what was
+        // read before instead of serving it from `lastGood`: deleting an
+        // application deletes its deploy-status artifact, and a reader that
+        // keeps falling back would render the deleted deployment for the rest
+        // of the session. Only a repo-wide read is trusted this far — a
+        // run-scoped read can momentarily list nothing while the producer
+        // rotates a live slot, and blanking on that would flicker the graph
+        // mid-deploy.
+        hasAccepted = false;
+        acceptedRunId = null;
+        acceptedSequence = -1;
+        lastGood = null;
       }
       cache = { at: now(), result };
       inflight = null;

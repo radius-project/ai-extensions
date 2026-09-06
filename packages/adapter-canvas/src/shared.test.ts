@@ -25,9 +25,23 @@ describe("credential store path", () => {
     ).toBe("fixture/credentials.json");
   });
 
-  it("falls back to the package-local compatibility path", () => {
+  it("falls back to the package-local path", () => {
     expect(resolveCredentialsFilePath({}, "package")).toBe(
       path.join("package", ".radius-credentials.json")
+    );
+  });
+
+  it("stores credentials at the canonical bundle's plugin root", () => {
+    const pluginRoot = path.join(path.parse(process.cwd()).root, "plugin");
+    const moduleDirectory = path.join(
+      pluginRoot,
+      "com.github.copilot",
+      "extensions",
+      "radius"
+    );
+
+    expect(resolveCredentialsFilePath({}, moduleDirectory)).toBe(
+      path.join(pluginRoot, ".radius-credentials.json")
     );
   });
 });

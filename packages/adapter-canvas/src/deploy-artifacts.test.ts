@@ -1226,6 +1226,143 @@ describe("createDeployStatusReader", () => {
     expect((await reader.progress())?.sequence).toBe(4);
   });
 
+  it("stops serving a deployment whose artifact was deleted", async () => {
+    // Deleting an application deletes its deploy-status artifact, so a
+    // repo-wide read that finds nothing is the deletion becoming visible. The
+    // reader must retire what it read before rather than keep answering from
+    // `lastGood` for the rest of the session.
+    let listing: WorkflowArtifact[] = [
+      artifact("radius-deploy-status-dev-todolist")
+    ];
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      ttlMs: 0,
+      listArtifacts: async () => listing,
+      downloadArtifact: async () => ({
+        ...okFiles(),
+        [DEPLOY_STATUS_FILES.controlPlane]: "recipe log"
+      })
+    });
+
+    expect((await reader.graph()).graph).toEqual({
+      resources: [{ name: "frontend" }]
+    });
+
+    listing = [];
+    expect(await reader.status()).toBe("missing");
+    expect((await reader.graph()).graph).toBeNull();
+    expect((await reader.graph()).artifact).toBeNull();
+    expect(await reader.progress()).toBeNull();
+    expect(await reader.controlPlaneLog()).toBeNull();
+  });
+
+  it("accepts a redeploy after the previous artifact was deleted", async () => {
+    // Retiring the cache must also reset the monotonic sequence guard: the new
+    // run's first snapshot restarts at sequence 1 and would otherwise look like
+    // a stale replay of the deployment that was deleted.
+    let listing: WorkflowArtifact[] = [
+      artifact("radius-deploy-status-dev-todolist")
+    ];
+    let sequence = 7;
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      ttlMs: 0,
+      listArtifacts: async () => listing,
+      downloadArtifact: async () => okFiles({ sequence, runId: 100 })
+    });
+
+    expect((await reader.progress())?.sequence).toBe(7);
+
+    listing = [];
+    expect(await reader.status()).toBe("missing");
+
+    listing = [artifact("radius-deploy-status-dev-todolist")];
+    sequence = 1;
+    expect((await reader.progress())?.sequence).toBe(1);
+  });
+
+  it("keeps the last good snapshot when a run-scoped read finds no slot", async () => {
+    // Live slots rotate by uploading under a new artifact ID, so a run-scoped
+    // listing can momentarily come back empty. Blanking the graph on that would
+    // flicker resources back to pending mid-deploy.
+    let listing: WorkflowArtifact[] = [
+      artifact("radius-deploy-status-dev-todolist-live-100-slot-0")
+    ];
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      runId: 100,
+      ttlMs: 0,
+      listArtifacts: async () => listing,
+      downloadArtifact: async () => okFiles({ runId: 100 })
+    });
+
+    expect((await reader.graph()).graph).toEqual({
+      resources: [{ name: "frontend" }]
+    });
+
+    listing = [];
+    expect(await reader.status()).toBe("missing");
+    expect((await reader.graph()).graph).toEqual({
+      resources: [{ name: "frontend" }]
+    });
+  });
+
+  it("keeps the last good snapshot when the artifact is temporarily unreadable", async () => {
+    // A candidate that fails to download proves nothing about whether the
+    // deployment still exists. Only a listing that genuinely has nothing for it
+    // is a deletion; a transient download failure must not blank a valid graph.
+    let downloadFails = false;
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      ttlMs: 0,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist")
+      ],
+      downloadArtifact: async () => {
+        if (downloadFails) throw new Error("network reset");
+        return okFiles();
+      }
+    });
+
+    expect((await reader.graph()).graph).toEqual({
+      resources: [{ name: "frontend" }]
+    });
+
+    downloadFails = true;
+    // Reported as an error rather than an absence, so the cache survives.
+    expect(await reader.status()).toBe("error");
+    expect((await reader.graph()).graph).toEqual({
+      resources: [{ name: "frontend" }]
+    });
+
+    downloadFails = false;
+    expect((await reader.graph()).graph).toEqual({
+      resources: [{ name: "frontend" }]
+    });
+  });
+
+  it("keeps the last good snapshot when the artifact download returns nothing", async () => {
+    let downloadEmpty = false;
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      ttlMs: 0,
+      listArtifacts: async () => [
+        artifact("radius-deploy-status-dev-todolist")
+      ],
+      downloadArtifact: async () => (downloadEmpty ? null : okFiles())
+    });
+
+    expect((await reader.graph()).graph).toEqual({
+      resources: [{ name: "frontend" }]
+    });
+
+    downloadEmpty = true;
+    expect(await reader.status()).toBe("error");
+    expect((await reader.graph()).graph).toEqual({
+      resources: [{ name: "frontend" }]
+    });
+  });
+
   it("downloads an immutable artifact ID only once across polls", async () => {
     let downloads = 0;
     const reader = createDeployStatusReader({

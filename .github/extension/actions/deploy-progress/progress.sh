@@ -23,6 +23,22 @@ radius_deploy_artifact_name() {
     printf 'radius-deploy-status-%s' "${base_name}"
 }
 
+# Sanitizes one identity segment -- an environment or an application name -- the
+# way the canvas reader's sanitizeArtifactSegment does, so both sides agree on
+# when two independently recorded names denote the same deployment.
+#
+# Deliberately not the same thing as radius_deploy_artifact_name, which joins
+# the pair before sanitizing and so cannot tell (prod, billing-east) from
+# (prod-billing, east). Sanitizing each segment on its own keeps those two
+# distinct while still matching names that differ only in case or in characters
+# the artifact name could never carry.
+radius_deploy_identity_segment() {
+    printf '%s' "$1" |
+        LC_ALL=C tr '[:upper:]' '[:lower:]' |
+        LC_ALL=C sed -E 's/[^a-z0-9._-]+/-/g; s/^-+//; s/-+$//' |
+        LC_ALL=C cut -c1-80
+}
+
 radius_progress_dir() {
     printf '%s/radius-deploy-progress' "${RUNNER_TEMP:-/tmp}"
 }

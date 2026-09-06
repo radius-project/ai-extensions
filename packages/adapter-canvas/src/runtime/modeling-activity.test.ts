@@ -72,6 +72,7 @@ function harness(overrides: Partial<ModelingActivityDependencies> = {}) {
   });
   const activity = {
     announce: rawActivity.announce,
+    release: rawActivity.release,
     inFlight: (
       repo: string,
       branches: ReadonlyArray<string>,
@@ -97,6 +98,17 @@ describe("createModelingActivity", () => {
     // The announcement alone settles it, so the filesystem is never probed for
     // a staging directory the run has not created yet.
     expect(observeStagedRun).not.toHaveBeenCalled();
+  });
+
+  it("releases only the terminal modeling run's announcement", async () => {
+    const { activity } = harness();
+    activity.announce({ repo: "a/b", branch: "feat" });
+    activity.announce({ repo: "a/b", branch: "main" });
+
+    activity.release({ repo: "a/b", branch: "feat" });
+
+    expect(await activity.inFlight("a/b", ["feat"])).toBe(false);
+    expect(await activity.inFlight("a/b", ["main"])).toBe(true);
   });
 
   it("does not let one repo's announcement silence another repo or branch", async () => {

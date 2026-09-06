@@ -6,7 +6,13 @@ import {
   resolveGeneratorVersion
 } from "./generator-version.js";
 
-const MODULE_DIR = path.join("/opt", "extensions", "radius");
+const PLUGIN_ROOT = path.join("/opt", "radius");
+const MODULE_DIR = path.join(
+  PLUGIN_ROOT,
+  "com.github.copilot",
+  "extensions",
+  "radius"
+);
 
 function reader(files: Record<string, string>) {
   return (filePath: string): string => {
@@ -19,10 +25,10 @@ function reader(files: Record<string, string>) {
 }
 
 describe("generatorVersionCandidates", () => {
-  it("prefers the installed manifest beside the bundle over the workspace source", () => {
+  it("prefers the installed plugin manifest over the workspace source", () => {
     expect(generatorVersionCandidates(MODULE_DIR)).toEqual([
-      path.join(MODULE_DIR, "package.json"),
-      path.resolve(MODULE_DIR, "../../../plugins/radius/package.json")
+      path.join(PLUGIN_ROOT, "package.json"),
+      path.resolve(MODULE_DIR, "../../../extensions/radius/package.json")
     ]);
   });
 });
@@ -94,7 +100,7 @@ describe("createGeneratorVersionReader", () => {
   const [installed] = generatorVersionCandidates(MODULE_DIR);
 
   it("resolves this build's own manifest version", () => {
-    // Not asserted against a literal: Changesets owns plugins/radius/package.json
+    // Not asserted against a literal: Changesets owns extensions/radius/package.json
     // and bumps it on release, so pinning the number here would fail on the
     // first one. The behavior under test is that the reader agrees with a direct
     // resolve and returns something usable.

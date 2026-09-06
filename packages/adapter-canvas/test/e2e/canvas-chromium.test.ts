@@ -501,8 +501,6 @@ test.describe("Radius Canvas in Chromium", () => {
     await gotoCanvas(page, canvas, "graph");
 
     await expect(page.getByLabel("Branch")).toHaveValue(WORKTREE_BRANCH);
-    await page.getByRole("button", { name: "Plan Deployment" }).focus();
-    await page.getByLabel("Branch").selectOption(WORKTREE_BRANCH);
     await expect
       .poll(() =>
         canvas.requests.some(
@@ -514,6 +512,7 @@ test.describe("Radius Canvas in Chromium", () => {
     expect(bodyFor(canvas, "/api/load-graph")).toEqual({
       repo: REPOSITORY,
       branch: WORKTREE_BRANCH,
+      followWorkspaceBranch: true,
       restartWait: true
     });
     await expect
@@ -900,6 +899,112 @@ test.describe("Radius Canvas in Chromium", () => {
       page.locator("#graph-status, #graph-refresh-status")
     ).toContainText("Application graph ready");
     releaseFirst?.();
+  });
+
+  test("loads the graph from a renamed real worktree branch", async ({
+    page,
+    canvas
+  }) => {
+    const renamedBranch = "renamed-worktree";
+    canvas.renameWorkspaceBranch(renamedBranch);
+    expect(canvas.currentWorkspaceBranch()).toBe(renamedBranch);
+
+    const response = await fetch(`${canvas.baseUrl}/api/load-graph`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repo: REPOSITORY,
+        branch: WORKTREE_BRANCH,
+        followWorkspaceBranch: true,
+        restartWait: true
+      })
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      resolvedBranch: renamedBranch,
+      fromWorkspace: true
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+
+    await expect(page.getByLabel("Branch")).toHaveValue(renamedBranch);
+    await expect(
+      page.locator("#graph-status, #graph-refresh-status")
+    ).toContainText("Application graph ready");
+  });
+
+  test("refreshes an open graph after the workspace model is regenerated", async ({
+    page,
+    canvas
+  }) => {
+    let graphRequests = 0;
+    await page.route("**/api/load-graph", async (route) => {
+      graphRequests++;
+      if (graphRequests === 1) {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [
+            {
+              id: "app/regenerated",
+              name: "regenerated",
+              type: "Radius.Compute/containers",
+              connections: [],
+              outputResources: []
+            }
+          ],
+          fromWorkspace: true
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+    await expect(
+      page.locator("#graph-status, #graph-refresh-status")
+    ).toContainText("Application graph ready", { timeout: 15_000 });
+
+    await fs.appendFile(
+      path.join(canvas.workspacePath, ".radius", "app.bicep"),
+      "\n// regenerated model\n",
+      "utf8"
+    );
+    await expect
+      .poll(async () => {
+        await page.evaluate("window.dispatchEvent(new Event('focus'))");
+        return graphRequests;
+      })
+      .toBe(2);
+    await expect(page.locator(".rad-node")).toHaveCount(1);
+    await expect(page.locator(".rad-node")).toContainText("regenerated");
+  });
+
+  test("reloads the graph when the server canonicalizes its branch", async ({
+    page,
+    canvas
+  }) => {
+    let requests = 0;
+    await page.route("**/api/load-graph", async (route) => {
+      requests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [],
+          ...(requests === 1 ? { resolvedBranch: "renamed-worktree" } : {})
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+
+    await expect.poll(() => requests).toBeGreaterThanOrEqual(2);
+    await expect(
+      page.locator("#graph-status, #graph-refresh-status")
+    ).toContainText("Application graph ready");
   });
 
   test("keeps the modeling status stable while the graph automatically polls", async ({
@@ -1508,7 +1613,38 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(namespace).not.toContainText("default");
     await expect(namespace).not.toContainText("selected-team");
     await namespace.selectOption("__custom__");
-    await expect(page.locator("#azure-namespace-custom")).toBeVisible();
+    const customNamespace = page.locator("#azure-namespace-custom");
+    await expect(customNamespace).toBeVisible();
+
+    let operationPosts = 0;
+    await page.route("**/api/operations", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      operationPosts += 1;
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ operationId: "unexpected" })
+      });
+    });
+    await page.locator("#env-name-input").fill("production");
+    await customNamespace.fill("Todo-app-3");
+
+    const namespaceError = page.locator("#azure-namespace-error");
+    await expect(namespaceError).toHaveText(
+      "Kubernetes namespace must be 1-63 lowercase letters, numbers, or hyphens and must start and end with a letter or number."
+    );
+    await expect(namespaceError).toBeVisible();
+    await expect(customNamespace).toHaveAttribute("aria-invalid", "true");
+    await expect(customNamespace).toBeFocused();
+    expect(operationPosts).toBe(0);
+    await expectNoWcagViolations(page);
+
+    await customNamespace.fill("todo-app-3");
+    await expect(namespaceError).toBeHidden();
+    await expect(customNamespace).not.toHaveAttribute("aria-invalid", "true");
   });
 
   test("turns Azure MFA discovery failure into a tenant-scoped login callout", async ({

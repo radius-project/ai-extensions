@@ -333,6 +333,7 @@ describe("RU-14: workspace repo/branch resolution on open()", () => {
     const state = deps.servers.get("radius-panel")!.state;
     expect(state.contextRepo).toBe("acme/widgets");
     expect(state.contextBranch).toBe("feature/x");
+    expect(state.contextBranchSource).toBe("workspace");
   });
 
   it("uses an explicit remote branch of the workspace repository", async () => {
@@ -353,6 +354,7 @@ describe("RU-14: workspace repo/branch resolution on open()", () => {
     const state = deps.servers.get("radius-panel")!.state;
     expect(state.contextRepo).toBe("acme/widgets");
     expect(state.contextBranch).toBe("release");
+    expect(state.contextBranchSource).toBe("explicit");
   });
 
   it("uses an explicit branch with the workspace repository when repo is omitted", async () => {
@@ -369,6 +371,30 @@ describe("RU-14: workspace repo/branch resolution on open()", () => {
     const state = deps.servers.get("radius-panel")!.state;
     expect(state.contextRepo).toBe("acme/widgets");
     expect(state.contextBranch).toBe("release");
+    expect(state.contextBranchSource).toBe("explicit");
+  });
+
+  it("preserves explicit branch intent when reopening another page without context input", async () => {
+    const { canvas, deps } = setup({
+      workspaceContext: {
+        workspacePath: "/ws",
+        repo: "acme/widgets",
+        branch: "feature/x"
+      }
+    });
+    await canvas.open(
+      ctx("radius-panel", {
+        page: "graph",
+        repo: "acme/widgets",
+        branch: "release"
+      })
+    );
+
+    await canvas.open(ctx("radius-panel", { page: "planned" }));
+
+    const state = deps.servers.get("radius-panel")!.state;
+    expect(state.contextBranch).toBe("release");
+    expect(state.contextBranchSource).toBe("explicit");
   });
 
   it("falls back to the given branch (or main) for a different repo", async () => {
@@ -385,6 +411,7 @@ describe("RU-14: workspace repo/branch resolution on open()", () => {
     let state = deps.servers.get("radius-panel")!.state;
     expect(state.contextRepo).toBe("other/repo");
     expect(state.contextBranch).toBe("main");
+    expect(state.contextBranchSource).toBe("explicit");
 
     await canvas.open(
       ctx("radius-panel", {
@@ -395,6 +422,7 @@ describe("RU-14: workspace repo/branch resolution on open()", () => {
     );
     state = deps.servers.get("radius-panel")!.state;
     expect(state.contextBranch).toBe("dev");
+    expect(state.contextBranchSource).toBe("explicit");
   });
 
   it("detects the repo from the git remote when no repo is given and none is set yet", async () => {

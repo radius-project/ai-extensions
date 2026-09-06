@@ -16,7 +16,7 @@ import { resolveGeneratorVersion } from "./generator-version.js";
 
 const script = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  "../../../plugins/radius/skills/radius-app-bicep/scripts/write-app-origin.mjs"
+  "../../../extensions/radius/skills/radius-app-bicep/scripts/write-app-origin.mjs"
 );
 
 const MODEL =
