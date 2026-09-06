@@ -27,9 +27,11 @@ import {
   showGraphModelingFailure,
   unsupportedGraphModelMessage
 } from "./graph-modeling-failure.js";
+import { WORKSPACE_MODEL_CHANGED_EVENT } from "../heartbeat.js";
+import { GRAPH_PAGE_STATE_ID } from "../page-state-ids.js";
 
 const ENTRY_KEY = "graph-page";
-export const GRAPH_PAGE_STATE_ID = "radius-graph-page-state";
+export { GRAPH_PAGE_STATE_ID };
 export const GRAPH_RETRY_MS = 10_000;
 export const GRAPH_STALE_RETRY_MS = 1_000;
 export const GRAPH_PROGRESS_MS = 800;
@@ -117,6 +119,8 @@ export function initializeGraphPage(
   // graph and the refresh decides the real state.
   let modelState: "pending" | "ready" | "failed" = "pending";
   let followWorkspaceBranch = page.followWorkspaceBranch;
+  let graphFromWorkspace = page.localSource;
+  let refreshLoadedGraph: (() => void) | null = null;
 
   // Keep the primary button in step with the compile state. The server renders
   // the button without a mode and loadModeledEnvState assigns "plan" later, so
@@ -230,10 +234,12 @@ export function initializeGraphPage(
 
   // The server recomputes provenance per request, so a response that reports it
   // wins over the value serialized into the initial page render.
-  const sourceProvenance = (payload: unknown): boolean =>
-    isRecord(payload) && typeof payload.fromWorkspace === "boolean" ?
-      payload.fromWorkspace
-    : page.localSource;
+  const recordSourceProvenance = (payload: unknown): boolean => {
+    if (isRecord(payload) && typeof payload.fromWorkspace === "boolean") {
+      graphFromWorkspace = payload.fromWorkspace;
+    }
+    return graphFromWorkspace;
+  };
 
   const showGuidance = (): void => {
     const guidance = context.dom.byId("graph-guidance");
@@ -293,9 +299,13 @@ export function initializeGraphPage(
       });
   };
 
+  // The selector is the live source of the branch on screen; the serialized
+  // page branch is only the starting point.
+  const currentBranch = (): string => branchSelect?.value.trim() || page.branch;
+
   const load = (options: { readonly continuing?: boolean } = {}): void => {
     if (requestActive || !entry.active) return;
-    const branch = branchSelect?.value.trim() || page.branch;
+    const branch = currentBranch();
     if (!page.repo || !branch) {
       showStatus(
         context,
@@ -358,7 +368,7 @@ export function initializeGraphPage(
           renderOrUpdate(parseGraphResources(payload.resources), {
             repoUrl: githubRepositoryUrl(page.repo),
             branch,
-            localSource: sourceProvenance(payload)
+            localSource: recordSourceProvenance(payload)
           });
           hasLoadedGraph = true;
           return;
@@ -451,9 +461,7 @@ export function initializeGraphPage(
     // blanks the container before it fetches. Only the first request restarts
     // the server-side wait; the polls that continue it must not, or the wait
     // would never age out.
-    const refreshLoadedGraph = (
-      options: { readonly continuing?: boolean } = {}
-    ): void => {
+    const refresh = (options: { readonly continuing?: boolean } = {}): void => {
       const refreshGeneration = ++generation;
       requestAbort = context.net.createAbort();
       void context.net
@@ -484,7 +492,7 @@ export function initializeGraphPage(
             showStatus(context, "Application graph ready.", "info");
             renderOrUpdate(parseGraphResources(payload.resources), {
               ...graphOptions,
-              localSource: sourceProvenance(payload)
+              localSource: recordSourceProvenance(payload)
             });
             showGuidance();
             return;
@@ -509,7 +517,7 @@ export function initializeGraphPage(
             );
             retry = entry.after(GRAPH_RETRY_MS, () => {
               retry = null;
-              refreshLoadedGraph({ continuing: true });
+              refresh({ continuing: true });
             });
           } else if (readBoolean(payload, "stale")) {
             showStatus(
@@ -519,7 +527,7 @@ export function initializeGraphPage(
             );
             retry = entry.after(GRAPH_STALE_RETRY_MS, () => {
               retry = null;
-              refreshLoadedGraph({ continuing: true });
+              refresh({ continuing: true });
             });
           } else {
             const error = readString(payload, "error");
@@ -555,8 +563,22 @@ export function initializeGraphPage(
           if (refreshGeneration === generation) requestAbort = null;
         });
     };
-    refreshLoadedGraph();
+    refreshLoadedGraph = refresh;
+    refresh();
   }
+  entry.on(context.dom.document, WORKSPACE_MODEL_CHANGED_EVENT, () => {
+    if (!graphFromWorkspace || !hasLoadedGraph) return;
+    stopRequest();
+    // The preloaded refresh closure is pinned to the branch the page was
+    // rendered with. Once the selection has moved on, only `load` targets the
+    // branch that is actually on screen.
+    const selectedBranch = currentBranch();
+    if (refreshLoadedGraph && selectedBranch === page.branch) {
+      refreshLoadedGraph();
+    } else {
+      load();
+    }
+  });
   void populateApplications(context, page.repo, "graph-app");
   const branchListingGeneration = branchSelectionGeneration;
   void populateBranches(
