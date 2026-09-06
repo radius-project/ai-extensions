@@ -19,7 +19,7 @@
 //   stage authenticate as the privileged runner identity and pass.
 import type { CanvasState } from "../../../src/shared.js";
 import { TERMINAL_STATES } from "../../../src/operations.js";
-import { describeError } from "./cloud-command-port.js";
+import { describeError, isGitHubApiNotFound } from "./cloud-command-port.js";
 
 /** The verify workflow the product publishes, named as a stable anchor. */
 export const VERIFY_WORKFLOW_PATH =
@@ -698,7 +698,7 @@ export function readWorkflowDirectory(
   context: string
 ): string[] {
   if (result.code !== 0) {
-    if (/HTTP 404/i.test(`${result.stderr}\n${result.stdout}`)) return [];
+    if (isGitHubApiNotFound(result)) return [];
     const diagnostic =
       result.stderr.trim() || result.stdout.trim() || "<no output>";
     throw new Error(

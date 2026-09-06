@@ -222,18 +222,31 @@ describe("cloud-e2e.yml", () => {
     expect(run?.["working-directory"]).toBe("packages/adapter-canvas");
   });
 
-  it("authenticates to Azure by OIDC and to GitHub by installation token", async () => {
-    // No long-lived cloud secret exists to leak: both credentials are minted
-    // per run and expire with it.
+  it("isolates the package credential from the repository installation token", async () => {
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const used = steps(workflow.jobs?.["cloud-e2e"]).map((step) => step.uses);
     expect(used.some((use) => use?.startsWith("azure/login@"))).toBe(true);
     expect(
       used.some((use) => use?.startsWith("actions/create-github-app-token@"))
     ).toBe(true);
+    const run = steps(workflow.jobs?.["cloud-e2e"]).find((step) =>
+      step.run?.includes("test:cloud")
+    );
+    expect(run?.env).toMatchObject({
+      AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY:
+        "${{ steps.fixture.outputs.full-name }}",
+      CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
+      CLOUD_E2E_BOT_INSTALLATION_ID:
+        "${{ steps.app-token.outputs.installation-id }}",
+      CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}",
+      GH_PACKAGES_TOKEN: "${{ secrets.CLOUD_E2E_PACKAGES_TOKEN }}",
+      GH_PACKAGES_USER: "${{ secrets.CLOUD_E2E_PACKAGES_USER }}"
+    });
+    expect(run?.env?.GH_TOKEN).toBe("${{ steps.app-token.outputs.token }}");
+    expect(workflow.jobs?.["cloud-e2e"]?.permissions?.packages).toBeUndefined();
   });
 
-  it("requests the workflow scope explicitly rather than discovering it is missing", async () => {
+  it("requests the workflow and deployment scopes explicitly rather than discovering they are missing", async () => {
     // A token silently missing `workflows` sends the product down its
     // pull-request fallback path, and the journey would pass without ever
     // having committed a workflow to the default branch. Asking for the
@@ -242,7 +255,8 @@ describe("cloud-e2e.yml", () => {
     const token = steps(workflow.jobs?.["cloud-e2e"]).find((step) =>
       step.uses?.startsWith("actions/create-github-app-token@")
     );
-    expect(token?.with?.["permission-actions"]).toBe("read");
+    expect(token?.with?.["permission-actions"]).toBe("write");
+    expect(token?.with?.["permission-deployments"]).toBe("read");
     expect(token?.with?.["permission-workflows"]).toBe("write");
     expect(token?.with?.["permission-environments"]).toBe("write");
   });

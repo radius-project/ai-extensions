@@ -25,6 +25,7 @@ const RESOURCE_GROUP = `radtest-canvas-${UNIQUE_ID}`;
 const CLUSTER = `aks-${UNIQUE_ID}`;
 const ENVIRONMENT = `radtest-${UNIQUE_ID}`;
 const SCOPE = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RESOURCE_GROUP}`;
+const CLUSTER_SCOPE = `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`;
 const APP_NAME = "radius-deploy-fixture-owner-fixture-repo";
 
 // Spelled out rather than rebuilt from the fixture's own helpers, so a change to
@@ -37,6 +38,12 @@ const PULLS_PATH = `repos/${REPOSITORY}/pulls?state=open&per_page=100`;
 const DEFAULT_REF_PATH = `repos/${REPOSITORY}/git/refs/heads/${BRANCH}`;
 const LEASE_REF = "refs/heads/radius/cloud-e2e-lease";
 const LEASE_REF_PATH = `repos/${REPOSITORY}/git/${LEASE_REF}`;
+const STATE_PACKAGE =
+  "ghcr.io/fixture-owner/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
+const PACKAGE_PATH =
+  "orgs/fixture-owner/packages/container/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
+const USER_PACKAGE_PATH =
+  "users/fixture-owner/packages/container/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
 
 const pullPages = (...pages: readonly unknown[][]): string =>
   JSON.stringify(pages);
@@ -112,6 +119,16 @@ function baselineStubs(): FakeCommandStub[] {
     { tool: "az", match: FIC_LIST, respond: { stdout: "[]" } },
     { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" } },
     { tool: "gh", match: ["api", ENVIRONMENT_PATH], respond: NOT_FOUND },
+    {
+      tool: "gh-package",
+      match: ["api", "users/fixture-owner", "--jq", ".type"],
+      respond: { stdout: "Organization" }
+    },
+    {
+      tool: "gh-package",
+      match: ["api", PACKAGE_PATH],
+      respond: NOT_FOUND
+    },
     { tool: "gh", match: ["api", COMMITS_PATH], respond: { stdout: BASELINE } },
     {
       tool: "gh",
@@ -703,7 +720,7 @@ describe("createCloudFixture", () => {
       const { fixture } = await createHarness([
         {
           tool: "az",
-          match: ROLE_LIST,
+          match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
             stdout: JSON.stringify([
               { principalId: "sp-1", roleDefinitionName: "Contributor" }
@@ -715,6 +732,33 @@ describe("createCloudFixture", () => {
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
         new RegExp(
           `role assignment "Contributor" for principal sp-1 at ${SCOPE.replace(
+            /\//g,
+            "\\/"
+          )}`
+        )
+      );
+    });
+
+    it("reports a leaked role assignment at the exact AKS cluster scope", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([
+              {
+                principalId: "sp-cluster",
+                roleDefinitionName:
+                  "Azure Kubernetes Service RBAC Cluster Admin"
+              }
+            ])
+          }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        new RegExp(
+          `role assignment "Azure Kubernetes Service RBAC Cluster Admin" for principal sp-cluster at ${CLUSTER_SCOPE.replace(
             /\//g,
             "\\/"
           )}`
@@ -748,6 +792,86 @@ describe("createCloudFixture", () => {
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
         new RegExp(`GitHub environment "${ENVIRONMENT}" in ${REPOSITORY}`)
       );
+    });
+
+    it("reports a leaked GHCR state package", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "private",
+              repository: { full_name: REPOSITORY }
+            })
+          }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        `GHCR state package "${STATE_PACKAGE}" (private visibility, linked to "${REPOSITORY}")`
+      );
+    });
+
+    it("fails when the GHCR state package cannot be probed", async () => {
+      const { fixture } = await createHarness([
+        failing("gh-package", ["api", PACKAGE_PATH], "HTTP 403")
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        /read GHCR package .*HTTP 403/
+      );
+    });
+
+    it("uses the user package endpoint for a user-owned fixture repository", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", "users/fixture-owner", "--jq", ".type"],
+          respond: { stdout: "User" },
+          times: 1
+        },
+        {
+          tool: "gh-package",
+          match: ["api", USER_PACKAGE_PATH],
+          respond: NOT_FOUND
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).resolves.toBeUndefined();
+      expect(fake.commands.commandLines("gh-package")).toContain(
+        `api ${USER_PACKAGE_PATH}`
+      );
+    });
+
+    it("rejects an unsupported package-owner type", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", "users/fixture-owner", "--jq", ".type"],
+          respond: { stdout: "Enterprise" },
+          times: 1
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        /unsupported type "Enterprise"/
+      );
+    });
+
+    it.each([
+      ["invalid JSON", "{not-json", /returned invalid JSON/],
+      ["a non-object response", "[]", /returned a non-object response/]
+    ])("rejects %s from the package API", async (_label, stdout, expected) => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: { stdout }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(expected);
     });
 
     it("refuses to read a non-404 environment probe failure as absence", async () => {
@@ -1000,7 +1124,7 @@ describe("createCloudFixture", () => {
 
       const error = await captureError(fixture.assertCleanSlate());
 
-      expect(error.message.split("\n  - ")).toHaveLength(9);
+      expect(error.message.split("\n  - ")).toHaveLength(10);
       for (const fragment of [
         "app registration",
         "service principal",
@@ -1330,10 +1454,10 @@ describe("createCloudFixture", () => {
 
     it("polls until the role assignment becomes visible", async () => {
       const { fixture, fake } = await createHarness([
-        { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" }, times: 1 },
+        { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" }, times: 2 },
         {
           tool: "az",
-          match: ROLE_LIST,
+          match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
             stdout: JSON.stringify([
               { principalId: "sp-1", roleDefinitionName: "Contributor" }
@@ -1346,6 +1470,28 @@ describe("createCloudFixture", () => {
         fixture.assertRoleAssignmentExists("sp-1")
       ).resolves.toBeUndefined();
       expect(fake.waits).toEqual([1000]);
+    });
+
+    it("finds a role assignment at the exact AKS cluster scope", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([
+              {
+                principalId: "sp-1",
+                roleDefinitionName:
+                  "Azure Kubernetes Service RBAC Cluster Admin"
+              }
+            ])
+          }
+        }
+      ]);
+
+      await expect(
+        fixture.assertRoleAssignmentExists("sp-1")
+      ).resolves.toBeUndefined();
     });
 
     it("fails plainly when the group carries no assignments", async () => {
@@ -1447,6 +1593,338 @@ describe("createCloudFixture", () => {
     });
   });
 
+  describe("absence assertions", () => {
+    const SUBJECT = "repo:fixture-owner/fixture-repo:environment:radtest-run";
+    const APP_LIST_RESULT = JSON.stringify([
+      { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+    ]);
+
+    async function observedHarness(stubs: FakeCommandStub[] = []) {
+      const harness = await createHarness([
+        {
+          tool: "az",
+          match: APP_LIST,
+          respond: { stdout: APP_LIST_RESULT },
+          times: 1
+        },
+        {
+          tool: "gh",
+          match: ["api", ENVIRONMENT_PATH],
+          respond: { stdout: '{"name":"radtest"}' },
+          times: 1
+        },
+        {
+          tool: "az",
+          match: ROLE_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { principalId: "sp-1", roleDefinitionName: "Contributor" }
+            ])
+          },
+          times: 1
+        },
+        {
+          tool: "az",
+          match: FIC_LIST,
+          respond: {
+            stdout: JSON.stringify([{ name: "fc", subject: SUBJECT }])
+          },
+          times: 1
+        },
+        ...stubs
+      ]);
+      await harness.fixture.assertGitHubEnvironmentExists();
+      await harness.fixture.assertRoleAssignmentExists("sp-1");
+      await harness.fixture.assertFederatedCredentialExists(SUBJECT);
+      return harness;
+    }
+
+    describe("refuses to answer before presence was established", () => {
+      it.each([
+        [
+          "the GitHub Environment",
+          (fixture: CloudFixture) => fixture.assertGitHubEnvironmentAbsent(),
+          new RegExp(`GitHub Environment "${ENVIRONMENT}"`)
+        ],
+        [
+          "the app registration",
+          (fixture: CloudFixture) => fixture.assertAppRegistrationAbsent(),
+          new RegExp(`app registration "${APP_NAME}"`)
+        ],
+        [
+          "a federated credential",
+          (fixture: CloudFixture) =>
+            fixture.assertFederatedCredentialAbsent(SUBJECT),
+          /federated credential for subject/
+        ],
+        [
+          "a role assignment",
+          (fixture: CloudFixture) => fixture.assertRoleAssignmentAbsent("sp-1"),
+          /role assignment for principal sp-1/
+        ]
+      ])(
+        "for %s, because a product that never created it would pass too",
+        async (_label, assertAbsent, subject) => {
+          const { fixture } = await createHarness();
+
+          const error = await captureError(assertAbsent(fixture));
+          expect(error.message).toMatch(/never observed it present/);
+          expect(error.message).toMatch(subject);
+        }
+      );
+    });
+
+    describe("assertGitHubEnvironmentAbsent", () => {
+      it("resolves once the environment is gone", async () => {
+        const { fixture } = await observedHarness([
+          { tool: "gh", match: ["api", ENVIRONMENT_PATH], respond: NOT_FOUND }
+        ]);
+
+        await expect(
+          fixture.assertGitHubEnvironmentAbsent()
+        ).resolves.toBeUndefined();
+      });
+
+      it("polls until the deletion becomes visible", async () => {
+        const { fixture, fake } = await observedHarness([
+          {
+            tool: "gh",
+            match: ["api", ENVIRONMENT_PATH],
+            respond: { stdout: '{"name":"radtest"}' },
+            times: 1
+          },
+          { tool: "gh", match: ["api", ENVIRONMENT_PATH], respond: NOT_FOUND }
+        ]);
+
+        await expect(
+          fixture.assertGitHubEnvironmentAbsent()
+        ).resolves.toBeUndefined();
+        expect(fake.waits).toEqual([1000]);
+      });
+
+      it("fails when the product left the environment standing", async () => {
+        const { fixture } = await observedHarness([
+          {
+            tool: "gh",
+            match: ["api", ENVIRONMENT_PATH],
+            respond: { stdout: '{"name":"radtest"}' }
+          }
+        ]);
+
+        await expect(fixture.assertGitHubEnvironmentAbsent()).rejects.toThrow(
+          /waiting for the product to delete GitHub Environment .* it still exists\./
+        );
+      });
+
+      it("distinguishes an unreadable answer from a deleted environment", async () => {
+        const { fixture } = await observedHarness([
+          {
+            tool: "gh",
+            match: ["api", ENVIRONMENT_PATH],
+            respond: { code: 1, stdout: "rate limit exceeded" }
+          }
+        ]);
+
+        await expect(fixture.assertGitHubEnvironmentAbsent()).rejects.toThrow(
+          /Could not determine whether GitHub Environment .* still exists .* gh exited 1: rate limit exceeded/
+        );
+      });
+
+      it("does not read an unrelated Not Found phrase as deletion", async () => {
+        const { fixture } = await observedHarness([
+          {
+            tool: "gh",
+            match: ["api", ENVIRONMENT_PATH],
+            respond: {
+              code: 1,
+              stderr: "Not Found while resolving the configured GitHub host"
+            }
+          }
+        ]);
+
+        await expect(fixture.assertGitHubEnvironmentAbsent()).rejects.toThrow(
+          /Could not determine whether GitHub Environment .* still exists .* gh exited 1: Not Found while resolving/
+        );
+      });
+    });
+
+    describe("assertAppRegistrationAbsent", () => {
+      it("resolves once no registration with the product's name remains", async () => {
+        const { fixture } = await observedHarness([
+          { tool: "az", match: APP_LIST, respond: { stdout: "[]" } }
+        ]);
+
+        await expect(
+          fixture.assertAppRegistrationAbsent()
+        ).resolves.toBeUndefined();
+      });
+
+      it("names the registrations still standing when the wait expires", async () => {
+        const { fixture } = await observedHarness([
+          { tool: "az", match: APP_LIST, respond: { stdout: APP_LIST_RESULT } }
+        ]);
+
+        await expect(fixture.assertAppRegistrationAbsent()).rejects.toThrow(
+          /to be deleted; 1 still exist\(s\) \(app-1\)\./
+        );
+      });
+
+      it("propagates a failing lookup rather than reading it as absence", async () => {
+        const { fixture } = await observedHarness([
+          failing("az", APP_LIST, "AADSTS700016")
+        ]);
+
+        await expect(fixture.assertAppRegistrationAbsent()).rejects.toThrow(
+          /AADSTS700016/
+        );
+      });
+    });
+
+    describe("assertFederatedCredentialAbsent", () => {
+      it("queries the exact observed registration and resolves once the credential is gone", async () => {
+        const { fixture, fake } = await observedHarness([
+          { tool: "az", match: FIC_LIST, respond: { stdout: "[]" } }
+        ]);
+
+        await expect(
+          fixture.assertFederatedCredentialAbsent(SUBJECT)
+        ).resolves.toBeUndefined();
+        expect(
+          fake.commands
+            .commandLines("az")
+            .filter((line) => line.includes("ad app list"))
+        ).toHaveLength(1);
+        expect(fake.commands.commandLines("az")).toContain(
+          "ad app federated-credential list --id obj-1 --query [].{name:name,subject:subject} -o json"
+        );
+      });
+
+      it("polls the exact observed registration until the credential is gone", async () => {
+        const { fixture, fake } = await observedHarness([
+          {
+            tool: "az",
+            match: FIC_LIST,
+            respond: {
+              stdout: JSON.stringify([{ name: "fc", subject: SUBJECT }])
+            },
+            times: 1
+          },
+          { tool: "az", match: FIC_LIST, respond: { stdout: "[]" } }
+        ]);
+
+        await expect(
+          fixture.assertFederatedCredentialAbsent(SUBJECT)
+        ).resolves.toBeUndefined();
+        expect(fake.waits).toEqual([1000]);
+      });
+
+      it("fails closed when the exact observed registration cannot be queried", async () => {
+        const { fixture } = await observedHarness([
+          failing("az", FIC_LIST, "Microsoft Graph is unavailable")
+        ]);
+
+        await expect(
+          fixture.assertFederatedCredentialAbsent(SUBJECT)
+        ).rejects.toThrow(/Microsoft Graph is unavailable/);
+      });
+
+      it("reports a credential the product failed to remove", async () => {
+        const { fixture } = await observedHarness([
+          {
+            tool: "az",
+            match: FIC_LIST,
+            respond: {
+              stdout: JSON.stringify([{ name: "fc", subject: SUBJECT }])
+            }
+          }
+        ]);
+
+        await expect(
+          fixture.assertFederatedCredentialAbsent(SUBJECT)
+        ).rejects.toThrow(/still carries 1 credential\(s\)\./);
+      });
+    });
+
+    describe("assertRoleAssignmentAbsent", () => {
+      it("resolves once the principal holds nothing in scope", async () => {
+        const { fixture, fake } = await observedHarness([
+          { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" } }
+        ]);
+
+        await expect(
+          fixture.assertRoleAssignmentAbsent("sp-1")
+        ).resolves.toBeUndefined();
+        const roleLookups = fake.commands
+          .commandLines("az")
+          .filter((line) => line.startsWith("role assignment list"));
+        expect(roleLookups).toContain(
+          `role assignment list --scope ${SCOPE} --query [].{principalId:principalId,roleDefinitionName:roleDefinitionName} -o json`
+        );
+        expect(roleLookups).toContain(
+          `role assignment list --scope ${CLUSTER_SCOPE} --query [].{principalId:principalId,roleDefinitionName:roleDefinitionName} -o json`
+        );
+      });
+
+      it("ignores assignments belonging to other principals", async () => {
+        const { fixture } = await observedHarness([
+          {
+            tool: "az",
+            match: ROLE_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                { principalId: "sp-2", roleDefinitionName: "Contributor" }
+              ])
+            }
+          }
+        ]);
+
+        await expect(
+          fixture.assertRoleAssignmentAbsent("sp-1")
+        ).resolves.toBeUndefined();
+      });
+
+      it("reports assignments the product failed to remove, matching case-insensitively", async () => {
+        const { fixture } = await observedHarness([
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SCOPE],
+            respond: {
+              stdout: JSON.stringify([
+                { principalId: "SP-1", roleDefinitionName: "Contributor" }
+              ])
+            }
+          }
+        ]);
+
+        await expect(
+          fixture.assertRoleAssignmentAbsent("sp-1")
+        ).rejects.toThrow(/to be removed; 1 remain\(s\)\./);
+      });
+
+      it("reports an assignment left at the AKS cluster scope", async () => {
+        const { fixture } = await observedHarness([
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+            respond: {
+              stdout: JSON.stringify([
+                {
+                  principalId: "sp-1",
+                  roleDefinitionName:
+                    "Azure Kubernetes Service RBAC Cluster Admin"
+                }
+              ])
+            }
+          }
+        ]);
+
+        await expect(
+          fixture.assertRoleAssignmentAbsent("sp-1")
+        ).rejects.toThrow(/to be removed; 1 remain\(s\)\./);
+      });
+    });
+  });
+
   describe("reclaimLeakedProductArtifacts", () => {
     it("reclaims nothing when the world is already clean", async () => {
       const { fixture, fake } = await createHarness();
@@ -1508,6 +1986,22 @@ describe("createCloudFixture", () => {
             ])
           }
         },
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "private",
+              repository: { full_name: REPOSITORY }
+            })
+          },
+          times: 1
+        },
+        {
+          tool: "gh-package",
+          match: ["api", "--method", "DELETE", PACKAGE_PATH],
+          respond: {}
+        },
         { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} },
         { tool: "gh", match: ["api", "--method", "PATCH"], respond: {} }
       ]);
@@ -1516,6 +2010,7 @@ describe("createCloudFixture", () => {
         "service principal sp-1",
         "app registration app-1",
         `GitHub environment ${ENVIRONMENT}`,
+        `GHCR state package ${STATE_PACKAGE}`,
         "pull request #7",
         "branch radius/setup-a",
         `${BRANCH} reset to ${BASELINE}`
@@ -1523,6 +2018,9 @@ describe("createCloudFixture", () => {
 
       const lines = fake.commands.commandLines("gh");
       expect(lines).toContain(`api --method DELETE ${ENVIRONMENT_PATH}`);
+      expect(fake.commands.commandLines("gh-package")).toContain(
+        `api --method DELETE ${PACKAGE_PATH}`
+      );
       expect(lines).toContain(
         `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
       );
@@ -1765,6 +2263,109 @@ describe("createCloudFixture", () => {
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
         /probe GitHub environment .* gh exited 1: \{"message":"Bad gateway"\}/
+      );
+    });
+
+    it("refuses to delete a package that is not private or internal", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "public",
+              repository: { full_name: REPOSITORY }
+            })
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /refuse GHCR state package .* visibility is "public"/
+      );
+      expect(
+        fake.commands
+          .commandLines("gh-package")
+          .some((line) => line.includes("--method DELETE"))
+      ).toBe(false);
+    });
+
+    it("refuses to delete a package linked to another repository", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "private",
+              repository: { full_name: "other/repository" }
+            })
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /linked to "other\/repository", not "fixture-owner\/fixture-repo"/
+      );
+    });
+
+    it("refuses to delete a package with no repository link", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({ visibility: "private" })
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /it is not linked to "fixture-owner\/fixture-repo"/
+      );
+    });
+
+    it("records a failing GHCR state package deletion", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "gh-package",
+          match: ["api", PACKAGE_PATH],
+          respond: {
+            stdout: JSON.stringify({
+              visibility: "internal",
+              repository: { full_name: REPOSITORY }
+            })
+          },
+          times: 1
+        },
+        failing(
+          "gh-package",
+          ["api", "--method", "DELETE", PACKAGE_PATH],
+          "HTTP 403"
+        )
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /GHCR state package .*HTTP 403/
+      );
+    });
+
+    it("records an unreadable GHCR state package probe and continues cleanup", async () => {
+      const { fixture, fake } = await createHarness([
+        failing("gh-package", ["api", PACKAGE_PATH], "HTTP 502"),
+        {
+          tool: "gh",
+          match: ["api", MATCHING_REFS_PATH],
+          respond: { stdout: '[{"ref":"refs/heads/radius/setup-a"}]' }
+        },
+        { tool: "gh", match: ["api", "--method", "DELETE"], respond: {} }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /probe GHCR state package .*HTTP 502.*Reclaimed before failing: branch radius\/setup-a/s
+      );
+      expect(fake.commands.commandLines("gh")).toContain(
+        `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
       );
     });
 
