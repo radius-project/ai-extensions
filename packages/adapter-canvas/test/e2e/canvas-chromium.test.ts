@@ -60,6 +60,41 @@ async function filesContainingText(
   return matches;
 }
 
+async function waitForStableComputedTransform(
+  page: Page,
+  viewport: Locator
+): Promise<string> {
+  let previous = "";
+  let current = "";
+  let stableChecks = 0;
+  await expect
+    .poll(async () => {
+      await page.clock.fastForward(50);
+      current = await viewport.evaluate((element) => {
+        const getComputedStyleFromGlobal = Reflect.get(
+          globalThis,
+          "getComputedStyle"
+        );
+        if (typeof getComputedStyleFromGlobal !== "function") return "none";
+        const computedStyle = Reflect.apply(
+          getComputedStyleFromGlobal,
+          globalThis,
+          [element]
+        );
+        if (computedStyle === null || typeof computedStyle !== "object") {
+          return "none";
+        }
+        return String(Reflect.get(computedStyle, "transform"));
+      });
+      if (current === previous && current !== "none") stableChecks++;
+      else stableChecks = 0;
+      previous = current;
+      return stableChecks;
+    })
+    .toBeGreaterThanOrEqual(2);
+  return current;
+}
+
 // The environment-deletion route refuses (409 app-deployed) while an
 // application is still deployed to the environment, and only deletes
 // Azure-backed environments (it reads AZURE_CLIENT_ID / AZURE_TENANT_ID to plan
@@ -2983,22 +3018,25 @@ test.describe("Radius Canvas in Chromium", () => {
 
     const viewport = page.locator(".react-flow__viewport");
     const zoomOut = page.locator(".react-flow__controls-zoomout");
-    await page.clock.fastForward(30);
-    const fittedTransform = await viewport.getAttribute("style");
+    const fittedTransform = await waitForStableComputedTransform(
+      page,
+      viewport
+    );
     await zoomOut.click();
-    await page.clock.fastForward(300);
-    const zoomedTransform = await viewport.getAttribute("style");
+    const zoomedTransform = await waitForStableComputedTransform(
+      page,
+      viewport
+    );
     // The refresh assertion below is only meaningful if the zoom control
     // actually moved the viewport first.
     expect(zoomedTransform).not.toBe(fittedTransform);
 
     await page.clock.fastForward(DEPLOYED_GRAPH_POLL_MS);
     await expect.poll(() => graphRequests).toBe(2);
-    await page.clock.fastForward(50);
     await expect(page.getByAltText("Deployed")).toHaveCount(2);
-    await expect
-      .poll(() => viewport.getAttribute("style"))
-      .toBe(zoomedTransform);
+    expect(await waitForStableComputedTransform(page, viewport)).toBe(
+      zoomedTransform
+    );
   });
 
   test("confirms stop-tracking recovery by keyboard and sends the failed teardown identity @safety", async ({
