@@ -92,6 +92,7 @@ import {
   applicationNamespace,
   classifyDeploymentPresence,
   DELETE_DEPLOYMENT_WORKFLOW,
+  DELETE_ENVIRONMENT_WORKFLOW,
   describeDeployFailure,
   describeProblems as describeDeploymentProblems,
   findDeleteEnvironmentRefusalProblems,
@@ -1077,6 +1078,12 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
           new URL(response.url()).pathname === DELETE_ENVIRONMENT_PATH &&
           response.request().method() === "POST"
       );
+      const runsBefore = await listWorkflowRunIds(
+        ports.commands,
+        cloud.repository,
+        DELETE_ENVIRONMENT_WORKFLOW
+      );
+      untrackedWorkflowDispatch = true;
       await page.locator("#env-confirm-ok").click();
       const response = await deleteResponse;
       const payload = (await response.json()) as unknown;
@@ -1118,6 +1125,29 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         })
         .toBe(true);
       const finished = await snapshot();
+      try {
+        const runId =
+          finished.state === "succeeded" ?
+            await discoverNewWorkflowRunId(
+              ports.commands,
+              cloud.repository,
+              DELETE_ENVIRONMENT_WORKFLOW,
+              runsBefore
+            )
+          : findNewWorkflowRunId(
+              runsBefore,
+              await listWorkflowRunIds(
+                ports.commands,
+                cloud.repository,
+                DELETE_ENVIRONMENT_WORKFLOW
+              )
+            );
+        if (runId) ownedWorkflowRunIds.add(runId);
+        untrackedWorkflowDispatch = false;
+      } catch (error) {
+        untrackedWorkflowDispatch = true;
+        throw error;
+      }
       expect(
         finished.state,
         `The delete-environment operation ended ${finished.state}: ${finished.error || "no error was reported."}`

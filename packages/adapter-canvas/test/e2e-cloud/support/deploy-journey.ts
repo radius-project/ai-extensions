@@ -46,6 +46,9 @@ export const REQUIRED_DELETE_WORKFLOWS: readonly string[] = [
 /** The workflow whose exact run must settle before fixture reclamation. */
 export const DELETE_DEPLOYMENT_WORKFLOW = DELETE_APP_DISPATCHER_FILE;
 
+/** The environment workflow whose run must settle before fixture reclamation. */
+export const DELETE_ENVIRONMENT_WORKFLOW = DELETE_ENV_DISPATCHER_FILE;
+
 /** Every workflow the complete lifecycle requires before its first dispatch. */
 export const REQUIRED_LIFECYCLE_WORKFLOWS: readonly string[] = [
   ...REQUIRED_DEFAULT_BRANCH_WORKFLOWS,
@@ -457,6 +460,15 @@ export interface KubernetesWorkload {
   readonly availableReplicas: number;
 }
 
+export function isKubernetesWorkloadReady(
+  workload: KubernetesWorkload
+): boolean {
+  return (
+    workload.desiredReplicas > 0 &&
+    workload.availableReplicas >= workload.desiredReplicas
+  );
+}
+
 /**
  * Narrows `kubectl get deployments -o json`.
  *
@@ -646,7 +658,7 @@ export function findDeployedApplicationProblems(
   }
 
   const unavailable = owned.filter(
-    (workload) => workload.availableReplicas < 1
+    (workload) => !isKubernetesWorkloadReady(workload)
   );
   for (const workload of unavailable)
     problems.push(

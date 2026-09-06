@@ -13,12 +13,14 @@ import {
   applicationNamespace,
   classifyDeploymentPresence,
   DELETE_DEPLOYMENT_WORKFLOW,
+  DELETE_ENVIRONMENT_WORKFLOW,
   describeDeployFailure,
   describeProblems,
   findDeleteEnvironmentRefusalProblems,
   findDeployedApplicationProblems,
   findNewWorkflowRunId,
   findSurvivingArtifactProblems,
+  isKubernetesWorkloadReady,
   RADIUS_APPLICATION_LABEL,
   radiusApplicationSelector,
   readApplicationNames,
@@ -220,6 +222,7 @@ describe("workflow run ownership", () => {
 
   it("exposes the exact delete dispatcher used for run discovery", () => {
     expect(DELETE_DEPLOYMENT_WORKFLOW).toBe(DELETE_APP_DISPATCHER_FILE);
+    expect(DELETE_ENVIRONMENT_WORKFLOW).toBe(DELETE_ENV_DISPATCHER_FILE);
   });
 
   it("cancels active owned runs and waits for completion", async () => {
@@ -927,15 +930,42 @@ describe("findDeployedApplicationProblems", () => {
           desiredReplicas: 1
         }),
         workload({ name: "backend", availableReplicas: 0, desiredReplicas: 2 }),
+        workload({ name: "partial", availableReplicas: 1, desiredReplicas: 2 }),
+        workload({
+          name: "scaled-down",
+          availableReplicas: 0,
+          desiredReplicas: 0
+        }),
         workload({ name: "worker" })
       ]
     });
-    expect(problems).toHaveLength(2);
+    expect(problems).toHaveLength(4);
     expect(problems[0]).toMatch(
       /"frontend" applied but has 0 available replica\(s\) of 1 desired/
     );
     expect(problems[1]).toMatch(/"backend"/);
+    expect(problems[2]).toMatch(/"partial"/);
+    expect(problems[3]).toMatch(/"scaled-down"/);
   });
+});
+
+describe("isKubernetesWorkloadReady", () => {
+  it.each([
+    ["ready", 1, 1, true],
+    ["over-available", 3, 2, true],
+    ["partially available", 1, 2, false],
+    ["unavailable", 0, 1, false],
+    ["scaled to zero", 0, 0, false]
+  ])(
+    "classifies %s workloads",
+    (_label, availableReplicas, desiredReplicas, expected) => {
+      expect(
+        isKubernetesWorkloadReady(
+          workload({ availableReplicas, desiredReplicas })
+        )
+      ).toBe(expected);
+    }
+  );
 });
 
 describe("findSurvivingArtifactProblems", () => {

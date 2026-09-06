@@ -2717,12 +2717,12 @@ describe("createCloudFixture", () => {
     });
 
     const workloadsJson = (
-      ...names: readonly (readonly [string, number])[]
+      ...names: readonly (readonly [string, number, number?])[]
     ): string =>
       JSON.stringify({
-        items: names.map(([name, available]) => ({
+        items: names.map(([name, available, desired = 1]) => ({
           metadata: { name, labels: { "radapp.io/application": APP } },
-          spec: { replicas: 1 },
+          spec: { replicas: desired },
           status: { availableReplicas: available }
         }))
       });
@@ -2942,6 +2942,42 @@ describe("createCloudFixture", () => {
       expect(workloads[0]?.availableReplicas).toBe(1);
       expect(fake.waits).toEqual([1000]);
     });
+
+    it.each([
+      ["partially available", 1, 3],
+      ["scaled to zero", 0, 0]
+    ])(
+      "waits when a workload is %s",
+      async (_label, availableReplicas, desiredReplicas) => {
+        const { fixture, fake } = await clusterHarness([
+          credentials(),
+          {
+            tool: "kubectl",
+            match: ["get", "deployments"],
+            respond: {
+              stdout: workloadsJson([
+                "demo-frontend",
+                availableReplicas,
+                desiredReplicas
+              ])
+            },
+            times: 1
+          },
+          listing({ stdout: workloadsJson(["demo-frontend", 3, 3]) })
+        ]);
+
+        const workloads = await fixture.assertApplicationWorkloadsPresent(
+          APP,
+          NAMESPACE
+        );
+
+        expect(workloads[0]).toMatchObject({
+          desiredReplicas: 3,
+          availableReplicas: 3
+        });
+        expect(fake.waits).toEqual([1000]);
+      }
+    );
 
     it("bounds every readiness probe by the remaining assertion time", async () => {
       const { fixture, fake } = await clusterHarness(

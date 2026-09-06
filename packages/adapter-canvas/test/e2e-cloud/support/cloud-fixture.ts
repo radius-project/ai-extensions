@@ -45,6 +45,7 @@ import {
   radiusApplicationSelector,
   readKubernetesWorkloads,
   readKubernetesResourceNames,
+  isKubernetesWorkloadReady,
   type KubernetesWorkload
 } from "./deploy-journey.js";
 
@@ -882,7 +883,7 @@ export async function createCloudFixture(
           lastSeen = await listWorkloads(application, namespace, remainingMs);
           if (lastSeen === "no-namespace" || lastSeen.length === 0)
             return undefined;
-          if (lastSeen.some((workload) => workload.availableReplicas < 1))
+          if (lastSeen.some((workload) => !isKubernetesWorkloadReady(workload)))
             return undefined;
           return lastSeen;
         },
@@ -894,7 +895,7 @@ export async function createCloudFixture(
           : lastSeen.length === 0 ?
             "The namespace exists but carries no workload labelled for the application."
           : `The application workloads exist but are not ready: ${lastSeen
-              .filter((workload) => workload.availableReplicas < 1)
+              .filter((workload) => !isKubernetesWorkloadReady(workload))
               .map(
                 (workload) =>
                   `"${workload.name}" has ${workload.availableReplicas} available replica(s) of ${workload.desiredReplicas} desired`
