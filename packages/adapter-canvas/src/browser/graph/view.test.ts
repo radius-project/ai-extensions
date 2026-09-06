@@ -558,6 +558,10 @@ describe("flow application", () => {
     updater.fn?.([], []);
     expect(vendor.reactFlow.nodeUpdates).toHaveLength(1);
     expect(vendor.reactFlow.edgeUpdates).toHaveLength(1);
+    // An update must not schedule any deferred work. Without this the
+    // assertion below would still pass if a re-fit timer were reintroduced,
+    // because the fake clock would never flush it.
+    expect(clock.timeouts).toBe(0);
     expect(instance.fits).toEqual([{ padding: 0.18 }]);
   });
 
