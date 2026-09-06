@@ -7,7 +7,7 @@
 const USER_AGENT = "radius-ai-extensions-live-tests";
 const DEFAULT_RETRY_DELAYS_MS = [250, 1000] as const;
 
-export interface LiveGithubFetchResult {
+export interface LiveGitHubFetchResult {
   readonly response: Response;
   readonly attempts: number;
 }
@@ -23,7 +23,19 @@ function sleep(milliseconds: number): Promise<void> {
 }
 
 function isTransientStatus(status: number): boolean {
-  return status === 408 || status === 429 || status >= 500;
+  return status === 408 || status === 429 || (status >= 500 && status <= 599);
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Body cleanup is best-effort and must not hide the request failure.
+  }
+}
+
+function formatAttemptCount(attempts: number): string {
+  return `${attempts} ${attempts === 1 ? "attempt" : "attempts"}`;
 }
 
 // Build the standard GitHub REST headers, adding `Authorization` when a
@@ -54,7 +66,7 @@ export async function fetchGitHubWithRetry(
   url: string,
   init: RequestInit,
   options: FetchGitHubWithRetryOptions = {}
-): Promise<LiveGithubFetchResult> {
+): Promise<LiveGitHubFetchResult> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const retryDelaysMs = [...(options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS)];
   const delay = options.sleep ?? sleep;
@@ -65,6 +77,7 @@ export async function fetchGitHubWithRetry(
       if (response.ok || !isTransientStatus(response.status)) {
         return { response, attempts: attemptIndex + 1 };
       }
+      await cancelResponseBody(response);
     } catch {
       // Retry rejected fetches until the retry budget is exhausted.
     }
@@ -72,8 +85,17 @@ export async function fetchGitHubWithRetry(
     await delay(retryDelayMs);
   }
 
-  const response = await fetchImpl(url, init);
-  return { response, attempts: retryDelaysMs.length + 1 };
+  const attempts = retryDelaysMs.length + 1;
+  try {
+    const response = await fetchImpl(url, init);
+    return { response, attempts };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `failed to fetch ${url} after ${formatAttemptCount(attempts)}: ${reason}`,
+      { cause: error }
+    );
+  }
 }
 
 // Fetch one file under a repo's `.github/extension/` tree as raw text through
@@ -95,9 +117,9 @@ export async function fetchExtensionFile(
     options
   );
   if (!res.ok) {
-    const attemptNoun = attempts === 1 ? "attempt" : "attempts";
+    await cancelResponseBody(res);
     throw new Error(
-      `failed to fetch ${url} after ${attempts} ${attemptNoun}: ${res.status} ${res.statusText}`
+      `failed to fetch ${url} after ${formatAttemptCount(attempts)}: ${res.status} ${res.statusText}`
     );
   }
   return res.text();
