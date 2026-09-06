@@ -1660,6 +1660,45 @@ describe("createCloudFixture", () => {
       ).resolves.toBeUndefined();
     });
 
+    it("shares the assertion deadline across exact-scope lookups", async () => {
+      let now = NOW;
+      const expected = [roleAssignment(), clusterRoleAssignment()];
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SCOPE],
+            respond: () => {
+              now = new Date(NOW.getTime() + 500);
+              return { stdout: JSON.stringify([roleAssignment()]) };
+            }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+            respond: {
+              stdout: JSON.stringify([clusterRoleAssignment()])
+            }
+          }
+        ],
+        { readNow: () => now },
+        { assertionTimeoutMs: 2_000 }
+      );
+
+      await expect(
+        fixture.assertRoleAssignmentsExist(expected)
+      ).resolves.toBeUndefined();
+      expect(
+        fake.commands.calls
+          .filter(
+            (call) =>
+              call.tool === "az" &&
+              call.args.slice(0, 3).join(" ") === "role assignment list"
+          )
+          .map((call) => call.timeoutMs)
+      ).toEqual([2_000, 1_500]);
+    });
+
     it("rejects an empty captured inventory", async () => {
       const { fixture } = await createHarness();
 

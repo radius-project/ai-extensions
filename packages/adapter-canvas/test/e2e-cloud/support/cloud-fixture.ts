@@ -662,10 +662,12 @@ export async function createCloudFixture(
         ports,
         timeoutMs: assertionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
-        probe: async () => {
+        probe: async (remainingMs) => {
           assignments = await listRoleAssignmentsAtScopes(
             commands,
-            roleAssignmentScopes
+            roleAssignmentScopes,
+            remainingMs,
+            ports.now
           );
           const matching = assignments.filter(
             (assignment) =>
@@ -705,10 +707,13 @@ export async function createCloudFixture(
         ports,
         timeoutMs: assertionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
-        probe: async () => {
-          const current = await listRoleAssignmentsAtScopes(commands, [
-            ...new Set(expected.map((assignment) => assignment.scope))
-          ]);
+        probe: async (remainingMs) => {
+          const current = await listRoleAssignmentsAtScopes(
+            commands,
+            [...new Set(expected.map((assignment) => assignment.scope))],
+            remainingMs,
+            ports.now
+          );
           missing = expected.filter(
             (wanted) =>
               !current.some(
@@ -1482,21 +1487,25 @@ async function listFederatedCredentials(
 
 async function listRoleAssignmentRecords(
   commands: CloudCommandPort,
-  scope: string
+  scope: string,
+  timeoutMs: number
 ): Promise<RoleAssignmentRecord[]> {
   const context = `az role assignment list --scope ${scope}`;
   const entries = parseJsonArray(
-    await commands.runAz([
-      "role",
-      "assignment",
-      "list",
-      "--scope",
-      scope,
-      "--query",
-      "[].{id:id,principalId:principalId,roleDefinitionName:roleDefinitionName,scope:scope}",
-      "-o",
-      "json"
-    ]),
+    await commands.runAz(
+      [
+        "role",
+        "assignment",
+        "list",
+        "--scope",
+        scope,
+        "--query",
+        "[].{id:id,principalId:principalId,roleDefinitionName:roleDefinitionName,scope:scope}",
+        "-o",
+        "json"
+      ],
+      timeoutMs
+    ),
     context
   );
   return entries.map((entry, index) => {
@@ -1563,11 +1572,22 @@ async function listRoleAssignments(
 
 async function listRoleAssignmentsAtScopes(
   commands: CloudCommandPort,
-  scopes: readonly string[]
+  scopes: readonly string[],
+  timeoutMs: number,
+  now: () => Date
 ): Promise<RoleAssignmentRecord[]> {
+  const deadline = now().getTime() + timeoutMs;
   const byId = new Map<string, RoleAssignmentRecord>();
   for (const scope of scopes)
-    for (const assignment of await listRoleAssignmentRecords(commands, scope))
+    for (const assignment of await listRoleAssignmentRecords(
+      commands,
+      scope,
+      remainingCommandTimeout(
+        deadline,
+        now,
+        `Role-assignment lookup at ${scope}`
+      )
+    ))
       byId.set(assignment.id.toLowerCase(), assignment);
   return [...byId.values()];
 }
