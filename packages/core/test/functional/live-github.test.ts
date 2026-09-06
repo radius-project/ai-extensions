@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   fetchExtensionFile,
-  fetchGitHubWithRetry
+  fetchGitHubWithRetry,
 } from "../support/live-github.js";
 
 const noDelay = async (): Promise<void> => {};
@@ -10,7 +10,7 @@ describe("live GitHub test support", () => {
   it.each([
     { status: 408, statusText: "Request Timeout" },
     { status: 429, statusText: "Too Many Requests" },
-    { status: 500, statusText: "Internal Server Error" }
+    { status: 500, statusText: "Internal Server Error" },
   ])(
     "retries transient GitHub $status responses before returning a successful response",
     async ({ status, statusText }) => {
@@ -19,9 +19,9 @@ describe("live GitHub test support", () => {
       const responses = [
         new Response("try again", {
           status,
-          statusText
+          statusText,
         }),
-        new Response("contents")
+        new Response("contents"),
       ];
       const fetchImpl: typeof fetch = async () => {
         calls += 1;
@@ -31,23 +31,75 @@ describe("live GitHub test support", () => {
       const result = await fetchGitHubWithRetry(
         "https://api.github.com/test",
         {
-          headers: {}
+          headers: {},
         },
         {
           fetchImpl,
           sleep: async (milliseconds) => {
             delays.push(milliseconds);
           },
-          retryDelaysMs: [5, 10]
-        }
+          retryDelaysMs: [5, 10],
+        },
       );
 
       expect(await result.response.text()).toBe("contents");
       expect(result.attempts).toBe(2);
       expect(calls).toBe(2);
       expect(delays).toEqual([5]);
-    }
+    },
   );
+
+  it("returns the file contents when the first content fetch attempt succeeds", async () => {
+    let calls = 0;
+    const delays: number[] = [];
+    const fetchImpl: typeof fetch = async () => {
+      calls += 1;
+      return new Response("template contents");
+    };
+
+    const contents = await fetchExtensionFile(
+      "owner/repo",
+      ".github/extension",
+      "deploy.yml",
+      "main",
+      {
+        fetchImpl,
+        sleep: async (milliseconds) => {
+          delays.push(milliseconds);
+        },
+      },
+    );
+
+    expect(contents).toBe("template contents");
+    expect(calls).toBe(1);
+    expect(delays).toEqual([]);
+  });
+
+  it("retries a rejected fetch before returning a later successful response", async () => {
+    let calls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error("network reset");
+      }
+      return new Response("template contents");
+    };
+
+    const contents = await fetchExtensionFile(
+      "owner/repo",
+      ".github/extension",
+      "deploy.yml",
+      "main",
+      {
+        fetchImpl,
+        sleep: noDelay,
+        retryDelaysMs: [5, 10],
+      },
+    );
+
+    expect(contents).toBe("template contents");
+    expect(calls).toBe(2);
+  });
 
   it("does not retry permanent GitHub content fetch responses", async () => {
     let calls = 0;
@@ -55,7 +107,7 @@ describe("live GitHub test support", () => {
       calls += 1;
       return new Response("missing", {
         status: 404,
-        statusText: "Not Found"
+        statusText: "Not Found",
       });
     };
 
@@ -67,11 +119,11 @@ describe("live GitHub test support", () => {
         "main",
         {
           fetchImpl,
-          sleep: noDelay
-        }
-      )
+          sleep: noDelay,
+        },
+      ),
     ).rejects.toThrow(
-      "failed to fetch https://api.github.com/repos/owner/repo/contents/.github/extension/missing.yml?ref=main after 1 attempt: 404 Not Found"
+      "failed to fetch https://api.github.com/repos/owner/repo/contents/.github/extension/missing.yml?ref=main after 1 attempt: 404 Not Found",
     );
     expect(calls).toBe(1);
   });
@@ -80,18 +132,18 @@ describe("live GitHub test support", () => {
     const fetchImpl: typeof fetch = async () =>
       new Response("missing", {
         status: 404,
-        statusText: "Not Found"
+        statusText: "Not Found",
       });
 
     const result = await fetchGitHubWithRetry(
       "https://api.github.com/test",
       {
-        headers: {}
+        headers: {},
       },
       {
         fetchImpl,
-        sleep: noDelay
-      }
+        sleep: noDelay,
+      },
     );
     expect(result.response.status).toBe(404);
     expect(result.attempts).toBe(1);
@@ -108,14 +160,14 @@ describe("live GitHub test support", () => {
       fetchGitHubWithRetry(
         "https://api.github.com/test",
         {
-          headers: {}
+          headers: {},
         },
         {
           fetchImpl,
           sleep: noDelay,
-          retryDelaysMs: [5, 10]
-        }
-      )
+          retryDelaysMs: [5, 10],
+        },
+      ),
     ).rejects.toThrow("network failure 3");
     expect(calls).toBe(3);
   });
@@ -126,7 +178,7 @@ describe("live GitHub test support", () => {
       calls += 1;
       return new Response("still unavailable", {
         status: 500,
-        statusText: "Internal Server Error"
+        statusText: "Internal Server Error",
       });
     };
 
@@ -139,11 +191,11 @@ describe("live GitHub test support", () => {
         {
           fetchImpl,
           sleep: noDelay,
-          retryDelaysMs: [5, 10]
-        }
-      )
+          retryDelaysMs: [5, 10],
+        },
+      ),
     ).rejects.toThrow(
-      "failed to fetch https://api.github.com/repos/owner/repo/contents/.github/extension/delete-aws.yml?ref=sha%20with%20space after 3 attempts: 500 Internal Server Error"
+      "failed to fetch https://api.github.com/repos/owner/repo/contents/.github/extension/delete-aws.yml?ref=sha%20with%20space after 3 attempts: 500 Internal Server Error",
     );
     expect(calls).toBe(3);
   });
