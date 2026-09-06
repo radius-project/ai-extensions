@@ -387,14 +387,70 @@ describe("createNodeCloudFixturePorts", () => {
     });
   });
 
-  it("runs package commands through the real gh executable with a dedicated token", async () => {
-    const outcome = await createNodeCloudFixturePorts({
-      packageToken: "package-token-for-version-probe"
-    }).commands.runGhPackage(["--version"]);
+  it("isolates and redacts the dedicated token through a fake gh executable", async () => {
+    const packageToken = "package-token-for-port-test";
+    const appToken = "app-token-must-not-reach-package-command";
+    const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-gh-"));
+    const originalPath = process.env.PATH;
+    const originalPathExt = process.env.PATHEXT;
+    const originalGhToken = process.env.GH_TOKEN;
+    const originalGitHubToken = process.env.GITHUB_TOKEN;
+    const originalNodeOptions = process.env.NODE_OPTIONS;
 
-    expect(outcome.code).toBe(0);
-    expect(outcome.stdout).toMatch(/^gh version /);
-    expect(outcome.stdout).not.toContain("package-token-for-version-probe");
+    await fs.writeFile(
+      path.join(fakeBin, "gh"),
+      [
+        "#!/bin/sh",
+        'printf "GH_TOKEN=%s\\n" "$GH_TOKEN"',
+        'printf "GITHUB_TOKEN=%s\\n" "$GITHUB_TOKEN" >&2',
+        "exit 7",
+        ""
+      ].join("\n")
+    );
+    await fs.chmod(path.join(fakeBin, "gh"), 0o755);
+    if (process.platform === "win32") {
+      const hook = path.join(fakeBin, "fake-gh.cjs");
+      await fs.copyFile(process.execPath, path.join(fakeBin, "gh.exe"));
+      await fs.writeFile(
+        hook,
+        [
+          "process.stdout.write(`GH_TOKEN=${process.env.GH_TOKEN}\\n`);",
+          "process.stderr.write(`GITHUB_TOKEN=${process.env.GITHUB_TOKEN}\\n`);",
+          "process.exit(7);",
+          ""
+        ].join("\n")
+      );
+      process.env.NODE_OPTIONS = `--require="${hook.replaceAll("\\", "/")}"`;
+    }
+
+    try {
+      process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
+      process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+      process.env.GH_TOKEN = appToken;
+      process.env.GITHUB_TOKEN = appToken;
+
+      const outcome = await createNodeCloudFixturePorts({
+        packageToken
+      }).commands.runGhPackage(["api", "user"]);
+
+      expect(outcome.code).toBe(7);
+      expect(outcome.stdout).toContain("GH_TOKEN=[REDACTED]");
+      expect(outcome.stderr).toContain("GITHUB_TOKEN=[REDACTED]");
+      expect(`${outcome.stdout}${outcome.stderr}`).not.toContain(packageToken);
+      expect(`${outcome.stdout}${outcome.stderr}`).not.toContain(appToken);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (originalPathExt === undefined) delete process.env.PATHEXT;
+      else process.env.PATHEXT = originalPathExt;
+      if (originalGhToken === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = originalGhToken;
+      if (originalGitHubToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = originalGitHubToken;
+      if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = originalNodeOptions;
+      await fs.rm(fakeBin, { recursive: true, force: true });
+    }
   });
 
   it("redacts the dedicated package token from command output", () => {

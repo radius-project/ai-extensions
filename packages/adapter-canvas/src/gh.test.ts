@@ -780,6 +780,38 @@ describe.sequential("cliExec", () => {
     expect(options.env.GITHUB_TOKEN).toBeUndefined();
   });
 
+  it("preserves an explicitly selected GitHub token when keyring fallback is active", async () => {
+    const { cliExec } = await loadGh("win32", {
+      prime: true,
+      token: "ambient-gh",
+      withToken: STATUS.tokenNoWorkflow,
+      keyring: STATUS.keyringWithWorkflow
+    });
+    const callback = vi.fn();
+
+    cliExec(
+      "gh",
+      ["api", "user"],
+      {
+        env: {
+          GH_TOKEN: "dedicated-token",
+          GITHUB_TOKEN: "dedicated-token"
+        },
+        preserveGitHubToken: true
+      },
+      callback
+    );
+
+    const [, , options] = childProcess.execFile.mock.calls[0];
+    expect(options).not.toHaveProperty("preserveGitHubToken");
+    expect(options.env).toEqual(
+      expect.objectContaining({
+        GH_TOKEN: "dedicated-token",
+        GITHUB_TOKEN: "dedicated-token"
+      })
+    );
+  });
+
   it("keeps ambient GitHub tokens when the injected token already has workflow (even with a keyring login)", async () => {
     const { cliExec } = await loadGh("win32", {
       prime: true,

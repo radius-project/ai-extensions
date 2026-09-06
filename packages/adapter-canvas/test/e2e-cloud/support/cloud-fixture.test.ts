@@ -742,7 +742,7 @@ describe("createCloudFixture", () => {
       const { fixture } = await createHarness([
         {
           tool: "az",
-          match: ROLE_LIST,
+          match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
             stdout: JSON.stringify([roleAssignment()])
           }
@@ -752,6 +752,33 @@ describe("createCloudFixture", () => {
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
         new RegExp(
           `role assignment "Contributor" for principal sp-1 at ${SCOPE.replace(
+            /\//g,
+            "\\/"
+          )}`
+        )
+      );
+    });
+
+    it("reports a leaked role assignment at the exact AKS cluster scope", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([
+              {
+                principalId: "sp-cluster",
+                roleDefinitionName:
+                  "Azure Kubernetes Service RBAC Cluster Admin"
+              }
+            ])
+          }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        new RegExp(
+          `role assignment "Azure Kubernetes Service RBAC Cluster Admin" for principal sp-cluster at ${CLUSTER_SCOPE.replace(
             /\//g,
             "\\/"
           )}`
@@ -1124,7 +1151,7 @@ describe("createCloudFixture", () => {
 
       const error = await captureError(fixture.assertCleanSlate());
 
-      expect(error.message.split("\n  - ")).toHaveLength(9);
+      expect(error.message.split("\n  - ")).toHaveLength(10);
       for (const fragment of [
         "app registration",
         "service principal",
@@ -1482,6 +1509,29 @@ describe("createCloudFixture", () => {
       expect(fake.waits).toEqual([1000]);
     });
 
+    it("requires role assignments at both exact product scopes", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", SCOPE],
+          respond: {
+            stdout: JSON.stringify([roleAssignment()])
+          }
+        },
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([clusterRoleAssignment()])
+          }
+        }
+      ]);
+
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
+        [roleAssignment(), clusterRoleAssignment()]
+      );
+    });
+
     it("fails plainly when the group carries no assignments", async () => {
       const { fixture } = await createHarness();
 
@@ -1609,6 +1659,45 @@ describe("createCloudFixture", () => {
       await expect(
         fixture.assertRoleAssignmentsExist(expected)
       ).resolves.toBeUndefined();
+    });
+
+    it("shares the assertion deadline across exact-scope lookups", async () => {
+      let now = NOW;
+      const expected = [roleAssignment(), clusterRoleAssignment()];
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SCOPE],
+            respond: () => {
+              now = new Date(NOW.getTime() + 500);
+              return { stdout: JSON.stringify([roleAssignment()]) };
+            }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+            respond: {
+              stdout: JSON.stringify([clusterRoleAssignment()])
+            }
+          }
+        ],
+        { readNow: () => now },
+        { assertionTimeoutMs: 2_000 }
+      );
+
+      await expect(
+        fixture.assertRoleAssignmentsExist(expected)
+      ).resolves.toBeUndefined();
+      expect(
+        fake.commands.calls
+          .filter(
+            (call) =>
+              call.tool === "az" &&
+              call.args.slice(0, 3).join(" ") === "role assignment list"
+          )
+          .map((call) => call.timeoutMs)
+      ).toEqual([2_000, 1_500]);
     });
 
     it("rejects an empty captured inventory", async () => {
@@ -2129,13 +2218,22 @@ describe("createCloudFixture", () => {
 
     describe("assertRoleAssignmentAbsent", () => {
       it("resolves once the principal holds nothing in scope", async () => {
-        const { fixture } = await observedHarness([
+        const { fixture, fake } = await observedHarness([
           { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" } }
         ]);
 
         await expect(
           fixture.assertRoleAssignmentAbsent("sp-1")
         ).resolves.toBeUndefined();
+        const roleLookups = fake.commands
+          .commandLines("az")
+          .filter((line) => line.startsWith("role assignment list"));
+        expect(roleLookups).toContain(
+          `role assignment list --scope ${SCOPE} --query [].{principalId:principalId,roleDefinitionName:roleDefinitionName} -o json`
+        );
+        expect(roleLookups).toContain(
+          `role assignment list --scope ${CLUSTER_SCOPE} --query [].{principalId:principalId,roleDefinitionName:roleDefinitionName} -o json`
+        );
       });
 
       it("ignores assignments belonging to other principals", async () => {
@@ -2160,9 +2258,31 @@ describe("createCloudFixture", () => {
         const { fixture } = await observedHarness([
           {
             tool: "az",
-            match: ROLE_LIST,
+            match: [...ROLE_LIST, "--scope", SCOPE],
             respond: {
               stdout: JSON.stringify([roleAssignment("SP-1")])
+            }
+          }
+        ]);
+
+        await expect(
+          fixture.assertRoleAssignmentAbsent("sp-1")
+        ).rejects.toThrow(/to be removed; 1 remain\(s\)\./);
+      });
+
+      it("reports an assignment left at the AKS cluster scope", async () => {
+        const { fixture } = await observedHarness([
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+            respond: {
+              stdout: JSON.stringify([
+                {
+                  principalId: "sp-1",
+                  roleDefinitionName:
+                    "Azure Kubernetes Service RBAC Cluster Admin"
+                }
+              ])
             }
           }
         ]);
@@ -2857,12 +2977,12 @@ describe("createCloudFixture", () => {
     });
 
     const workloadsJson = (
-      ...names: readonly (readonly [string, number])[]
+      ...names: readonly (readonly [string, number, number?])[]
     ): string =>
       JSON.stringify({
-        items: names.map(([name, available]) => ({
+        items: names.map(([name, available, desired = 1]) => ({
           metadata: { name, labels: { "radapp.io/application": APP } },
-          spec: { replicas: 1 },
+          spec: { replicas: desired },
           status: { availableReplicas: available }
         }))
       });
@@ -3082,6 +3202,42 @@ describe("createCloudFixture", () => {
       expect(workloads[0]?.availableReplicas).toBe(1);
       expect(fake.waits).toEqual([1000]);
     });
+
+    it.each([
+      ["partially available", 1, 3],
+      ["scaled to zero", 0, 0]
+    ])(
+      "waits when a workload is %s",
+      async (_label, availableReplicas, desiredReplicas) => {
+        const { fixture, fake } = await clusterHarness([
+          credentials(),
+          {
+            tool: "kubectl",
+            match: ["get", "deployments"],
+            respond: {
+              stdout: workloadsJson([
+                "demo-frontend",
+                availableReplicas,
+                desiredReplicas
+              ])
+            },
+            times: 1
+          },
+          listing({ stdout: workloadsJson(["demo-frontend", 3, 3]) })
+        ]);
+
+        const workloads = await fixture.assertApplicationWorkloadsPresent(
+          APP,
+          NAMESPACE
+        );
+
+        expect(workloads[0]).toMatchObject({
+          desiredReplicas: 3,
+          availableReplicas: 3
+        });
+        expect(fake.waits).toEqual([1000]);
+      }
+    );
 
     it("bounds every readiness probe by the remaining assertion time", async () => {
       const { fixture, fake } = await clusterHarness(
