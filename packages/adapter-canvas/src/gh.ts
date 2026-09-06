@@ -12,6 +12,7 @@ import type {
   ExecFileOptions,
   ExecFileOptionsWithStringEncoding
 } from "node:child_process";
+import { redactCredentials } from "./credential-redaction.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
 
 export interface GhAccount {
@@ -173,23 +174,13 @@ export function supportsWorkflowDispatchRunDetails(
   return version[0] > 2 || (version[0] === 2 && version[1] >= 87);
 }
 
-const MIN_OPAQUE_TOKEN_REDACTION_LENGTH = 12;
-
 // This module is the gh process boundary, so every diagnostic leaving it must
 // redact both recognizable GitHub credentials and opaque injected tokens.
 export function redactGhCredentials(
   value: string,
   env: NodeJS.ProcessEnv = process.env
 ): string {
-  let redacted = value;
-  for (const token of [env.GH_TOKEN?.trim(), env.GITHUB_TOKEN?.trim()]) {
-    if (token && token.length >= MIN_OPAQUE_TOKEN_REDACTION_LENGTH)
-      redacted = redacted.replaceAll(token, "[REDACTED]");
-  }
-  return redacted.replace(
-    /\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/g,
-    "[REDACTED]"
-  );
+  return redactCredentials(value, [env.GH_TOKEN, env.GITHUB_TOKEN]);
 }
 
 function errorMessage(error: unknown): string {
