@@ -2,12 +2,15 @@
 // package's tsconfig only includes `src/**/*.ts`, so tsc cannot verify this file
 // against the implementation — keep the two in sync by hand when either changes.
 
-import type { ChildProcess } from "node:child_process";
-
 export interface RadSpawnOptions {
   stdio: ["ignore", "pipe", "pipe"];
   windowsHide: true;
   detached: boolean;
+}
+
+export interface ChildProcessLike {
+  pid?: number | null;
+  kill(signal?: NodeJS.Signals | number): boolean;
 }
 
 export interface ProcessResult {
@@ -35,7 +38,9 @@ export class RadProcessError extends Error {
   constructor(message: string, stdout: string, stderr: string);
 }
 
-export function killChildTree(child: ChildProcess | null | undefined): void;
+export function windowsTaskkillPath(env?: NodeJS.ProcessEnv): string;
+
+export function killChildTree(child: ChildProcessLike | null | undefined): void;
 
 export function radSpawnOptions(platform?: NodeJS.Platform): RadSpawnOptions;
 

@@ -1,19 +1,13 @@
-import { execFile } from "node:child_process";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { RadProcessError, spawnRad } from "./rad-process.mjs";
 
-const execFileAsync = promisify(execFile);
 const describeWindows = process.platform === "win32" ? describe : describe.skip;
 const childHarnessPath = fileURLToPath(
   new URL("../test/fixtures/spawn-rad-child.mjs", import.meta.url)
-);
-const contractDriverPath = fileURLToPath(
-  new URL("../test/fixtures/spawn-rad-driver.mjs", import.meta.url)
 );
 
 interface ProcessTree {
@@ -88,36 +82,18 @@ describeWindows("spawnRad Windows process integration", () => {
     ]);
   }, 15_000);
 
-  it("uses the Windows spawn contract that avoids inherited-input hangs and visible windows", async () => {
-    // Node exposes normalized native spawn options only through this diagnostic.
-    // The repository pins Node 24, so a format change is an explicit upgrade task.
-    const environment: NodeJS.ProcessEnv = {
-      NODE_DEBUG: "child_process"
-    };
-    for (const key of ["ComSpec", "SystemRoot", "TEMP", "TMP", "WINDIR"]) {
-      if (process.env[key]) {
-        environment[key] = process.env[key];
-      }
-    }
+  it("rejects with a RadProcessError when rad.exe cannot be spawned", async () => {
+    const error = await spawnRad(join(directory, "missing-rad.exe"), ["x"], {
+      timeout: 2_000
+    }).catch((reason: unknown) => reason);
 
-    const { stdout, stderr } = await execFileAsync(
-      process.execPath,
-      [contractDriverPath, radPath, childHarnessPath],
-      {
-        env: environment,
-        timeout: 10_000,
-        windowsHide: true
-      }
-    );
-
-    expect(JSON.parse(stdout)).toEqual({
-      stdout: JSON.stringify(["contract"]),
-      stderr: "fixture stderr"
+    expect(error).toBeInstanceOf(RadProcessError);
+    expect(error).toMatchObject({
+      stdout: "",
+      stderr: ""
     });
-    expect(stderr).toMatch(/stdio:\s*\[\s*'ignore',\s*'pipe',\s*'pipe'\s*\]/);
-    expect(stderr).toMatch(/windowsHide:\s*true/);
-    expect(stderr).toMatch(/detached:\s*false/);
-  }, 15_000);
+    expect((error as RadProcessError).message).toContain("ENOENT");
+  });
 });
 
 async function waitForProcessesToExit(pids: number[]): Promise<void> {

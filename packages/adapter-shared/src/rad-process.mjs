@@ -15,6 +15,7 @@
 // must be mirrored in `rad-process.d.mts` by hand.
 
 import { spawn } from "node:child_process";
+import { win32 as pathWin32 } from "node:path";
 
 export function managedBicepEnv(env = {}, bicepPath) {
   return { ...env, BICEP: bicepPath };
@@ -34,6 +35,13 @@ export class RadProcessError extends Error {
   }
 }
 
+export function windowsTaskkillPath(env = process.env) {
+  const systemRoot = env.SystemRoot || env.WINDIR;
+  return systemRoot ?
+      pathWin32.join(systemRoot, "System32", "taskkill.exe")
+    : "taskkill";
+}
+
 // Terminates rad and any bicep child it spawned. On Windows, `taskkill /t` kills
 // the whole process tree while leaving rad in the caller's Job Object; on POSIX,
 // rad is a process-group leader (spawned detached), so signalling the group
@@ -43,7 +51,7 @@ export function killChildTree(child) {
   if (!child || child.pid == null) return;
   try {
     if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+      spawn(windowsTaskkillPath(), ["/pid", String(child.pid), "/t", "/f"], {
         stdio: "ignore",
         windowsHide: true
       });
