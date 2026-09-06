@@ -31,6 +31,8 @@ export class RadProcessError extends Error {
 
 export function killChildTree(child: ChildProcess | null | undefined): void;
 
+export function shouldDetachRadProcess(platform?: NodeJS.Platform): boolean;
+
 export function spawnRad(
   radPath: string,
   args: string[],

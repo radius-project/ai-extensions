@@ -35,9 +35,10 @@ export class RadProcessError extends Error {
 }
 
 // Terminates rad and any bicep child it spawned. On Windows, `taskkill /t` kills
-// the whole process tree; on POSIX, rad is a process-group leader (spawned
-// detached), so signalling the group (-pid) stops rad and its children together.
-// Best-effort — any failure is swallowed.
+// the whole process tree while leaving rad in the caller's Job Object; on POSIX,
+// rad is a process-group leader (spawned detached), so signalling the group
+// (-pid) stops rad and its children together. Best-effort — any failure is
+// swallowed.
 export function killChildTree(child) {
   if (!child || child.pid == null) return;
   try {
@@ -58,15 +59,19 @@ export function killChildTree(child) {
   }
 }
 
+export function shouldDetachRadProcess(platform = process.platform) {
+  return platform !== "win32";
+}
+
 /**
  * spawnRad - the process-handling core every managed-rad invocation needs:
  * spawn `radPath args`, capture stdout/stderr (capped at 32MB), and resolve
  * { stdout, stderr } on a zero exit or reject (with both streams attached) on a
  * non-zero exit, timeout, or spawn error. rad shells out to bicep as a
- * grandchild, so it spawns detached (rad leads its own process group), kills the
- * whole tree on timeout, and uses an exit/close grace window because that
- * grandchild can inherit and hold the stdio pipes open. `label` only names the
- * command in timeout/exit error messages; `env` is merged over process.env.
+ * grandchild, so POSIX runs rad as a detached process-group leader while
+ * Windows keeps rad in the caller's Job Object and relies on taskkill /t for
+ * tree cleanup. `label` only names the command in timeout/exit error messages;
+ * `env` is merged over process.env.
  */
 export function spawnRad(
   radPath,
@@ -79,7 +84,7 @@ export function spawnRad(
       env: { ...process.env, ...env },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
-      detached: true
+      detached: shouldDetachRadProcess()
     });
 
     const maxOutput = 32 * 1024 * 1024;

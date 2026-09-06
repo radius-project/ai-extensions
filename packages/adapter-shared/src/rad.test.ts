@@ -36,6 +36,7 @@ import {
   type SpawnRadOptions,
   type BicepCompileConfig
 } from "./rad.js";
+import { shouldDetachRadProcess } from "./rad-process.mjs";
 
 const RAD = `rad${process.platform === "win32" ? ".exe" : ""}`;
 const BICEP = `bicep${process.platform === "win32" ? ".exe" : ""}`;
@@ -1370,6 +1371,14 @@ describeSpawn("spawnRad", () => {
     await expect(
       spawnRad(path.join(dir, "does-not-exist"), ["x"], { timeout: 2000 })
     ).rejects.toBeInstanceOf(Error);
+  });
+});
+
+describe("shouldDetachRadProcess", () => {
+  it("keeps Windows rad processes in the caller job and detaches POSIX process groups", () => {
+    expect(shouldDetachRadProcess("win32")).toBe(false);
+    expect(shouldDetachRadProcess("linux")).toBe(true);
+    expect(shouldDetachRadProcess("darwin")).toBe(true);
   });
 });
 

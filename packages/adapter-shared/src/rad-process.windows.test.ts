@@ -88,7 +88,7 @@ describeWindows("spawnRad Windows process integration", () => {
     ]);
   }, 15_000);
 
-  it("uses the Windows spawn contract that avoids inherited-input hangs", async () => {
+  it("uses the Windows spawn contract that avoids inherited-input hangs and visible windows", async () => {
     // Node exposes normalized native spawn options only through this diagnostic.
     // The repository pins Node 24, so a format change is an explicit upgrade task.
     const environment: NodeJS.ProcessEnv = {
@@ -116,7 +116,7 @@ describeWindows("spawnRad Windows process integration", () => {
     });
     expect(stderr).toMatch(/stdio:\s*\[\s*'ignore',\s*'pipe',\s*'pipe'\s*\]/);
     expect(stderr).toMatch(/windowsHide:\s*true/);
-    expect(stderr).toMatch(/detached:\s*true/);
+    expect(stderr).toMatch(/detached:\s*false/);
   }, 15_000);
 });
 

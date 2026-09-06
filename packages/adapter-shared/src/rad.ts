@@ -40,6 +40,7 @@ import {
   killChildTree,
   managedBicepEnv as processManagedBicepEnv,
   RadProcessError,
+  shouldDetachRadProcess,
   spawnRad
 } from "./rad-process.mjs";
 import type { ProcessResult, SpawnRadOptions } from "./rad-process.mjs";
@@ -435,14 +436,14 @@ export function radBinaryVersion(
   return new Promise((resolve) => {
     let child: ChildProcess;
     try {
-      // Keep rad outside the parent job/process group on every platform. Some
-      // Windows rad builds wedge when inherited into the host group; windowsHide
-      // suppresses the detached child's console window.
+      // Keep POSIX rad runs in their own process group for cleanup. On Windows,
+      // Radius supports non-detached automation so rad remains in the caller's
+      // Job Object and windowsHide can suppress the initial console window.
       child = spawn(radPath, ["version", "--cli", "--output", "json"], {
         env: managedBicepEnv(process.env),
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
-        detached: true
+        detached: shouldDetachRadProcess()
       });
     } catch {
       resolve(null);
@@ -1190,13 +1191,13 @@ export async function runRadAppGraph(
           cwd,
           // Clear GITHUB_ACTIONS so rad writes app-graph.json locally instead of
           // committing to the radius-graph orphan branch. stdin is ignored so rad
-          // never blocks waiting for interactive input. Detaching preserves the
-          // process-group isolation required by Windows rad builds; windowsHide
-          // prevents that isolated process from opening a console window.
+          // never blocks waiting for interactive input. POSIX detaches for
+          // process-group cleanup; Windows stays non-detached so the caller's Job
+          // Object can cancel the tree and windowsHide can suppress the window.
           env: { ...process.env, ...managedBicepEnv(), GITHUB_ACTIONS: "" },
           stdio: ["ignore", "pipe", "pipe"],
           windowsHide: true,
-          detached: true
+          detached: shouldDetachRadProcess(processPlatform)
         }
       );
 
