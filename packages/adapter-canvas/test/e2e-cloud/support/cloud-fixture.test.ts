@@ -1532,6 +1532,40 @@ describe("createCloudFixture", () => {
       );
     });
 
+    it("rejects unrelated roles at both required scopes", async () => {
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SCOPE],
+            respond: {
+              stdout: JSON.stringify([roleAssignment("sp-1", "Owner")])
+            }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+            respond: {
+              stdout: JSON.stringify([
+                roleAssignment(
+                  "sp-1",
+                  "Azure Kubernetes Service RBAC Reader",
+                  "assignment-cluster-reader",
+                  CLUSTER_SCOPE
+                )
+              ])
+            }
+          }
+        ],
+        {},
+        { assertionTimeoutMs: 2_000, assertionPollIntervalMs: 1_000 }
+      );
+
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
+        /missing "Contributor".*"Azure Kubernetes Service RBAC Cluster Admin"/
+      );
+    });
+
     it("fails plainly when the group carries no assignments", async () => {
       const { fixture } = await createHarness();
 
@@ -1632,7 +1666,12 @@ describe("createCloudFixture", () => {
       );
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
-        new RegExp(`missing ${CLUSTER_SCOPE.replace(/\//g, "\\/")}`)
+        new RegExp(
+          `missing "Azure Kubernetes Service RBAC Cluster Admin" at ${CLUSTER_SCOPE.replace(
+            /\//g,
+            "\\/"
+          )}`
+        )
       );
     });
   });

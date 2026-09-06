@@ -315,7 +315,9 @@ export function createRefreshingAzureCommandRunner(
   return async (args, timeoutMs) => {
     const deadline = timeoutMs === undefined ? undefined : now() + timeoutMs;
     if (oidcRefreshConfigured && now() - refreshedAt >= refreshIntervalMs) {
-      pendingRefresh ??= refresh(deadline).finally(() => {
+      // A shared refresh must not inherit the first waiter's budget. Each
+      // caller races this caller-independent renewal against its own deadline.
+      pendingRefresh ??= refresh(now() + COMMAND_TIMEOUT_MS).finally(() => {
         pendingRefresh = undefined;
       });
       let failure: CloudCommandResult | null;

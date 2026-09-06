@@ -534,7 +534,7 @@ describe("createNodeCloudFixturePorts", () => {
       );
     });
 
-    it("shares one timeout budget across renewal and the requested command", async () => {
+    it("uses a caller-independent refresh budget before the requested command", async () => {
       let now = 0;
       const calls: Array<{
         args: readonly string[];
@@ -557,14 +557,14 @@ describe("createNodeCloudFixturePorts", () => {
         code: 0
       });
       expect(calls.map(({ args, timeoutMs }) => [args[0], timeoutMs])).toEqual([
-        ["login", 30],
-        ["account", 20],
+        ["login", 15 * 60_000],
+        ["account", 15 * 60_000 - 10],
         ["group", 10]
       ]);
     });
 
     it.each([
-      [5_000, 5_000],
+      [5_000, 20_000],
       [30_000, 20_000]
     ])(
       "bounds the OIDC request by a %ims command budget at %ims",
@@ -589,7 +589,7 @@ describe("createNodeCloudFixturePorts", () => {
       }
     );
 
-    it("does not request an OIDC assertion after the command deadline", async () => {
+    it("lets a shared refresh continue after its first caller times out", async () => {
       let now = 0;
       const fetchImpl = successfulFetch();
       const runCommand = vi.fn((_: readonly string[]) =>
@@ -608,11 +608,15 @@ describe("createNodeCloudFixturePorts", () => {
         code: 1,
         stderr: expect.stringMatching(/refresh.*exhausted its timeout/i)
       });
-      expect(fetchImpl).not.toHaveBeenCalled();
-      expect(runCommand).not.toHaveBeenCalled();
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(runCommand).toHaveBeenCalledTimes(2));
+      expect(runCommand.mock.calls.map(([args]) => args[0])).toEqual([
+        "login",
+        "account"
+      ]);
     });
 
-    it("does not start another command after renewal exhausts the timeout", async () => {
+    it("does not start the requested command after its timeout expires during renewal", async () => {
       let now = 0;
       const runCommand = vi.fn((_: readonly string[]) => {
         now += 31;
@@ -631,7 +635,11 @@ describe("createNodeCloudFixturePorts", () => {
         code: 1,
         stderr: expect.stringMatching(/exhausted its timeout/)
       });
-      expect(runCommand).toHaveBeenCalledOnce();
+      expect(runCommand).toHaveBeenCalledTimes(2);
+      expect(runCommand.mock.calls.map(([args]) => args[0])).toEqual([
+        "login",
+        "account"
+      ]);
     });
 
     it("does not start the requested command when renewal consumes the timeout", async () => {
@@ -870,6 +878,50 @@ describe("createNodeCloudFixturePorts", () => {
           new Response(JSON.stringify({ value: "header.payload.signature" }))
         );
         await expect(unbounded).resolves.toMatchObject({ code: 0 });
+        expect(
+          runCommand.mock.calls.filter(([args]) => args[1] === "show")
+        ).toHaveLength(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not let a short first caller abort the shared renewal", async () => {
+      vi.useFakeTimers();
+      let now = 0;
+      let resolveFetch: ((response: Response) => void) | undefined;
+      const fetchImpl = vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFetch = resolve;
+          })
+      );
+      const runCommand = vi.fn((_: readonly string[]) =>
+        Promise.resolve(result({}))
+      );
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: fetchImpl,
+        runCommand
+      });
+
+      try {
+        now = 100;
+        const bounded = run(["group", "show"], 10);
+        const unbounded = run(["group", "list"]);
+        await vi.advanceTimersByTimeAsync(10);
+        await expect(bounded).resolves.toMatchObject({
+          code: 1,
+          stderr: expect.stringMatching(/awaiting credential refresh/)
+        });
+
+        resolveFetch?.(
+          new Response(JSON.stringify({ value: "header.payload.signature" }))
+        );
+        await expect(unbounded).resolves.toMatchObject({ code: 0 });
+        expect(fetchImpl).toHaveBeenCalledOnce();
         expect(
           runCommand.mock.calls.filter(([args]) => args[1] === "show")
         ).toHaveLength(0);

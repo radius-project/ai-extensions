@@ -235,6 +235,13 @@ export async function createCloudFixture(
   const scope = resourceGroupScope(subscriptionId, resourceGroup);
   const clusterScope = `${scope}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
   const roleAssignmentScopes = [scope, clusterScope] as const;
+  const requiredRoleAssignments = [
+    { scope, roleDefinitionName: "Contributor" },
+    {
+      scope: clusterScope,
+      roleDefinitionName: "Azure Kubernetes Service RBAC Cluster Admin"
+    }
+  ] as const;
   const expectedAppName = appRegistrationName(repository);
   const statePackage = stateRegistryForEnvironment(repository, environmentName);
 
@@ -662,7 +669,7 @@ export async function createCloudFixture(
 
     async assertRoleAssignmentExists(principalId) {
       let assignments: RoleAssignmentRecord[] = [];
-      let missingScopes = [...roleAssignmentScopes];
+      let missingRequirements = [...requiredRoleAssignments];
       const observed = await pollForValue({
         ports,
         timeoutMs: assertionTimeoutMs,
@@ -678,18 +685,26 @@ export async function createCloudFixture(
             (assignment) =>
               assignment.principalId.toLowerCase() === principalId.toLowerCase()
           );
-          missingScopes = roleAssignmentScopes.filter(
-            (expectedScope) =>
+          missingRequirements = requiredRoleAssignments.filter(
+            (expected) =>
               !matching.some(
                 (assignment) =>
-                  assignment.scope.toLowerCase() === expectedScope.toLowerCase()
+                  assignment.scope.toLowerCase() ===
+                    expected.scope.toLowerCase() &&
+                  assignment.roleDefinitionName.toLowerCase() ===
+                    expected.roleDefinitionName.toLowerCase()
               )
           );
-          return missingScopes.length === 0 ? matching : undefined;
+          return missingRequirements.length === 0 ? matching : undefined;
         },
         timeoutMessage: () =>
           `Timed out after ${assertionTimeoutMs}ms waiting for role assignments for principal ` +
-          `${principalId} at the resource-group and AKS scopes; missing ${missingScopes.join(", ")}; found ` +
+          `${principalId}; missing ${missingRequirements
+            .map(
+              (expected) =>
+                `"${expected.roleDefinitionName}" at ${expected.scope}`
+            )
+            .join(", ")}; found ` +
           (assignments.length === 0 ?
             "no role assignments at all."
           : `only assignments for ${[
