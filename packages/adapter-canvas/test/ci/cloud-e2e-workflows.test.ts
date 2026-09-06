@@ -222,9 +222,7 @@ describe("cloud-e2e.yml", () => {
     expect(run?.["working-directory"]).toBe("packages/adapter-canvas");
   });
 
-  it("authenticates to Azure by OIDC and to GitHub by installation token", async () => {
-    // No long-lived cloud secret exists to leak: both credentials are minted
-    // per run and expire with it.
+  it("isolates the package credential from the repository installation token", async () => {
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const used = steps(workflow.jobs?.["cloud-e2e"]).map((step) => step.uses);
     expect(used.some((use) => use?.startsWith("azure/login@"))).toBe(true);
@@ -241,10 +239,11 @@ describe("cloud-e2e.yml", () => {
       CLOUD_E2E_BOT_INSTALLATION_ID:
         "${{ steps.app-token.outputs.installation-id }}",
       CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}",
-      GH_PACKAGES_TOKEN: "${{ github.token }}",
-      GH_PACKAGES_USER: "${{ github.actor }}"
+      GH_PACKAGES_TOKEN: "${{ secrets.CLOUD_E2E_PACKAGES_TOKEN }}",
+      GH_PACKAGES_USER: "${{ secrets.CLOUD_E2E_PACKAGES_USER }}"
     });
-    expect(workflow.jobs?.["cloud-e2e"]?.permissions?.packages).toBe("write");
+    expect(run?.env?.GH_TOKEN).toBe("${{ steps.app-token.outputs.token }}");
+    expect(workflow.jobs?.["cloud-e2e"]?.permissions?.packages).toBeUndefined();
   });
 
   it("requests the workflow and deployment scopes explicitly rather than discovering they are missing", async () => {

@@ -73,7 +73,8 @@ function runTool(
     stdout: string | undefined,
     stderr: string | undefined
   ) => CloudCommandResult = normalizeCommandResult,
-  env?: NodeJS.ProcessEnv
+  env?: NodeJS.ProcessEnv,
+  preserveGitHubToken = false
 ): Promise<CloudCommandResult> {
   return new Promise((resolve) => {
     const child = cliExec(
@@ -84,7 +85,8 @@ function runTool(
         env,
         timeout: COMMAND_TIMEOUT_MS,
         maxBuffer: MAX_OUTPUT_BYTES,
-        windowsHide: true
+        windowsHide: true,
+        preserveGitHubToken
       },
       (error, stdout, stderr) => resolve(normalize(error, stdout, stderr))
     );
@@ -342,7 +344,8 @@ export function createNodeCloudFixturePorts(
               stderr,
               packageEnv.GH_TOKEN
             ),
-          packageEnv
+          packageEnv,
+          true
         );
       },
       runGit: (args, cwd) => runTool("git", args, cwd)

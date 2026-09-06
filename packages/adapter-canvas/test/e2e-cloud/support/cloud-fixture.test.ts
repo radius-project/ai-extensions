@@ -25,6 +25,7 @@ const RESOURCE_GROUP = `radtest-canvas-${UNIQUE_ID}`;
 const CLUSTER = `aks-${UNIQUE_ID}`;
 const ENVIRONMENT = `radtest-${UNIQUE_ID}`;
 const SCOPE = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RESOURCE_GROUP}`;
+const CLUSTER_SCOPE = `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`;
 const APP_NAME = "radius-deploy-fixture-owner-fixture-repo";
 
 // Spelled out rather than rebuilt from the fixture's own helpers, so a change to
@@ -719,7 +720,7 @@ describe("createCloudFixture", () => {
       const { fixture } = await createHarness([
         {
           tool: "az",
-          match: ROLE_LIST,
+          match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
             stdout: JSON.stringify([
               { principalId: "sp-1", roleDefinitionName: "Contributor" }
@@ -731,6 +732,33 @@ describe("createCloudFixture", () => {
       await expect(fixture.assertCleanSlate()).rejects.toThrow(
         new RegExp(
           `role assignment "Contributor" for principal sp-1 at ${SCOPE.replace(
+            /\//g,
+            "\\/"
+          )}`
+        )
+      );
+    });
+
+    it("reports a leaked role assignment at the exact AKS cluster scope", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([
+              {
+                principalId: "sp-cluster",
+                roleDefinitionName:
+                  "Azure Kubernetes Service RBAC Cluster Admin"
+              }
+            ])
+          }
+        }
+      ]);
+
+      await expect(fixture.assertCleanSlate()).rejects.toThrow(
+        new RegExp(
+          `role assignment "Azure Kubernetes Service RBAC Cluster Admin" for principal sp-cluster at ${CLUSTER_SCOPE.replace(
             /\//g,
             "\\/"
           )}`
@@ -1096,7 +1124,7 @@ describe("createCloudFixture", () => {
 
       const error = await captureError(fixture.assertCleanSlate());
 
-      expect(error.message.split("\n  - ")).toHaveLength(9);
+      expect(error.message.split("\n  - ")).toHaveLength(10);
       for (const fragment of [
         "app registration",
         "service principal",
@@ -1426,10 +1454,10 @@ describe("createCloudFixture", () => {
 
     it("polls until the role assignment becomes visible", async () => {
       const { fixture, fake } = await createHarness([
-        { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" }, times: 1 },
+        { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" }, times: 2 },
         {
           tool: "az",
-          match: ROLE_LIST,
+          match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
             stdout: JSON.stringify([
               { principalId: "sp-1", roleDefinitionName: "Contributor" }
@@ -1442,6 +1470,28 @@ describe("createCloudFixture", () => {
         fixture.assertRoleAssignmentExists("sp-1")
       ).resolves.toBeUndefined();
       expect(fake.waits).toEqual([1000]);
+    });
+
+    it("finds a role assignment at the exact AKS cluster scope", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([
+              {
+                principalId: "sp-1",
+                roleDefinitionName:
+                  "Azure Kubernetes Service RBAC Cluster Admin"
+              }
+            ])
+          }
+        }
+      ]);
+
+      await expect(
+        fixture.assertRoleAssignmentExists("sp-1")
+      ).resolves.toBeUndefined();
     });
 
     it("fails plainly when the group carries no assignments", async () => {
@@ -1797,13 +1847,22 @@ describe("createCloudFixture", () => {
 
     describe("assertRoleAssignmentAbsent", () => {
       it("resolves once the principal holds nothing in scope", async () => {
-        const { fixture } = await observedHarness([
+        const { fixture, fake } = await observedHarness([
           { tool: "az", match: ROLE_LIST, respond: { stdout: "[]" } }
         ]);
 
         await expect(
           fixture.assertRoleAssignmentAbsent("sp-1")
         ).resolves.toBeUndefined();
+        const roleLookups = fake.commands
+          .commandLines("az")
+          .filter((line) => line.startsWith("role assignment list"));
+        expect(roleLookups).toContain(
+          `role assignment list --scope ${SCOPE} --query [].{principalId:principalId,roleDefinitionName:roleDefinitionName} -o json`
+        );
+        expect(roleLookups).toContain(
+          `role assignment list --scope ${CLUSTER_SCOPE} --query [].{principalId:principalId,roleDefinitionName:roleDefinitionName} -o json`
+        );
       });
 
       it("ignores assignments belonging to other principals", async () => {
@@ -1828,10 +1887,32 @@ describe("createCloudFixture", () => {
         const { fixture } = await observedHarness([
           {
             tool: "az",
-            match: ROLE_LIST,
+            match: [...ROLE_LIST, "--scope", SCOPE],
             respond: {
               stdout: JSON.stringify([
                 { principalId: "SP-1", roleDefinitionName: "Contributor" }
+              ])
+            }
+          }
+        ]);
+
+        await expect(
+          fixture.assertRoleAssignmentAbsent("sp-1")
+        ).rejects.toThrow(/to be removed; 1 remain\(s\)\./);
+      });
+
+      it("reports an assignment left at the AKS cluster scope", async () => {
+        const { fixture } = await observedHarness([
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+            respond: {
+              stdout: JSON.stringify([
+                {
+                  principalId: "sp-1",
+                  roleDefinitionName:
+                    "Azure Kubernetes Service RBAC Cluster Admin"
+                }
               ])
             }
           }

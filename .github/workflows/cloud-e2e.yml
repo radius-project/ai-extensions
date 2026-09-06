@@ -12,7 +12,7 @@ name: Cloud E2E
 # infrastructure failure, or leaked state from an earlier run - and treating
 # them as one destroys the signal this tier exists to provide.
 #
-# THIS WORKFLOW HAS NEVER EXECUTED. Five prerequisites are outstanding, none of
+# THIS WORKFLOW HAS NEVER EXECUTED. Six prerequisites are outstanding, none of
 # them in this repository:
 #
 #   1. radius-project/wellknown#134 (the Terraform that publishes the identity
@@ -24,7 +24,10 @@ name: Cloud E2E
 #   4. The dedicated Cloud E2E GitHub App must be created, installed only on the
 #      fixture repository, and its client id and private key stored here as
 #      `CLOUD_E2E_BOT_CLIENT_ID` and `CLOUD_E2E_BOT_PRIVATE_KEY`.
-#   5. The fixture repository does not exist. `FIXTURE_BASELINE_SHA` in
+#   5. A dedicated machine or bot account with package access to the fixture
+#      owner's namespace must provide `CLOUD_E2E_PACKAGES_USER` and a classic
+#      PAT in `CLOUD_E2E_PACKAGES_TOKEN` with read/write/delete package scopes.
+#   6. The fixture repository does not exist. `FIXTURE_BASELINE_SHA` in
 #      packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts is
 #      still forty zeros, which makes the suite skip rather than pass hollowly.
 #
@@ -100,7 +103,6 @@ jobs:
     permissions:
       contents: read # actions/checkout
       id-token: write # OIDC token exchanged for an Azure token by azure/login
-      packages: write # native workflow token manages the fixture's GHCR state package
     env:
       # Turns the suite on. Without it the journey skips rather than fails, so
       # an ordinary `pnpm test` is never broken by absent credentials.
@@ -243,8 +245,8 @@ jobs:
           AIEXT_CLOUD_E2E_AZURE_LOCATION: ${{ vars.AIEXT_CLOUD_E2E_AZURE_LOCATION }}
           AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_PACKAGES_TOKEN: ${{ github.token }}
-          GH_PACKAGES_USER: ${{ github.actor }}
+          GH_PACKAGES_TOKEN: ${{ secrets.CLOUD_E2E_PACKAGES_TOKEN }}
+          GH_PACKAGES_USER: ${{ secrets.CLOUD_E2E_PACKAGES_USER }}
           CLOUD_E2E_BOT_CLIENT_ID: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
           CLOUD_E2E_BOT_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
           CLOUD_E2E_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
