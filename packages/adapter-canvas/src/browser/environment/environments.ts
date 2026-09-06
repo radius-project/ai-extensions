@@ -786,8 +786,9 @@ export function initializeEnvironmentPane(
       )}</strong> Environment <strong>${escapeBrowserHtml(
         name
       )}</strong> is set up, but one step is left for you. `;
-      if (readString(terminal, "userMessage")) {
-        html += escapeBrowserHtml(readString(terminal, "userMessage"));
+      const userMessage = readString(terminal, "userMessage");
+      if (userMessage) {
+        html += escapeBrowserHtml(userMessage);
       } else if (hasPullRequest) {
         html +=
           "Radius could not push the deploy workflows to the default branch, so it opened a pull request. Credential verification and deploys start working once it merges.";
