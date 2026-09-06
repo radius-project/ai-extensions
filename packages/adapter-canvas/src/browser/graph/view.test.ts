@@ -558,7 +558,6 @@ describe("flow application", () => {
     updater.fn?.([], []);
     expect(vendor.reactFlow.nodeUpdates).toHaveLength(1);
     expect(vendor.reactFlow.edgeUpdates).toHaveLength(1);
-    clock.tick(40);
     expect(instance.fits).toEqual([{ padding: 0.18 }]);
   });
 
