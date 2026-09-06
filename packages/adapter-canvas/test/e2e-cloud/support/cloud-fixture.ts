@@ -229,7 +229,7 @@ export async function createCloudFixture(
   const environmentName = buildEnvironmentName(uniqueId);
   const scope = resourceGroupScope(subscriptionId, resourceGroup);
   const clusterScope = `${scope}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
-  const roleAssignmentScopes = [scope, clusterScope];
+  const roleAssignmentScopes = [scope, clusterScope] as const;
   const expectedAppName = appRegistrationName(repository);
   const statePackage = stateRegistryForEnvironment(repository, environmentName);
 
@@ -827,14 +827,14 @@ export async function createCloudFixture(
         roleAssignmentKey(principalId),
         `the role assignment inventory for principal ${principalId} at the resource-group and AKS scopes`
       );
-      let remaining: RoleAssignmentRecord[] = [];
+      let remaining: RoleAssignment[] = [];
       await pollForValue({
         ports,
         timeoutMs: assertionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
         probe: async () => {
           remaining = (
-            await listRoleAssignmentsAtScopes(commands, roleAssignmentScopes)
+            await listRoleAssignments(commands, roleAssignmentScopes)
           ).filter(
             (assignment) =>
               assignment.principalId.toLowerCase() === principalId.toLowerCase()
@@ -1176,6 +1176,12 @@ interface LeakProbeInput {
   readonly statePackage: string;
 }
 
+interface RoleAssignment {
+  readonly principalId: string;
+  readonly roleDefinitionName: string;
+  readonly scope: string;
+}
+
 interface StatePackageRecord {
   readonly apiPath: string;
   readonly visibility: string;
@@ -1245,7 +1251,7 @@ async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
 
   // Azure's --scope filter applies atScope(), so query both exact scopes the
   // product writes instead of assuming the resource-group query includes AKS.
-  const assignments = await listRoleAssignmentsAtScopes(
+  const assignments = await listRoleAssignments(
     commands,
     input.roleAssignmentScopes
   );
@@ -1474,7 +1480,7 @@ async function listFederatedCredentials(
   });
 }
 
-async function listRoleAssignments(
+async function listRoleAssignmentRecords(
   commands: CloudCommandPort,
   scope: string
 ): Promise<RoleAssignmentRecord[]> {
@@ -1512,13 +1518,56 @@ async function listRoleAssignments(
   });
 }
 
+async function listRoleAssignments(
+  commands: CloudCommandPort,
+  scopes: readonly string[]
+): Promise<RoleAssignment[]> {
+  const assignments: RoleAssignment[] = [];
+  for (const scope of scopes) {
+    const context = `az role assignment list --scope ${scope}`;
+    const entries = parseJsonArray(
+      await commands.runAz([
+        "role",
+        "assignment",
+        "list",
+        "--scope",
+        scope,
+        "--query",
+        "[].{principalId:principalId,roleDefinitionName:roleDefinitionName}",
+        "-o",
+        "json"
+      ]),
+      context
+    );
+    assignments.push(
+      ...entries.map((entry, index) => {
+        const record = asRecord(entry, context, index);
+        return {
+          principalId: requireString(
+            record.principalId,
+            "principalId",
+            context,
+            index
+          ),
+          roleDefinitionName:
+            typeof record.roleDefinitionName === "string" ?
+              record.roleDefinitionName
+            : "(unnamed role)",
+          scope
+        };
+      })
+    );
+  }
+  return assignments;
+}
+
 async function listRoleAssignmentsAtScopes(
   commands: CloudCommandPort,
   scopes: readonly string[]
 ): Promise<RoleAssignmentRecord[]> {
   const byId = new Map<string, RoleAssignmentRecord>();
   for (const scope of scopes)
-    for (const assignment of await listRoleAssignments(commands, scope))
+    for (const assignment of await listRoleAssignmentRecords(commands, scope))
       byId.set(assignment.id.toLowerCase(), assignment);
   return [...byId.values()];
 }

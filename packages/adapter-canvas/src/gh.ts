@@ -89,6 +89,7 @@ type CliCallback = (
 
 export interface CliOptions extends ExecFileOptions {
   env?: NodeJS.ProcessEnv;
+  preserveGitHubToken?: boolean;
 }
 
 export interface CommandOptions extends CliOptions {
@@ -1285,13 +1286,15 @@ export function cliExec(
   opts: CliOptions,
   cb: CliCallback
 ): ChildProcess {
+  const { preserveGitHubToken = false, ...processOptions } = opts;
   const execOpts: ExecFileOptionsWithStringEncoding = {
     maxBuffer: 10 * 1024 * 1024,
     windowsHide: true,
-    ...opts,
+    ...processOptions,
     encoding: "utf8"
   };
-  if (isGhCmd(cmd)) execOpts.env = ghChildEnv(execOpts.env);
+  if (isGhCmd(cmd) && !preserveGitHubToken)
+    execOpts.env = ghChildEnv(execOpts.env);
   execOpts.env = withoutAgentSession(execOpts.env);
   const isWindows = process.platform === "win32";
   const isWindowsGh = isWindows && isGhCmd(cmd);

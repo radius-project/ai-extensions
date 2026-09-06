@@ -227,7 +227,7 @@ describe("cloud-e2e.yml", () => {
     });
   });
 
-  it("authenticates to Azure by OIDC and to GitHub by installation token", async () => {
+  it("isolates package credentials while using OIDC and an installation token", async () => {
     // No stored bearer token exists to leak: both access credentials are minted
     // per run and expire with it. The App signing key remains a masked secret.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
@@ -246,10 +246,11 @@ describe("cloud-e2e.yml", () => {
       CLOUD_E2E_BOT_INSTALLATION_ID:
         "${{ steps.app-token.outputs.installation-id }}",
       CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}",
-      GH_PACKAGES_TOKEN: "${{ github.token }}",
-      GH_PACKAGES_USER: "${{ github.actor }}"
+      GH_PACKAGES_TOKEN: "${{ secrets.CLOUD_E2E_PACKAGES_TOKEN }}",
+      GH_PACKAGES_USER: "${{ secrets.CLOUD_E2E_PACKAGES_USER }}"
     });
-    expect(workflow.jobs?.["cloud-e2e"]?.permissions?.packages).toBe("write");
+    expect(run?.env?.GH_TOKEN).toBe("${{ steps.app-token.outputs.token }}");
+    expect(workflow.jobs?.["cloud-e2e"]?.permissions?.packages).toBeUndefined();
   });
 
   it("requests the workflow and deployment scopes explicitly rather than discovering they are missing", async () => {
