@@ -35,6 +35,7 @@ export interface CloudCommandResult {
 export interface CloudCommandPort {
   runAz(args: readonly string[]): Promise<CloudCommandResult>;
   runGh(args: readonly string[]): Promise<CloudCommandResult>;
+  runGhPackage(args: readonly string[]): Promise<CloudCommandResult>;
   runGit(args: readonly string[], cwd: string): Promise<CloudCommandResult>;
 }
 
@@ -71,7 +72,9 @@ function runTool(
     error: { code?: string | number | null } | null,
     stdout: string | undefined,
     stderr: string | undefined
-  ) => CloudCommandResult = normalizeCommandResult
+  ) => CloudCommandResult = normalizeCommandResult,
+  env?: NodeJS.ProcessEnv,
+  preserveGitHubToken = false
 ): Promise<CloudCommandResult> {
   return new Promise((resolve) => {
     const child = cliExec(
@@ -79,9 +82,11 @@ function runTool(
       [...args],
       {
         cwd,
+        env,
         timeout: COMMAND_TIMEOUT_MS,
         maxBuffer: MAX_OUTPUT_BYTES,
-        windowsHide: true
+        windowsHide: true,
+        preserveGitHubToken
       },
       (error, stdout, stderr) => resolve(normalize(error, stdout, stderr))
     );
@@ -288,16 +293,61 @@ export function normalizeCommandResult(
 }
 
 /**
+ * Whether a failed `gh api` call carries GitHub CLI's HTTP 404 diagnostic.
+ *
+ * A bare "Not Found" is not enough: DNS, configuration, and wrapper failures
+ * can contain those words without proving that GitHub answered for the
+ * requested resource. Successful commands cannot report absence either, even
+ * when their response body happens to mention an earlier HTTP 404.
+ */
+export function isGitHubApiNotFound(result: CloudCommandResult): boolean {
+  if (result.code === 0) return false;
+  return `${result.stderr}\n${result.stdout}`
+    .split(/\r?\n/)
+    .some((line) =>
+      /^(?:gh:\s.*\(HTTP 404\)|HTTP 404(?::.*)?)$/i.test(line.trim())
+    );
+}
+
+/**
  * The production wiring. Deliberately branch-free: it holds no fixture logic,
  * so the code a credentialed run exercises but this suite cannot is as small as
  * it can be made.
  */
-export function createNodeCloudFixturePorts(): CloudFixturePorts {
+export function createNodeCloudFixturePorts(
+  options: { readonly packageToken?: string } = {}
+): CloudFixturePorts {
   const runAz = createRefreshingAzureCommandRunner();
+  const packageEnv = createGitHubPackageCommandEnvironment(
+    options.packageToken
+  );
   return {
     commands: {
       runAz,
       runGh: (args) => runTool("gh", args),
+      runGhPackage: (args) => {
+        if (!packageEnv)
+          return Promise.resolve({
+            code: 1,
+            stdout: "",
+            stderr:
+              "GH_PACKAGES_TOKEN is required for cloud fixture package operations."
+          });
+        return runTool(
+          "gh",
+          args,
+          undefined,
+          (error, stdout, stderr) =>
+            normalizeGitHubPackageCommandResult(
+              error,
+              stdout,
+              stderr,
+              packageEnv.GH_TOKEN
+            ),
+          packageEnv,
+          true
+        );
+      },
       runGit: (args, cwd) => runTool("git", args, cwd)
     },
     makeWorkspaceDir: (prefix) =>
@@ -307,6 +357,38 @@ export function createNodeCloudFixturePorts(): CloudFixturePorts {
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     now: () => new Date(),
     newUniqueId: () => randomUUID()
+  };
+}
+
+export function createGitHubPackageCommandEnvironment(
+  packageToken: string | undefined,
+  env: NodeJS.ProcessEnv = process.env
+):
+  | (NodeJS.ProcessEnv & {
+      readonly GH_TOKEN: string;
+      readonly GITHUB_TOKEN: string;
+    })
+  | null {
+  const token = packageToken?.trim();
+  if (!token) return null;
+  return {
+    ...env,
+    GH_TOKEN: token,
+    GITHUB_TOKEN: token
+  };
+}
+
+export function normalizeGitHubPackageCommandResult(
+  error: { code?: string | number | null } | null,
+  stdout: string | undefined,
+  stderr: string | undefined,
+  packageToken: string
+): CloudCommandResult {
+  const result = normalizeCommandResult(error, stdout, stderr);
+  return {
+    ...result,
+    stdout: redactCredentials(result.stdout, [packageToken]),
+    stderr: redactCredentials(result.stderr, [packageToken])
   };
 }
 

@@ -89,6 +89,7 @@ type CliCallback = (
 
 export interface CliOptions extends ExecFileOptions {
   env?: NodeJS.ProcessEnv;
+  preserveGitHubToken?: boolean;
 }
 
 export interface CommandOptions extends CliOptions {
@@ -180,7 +181,11 @@ export function redactGhCredentials(
   value: string,
   env: NodeJS.ProcessEnv = process.env
 ): string {
-  return redactCredentials(value, [env.GH_TOKEN, env.GITHUB_TOKEN]);
+  return redactCredentials(value, [
+    env.GH_TOKEN,
+    env.GITHUB_TOKEN,
+    env.GH_PACKAGES_TOKEN
+  ]);
 }
 
 function errorMessage(error: unknown): string {
@@ -489,10 +494,14 @@ function resolveActingLogin(
 // operations will use, together with WHICH credential it turned out to be.
 //
 // Preference order:
-//   1. When the acting login has a keyring entry, use its token pinned via
+//   1. When the host provides GH_PACKAGES_TOKEN and GH_PACKAGES_USER, use them
+//      only for package calls. This keeps a repository-scoped App token on
+//      GH_TOKEN while allowing a workflow-native token to authenticate to
+//      GitHub Packages under its own login.
+//   2. When the acting login has a keyring entry, use its token pinned via
 //      `--user` (a full `gh auth login` credential, which carries the
 //      read:packages/write:packages scopes GHCR needs).
-//   2. Otherwise — including when that keyring lookup yields nothing — fall back
+//   3. Otherwise — including when that keyring lookup yields nothing — fall back
 //      to the injected GH_TOKEN/GITHUB_TOKEN for that same identity. It may lack
 //      package scopes, in which case GHCR returns a scope error the caller
 //      surfaces with refresh guidance.
@@ -501,6 +510,29 @@ function resolveActingLogin(
 function ensurePackageCredential(): Promise<GhPackageCredentialResolution> {
   if (_ghPackageCredentialPromise) return _ghPackageCredentialPromise;
   _ghPackageCredentialPromise = (async () => {
+    const packageToken = process.env.GH_PACKAGES_TOKEN?.trim();
+    if (packageToken) {
+      const packageUser = process.env.GH_PACKAGES_USER?.trim();
+      if (!packageUser) {
+        return {
+          ok: false,
+          error:
+            "GH_PACKAGES_USER is required when GH_PACKAGES_TOKEN is configured."
+        };
+      }
+      return {
+        ok: true,
+        credentials: {
+          token: packageToken,
+          username: packageUser,
+          source: "injected-token",
+          // Workflow tokens do not expose OAuth scopes. The host opts into this
+          // dedicated path only after granting package permissions; the GHCR
+          // request remains the authoritative access check.
+          scopes: ["read:packages", "write:packages", "delete:packages"]
+        }
+      };
+    }
     const snapshot = await ensureGhSnapshot();
     const strategy = await ensureGhStrategy();
     const login = resolveActingLogin(snapshot, strategy);
@@ -641,11 +673,9 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
       packagesResolution.credentials.source
     : "unavailable";
   const resolvedPackagesScopes =
-    (packagesCredentialSource === "keyring" ?
-      keyringScopesByLogin.get(packagesLogin)
-    : packagesCredentialSource === "injected-token" ?
-      injectedScopesFor(packagesLogin)
-    : undefined) || [];
+    (packagesResolution.ok ?
+      packagesResolution.credentials.scopes
+    : undefined) ?? [];
   const packagesHasWrite = resolvedPackagesScopes.includes("write:packages");
   const seen = new Set<string>();
   const accounts: GitHubIdentityAccount[] = [];
@@ -1256,13 +1286,15 @@ export function cliExec(
   opts: CliOptions,
   cb: CliCallback
 ): ChildProcess {
+  const { preserveGitHubToken = false, ...processOptions } = opts;
   const execOpts: ExecFileOptionsWithStringEncoding = {
     maxBuffer: 10 * 1024 * 1024,
     windowsHide: true,
-    ...opts,
+    ...processOptions,
     encoding: "utf8"
   };
-  if (isGhCmd(cmd)) execOpts.env = ghChildEnv(execOpts.env);
+  if (isGhCmd(cmd) && !preserveGitHubToken)
+    execOpts.env = ghChildEnv(execOpts.env);
   execOpts.env = withoutAgentSession(execOpts.env);
   const isWindows = process.platform === "win32";
   const isWindowsGh = isWindows && isGhCmd(cmd);

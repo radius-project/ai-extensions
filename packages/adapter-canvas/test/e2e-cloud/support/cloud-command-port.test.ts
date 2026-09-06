@@ -5,11 +5,14 @@ import { promises as fs } from "node:fs";
 import {
   CloudCommandError,
   createRefreshingAzureCommandRunner,
+  createGitHubPackageCommandEnvironment,
   createNodeCloudFixturePorts,
   describeError,
   expectSuccess,
+  isGitHubApiNotFound,
   normalizeAzureCommandResult,
   normalizeCommandResult,
+  normalizeGitHubPackageCommandResult,
   parseJsonArray,
   type CloudCommandResult
 } from "./cloud-command-port.js";
@@ -162,6 +165,37 @@ describe("normalizeCommandResult", () => {
   });
 });
 
+describe("isGitHubApiNotFound", () => {
+  it.each([
+    [
+      "the standard stderr form",
+      { code: 1, stderr: "gh: Not Found (HTTP 404)" }
+    ],
+    ["the stdout status form", { code: 1, stdout: "HTTP 404: Not Found" }],
+    [
+      "a 404 line after another diagnostic",
+      { code: 1, stderr: "request failed\ngh: Not Found (HTTP 404)" }
+    ]
+  ])("recognizes %s", (_label, output) => {
+    expect(isGitHubApiNotFound(result(output))).toBe(true);
+  });
+
+  it.each([
+    ["a successful body", { code: 0, stdout: "HTTP 404: historical result" }],
+    [
+      "a bare phrase",
+      { code: 1, stderr: "Not Found while resolving hostname" }
+    ],
+    ["a different status", { code: 1, stderr: "gh: Not Found (HTTP 403)" }],
+    [
+      "an embedded status",
+      { code: 1, stderr: "request failed after HTTP 404: retry exhausted" }
+    ]
+  ])("rejects %s", (_label, output) => {
+    expect(isGitHubApiNotFound(result(output))).toBe(false);
+  });
+});
+
 describe("describeError", () => {
   it("uses an Error's message", () => {
     expect(describeError(new Error("group is locked"))).toBe("group is locked");
@@ -273,6 +307,122 @@ describe("parseJsonArray", () => {
 });
 
 describe("createNodeCloudFixturePorts", () => {
+  it("isolates package commands onto the dedicated token", () => {
+    expect(
+      createGitHubPackageCommandEnvironment(" package-token ", {
+        GH_TOKEN: "app-token",
+        GITHUB_TOKEN: "stale-token",
+        PATH: "/tools"
+      })
+    ).toEqual({
+      GH_TOKEN: "package-token",
+      GITHUB_TOKEN: "package-token",
+      PATH: "/tools"
+    });
+  });
+
+  it.each([undefined, "", "   "])(
+    "rejects a missing package command token represented by %j",
+    (packageToken) => {
+      expect(
+        createGitHubPackageCommandEnvironment(packageToken, {})
+      ).toBeNull();
+    }
+  );
+
+  it("fails package commands explicitly when no package token was supplied", async () => {
+    await expect(
+      createNodeCloudFixturePorts().commands.runGhPackage(["api", "user"])
+    ).resolves.toEqual({
+      code: 1,
+      stdout: "",
+      stderr:
+        "GH_PACKAGES_TOKEN is required for cloud fixture package operations."
+    });
+  });
+
+  it("isolates and redacts the dedicated token through a fake gh executable", async () => {
+    const packageToken = "package-token-for-port-test";
+    const appToken = "app-token-must-not-reach-package-command";
+    const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-gh-"));
+    const originalPath = process.env.PATH;
+    const originalPathExt = process.env.PATHEXT;
+    const originalGhToken = process.env.GH_TOKEN;
+    const originalGitHubToken = process.env.GITHUB_TOKEN;
+    const originalNodeOptions = process.env.NODE_OPTIONS;
+
+    await fs.writeFile(
+      path.join(fakeBin, "gh"),
+      [
+        "#!/bin/sh",
+        'printf "GH_TOKEN=%s\\n" "$GH_TOKEN"',
+        'printf "GITHUB_TOKEN=%s\\n" "$GITHUB_TOKEN" >&2',
+        "exit 7",
+        ""
+      ].join("\n")
+    );
+    await fs.chmod(path.join(fakeBin, "gh"), 0o755);
+    if (process.platform === "win32") {
+      const hook = path.join(fakeBin, "fake-gh.cjs");
+      await fs.copyFile(process.execPath, path.join(fakeBin, "gh.exe"));
+      await fs.writeFile(
+        hook,
+        [
+          "process.stdout.write(`GH_TOKEN=${process.env.GH_TOKEN}\\n`);",
+          "process.stderr.write(`GITHUB_TOKEN=${process.env.GITHUB_TOKEN}\\n`);",
+          "process.exit(7);",
+          ""
+        ].join("\n")
+      );
+      process.env.NODE_OPTIONS = `--require="${hook.replaceAll("\\", "/")}"`;
+    }
+
+    try {
+      process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
+      process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+      process.env.GH_TOKEN = appToken;
+      process.env.GITHUB_TOKEN = appToken;
+
+      const outcome = await createNodeCloudFixturePorts({
+        packageToken
+      }).commands.runGhPackage(["api", "user"]);
+
+      expect(outcome.code).toBe(7);
+      expect(outcome.stdout).toContain("GH_TOKEN=[REDACTED]");
+      expect(outcome.stderr).toContain("GITHUB_TOKEN=[REDACTED]");
+      expect(`${outcome.stdout}${outcome.stderr}`).not.toContain(packageToken);
+      expect(`${outcome.stdout}${outcome.stderr}`).not.toContain(appToken);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (originalPathExt === undefined) delete process.env.PATHEXT;
+      else process.env.PATHEXT = originalPathExt;
+      if (originalGhToken === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = originalGhToken;
+      if (originalGitHubToken === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = originalGitHubToken;
+      if (originalNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = originalNodeOptions;
+      await fs.rm(fakeBin, { recursive: true, force: true });
+    }
+  });
+
+  it("redacts the dedicated package token from command output", () => {
+    const token = "dedicated-package-token";
+    expect(
+      normalizeGitHubPackageCommandResult(
+        { code: 1 },
+        `stdout ${token}`,
+        `stderr ${token}`,
+        token
+      )
+    ).toEqual({
+      code: 1,
+      stdout: "stdout [REDACTED]",
+      stderr: "stderr [REDACTED]"
+    });
+  });
+
   it("creates and removes a workspace directory under the system temp root", async () => {
     const ports = createNodeCloudFixturePorts();
 
