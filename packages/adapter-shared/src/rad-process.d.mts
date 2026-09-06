@@ -4,6 +4,12 @@
 
 import type { ChildProcess } from "node:child_process";
 
+export interface RadSpawnOptions {
+  stdio: ["ignore", "pipe", "pipe"];
+  windowsHide: true;
+  detached: boolean;
+}
+
 export interface ProcessResult {
   stdout: string;
   stderr: string;
@@ -31,7 +37,7 @@ export class RadProcessError extends Error {
 
 export function killChildTree(child: ChildProcess | null | undefined): void;
 
-export function shouldDetachRadProcess(platform?: NodeJS.Platform): boolean;
+export function radSpawnOptions(platform?: NodeJS.Platform): RadSpawnOptions;
 
 export function spawnRad(
   radPath: string,

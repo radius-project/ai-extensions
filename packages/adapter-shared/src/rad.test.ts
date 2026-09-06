@@ -36,7 +36,7 @@ import {
   type SpawnRadOptions,
   type BicepCompileConfig
 } from "./rad.js";
-import { shouldDetachRadProcess } from "./rad-process.mjs";
+import { radSpawnOptions } from "./rad-process.mjs";
 
 const RAD = `rad${process.platform === "win32" ? ".exe" : ""}`;
 const BICEP = `bicep${process.platform === "win32" ? ".exe" : ""}`;
@@ -1374,12 +1374,25 @@ describeSpawn("spawnRad", () => {
   });
 });
 
-describe("shouldDetachRadProcess", () => {
-  it("keeps Windows rad processes in the caller job and detaches POSIX process groups", () => {
-    expect(shouldDetachRadProcess("win32")).toBe(false);
-    expect(shouldDetachRadProcess("linux")).toBe(true);
-    expect(shouldDetachRadProcess("darwin")).toBe(true);
+describe("managed rad process options", () => {
+  it("keeps Windows processes in the caller job with hidden windows and piped output", () => {
+    expect(radSpawnOptions("win32")).toEqual({
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      detached: false
+    });
   });
+
+  it.each<NodeJS.Platform>(["darwin", "linux"])(
+    "keeps a detached process group on %s for tree cancellation",
+    (platform) => {
+      expect(radSpawnOptions(platform)).toEqual({
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+        detached: true
+      });
+    }
+  );
 });
 
 describe("saveGraphJson", () => {

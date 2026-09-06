@@ -59,8 +59,24 @@ export function killChildTree(child) {
   }
 }
 
-export function shouldDetachRadProcess(platform = process.platform) {
-  return platform !== "win32";
+/**
+ * Keep Windows rad processes attached to the caller's Job Object so cancellation
+ * reaches their full process tree. POSIX still uses a detached process group,
+ * which killChildTree signals by its negative process ID.
+ *
+ * @param {NodeJS.Platform} [platform]
+ * @returns {{
+ *   stdio: ["ignore", "pipe", "pipe"],
+ *   windowsHide: true,
+ *   detached: boolean
+ * }}
+ */
+export function radSpawnOptions(platform = process.platform) {
+  return {
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+    detached: platform !== "win32"
+  };
 }
 
 /**
@@ -82,9 +98,7 @@ export function spawnRad(
     const child = spawn(radPath, args, {
       cwd,
       env: { ...process.env, ...env },
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-      detached: shouldDetachRadProcess()
+      ...radSpawnOptions()
     });
 
     const maxOutput = 32 * 1024 * 1024;

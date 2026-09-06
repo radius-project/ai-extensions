@@ -40,7 +40,7 @@ import {
   killChildTree,
   managedBicepEnv as processManagedBicepEnv,
   RadProcessError,
-  shouldDetachRadProcess,
+  radSpawnOptions,
   spawnRad
 } from "./rad-process.mjs";
 import type { ProcessResult, SpawnRadOptions } from "./rad-process.mjs";
@@ -436,14 +436,9 @@ export function radBinaryVersion(
   return new Promise((resolve) => {
     let child: ChildProcess;
     try {
-      // Keep POSIX rad runs in their own process group for cleanup. On Windows,
-      // Radius supports non-detached automation so rad remains in the caller's
-      // Job Object and windowsHide can suppress the initial console window.
       child = spawn(radPath, ["version", "--cli", "--output", "json"], {
         env: managedBicepEnv(process.env),
-        stdio: ["ignore", "pipe", "ignore"],
-        windowsHide: true,
-        detached: shouldDetachRadProcess()
+        ...radSpawnOptions()
       });
     } catch {
       resolve(null);
@@ -466,6 +461,7 @@ export function radBinaryVersion(
     child.stdout?.on("data", (c: Buffer) => {
       if (stdout.length < 1024 * 1024) stdout += c.toString();
     });
+    child.stderr?.resume();
     child.on("error", () => finish(null));
     child.on("close", (code) => {
       if (code !== 0) {
@@ -1191,13 +1187,10 @@ export async function runRadAppGraph(
           cwd,
           // Clear GITHUB_ACTIONS so rad writes app-graph.json locally instead of
           // committing to the radius-graph orphan branch. stdin is ignored so rad
-          // never blocks waiting for interactive input. POSIX detaches for
-          // process-group cleanup; Windows stays non-detached so the caller's Job
-          // Object can cancel the tree and windowsHide can suppress the window.
+          // never blocks waiting for interactive input. Windows remains in the
+          // caller's Job Object; POSIX uses a process group for tree cleanup.
           env: { ...process.env, ...managedBicepEnv(), GITHUB_ACTIONS: "" },
-          stdio: ["ignore", "pipe", "pipe"],
-          windowsHide: true,
-          detached: shouldDetachRadProcess(processPlatform)
+          ...radSpawnOptions(processPlatform)
         }
       );
 
