@@ -23,6 +23,15 @@ import os from "node:os";
 import path from "node:path";
 
 const STAGING_RUN_RECORD = "run.json";
+// The resolved type contract show-radius-type.mjs stages for this run: a map of
+// `<type>@<api-version>` to each envelope property's schema sensitivity. This
+// script compiles offline and has no type catalog, and the compiled template
+// keeps no trace of which property is sensitive, so the flag can only arrive
+// from the run that resolved the schemas. The name must stay in step with the
+// copy in show-radius-type.mjs; the built-extension smoke test asserts the two
+// packaged scripts agree.
+const STAGING_RESOLVED_TYPES = "resolved-types.json";
+const RESOLVED_TYPES_CONTRACT_VERSION = 1;
 const REPAIR_ATTEMPT_BUDGET = 5;
 const REPAIR_COMPILE_LIMIT = REPAIR_ATTEMPT_BUDGET + 1;
 
@@ -732,6 +741,224 @@ function checkRuntimeVariableExpansion(
   return failed;
 }
 
+// Two Radius types can name a property `password` and mean opposite things.
+// `Radius.Data/mySqlDatabases.password` is marked sensitive and takes the
+// credential itself; `Radius.Messaging/rabbitMQ.password` is a plain string that
+// takes the resource ID of a `Radius.Security/secrets` resource. Assigning a
+// `@secure()` parameter to the second one compiles and deploys, and then fails
+// in the cluster: the Recipe takes the last path segment of that value as the
+// Kubernetes Secret name for `secretKeyRef`, so the password becomes a Secret
+// name and Kubernetes rejects the Deployment because it is not a lowercase RFC
+// 1123 subdomain.
+//
+// The only sound discriminator is the schema's sensitivity flag. A rule keyed on
+// the property's name, or one that objected to any secure parameter reaching any
+// resource, would reject the prescribed `mySqlDatabases` spelling, which is the
+// correct way to supply that credential. So this check asks the run's staged
+// resolved types, and reports nothing it cannot support with that evidence.
+//
+// What it inspects is exactly one shape: a property of a Radius resource's
+// properties envelope whose compiled value is a whole reference to a
+// `securestring` parameter of the template that declares it. A credential that
+// arrives through a variable, a string interpolation, or a nested object is not
+// this shape and is not reported, because the template no longer proves where
+// the value came from. `securestring` also keeps the check to the string
+// credentials the guidance prescribes: a `@secure()` object compiles to
+// `secureObject` and legitimately carries a Secret's whole `data` map, whose
+// enclosing property is not itself marked sensitive.
+const SECURE_PARAMETER_REFERENCE = /^\[parameters\('([^']+)'\)\]$/u;
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// The staged resolved types, or why they cannot be used. `unstaged` is a compile
+// that is not part of a modeling run at all, which is the same thing the repair
+// budget does with a missing run record: a plain `.radius/app.bicep` never had a
+// staged contract to consult, so there is nothing to enforce against it.
+function readResolvedTypes(app, staged) {
+  const file = path.join(path.dirname(app), STAGING_RESOLVED_TYPES);
+  if (!staged) {
+    return { status: "unstaged", file, types: {} };
+  }
+  let text;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { status: "absent", file, types: {} };
+    }
+    return { status: "unusable", file, types: {}, detail: error.message };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return {
+      status: "unusable",
+      file,
+      types: {},
+      detail: "it is not valid JSON"
+    };
+  }
+  if (
+    !isPlainObject(parsed) ||
+    parsed.contractVersion !== RESOLVED_TYPES_CONTRACT_VERSION ||
+    !isPlainObject(parsed.types)
+  ) {
+    return {
+      status: "unusable",
+      file,
+      types: {},
+      detail: `it is not a version ${RESOLVED_TYPES_CONTRACT_VERSION} resolved-type contract`
+    };
+  }
+  for (const [type, entry] of Object.entries(parsed.types)) {
+    if (
+      !isPlainObject(entry) ||
+      Object.values(entry).some((sensitive) => typeof sensitive !== "boolean")
+    ) {
+      return {
+        status: "unusable",
+        file,
+        types: {},
+        detail: `"${type}" does not map each property to a boolean`
+      };
+    }
+  }
+  return { status: "ready", file, types: parsed.types };
+}
+
+function secureParameterNames(template) {
+  const names = new Set();
+  for (const [name, declaration] of Object.entries(template.parameters ?? {})) {
+    if (isPlainObject(declaration) && declaration.type === "securestring") {
+      names.add(name);
+    }
+  }
+  return names;
+}
+
+// What is wrong with assigning `parameter` to `type`.`property`, or null when
+// nothing is. Every branch that is not "the schema marks it sensitive" reports,
+// because the alternative is to treat an unknown property as sensitive, which is
+// exactly the assumption that shipped the broken model.
+function secureTargetFinding(contract, type, property, parameter) {
+  const lead = `parameter ${JSON.stringify(parameter)} is @secure()`;
+  if (contract.status === "absent") {
+    return (
+      `${lead}, but this modeling run staged no resolved type schemas, so no property's sensitivity could be checked. ` +
+      "Resolve every predefined type the model uses with show-radius-type.mjs before assigning a credential to one of its properties."
+    );
+  }
+  const entry = contract.types[type];
+  if (entry === undefined) {
+    return (
+      `${lead}, but "${type}" was not resolved in this modeling run, so nothing establishes whether ${property} is a sensitive inline value or a plain Radius.Security/secrets resource ID. ` +
+      "Resolve the type with show-radius-type.mjs and assign the credential the way its schema requires."
+    );
+  }
+  const sensitive = entry[property];
+  if (sensitive === true) {
+    return null;
+  }
+  if (sensitive === undefined) {
+    return (
+      `${lead}, but the resolved schema for "${type}" does not describe ${property}, so its sensitivity is unknown. ` +
+      "Assign a credential only to a property the resolved schema marks sensitive."
+    );
+  }
+  return (
+    `${lead}, but the resolved schema for "${type}" does not mark ${property} sensitive, so it holds a plain string rather than the credential. ` +
+    "A non-sensitive credential property takes the resource ID of a Radius.Security/secrets resource: author or reuse that Secret with the @secure() parameter in its data and assign <secret>.id here. " +
+    "Assigned raw, the credential becomes the Kubernetes Secret name the Recipe looks up in secretKeyRef and the deployment fails."
+  );
+}
+
+function scanSecureParameterTargets(template, app, contract, parentPath = "") {
+  let failed = false;
+  const secure = secureParameterNames(template);
+  for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
+    const resourcePath = parentPath ? `${parentPath}.${symbol}` : symbol;
+    if (resource?.type === "Microsoft.Resources/deployments") {
+      const nestedTemplate = resource?.properties?.template;
+      if (isPlainObject(nestedTemplate)) {
+        // A module declares its own parameters, so the nested template states
+        // for itself which of them are secure; nothing has to be carried down.
+        if (
+          scanSecureParameterTargets(
+            nestedTemplate,
+            app,
+            contract,
+            resourcePath
+          )
+        ) {
+          failed = true;
+        }
+      }
+      continue;
+    }
+    if (
+      typeof resource?.type !== "string" ||
+      !resource.type.startsWith("Radius.") ||
+      // A generated custom type is never in the staged contract, because
+      // show-radius-type.mjs resolves only predefined types and refuses
+      // `Radius.Resources` selectors. Its schema may legitimately mark a
+      // property sensitive, so reporting it here would fail a correct model on
+      // evidence this script does not have.
+      resource.type.startsWith("Radius.Resources/")
+    ) {
+      continue;
+    }
+    const properties = resource?.properties?.properties;
+    if (!isPlainObject(properties)) {
+      continue;
+    }
+    for (const [property, value] of Object.entries(properties)) {
+      if (typeof value !== "string") {
+        continue;
+      }
+      const reference = SECURE_PARAMETER_REFERENCE.exec(value);
+      if (reference === null || !secure.has(reference[1])) {
+        continue;
+      }
+      const finding = secureTargetFinding(
+        contract,
+        resource.type,
+        property,
+        reference[1]
+      );
+      if (finding === null) {
+        continue;
+      }
+      report(
+        `${app}: error secure-parameter-target: ${resourcePath}.properties.${property}: ${finding}`
+      );
+      failed = true;
+    }
+  }
+  return failed;
+}
+
+function checkSecureParameterTargets(template, app, contract) {
+  // A staged contract that exists but cannot be read fails the compile whether
+  // or not the model assigns a secure parameter anywhere. The file is this
+  // check's only evidence, and reporting nothing would be indistinguishable
+  // from having inspected the model and found it correct.
+  if (contract.status === "unusable") {
+    report(
+      `${app}: error secure-parameter-target: the resolved type schemas staged in ${contract.file} could not be read: ${contract.detail}. ` +
+        "No @secure() parameter could be checked against the schema that decides where it may go. " +
+        "Rerun show-radius-type.mjs for every predefined type the model uses, or start the modeling run again with promote-app-model.mjs --begin."
+    );
+    return true;
+  }
+  if (contract.status === "unstaged") {
+    return false;
+  }
+  return scanSecureParameterTargets(template, app, contract);
+}
+
 const executable = process.platform === "win32" ? "bicep.exe" : "bicep";
 const bicep = path.join(
   os.homedir(),
@@ -743,7 +970,7 @@ const bicep = path.join(
 
 // Compiles the model and reports what Bicep rejected. Unchanged from what this
 // script has always done; the budget wraps it rather than living inside it.
-function check(app) {
+function check(app, staged) {
   const compiled = spawnSync(
     bicep,
     ["build", app, "--diagnostics-format", "sarif", "--stdout"],
@@ -796,11 +1023,17 @@ function check(app) {
     template,
     app
   );
+  const misplacedSecureParameter = checkSecureParameterTargets(
+    template,
+    app,
+    readResolvedTypes(app, staged)
+  );
   return (
       compilerFindings.some(isFailure) ||
         invalidBuildSource ||
         invalidSourceReference ||
-        unresolvedRuntimeVariable
+        unresolvedRuntimeVariable ||
+        misplacedSecureParameter
     ) ?
       1
     : 0;
@@ -810,7 +1043,7 @@ function main() {
   const app = path.resolve(process.argv[2] || ".radius/app.bicep");
   const run = readRunRecord(app);
   if (run === null) {
-    return check(app);
+    return check(app, false);
   }
 
   // Fail closed: a staged run whose record cannot be parsed or read has no
@@ -837,7 +1070,7 @@ function main() {
     return 1;
   }
 
-  const status = check(app);
+  const status = check(app, true);
   const fingerprint =
     status === 0 ? null : fingerprintCompilerOutput(reported.join("\n"));
   if (isRepeatedFailure(run.state, fingerprint)) {

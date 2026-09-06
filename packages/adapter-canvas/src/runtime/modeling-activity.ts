@@ -59,6 +59,7 @@ export interface ModelingActivityDependencies {
 
 export interface ModelingActivity {
   announce(announcement: ModelingAnnouncement): void;
+  release(announcement: ModelingAnnouncement): void;
   inFlight(
     repo: string,
     branches: ReadonlyArray<string>,
@@ -130,6 +131,10 @@ export function createModelingActivity(
       announcements.delete(keyFor(repo, branch));
       announcements.set(keyFor(repo, branch), nowMs);
       trim();
+    },
+
+    release({ repo, branch }: ModelingAnnouncement): void {
+      announcements.delete(keyFor(repo, branch));
     },
 
     async inFlight(

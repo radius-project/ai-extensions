@@ -17,15 +17,77 @@ export interface LivenessSourceDependencies {
   // contract.
   getOpenSourceHandler(): OpenSourceInvoker | null;
   readInstanceState(instanceId: string): CanvasState | undefined;
+  getWorkspaceModelRevision(instanceId: string): Promise<string | null>;
   toSafeRepoRelPath(input: unknown): string;
 }
 
 const NO_STORE = Object.freeze({ "Cache-Control": "no-store" });
 
+// The heartbeat aborts a ping after 4s and counts it as a miss, so the optional
+// workspace read gets a budget well inside that window. A slow disk then costs
+// one delayed invalidation instead of raising the reconnect overlay.
+export const PING_MODEL_REVISION_BUDGET_MS = 1_000;
+
+// Resolves to null instead of rejecting or outliving its budget, so liveness is
+// never held hostage by the optional revision read.
+function revisionWithinBudget(
+  read: () => Promise<string | null>,
+  budgetMs: number
+): Promise<string | null> {
+  // The executor runs synchronously, so the timer is always assigned before the
+  // race can settle and is always cleared by the time this resolves.
+  let timer!: ReturnType<typeof setTimeout>;
+  const budget = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), budgetMs);
+  });
+  return Promise.race([
+    Promise.resolve()
+      .then(read)
+      .catch(() => null),
+    budget
+  ]).finally(() => {
+    clearTimeout(timer);
+  });
+}
+
 // Lightweight liveness probe used by the client-side heartbeat so pages can
 // detect when the server has come back after an idle respawn.
-export function handlePing(context: CanvasRequestContext): void {
-  context.json(200, { ok: true, instanceId: context.instanceId }, NO_STORE);
+export async function handlePing(
+  context: CanvasRequestContext,
+  dependencies: Pick<
+    LivenessSourceDependencies,
+    "getWorkspaceModelRevision" | "readInstanceState"
+  >
+): Promise<void> {
+  // Invalidation reporting is opportunistic: liveness must keep answering even
+  // when the workspace read fails or runs long, or a transient filesystem
+  // problem would look like a dead server to the heartbeat.
+  const workspaceModelRevision =
+    context.request.headers["x-radius-workspace-model"] === "1" ?
+      await revisionWithinBudget(
+        () => dependencies.getWorkspaceModelRevision(context.instanceId),
+        PING_MODEL_REVISION_BUDGET_MS
+      )
+    : null;
+  const renderedModelRevision = dependencies.readInstanceState(
+    context.instanceId
+  )?.graphModelRevision;
+  context.json(
+    200,
+    {
+      ok: true,
+      instanceId: context.instanceId,
+      ...(workspaceModelRevision ?
+        {
+          workspaceModelRevision,
+          workspaceModelChanged:
+            typeof renderedModelRevision === "string" &&
+            workspaceModelRevision !== renderedModelRevision
+        }
+      : {})
+    },
+    NO_STORE
+  );
 }
 
 // Only the webview for a local-workspace graph calls this (client passes
@@ -84,7 +146,7 @@ export function createLivenessSourceRoutes(
   dependencies: LivenessSourceDependencies
 ): RouteHandlerRegistry {
   return {
-    "ANY /api/ping": handlePing,
+    "ANY /api/ping": (context) => handlePing(context, dependencies),
     "POST /api/open-source": (context) =>
       handleOpenSource(context, dependencies)
   };

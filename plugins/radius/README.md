@@ -4,13 +4,11 @@ Model, visualize, and deploy applications with [Radius](https://radapp.io) from 
 
 ## Installation
 
-```bash
-copilot plugin install radius@awesome-copilot
-```
+The `radius` plugin is available in the [`github/awesome-copilot`](https://github.com/github/awesome-copilot) plugin catalog.
 
-You can also install from the GitHub Copilot app: open app settings, select **Plugins**, add the `radius-project/ai-extensions` marketplace, then browse to and install the `radius` plugin. See [Adding plugins](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-plugins) for details.
+Open the GitHub Copilot app, select **Customize** in the side menu, and then select **Plugins**. Search for `radius` and install the plugin. See [Adding plugins](https://docs.github.com/en/copilot/how-tos/github-copilot-app/customize-github-copilot-app#adding-plugins) for details.
 
-Radius Canvas is displayed only by the GitHub Copilot app. Restart your Copilot session after installing so the skills and the canvas become available.
+Restart your Copilot session after installing so the skills and the canvas extension become available. Use the plugin's three-dot menu to update or uninstall it.
 
 ## What's Included
 

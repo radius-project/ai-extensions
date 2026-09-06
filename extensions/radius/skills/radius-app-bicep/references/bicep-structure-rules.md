@@ -295,9 +295,9 @@ resource mysqlDb 'Radius.Data/mySqlDatabases@2025-08-01-preview' = {
 
 Rules:
 
-- Credentials follow whatever the type's schema defines (do not assume by engine):
-  - schema has `username` + `password`: set them on the resource (`password` from a `@secure() param`, marked `x-radius-sensitive`)
-  - schema has `secretName`: create a `Radius.Security/secrets` and reference it (see below)
+- Credential inputs follow the type's schema, classified by sensitivity rather than by property name (do not assume by engine, and do not assume by the word `password`):
+  - property marked `x-radius-sensitive: true`: set it on the resource from a `@secure() param` (`Radius.Data/mySqlDatabases.password`)
+  - plain, non-sensitive `string` property whose schema description identifies it as the resource ID of a `Radius.Security/secrets` resource: create or reuse that Secret and assign `<secret>.id`, never a `@secure() param` (`Radius.Messaging/rabbitMQ.password`, and likewise a property named `passwordSecret` or `secretName`); assigning the raw credential makes it the Kubernetes Secret name the Recipe looks up and fails the deployment
   - schema has neither: do not invent credentials; inspect the recipe outputs and application auth requirements
 - Symbolic name is engine/instance-derived (`mysqlDb`), NOT fixed — so multiple data stores never collide
 - Developer-facing props (`database`, `version`, `size`, `topic`, `queue`, `container`) are derived from source — do NOT hardcode; only set properties the schema defines
@@ -332,7 +332,7 @@ resource dbSecret 'Radius.Security/secrets@2025-08-01-preview' = {
 Rules:
 Rules:
 
-- Use only when the exact schema supports it: for a type's required secret input (`secretName`), app secrets/config files, or the `radius-ghcr-registry-creds` registry-push Secret required by a `Radius.Compute/containerImages` build when the push registry is authenticated (see [containerImages](#radiuscomputecontainerimages-structure))
+- Use only when the exact schema supports it: for a type's secret-reference credential input, app secrets/config files, or the `radius-ghcr-registry-creds` registry-push Secret required by a `Radius.Compute/containerImages` build when the push registry is authenticated (see [containerImages](#radiuscomputecontainerimages-structure))
 - Do not re-author a recipe-generated output. Bind directly from its schema-declared managed secret, or report that the exact contract cannot supply it
 - Never set authored secret `data.value` from a recipe resource's sensitive output or a guessed convenience property
 - NEVER hardcode passwords — use `@secure() param`

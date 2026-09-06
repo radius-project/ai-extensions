@@ -19,6 +19,7 @@ import {
   deployStatusKeys,
   fetchBicepFromRepo,
   fetchRecipePack,
+  isKubernetesNamespace,
   mergeDeployedGraphMetadata,
   projectDeployedGraph,
   resolveRecipeOutputs,
@@ -113,11 +114,14 @@ import {
   extractAppName
 } from "./bicep.js";
 import {
+  commitWorkspaceBranchResolution,
   createWorkspaceGitHub,
+  currentWorkspaceBranch,
   defaultBranchForState,
   resolveWorkspaceBicep,
   fetchWorkspaceFile,
   isWorkspaceSelection,
+  resolveGraphBranchForRequest,
   modelingRunLastActivityAtMs,
   resolveSessionId,
   toSafeRepoRelPath,
@@ -710,6 +714,24 @@ const livenessSourceRoutes = createLivenessSourceRoutes({
   getOpenSourceHandler: () => openSourceHandler,
   readInstanceState: (instanceId) =>
     canvasServer.instances.get(instanceId)?.state,
+  getWorkspaceModelRevision: async (instanceId) => {
+    const state = canvasServer.instances.get(instanceId)?.state;
+    if (
+      !state?.graphFromWorkspace ||
+      !state.graphTargetRepo ||
+      !state.graphBranch
+    ) {
+      return null;
+    }
+    const model = await resolveWorkspaceBicep(
+      state,
+      state.graphTargetRepo,
+      state.graphBranch
+    );
+    // Model content only: the revision must not move when a staged-artifact
+    // fingerprint changes, or every stage would look like a model edit.
+    return model ? graphDefinitionHash(model.content, "") : null;
+  },
   toSafeRepoRelPath
 });
 
@@ -756,6 +778,7 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     isValidRepoSlug,
     isResourceGroupName,
     isAksClusterName,
+    isKubernetesNamespace,
     isUuid,
     buildStages,
     createOperation,
@@ -1181,7 +1204,16 @@ const remediationRoutes = createRemediationRoutes(
 
 const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  defaultBranchForState,
+  resolveBranchForRequest: (entry, repo, requestedBranch) =>
+    resolveGraphBranchForRequest(
+      entry.state,
+      repo,
+      requestedBranch,
+      undefined,
+      currentWorkspaceBranch
+    ),
+  commitBranchResolution: (entry, repo, resolution) =>
+    commitWorkspaceBranchResolution(entry.state, repo, resolution),
   prepareSourceRef: (entry, context) =>
     prepareSourceRefResources(entry, "graph", context),
   commitSourceRef: (entry, resources, context, expectedToken) =>
@@ -1217,9 +1249,9 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
 //
 // `github` is bound into `resolveRadArtifactsDir`, `fetchRecipePack` and
 // `resolveRecipeOutputs` here rather than injected, which is what keeps the
-// route modules free of it. The pure helpers (`defaultBranchForState`,
-// `computeGraphDiff`, `record`, …) are injected rather than imported by the
-// workflows, matching how the sibling families inject `repoMatchesWorkspace`.
+// route modules free of it. The pure helpers (`computeGraphDiff`, `record`, …)
+// are injected rather than imported by the workflows, matching how the sibling
+// families inject `repoMatchesWorkspace`.
 const observeServerWorkspaceModelingRun = (
   state: CanvasState,
   repo: string,
@@ -1238,6 +1270,21 @@ const observeServerWorkspaceModelingRun = (
 
 const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  resolveBranchForRequest: (
+    entry,
+    repo,
+    requestedBranch,
+    followWorkspaceBranch
+  ) =>
+    resolveGraphBranchForRequest(
+      entry.state,
+      repo,
+      requestedBranch,
+      followWorkspaceBranch,
+      currentWorkspaceBranch
+    ),
+  commitBranchResolution: (entry, repo, resolution) =>
+    commitWorkspaceBranchResolution(entry.state, repo, resolution),
   pipeline: createGraphPipeline<CanvasServerEntry>({
     fetchBicepSelection: (entry, repo, branch) =>
       fetchBicepSelection(entry, repo, branch),
@@ -1267,7 +1314,6 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   setSourceRefResources: (entry, view, resources, sourceRefInput, token) =>
     setSourceRefResources(entry, view, resources, sourceRefInput, token),
   isCurrentSourceRefToken,
-  defaultBranchForState,
   canReuseModeledGraph,
   addGraphProgress,
   beginPlannedGraphRequest,

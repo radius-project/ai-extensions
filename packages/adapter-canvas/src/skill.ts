@@ -1,10 +1,11 @@
-// Compact bootstrap for the radius-app-bicep skill packaged beside the Canvas.
+// Compact bootstrap for the radius-app-bicep skill packaged with the Canvas.
 
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveGeneratorVersion } from "./generator-version.js";
+import { resolvePluginRoot } from "./plugin-root.js";
 
 const REQUIRED_SKILL_FILES = [
   "SKILL.md",
@@ -46,8 +47,9 @@ function skillBaseCandidates(
   moduleDir: string,
   homeDir: string
 ): readonly string[] {
+  const pluginRoot = resolvePluginRoot(moduleDir);
   return [
-    path.join(moduleDir, "skills", "radius-app-bicep"),
+    path.join(pluginRoot, "skills", "radius-app-bicep"),
     path.resolve(
       moduleDir,
       "../../../extensions/radius/skills/radius-app-bicep"

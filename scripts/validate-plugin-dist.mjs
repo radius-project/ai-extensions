@@ -34,8 +34,7 @@ const SUPPORTED_SCHEMA_KEYWORDS = new Set([
 const DNS_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 const CANVAS_KEYWORD = "canvas";
 const CANVAS_LOGO = "assets/preview.png";
-const CANVAS_ENTRY_POINT = "extension.mjs";
-const CANVAS_COMPATIBILITY_ENTRY_POINT = "extensions/extension.mjs";
+const COPILOT_CLIENT_NAMESPACE = "com.github.copilot";
 
 class Failure extends Error {}
 
@@ -225,23 +224,24 @@ function isCanvasPlugin(manifest) {
   );
 }
 
-function requireCanvasContract(dist, manifest) {
-  if (manifest.logo !== CANVAS_LOGO) {
+function requireCanvasContract(dist, manifest, packageJson, pluginName) {
+  const logo = manifest.extensions?.[COPILOT_CLIENT_NAMESPACE]?.logo;
+  if (logo !== CANVAS_LOGO) {
     fail(
-      `plugin.json#logo must be ${JSON.stringify(CANVAS_LOGO)} for a plugin keyworded "${CANVAS_KEYWORD}"`
+      `plugin.json#extensions.${COPILOT_CLIENT_NAMESPACE}.logo must be ${JSON.stringify(CANVAS_LOGO)} for a plugin keyworded "${CANVAS_KEYWORD}"`
     );
   }
-  if (manifest.extensions !== "extensions") {
-    fail('published canvas plugin.json#extensions must be "extensions"');
-  }
-  requirePath(dist, manifest.logo, "plugin.json#logo", "file");
-  requirePath(dist, CANVAS_ENTRY_POINT, "canvas entry point", "file");
   requirePath(
     dist,
-    CANVAS_COMPATIBILITY_ENTRY_POINT,
-    "Awesome Copilot canvas entry point",
+    logo,
+    `plugin.json#extensions.${COPILOT_CLIENT_NAMESPACE}.logo`,
     "file"
   );
+  const canvasEntryPoint = `${COPILOT_CLIENT_NAMESPACE}/extensions/${pluginName}/extension.mjs`;
+  if (packageJson.main !== canvasEntryPoint) {
+    fail(`package.json#main must be ${JSON.stringify(canvasEntryPoint)}`);
+  }
+  requirePath(dist, canvasEntryPoint, "canvas entry point", "file");
 }
 
 function requirePath(root, declared, label, type) {
@@ -306,14 +306,9 @@ async function main() {
     );
   }
   const canvas = isJsonObject(manifest) && isCanvasPlugin(manifest);
-  const portable = canvas ? { ...manifest } : manifest;
-  if (canvas) {
-    delete portable.logo;
-    delete portable.extensions;
-  }
-  const manifestError = validateSchema(portable, manifestSchema, "plugin.json");
+  const manifestError = validateSchema(manifest, manifestSchema, "plugin.json");
   if (manifestError !== undefined) fail(manifestError);
-  if (canvas) requireCanvasContract(dist, manifest);
+  if (canvas) requireCanvasContract(dist, manifest, packageJson, plugin.name);
 
   if (packageJson.name !== plugin.name || manifest.name !== plugin.name) {
     fail(`dist manifests must both be named "${plugin.name}"`);

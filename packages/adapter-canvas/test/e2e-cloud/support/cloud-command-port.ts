@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { redactCredentials } from "../../../src/credential-redaction.js";
 import { cliExec } from "../../../src/gh.js";
 
 export interface CloudCommandResult {
@@ -34,6 +35,7 @@ export interface CloudCommandResult {
 export interface CloudCommandPort {
   runAz(args: readonly string[]): Promise<CloudCommandResult>;
   runGh(args: readonly string[]): Promise<CloudCommandResult>;
+  runGhPackage(args: readonly string[]): Promise<CloudCommandResult>;
   runGit(args: readonly string[], cwd: string): Promise<CloudCommandResult>;
 }
 
@@ -52,6 +54,8 @@ export interface CloudFixturePorts {
 
 const COMMAND_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+const AZURE_LOGIN_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
+const AZURE_OIDC_AUDIENCE = "api://AzureADTokenExchange";
 
 // Delegates to the product's own CLI launcher rather than calling `execFile`
 // again here. `cliExec` already solves the Windows problems this would
@@ -63,7 +67,14 @@ const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 function runTool(
   tool: string,
   args: readonly string[],
-  cwd?: string
+  cwd?: string,
+  normalize: (
+    error: { code?: string | number | null } | null,
+    stdout: string | undefined,
+    stderr: string | undefined
+  ) => CloudCommandResult = normalizeCommandResult,
+  env?: NodeJS.ProcessEnv,
+  preserveGitHubToken = false
 ): Promise<CloudCommandResult> {
   return new Promise((resolve) => {
     const child = cliExec(
@@ -71,17 +82,189 @@ function runTool(
       [...args],
       {
         cwd,
+        env,
         timeout: COMMAND_TIMEOUT_MS,
         maxBuffer: MAX_OUTPUT_BYTES,
-        windowsHide: true
+        windowsHide: true,
+        preserveGitHubToken
       },
-      (error, stdout, stderr) =>
-        resolve(normalizeCommandResult(error, stdout, stderr))
+      (error, stdout, stderr) => resolve(normalize(error, stdout, stderr))
     );
     // Nothing the fixture runs reads stdin, and an inherited stdin would let a
     // credential prompt hang the run instead of failing it.
     child.stdin?.end();
   });
+}
+
+type RunAzureCommand = (args: readonly string[]) => Promise<CloudCommandResult>;
+
+export interface AzureCommandRefreshOptions {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly fetch?: typeof fetch;
+  readonly now?: () => number;
+  readonly refreshIntervalMs?: number;
+  readonly runCommand?: RunAzureCommand;
+}
+
+function refreshFailure(
+  error: unknown,
+  env: NodeJS.ProcessEnv
+): CloudCommandResult {
+  return {
+    code: 1,
+    stdout: "",
+    stderr: `Azure OIDC login refresh failed: ${redactAzureCredentials(
+      describeError(error),
+      env
+    )}`
+  };
+}
+
+async function requestAzureIdentityAssertion(
+  env: NodeJS.ProcessEnv,
+  fetchImpl: typeof fetch
+): Promise<string> {
+  const requestUrl = env.ACTIONS_ID_TOKEN_REQUEST_URL?.trim();
+  const requestToken = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN?.trim();
+  if (!requestUrl || !requestToken)
+    throw new Error(
+      "GitHub Actions did not provide the OIDC request URL and token."
+    );
+
+  const url = new URL(requestUrl);
+  url.searchParams.set("audience", AZURE_OIDC_AUDIENCE);
+  const response = await fetchImpl(url, {
+    headers: { Authorization: `bearer ${requestToken}` },
+    signal: AbortSignal.timeout(20_000)
+  });
+  if (!response.ok)
+    throw new Error(
+      `GitHub OIDC assertion request returned HTTP ${response.status}.`
+    );
+
+  const payload: unknown = await response.json();
+  const assertion =
+    (
+      typeof payload === "object" &&
+      payload !== null &&
+      "value" in payload &&
+      typeof payload.value === "string"
+    ) ?
+      payload.value.trim()
+    : "";
+  if (!assertion)
+    throw new Error("GitHub OIDC assertion response did not contain a token.");
+  return assertion;
+}
+
+export function createRefreshingAzureCommandRunner(
+  options: AzureCommandRefreshOptions = {}
+): RunAzureCommand {
+  const env = options.env ?? process.env;
+  const fetchImpl = options.fetch ?? fetch;
+  const now = options.now ?? Date.now;
+  const refreshIntervalMs =
+    options.refreshIntervalMs ?? AZURE_LOGIN_REFRESH_INTERVAL_MS;
+  if (!Number.isFinite(refreshIntervalMs) || refreshIntervalMs <= 0)
+    throw new Error(
+      "Azure login refresh interval must be positive and finite."
+    );
+  const runCommand =
+    options.runCommand ??
+    ((args) =>
+      runTool("az", args, undefined, (error, stdout, stderr) =>
+        normalizeAzureCommandResult(error, stdout, stderr, env)
+      ));
+  const oidcRefreshConfigured = Boolean(
+    env.ACTIONS_ID_TOKEN_REQUEST_URL?.trim() ||
+    env.ACTIONS_ID_TOKEN_REQUEST_TOKEN?.trim()
+  );
+  let refreshedAt = now();
+  let pendingRefresh: Promise<CloudCommandResult | null> | undefined;
+
+  const refresh = async (): Promise<CloudCommandResult | null> => {
+    const clientId = env.AZURE_CLIENT_ID?.trim();
+    const tenantId = env.AZURE_TENANT_ID?.trim();
+    const subscriptionId = env.AZURE_SUBSCRIPTION_ID?.trim();
+    if (!clientId || !tenantId || !subscriptionId)
+      return refreshFailure(
+        new Error(
+          "AZURE_CLIENT_ID, AZURE_TENANT_ID, and AZURE_SUBSCRIPTION_ID are required."
+        ),
+        env
+      );
+
+    let assertion: string;
+    try {
+      assertion = await requestAzureIdentityAssertion(env, fetchImpl);
+    } catch (error) {
+      return refreshFailure(error, env);
+    }
+
+    const login = await runCommand([
+      "login",
+      "--service-principal",
+      "--username",
+      clientId,
+      "--tenant",
+      tenantId,
+      "--federated-token",
+      assertion,
+      "--output",
+      "none"
+    ]);
+    if (login.code !== 0) return login;
+    const select = await runCommand([
+      "account",
+      "set",
+      "--subscription",
+      subscriptionId
+    ]);
+    if (select.code !== 0) return select;
+    refreshedAt = now();
+    return null;
+  };
+
+  return async (args) => {
+    if (oidcRefreshConfigured && now() - refreshedAt >= refreshIntervalMs) {
+      pendingRefresh ??= refresh().finally(() => {
+        pendingRefresh = undefined;
+      });
+      const failure = await pendingRefresh;
+      if (failure) return failure;
+    }
+    return runCommand(args);
+  };
+}
+
+export function redactAzureCredentials(
+  value: string,
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  return redactCredentials(value, [
+    env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+    env.ARM_ACCESS_TOKEN,
+    env.ARM_CLIENT_SECRET,
+    env.ARM_OIDC_TOKEN,
+    env.AZURE_ACCESS_TOKEN,
+    env.AZURE_CLIENT_SECRET,
+    env.AZURE_FEDERATED_TOKEN,
+    env.AZURE_PASSWORD
+  ]);
+}
+
+export function normalizeAzureCommandResult(
+  error: { code?: string | number | null } | null,
+  stdout: string | undefined,
+  stderr: string | undefined,
+  env: NodeJS.ProcessEnv = process.env
+): CloudCommandResult {
+  const result = normalizeCommandResult(error, stdout, stderr);
+  return {
+    ...result,
+    stdout: redactAzureCredentials(result.stdout, env),
+    stderr: redactAzureCredentials(result.stderr, env)
+  };
 }
 
 /**
@@ -110,15 +293,61 @@ export function normalizeCommandResult(
 }
 
 /**
+ * Whether a failed `gh api` call carries GitHub CLI's HTTP 404 diagnostic.
+ *
+ * A bare "Not Found" is not enough: DNS, configuration, and wrapper failures
+ * can contain those words without proving that GitHub answered for the
+ * requested resource. Successful commands cannot report absence either, even
+ * when their response body happens to mention an earlier HTTP 404.
+ */
+export function isGitHubApiNotFound(result: CloudCommandResult): boolean {
+  if (result.code === 0) return false;
+  return `${result.stderr}\n${result.stdout}`
+    .split(/\r?\n/)
+    .some((line) =>
+      /^(?:gh:\s.*\(HTTP 404\)|HTTP 404(?::.*)?)$/i.test(line.trim())
+    );
+}
+
+/**
  * The production wiring. Deliberately branch-free: it holds no fixture logic,
  * so the code a credentialed run exercises but this suite cannot is as small as
  * it can be made.
  */
-export function createNodeCloudFixturePorts(): CloudFixturePorts {
+export function createNodeCloudFixturePorts(
+  options: { readonly packageToken?: string } = {}
+): CloudFixturePorts {
+  const runAz = createRefreshingAzureCommandRunner();
+  const packageEnv = createGitHubPackageCommandEnvironment(
+    options.packageToken
+  );
   return {
     commands: {
-      runAz: (args) => runTool("az", args),
+      runAz,
       runGh: (args) => runTool("gh", args),
+      runGhPackage: (args) => {
+        if (!packageEnv)
+          return Promise.resolve({
+            code: 1,
+            stdout: "",
+            stderr:
+              "GH_PACKAGES_TOKEN is required for cloud fixture package operations."
+          });
+        return runTool(
+          "gh",
+          args,
+          undefined,
+          (error, stdout, stderr) =>
+            normalizeGitHubPackageCommandResult(
+              error,
+              stdout,
+              stderr,
+              packageEnv.GH_TOKEN
+            ),
+          packageEnv,
+          true
+        );
+      },
       runGit: (args, cwd) => runTool("git", args, cwd)
     },
     makeWorkspaceDir: (prefix) =>
@@ -128,6 +357,38 @@ export function createNodeCloudFixturePorts(): CloudFixturePorts {
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     now: () => new Date(),
     newUniqueId: () => randomUUID()
+  };
+}
+
+export function createGitHubPackageCommandEnvironment(
+  packageToken: string | undefined,
+  env: NodeJS.ProcessEnv = process.env
+):
+  | (NodeJS.ProcessEnv & {
+      readonly GH_TOKEN: string;
+      readonly GITHUB_TOKEN: string;
+    })
+  | null {
+  const token = packageToken?.trim();
+  if (!token) return null;
+  return {
+    ...env,
+    GH_TOKEN: token,
+    GITHUB_TOKEN: token
+  };
+}
+
+export function normalizeGitHubPackageCommandResult(
+  error: { code?: string | number | null } | null,
+  stdout: string | undefined,
+  stderr: string | undefined,
+  packageToken: string
+): CloudCommandResult {
+  const result = normalizeCommandResult(error, stdout, stderr);
+  return {
+    ...result,
+    stdout: redactCredentials(result.stdout, [packageToken]),
+    stderr: redactCredentials(result.stderr, [packageToken])
   };
 }
 

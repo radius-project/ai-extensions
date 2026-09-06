@@ -42,15 +42,31 @@ export const FIXTURE_REPOSITORY = `${FIXTURE_REPO_OWNER}/${FIXTURE_REPO_NAME}`;
 export const FIXTURE_RADIUS_DIRECTORY = ".radius";
 
 /**
- * The Radius purge job in the shared subscription deletes resource groups
- * matching `^radtest-` that are older than six hours. Matching an existing
- * prefix rather than adding a new one makes that job our safety net for a
- * crashed runner without an upstream change.
+ * The scheduled Cloud E2E cleanup workflow deletes tagged groups with this
+ * prefix first. The shared Radius purge job also deletes `^radtest-` groups
+ * older than six hours, so this prefix keeps that job as the fallback safety net
+ * when our own cleanup cannot run.
  */
 export const RESOURCE_GROUP_PREFIX = "radtest-canvas";
 
 /** Branch prefix the product uses when it lacks `workflow` token scope. */
 export const WORKFLOW_FALLBACK_BRANCH_PREFIX = "radius/setup-";
+
+/** Repository-scoped mutex shared by cloud runs and scheduled cleanup. */
+export const CLOUD_E2E_LEASE_REF = "refs/heads/radius/cloud-e2e-lease";
+
+/** Commit-message field that binds a held lease to its GitHub Actions run. */
+export const CLOUD_E2E_LEASE_OWNER_PREFIX = "cloud-e2e-owner-run-id:";
+
+/**
+ * Prefix every per-run GitHub Environment name carries.
+ *
+ * Exported rather than inlined into `environmentName` because the cleanup
+ * workflow matches stale environments on it. A second copy of the prefix in
+ * YAML would be a destructive operation keyed off a value nothing keeps in
+ * step with this one.
+ */
+export const ENVIRONMENT_NAME_PREFIX = "radtest-";
 
 const PLACEHOLDER_PATTERN = /^TODO-/;
 const UNSET_SHA_PATTERN = /^0+$/;
@@ -67,6 +83,27 @@ export const FIXTURE_REPOSITORY_PIN: FixtureRepositoryPin = {
   name: FIXTURE_REPO_NAME,
   baselineSha: FIXTURE_BASELINE_SHA
 };
+
+export function cloudE2ELeaseCommitMessage(githubRunId: string): string {
+  const normalized = githubRunId.trim();
+  if (!/^[1-9]\d*$/.test(normalized))
+    throw new Error(
+      `A GitHub Actions run id must be a positive integer; received "${githubRunId}".`
+    );
+  return `Radius Cloud E2E lease\n\n${CLOUD_E2E_LEASE_OWNER_PREFIX}${normalized}`;
+}
+
+export function parseCloudE2ELeaseOwnerRunId(
+  commitMessage: unknown
+): string | null {
+  if (typeof commitMessage !== "string") return null;
+  const ownerLine = commitMessage
+    .split(/\r?\n/)
+    .find((line) => line.startsWith(CLOUD_E2E_LEASE_OWNER_PREFIX));
+  if (!ownerLine) return null;
+  const runId = ownerLine.slice(CLOUD_E2E_LEASE_OWNER_PREFIX.length).trim();
+  return /^[1-9]\d*$/.test(runId) ? runId : null;
+}
 
 /**
  * Which of the pinned constants still hold placeholder values.
@@ -131,7 +168,7 @@ export function clusterName(uniqueId: string): string {
  * below) cannot be.
  */
 export function environmentName(uniqueId: string): string {
-  return `radtest-${requireUniqueId(uniqueId)}`;
+  return `${ENVIRONMENT_NAME_PREFIX}${requireUniqueId(uniqueId)}`;
 }
 
 /**
@@ -176,4 +213,34 @@ function requireUniqueId(value: string): string {
   if (!value || !value.trim())
     throw new Error("A run unique id is required to name cloud resources.");
   return value;
+}
+
+/**
+ * An Azure region token: lowercase letters and digits, beginning with a letter,
+ * as in `westus3` or `eastus2euap`. Deliberately narrow. The value reaches
+ * `az group create --location`, so anything unexpected should be rejected here
+ * with a readable message rather than surfacing forty minutes later as an
+ * opaque `az` failure that triages as an infrastructure fault.
+ */
+const AZURE_REGION_PATTERN = /^[a-z]+[a-z0-9]*$/;
+
+/**
+ * The region CI asks for, or `undefined` to leave the fixture's own default.
+ *
+ * `AIEXT_CLOUD_E2E_AZURE_LOCATION` is published by the upstream Terraform so the
+ * region can move without a code change. It is absent locally and absent until
+ * that Terraform is applied, and an absent value must mean "use the default"
+ * rather than "use the empty string" — `az group create --location ""` fails in
+ * a way that looks nothing like a missing variable.
+ */
+export function resolveFixtureLocation(
+  value: string | undefined
+): string | undefined {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (!AZURE_REGION_PATTERN.test(normalized))
+    throw new Error(
+      `AIEXT_CLOUD_E2E_AZURE_LOCATION must be an Azure region such as "westus3"; received "${value}".`
+    );
+  return normalized;
 }

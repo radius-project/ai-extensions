@@ -315,13 +315,7 @@ async function readJsonBlob(entry, label) {
   }
 }
 
-async function verifyArtifactState({
-  plugin,
-  version,
-  source,
-  branch,
-  allowLegacyPluginRoot = false
-}) {
+async function verifyArtifactState({ plugin, version, source, branch }) {
   const ref = await readRef(`refs/heads/${branch}`, true);
   if (!ref) fail(`refs/heads/${branch} does not exist`);
   if (ref.object?.type !== "commit") {
@@ -343,7 +337,6 @@ async function verifyArtifactState({
   for (const entry of files) {
     const allowed =
       entry.path === MARKETPLACE ||
-      entry.path.startsWith(`${plugin.publishDir}/`) ||
       entry.path.startsWith(`${plugin.dir}/`) ||
       entry.path.startsWith(`${EXTENSION_ROOT}/`);
     if (!allowed) fail(`${branch} contains an unexpected path: ${entry.path}`);
@@ -359,46 +352,17 @@ async function verifyArtifactState({
         .map((entry) => [entry.path.slice(root.length + 1), entry])
     );
   const pluginFiles = filesUnder(plugin.dir);
-  const publishedFiles = filesUnder(plugin.publishDir);
-  const exactPluginRoot =
-    pluginFiles.size > 0 &&
-    pluginFiles.size === publishedFiles.size &&
-    [...publishedFiles].every(([path, shipped]) => {
-      const pinned = pluginFiles.get(path);
-      return (
-        pinned &&
-        pinned.type === shipped.type &&
-        pinned.mode === shipped.mode &&
-        pinned.sha === shipped.sha
-      );
-    });
-  const legacyMetadata = ["plugin.json", "README.md"];
-  const legacyPluginRoot =
-    allowLegacyPluginRoot &&
-    pluginFiles.size === legacyMetadata.length &&
-    legacyMetadata.every((path) => {
-      const pinned = pluginFiles.get(path);
-      const shipped = publishedFiles.get(path);
-      return (
-        pinned &&
-        shipped &&
-        pinned.type === shipped.type &&
-        pinned.mode === shipped.mode &&
-        pinned.sha === shipped.sha
-      );
-    });
-  if (!exactPluginRoot && !legacyPluginRoot) {
-    fail(
-      `${branch} does not publish an exact copy of ${plugin.publishDir} at ${plugin.dir}`
-    );
+  if (pluginFiles.size === 0) {
+    fail(`${branch} does not publish a valid plugin at ${plugin.dir}`);
   }
+  const artifactRoot = plugin.dir;
 
   const rootAssets = new Map(
     files
       .filter((entry) => entry.path.startsWith(`${EXTENSION_ROOT}/`))
       .map((entry) => [entry.path.slice(EXTENSION_ROOT.length + 1), entry.sha])
   );
-  const bundledRoot = `${plugin.publishDir}/workflows`;
+  const bundledRoot = `${artifactRoot}/workflows`;
   const bundledAssets = new Map(
     files
       .filter((entry) => entry.path.startsWith(`${bundledRoot}/`))
@@ -416,7 +380,7 @@ async function verifyArtifactState({
     );
   }
 
-  const packagePath = `${plugin.publishDir}/package.json`;
+  const packagePath = `${artifactRoot}/package.json`;
   const packageJson = await readJsonBlob(
     files.find((entry) => entry.path === packagePath),
     packagePath
@@ -460,10 +424,10 @@ async function verifyArtifactState({
   if (
     catalogEntry?.version !== actualVersion ||
     catalogEntry?.source?.ref !== branch ||
-    catalogEntry?.source?.path !== plugin.publishDir
+    catalogEntry?.source?.path !== artifactRoot
   ) {
     fail(
-      `${MARKETPLACE} does not publish ${plugin.name}@${actualVersion} from ${plugin.publishDir} at ${branch}`
+      `${MARKETPLACE} does not publish ${plugin.name}@${actualVersion} from ${artifactRoot} at ${branch}`
     );
   }
 
@@ -501,8 +465,7 @@ async function verifyCompletion(args) {
     plugin,
     version,
     source,
-    branch: refs.PLUGIN_PINNED_BRANCH,
-    allowLegacyPluginRoot: args.includes("--allow-legacy-plugin-root")
+    branch: refs.PLUGIN_PINNED_BRANCH
   });
 
   await verifyTagTarget(refs.PLUGIN_SOURCE_TAG, artifact.commit);

@@ -15,6 +15,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolvePluginRoot } from "./plugin-root.js";
 
 export interface GeneratorVersionOptions {
   // Directory holding the loaded extension bundle. Defaults to this module's.
@@ -38,12 +39,12 @@ function versionFromManifest(text: string): string {
   return typeof version === "string" ? version.trim() : "";
 }
 
-// Manifests to consult, in order: the installed plugin's package.json sits
-// beside the bundle, and the workspace source manifest covers a dev run loaded
-// straight from packages/adapter-canvas/src.
+// Manifests to consult, in order: the installed plugin's package.json is
+// resolved from the bundle location, and the workspace source manifest covers
+// a dev run loaded straight from packages/adapter-canvas/src.
 export function generatorVersionCandidates(moduleDir: string): string[] {
   return [
-    path.join(moduleDir, "package.json"),
+    path.join(resolvePluginRoot(moduleDir), "package.json"),
     path.resolve(moduleDir, "../../../extensions/radius/package.json")
   ];
 }

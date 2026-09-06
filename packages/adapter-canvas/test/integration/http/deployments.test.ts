@@ -482,6 +482,68 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(harness.cache.has("octo/todo")).toBe(false);
   });
 
+  it("discards the deleted application's graph state over a real socket", async () => {
+    // The workflow removes this application's deploy-status artifact, but the
+    // session that pressed Delete holds its own copy. Proven end to end because
+    // both the delete route and the state it clears are read back through the
+    // real container, not a handler-level fake.
+    const harness = start();
+    harness.environments.push("dev");
+    Object.assign(harness.state, {
+      deployEnvName: "dev",
+      deployAppName: "todo-app",
+      deployStatus: "complete",
+      deployRunId: 7,
+      deployedGraph: [{ name: "frontend" }],
+      deployedGraphRepo: "octo/todo",
+      deployingResources: [{ name: "frontend", deployStatus: "success" }]
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(harness.state.deployedGraph).toBeNull();
+    expect(harness.state.deployedGraphRepo).toBeUndefined();
+    expect(harness.state.deployingResources).toBeNull();
+    expect(harness.state.deployStatus).toBe("");
+    expect(harness.state.deployRunId).toBeNull();
+  });
+
+  it("keeps another application's graph state when one application is deleted", async () => {
+    const harness = start();
+    harness.environments.push("dev");
+    Object.assign(harness.state, {
+      deployEnvName: "dev",
+      deployAppName: "storefront",
+      deployStatus: "complete",
+      deployedGraph: [{ name: "frontend" }]
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(harness.state.deployedGraph).toEqual([{ name: "frontend" }]);
+    expect(harness.state.deployStatus).toBe("complete");
+  });
+
   it("does not re-dispatch a delete whose first attempt timed out", async () => {
     // End to end over a real socket: a timed-out dispatch may already have been
     // accepted by GitHub, so the scope failure must surface instead of starting
