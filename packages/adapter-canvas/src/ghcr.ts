@@ -168,7 +168,11 @@ function packageAuthGuidance(
   credentialSource?: GhCredentials["source"]
 ): string {
   if (credentialSource === "injected-token") {
-    return `The selected package credential comes from GH_TOKEN or GITHUB_TOKEN, so gh auth refresh cannot change it. Update that injected token to include ${scopes}, or remove it and sign in to the selected account with GitHub CLI. ${presentation.installationNote}`.trim();
+    const source =
+      process.env.GH_PACKAGES_TOKEN?.trim() ?
+        "GH_PACKAGES_TOKEN"
+      : "GH_TOKEN or GITHUB_TOKEN";
+    return `The selected package credential comes from ${source}, so gh auth refresh cannot change it. Update that injected token to include ${scopes}, or remove it and sign in to the selected account with GitHub CLI. ${presentation.installationNote}`.trim();
   }
   const switchCommand = displayGhCommand(presentation, [
     "auth",
