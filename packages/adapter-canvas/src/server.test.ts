@@ -5943,13 +5943,17 @@ describe("environment deletion session reporting coordinator", () => {
       instanceId,
       () => "http://127.0.0.1:0",
       {
-        deleteRadiusEnvironment: vi.fn(async () => ({ outcome: "deleted" })),
+        deleteRadiusEnvironment: vi.fn(async () => ({
+          outcome: "deleted" as const
+        })),
         runAz: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
         readAzureIdentity: vi.fn(async () => ({
           tenantId: "tenant-1",
           applicationObjectId: "application-1"
         })),
-        deleteGitHubEnvironment: vi.fn(async () => ({ outcome: "deleted" })),
+        deleteGitHubEnvironment: vi.fn(async () => ({
+          outcome: "deleted" as const
+        })),
         deleteStatePackage: vi.fn(async () => {
           throw new Error("missing delete:packages");
         }),
