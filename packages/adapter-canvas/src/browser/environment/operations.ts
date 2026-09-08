@@ -63,6 +63,7 @@ export const PROGRESS_IDS = {
   details: "env-progress-details",
   diagnostics: "env-progress-diagnostics",
   actions: "env-progress-actions",
+  verifyBypass: "env-progress-verify-bypass",
   bottomButtons: "env-progress-bottom-buttons",
   dismiss: "env-progress-dismiss",
   failureCard: "env-progress-failure",
@@ -92,6 +93,11 @@ export const PROGRESS_IDS = {
   commandStatus: "env-progress-command-status",
   commandError: "env-progress-command-error"
 } as const;
+
+// The verify-bypass control is built dynamically (not part of the static
+// panel template), so its id lives here for the browser to bind and tests to
+// locate it.
+export const VERIFY_BYPASS_BUTTON_ID = "env-progress-verify-bypass-button";
 
 export const DIAGNOSTIC_IDS = {
   open: "env-progress-diagnostics-open",
@@ -416,12 +422,44 @@ export interface OperationRecord {
   readonly terminal: OperationTerminalPayload | null;
 }
 
+// The failure category the server inferred from a failed verify run, mapping to
+// the Part 4 exception scenarios: "oidc-trust" (4.3), "permissions" (4.4),
+// "cluster-unreachable" / "cloud-unreachable" (4.5), or "generic" when no
+// specific cause was identified. Empty on a non-failed status.
+export type VerifyFailureCategory =
+  | ""
+  | "oidc-trust"
+  | "permissions"
+  | "cluster-unreachable"
+  | "cloud-unreachable"
+  | "generic";
+
 export interface VerifyStatus {
   readonly state: string;
   readonly terminal: boolean;
   readonly error: string;
   readonly runUrl: string;
+  readonly runId: string;
   readonly activity: string;
+  readonly category: VerifyFailureCategory;
+  readonly component: string;
+  readonly missingPermissions: readonly string[];
+  readonly detail: string;
+}
+
+const VERIFY_FAILURE_CATEGORIES: readonly VerifyFailureCategory[] = [
+  "oidc-trust",
+  "permissions",
+  "cluster-unreachable",
+  "cloud-unreachable",
+  "generic"
+];
+
+function readVerifyCategory(payload: unknown): VerifyFailureCategory {
+  const value = readString(payload, "category");
+  return VERIFY_FAILURE_CATEGORIES.includes(value as VerifyFailureCategory) ?
+      (value as VerifyFailureCategory)
+    : "";
 }
 
 export interface EnvironmentOperationsDeps {
@@ -827,7 +865,103 @@ export function parseVerifyStatus(payload: unknown): VerifyStatus {
     terminal: readBoolean(payload, "terminal"),
     error: readString(payload, "error"),
     runUrl: readString(payload, "runUrl"),
-    activity: readString(payload, "activity")
+    runId: readRunId(payload),
+    activity: readString(payload, "activity"),
+    category: readVerifyCategory(payload),
+    component: readString(payload, "component"),
+    missingPermissions: readStringArray(payload, "missingPermissions"),
+    detail: readString(payload, "detail")
+  };
+}
+
+// The server reports `runId` as a number, but the bypass request sends it back
+// as a string, so accept either shape and normalize to a string ("" when
+// absent).
+function readRunId(payload: unknown): string {
+  const asString = readString(payload, "runId");
+  if (asString !== "") return asString;
+  const asNumber = readNumber(payload, "runId");
+  return asNumber === null ? "" : String(asNumber);
+}
+
+export interface VerifyFailureDescription {
+  readonly headline: string;
+  readonly guidance: string;
+  readonly permissions: readonly string[];
+  readonly offerBypass: boolean;
+}
+
+function providerLabel(provider: string): string {
+  if (provider === "aws") return "AWS";
+  if (provider === "azure") return "Azure";
+  return "the cloud provider";
+}
+
+// Turn a classified verify failure into user-facing recovery copy. Pure: the
+// category and fields come from the server's classifier (4.3 oidc-trust, 4.4
+// permissions, 4.5 cluster/cloud-unreachable) and an unknown/empty category
+// falls back to the existing generic failure message so a novel failure is never
+// mislabeled. `offerBypass` gates the "Create environment anyway" recovery: an
+// OIDC-trust gap (4.3) must be fixed before the environment is usable, so it is
+// never bypassable, whereas a permissions gap or an unreachable endpoint may be
+// resolved after the environment record exists.
+export function describeVerifyFailure(
+  status: VerifyStatus,
+  provider: string
+): VerifyFailureDescription {
+  const cloud = providerLabel(provider);
+  if (status.category === "oidc-trust") {
+    return {
+      headline: `GitHub Actions isn’t trusted to sign in to ${cloud}.`,
+      guidance:
+        status.detail !== "" ?
+          status.detail
+        : `The verification workflow reached ${cloud}, but the OIDC trust for this repository isn’t configured. Fix the federated-credential / trust policy, then re-verify.`,
+      permissions: [],
+      offerBypass: false
+    };
+  }
+  if (status.category === "permissions") {
+    return {
+      headline: `Signed in to ${cloud}, but the identity is missing required permissions.`,
+      guidance:
+        status.detail !== "" ?
+          status.detail
+        : "Grant the missing permissions to the deploy identity and re-verify, or create the environment now and fix access before deploying.",
+      permissions: status.missingPermissions,
+      offerBypass: true
+    };
+  }
+  if (status.category === "cluster-unreachable") {
+    // The classifier defaults component to the generic "Kubernetes cluster"
+    // label, which the headline already names. Only add the parenthetical when
+    // component is something more specific, so a richer future value still
+    // renders but today's default doesn't read as "the cluster (Kubernetes
+    // cluster)".
+    const named =
+      status.component !== "" && status.component !== "Kubernetes cluster" ?
+        ` (${status.component})`
+      : "";
+    return {
+      headline: "Radius couldn’t reach the Kubernetes cluster.",
+      guidance: `Credentials were accepted, but the cluster${named} couldn’t be reached. Check it is running and reachable, then re-verify — or create the environment now and deploy once it’s reachable.`,
+      permissions: [],
+      offerBypass: true
+    };
+  }
+  if (status.category === "cloud-unreachable") {
+    return {
+      headline: `Radius couldn’t reach ${cloud}.`,
+      guidance: `The verification workflow couldn’t contact ${cloud}. This is usually transient. Re-verify — or create the environment now and deploy once connectivity is restored.`,
+      permissions: [],
+      offerBypass: true
+    };
+  }
+  return {
+    headline: "Credential verification failed.",
+    guidance: status.error,
+    permissions: [],
+    offerBypass: false
   };
 }
 
@@ -1122,6 +1256,16 @@ export function initializeEnvironmentOperations(
     verifyActivity = "";
     abortInFlight();
     setPanelActive(false);
+    // Tear down any "Create environment anyway" control from the previous
+    // tracking session so a stale, still-visible button cannot POST a bypass
+    // against a superseded run. The failed-verification branch calls
+    // stopProgress() before rebuilding the button, so the current offer is
+    // unaffected.
+    const bypassContainer = dom.byId(PROGRESS_IDS.verifyBypass);
+    if (bypassContainer) {
+      bypassContainer.replaceChildren();
+      bypassContainer.style.display = "none";
+    }
     if (progressTimer !== null) {
       scope.cancel(progressTimer);
       progressTimer = null;
@@ -2429,6 +2573,87 @@ export function initializeEnvironmentOperations(
       progressTimer = scope.after(delayMs, tick);
     }
 
+    // Build (or clear) the "Create environment anyway" control for a failed
+    // verification. Offered only for failures that can be resolved after the
+    // environment record exists (4.4 permissions, 4.5 unreachable); an
+    // OIDC-trust gap is never bypassable. The button is rebuilt fresh each time
+    // rather than reused so no stale click listener survives from an earlier
+    // tracking session.
+    function renderVerifyBypass(
+      offer: boolean,
+      provider: string,
+      environment: string,
+      operationId: string,
+      runId: string
+    ): void {
+      const container = dom.byId(PROGRESS_IDS.verifyBypass);
+      if (!container) return;
+      if (!offer || operationId === "" || runId === "") {
+        container.replaceChildren();
+        container.style.display = "none";
+        return;
+      }
+      container.style.display = "flex";
+      const button = dom.createElement("button") as DomInputElement;
+      button.setAttribute("type", "button");
+      button.id = VERIFY_BYPASS_BUTTON_ID;
+      button.className = "rad-btn rad-btn--secondary";
+      button.textContent = "Create environment anyway";
+      const errorEl = dom.createElement("div");
+      errorEl.className = "env-progress__command-error";
+      errorEl.setAttribute("role", "alert");
+      button.addEventListener("click", () => {
+        if (button.disabled) return;
+        // Guard activity *before* issuing the mutation, not just after the
+        // response, so a click on a control from a superseded session can never
+        // POST a bypass.
+        if (!active()) return;
+        button.disabled = true;
+        errorEl.textContent = "";
+        void fetchTracked("/api/bypass-verification", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Radius-Mutation-Nonce": options.mutationNonce || ""
+          },
+          body: JSON.stringify({ repo, environment, operationId, runId })
+        })
+          .then((response) =>
+            response
+              .json()
+              .then((payload) => ({ ok: response.ok, payload }))
+              .catch(() => ({ ok: false, payload: null }))
+          )
+          .then((result) => {
+            if (!active()) return;
+            // Require the explicit success contract: a 2xx alone (or an
+            // unparseable / success-less body) is treated as a failure so a
+            // malformed response never masquerades as a completed bypass.
+            const succeeded =
+              result.ok &&
+              isRecord(result.payload) &&
+              result.payload.success === true;
+            if (!succeeded) {
+              button.disabled = false;
+              errorEl.textContent =
+                readString(result.payload, "error") ||
+                "Could not create the environment. Try again.";
+              return;
+            }
+            hideProgress();
+            deps.showSuccessBanner(provider || "azure", environment);
+            deps.reloadEnvironmentsTable();
+          })
+          .catch(() => {
+            if (!active()) return;
+            button.disabled = false;
+            errorEl.textContent =
+              "Could not create the environment. Try again.";
+          });
+      });
+      container.replaceChildren(button, errorEl);
+    }
+
     function pollVerifyStatus(): void {
       void fetchTracked(verifyStatusUrl(repo, environment, operationId))
         .then((response) => response.json())
@@ -2474,11 +2699,24 @@ export function initializeEnvironmentOperations(
             panel.style.display = "block";
             panel.classList.remove("env-progress--done");
             panel.classList.add("env-progress--failed");
+            const desc = describeVerifyFailure(v, provider);
             const activityEl = dom.byId(PROGRESS_IDS.activity);
-            if (activityEl)
-              activityEl.textContent =
-                `Credential verification failed. ${v.error}` +
-                (v.runUrl === "" ? "" : ` View the run: ${v.runUrl}`);
+            if (activityEl) {
+              const parts = [desc.headline, desc.guidance];
+              if (desc.permissions.length > 0)
+                parts.push(`Missing: ${desc.permissions.join(", ")}.`);
+              if (v.runUrl !== "") parts.push(`View the run: ${v.runUrl}`);
+              activityEl.textContent = parts
+                .filter((part) => part !== "")
+                .join(" ");
+            }
+            renderVerifyBypass(
+              desc.offerBypass,
+              provider,
+              environment,
+              operationId,
+              v.runId
+            );
             return;
           }
           if (v.activity !== "") verifyActivity = v.activity;

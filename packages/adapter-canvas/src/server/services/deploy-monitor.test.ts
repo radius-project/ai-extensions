@@ -1317,6 +1317,8 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       extractGitHubActionsStepLog: () => "",
       explainOidcEnterpriseClaim: () => "",
       extractRadDeployError: () => "",
+      classifyDeployCloudAuthDrift: () => "",
+      cloudAuthDriftKind: "cloud-auth-drift",
       sleep: () => Promise.resolve(),
       now: () => 1_700_000_060_000
     });
