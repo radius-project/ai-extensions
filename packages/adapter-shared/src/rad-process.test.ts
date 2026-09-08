@@ -67,10 +67,9 @@ describe("rad process spawn policy", () => {
   });
 
   it("resolves taskkill from SystemRoot so timeout cleanup survives sanitized PATH", async () => {
-    setProcessPlatform("win32");
     vi.stubEnv("SystemRoot", "C:\\Windows");
     vi.stubEnv("PATH", "");
-    const spawn = vi.fn();
+    const spawn = vi.fn(() => new EventEmitter());
     vi.doMock("node:child_process", () => ({ spawn }));
     const { killChildTree } = await import("./rad-process.mjs");
     const child = Object.assign(new EventEmitter(), {
@@ -78,13 +77,29 @@ describe("rad process spawn policy", () => {
       kill: vi.fn(() => true)
     });
 
-    killChildTree(child);
+    killChildTree(child, "win32");
 
     expect(spawn).toHaveBeenCalledWith(
       "C:\\Windows\\System32\\taskkill.exe",
       ["/pid", "67890", "/t", "/f"],
       { stdio: "ignore", windowsHide: true }
     );
+  });
+
+  it("falls back to killing the child when taskkill cannot start", async () => {
+    const taskkill = new EventEmitter();
+    const spawn = vi.fn(() => taskkill);
+    vi.doMock("node:child_process", () => ({ spawn }));
+    const { killChildTree } = await import("./rad-process.mjs");
+    const child = {
+      pid: 67890,
+      kill: vi.fn(() => true)
+    };
+
+    killChildTree(child, "win32");
+    taskkill.emit("error", new Error("taskkill unavailable"));
+
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
   });
 });
 

@@ -40,7 +40,10 @@ export class RadProcessError extends Error {
 
 export function windowsTaskkillPath(env?: NodeJS.ProcessEnv): string;
 
-export function killChildTree(child: ChildProcessLike | null | undefined): void;
+export function killChildTree(
+  child: ChildProcessLike | null | undefined,
+  platform?: NodeJS.Platform
+): void;
 
 export function radSpawnOptions(platform?: NodeJS.Platform): RadSpawnOptions;
 

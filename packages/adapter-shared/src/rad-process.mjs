@@ -47,23 +47,31 @@ export function windowsTaskkillPath(env = process.env) {
 // rad is a process-group leader (spawned detached), so signalling the group
 // (-pid) stops rad and its children together. Best-effort — any failure is
 // swallowed.
-export function killChildTree(child) {
+export function killChildTree(child, platform = process.platform) {
   if (!child || child.pid == null) return;
-  try {
-    if (process.platform === "win32") {
-      spawn(windowsTaskkillPath(), ["/pid", String(child.pid), "/t", "/f"], {
-        stdio: "ignore",
-        windowsHide: true
-      });
-    } else {
-      process.kill(-child.pid, "SIGKILL");
-    }
-  } catch {
+  const killChild = () => {
     try {
       child.kill("SIGKILL");
     } catch {
       // Best-effort cleanup.
     }
+  };
+  try {
+    if (platform === "win32") {
+      const taskkill = spawn(
+        windowsTaskkillPath(),
+        ["/pid", String(child.pid), "/t", "/f"],
+        {
+          stdio: "ignore",
+          windowsHide: true
+        }
+      );
+      taskkill.once("error", killChild);
+    } else {
+      process.kill(-child.pid, "SIGKILL");
+    }
+  } catch {
+    killChild();
   }
 }
 

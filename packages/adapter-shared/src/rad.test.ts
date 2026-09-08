@@ -1619,6 +1619,41 @@ describe("radBinaryVersion", () => {
       radBinaryVersion(missing, { timeout: 2000 })
     ).resolves.toBeNull();
   });
+
+  it("drains stderr beyond the pipe buffer while reading the version", async () => {
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "rad-version-stderr-")
+    );
+    const preload = path.join(directory, "fake-rad.cjs");
+    const previousNodeOptions = process.env.NODE_OPTIONS;
+    fs.writeFileSync(
+      preload,
+      [
+        'require("node:module").runMain = () => {};',
+        'process.stderr.write("x".repeat(2 * 1024 * 1024), () => {',
+        '  process.stdout.write(JSON.stringify({ version: "v0.60.0" }), () => {',
+        "    process.exit(0);",
+        "  });",
+        "});"
+      ].join("\n"),
+      "utf8"
+    );
+    const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
+    process.env.NODE_OPTIONS =
+      previousNodeOptions ?
+        `${previousNodeOptions} ${preloadOption}`
+      : preloadOption;
+
+    try {
+      await expect(
+        radBinaryVersion(process.execPath, { timeout: 5000 })
+      ).resolves.toBe("v0.60.0");
+    } finally {
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 // These reconciliation tests write executable shebang scripts and spawn them as

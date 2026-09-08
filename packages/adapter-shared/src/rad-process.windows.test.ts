@@ -27,7 +27,12 @@ describeWindows("spawnRad Windows process integration", () => {
 
   afterAll(async () => {
     if (directory) {
-      await rm(directory, { recursive: true, force: true });
+      await rm(directory, {
+        recursive: true,
+        force: true,
+        maxRetries: 50,
+        retryDelay: 100
+      });
     }
   });
 

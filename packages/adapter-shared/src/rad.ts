@@ -1216,7 +1216,7 @@ export async function runRadAppGraph(
         settled = true;
         if (graceTimer) clearTimeout(graceTimer);
         if (artifactTimer) clearInterval(artifactTimer);
-        killChildTree(child);
+        killChildTree(child, processPlatform);
         reject(
           new RadProcessError(
             `rad app graph timed out after ${timeout}ms`,
@@ -1285,7 +1285,7 @@ export async function runRadAppGraph(
             return;
           }
           complete();
-          killChildTree(child);
+          killChildTree(child, processPlatform);
           resolve();
         }, artifactPollIntervalMs);
       }
