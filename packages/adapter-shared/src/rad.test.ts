@@ -926,23 +926,33 @@ describe("writeBicepCompileConfig", () => {
     );
   });
 
-  it("preserves a pinned extensions.radius reference from the repository config", () => {
-    // The canvas must compile against the repository's exact pinned extension,
-    // not the base radius:latest, otherwise validation runs against a different
-    // contract than the generated app targets.
-    fs.writeFileSync(
-      path.join(ws, "bicepconfig.json"),
-      JSON.stringify({
-        experimentalFeaturesEnabled: { extensibility: true },
-        extensions: { radius: "br:biceptypes.azurecr.io/radius:0.48" }
-      })
-    );
+  it.each([
+    ["0.48", ""],
+    ["0.60.0-rc3", "br:biceptypes.azurecr.io/radius:0.59"],
+    ["latest", ""],
+    ["latest", "br:biceptypes.azurecr.io/radius:0.59"]
+  ])(
+    "preserves a pinned extensions.radius %s over derived reference %j",
+    (channel, derived) => {
+      // The canvas must compile against the repository's exact pinned extension,
+      // not the base radius:latest, otherwise validation runs against a different
+      // contract than the generated app targets.
+      fs.writeFileSync(
+        path.join(ws, "bicepconfig.json"),
+        JSON.stringify({
+          experimentalFeaturesEnabled: { extensibility: true },
+          extensions: { radius: `br:biceptypes.azurecr.io/radius:${channel}` }
+        })
+      );
 
-    writeBicepCompileConfig(dir, ws);
+      writeBicepCompileConfig(dir, ws, undefined, derived);
 
-    const cfg = readConfig();
-    expect(cfg.extensions.radius).toBe("br:biceptypes.azurecr.io/radius:0.48");
-  });
+      const cfg = readConfig();
+      expect(cfg.extensions.radius).toBe(
+        `br:biceptypes.azurecr.io/radius:${channel}`
+      );
+    }
+  );
 
   it("preserves unrelated Bicep settings from the repository config verbatim", () => {
     // The applicable bicepconfig.json may carry settings beyond extensions (e.g.
