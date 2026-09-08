@@ -13,11 +13,7 @@ import {
   createWorkflowScopeGhRunner,
   type WorkflowScopeGhRunnerPorts
 } from "./create-environment-gh-runner.js";
-import {
-  createWorkflowFileCommitter,
-  recordedSetupBranchCreate,
-  setupWorkflowBranchName
-} from "./create-environment-workflow-committer.js";
+import { createWorkflowFileCommitter } from "./create-environment-workflow-committer.js";
 import {
   settleProviderMutation,
   shouldStop,
@@ -727,7 +723,6 @@ export async function handleCreateEnvironment(
       },
       { targetRepo, envName }
     );
-    const commitWorkflowFileSmart = committer.commitWorkflowFileSmart;
     const prBranch = (): string | null =>
       committer.pullRequestState()?.branch || null;
 
@@ -882,27 +877,38 @@ export async function handleCreateEnvironment(
       existingAutomaticIdentity ?
         Number(existingAutomaticIdentity.dispatchedAt)
       : dependencies.now();
-    const automaticRef =
-      (existingAutomaticIdentity?.ref as string | undefined) ||
-      recordedSetupBranchCreate(operation, targetRepo)?.branch ||
-      setupWorkflowBranchName(
-        envName,
-        operation.operationId,
-        automaticStartedAt
+    const commitWorkflowFileSmart = async (
+      path: string,
+      contentB64: string,
+      message: string
+    ) => {
+      const outcome = await committer.commitWorkflowFileSmart(
+        path,
+        contentB64,
+        message
       );
-    if (setupPushOperationMarker && !existingVerification) {
-      operation.verification = {
-        dispatchedAt: automaticStartedAt,
-        workflow: dependencies.verifyWorkflowFile,
-        ref: automaticRef,
-        environment: envName,
-        event: "push",
-        operationMarker: setupPushOperationMarker,
-        baselineRunId: null,
-        runId: null,
-        runUrl: null
-      };
-    }
+      const fallback = committer.pullRequestState();
+      if (
+        setupPushOperationMarker &&
+        outcome.ok &&
+        outcome.viaPr &&
+        fallback &&
+        !operation.verification
+      ) {
+        operation.verification = {
+          dispatchedAt: automaticStartedAt,
+          workflow: dependencies.verifyWorkflowFile,
+          ref: fallback.branch,
+          environment: envName,
+          event: "push",
+          operationMarker: setupPushOperationMarker,
+          baselineRunId: null,
+          runId: null,
+          runUrl: null
+        };
+      }
+      return outcome;
+    };
     if (!(await checkpoint("before-workflow-commit"))) return;
 
     // Steps 3, 4 and 4b: publish the verify, deploy and delete workflow files.

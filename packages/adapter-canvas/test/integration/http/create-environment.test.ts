@@ -2548,7 +2548,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
   });
 
   it("fails 400 with the write-access hint for any other commit refusal", async () => {
-    start({
+    const harness = start({
       gh: [
         {
           match: /^api --method PUT \/repos\/octo\/app\/contents\//,
@@ -2564,6 +2564,7 @@ describe("create-environment real-loopback HIT: the seven-step workflow", () => 
     expect(payload.error).toContain(
       "Check that you have write access to the repository"
     );
+    expect(harness.operation.verification).toBeUndefined();
   });
 
   it("does not report a server-side commit failure as a refusal it can retry", async () => {
