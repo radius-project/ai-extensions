@@ -3,7 +3,8 @@ import {
   createCloudFixture,
   radiusPurgeCreationTime,
   type CloudFixture,
-  type CloudFixtureOptions
+  type CloudFixtureOptions,
+  type RoleAssignmentRecord
 } from "./cloud-fixture.js";
 import {
   createFakeFixturePorts,
@@ -19,6 +20,8 @@ const BASELINE_TREE = "b".repeat(40);
 const LEASE_COMMIT = "c".repeat(40);
 const UNIQUE_ID = "run0000000a";
 const WORKSPACE = "/tmp/radtest-workspace";
+const KUBE_DIR = "/tmp/radtest-kubeconfig";
+const APP = "demo";
 const NOW = new Date("2026-08-29T12:34:56.000Z");
 
 const RESOURCE_GROUP = `radtest-canvas-${UNIQUE_ID}`;
@@ -75,6 +78,24 @@ const FIC_LIST: readonly string[] = [
   "list"
 ];
 const ROLE_LIST: readonly string[] = ["role", "assignment", "list"];
+
+function roleAssignment(
+  principalId = "sp-1",
+  roleDefinitionName = "Contributor",
+  id = `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/assignment-1`,
+  scope = SCOPE
+): RoleAssignmentRecord {
+  return { id, principalId, roleDefinitionName, scope };
+}
+
+function clusterRoleAssignment(principalId = "sp-1"): RoleAssignmentRecord {
+  return roleAssignment(
+    principalId,
+    "Azure Kubernetes Service RBAC Cluster Admin",
+    "assignment-cluster",
+    CLUSTER_SCOPE
+  );
+}
 
 /**
  * Every command a healthy run issues, all answering "clean".
@@ -724,9 +745,7 @@ describe("createCloudFixture", () => {
           tool: "az",
           match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([
-              { principalId: "sp-1", roleDefinitionName: "Contributor" }
-            ])
+            stdout: JSON.stringify([roleAssignment()])
           }
         }
       ]);
@@ -773,7 +792,15 @@ describe("createCloudFixture", () => {
         {
           tool: "az",
           match: ROLE_LIST,
-          respond: { stdout: JSON.stringify([{ principalId: "sp-1" }]) }
+          respond: {
+            stdout: JSON.stringify([
+              {
+                id: "assignment-1",
+                principalId: "sp-1",
+                scope: SCOPE
+              }
+            ])
+          }
         }
       ]);
 
@@ -1096,8 +1123,7 @@ describe("createCloudFixture", () => {
           tool: "az",
           match: ROLE_LIST,
           respond: {
-            stdout:
-              '[{"principalId":"sp-1","roleDefinitionName":"Contributor"}]'
+            stdout: JSON.stringify([roleAssignment()])
           }
         },
         {
@@ -1436,22 +1462,27 @@ describe("createCloudFixture", () => {
   });
 
   describe("assertRoleAssignmentExists", () => {
-    it("resolves when the principal holds an assignment in the group", async () => {
+    it("resolves when the principal holds assignments at both required scopes", async () => {
       const { fixture } = await createHarness([
         {
           tool: "az",
-          match: ROLE_LIST,
+          match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([
-              { principalId: "SP-1", roleDefinitionName: "Contributor" }
-            ])
+            stdout: JSON.stringify([roleAssignment("SP-1")])
+          }
+        },
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([clusterRoleAssignment("SP-1")])
           }
         }
       ]);
 
-      await expect(
-        fixture.assertRoleAssignmentExists("sp-1")
-      ).resolves.toBeUndefined();
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
+        [roleAssignment("SP-1"), clusterRoleAssignment("SP-1")]
+      );
     });
 
     it("polls until the role assignment becomes visible", async () => {
@@ -1461,39 +1492,79 @@ describe("createCloudFixture", () => {
           tool: "az",
           match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([
-              { principalId: "sp-1", roleDefinitionName: "Contributor" }
-            ])
+            stdout: JSON.stringify([roleAssignment()])
           }
-        }
-      ]);
-
-      await expect(
-        fixture.assertRoleAssignmentExists("sp-1")
-      ).resolves.toBeUndefined();
-      expect(fake.waits).toEqual([1000]);
-    });
-
-    it("finds a role assignment at the exact AKS cluster scope", async () => {
-      const { fixture } = await createHarness([
+        },
         {
           tool: "az",
           match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
           respond: {
-            stdout: JSON.stringify([
-              {
-                principalId: "sp-1",
-                roleDefinitionName:
-                  "Azure Kubernetes Service RBAC Cluster Admin"
-              }
-            ])
+            stdout: JSON.stringify([clusterRoleAssignment()])
           }
         }
       ]);
 
-      await expect(
-        fixture.assertRoleAssignmentExists("sp-1")
-      ).resolves.toBeUndefined();
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
+        [roleAssignment(), clusterRoleAssignment()]
+      );
+      expect(fake.waits).toEqual([1000]);
+    });
+
+    it("requires role assignments at both exact product scopes", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", SCOPE],
+          respond: {
+            stdout: JSON.stringify([roleAssignment()])
+          }
+        },
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([clusterRoleAssignment()])
+          }
+        }
+      ]);
+
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
+        [roleAssignment(), clusterRoleAssignment()]
+      );
+    });
+
+    it("rejects unrelated roles at both required scopes", async () => {
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SCOPE],
+            respond: {
+              stdout: JSON.stringify([roleAssignment("sp-1", "Owner")])
+            }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+            respond: {
+              stdout: JSON.stringify([
+                roleAssignment(
+                  "sp-1",
+                  "Azure Kubernetes Service RBAC Reader",
+                  "assignment-cluster-reader",
+                  CLUSTER_SCOPE
+                )
+              ])
+            }
+          }
+        ],
+        {},
+        { assertionTimeoutMs: 2_000, assertionPollIntervalMs: 1_000 }
+      );
+
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
+        /missing "Contributor".*"Azure Kubernetes Service RBAC Cluster Admin"/
+      );
     });
 
     it("fails plainly when the group carries no assignments", async () => {
@@ -1511,8 +1582,13 @@ describe("createCloudFixture", () => {
           match: ROLE_LIST,
           respond: {
             stdout: JSON.stringify([
-              { principalId: "sp-2", roleDefinitionName: "Contributor" },
-              { principalId: "sp-2", roleDefinitionName: "AKS RBAC Admin" }
+              roleAssignment("sp-2", "Contributor", "assignment-sp2"),
+              roleAssignment(
+                "sp-2",
+                "AKS RBAC Admin",
+                `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/assignment-2`,
+                `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`
+              )
             ])
           }
         }
@@ -1531,6 +1607,194 @@ describe("createCloudFixture", () => {
       await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
         /AuthorizationFailed/
       );
+    });
+
+    it("rejects an assignment without its stable identity and scope", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: ROLE_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { principalId: "sp-1", roleDefinitionName: "Contributor" }
+            ])
+          }
+        }
+      ]);
+
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
+        /no usable "id"/
+      );
+    });
+
+    it("captures assignments from the resource group and exact cluster scope", async () => {
+      const contributor = roleAssignment();
+      const clusterAdmin = clusterRoleAssignment();
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", SCOPE],
+          respond: { stdout: JSON.stringify([contributor]) }
+        },
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: { stdout: JSON.stringify([clusterAdmin]) }
+        }
+      ]);
+
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
+        [contributor, clusterAdmin]
+      );
+    });
+
+    it("waits until the principal has an assignment at both required scopes", async () => {
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SCOPE],
+            respond: { stdout: JSON.stringify([roleAssignment()]) }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+            respond: { stdout: "[]" }
+          }
+        ],
+        {},
+        { assertionTimeoutMs: 2_000, assertionPollIntervalMs: 1_000 }
+      );
+
+      await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
+        new RegExp(
+          `missing "Azure Kubernetes Service RBAC Cluster Admin" at ${CLUSTER_SCOPE.replace(
+            /\//g,
+            "\\/"
+          )}`
+        )
+      );
+    });
+  });
+
+  describe("assertRoleAssignmentsExist", () => {
+    it("requires every captured assignment identity, role, and scope", async () => {
+      const expected = [
+        roleAssignment(),
+        roleAssignment(
+          "sp-1",
+          "Azure Kubernetes Service RBAC Cluster Admin",
+          `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/assignment-2`,
+          `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`
+        )
+      ];
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: ROLE_LIST,
+          respond: { stdout: JSON.stringify(expected) }
+        }
+      ]);
+
+      await expect(
+        fixture.assertRoleAssignmentsExist(expected)
+      ).resolves.toBeUndefined();
+    });
+
+    it("shares the assertion deadline across exact-scope lookups", async () => {
+      let now = NOW;
+      const expected = [roleAssignment(), clusterRoleAssignment()];
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SCOPE],
+            respond: () => {
+              now = new Date(NOW.getTime() + 500);
+              return { stdout: JSON.stringify([roleAssignment()]) };
+            }
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+            respond: {
+              stdout: JSON.stringify([clusterRoleAssignment()])
+            }
+          }
+        ],
+        { readNow: () => now },
+        { assertionTimeoutMs: 2_000 }
+      );
+
+      await expect(
+        fixture.assertRoleAssignmentsExist(expected)
+      ).resolves.toBeUndefined();
+      expect(
+        fake.commands.calls
+          .filter(
+            (call) =>
+              call.tool === "az" &&
+              call.args.slice(0, 3).join(" ") === "role assignment list"
+          )
+          .map((call) => call.timeoutMs)
+      ).toEqual([2_000, 1_500]);
+    });
+
+    it("rejects an empty captured inventory", async () => {
+      const { fixture } = await createHarness();
+
+      await expect(fixture.assertRoleAssignmentsExist([])).rejects.toThrow(
+        /empty role-assignment inventory/
+      );
+    });
+
+    it.each([
+      [
+        "assignment id",
+        roleAssignment(
+          "sp-1",
+          "Contributor",
+          `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/replacement`
+        )
+      ],
+      ["role", roleAssignment("sp-1", "Reader")],
+      [
+        "scope",
+        roleAssignment(
+          "sp-1",
+          "Contributor",
+          `/subscriptions/${SUBSCRIPTION}/providers/Microsoft.Authorization/roleAssignments/assignment-1`,
+          `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`
+        )
+      ],
+      ["principal", roleAssignment("sp-2")]
+    ])("rejects a replacement with a different %s", async (_label, actual) => {
+      const expected = roleAssignment();
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ROLE_LIST,
+            respond: { stdout: JSON.stringify([actual]) }
+          }
+        ],
+        {},
+        { assertionTimeoutMs: 2_000, assertionPollIntervalMs: 1_000 }
+      );
+
+      await expect(
+        fixture.assertRoleAssignmentsExist([expected])
+      ).rejects.toThrow(/missing .*assignment-1/);
+    });
+
+    it("propagates a failing survival lookup", async () => {
+      const { fixture } = await createHarness([
+        failing("az", ROLE_LIST, "AuthorizationFailed")
+      ]);
+
+      await expect(
+        fixture.assertRoleAssignmentsExist([roleAssignment()])
+      ).rejects.toThrow(/AuthorizationFailed/);
     });
   });
 
@@ -1617,11 +1881,17 @@ describe("createCloudFixture", () => {
         },
         {
           tool: "az",
-          match: ROLE_LIST,
+          match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([
-              { principalId: "sp-1", roleDefinitionName: "Contributor" }
-            ])
+            stdout: JSON.stringify([roleAssignment()])
+          },
+          times: 1
+        },
+        {
+          tool: "az",
+          match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+          respond: {
+            stdout: JSON.stringify([clusterRoleAssignment()])
           },
           times: 1
         },
@@ -1662,7 +1932,7 @@ describe("createCloudFixture", () => {
         [
           "a role assignment",
           (fixture: CloudFixture) => fixture.assertRoleAssignmentAbsent("sp-1"),
-          /role assignment for principal sp-1/
+          /role assignment inventory for principal sp-1/
         ]
       ])(
         "for %s, because a product that never created it would pass too",
@@ -1874,7 +2144,7 @@ describe("createCloudFixture", () => {
             match: ROLE_LIST,
             respond: {
               stdout: JSON.stringify([
-                { principalId: "sp-2", roleDefinitionName: "Contributor" }
+                roleAssignment("sp-2", "Contributor", "assignment-sp2")
               ])
             }
           }
@@ -1891,9 +2161,7 @@ describe("createCloudFixture", () => {
             tool: "az",
             match: [...ROLE_LIST, "--scope", SCOPE],
             respond: {
-              stdout: JSON.stringify([
-                { principalId: "SP-1", roleDefinitionName: "Contributor" }
-              ])
+              stdout: JSON.stringify([roleAssignment("SP-1")])
             }
           }
         ]);
@@ -2580,6 +2848,567 @@ describe("createCloudFixture", () => {
       });
 
       await expect(fixture.dispose()).rejects.toThrow(/directory vanished/);
+    });
+  });
+  describe("cluster assertions", () => {
+    const NAMESPACE = "radius-demo";
+    const SELECTOR = `radapp.io/application=${APP}`;
+    const KUBECONFIG = `${KUBE_DIR}/kubeconfig`;
+
+    const credentials = (
+      respond: FakeCommandStub["respond"] = {}
+    ): FakeCommandStub => ({
+      tool: "az",
+      match: ["aks", "get-credentials"],
+      respond
+    });
+
+    const listing = (respond: FakeCommandStub["respond"]): FakeCommandStub => ({
+      tool: "kubectl",
+      match: ["get", "deployments"],
+      respond
+    });
+
+    const resourceListing = (
+      respond: FakeCommandStub["respond"]
+    ): FakeCommandStub => ({
+      tool: "kubectl",
+      match: ["get", "deployments,pods"],
+      respond
+    });
+
+    const workloadsJson = (
+      ...names: readonly (readonly [string, number, number?])[]
+    ): string =>
+      JSON.stringify({
+        items: names.map(([name, available, desired = 1]) => ({
+          metadata: { name, labels: { "radapp.io/application": APP } },
+          spec: { replicas: desired },
+          status: { availableReplicas: available }
+        }))
+      });
+
+    const resourcesJson = (
+      ...resources: readonly (readonly [string, string])[]
+    ): string =>
+      JSON.stringify({
+        items: resources.map(([kind, name]) => ({
+          kind,
+          metadata: { name }
+        }))
+      });
+
+    /** A harness whose kubeconfig directory is distinguishable from the clone. */
+    async function clusterHarness(
+      overrides: readonly FakeCommandStub[],
+      fixtureOptions: Partial<CloudFixtureOptions> = {}
+    ): Promise<Harness> {
+      return createHarness(
+        overrides,
+        {
+          makeWorkspaceDir: (prefix) =>
+            Promise.resolve(prefix.includes("kube") ? KUBE_DIR : WORKSPACE)
+        },
+        fixtureOptions
+      );
+    }
+
+    it("fetches cluster credentials to a private file rather than the ambient kubeconfig", async () => {
+      const { fixture, fake } = await clusterHarness([
+        credentials(),
+        listing({ stdout: workloadsJson(["demo-frontend", 1]) })
+      ]);
+
+      await fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE);
+
+      expect(
+        fake.commands.calls.find(
+          (call) => call.tool === "az" && call.args.includes("get-credentials")
+        )?.timeoutMs
+      ).toBe(30_000);
+      const az = fake.commands
+        .commandLines("az")
+        .find((line) => line.includes("get-credentials"));
+      expect(az).toContain(`--resource-group ${RESOURCE_GROUP}`);
+      expect(az).toContain(`--name ${CLUSTER}`);
+      expect(az).toContain(`--file ${KUBECONFIG}`);
+      expect(az).toContain("--overwrite-existing");
+      expect(fake.commands.commandLines("kubectl")[0]).toContain(
+        `--kubeconfig ${KUBECONFIG}`
+      );
+    });
+
+    it("does not start kubectl after credential retrieval exhausts the assertion deadline", async () => {
+      let current = NOW;
+      const { fixture, fake } = await createHarness(
+        [
+          credentials(() => {
+            current = new Date(NOW.getTime() + 2000);
+            return {};
+          })
+        ],
+        {
+          makeWorkspaceDir: (prefix) =>
+            Promise.resolve(prefix.includes("kube") ? KUBE_DIR : WORKSPACE),
+          readNow: () => current
+        },
+        { assertionTimeoutMs: 2000 }
+      );
+
+      await expect(
+        fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE)
+      ).rejects.toThrow(/exhausted its assertion deadline/);
+      expect(
+        fake.commands.calls.find(
+          (call) => call.tool === "az" && call.args.includes("get-credentials")
+        )?.timeoutMs
+      ).toBe(2000);
+      expect(fake.commands.commandLines("kubectl")).toEqual([]);
+    });
+
+    it("queries only the workloads Radius labelled for the application", async () => {
+      const { fixture, fake } = await clusterHarness([
+        credentials(),
+        listing({ stdout: workloadsJson(["demo-frontend", 1]) })
+      ]);
+
+      const workloads = await fixture.assertApplicationWorkloadsPresent(
+        APP,
+        NAMESPACE
+      );
+
+      expect(fake.commands.commandLines("kubectl")).toEqual([
+        `--kubeconfig ${KUBECONFIG} get deployments --namespace ${NAMESPACE} ` +
+          `--selector ${SELECTOR} --output json`
+      ]);
+      expect(workloads).toEqual([
+        {
+          name: "demo-frontend",
+          application: APP,
+          desiredReplicas: 1,
+          availableReplicas: 1
+        }
+      ]);
+    });
+
+    it("fetches the kubeconfig once and reuses it across assertions", async () => {
+      const { fixture, fake } = await clusterHarness([
+        credentials(),
+        listing({ stdout: workloadsJson(["demo-frontend", 1]) })
+      ]);
+
+      await fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE);
+      await fixture.readApplicationWorkloads(APP, NAMESPACE);
+
+      expect(
+        fake.commands
+          .commandLines("az")
+          .filter((line) => line.includes("get-credentials"))
+      ).toHaveLength(1);
+      expect(fake.commands.commandLines("kubectl")).toHaveLength(2);
+    });
+
+    it("fetches no cluster credentials when no cluster assertion is made", async () => {
+      const { fixture, fake } = await clusterHarness([]);
+
+      await fixture.assertCleanSlate();
+
+      expect(
+        fake.commands
+          .commandLines("az")
+          .filter((line) => line.includes("get-credentials"))
+      ).toEqual([]);
+      expect(fake.removed).toEqual([]);
+      await fixture.dispose();
+      expect(fake.removed).toEqual([WORKSPACE]);
+    });
+
+    it("surfaces a credential fetch failure instead of probing an empty cluster", async () => {
+      const { fixture } = await clusterHarness([
+        failing(
+          "az",
+          ["aks", "get-credentials"],
+          "AuthorizationFailed: listClusterUserCredential denied"
+        )
+      ]);
+
+      await expect(
+        fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE)
+      ).rejects.toThrow(/listClusterUserCredential denied/);
+    });
+
+    it("removes the kubeconfig directory on teardown after a successful fetch", async () => {
+      const { fixture, fake } = await clusterHarness([
+        credentials(),
+        listing({ stdout: workloadsJson(["demo-frontend", 1]) })
+      ]);
+
+      await fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE);
+      await fixture.dispose();
+
+      expect(fake.removed).toEqual([KUBE_DIR, WORKSPACE]);
+    });
+
+    it("removes the kubeconfig directory even when the credential fetch failed", async () => {
+      const { fixture, fake } = await clusterHarness([
+        failing("az", ["aks", "get-credentials"], "denied")
+      ]);
+
+      await expect(
+        fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE)
+      ).rejects.toThrow(/denied/);
+      await fixture.dispose();
+
+      expect(fake.removed).toEqual([KUBE_DIR, WORKSPACE]);
+    });
+
+    it("waits for a workload that appears after the namespace is first empty", async () => {
+      const { fixture, fake } = await clusterHarness([
+        credentials(),
+        {
+          tool: "kubectl",
+          match: ["get", "deployments"],
+          respond: { stdout: JSON.stringify({ items: [] }) },
+          times: 2
+        },
+        listing({ stdout: workloadsJson(["demo-frontend", 1]) })
+      ]);
+
+      const workloads = await fixture.assertApplicationWorkloadsPresent(
+        APP,
+        NAMESPACE
+      );
+
+      expect(workloads).toHaveLength(1);
+      expect(fake.waits).toEqual([1000, 1000]);
+    });
+
+    it("waits for an applied workload to become ready", async () => {
+      const { fixture, fake } = await clusterHarness([
+        credentials(),
+        {
+          tool: "kubectl",
+          match: ["get", "deployments"],
+          respond: { stdout: workloadsJson(["demo-frontend", 0]) },
+          times: 1
+        },
+        listing({ stdout: workloadsJson(["demo-frontend", 1]) })
+      ]);
+
+      const workloads = await fixture.assertApplicationWorkloadsPresent(
+        APP,
+        NAMESPACE
+      );
+
+      expect(workloads[0]?.availableReplicas).toBe(1);
+      expect(fake.waits).toEqual([1000]);
+    });
+
+    it.each([
+      ["partially available", 1, 3],
+      ["scaled to zero", 0, 0]
+    ])(
+      "waits when a workload is %s",
+      async (_label, availableReplicas, desiredReplicas) => {
+        const { fixture, fake } = await clusterHarness([
+          credentials(),
+          {
+            tool: "kubectl",
+            match: ["get", "deployments"],
+            respond: {
+              stdout: workloadsJson([
+                "demo-frontend",
+                availableReplicas,
+                desiredReplicas
+              ])
+            },
+            times: 1
+          },
+          listing({ stdout: workloadsJson(["demo-frontend", 3, 3]) })
+        ]);
+
+        const workloads = await fixture.assertApplicationWorkloadsPresent(
+          APP,
+          NAMESPACE
+        );
+
+        expect(workloads[0]).toMatchObject({
+          desiredReplicas: 3,
+          availableReplicas: 3
+        });
+        expect(fake.waits).toEqual([1000]);
+      }
+    );
+
+    it("bounds every readiness probe by the remaining assertion time", async () => {
+      const { fixture, fake } = await clusterHarness(
+        [
+          credentials(),
+          listing({ stdout: workloadsJson(["demo-frontend", 0]) })
+        ],
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+
+      await expect(
+        fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE)
+      ).rejects.toThrow(
+        /"demo-frontend" has 0 available replica\(s\) of 1 desired/
+      );
+      expect(
+        fake.commands.calls
+          .filter((call) => call.tool === "kubectl")
+          .map((call) => call.timeoutMs)
+      ).toEqual([2000, 1000]);
+    });
+
+    it("reports a namespace that never appeared as the deploy never reaching the cluster", async () => {
+      const { fixture } = await clusterHarness(
+        [
+          credentials(),
+          listing({
+            code: 1,
+            stderr: `Error from server (NotFound): namespaces "${NAMESPACE}" not found`
+          })
+        ],
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+
+      await expect(
+        fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE)
+      ).rejects.toThrow(
+        /The namespace does not exist, so the deploy never reached this cluster/
+      );
+    });
+
+    it("reports an empty namespace differently from a missing one", async () => {
+      const { fixture } = await clusterHarness(
+        [credentials(), listing({ stdout: JSON.stringify({ items: [] }) })],
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+
+      await expect(
+        fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE)
+      ).rejects.toThrow(
+        /carries no workload labelled for the application|no workload labelled/
+      );
+    });
+
+    it("raises a probe failure that is not a missing namespace rather than waiting it out", async () => {
+      const { fixture } = await clusterHarness([
+        credentials(),
+        listing({
+          code: 1,
+          stderr: "Unable to connect to the server: dial tcp: i/o timeout"
+        })
+      ]);
+
+      await expect(
+        fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE)
+      ).rejects.toThrow(
+        /kubectl get deployments -n radius-demo failed with exit code 1: Unable to connect/
+      );
+    });
+
+    it("reports a listing failure written to stdout rather than stderr", async () => {
+      const { fixture } = await clusterHarness([
+        credentials(),
+        listing({
+          code: 1,
+          stdout: "error: You must be logged in to the server (Unauthorized)"
+        })
+      ]);
+
+      await expect(
+        fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE)
+      ).rejects.toThrow(
+        /failed with exit code 1: error: You must be logged in/
+      );
+    });
+
+    it("refuses to read an unparseable listing as no workloads", async () => {
+      const { fixture } = await clusterHarness([
+        credentials(),
+        listing({ stdout: "not json" })
+      ]);
+
+      await expect(
+        fixture.assertApplicationWorkloadsPresent(APP, NAMESPACE)
+      ).rejects.toThrow(/not valid JSON/);
+    });
+
+    it("accepts an emptied namespace as a completed delete", async () => {
+      const { fixture } = await clusterHarness([
+        credentials(),
+        resourceListing({ stdout: JSON.stringify({ items: [] }) })
+      ]);
+
+      await expect(
+        fixture.assertApplicationWorkloadsAbsent(APP, NAMESPACE)
+      ).resolves.toBeUndefined();
+    });
+
+    it("accepts a removed namespace as the strongest form of absence", async () => {
+      const { fixture } = await clusterHarness([
+        credentials(),
+        resourceListing({
+          code: 1,
+          stderr: `Error from server (NotFound): namespaces "${NAMESPACE}" not found`
+        })
+      ]);
+
+      await expect(
+        fixture.assertApplicationWorkloadsAbsent(APP, NAMESPACE)
+      ).resolves.toBeUndefined();
+    });
+
+    it("waits for workloads that are still terminating", async () => {
+      const { fixture, fake } = await clusterHarness([
+        credentials(),
+        {
+          tool: "kubectl",
+          match: ["get", "deployments,pods"],
+          respond: {
+            stdout: resourcesJson(
+              ["Deployment", "demo-frontend"],
+              ["Pod", "demo-frontend-abc"]
+            )
+          },
+          times: 1
+        },
+        resourceListing({ stdout: JSON.stringify({ items: [] }) })
+      ]);
+
+      await fixture.assertApplicationWorkloadsAbsent(APP, NAMESPACE);
+
+      expect(fake.waits).toEqual([1000]);
+    });
+
+    it("bounds every absence probe and stops before starting one past the deadline", async () => {
+      const { fixture, fake } = await clusterHarness(
+        [
+          credentials(),
+          resourceListing({
+            stdout: resourcesJson(
+              ["Deployment", "demo-frontend"],
+              ["Pod", "demo-backend-abc"]
+            )
+          })
+        ],
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+
+      await expect(
+        fixture.assertApplicationWorkloadsAbsent(APP, NAMESPACE)
+      ).rejects.toThrow(
+        /2 workload resource\(s\) remain: "Deployment\/demo-frontend", "Pod\/demo-backend-abc"/
+      );
+      expect(
+        fake.commands.calls
+          .filter((call) => call.tool === "kubectl")
+          .map((call) => call.timeoutMs)
+      ).toEqual([2000, 1000]);
+    });
+
+    it("does not accept an orphaned application pod as workload absence", async () => {
+      const { fixture } = await clusterHarness(
+        [
+          credentials(),
+          resourceListing({
+            stdout: resourcesJson(["Pod", "demo-frontend-orphan"])
+          })
+        ],
+        { assertionTimeoutMs: 2000, assertionPollIntervalMs: 1000 }
+      );
+
+      await expect(
+        fixture.assertApplicationWorkloadsAbsent(APP, NAMESPACE)
+      ).rejects.toThrow(/"Pod\/demo-frontend-orphan"/);
+    });
+
+    it("raises an absence probe failure instead of claiming the resources are gone", async () => {
+      const { fixture } = await clusterHarness([
+        credentials(),
+        resourceListing({
+          code: 1,
+          stderr: "Unable to connect to the server"
+        })
+      ]);
+
+      await expect(
+        fixture.assertApplicationWorkloadsAbsent(APP, NAMESPACE)
+      ).rejects.toThrow(
+        /kubectl get deployments,pods -n radius-demo failed with exit code 1/
+      );
+    });
+
+    it("refuses to read malformed resource JSON as workload absence", async () => {
+      const { fixture } = await clusterHarness([
+        credentials(),
+        resourceListing({ stdout: "not json" })
+      ]);
+
+      await expect(
+        fixture.assertApplicationWorkloadsAbsent(APP, NAMESPACE)
+      ).rejects.toThrow(/not valid JSON/);
+    });
+
+    it("reads workloads without waiting, reporting a missing namespace as none", async () => {
+      const { fixture, fake } = await clusterHarness([
+        credentials(),
+        listing({
+          code: 1,
+          stderr: `Error from server (NotFound): namespaces "${NAMESPACE}" not found`
+        })
+      ]);
+
+      await expect(
+        fixture.readApplicationWorkloads(APP, NAMESPACE)
+      ).resolves.toEqual([]);
+      expect(fake.waits).toEqual([]);
+    });
+
+    it("reports whether the application namespace exists", async () => {
+      const { fixture, fake } = await clusterHarness([
+        credentials(),
+        {
+          tool: "kubectl",
+          match: ["get", "namespace"],
+          respond: { stdout: `namespace/${NAMESPACE}` },
+          times: 1
+        },
+        {
+          tool: "kubectl",
+          match: ["get", "namespace"],
+          respond: {
+            code: 1,
+            stderr: `Error from server (NotFound): namespaces "gone" not found`
+          }
+        }
+      ]);
+
+      await expect(fixture.namespaceExists(NAMESPACE)).resolves.toBe(true);
+      await expect(fixture.namespaceExists("gone")).resolves.toBe(false);
+      expect(fake.commands.commandLines("kubectl")[0]).toBe(
+        `--kubeconfig ${KUBECONFIG} get namespace ${NAMESPACE} --output name`
+      );
+    });
+
+    it("raises a namespace probe that failed for any other reason", async () => {
+      const { fixture } = await clusterHarness([
+        credentials(),
+        {
+          tool: "kubectl",
+          match: ["get", "namespace"],
+          respond: {
+            code: 1,
+            stdout: "error: You must be logged in to the server (Unauthorized)"
+          }
+        }
+      ]);
+
+      await expect(fixture.namespaceExists(NAMESPACE)).rejects.toThrow(
+        /kubectl get namespace radius-demo failed with exit code 1: error: You must be logged in/
+      );
     });
   });
 });
