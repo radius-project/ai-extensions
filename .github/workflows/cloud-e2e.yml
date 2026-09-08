@@ -113,9 +113,9 @@ jobs:
       # test/e2e-cloud/support/fixture-repository.ts, but the App token action
       # wants bare repository names.
       #
-      # An unset variable means the upstream Terraform has not been applied yet,
-      # which is today's state. That skips the cloud steps rather than failing
-      # them: this workflow is scheduled, and a job that fails every night for a
+      # An unset variable means the fixture repository is not configured. That
+      # skips the cloud steps rather than failing them: this workflow is
+      # scheduled, and a job that fails every night for a
       # reason nobody in this repository can fix trains people to ignore the
       # alert that is supposed to mean something. It mirrors the
       # skip-without-credentials convention live-tests.yml already uses. A value

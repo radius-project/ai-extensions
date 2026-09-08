@@ -28,7 +28,7 @@ describe("pinned baseline constants", () => {
     expect(FIXTURE_REPOSITORY).toBe("radius-project/ai-extensions-fixture");
     expect(FIXTURE_REPO_DEFAULT_BRANCH).toBe("main");
     expect(FIXTURE_BASELINE_SHA).toBe(
-      "07deb510c0a663047eca085f429e51c8bea384f1"
+      "1b9cb3a56ebc52792c0665c2d8497469f65da759"
     );
   });
 

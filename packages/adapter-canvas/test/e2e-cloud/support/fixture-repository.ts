@@ -26,7 +26,7 @@ export const FIXTURE_REPO_DEFAULT_BRANCH = "main";
 /**
  * The commit the fixture repository is reset to before and after every run.
  */
-export const FIXTURE_BASELINE_SHA = "07deb510c0a663047eca085f429e51c8bea384f1";
+export const FIXTURE_BASELINE_SHA = "1b9cb3a56ebc52792c0665c2d8497469f65da759";
 
 /** `owner/name`, the form both `gh` and the product's OIDC lookup use. */
 export const FIXTURE_REPOSITORY = `${FIXTURE_REPO_OWNER}/${FIXTURE_REPO_NAME}`;

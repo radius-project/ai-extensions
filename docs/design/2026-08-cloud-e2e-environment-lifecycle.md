@@ -242,7 +242,7 @@ This file is provenance for the exact `app.bicep` bytes and must be generated wh
 
 `appBicepHash` is calculated after converting CRLF to LF, removing trailing spaces from each line, and removing trailing whitespace from the file. An empty `skillVersion` is intentional for this hand-maintained fixture: it preserves the provenance record without making routine extension releases mark the fixture stale. The source commit may precede the baseline commit because freshness checks ignore changes confined to `.radius`; after committing all three files, the resulting commit becomes `FIXTURE_BASELINE_SHA`.
 
-The initial baseline was prepared in [`radius-project/ai-extensions-fixture#1`](https://github.com/radius-project/ai-extensions-fixture/pull/1), and the managed PostgreSQL resource was added in [`radius-project/ai-extensions-fixture#2`](https://github.com/radius-project/ai-extensions-fixture/pull/2). The current full source pin is `07deb510c0a663047eca085f429e51c8bea384f1`.
+The initial baseline was prepared in [`radius-project/ai-extensions-fixture#1`](https://github.com/radius-project/ai-extensions-fixture/pull/1), the managed PostgreSQL resource was added in [`radius-project/ai-extensions-fixture#2`](https://github.com/radius-project/ai-extensions-fixture/pull/2), the fixture Dockerfile was added in [`radius-project/ai-extensions-fixture#3`](https://github.com/radius-project/ai-extensions-fixture/pull/3), and the provenance record was refreshed against the resulting `main` history in [`radius-project/ai-extensions-fixture#4`](https://github.com/radius-project/ai-extensions-fixture/pull/4). The current full source pin is `1b9cb3a56ebc52792c0665c2d8497469f65da759`.
 
 Provisioning and later baseline updates follow this order:
 

@@ -513,7 +513,7 @@ describe("createCloudFixture", () => {
       expect(fixture.repository).toBe("radius-project/ai-extensions-fixture");
       expect(fixture.defaultBranch).toBe("main");
       expect(fixture.baselineSha).toBe(
-        "07deb510c0a663047eca085f429e51c8bea384f1"
+        "1b9cb3a56ebc52792c0665c2d8497469f65da759"
       );
     });
 
