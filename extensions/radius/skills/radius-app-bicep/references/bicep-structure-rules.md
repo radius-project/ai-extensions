@@ -174,8 +174,8 @@ param registryUsername string
 @secure()
 param registryPassword string
 
-// Registry push credentials for the containerImages recipe. The name MUST be
-// exactly 'radius-ghcr-registry-creds' to match the recipe pack's
+// Do not rename this Secret. The resource name MUST remain exactly
+// 'radius-ghcr-registry-creds' to match the recipe pack's
 // containerImagesRegistrySecretName — the recipe reads the push credentials
 // from a Secret of that name on the target cluster. Omit this resource entirely
 // when pushing to an unauthenticated registry.
@@ -217,6 +217,7 @@ Registry-credentials rules:
 
 - Author the registry Secret only when the push registry requires authentication. For an unauthenticated registry, omit the Secret, the `registryUsername`/`registryPassword` params, and the `dependsOn` — the recipe pack registers the recipe with an empty `containerImagesRegistrySecretName` in that case
 - WHEN the Secret is authored, its resource name MUST be exactly `radius-ghcr-registry-creds` — it is not free-form. It is the fixed `containerImagesRegistrySecretName` the recipe pack registers the recipe with; any other name means the recipe can't find the push credentials
+- Emit the warning comment shown above immediately before the Secret so users know its resource name must remain `radius-ghcr-registry-creds`; do not omit the warning from generated `app.bicep`
 - Author it with the two keys `username` and `password` (lowercase, exactly these keys — the recipe reads them by name)
 - Populate the keys from a plain `param registryUsername string` and an `@secure() param registryPassword string`. Do NOT hardcode the credentials
 - Add `dependsOn: [registryCreds]` on the `containerImages` resource so the Secret exists on the target cluster before the build/push runs
