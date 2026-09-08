@@ -270,13 +270,19 @@ describe("resource selection and release identity", () => {
     expect(resolver.deriveExtensionReference("0.60.2+build.7")).toBe(
       "br:biceptypes.azurecr.io/radius:0.60"
     );
-    expect(resolver.deriveExtensionReference("edge")).toBe(
+    expect(() => resolver.deriveExtensionReference("edge")).toThrow(
+      /has no exact published Bicep extension/u
+    );
+    expect(resolver.deriveExtensionReference("edge", true)).toBe(
       "br:biceptypes.azurecr.io/radius:latest"
     );
     expect(() => resolver.deriveExtensionReference("latest")).toThrow(
       /Unsupported Radius release.*Do not replace or modify the configured Radius CLI.*stop modeling/u
     );
-    expect(resolver.deriveExtensionReference("pr-12885")).toBe(
+    expect(() => resolver.deriveExtensionReference("pr-12885")).toThrow(
+      /has no exact published Bicep extension/u
+    );
+    expect(resolver.deriveExtensionReference("pr-12885", true)).toBe(
       "br:biceptypes.azurecr.io/radius:latest"
     );
   });
@@ -318,8 +324,10 @@ describe("resource selection and release identity", () => {
       ).extension
     ).toBe("br:biceptypes.azurecr.io/radius:0.60.0-rc3");
     expect(
-      resolver.parseRadiusIdentity(JSON.stringify({ release: "edge", commit }))
-        .extension
+      resolver.parseRadiusIdentity(
+        JSON.stringify({ release: "edge", commit }),
+        true
+      ).extension
     ).toBe("br:biceptypes.azurecr.io/radius:latest");
     expect(
       resolver.parseRadiusIdentity(
@@ -327,7 +335,8 @@ describe("resource selection and release identity", () => {
           release: "pr-12885",
           version: "04599d9",
           commit
-        })
+        }),
+        true
       ).extension
     ).toBe("br:biceptypes.azurecr.io/radius:latest");
     expect(() =>
@@ -1453,6 +1462,51 @@ describe("network and cache behavior", () => {
 });
 
 describe("command boundary", () => {
+  it.each([
+    ["edge", "latest"],
+    ["pr-12885", "latest"]
+  ])(
+    "allows the unpinned %s extension channel only with explicit consent",
+    async (release, channel) => {
+      const cacheRoot = temporaryDirectory();
+      const radiusIdentity = { release, commit };
+      const fetchImpl = vi.fn();
+
+      await expect(
+        resolver.resolveRadiusTypes(["Radius.Core/applications"], {
+          ...managedIdentityOptions({ radiusIdentity }),
+          env: {
+            ...process.env,
+            RADIUS_RAD_BINARY: process.execPath,
+            RADIUS_ALLOW_UNPINNED_EXTENSION: "0"
+          },
+          cacheRoot,
+          fetchImpl
+        })
+      ).rejects.toThrow(/has no exact published Bicep extension/u);
+      expect(fetchImpl).not.toHaveBeenCalled();
+
+      seedCache(cacheRoot);
+      const contract = await resolver.resolveRadiusTypes(
+        ["Radius.Core/applications"],
+        {
+          ...managedIdentityOptions({ radiusIdentity }),
+          env: {
+            ...process.env,
+            RADIUS_RAD_BINARY: process.execPath,
+            RADIUS_ALLOW_UNPINNED_EXTENSION: "1"
+          },
+          cacheRoot,
+          fetchImpl: fixtureFetch([])
+        }
+      );
+
+      expect(contract.extension).toBe(
+        `br:biceptypes.azurecr.io/radius:${channel}`
+      );
+    }
+  );
+
   it("queries managed identity through the injected process boundary", async () => {
     const cacheRoot = temporaryDirectory();
     seedCache(cacheRoot);

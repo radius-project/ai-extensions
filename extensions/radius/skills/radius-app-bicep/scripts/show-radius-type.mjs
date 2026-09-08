@@ -226,9 +226,17 @@ function parseArguments(args) {
   return { help: false, stagingDir, selectors };
 }
 
-export function deriveExtensionReference(release) {
+export function deriveExtensionReference(
+  release,
+  allowUnpinnedExtension = false
+) {
   const normalized = typeof release === "string" ? release.trim() : "";
   if (normalized === "edge" || isPullRequestRelease(normalized)) {
+    if (!allowUnpinnedExtension) {
+      throw new Error(
+        `Radius release "${normalized}" has no exact published Bicep extension. Use a released Radius CLI.`
+      );
+    }
     return "br:biceptypes.azurecr.io/radius:latest";
   }
   const version = parseRadiusRelease(normalized);
@@ -243,7 +251,7 @@ export function deriveExtensionReference(release) {
   );
 }
 
-export function parseRadiusIdentity(output) {
+export function parseRadiusIdentity(output, allowUnpinnedExtension = false) {
   let parsed;
   try {
     parsed = JSON.parse(output);
@@ -266,7 +274,7 @@ export function parseRadiusIdentity(output) {
   }
   return {
     commit: commit.toLowerCase(),
-    extension: deriveExtensionReference(release)
+    extension: deriveExtensionReference(release, allowUnpinnedExtension)
   };
 }
 
@@ -517,7 +525,10 @@ async function queryManagedRadiusIdentity({
         label: "Managed Radius version query"
       }
     );
-    return parseRadiusIdentity(stdout);
+    return parseRadiusIdentity(
+      stdout,
+      env.RADIUS_ALLOW_UNPINNED_EXTENSION === "1"
+    );
   } catch (error) {
     const detail = error?.stderr?.trim() || message(error);
     throw new Error(`Managed Radius version query failed: ${detail}`, {
