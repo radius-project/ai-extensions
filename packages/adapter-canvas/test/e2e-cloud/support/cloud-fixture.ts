@@ -22,7 +22,9 @@ import {
   expectSuccess,
   isGitHubApiNotFound,
   parseJsonArray,
+  parseJsonObject,
   type CloudCommandPort,
+  type CloudCommandResult,
   type CloudFixturePorts
 } from "./cloud-command-port.js";
 import {
@@ -39,6 +41,13 @@ import {
   shortenUniqueId,
   WORKFLOW_FALLBACK_BRANCH_PREFIX
 } from "./fixture-repository.js";
+import {
+  radiusApplicationSelector,
+  readKubernetesWorkloads,
+  readKubernetesResourceNames,
+  isKubernetesWorkloadReady,
+  type KubernetesWorkload
+} from "./deploy-journey.js";
 
 /** The Entra application the product creates, as the fixture observed it. */
 export interface AppRegistrationRecord {
@@ -47,6 +56,13 @@ export interface AppRegistrationRecord {
   /** The directory object id `az ad app federated-credential` addresses. */
   readonly objectId: string;
   readonly displayName: string;
+}
+
+export interface RoleAssignmentRecord {
+  readonly id: string;
+  readonly principalId: string;
+  readonly roleDefinitionName: string;
+  readonly scope: string;
 }
 
 export interface CloudFixture {
@@ -65,34 +81,62 @@ export interface CloudFixture {
   assertCleanSlate(): Promise<void>;
   assertAppRegistrationExists(): Promise<AppRegistrationRecord>;
   assertFederatedCredentialExists(subject: string): Promise<void>;
-  assertRoleAssignmentExists(principalId: string): Promise<void>;
+  assertRoleAssignmentExists(
+    principalId: string
+  ): Promise<readonly RoleAssignmentRecord[]>;
+  assertRoleAssignmentsExist(
+    expected: readonly RoleAssignmentRecord[]
+  ): Promise<void>;
   assertGitHubEnvironmentExists(): Promise<void>;
   /**
    * Waits until the GitHub Environment is gone.
    *
    * The mirror of `assertGitHubEnvironmentExists`, and the pair is the point:
-   * stage one proves the product creates the Environment, stage two proves it
-   * removes it. Absence on its own would prove nothing, so this refuses to
+   * stage one proves the product creates the Environment, the final stage proves
+   * it removes it. Absence on its own would prove nothing, so this refuses to
    * answer until presence was established first.
    */
   assertGitHubEnvironmentAbsent(): Promise<void>;
   /**
    * Waits until no app registration with the product's name remains.
    *
-   * Not called by the lifecycle journey because the repository-scoped
-   * application is shared by multiple environments and is intentionally
-   * retained after one environment is deleted.
+   * Product environment deletion intentionally retains the repository-scoped
+   * app registration because other environments or callers can share it. This
+   * guarded mirror is therefore a fixture-cleanup assertion, not proof of the
+   * product's environment-deletion contract.
    */
   assertAppRegistrationAbsent(): Promise<void>;
-  /** Waits until the deleted environment's credential is removed. */
+  /**
+   * Waits until the app registration carries no credential for the subject.
+   *
+   * Unlike app-registration and role-assignment absence, this mirror validates
+   * product deletion of the environment-specific credential.
+   */
   assertFederatedCredentialAbsent(subject: string): Promise<void>;
   /**
    * Waits until no role assignment for the principal remains in scope.
    *
-   * Not called by the lifecycle journey because the assignment belongs to the
-   * shared application and is intentionally retained.
+   * Product environment deletion intentionally retains this shared assignment,
+   * so this guarded mirror is used only to verify fixture cleanup.
    */
   assertRoleAssignmentAbsent(principalId: string): Promise<void>;
+  /** Waits until Radius has rendered a ready workload on the target cluster. */
+  assertApplicationWorkloadsPresent(
+    application: string,
+    namespace: string
+  ): Promise<readonly KubernetesWorkload[]>;
+  /** Waits until no workload for the application remains on the target cluster. */
+  assertApplicationWorkloadsAbsent(
+    application: string,
+    namespace: string
+  ): Promise<void>;
+  /** Reads application workloads once without polling. */
+  readApplicationWorkloads(
+    application: string,
+    namespace: string
+  ): Promise<readonly KubernetesWorkload[]>;
+  /** Reports whether the application namespace exists on the target cluster. */
+  namespaceExists(namespace: string): Promise<boolean>;
   /**
    * Best-effort removal of product-created state left behind by this run.
    *
@@ -186,6 +230,13 @@ export async function createCloudFixture(
   const scope = resourceGroupScope(subscriptionId, resourceGroup);
   const clusterScope = `${scope}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
   const roleAssignmentScopes = [scope, clusterScope] as const;
+  const requiredRoleAssignments = [
+    { scope, roleDefinitionName: "Contributor" },
+    {
+      scope: clusterScope,
+      roleDefinitionName: "Azure Kubernetes Service RBAC Cluster Admin"
+    }
+  ] as const;
   const expectedAppName = appRegistrationName(repository);
   const statePackage = stateRegistryForEnvironment(repository, environmentName);
 
@@ -362,6 +413,119 @@ export async function createCloudFixture(
   }
 
   let disposed = false;
+  let kubeconfigPath = "";
+
+  const clusterKubeconfig = async (timeoutMs?: number): Promise<string> => {
+    if (kubeconfigPath) return kubeconfigPath;
+    const directory = await ports.makeWorkspaceDir(
+      `radtest-canvas-kube-${uniqueId}`
+    );
+    unwind.push({
+      describe: `remove kubeconfig directory ${directory}`,
+      run: () => ports.removeDir(directory)
+    });
+    const candidate = `${directory}/kubeconfig`;
+    expectSuccess(
+      await commands.runAz(
+        [
+          "aks",
+          "get-credentials",
+          "--resource-group",
+          resourceGroup,
+          "--name",
+          clusterName,
+          "--subscription",
+          subscriptionId,
+          "--file",
+          candidate,
+          "--overwrite-existing",
+          "--only-show-errors"
+        ],
+        timeoutMs
+      ),
+      `az aks get-credentials ${clusterName}`
+    );
+    kubeconfigPath = candidate;
+    return kubeconfigPath;
+  };
+
+  const listWorkloads = async (
+    application: string,
+    namespace: string,
+    timeoutMs?: number
+  ): Promise<readonly KubernetesWorkload[] | "no-namespace"> => {
+    const context = `kubectl get deployments -n ${namespace}`;
+    const deadline =
+      timeoutMs === undefined ? undefined : ports.now().getTime() + timeoutMs;
+    const kubeconfig = await clusterKubeconfig(timeoutMs);
+    const commandTimeoutMs =
+      deadline === undefined ? undefined : (
+        remainingCommandTimeout(deadline, ports.now, context)
+      );
+    const result = await commands.runKubectl(
+      [
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "deployments",
+        "--namespace",
+        namespace,
+        "--selector",
+        radiusApplicationSelector(application),
+        "--output",
+        "json"
+      ],
+      commandTimeoutMs
+    );
+    if (result.code !== 0) {
+      if (isMissingNamespace(result)) return "no-namespace";
+      throw new Error(
+        `${context} failed with exit code ${result.code}: ${(
+          result.stderr || result.stdout
+        ).trim()}`
+      );
+    }
+    return readKubernetesWorkloads(parseJsonObject(result, context));
+  };
+
+  const listApplicationResources = async (
+    application: string,
+    namespace: string,
+    timeoutMs: number
+  ): Promise<readonly string[] | "no-namespace"> => {
+    const context = `kubectl get deployments,pods -n ${namespace}`;
+    const deadline = ports.now().getTime() + timeoutMs;
+    const kubeconfig = await clusterKubeconfig(timeoutMs);
+    const commandTimeoutMs = remainingCommandTimeout(
+      deadline,
+      ports.now,
+      context
+    );
+    const result = await commands.runKubectl(
+      [
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "deployments,pods",
+        "--namespace",
+        namespace,
+        "--selector",
+        radiusApplicationSelector(application),
+        "--output",
+        "json"
+      ],
+      commandTimeoutMs
+    );
+    if (result.code !== 0) {
+      if (isMissingNamespace(result)) return "no-namespace";
+      throw new Error(
+        `${context} failed with exit code ${result.code}: ${(
+          result.stderr || result.stdout
+        ).trim()}`
+      );
+    }
+    return readKubernetesResourceNames(parseJsonObject(result, context));
+  };
 
   /**
    * Artifacts this run has independently observed in place.
@@ -499,29 +663,43 @@ export async function createCloudFixture(
     },
 
     async assertRoleAssignmentExists(principalId) {
-      let assignments: RoleAssignment[] = [];
-      await pollForValue({
+      let assignments: RoleAssignmentRecord[] = [];
+      let missingRequirements = [...requiredRoleAssignments];
+      const observed = await pollForValue({
         ports,
         timeoutMs: assertionTimeoutMs,
         intervalMs: assertionPollIntervalMs,
-        probe: async () => {
-          assignments = await listRoleAssignments(
+        probe: async (remainingMs) => {
+          assignments = await listRoleAssignmentsAtScopes(
             commands,
-            roleAssignmentScopes
+            roleAssignmentScopes,
+            remainingMs,
+            ports.now
           );
-          return (
-              assignments.some(
+          const matching = assignments.filter(
+            (assignment) =>
+              assignment.principalId.toLowerCase() === principalId.toLowerCase()
+          );
+          missingRequirements = requiredRoleAssignments.filter(
+            (expected) =>
+              !matching.some(
                 (assignment) =>
-                  assignment.principalId.toLowerCase() ===
-                  principalId.toLowerCase()
+                  assignment.scope.toLowerCase() ===
+                    expected.scope.toLowerCase() &&
+                  assignment.roleDefinitionName.toLowerCase() ===
+                    expected.roleDefinitionName.toLowerCase()
               )
-            ) ?
-              true
-            : undefined;
+          );
+          return missingRequirements.length === 0 ? matching : undefined;
         },
         timeoutMessage: () =>
-          `Timed out after ${assertionTimeoutMs}ms waiting for a role assignment for principal ` +
-          `${principalId} at ${roleAssignmentScopes.join(" or ")}; found ` +
+          `Timed out after ${assertionTimeoutMs}ms waiting for role assignments for principal ` +
+          `${principalId}; missing ${missingRequirements
+            .map(
+              (expected) =>
+                `"${expected.roleDefinitionName}" at ${expected.scope}`
+            )
+            .join(", ")}; found ` +
           (assignments.length === 0 ?
             "no role assignments at all."
           : `only assignments for ${[
@@ -531,6 +709,43 @@ export async function createCloudFixture(
             ].join(", ")}.`)
       });
       observedPresent.add(roleAssignmentKey(principalId));
+      return observed;
+    },
+
+    async assertRoleAssignmentsExist(expected) {
+      if (expected.length === 0)
+        throw new Error(
+          "Refusing to assert an empty role-assignment inventory."
+        );
+      let missing = [...expected];
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async (remainingMs) => {
+          const current = await listRoleAssignmentsAtScopes(
+            commands,
+            [...new Set(expected.map((assignment) => assignment.scope))],
+            remainingMs,
+            ports.now
+          );
+          missing = expected.filter(
+            (wanted) =>
+              !current.some(
+                (actual) =>
+                  actual.id.toLowerCase() === wanted.id.toLowerCase() &&
+                  actual.principalId.toLowerCase() ===
+                    wanted.principalId.toLowerCase() &&
+                  actual.roleDefinitionName === wanted.roleDefinitionName &&
+                  actual.scope.toLowerCase() === wanted.scope.toLowerCase()
+              )
+          );
+          return missing.length === 0 ? true : undefined;
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for the exact role assignments observed during creation to survive; ` +
+          `missing ${missing.map((assignment) => assignment.id).join(", ")}.`
+      });
     },
 
     async assertGitHubEnvironmentExists() {
@@ -630,7 +845,7 @@ export async function createCloudFixture(
     async assertRoleAssignmentAbsent(principalId) {
       requireObservedPresent(
         roleAssignmentKey(principalId),
-        `the role assignment for principal ${principalId} at ${roleAssignmentScopes.join(" or ")}`
+        `the role assignment inventory for principal ${principalId} at the resource-group and AKS scopes`
       );
       let remaining: RoleAssignment[] = [];
       await pollForValue({
@@ -648,7 +863,89 @@ export async function createCloudFixture(
         },
         timeoutMessage: () =>
           `Timed out after ${assertionTimeoutMs}ms waiting for the role assignment(s) for principal ` +
-          `${principalId} at ${roleAssignmentScopes.join(" or ")} to be removed; ${remaining.length} remain(s).`
+          `${principalId} at the resource-group and AKS scopes to be removed; ${remaining.length} remain(s).`
+      });
+    },
+
+    async namespaceExists(namespace) {
+      const kubeconfig = await clusterKubeconfig();
+      const context = `kubectl get namespace ${namespace}`;
+      const result = await commands.runKubectl([
+        "--kubeconfig",
+        kubeconfig,
+        "get",
+        "namespace",
+        namespace,
+        "--output",
+        "name"
+      ]);
+      if (result.code === 0) return true;
+      if (isMissingNamespace(result)) return false;
+      throw new Error(
+        `${context} failed with exit code ${result.code}: ${(
+          result.stderr || result.stdout
+        ).trim()}`
+      );
+    },
+
+    async readApplicationWorkloads(application, namespace) {
+      const workloads = await listWorkloads(application, namespace);
+      return workloads === "no-namespace" ? [] : workloads;
+    },
+
+    async assertApplicationWorkloadsPresent(application, namespace) {
+      let lastSeen: readonly KubernetesWorkload[] | "no-namespace" = [];
+      return pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async (remainingMs) => {
+          lastSeen = await listWorkloads(application, namespace, remainingMs);
+          if (lastSeen === "no-namespace" || lastSeen.length === 0)
+            return undefined;
+          if (lastSeen.some((workload) => !isKubernetesWorkloadReady(workload)))
+            return undefined;
+          return lastSeen;
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for Radius to render application "${application}" ` +
+          `into namespace "${namespace}" on cluster ${clusterName}. ` +
+          (lastSeen === "no-namespace" ?
+            "The namespace does not exist, so the deploy never reached this cluster."
+          : lastSeen.length === 0 ?
+            "The namespace exists but carries no workload labelled for the application."
+          : `The application workloads exist but are not ready: ${lastSeen
+              .filter((workload) => !isKubernetesWorkloadReady(workload))
+              .map(
+                (workload) =>
+                  `"${workload.name}" has ${workload.availableReplicas} available replica(s) of ${workload.desiredReplicas} desired`
+              )
+              .join(", ")}.`)
+      });
+    },
+
+    async assertApplicationWorkloadsAbsent(application, namespace) {
+      let lastSeen: readonly string[] = [];
+      await pollForValue({
+        ports,
+        timeoutMs: assertionTimeoutMs,
+        intervalMs: assertionPollIntervalMs,
+        probe: async (remainingMs) => {
+          const resources = await listApplicationResources(
+            application,
+            namespace,
+            remainingMs
+          );
+          if (resources === "no-namespace") return true;
+          lastSeen = resources;
+          return resources.length === 0 ? true : undefined;
+        },
+        timeoutMessage: () =>
+          `Timed out after ${assertionTimeoutMs}ms waiting for the delete to remove application ` +
+          `"${application}" from namespace "${namespace}" on cluster ${clusterName}; ` +
+          `${lastSeen.length} workload resource(s) remain: ${lastSeen
+            .map((resource) => `"${resource}"`)
+            .join(", ")}.`
       });
     },
 
@@ -915,19 +1212,32 @@ interface PollForValueOptions<T> {
   readonly ports: Pick<CloudFixturePorts, "now" | "wait">;
   readonly timeoutMs: number;
   readonly intervalMs: number;
-  readonly probe: () => Promise<T | undefined>;
+  readonly probe: (remainingMs: number) => Promise<T | undefined>;
   readonly timeoutMessage: () => string;
 }
 
 async function pollForValue<T>(options: PollForValueOptions<T>): Promise<T> {
   const deadline = options.ports.now().getTime() + options.timeoutMs;
   while (true) {
-    const value = await options.probe();
+    const remainingBeforeProbe = deadline - options.ports.now().getTime();
+    if (remainingBeforeProbe <= 0) throw new Error(options.timeoutMessage());
+    const value = await options.probe(remainingBeforeProbe);
     if (value !== undefined) return value;
     const remaining = deadline - options.ports.now().getTime();
     if (remaining <= 0) throw new Error(options.timeoutMessage());
     await options.ports.wait(Math.min(options.intervalMs, remaining));
   }
+}
+
+function remainingCommandTimeout(
+  deadline: number,
+  now: () => Date,
+  context: string
+): number {
+  const remaining = deadline - now().getTime();
+  if (remaining <= 0)
+    throw new Error(`${context} exhausted its assertion deadline.`);
+  return remaining;
 }
 
 async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
@@ -959,8 +1269,8 @@ async function collectLeakedState(input: LeakProbeInput): Promise<string[]> {
       );
   }
 
-  // `az role assignment list --scope` is exact-scope only. Probe both scopes
-  // the product writes so a leaked cluster assignment cannot pass as clean.
+  // Azure's --scope filter applies atScope(), so query both exact scopes the
+  // product writes instead of assuming the resource-group query includes AKS.
   const assignments = await listRoleAssignments(
     commands,
     input.roleAssignmentScopes
@@ -1190,6 +1500,48 @@ async function listFederatedCredentials(
   });
 }
 
+async function listRoleAssignmentRecords(
+  commands: CloudCommandPort,
+  scope: string,
+  timeoutMs: number
+): Promise<RoleAssignmentRecord[]> {
+  const context = `az role assignment list --scope ${scope}`;
+  const entries = parseJsonArray(
+    await commands.runAz(
+      [
+        "role",
+        "assignment",
+        "list",
+        "--scope",
+        scope,
+        "--query",
+        "[].{id:id,principalId:principalId,roleDefinitionName:roleDefinitionName,scope:scope}",
+        "-o",
+        "json"
+      ],
+      timeoutMs
+    ),
+    context
+  );
+  return entries.map((entry, index) => {
+    const record = asRecord(entry, context, index);
+    return {
+      id: requireString(record.id, "id", context, index),
+      principalId: requireString(
+        record.principalId,
+        "principalId",
+        context,
+        index
+      ),
+      roleDefinitionName:
+        typeof record.roleDefinitionName === "string" ?
+          record.roleDefinitionName
+        : "(unnamed role)",
+      scope: requireString(record.scope, "scope", context, index)
+    };
+  });
+}
+
 async function listRoleAssignments(
   commands: CloudCommandPort,
   scopes: readonly string[]
@@ -1231,6 +1583,28 @@ async function listRoleAssignments(
     );
   }
   return assignments;
+}
+
+async function listRoleAssignmentsAtScopes(
+  commands: CloudCommandPort,
+  scopes: readonly string[],
+  timeoutMs: number,
+  now: () => Date
+): Promise<RoleAssignmentRecord[]> {
+  const deadline = now().getTime() + timeoutMs;
+  const byId = new Map<string, RoleAssignmentRecord>();
+  for (const scope of scopes)
+    for (const assignment of await listRoleAssignmentRecords(
+      commands,
+      scope,
+      remainingCommandTimeout(
+        deadline,
+        now,
+        `Role-assignment lookup at ${scope}`
+      )
+    ))
+      byId.set(assignment.id.toLowerCase(), assignment);
+  return [...byId.values()];
 }
 
 async function listWorkflowFallbackBranches(
@@ -1320,6 +1694,12 @@ async function readDefaultBranchSha(
 
 function sameSha(left: string, right: string): boolean {
   return left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
+function isMissingNamespace(result: CloudCommandResult): boolean {
+  return /namespaces? "[^"]*" not found/i.test(
+    `${result.stderr}\n${result.stdout}`
+  );
 }
 
 function asRecord(
