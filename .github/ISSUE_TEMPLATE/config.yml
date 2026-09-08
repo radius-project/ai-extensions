@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or discussion
+    url: https://github.com/radius-project/ai-extensions/discussions
+    about: Ask a question or discuss an idea before filing an issue.
+  - name: Radius community Discord
+    url: https://aka.ms/radius/discord
+    about: Get help from the Radius community in real time.
