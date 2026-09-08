@@ -1,10 +1,10 @@
 // The seam between the cloud fixture and the outside world.
 //
-// Nothing in `test/e2e-cloud/` calls `execFile` directly. Every `az`, `gh`, and
-// `git` invocation goes through a port, so each branch of the fixture — a
-// missing resource, a failed command, malformed output, a partially built
-// fixture — is provable on a machine with no Azure or GitHub credentials at
-// all. The real run passes `createNodeCloudFixturePorts()`; this is not a
+// Nothing in `test/e2e-cloud/` calls `execFile` directly. Every `az`, `gh`,
+// `git`, and `kubectl` invocation goes through a port, so each branch of the
+// fixture — a missing resource, a failed command, malformed output, a partially
+// built fixture — is provable on a machine with no Azure or GitHub credentials
+// at all. The real run passes `createNodeCloudFixturePorts()`; this is not a
 // test-only hook.
 //
 // The result shape and the "resolve for a non-zero exit rather than reject"
@@ -33,10 +33,23 @@ export interface CloudCommandResult {
  * absent.
  */
 export interface CloudCommandPort {
-  runAz(args: readonly string[]): Promise<CloudCommandResult>;
+  runAz(
+    args: readonly string[],
+    timeoutMs?: number
+  ): Promise<CloudCommandResult>;
   runGh(args: readonly string[]): Promise<CloudCommandResult>;
   runGhPackage(args: readonly string[]): Promise<CloudCommandResult>;
   runGit(args: readonly string[], cwd: string): Promise<CloudCommandResult>;
+  /**
+   * Queries a Kubernetes cluster using an explicit kubeconfig argv.
+   *
+   * Requiring callers to pass `--kubeconfig <path>` prevents an inherited
+   * KUBECONFIG from redirecting the journey to a developer's personal cluster.
+   */
+  runKubectl(
+    args: readonly string[],
+    timeoutMs?: number
+  ): Promise<CloudCommandResult>;
 }
 
 export interface CloudFixturePorts {
@@ -73,6 +86,7 @@ function runTool(
     stdout: string | undefined,
     stderr: string | undefined
   ) => CloudCommandResult = normalizeCommandResult,
+  timeoutMs = COMMAND_TIMEOUT_MS,
   env?: NodeJS.ProcessEnv,
   preserveGitHubToken = false
 ): Promise<CloudCommandResult> {
@@ -82,8 +96,8 @@ function runTool(
       [...args],
       {
         cwd,
+        timeout: timeoutMs,
         env,
-        timeout: COMMAND_TIMEOUT_MS,
         maxBuffer: MAX_OUTPUT_BYTES,
         windowsHide: true,
         preserveGitHubToken
@@ -96,7 +110,10 @@ function runTool(
   });
 }
 
-type RunAzureCommand = (args: readonly string[]) => Promise<CloudCommandResult>;
+type RunAzureCommand = (
+  args: readonly string[],
+  timeoutMs?: number
+) => Promise<CloudCommandResult>;
 
 export interface AzureCommandRefreshOptions {
   readonly env?: NodeJS.ProcessEnv;
@@ -120,9 +137,24 @@ function refreshFailure(
   };
 }
 
+function commandFailure(
+  error: unknown,
+  env: NodeJS.ProcessEnv
+): CloudCommandResult {
+  return {
+    code: 1,
+    stdout: "",
+    stderr: `Azure command failed: ${redactAzureCredentials(
+      describeError(error),
+      env
+    )}`
+  };
+}
+
 async function requestAzureIdentityAssertion(
   env: NodeJS.ProcessEnv,
-  fetchImpl: typeof fetch
+  fetchImpl: typeof fetch,
+  timeoutMs?: number
 ): Promise<string> {
   const requestUrl = env.ACTIONS_ID_TOKEN_REQUEST_URL?.trim();
   const requestToken = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN?.trim();
@@ -135,7 +167,7 @@ async function requestAzureIdentityAssertion(
   url.searchParams.set("audience", AZURE_OIDC_AUDIENCE);
   const response = await fetchImpl(url, {
     headers: { Authorization: `bearer ${requestToken}` },
-    signal: AbortSignal.timeout(20_000)
+    signal: AbortSignal.timeout(Math.min(timeoutMs ?? 20_000, 20_000))
   });
   if (!response.ok)
     throw new Error(
@@ -171,9 +203,14 @@ export function createRefreshingAzureCommandRunner(
     );
   const runCommand =
     options.runCommand ??
-    ((args) =>
-      runTool("az", args, undefined, (error, stdout, stderr) =>
-        normalizeAzureCommandResult(error, stdout, stderr, env)
+    ((args, timeoutMs) =>
+      runTool(
+        "az",
+        args,
+        undefined,
+        (error, stdout, stderr) =>
+          normalizeAzureCommandResult(error, stdout, stderr, env),
+        timeoutMs
       ));
   const oidcRefreshConfigured = Boolean(
     env.ACTIONS_ID_TOKEN_REQUEST_URL?.trim() ||
@@ -182,7 +219,30 @@ export function createRefreshingAzureCommandRunner(
   let refreshedAt = now();
   let pendingRefresh: Promise<CloudCommandResult | null> | undefined;
 
-  const refresh = async (): Promise<CloudCommandResult | null> => {
+  const remainingTimeout = (
+    deadline: number | undefined
+  ): number | undefined => {
+    if (deadline === undefined) return undefined;
+    const remaining = deadline - now();
+    if (remaining <= 0)
+      throw new Error(
+        "The Azure command exhausted its timeout while refreshing credentials."
+      );
+    return remaining;
+  };
+  const runBeforeDeadline = (
+    args: readonly string[],
+    deadline: number | undefined
+  ): Promise<CloudCommandResult> => {
+    const remaining = remainingTimeout(deadline);
+    return remaining === undefined ?
+        runCommand(args)
+      : runCommand(args, remaining);
+  };
+
+  const refresh = async (
+    deadline: number | undefined
+  ): Promise<CloudCommandResult | null> => {
     const clientId = env.AZURE_CLIENT_ID?.trim();
     const tenantId = env.AZURE_TENANT_ID?.trim();
     const subscriptionId = env.AZURE_SUBSCRIPTION_ID?.trim();
@@ -194,46 +254,85 @@ export function createRefreshingAzureCommandRunner(
         env
       );
 
-    let assertion: string;
     try {
-      assertion = await requestAzureIdentityAssertion(env, fetchImpl);
+      const assertion = await requestAzureIdentityAssertion(
+        env,
+        fetchImpl,
+        remainingTimeout(deadline)
+      );
+      const login = await runBeforeDeadline(
+        [
+          "login",
+          "--service-principal",
+          "--username",
+          clientId,
+          "--tenant",
+          tenantId,
+          "--federated-token",
+          assertion,
+          "--output",
+          "none"
+        ],
+        deadline
+      );
+      if (login.code !== 0) return login;
+      const select = await runBeforeDeadline(
+        ["account", "set", "--subscription", subscriptionId],
+        deadline
+      );
+      if (select.code !== 0) return select;
+      refreshedAt = now();
+      return null;
     } catch (error) {
       return refreshFailure(error, env);
     }
-
-    const login = await runCommand([
-      "login",
-      "--service-principal",
-      "--username",
-      clientId,
-      "--tenant",
-      tenantId,
-      "--federated-token",
-      assertion,
-      "--output",
-      "none"
-    ]);
-    if (login.code !== 0) return login;
-    const select = await runCommand([
-      "account",
-      "set",
-      "--subscription",
-      subscriptionId
-    ]);
-    if (select.code !== 0) return select;
-    refreshedAt = now();
-    return null;
+  };
+  const awaitRefreshBeforeDeadline = (
+    refreshPromise: Promise<CloudCommandResult | null>,
+    deadline: number | undefined
+  ): Promise<CloudCommandResult | null> => {
+    const remaining = remainingTimeout(deadline);
+    if (remaining === undefined) return refreshPromise;
+    const signal = AbortSignal.timeout(remaining);
+    const timeout = new Promise<CloudCommandResult>((resolve) => {
+      signal.addEventListener(
+        "abort",
+        () =>
+          resolve(
+            refreshFailure(
+              new Error(
+                "The Azure command exhausted its timeout while awaiting credential refresh."
+              ),
+              env
+            )
+          ),
+        { once: true }
+      );
+    });
+    return Promise.race([refreshPromise, timeout]);
   };
 
-  return async (args) => {
+  return async (args, timeoutMs) => {
+    const deadline = timeoutMs === undefined ? undefined : now() + timeoutMs;
     if (oidcRefreshConfigured && now() - refreshedAt >= refreshIntervalMs) {
-      pendingRefresh ??= refresh().finally(() => {
+      // A shared refresh must not inherit the first waiter's budget. Each
+      // caller races this caller-independent renewal against its own deadline.
+      pendingRefresh ??= refresh(now() + COMMAND_TIMEOUT_MS).finally(() => {
         pendingRefresh = undefined;
       });
-      const failure = await pendingRefresh;
+      let failure: CloudCommandResult | null;
+      try {
+        failure = await awaitRefreshBeforeDeadline(pendingRefresh, deadline);
+      } catch (error) {
+        return refreshFailure(error, env);
+      }
       if (failure) return failure;
     }
-    return runCommand(args);
+    try {
+      return await runBeforeDeadline(args, deadline);
+    } catch (error) {
+      return commandFailure(error, env);
+    }
   };
 }
 
@@ -344,11 +443,14 @@ export function createNodeCloudFixturePorts(
               stderr,
               packageEnv.GH_TOKEN
             ),
+          COMMAND_TIMEOUT_MS,
           packageEnv,
           true
         );
       },
-      runGit: (args, cwd) => runTool("git", args, cwd)
+      runGit: (args, cwd) => runTool("git", args, cwd),
+      runKubectl: (args, timeoutMs) =>
+        runTool("kubectl", args, undefined, normalizeCommandResult, timeoutMs)
     },
     makeWorkspaceDir: (prefix) =>
       fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`)),
@@ -460,7 +562,37 @@ export function parseJsonArray(
 
 function describeJsonKind(value: unknown): string {
   if (value === null) return "null";
+  if (Array.isArray(value)) return "a JSON array";
   return `a JSON ${typeof value}`;
+}
+
+/**
+ * Parses a successful command's stdout as a JSON object.
+ *
+ * Empty, malformed, and non-object output fail closed because an empty object
+ * could otherwise be mistaken for a successfully deleted cluster workload.
+ */
+export function parseJsonObject(
+  result: CloudCommandResult,
+  context: string
+): Record<string, unknown> {
+  expectSuccess(result, context);
+  const text = result.stdout.trim();
+  if (!text) throw new Error(`${context} returned no output to parse as JSON.`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(
+      `${context} returned output that is not valid JSON: ${describeError(error)}`,
+      { cause: error }
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error(
+      `${context} returned ${describeJsonKind(parsed)} where a JSON object was expected.`
+    );
+  return parsed as Record<string, unknown>;
 }
 
 /**

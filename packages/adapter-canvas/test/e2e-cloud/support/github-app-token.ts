@@ -1,4 +1,5 @@
 import { sign } from "node:crypto";
+import { CLOUD_MINIMUM_REFRESHED_TOKEN_LIFETIME_MS } from "./cloud-timeout-budget.js";
 
 export interface GitHubAppTokenConfig {
   readonly clientId: string;
@@ -157,7 +158,8 @@ export async function mintGitHubAppToken(
     token.trim() === "" ||
     typeof expiresAt !== "string" ||
     !Number.isFinite(Date.parse(expiresAt)) ||
-    Date.parse(expiresAt) <= ports.now().getTime()
+    Date.parse(expiresAt) - ports.now().getTime() <
+      CLOUD_MINIMUM_REFRESHED_TOKEN_LIFETIME_MS
   )
     throw new Error(
       "GitHub App token refresh returned no usable unexpired token."
