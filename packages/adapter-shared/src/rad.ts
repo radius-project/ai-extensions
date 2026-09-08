@@ -40,6 +40,7 @@ import {
   killChildTree,
   managedBicepEnv as processManagedBicepEnv,
   RadProcessError,
+  radSpawnOptions,
   spawnRad
 } from "./rad-process.mjs";
 import type { ProcessResult, SpawnRadOptions } from "./rad-process.mjs";
@@ -435,14 +436,9 @@ export function radBinaryVersion(
   return new Promise((resolve) => {
     let child: ChildProcess;
     try {
-      // Keep rad outside the parent job/process group on every platform. Some
-      // Windows rad builds wedge when inherited into the host group; windowsHide
-      // suppresses the detached child's console window.
       child = spawn(radPath, ["version", "--cli", "--output", "json"], {
         env: managedBicepEnv(process.env),
-        stdio: ["ignore", "pipe", "ignore"],
-        windowsHide: true,
-        detached: true
+        ...radSpawnOptions()
       });
     } catch {
       resolve(null);
@@ -465,6 +461,7 @@ export function radBinaryVersion(
     child.stdout?.on("data", (c: Buffer) => {
       if (stdout.length < 1024 * 1024) stdout += c.toString();
     });
+    child.stderr?.resume();
     child.on("error", () => finish(null));
     child.on("close", (code) => {
       if (code !== 0) {
@@ -1190,13 +1187,10 @@ export async function runRadAppGraph(
           cwd,
           // Clear GITHUB_ACTIONS so rad writes app-graph.json locally instead of
           // committing to the radius-graph orphan branch. stdin is ignored so rad
-          // never blocks waiting for interactive input. Detaching preserves the
-          // process-group isolation required by Windows rad builds; windowsHide
-          // prevents that isolated process from opening a console window.
+          // never blocks waiting for interactive input. Windows remains in the
+          // caller's Job Object; POSIX uses a process group for tree cleanup.
           env: { ...process.env, ...managedBicepEnv(), GITHUB_ACTIONS: "" },
-          stdio: ["ignore", "pipe", "pipe"],
-          windowsHide: true,
-          detached: true
+          ...radSpawnOptions(processPlatform)
         }
       );
 
@@ -1222,7 +1216,7 @@ export async function runRadAppGraph(
         settled = true;
         if (graceTimer) clearTimeout(graceTimer);
         if (artifactTimer) clearInterval(artifactTimer);
-        killChildTree(child);
+        killChildTree(child, processPlatform);
         reject(
           new RadProcessError(
             `rad app graph timed out after ${timeout}ms`,
@@ -1291,7 +1285,7 @@ export async function runRadAppGraph(
             return;
           }
           complete();
-          killChildTree(child);
+          killChildTree(child, processPlatform);
           resolve();
         }, artifactPollIntervalMs);
       }
