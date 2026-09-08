@@ -98,6 +98,89 @@ function requireObject(value, context) {
   return value;
 }
 
+function isAsciiDigit(character) {
+  return character >= "0" && character <= "9";
+}
+
+function isAsciiLetter(character) {
+  return (
+    (character >= "A" && character <= "Z") ||
+    (character >= "a" && character <= "z")
+  );
+}
+
+function isNumericIdentifier(value) {
+  return (
+    value.length > 0 &&
+    [...value].every(isAsciiDigit) &&
+    (value === "0" || !value.startsWith("0"))
+  );
+}
+
+function hasOnlySemverCharacters(value) {
+  return (
+    value.length > 0 &&
+    [...value].every(
+      (character) =>
+        isAsciiDigit(character) || isAsciiLetter(character) || character === "-"
+    )
+  );
+}
+
+function isPrereleaseIdentifier(value) {
+  return (
+    hasOnlySemverCharacters(value) &&
+    (![...value].every(isAsciiDigit) || isNumericIdentifier(value))
+  );
+}
+
+function hasValidIdentifiers(value, validate) {
+  return value.split(".").every(validate);
+}
+
+function parseRadiusRelease(release) {
+  const buildParts = release.split("+");
+  const [version, buildMetadata] = buildParts;
+  if (
+    buildParts.length > 2 ||
+    (buildMetadata !== undefined &&
+      !hasValidIdentifiers(buildMetadata, hasOnlySemverCharacters))
+  ) {
+    return undefined;
+  }
+
+  const prereleaseAt = version.indexOf("-");
+  const core = prereleaseAt === -1 ? version : version.slice(0, prereleaseAt);
+  const prerelease =
+    prereleaseAt === -1 ? undefined : version.slice(prereleaseAt + 1);
+  const coreParts = core.split(".");
+  if (coreParts.length !== 3 || !coreParts.every(isNumericIdentifier)) {
+    return undefined;
+  }
+  if (
+    prerelease !== undefined &&
+    !hasValidIdentifiers(prerelease, isPrereleaseIdentifier)
+  ) {
+    return undefined;
+  }
+  // Prerelease channels are published verbatim, but OCI tags cannot contain
+  // the "+" separator that introduces build metadata.
+  if (prerelease !== undefined && buildMetadata !== undefined) return undefined;
+
+  return {
+    major: coreParts[0],
+    minor: coreParts[1],
+    patch: coreParts[2],
+    prerelease
+  };
+}
+
+function isPullRequestRelease(release) {
+  if (!release.startsWith("pr-")) return false;
+  const number = release.slice(3);
+  return number !== "0" && isNumericIdentifier(number);
+}
+
 export function parseResourceSelector(value) {
   const match =
     /^(Radius(?:\.[A-Za-z][A-Za-z0-9]*)+)\/([A-Za-z][A-Za-z0-9]*)(?:@([A-Za-z0-9][A-Za-z0-9.-]*))?$/u.exec(
@@ -143,17 +226,21 @@ function parseArguments(args) {
   return { help: false, stagingDir, selectors };
 }
 
-export function deriveExtensionReference(version) {
-  const match =
-    /^v?(\d+)\.(\d+)\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.exec(
-      typeof version === "string" ? version.trim() : ""
-    );
-  if (match === null) {
-    throw new Error(
-      `Unsupported Radius version "${version ?? ""}". Do not replace or modify the configured Radius CLI; report this error and stop modeling.`
-    );
+export function deriveExtensionReference(release) {
+  const normalized = typeof release === "string" ? release.trim() : "";
+  if (normalized === "edge" || isPullRequestRelease(normalized)) {
+    return "br:biceptypes.azurecr.io/radius:latest";
   }
-  return `br:biceptypes.azurecr.io/radius:${match[1]}.${match[2]}`;
+  const version = parseRadiusRelease(normalized);
+  if (version !== undefined) {
+    if (version.prerelease !== undefined) {
+      return `br:biceptypes.azurecr.io/radius:${version.major}.${version.minor}.${version.patch}-${version.prerelease}`;
+    }
+    return `br:biceptypes.azurecr.io/radius:${version.major}.${version.minor}`;
+  }
+  throw new Error(
+    `Unsupported Radius release "${release ?? ""}". Do not replace or modify the configured Radius CLI; report this error and stop modeling.`
+  );
 }
 
 export function parseRadiusIdentity(output) {
@@ -164,13 +251,13 @@ export function parseRadiusIdentity(output) {
     throw new Error("Managed Radius returned invalid version JSON.");
   }
   requireObject(parsed, "Managed Radius version JSON");
-  if (typeof parsed.version !== "string" || parsed.version.trim() === "") {
-    throw new Error('Managed Radius version JSON is missing "version".');
+  if (typeof parsed.release !== "string" || parsed.release.trim() === "") {
+    throw new Error('Managed Radius version JSON is missing "release".');
   }
   if (typeof parsed.commit !== "string" || parsed.commit.trim() === "") {
     throw new Error('Managed Radius version JSON is missing "commit".');
   }
-  const version = parsed.version.trim();
+  const release = parsed.release.trim();
   const commit = parsed.commit.trim();
   if (!/^[0-9a-f]{40}$/iu.test(commit)) {
     throw new Error(
@@ -179,7 +266,7 @@ export function parseRadiusIdentity(output) {
   }
   return {
     commit: commit.toLowerCase(),
-    extension: deriveExtensionReference(version)
+    extension: deriveExtensionReference(release)
   };
 }
 
