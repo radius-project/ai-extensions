@@ -55,6 +55,10 @@ export interface JourneyGateInput {
   readonly subscriptionId?: string;
   /** `GH_TOKEN`. */
   readonly githubToken?: string;
+  /** `CLOUD_E2E_BOT_CLIENT_ID`. */
+  readonly githubAppClientId?: string;
+  /** `CLOUD_E2E_BOT_PRIVATE_KEY`. */
+  readonly githubAppPrivateKey?: string;
 }
 
 function isSet(value: string | undefined): boolean {
@@ -97,6 +101,20 @@ export function evaluateCreateEnvironmentGate(
       disposition: "fail",
       reason:
         "GH_TOKEN is not set; the cloud harness needs a token for the fixture repository."
+    };
+  if (!isSet(input.githubAppClientId))
+    return {
+      enabled: false,
+      disposition: "fail",
+      reason:
+        "CLOUD_E2E_BOT_CLIENT_ID is not set; the journey cannot renew its GitHub App token between lifecycle stages."
+    };
+  if (!isSet(input.githubAppPrivateKey))
+    return {
+      enabled: false,
+      disposition: "fail",
+      reason:
+        "CLOUD_E2E_BOT_PRIVATE_KEY is not set; the journey cannot renew its GitHub App token between lifecycle stages."
     };
   return { enabled: true };
 }
