@@ -385,7 +385,11 @@ import {
 } from "./server/services/recovered-cleanup-command.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
-import { runEnvironmentDeletion } from "./server/services/environment-deletion.js";
+import {
+  runEnvironmentDeletion,
+  statePackageDeletionFailureMessage,
+  type EnvironmentDeletionPorts
+} from "./server/services/environment-deletion.js";
 import { createStatePackageDeletion } from "./server/services/state-package-deletion.js";
 import {
   recordCredentialProvenance,
@@ -1768,7 +1772,8 @@ const canvasServer = createCanvasServer(
     createRequestHandler: ({ instanceId, instances, markActivity }) => {
       const coordinator = createInstanceRequestCoordinator(
         instanceId,
-        () => instances.get(instanceId)?.baseUrl || ""
+        () => instances.get(instanceId)?.baseUrl || "",
+        productionEnvironmentDeletionPorts()
       );
       instanceRequestCoordinators.set(instanceId, coordinator);
       return createScaffoldRequestHandler({
@@ -2303,7 +2308,7 @@ export function setOpenSourceHandler(fn: OpenSourceHandler): void {
 // need the Copilot session to take an out-of-band action (for example, kicking
 // off Azure CLI login or install guidance) delegate through this hook.
 let sessionPromptHandler: SessionPromptHandler | null = null;
-export function setSessionPromptHandler(fn: SessionPromptHandler): void {
+export function setSessionPromptHandler(fn: SessionPromptHandler | null): void {
   sessionPromptHandler = fn;
 }
 
@@ -5513,9 +5518,81 @@ function preRouteCanvasRequest(context: CanvasRequestContext): boolean {
   return false;
 }
 
-function createInstanceRequestCoordinator(
+export type EnvironmentDeletionCoordinatorPorts = Omit<
+  EnvironmentDeletionPorts,
+  "reportStatePackageDeletionFailure"
+>;
+
+function productionEnvironmentDeletionPorts(): EnvironmentDeletionCoordinatorPorts {
+  return {
+    deleteRadiusEnvironment: (input, onHeartbeat) =>
+      deleteRadiusEnvironmentViaWorkflow(
+        input.repo,
+        input.environment,
+        onHeartbeat
+      ),
+    runAz: (args) => runCliCommand("az", args),
+    readAzureIdentity: async (clientId) => {
+      const tenant = await runCliCommand("az", [
+        "account",
+        "show",
+        "--query",
+        "tenantId",
+        "-o",
+        "tsv"
+      ]);
+      if (tenant.code !== 0 || !tenant.stdout.trim()) {
+        throw new Error(
+          tenant.stderr || "Could not resolve the active Entra tenant."
+        );
+      }
+      const application = await runCliCommand("az", [
+        "ad",
+        "app",
+        "show",
+        "--id",
+        clientId,
+        "--query",
+        "id",
+        "-o",
+        "tsv"
+      ]);
+      if (application.code !== 0 || !application.stdout.trim()) {
+        throw new Error(
+          application.stderr ||
+            "Could not resolve the App Registration object id."
+        );
+      }
+      return {
+        tenantId: tenant.stdout.trim(),
+        applicationObjectId: application.stdout.trim()
+      };
+    },
+    deleteGitHubEnvironment: (input) =>
+      deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
+    deleteStatePackage: createStatePackageDeletion({
+      stateRegistryForEnvironment,
+      getCredentials: getGhPackageCredentials,
+      deletePackage: deleteGHCRStatePackage,
+      ghCommandPresentation: GH_COMMAND_PRESENTATION
+    }),
+    withCredentialProvenanceLock,
+    readCredentialProvenance: (clientId) =>
+      listCredentialProvenanceForClient(clientId),
+    removeCredentialProvenance: (clientId, credentialId) =>
+      removeCredentialProvenance(clientId, credentialId),
+    clearEnvironmentCredentialProvenance: (repoId, environment) =>
+      clearEnvironmentCredentialProvenance(repoId, environment),
+    persist: () => operations.persist(),
+    errorMessage,
+    log: (message) => console.error(message)
+  };
+}
+
+export function createInstanceRequestCoordinator(
   instanceId: string,
-  resolveBaseUrl: () => string
+  resolveBaseUrl: () => string,
+  environmentDeletionPorts: EnvironmentDeletionCoordinatorPorts
 ) {
   const serverOwnedTasks = new Map<string, Promise<void>>();
   const automaticRecoveryRollbacks = new Set<string>();
@@ -5828,69 +5905,20 @@ function createInstanceRequestCoordinator(
     const op = operations.get(operationId);
     if (!op) return;
     if (op.kind === "delete") {
-      const deleteStatePackage = createStatePackageDeletion({
-        stateRegistryForEnvironment,
-        getCredentials: getGhPackageCredentials,
-        deletePackage: deleteGHCRStatePackage,
-        ghCommandPresentation: GH_COMMAND_PRESENTATION
-      });
       await runEnvironmentDeletion(op, {
-        deleteRadiusEnvironment: (input, onHeartbeat) =>
-          deleteRadiusEnvironmentViaWorkflow(
-            input.repo,
-            input.environment,
-            onHeartbeat
-          ),
-        runAz: (args) => runCliCommand("az", args),
-        readAzureIdentity: async (clientId) => {
-          const tenant = await runCliCommand("az", [
-            "account",
-            "show",
-            "--query",
-            "tenantId",
-            "-o",
-            "tsv"
-          ]);
-          if (tenant.code !== 0 || !tenant.stdout.trim()) {
+        ...environmentDeletionPorts,
+        reportStatePackageDeletionFailure: async (input) => {
+          const result = await invokeSessionPrompt(
+            sessionPromptHandler,
+            statePackageDeletionFailureMessage(input)
+          );
+          if (result.status >= 400) {
             throw new Error(
-              tenant.stderr || "Could not resolve the active Entra tenant."
+              result.error ||
+                "Could not report the GHCR package deletion failure to Copilot chat."
             );
           }
-          const application = await runCliCommand("az", [
-            "ad",
-            "app",
-            "show",
-            "--id",
-            clientId,
-            "--query",
-            "id",
-            "-o",
-            "tsv"
-          ]);
-          if (application.code !== 0 || !application.stdout.trim()) {
-            throw new Error(
-              application.stderr ||
-                "Could not resolve the App Registration object id."
-            );
-          }
-          return {
-            tenantId: tenant.stdout.trim(),
-            applicationObjectId: application.stdout.trim()
-          };
-        },
-        deleteGitHubEnvironment: (input) =>
-          deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
-        deleteStatePackage,
-        withCredentialProvenanceLock,
-        readCredentialProvenance: (clientId) =>
-          listCredentialProvenanceForClient(clientId),
-        removeCredentialProvenance: (clientId, credentialId) =>
-          removeCredentialProvenance(clientId, credentialId),
-        clearEnvironmentCredentialProvenance: (repoId, environment) =>
-          clearEnvironmentCredentialProvenance(repoId, environment),
-        persist: () => operations.persist(),
-        errorMessage,
-        log: (message) => console.error(message)
+        }
       });
       return;
     }
