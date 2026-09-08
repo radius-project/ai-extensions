@@ -19,7 +19,7 @@
 //   stage authenticate as the privileged runner identity and pass.
 import type { CanvasState } from "../../../src/shared.js";
 import { TERMINAL_STATES } from "../../../src/operations.js";
-import { describeError } from "./cloud-command-port.js";
+import { describeError, isGitHubApiNotFound } from "./cloud-command-port.js";
 
 /** The verify workflow the product publishes, named as a stable anchor. */
 export const VERIFY_WORKFLOW_PATH =
@@ -55,6 +55,10 @@ export interface JourneyGateInput {
   readonly subscriptionId?: string;
   /** `GH_TOKEN`. */
   readonly githubToken?: string;
+  /** `CLOUD_E2E_BOT_CLIENT_ID`. */
+  readonly githubAppClientId?: string;
+  /** `CLOUD_E2E_BOT_PRIVATE_KEY`. */
+  readonly githubAppPrivateKey?: string;
 }
 
 function isSet(value: string | undefined): boolean {
@@ -97,6 +101,20 @@ export function evaluateCreateEnvironmentGate(
       disposition: "fail",
       reason:
         "GH_TOKEN is not set; the cloud harness needs a token for the fixture repository."
+    };
+  if (!isSet(input.githubAppClientId))
+    return {
+      enabled: false,
+      disposition: "fail",
+      reason:
+        "CLOUD_E2E_BOT_CLIENT_ID is not set; the journey cannot renew its GitHub App token between lifecycle stages."
+    };
+  if (!isSet(input.githubAppPrivateKey))
+    return {
+      enabled: false,
+      disposition: "fail",
+      reason:
+        "CLOUD_E2E_BOT_PRIVATE_KEY is not set; the journey cannot renew its GitHub App token between lifecycle stages."
     };
   return { enabled: true };
 }
@@ -698,7 +716,7 @@ export function readWorkflowDirectory(
   context: string
 ): string[] {
   if (result.code !== 0) {
-    if (/HTTP 404/i.test(`${result.stderr}\n${result.stdout}`)) return [];
+    if (isGitHubApiNotFound(result)) return [];
     const diagnostic =
       result.stderr.trim() || result.stdout.trim() || "<no output>";
     throw new Error(

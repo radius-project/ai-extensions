@@ -10,7 +10,23 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import cloudConfig from "../../playwright.cloud.config.js";
 import chromiumConfig from "../../playwright.config.js";
+import reliabilityConfig from "../../vitest.reliability.config.js";
 import vitestConfig from "../../vitest.config.js";
+import {
+  CLOUD_HOOK_TEARDOWN_HEADROOM_MS,
+  CLOUD_INSTALLATION_TOKEN_LIFETIME_MS,
+  CLOUD_MINIMUM_REFRESHED_TOKEN_LIFETIME_MS,
+  CLOUD_SUITE_TIMEOUT_MS,
+  CREATE_OPERATION_TIMEOUT_MS,
+  CREATE_TEST_TIMEOUT_MS,
+  DELETE_REFUSAL_TEST_TIMEOUT_MS,
+  DELETE_OPERATION_TIMEOUT_MS,
+  DELETE_POSTCONDITION_TIMEOUT_MS,
+  DELETE_TEST_TIMEOUT_MS,
+  DEPLOYMENT_OPERATION_TIMEOUT_MS,
+  DEPLOYMENT_TEST_TIMEOUT_MS,
+  SERIAL_TEST_TIMEOUT_BUDGET_MS
+} from "./support/cloud-timeout-budget.js";
 
 const packageRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -43,6 +59,34 @@ describe("the cloud Playwright config", () => {
     expect(cloudConfig.timeout).toBeGreaterThan(chromiumTimeout);
     expect(cloudConfig.timeout).toBeGreaterThanOrEqual(30 * 60 * 1000);
     expect(cloudConfig.expect?.timeout).toBeGreaterThan(0);
+  });
+
+  it("keeps serial stages below the suite and credential ceilings", () => {
+    const globalTimeout = cloudConfig.globalTimeout ?? 0;
+
+    expect(CREATE_TEST_TIMEOUT_MS).toBeGreaterThan(CREATE_OPERATION_TIMEOUT_MS);
+    expect(DELETE_TEST_TIMEOUT_MS).toBeGreaterThanOrEqual(
+      DELETE_OPERATION_TIMEOUT_MS + 2 * DELETE_POSTCONDITION_TIMEOUT_MS
+    );
+    expect(DEPLOYMENT_TEST_TIMEOUT_MS).toBeGreaterThan(
+      DEPLOYMENT_OPERATION_TIMEOUT_MS
+    );
+    expect(globalTimeout).toBe(CLOUD_SUITE_TIMEOUT_MS);
+    expect(globalTimeout - SERIAL_TEST_TIMEOUT_BUDGET_MS).toBe(
+      CLOUD_HOOK_TEARDOWN_HEADROOM_MS
+    );
+    expect(
+      Math.max(
+        CREATE_TEST_TIMEOUT_MS,
+        DEPLOYMENT_TEST_TIMEOUT_MS,
+        DELETE_REFUSAL_TEST_TIMEOUT_MS,
+        DELETE_TEST_TIMEOUT_MS,
+        CLOUD_HOOK_TEARDOWN_HEADROOM_MS
+      )
+    ).toBeLessThan(CLOUD_MINIMUM_REFRESHED_TOKEN_LIFETIME_MS);
+    expect(CLOUD_MINIMUM_REFRESHED_TOKEN_LIFETIME_MS).toBeLessThan(
+      CLOUD_INSTALLATION_TOKEN_LIFETIME_MS
+    );
   });
 
   it("keeps its output apart so neither tier erases the other's traces", () => {
@@ -80,6 +124,12 @@ describe("the cloud tier's file sets", () => {
     const include = vitestConfig.test?.include ?? [];
     expect(include).toContain("test/e2e-cloud/**/*.test.ts");
     expect(include.some((pattern) => pattern.includes(".spec.ts"))).toBe(false);
+  });
+
+  it("runs the cloud command and fixture boundary tests in the reliability tier", () => {
+    expect(reliabilityConfig.test?.include).toContain(
+      "test/e2e-cloud/support/{cloud-command-port,cloud-fixture}.test.ts"
+    );
   });
 
   it("leaves the Chromium tier collecting only its own spec", () => {

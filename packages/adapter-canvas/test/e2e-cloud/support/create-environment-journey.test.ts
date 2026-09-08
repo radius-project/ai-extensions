@@ -28,7 +28,9 @@ import {
 
 const PROVISIONED = {
   fixtureProvisioned: true,
-  unprovisionedReason: "The fixture repository is provisioned."
+  unprovisionedReason: "The fixture repository is provisioned.",
+  githubAppClientId: "Iv1.example",
+  githubAppPrivateKey: "private-key"
 };
 
 async function captureError(work: Promise<unknown>): Promise<Error> {
@@ -104,6 +106,21 @@ describe("evaluateCreateEnvironmentGate", () => {
     });
     expect(gate.enabled === false && gate.disposition).toBe("fail");
     expect(gate.enabled === false && gate.reason).toContain("GH_TOKEN");
+  });
+
+  it.each([
+    ["client ID", { githubAppClientId: " " }, "CLOUD_E2E_BOT_CLIENT_ID"],
+    ["private key", { githubAppPrivateKey: "" }, "CLOUD_E2E_BOT_PRIVATE_KEY"]
+  ])("fails preflight without the GitHub App %s", (_label, patch, variable) => {
+    const gate = evaluateCreateEnvironmentGate({
+      cloudE2eFlag: "1",
+      ...PROVISIONED,
+      subscriptionId: "sub-1",
+      githubToken: "ghs_token",
+      ...patch
+    });
+    expect(gate.enabled === false && gate.disposition).toBe("fail");
+    expect(gate.enabled === false && gate.reason).toContain(variable);
   });
 });
 
@@ -894,6 +911,21 @@ describe("readWorkflowDirectory", () => {
     expect(
       readWorkflowDirectory({ code: 1, stdout, stderr }, "the workflow listing")
     ).toEqual([]);
+  });
+
+  it("does not read an unrelated Not Found phrase as an absent directory", () => {
+    expect(() =>
+      readWorkflowDirectory(
+        {
+          code: 1,
+          stdout: "",
+          stderr: "Not Found while resolving the configured GitHub host"
+        },
+        "the workflow listing"
+      )
+    ).toThrow(
+      /the workflow listing failed with exit code 1: Not Found while resolving/
+    );
   });
 
   it("raises any other failure instead of reading it as an empty directory", () => {

@@ -1,10 +1,10 @@
 // The seam between the cloud fixture and the outside world.
 //
-// Nothing in `test/e2e-cloud/` calls `execFile` directly. Every `az`, `gh`, and
-// `git` invocation goes through a port, so each branch of the fixture — a
-// missing resource, a failed command, malformed output, a partially built
-// fixture — is provable on a machine with no Azure or GitHub credentials at
-// all. The real run passes `createNodeCloudFixturePorts()`; this is not a
+// Nothing in `test/e2e-cloud/` calls `execFile` directly. Every `az`, `gh`,
+// `git`, and `kubectl` invocation goes through a port, so each branch of the
+// fixture — a missing resource, a failed command, malformed output, a partially
+// built fixture — is provable on a machine with no Azure or GitHub credentials
+// at all. The real run passes `createNodeCloudFixturePorts()`; this is not a
 // test-only hook.
 //
 // The result shape and the "resolve for a non-zero exit rather than reject"
@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { redactCredentials } from "../../../src/credential-redaction.js";
 import { cliExec } from "../../../src/gh.js";
 
 export interface CloudCommandResult {
@@ -32,9 +33,23 @@ export interface CloudCommandResult {
  * absent.
  */
 export interface CloudCommandPort {
-  runAz(args: readonly string[]): Promise<CloudCommandResult>;
+  runAz(
+    args: readonly string[],
+    timeoutMs?: number
+  ): Promise<CloudCommandResult>;
   runGh(args: readonly string[]): Promise<CloudCommandResult>;
+  runGhPackage(args: readonly string[]): Promise<CloudCommandResult>;
   runGit(args: readonly string[], cwd: string): Promise<CloudCommandResult>;
+  /**
+   * Queries a Kubernetes cluster using an explicit kubeconfig argv.
+   *
+   * Requiring callers to pass `--kubeconfig <path>` prevents an inherited
+   * KUBECONFIG from redirecting the journey to a developer's personal cluster.
+   */
+  runKubectl(
+    args: readonly string[],
+    timeoutMs?: number
+  ): Promise<CloudCommandResult>;
 }
 
 export interface CloudFixturePorts {
@@ -52,6 +67,8 @@ export interface CloudFixturePorts {
 
 const COMMAND_TIMEOUT_MS = 15 * 60 * 1000;
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+const AZURE_LOGIN_REFRESH_INTERVAL_MS = 30 * 60 * 1000;
+const AZURE_OIDC_AUDIENCE = "api://AzureADTokenExchange";
 
 // Delegates to the product's own CLI launcher rather than calling `execFile`
 // again here. `cliExec` already solves the Windows problems this would
@@ -63,7 +80,15 @@ const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 function runTool(
   tool: string,
   args: readonly string[],
-  cwd?: string
+  cwd?: string,
+  normalize: (
+    error: { code?: string | number | null } | null,
+    stdout: string | undefined,
+    stderr: string | undefined
+  ) => CloudCommandResult = normalizeCommandResult,
+  timeoutMs = COMMAND_TIMEOUT_MS,
+  env?: NodeJS.ProcessEnv,
+  preserveGitHubToken = false
 ): Promise<CloudCommandResult> {
   return new Promise((resolve) => {
     const child = cliExec(
@@ -71,17 +96,274 @@ function runTool(
       [...args],
       {
         cwd,
-        timeout: COMMAND_TIMEOUT_MS,
+        timeout: timeoutMs,
+        env,
         maxBuffer: MAX_OUTPUT_BYTES,
-        windowsHide: true
+        windowsHide: true,
+        preserveGitHubToken
       },
-      (error, stdout, stderr) =>
-        resolve(normalizeCommandResult(error, stdout, stderr))
+      (error, stdout, stderr) => resolve(normalize(error, stdout, stderr))
     );
     // Nothing the fixture runs reads stdin, and an inherited stdin would let a
     // credential prompt hang the run instead of failing it.
     child.stdin?.end();
   });
+}
+
+type RunAzureCommand = (
+  args: readonly string[],
+  timeoutMs?: number
+) => Promise<CloudCommandResult>;
+
+export interface AzureCommandRefreshOptions {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly fetch?: typeof fetch;
+  readonly now?: () => number;
+  readonly refreshIntervalMs?: number;
+  readonly runCommand?: RunAzureCommand;
+}
+
+function refreshFailure(
+  error: unknown,
+  env: NodeJS.ProcessEnv
+): CloudCommandResult {
+  return {
+    code: 1,
+    stdout: "",
+    stderr: `Azure OIDC login refresh failed: ${redactAzureCredentials(
+      describeError(error),
+      env
+    )}`
+  };
+}
+
+function commandFailure(
+  error: unknown,
+  env: NodeJS.ProcessEnv
+): CloudCommandResult {
+  return {
+    code: 1,
+    stdout: "",
+    stderr: `Azure command failed: ${redactAzureCredentials(
+      describeError(error),
+      env
+    )}`
+  };
+}
+
+async function requestAzureIdentityAssertion(
+  env: NodeJS.ProcessEnv,
+  fetchImpl: typeof fetch,
+  timeoutMs?: number
+): Promise<string> {
+  const requestUrl = env.ACTIONS_ID_TOKEN_REQUEST_URL?.trim();
+  const requestToken = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN?.trim();
+  if (!requestUrl || !requestToken)
+    throw new Error(
+      "GitHub Actions did not provide the OIDC request URL and token."
+    );
+
+  const url = new URL(requestUrl);
+  url.searchParams.set("audience", AZURE_OIDC_AUDIENCE);
+  const response = await fetchImpl(url, {
+    headers: { Authorization: `bearer ${requestToken}` },
+    signal: AbortSignal.timeout(Math.min(timeoutMs ?? 20_000, 20_000))
+  });
+  if (!response.ok)
+    throw new Error(
+      `GitHub OIDC assertion request returned HTTP ${response.status}.`
+    );
+
+  const payload: unknown = await response.json();
+  const assertion =
+    (
+      typeof payload === "object" &&
+      payload !== null &&
+      "value" in payload &&
+      typeof payload.value === "string"
+    ) ?
+      payload.value.trim()
+    : "";
+  if (!assertion)
+    throw new Error("GitHub OIDC assertion response did not contain a token.");
+  return assertion;
+}
+
+export function createRefreshingAzureCommandRunner(
+  options: AzureCommandRefreshOptions = {}
+): RunAzureCommand {
+  const env = options.env ?? process.env;
+  const fetchImpl = options.fetch ?? fetch;
+  const now = options.now ?? Date.now;
+  const refreshIntervalMs =
+    options.refreshIntervalMs ?? AZURE_LOGIN_REFRESH_INTERVAL_MS;
+  if (!Number.isFinite(refreshIntervalMs) || refreshIntervalMs <= 0)
+    throw new Error(
+      "Azure login refresh interval must be positive and finite."
+    );
+  const runCommand =
+    options.runCommand ??
+    ((args, timeoutMs) =>
+      runTool(
+        "az",
+        args,
+        undefined,
+        (error, stdout, stderr) =>
+          normalizeAzureCommandResult(error, stdout, stderr, env),
+        timeoutMs
+      ));
+  const oidcRefreshConfigured = Boolean(
+    env.ACTIONS_ID_TOKEN_REQUEST_URL?.trim() ||
+    env.ACTIONS_ID_TOKEN_REQUEST_TOKEN?.trim()
+  );
+  let refreshedAt = now();
+  let pendingRefresh: Promise<CloudCommandResult | null> | undefined;
+
+  const remainingTimeout = (
+    deadline: number | undefined
+  ): number | undefined => {
+    if (deadline === undefined) return undefined;
+    const remaining = deadline - now();
+    if (remaining <= 0)
+      throw new Error(
+        "The Azure command exhausted its timeout while refreshing credentials."
+      );
+    return remaining;
+  };
+  const runBeforeDeadline = (
+    args: readonly string[],
+    deadline: number | undefined
+  ): Promise<CloudCommandResult> => {
+    const remaining = remainingTimeout(deadline);
+    return remaining === undefined ?
+        runCommand(args)
+      : runCommand(args, remaining);
+  };
+
+  const refresh = async (
+    deadline: number | undefined
+  ): Promise<CloudCommandResult | null> => {
+    const clientId = env.AZURE_CLIENT_ID?.trim();
+    const tenantId = env.AZURE_TENANT_ID?.trim();
+    const subscriptionId = env.AZURE_SUBSCRIPTION_ID?.trim();
+    if (!clientId || !tenantId || !subscriptionId)
+      return refreshFailure(
+        new Error(
+          "AZURE_CLIENT_ID, AZURE_TENANT_ID, and AZURE_SUBSCRIPTION_ID are required."
+        ),
+        env
+      );
+
+    try {
+      const assertion = await requestAzureIdentityAssertion(
+        env,
+        fetchImpl,
+        remainingTimeout(deadline)
+      );
+      const login = await runBeforeDeadline(
+        [
+          "login",
+          "--service-principal",
+          "--username",
+          clientId,
+          "--tenant",
+          tenantId,
+          "--federated-token",
+          assertion,
+          "--output",
+          "none"
+        ],
+        deadline
+      );
+      if (login.code !== 0) return login;
+      const select = await runBeforeDeadline(
+        ["account", "set", "--subscription", subscriptionId],
+        deadline
+      );
+      if (select.code !== 0) return select;
+      refreshedAt = now();
+      return null;
+    } catch (error) {
+      return refreshFailure(error, env);
+    }
+  };
+  const awaitRefreshBeforeDeadline = (
+    refreshPromise: Promise<CloudCommandResult | null>,
+    deadline: number | undefined
+  ): Promise<CloudCommandResult | null> => {
+    const remaining = remainingTimeout(deadline);
+    if (remaining === undefined) return refreshPromise;
+    const signal = AbortSignal.timeout(remaining);
+    const timeout = new Promise<CloudCommandResult>((resolve) => {
+      signal.addEventListener(
+        "abort",
+        () =>
+          resolve(
+            refreshFailure(
+              new Error(
+                "The Azure command exhausted its timeout while awaiting credential refresh."
+              ),
+              env
+            )
+          ),
+        { once: true }
+      );
+    });
+    return Promise.race([refreshPromise, timeout]);
+  };
+
+  return async (args, timeoutMs) => {
+    const deadline = timeoutMs === undefined ? undefined : now() + timeoutMs;
+    if (oidcRefreshConfigured && now() - refreshedAt >= refreshIntervalMs) {
+      // A shared refresh must not inherit the first waiter's budget. Each
+      // caller races this caller-independent renewal against its own deadline.
+      pendingRefresh ??= refresh(now() + COMMAND_TIMEOUT_MS).finally(() => {
+        pendingRefresh = undefined;
+      });
+      let failure: CloudCommandResult | null;
+      try {
+        failure = await awaitRefreshBeforeDeadline(pendingRefresh, deadline);
+      } catch (error) {
+        return refreshFailure(error, env);
+      }
+      if (failure) return failure;
+    }
+    try {
+      return await runBeforeDeadline(args, deadline);
+    } catch (error) {
+      return commandFailure(error, env);
+    }
+  };
+}
+
+export function redactAzureCredentials(
+  value: string,
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  return redactCredentials(value, [
+    env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
+    env.ARM_ACCESS_TOKEN,
+    env.ARM_CLIENT_SECRET,
+    env.ARM_OIDC_TOKEN,
+    env.AZURE_ACCESS_TOKEN,
+    env.AZURE_CLIENT_SECRET,
+    env.AZURE_FEDERATED_TOKEN,
+    env.AZURE_PASSWORD
+  ]);
+}
+
+export function normalizeAzureCommandResult(
+  error: { code?: string | number | null } | null,
+  stdout: string | undefined,
+  stderr: string | undefined,
+  env: NodeJS.ProcessEnv = process.env
+): CloudCommandResult {
+  const result = normalizeCommandResult(error, stdout, stderr);
+  return {
+    ...result,
+    stdout: redactAzureCredentials(result.stdout, env),
+    stderr: redactAzureCredentials(result.stderr, env)
+  };
 }
 
 /**
@@ -110,16 +392,65 @@ export function normalizeCommandResult(
 }
 
 /**
+ * Whether a failed `gh api` call carries GitHub CLI's HTTP 404 diagnostic.
+ *
+ * A bare "Not Found" is not enough: DNS, configuration, and wrapper failures
+ * can contain those words without proving that GitHub answered for the
+ * requested resource. Successful commands cannot report absence either, even
+ * when their response body happens to mention an earlier HTTP 404.
+ */
+export function isGitHubApiNotFound(result: CloudCommandResult): boolean {
+  if (result.code === 0) return false;
+  return `${result.stderr}\n${result.stdout}`
+    .split(/\r?\n/)
+    .some((line) =>
+      /^(?:gh:\s.*\(HTTP 404\)|HTTP 404(?::.*)?)$/i.test(line.trim())
+    );
+}
+
+/**
  * The production wiring. Deliberately branch-free: it holds no fixture logic,
  * so the code a credentialed run exercises but this suite cannot is as small as
  * it can be made.
  */
-export function createNodeCloudFixturePorts(): CloudFixturePorts {
+export function createNodeCloudFixturePorts(
+  options: { readonly packageToken?: string } = {}
+): CloudFixturePorts {
+  const runAz = createRefreshingAzureCommandRunner();
+  const packageEnv = createGitHubPackageCommandEnvironment(
+    options.packageToken
+  );
   return {
     commands: {
-      runAz: (args) => runTool("az", args),
+      runAz,
       runGh: (args) => runTool("gh", args),
-      runGit: (args, cwd) => runTool("git", args, cwd)
+      runGhPackage: (args) => {
+        if (!packageEnv)
+          return Promise.resolve({
+            code: 1,
+            stdout: "",
+            stderr:
+              "GH_PACKAGES_TOKEN is required for cloud fixture package operations."
+          });
+        return runTool(
+          "gh",
+          args,
+          undefined,
+          (error, stdout, stderr) =>
+            normalizeGitHubPackageCommandResult(
+              error,
+              stdout,
+              stderr,
+              packageEnv.GH_TOKEN
+            ),
+          COMMAND_TIMEOUT_MS,
+          packageEnv,
+          true
+        );
+      },
+      runGit: (args, cwd) => runTool("git", args, cwd),
+      runKubectl: (args, timeoutMs) =>
+        runTool("kubectl", args, undefined, normalizeCommandResult, timeoutMs)
     },
     makeWorkspaceDir: (prefix) =>
       fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`)),
@@ -128,6 +459,38 @@ export function createNodeCloudFixturePorts(): CloudFixturePorts {
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     now: () => new Date(),
     newUniqueId: () => randomUUID()
+  };
+}
+
+export function createGitHubPackageCommandEnvironment(
+  packageToken: string | undefined,
+  env: NodeJS.ProcessEnv = process.env
+):
+  | (NodeJS.ProcessEnv & {
+      readonly GH_TOKEN: string;
+      readonly GITHUB_TOKEN: string;
+    })
+  | null {
+  const token = packageToken?.trim();
+  if (!token) return null;
+  return {
+    ...env,
+    GH_TOKEN: token,
+    GITHUB_TOKEN: token
+  };
+}
+
+export function normalizeGitHubPackageCommandResult(
+  error: { code?: string | number | null } | null,
+  stdout: string | undefined,
+  stderr: string | undefined,
+  packageToken: string
+): CloudCommandResult {
+  const result = normalizeCommandResult(error, stdout, stderr);
+  return {
+    ...result,
+    stdout: redactCredentials(result.stdout, [packageToken]),
+    stderr: redactCredentials(result.stderr, [packageToken])
   };
 }
 
@@ -199,7 +562,37 @@ export function parseJsonArray(
 
 function describeJsonKind(value: unknown): string {
   if (value === null) return "null";
+  if (Array.isArray(value)) return "a JSON array";
   return `a JSON ${typeof value}`;
+}
+
+/**
+ * Parses a successful command's stdout as a JSON object.
+ *
+ * Empty, malformed, and non-object output fail closed because an empty object
+ * could otherwise be mistaken for a successfully deleted cluster workload.
+ */
+export function parseJsonObject(
+  result: CloudCommandResult,
+  context: string
+): Record<string, unknown> {
+  expectSuccess(result, context);
+  const text = result.stdout.trim();
+  if (!text) throw new Error(`${context} returned no output to parse as JSON.`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new Error(
+      `${context} returned output that is not valid JSON: ${describeError(error)}`,
+      { cause: error }
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error(
+      `${context} returned ${describeJsonKind(parsed)} where a JSON object was expected.`
+    );
+  return parsed as Record<string, unknown>;
 }
 
 /**

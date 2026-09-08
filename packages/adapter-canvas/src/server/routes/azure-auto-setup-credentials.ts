@@ -1182,8 +1182,8 @@ export async function configureAzureAutoSetupCredentials({
     steps.push(
       "⚠️ Could not assign the AKS RBAC Cluster Admin role automatically. " +
         'If your cluster uses Azure RBAC for Kubernetes (the default for AKS Automatic) the deploy will fail at "Verify AKS Access". ' +
-        `Grant it manually: az role assignment create --assignee-object-id ${servicePrincipalObjectId} --assignee-principal-type ServicePrincipal --role "Azure Kubernetes Service RBAC Cluster Admin" --scope ${clusterScope}. ` +
-        "Details: " +
+        `Grant it manually: az role assignment create --assignee-object-id ${servicePrincipalObjectId} --assignee-principal-type ServicePrincipal --role "Azure Kubernetes Service RBAC Cluster Admin" --scope ${clusterScope}` +
+        "\nDetails: " +
         clusterRole.stderr
     );
   }
@@ -1191,6 +1191,67 @@ export async function configureAzureAutoSetupCredentials({
     await fail(
       409,
       "Radius reconciled the interrupted AKS role assignment and must delete the setup resources before setup can complete.",
+      "provider-rollback-pending",
+      { steps, clientId, appName }
+    );
+    return false;
+  }
+
+  // Contributor cannot manage Microsoft.Authorization/locks. Locks Contributor
+  // (28bf596f-4eb7-45ce-b5bc-6cf482fec137) grants only the lock read, write, and
+  // delete actions needed by recipes that create CanNotDelete locks.
+  //
+  // Best-effort and non-fatal, like the AKS cluster role: the operator may not
+  // be allowed to create role assignments, and applications that never request
+  // a lock work without this role.
+  const locksContributorAssignmentId = deterministicProviderUuid(
+    `${operation.operationId}\0${servicePrincipalObjectId}\0Locks Contributor\0${contributorScope}`
+  );
+  steps.push(
+    `Assigning Locks Contributor on ${resourceGroup} for applications that manage resource locks...`
+  );
+  const locksContributor = await assignRole(
+    {
+      objectId: servicePrincipalObjectId,
+      assignmentId: locksContributorAssignmentId,
+      role: "Locks Contributor",
+      scope: contributorScope,
+      subscriptionId
+    },
+    operation,
+    dependencies.operations.persist,
+    runAz,
+    dependencies.sleep,
+    stopBoundary
+  );
+  if (locksContributor.ok) {
+    steps.push("✅ Locks Contributor role assigned");
+    if (locksContributor.created) {
+      dependencies.operations.recordCreatedRoleAssignment(operation, {
+        assignmentId: locksContributorAssignmentId,
+        role: "Locks Contributor",
+        scope: contributorScope,
+        principalObjectId: servicePrincipalObjectId
+      });
+      if (!(await checkpoint("after-role-assignment:Locks Contributor")))
+        return false;
+    }
+  } else if (locksContributor.stopped) {
+    return false;
+  } else {
+    steps.push(
+      "⚠️ Could not assign the Locks Contributor role automatically. " +
+        "Applications whose recipes set a resource lock will fail to deploy, and " +
+        'existing locked resources will fail to delete with "AuthorizationFailed". ' +
+        `Grant the least-privilege role manually: az role assignment create --assignee-object-id ${servicePrincipalObjectId} --assignee-principal-type ServicePrincipal --role "Locks Contributor" --scope ${contributorScope}` +
+        "\nDetails: " +
+        locksContributor.stderr
+    );
+  }
+  if (isRollbackPending(operation)) {
+    await fail(
+      409,
+      "Radius reconciled the interrupted Locks Contributor role assignment and must delete the setup resources before setup can complete.",
       "provider-rollback-pending",
       { steps, clientId, appName }
     );

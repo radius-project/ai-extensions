@@ -27,6 +27,8 @@ interface LoadGhOptions {
   keyring?: string;
   token?: string | null;
   githubToken?: string | null;
+  packagesToken?: string | null;
+  packagesUser?: string | null;
   userTokens?: Record<string, string>;
   userTokenErrors?: Record<string, Error>;
   apiLogin?: string;
@@ -184,6 +186,8 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
     keyring = "",
     token = null,
     githubToken,
+    packagesToken,
+    packagesUser,
     userTokens = {},
     userTokenErrors = {},
     apiLogin = "",
@@ -200,6 +204,12 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
   }
   if (githubToken === null) delete process.env.GITHUB_TOKEN;
   else if (githubToken !== undefined) process.env.GITHUB_TOKEN = githubToken;
+  if (packagesToken === null || packagesToken === undefined)
+    delete process.env.GH_PACKAGES_TOKEN;
+  else process.env.GH_PACKAGES_TOKEN = packagesToken;
+  if (packagesUser === null || packagesUser === undefined)
+    delete process.env.GH_PACKAGES_USER;
+  else process.env.GH_PACKAGES_USER = packagesUser;
   // The identity layer now drives `gh auth status` and `gh auth token` through
   // async execFile (the read-only probes used to be synchronous execFileSync),
   // so one router serves them all.
@@ -305,6 +315,8 @@ describe.sequential("cliExec", () => {
     restorePlatform();
     delete process.env.GH_TOKEN;
     delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_PACKAGES_TOKEN;
+    delete process.env.GH_PACKAGES_USER;
   });
 
   it.each([
@@ -766,6 +778,38 @@ describe.sequential("cliExec", () => {
     const [, , options] = childProcess.execFile.mock.calls[0];
     expect(options.env.GH_TOKEN).toBeUndefined();
     expect(options.env.GITHUB_TOKEN).toBeUndefined();
+  });
+
+  it("preserves an explicitly selected GitHub token when keyring fallback is active", async () => {
+    const { cliExec } = await loadGh("win32", {
+      prime: true,
+      token: "ambient-gh",
+      withToken: STATUS.tokenNoWorkflow,
+      keyring: STATUS.keyringWithWorkflow
+    });
+    const callback = vi.fn();
+
+    cliExec(
+      "gh",
+      ["api", "user"],
+      {
+        env: {
+          GH_TOKEN: "dedicated-token",
+          GITHUB_TOKEN: "dedicated-token"
+        },
+        preserveGitHubToken: true
+      },
+      callback
+    );
+
+    const [, , options] = childProcess.execFile.mock.calls[0];
+    expect(options).not.toHaveProperty("preserveGitHubToken");
+    expect(options.env).toEqual(
+      expect.objectContaining({
+        GH_TOKEN: "dedicated-token",
+        GITHUB_TOKEN: "dedicated-token"
+      })
+    );
   });
 
   it("keeps ambient GitHub tokens when the injected token already has workflow (even with a keyring login)", async () => {
@@ -1274,10 +1318,13 @@ describe("GitHub diagnostic redaction", () => {
     const { redactGhCredentials } = await import("./gh.js");
     expect(
       redactGhCredentials(
-        "gh failed with placeholder-token and ghp_fixture_secret",
-        { GH_TOKEN: "  placeholder-token  " }
+        "gh failed with placeholder-token, package-token, and ghp_fixture_secret",
+        {
+          GH_TOKEN: "  placeholder-token  ",
+          GH_PACKAGES_TOKEN: "package-token"
+        }
       )
-    ).toBe("gh failed with [REDACTED] and [REDACTED]");
+    ).toBe("gh failed with [REDACTED], [REDACTED], and [REDACTED]");
   });
 
   it("does not replace incidental text matching a short injected value", async () => {
@@ -1325,6 +1372,8 @@ describe.sequential("selected GitHub executor", () => {
     delete process.env.GH_TOKEN;
     delete process.env.GITHUB_TOKEN;
     delete process.env.GH_HOST;
+    delete process.env.GH_PACKAGES_TOKEN;
+    delete process.env.GH_PACKAGES_USER;
   });
 
   it("pins the injected credential after removing ambient alternatives", async () => {
@@ -1676,6 +1725,8 @@ describe.sequential("getGitHubIdentity", () => {
     restorePlatform();
     delete process.env.GH_TOKEN;
     delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_PACKAGES_TOKEN;
+    delete process.env.GH_PACKAGES_USER;
   });
 
   it("reports acting == display with no mismatch when the token keeps its identity", async () => {
@@ -1701,11 +1752,31 @@ describe.sequential("getGitHubIdentity", () => {
       withToken: STATUS.tokenWithWorkflow,
       keyring: STATUS.keyringWithWorkflow
     });
+
     const id = await getGitHubIdentity();
     expect(id.actingHasPackages).toBe(false);
     expect(id.packagesHasWrite).toBe(false);
     expect(id.packagesCredentialSource).toBe("injected-token");
     expect(id.accounts.every((a) => a.hasPackages === false)).toBe(true);
+  });
+
+  it("reports package readiness from a dedicated package token", async () => {
+    const { getGitHubIdentity } = await loadGh("linux", {
+      token: "repository-app-token",
+      packagesToken: "workflow-package-token",
+      packagesUser: "github-actions[bot]",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.empty
+    });
+
+    await expect(getGitHubIdentity()).resolves.toMatchObject({
+      actingLogin: "tokuser",
+      actingHasWorkflow: true,
+      actingHasPackages: false,
+      packagesLogin: "github-actions[bot]",
+      packagesHasWrite: true,
+      packagesCredentialSource: "injected-token"
+    });
   });
 
   it("reads the packages scope keyring-first, matching the credential GHCR pushes use", async () => {
@@ -1807,6 +1878,8 @@ describe.sequential("getGhPackageCredentials", () => {
     restorePlatform();
     delete process.env.GH_TOKEN;
     delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_PACKAGES_TOKEN;
+    delete process.env.GH_PACKAGES_USER;
   });
 
   it("uses the acting login's keyring token, not the active (EMU) keyring account", async () => {
@@ -1865,12 +1938,65 @@ describe.sequential("getGhPackageCredentials", () => {
       keyring: STATUS.empty,
       userTokens: {}
     });
+
     expect(await getGhPackageCredentials()).toEqual({
       token: "injected-solo",
       username: "tokuser",
       source: "injected-token",
       scopes: ["repo", "read:org"]
     });
+  });
+
+  it("uses a dedicated package token ahead of keyring and repository tokens", async () => {
+    const { getGhPackageCredentials } = await loadGh("linux", {
+      token: "repository-app-token",
+      packagesToken: "workflow-package-token",
+      packagesUser: "github-actions[bot]",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringPubAndEmu,
+      userTokens: { tokuser: "keyring-token" }
+    });
+
+    await expect(getGhPackageCredentials()).resolves.toEqual({
+      token: "workflow-package-token",
+      username: "github-actions[bot]",
+      source: "injected-token",
+      scopes: ["read:packages", "write:packages", "delete:packages"]
+    });
+    expect(
+      childProcess.execFile.mock.calls.some(
+        ([, args]) => args[0] === "auth" && args[1] === "token"
+      )
+    ).toBe(false);
+  });
+
+  it("uses a self-contained dedicated package credential without a GitHub CLI login", async () => {
+    const { getGhPackageCredentials } = await loadGh("linux", {
+      packagesToken: "workflow-package-token",
+      packagesUser: "workflow-actor",
+      withToken: STATUS.empty,
+      keyring: STATUS.empty
+    });
+
+    await expect(getGhPackageCredentials()).resolves.toMatchObject({
+      token: "workflow-package-token",
+      username: "workflow-actor",
+      source: "injected-token"
+    });
+    expect(childProcess.execFile).not.toHaveBeenCalled();
+  });
+
+  it("rejects a dedicated package token without its owning login", async () => {
+    const { getGhPackageCredentials } = await loadGh("linux", {
+      token: "repository-app-token",
+      packagesToken: "workflow-package-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.empty
+    });
+
+    await expect(getGhPackageCredentials()).rejects.toThrow(
+      "GH_PACKAGES_USER is required"
+    );
   });
 
   it("reports injected credential source when keyring lookup times out", async () => {
