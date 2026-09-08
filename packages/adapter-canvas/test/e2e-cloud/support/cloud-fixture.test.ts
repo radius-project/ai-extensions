@@ -11,6 +11,7 @@ import {
   type FakeCommandStub,
   type FakeFixturePorts
 } from "./fake-cloud-commands.js";
+import { FIXTURE_BASELINE_SHA } from "./fixture-repository.js";
 
 const SUBSCRIPTION = "11111111-2222-3333-4444-555555555555";
 const REPOSITORY = "fixture-owner/fixture-repo";
@@ -512,9 +513,7 @@ describe("createCloudFixture", () => {
 
       expect(fixture.repository).toBe("radius-project/ai-extensions-fixture");
       expect(fixture.defaultBranch).toBe("main");
-      expect(fixture.baselineSha).toBe(
-        "1b9cb3a56ebc52792c0665c2d8497469f65da759"
-      );
+      expect(fixture.baselineSha).toBe(FIXTURE_BASELINE_SHA);
     });
 
     it("rejects a blank subscription id before issuing any command", async () => {

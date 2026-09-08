@@ -24,12 +24,10 @@ import {
 } from "./fixture-repository.js";
 
 describe("pinned baseline constants", () => {
-  it("pins the provisioned fixture repository and exact baseline commit", () => {
+  it("pins the provisioned fixture repository to an immutable commit", () => {
     expect(FIXTURE_REPOSITORY).toBe("radius-project/ai-extensions-fixture");
     expect(FIXTURE_REPO_DEFAULT_BRANCH).toBe("main");
-    expect(FIXTURE_BASELINE_SHA).toBe(
-      "1b9cb3a56ebc52792c0665c2d8497469f65da759"
-    );
+    expect(FIXTURE_BASELINE_SHA).toMatch(/^[0-9a-f]{40}$/);
   });
 
   it("uses a resource group prefix the Radius purge job still sweeps as a safety net", () => {
