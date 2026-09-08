@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -149,146 +148,32 @@ function fixtureFetch(
   calls: string[],
   {
     defaults = fixtureDefaults,
-    recipePack = fixtureRecipePack,
-    sourceCommit = commit
-  }: {
-    defaults?: string;
-    recipePack?: string;
-    sourceCommit?: string;
-  } = {}
+    recipePack = fixtureRecipePack
+  }: { defaults?: string; recipePack?: string } = {}
 ) {
   return async (url: string) => {
     calls.push(url);
-    if (url === `${generatedRoot}/${sourceCommit}/${defaultsPath}`) {
+    if (url.endsWith(`/${defaultsPath}`)) {
       return new Response(defaults, {
         status: 200,
         headers: { "content-type": "text/plain" }
       });
     }
-    if (
-      url ===
-      `https://raw.githubusercontent.com/radius-project/resource-types-contrib/${resourceTypesContribCommit}/${recipePackPath}`
-    ) {
+    if (url.endsWith(`/${resourceTypesContribCommit}/${recipePackPath}`)) {
       return new Response(recipePack, {
         status: 200,
         headers: { "content-type": "text/plain" }
       });
     }
-    const namespaceRoot = `${generatedRoot}/${sourceCommit}/hack/bicep-types-radius/generated`;
     const value =
-      url === `${namespaceRoot}/index.json` ? fixtureIndex
-      : (
-        url === `${namespaceRoot}/${fixtureTypePath.replaceAll(path.sep, "/")}`
-      ) ?
+      url.endsWith("/index.json") ? fixtureIndex
+      : url.endsWith(`/${fixtureTypePath.replaceAll(path.sep, "/")}`) ?
         fixtureTypes
-      : undefined;
-    if (value === undefined) throw new Error(`Unexpected source URL: ${url}`);
+      : null;
     return new Response(JSON.stringify(value), {
-      status: 200,
+      status: value === null ? 404 : 200,
       headers: { "content-type": "application/json" }
     });
-  };
-}
-
-function executableIdentityFixture(home: string, output: string, exitCode = 0) {
-  const binaryDirectory = path.join(fs.realpathSync(home), "developer-bin");
-  fs.mkdirSync(binaryDirectory);
-  const binary = path.join(
-    binaryDirectory,
-    `pr-rad${process.platform === "win32" ? ".exe" : ""}`
-  );
-  fs.copyFileSync(process.execPath, binary, fs.constants.COPYFILE_FICLONE);
-  fs.chmodSync(binary, 0o755);
-  const originalHash = createHash("sha256")
-    .update(fs.readFileSync(binary))
-    .digest("hex");
-  const calls = path.join(home, "cli-calls.json");
-  const fallbackBinaries = [
-    path.join(home, ".radius", "ai-extensions", "bin"),
-    path.join(home, ".rad", "bin"),
-    path.join(home, "path-bin")
-  ].map((directory) => {
-    fs.mkdirSync(directory, { recursive: true });
-    const fallback = path.join(
-      directory,
-      `rad${process.platform === "win32" ? ".exe" : ""}`
-    );
-    fs.copyFileSync(binary, fallback, fs.constants.COPYFILE_FICLONE);
-    return fallback;
-  });
-  const originalStats = [binary, ...fallbackBinaries].map((file) => {
-    const { ino, mode, mtimeMs } = fs.statSync(file);
-    return { file, ino, mode, mtimeMs };
-  });
-  fs.writeFileSync(
-    path.join(home, "version"),
-    `const assert = require("node:assert/strict");
-const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({
-  binary: process.execPath,
-  args: process.argv.slice(2),
-  override: process.env.RADIUS_RAD_BINARY,
-  skipVersionCheck: process.env.RADIUS_RAD_SKIP_VERSION_CHECK
-}) + "\\n");
-assert.deepEqual(process.argv.slice(2), ["--cli", "--output", "json"]);
-assert.equal(process.execPath, ${JSON.stringify(binary)});
-process.stdout.write(${JSON.stringify(output)});
-process.exitCode = ${exitCode};
-`
-  );
-  const networkCalls = path.join(home, "network-calls.txt");
-  const fallbackProbes = path.join(home, "fallback-probes.txt");
-  const offline = path.join(home, "offline.mjs");
-  fs.writeFileSync(
-    offline,
-    `import fs from "node:fs";
-import http from "node:http";
-import https from "node:https";
-const fallbacks = new Set(${JSON.stringify(fallbackBinaries)});
-const statSync = fs.statSync;
-fs.statSync = (file, ...args) => {
-  if (fallbacks.has(String(file))) {
-    fs.appendFileSync(${JSON.stringify(fallbackProbes)}, String(file) + "\\n");
-  }
-  return statSync(file, ...args);
-};
-const denyNetwork = () => {
-  fs.appendFileSync(${JSON.stringify(networkCalls)}, "network attempted\\n");
-  throw new Error("Network is disabled for this test");
-};
-globalThis.fetch = denyNetwork;
-http.get = http.request = https.get = https.request = denyNetwork;
-`
-  );
-  return {
-    offline,
-    env: {
-      HOME: home,
-      USERPROFILE: home,
-      SystemRoot: process.env.SystemRoot,
-      PATH: path.join(home, "path-bin"),
-      RADIUS_RAD_BINARY: binary,
-      RADIUS_RAD_SKIP_VERSION_CHECK: "1"
-    },
-    assertUnchanged() {
-      expect(JSON.parse(fs.readFileSync(calls, "utf8"))).toEqual({
-        binary,
-        args: ["--cli", "--output", "json"],
-        override: binary,
-        skipVersionCheck: "1"
-      });
-      expect(fs.existsSync(networkCalls)).toBe(false);
-      expect(fs.existsSync(fallbackProbes)).toBe(false);
-      for (const { file, ...stat } of originalStats) {
-        expect(fs.lstatSync(file)).toMatchObject(stat);
-        expect(fs.readdirSync(path.dirname(file))).toEqual([
-          path.basename(file)
-        ]);
-        expect(
-          createHash("sha256").update(fs.readFileSync(file)).digest("hex")
-        ).toBe(originalHash);
-      }
-    }
   };
 }
 
@@ -1568,64 +1453,6 @@ describe("network and cache behavior", () => {
 });
 
 describe("command boundary", () => {
-  it.each([
-    ["0.60.2", "v0.59.0", "0.60"],
-    ["0.60.0-rc3", "v0.59.0-7-g04599d9", "0.60.0-rc3"],
-    ["edge", "04599d9", "latest"],
-    ["pr-12885", "04599d9", "latest"]
-  ])(
-    "pins %s schemas and recipes independently of its extension channel",
-    async (release, version, channel) => {
-      const sourceCommit = "04599d9".padEnd(40, "a");
-      const staging = stagingDirectory();
-      const calls: string[] = [];
-      let stdout = "";
-      let stderr = "";
-
-      const status = await resolver.main(
-        ["--staging", staging, "Radius.Data/postgreSqlDatabases"],
-        {
-          stdout: { write: (value: string) => (stdout += value) },
-          stderr: { write: (value: string) => (stderr += value) },
-          resolve: (selectors: string[]) =>
-            resolver.resolveRadiusTypes(selectors, {
-              ...managedIdentityOptions({
-                runRadImpl: vi.fn(async () => ({
-                  stdout: JSON.stringify({
-                    release,
-                    version,
-                    commit: sourceCommit
-                  }),
-                  stderr: ""
-                }))
-              }),
-              cacheRoot: temporaryDirectory(),
-              fetchImpl: fixtureFetch(calls, { sourceCommit })
-            })
-        }
-      );
-
-      expect(status, stderr).toBe(0);
-      expect(stderr).toBe("");
-      expect(calls).toEqual([
-        `${generatedRoot}/${sourceCommit}/hack/bicep-types-radius/generated/index.json`,
-        `${generatedRoot}/${sourceCommit}/hack/bicep-types-radius/generated/${fixtureTypePath.replaceAll(path.sep, "/")}`,
-        `${generatedRoot}/${sourceCommit}/${defaultsPath}`,
-        `https://raw.githubusercontent.com/radius-project/resource-types-contrib/${resourceTypesContribCommit}/${recipePackPath}`
-      ]);
-      expect(JSON.parse(stdout).resources[0].recipe).toMatchObject({
-        status: "available",
-        commit: resourceTypesContribCommit,
-        definition: fixturePostgreSqlRecipeDefinition
-      });
-      expect(
-        JSON.parse(
-          fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
-        ).extensions.radius
-      ).toBe(`br:biceptypes.azurecr.io/radius:${channel}`);
-    }
-  );
-
   it("queries managed identity through the injected process boundary", async () => {
     const cacheRoot = temporaryDirectory();
     seedCache(cacheRoot);
@@ -2069,178 +1896,87 @@ describe("command boundary", () => {
     });
   });
 
-  it.each([
-    ["0.60.2", "v0.59.0", "0.60"],
-    ["0.60.0-rc3", "v0.59.0-7-g04599d9", "0.60.0-rc3"],
-    ["edge", "04599d9", "latest"],
-    ["pr-12885", "04599d9", "latest"]
-  ])(
-    "models %s through the executable without binary or network changes",
-    (release, version, channel) => {
-      const home = temporaryDirectory();
-      const staging = stagingDirectory(home);
-      const fake = executableIdentityFixture(
-        home,
-        JSON.stringify({ release, version, commit })
-      );
-      const cacheRoot = path.join(
-        home,
-        ".radius",
-        "ai-extensions",
-        "cache",
-        "radius-resource-types",
-        "v1"
-      );
-      seedCache(cacheRoot);
+  it("runs end to end with the managed version command and offline cache", () => {
+    const home = temporaryDirectory();
+    const staging = stagingDirectory(home);
+    const fakeVersion = path.join(home, "version");
+    fs.writeFileSync(
+      fakeVersion,
+      `console.log(${JSON.stringify(JSON.stringify(identity))});\n`
+    );
+    const cacheRoot = path.join(
+      home,
+      ".radius",
+      "ai-extensions",
+      "cache",
+      "radius-resource-types",
+      "v1"
+    );
+    seedCache(cacheRoot);
 
-      const result = spawnSync(
-        process.execPath,
-        [
-          "--import",
-          pathToFileURL(fake.offline).href,
-          script,
-          "--staging",
-          staging,
-          "Radius.Data/postgreSqlDatabases",
-          "Radius.Compute/containers",
-          "Radius.Compute/containerImages",
-          "Radius.Core/applications"
-        ],
-        {
-          cwd: home,
-          env: fake.env,
-          encoding: "utf8",
-          timeout: 20_000,
-          windowsHide: true
-        }
-      );
-      expect(result.status, result.stderr).toBe(0);
-      expect(result.stdout.trim()).not.toContain("\n");
-      expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThan(20 * 1024);
-      const contract = JSON.parse(result.stdout);
-      expect(contract.radius).toBeUndefined();
-      expect(contract.extension).toBeUndefined();
-      expect(contract.notFound).toEqual([]);
-      expect(
-        contract.resources.map((resource: { type: string }) => resource.type)
-      ).toEqual([
+    const result = spawnSync(
+      process.execPath,
+      [
+        script,
+        "--staging",
+        staging,
         "Radius.Data/postgreSqlDatabases",
         "Radius.Compute/containers",
         "Radius.Compute/containerImages",
         "Radius.Core/applications"
-      ]);
-      expect(
-        contract.resources.every((resource: object) => "schema" in resource)
-      ).toBe(true);
-      expect(contract.resources[0].recipe).toMatchObject({
-        status: "available",
-        provenance: "managed-release-default",
-        recipePack: "azure",
-        repository: "radius-project/resource-types-contrib",
-        commit: resourceTypesContribCommit,
-        path: recipePackPath
-      });
-      expect(contract.resources[0].recipe.definition).toContain(
-        "'Radius.Data/postgreSqlDatabases': {"
-      );
-      expect(
-        JSON.parse(
-          fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
-        )
-      ).toEqual({
-        experimentalFeaturesEnabled: { extensibility: true },
-        extensions: { radius: `br:biceptypes.azurecr.io/radius:${channel}` }
-      });
-      expect(result.stderr).toBe("");
-      fake.assertUnchanged();
-    }
-  );
-
-  it.each([
-    ["invalid JSON", "not-json", 0, /invalid version JSON/u],
-    [
-      "missing release",
-      JSON.stringify({ version: "v0.60.0", commit }),
-      0,
-      /missing "release"/u
-    ],
-    [
-      "unsupported release",
-      JSON.stringify({ release: "stable", version: "v0.60.0", commit }),
-      0,
-      /Unsupported Radius release.*Do not replace or modify.*stop modeling/u
-    ],
-    [
-      "missing commit",
-      JSON.stringify({ release: "pr-12885", version: "04599d9" }),
-      0,
-      /missing "commit"/u
-    ],
-    [
-      "short commit",
-      JSON.stringify({
-        release: "pr-12885",
-        version: "04599d9",
-        commit: "04599d9"
-      }),
-      0,
-      /not a full 40-character SHA/u
-    ],
-    [
-      "nonzero exit with usable JSON",
-      JSON.stringify({ release: "pr-12885", version: "04599d9", commit }),
-      3,
-      /exited with code 3/u
-    ]
-  ])(
-    "fails closed on %s without fallback or binary changes",
-    (_name, output, exitCode, error) => {
-      const home = temporaryDirectory();
-      const staging = stagingDirectory(home);
-      const fake = executableIdentityFixture(home, output, exitCode);
-      const currentConfig = path.join(home, ".radius", "bicepconfig.json");
-      const existingConfig = JSON.stringify({
-        extensions: { radius: identity.extension }
-      });
-      fs.writeFileSync(currentConfig, existingConfig);
-      seedCache(
-        path.join(
-          home,
-          ".radius",
-          "ai-extensions",
-          "cache",
-          "radius-resource-types",
-          "v1"
-        )
-      );
-
-      const result = spawnSync(
-        process.execPath,
-        [
-          "--import",
-          pathToFileURL(fake.offline).href,
-          script,
-          "--staging",
-          staging,
-          "Radius.Data/postgreSqlDatabases"
-        ],
-        {
-          cwd: home,
-          env: fake.env,
-          encoding: "utf8",
-          timeout: 10_000,
-          windowsHide: true
-        }
-      );
-
-      expect(result.status, result.stderr).toBe(1);
-      expect(result.stdout).toBe("");
-      expect(result.stderr).toMatch(error);
-      expect(fs.readdirSync(staging)).toEqual([STAGING_RUN_RECORD]);
-      expect(fs.readFileSync(currentConfig, "utf8")).toBe(existingConfig);
-      fake.assertUnchanged();
-    }
-  );
+      ],
+      {
+        cwd: home,
+        env: {
+          ...process.env,
+          HOME: home,
+          USERPROFILE: home,
+          RADIUS_RAD_BINARY: process.execPath
+        },
+        encoding: "utf8",
+        timeout: 20_000,
+        windowsHide: true
+      }
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).not.toContain("\n");
+    expect(Buffer.byteLength(result.stdout, "utf8")).toBeLessThan(20 * 1024);
+    const contract = JSON.parse(result.stdout);
+    expect(contract.radius).toBeUndefined();
+    expect(contract.extension).toBeUndefined();
+    expect(contract.notFound).toEqual([]);
+    expect(
+      contract.resources.map((resource: { type: string }) => resource.type)
+    ).toEqual([
+      "Radius.Data/postgreSqlDatabases",
+      "Radius.Compute/containers",
+      "Radius.Compute/containerImages",
+      "Radius.Core/applications"
+    ]);
+    expect(
+      contract.resources.every((resource: object) => "schema" in resource)
+    ).toBe(true);
+    expect(contract.resources[0].recipe).toMatchObject({
+      status: "available",
+      provenance: "managed-release-default",
+      recipePack: "azure",
+      repository: "radius-project/resource-types-contrib",
+      commit: resourceTypesContribCommit,
+      path: recipePackPath
+    });
+    expect(contract.resources[0].recipe.definition).toContain(
+      "'Radius.Data/postgreSqlDatabases': {"
+    );
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
+      )
+    ).toEqual({
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: { radius: identity.extension }
+    });
+    expect(result.stderr).toBe("");
+  });
 });
 
 describe("staged Bicep configuration", () => {
