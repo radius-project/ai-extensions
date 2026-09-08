@@ -317,11 +317,28 @@ function publisherRecorder(script: PublisherScript = {}) {
     previousBlobSha: string | null;
   }> = [];
   const commitCalls: string[] = [];
+  const verifyGenerationCalls: Array<{
+    environment: string;
+    provider: string;
+    setupPushOperationMarker: string | undefined;
+  }> = [];
   const journal: string[] = [];
+  const legacyDeleteBranches: Array<string | undefined> = [];
   let gateCalls = 0;
 
   const ports: WorkflowPublisherPorts = {
-    generateVerifyWorkflow: async () => "verify-yaml",
+    generateVerifyWorkflow: async (
+      environment,
+      provider,
+      setupPushOperationMarker
+    ) => {
+      verifyGenerationCalls.push({
+        environment,
+        provider,
+        setupPushOperationMarker
+      });
+      return "verify-yaml";
+    },
     generateDeployWorkflow: async () =>
       script.deployFiles ?? { "run-rad-commands.yml": "deploy-yaml" },
     generateDeleteWorkflow: async () => {
@@ -333,6 +350,7 @@ function publisherRecorder(script: PublisherScript = {}) {
       return (
         script.commits?.[path] ?? {
           ok: true,
+          changed: true,
           viaPr: script.viaPr ?? false,
           commitSha: `commit-${commitCalls.length}`,
           blobSha: `blob-${commitCalls.length}`,
@@ -345,11 +363,11 @@ function publisherRecorder(script: PublisherScript = {}) {
     recordCommittedWorkflowFile: (_operation, entry) => {
       committed.push(entry);
     },
-    deleteLegacyDeployWorkflow: async () => {
+    deleteLegacyDeployWorkflow: async (_repo, branch) => {
       journal.push("deleteLegacyDeployWorkflow");
+      legacyDeleteBranches.push(branch);
       return script.legacyDeleteCancelled ? "cancelled" : true;
     },
-    usingPullRequestBranch: () => script.viaPr ?? false,
     pullRequestBranch: () =>
       script.viaPr ? "radius/setup-dev-workflows" : null,
     errorMessage: (error) =>
@@ -378,12 +396,31 @@ function publisherRecorder(script: PublisherScript = {}) {
     steps,
     committed,
     commitCalls,
+    verifyGenerationCalls,
     journal,
+    legacyDeleteBranches,
     gateCount: () => gateCalls
   };
 }
 
 describe("publishWorkflowFiles", () => {
+  it("passes the approved automatic operation marker only to verify generation", async () => {
+    const recorder = publisherRecorder();
+
+    await publishWorkflowFiles(recorder.ports, {
+      ...recorder.target,
+      setupPushOperationMarker: "op-1"
+    });
+
+    expect(recorder.verifyGenerationCalls).toEqual([
+      {
+        environment: "dev",
+        provider: "azure",
+        setupPushOperationMarker: "op-1"
+      }
+    ]);
+  });
+
   it("commits verify, deploy and delete workflows in that order and gates after each", async () => {
     const recorder = publisherRecorder();
 
@@ -439,7 +476,7 @@ describe("publishWorkflowFiles", () => {
     // later refuses to roll the file back automatically.
     const recorder = publisherRecorder({
       commits: {
-        [VERIFY_WORKFLOW_PATH]: { ok: true, viaPr: false }
+        [VERIFY_WORKFLOW_PATH]: { ok: true, changed: true, viaPr: false }
       }
     });
 
@@ -455,6 +492,40 @@ describe("publishWorkflowFiles", () => {
       previousBlobSha: null,
       previousBlobKnown: false
     });
+  });
+
+  it("does not record workflows that were already up to date", async () => {
+    const recorder = publisherRecorder({
+      commits: {
+        [VERIFY_WORKFLOW_PATH]: {
+          ok: true,
+          changed: false,
+          viaPr: false
+        },
+        ".github/workflows/run-rad-commands.yml": {
+          ok: true,
+          changed: false,
+          viaPr: false
+        },
+        ".github/workflows/radius-delete.yml": {
+          ok: true,
+          changed: false,
+          viaPr: false
+        }
+      }
+    });
+
+    await expect(
+      publishWorkflowFiles(recorder.ports, recorder.target)
+    ).resolves.toEqual({ outcome: "published" });
+    expect(recorder.committed).toEqual([]);
+    expect(recorder.gateCount()).toBe(4);
+    expect(recorder.steps).toContain("✅ Verify workflow already up to date.");
+    expect(recorder.steps).toContain("✅ Deploy workflows already up to date.");
+    expect(recorder.steps).toContain("✅ Delete workflows already up to date.");
+    expect(recorder.steps).not.toContain("✅ Verify workflow committed.");
+    expect(recorder.steps).not.toContain("✅ Deploy workflows committed.");
+    expect(recorder.steps).not.toContain("✅ Delete workflows committed.");
   });
 
   it("records the pull-request branch when the commits fell back to one", async () => {
@@ -476,6 +547,7 @@ describe("publishWorkflowFiles", () => {
       commits: {
         [VERIFY_WORKFLOW_PATH]: {
           ok: false,
+          changed: false,
           stderr: "protected branch",
           viaPr: false
         }
@@ -503,6 +575,7 @@ describe("publishWorkflowFiles", () => {
       commits: {
         [VERIFY_WORKFLOW_PATH]: {
           ok: false,
+          changed: false,
           stderr: "protected branch",
           viaPr: false
         }
@@ -519,6 +592,7 @@ describe("publishWorkflowFiles", () => {
       commits: {
         ".github/workflows/run-rad-commands.yml": {
           ok: false,
+          changed: false,
           stderr: "",
           viaPr: false
         }
@@ -541,6 +615,7 @@ describe("publishWorkflowFiles", () => {
       commits: {
         ".github/workflows/radius-verify-credentials.yml": {
           ok: false,
+          changed: false,
           cancelled: true,
           stderr: "stopped",
           viaPr: false
@@ -587,19 +662,26 @@ describe("publishWorkflowFiles", () => {
     }
   );
 
-  it("removes the legacy deploy workflow only when not committing through a pull request", async () => {
+  it("removes the legacy deploy workflow on the branch receiving the workflows", async () => {
     const direct = publisherRecorder();
     await publishWorkflowFiles(direct.ports, direct.target);
     expect(direct.journal).toContain("deleteLegacyDeployWorkflow");
+    expect(direct.legacyDeleteBranches).toEqual([undefined]);
 
     const viaPr = publisherRecorder({ viaPr: true });
     await publishWorkflowFiles(viaPr.ports, viaPr.target);
-    expect(viaPr.journal).not.toContain("deleteLegacyDeployWorkflow");
+    expect(viaPr.legacyDeleteBranches).toEqual(["radius/setup-dev-workflows"]);
   });
 
   it("reports an empty gh error when the verify refusal carried no stderr", async () => {
     const recorder = publisherRecorder({
-      commits: { [VERIFY_WORKFLOW_PATH]: { ok: false, viaPr: false } }
+      commits: {
+        [VERIFY_WORKFLOW_PATH]: {
+          ok: false,
+          changed: false,
+          viaPr: false
+        }
+      }
     });
 
     const result = await publishWorkflowFiles(recorder.ports, recorder.target);
@@ -612,6 +694,7 @@ describe("publishWorkflowFiles", () => {
       commits: {
         ".github/workflows/radius-delete.yml": {
           ok: false,
+          changed: false,
           stderr: "HTTP 404",
           viaPr: false
         }
@@ -624,6 +707,12 @@ describe("publishWorkflowFiles", () => {
     expect(recorder.steps).toContain(
       "⚠️ Could not commit delete workflow radius-delete.yml: HTTP 404"
     );
+    expect(recorder.steps).toContain(
+      "⚠️ Delete workflow checks completed with warnings."
+    );
+    expect(recorder.steps).not.toContain(
+      "✅ Delete workflows already up to date."
+    );
     // A refused delete commit is not recorded, but its completed write attempt
     // still consumes a gate before any later mutation can begin.
     expect(recorder.committed).toHaveLength(2);
@@ -635,6 +724,7 @@ describe("publishWorkflowFiles", () => {
       commits: {
         ".github/workflows/radius-delete.yml": {
           ok: false,
+          changed: false,
           viaPr: false
         }
       }

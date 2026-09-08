@@ -12,21 +12,20 @@
 //    it skips by default. After explicit opt-in, missing fixture provisioning or
 //    credentials fail preflight so a broken cloud job cannot pass without
 //    executing assertions.
-// 2. **It contains no logic.** Every decision — the skip gate, the expected
+// 2. **It contains no policy logic.** Every decision — the skip gate, the expected
 //    federated-credential subjects, which workflow publication path was taken,
 //    whether the GitHub Environment names the right identity, whether a delete
 //    actually succeeded — lives in `support/create-environment-journey.ts` or
 //    `support/delete-environment-journey.ts` behind unit tests, because a rule
 //    written here could only ever be checked by a nightly run against real
-//    infrastructure.
+//    infrastructure. The spec only drives the real UI and gathers evidence.
 //
 // The stages are ordered and share one fixture, so the describe runs serially:
-// stage two deletes what stage one created, and a stage-one failure must skip
-// stage two rather than delete an environment that was never built. Deploying an
-// application, and deleting that deployment, are a separate lifecycle and are not
-// started here.
+// create environment, deploy, prove a live environment cannot be deleted, delete
+// the deployment, then delete the environment. A failure skips every dependent
+// destructive stage rather than acting on state the run never proved exists.
 //
-// Stage two proves the inverse of stage one, which is the only reason either
+// The final stage proves the inverse of stage one, which is the only reason either
 // means much: the same Environment the product created is the one it removes.
 // Absence on its own would prove nothing — a product that never created the
 // Environment would satisfy it just as readily — so the fixture refuses to make
@@ -43,16 +42,20 @@ import {
   type CloudFixturePorts
 } from "./support/cloud-command-port.js";
 import {
-  createCloudFixture,
   type AppRegistrationRecord,
-  type CloudFixture
+  createCloudFixture,
+  type CloudFixture,
+  type RoleAssignmentRecord
 } from "./support/cloud-fixture.js";
 import {
   CREATE_OPERATION_TIMEOUT_MS,
   CREATE_TEST_TIMEOUT_MS,
+  DELETE_REFUSAL_TEST_TIMEOUT_MS,
   DELETE_OPERATION_TIMEOUT_MS,
   DELETE_POSTCONDITION_TIMEOUT_MS,
-  DELETE_TEST_TIMEOUT_MS
+  DELETE_TEST_TIMEOUT_MS,
+  DEPLOYMENT_OPERATION_TIMEOUT_MS,
+  DEPLOYMENT_TEST_TIMEOUT_MS
 } from "./support/cloud-timeout-budget.js";
 import {
   refreshProcessGitHubToken,
@@ -81,10 +84,34 @@ import {
   workflowFallbackBranchPrefix
 } from "./support/create-environment-journey.js";
 import {
+  assertEnvironmentDeletionIdentityOutcome,
   DELETE_ENVIRONMENT_PATH,
   describeProblems,
   findDeleteEnvironmentSuccessProblems
 } from "./support/delete-environment-journey.js";
+import {
+  applicationNamespace,
+  classifyDeploymentPresence,
+  DELETE_DEPLOYMENT_WORKFLOW,
+  DELETE_ENVIRONMENT_WORKFLOW,
+  describeDeployFailure,
+  describeProblems as describeDeploymentProblems,
+  findDeleteEnvironmentRefusalProblems,
+  findDeployedApplicationProblems,
+  findNewWorkflowRunId,
+  findSurvivingArtifactProblems,
+  REQUIRED_LIFECYCLE_WORKFLOWS,
+  readApplicationNames,
+  readDeploymentRows,
+  readDeployStatusSnapshot,
+  readOptionalDispatchedWorkflowRunId,
+  readWorkflowRunIds,
+  readWorkflowRunStatus,
+  quiesceOwnedWorkflowRuns,
+  repositoryListingPath,
+  requireWorkflowRunId,
+  requireSingleApplication
+} from "./support/deploy-journey.js";
 import {
   describeUnprovisionedFixtureRepository,
   isFixtureRepositoryProvisioned,
@@ -100,12 +127,17 @@ const githubPackagesToken = process.env.GH_PACKAGES_TOKEN?.trim() ?? "";
 const githubPackagesUser = process.env.GH_PACKAGES_USER?.trim() ?? "";
 const githubAppTokenConfig = takeGitHubAppTokenConfig();
 
+const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
+const WORKFLOW_QUIESCENCE_TIMEOUT_MS = 10 * 60 * 1000;
+const WORKFLOW_DISCOVERY_TIMEOUT_MS = 2 * 60 * 1000;
 const gate = evaluateCreateEnvironmentGate({
   cloudE2eFlag: process.env.RADIUS_CLOUD_E2E,
   fixtureProvisioned: isFixtureRepositoryProvisioned(),
   unprovisionedReason: describeUnprovisionedFixtureRepository(),
   subscriptionId,
-  githubToken
+  githubToken,
+  githubAppClientId: githubAppTokenConfig?.clientId,
+  githubAppPrivateKey: githubAppTokenConfig?.privateKey
 });
 const skipReason =
   !gate.enabled && gate.disposition === "skip" ? gate.reason : "";
@@ -134,6 +166,101 @@ async function runAz(
     expectSuccess(await commands.runAz(args), context).stdout,
     context
   );
+}
+
+async function waitForOwnedWorkflowRuns(
+  commands: CloudCommandPort,
+  repository: string,
+  runIds: ReadonlySet<string>
+): Promise<void> {
+  const deadline = Date.now() + WORKFLOW_QUIESCENCE_TIMEOUT_MS;
+  const status = async (runId: string) =>
+    readWorkflowRunStatus(
+      await runGh(
+        commands,
+        ["run", "view", runId, "--repo", repository, "--json", "status"],
+        `gh run view ${runId}`
+      )
+    );
+
+  await quiesceOwnedWorkflowRuns(runIds, {
+    readStatus: status,
+    cancel: async (runId) => {
+      expectSuccess(
+        await commands.runGh([
+          "api",
+          "--method",
+          "POST",
+          `repos/${repository}/actions/runs/${runId}/cancel`
+        ]),
+        `gh api cancel workflow run ${runId}`
+      );
+    },
+    waitUntilCompleted: async (runId) => {
+      await expect
+        .poll(() => status(runId), {
+          timeout: Math.max(1, deadline - Date.now()),
+          intervals: [5_000]
+        })
+        .toBe("completed");
+    }
+  });
+}
+
+async function listWorkflowRunIds(
+  commands: CloudCommandPort,
+  repository: string,
+  workflow: string
+): Promise<ReadonlySet<string>> {
+  return readWorkflowRunIds(
+    await runGh(
+      commands,
+      [
+        "run",
+        "list",
+        "--repo",
+        repository,
+        "--workflow",
+        workflow,
+        "--event",
+        "workflow_dispatch",
+        "--limit",
+        "100",
+        "--json",
+        "databaseId"
+      ],
+      `gh run list ${workflow}`
+    )
+  );
+}
+
+async function discoverNewWorkflowRunId(
+  commands: CloudCommandPort,
+  repository: string,
+  workflow: string,
+  before: ReadonlySet<string>
+): Promise<string> {
+  let runId: string | undefined;
+  await expect
+    .poll(
+      async () => {
+        runId = findNewWorkflowRunId(
+          before,
+          await listWorkflowRunIds(commands, repository, workflow)
+        );
+        return runId;
+      },
+      {
+        timeout: WORKFLOW_DISCOVERY_TIMEOUT_MS,
+        intervals: [2_000]
+      }
+    )
+    .not.toBeUndefined();
+  if (!runId)
+    throw new Error(
+      `The ${workflow} dispatch did not produce a discoverable workflow run.`
+    );
+  return runId;
 }
 
 /**
@@ -177,13 +304,23 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   let federatedSubjects: readonly string[] = [];
   let appRegistration: AppRegistrationRecord | undefined;
   let servicePrincipalId: string | undefined;
+  let roleAssignments: readonly RoleAssignmentRecord[] = [];
+  let createdVariables: ReadonlyMap<string, string> = new Map();
+  let deployedApplication = "";
+  let deployedNamespace = "";
+  const ownedWorkflowRunIds = new Set<string>();
+  let untrackedWorkflowDispatch = false;
 
-  test.beforeAll(async () => {
-    if (!gate.enabled) throw new Error(gate.reason);
+  const refreshGitHubToken = async (): Promise<void> => {
     if (!githubAppTokenConfig)
       throw new Error(
         "GitHub App refresh credentials are required for the cloud lifecycle journey."
       );
+    await refreshProcessGitHubToken(githubAppTokenConfig);
+  };
+
+  test.beforeAll(async () => {
+    if (!gate.enabled) throw new Error(gate.reason);
     if (!githubPackagesToken)
       throw new Error(
         "GH_PACKAGES_TOKEN is required for the cloud lifecycle journey."
@@ -217,33 +354,37 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         )
       })
     );
-    await refreshProcessGitHubToken(githubAppTokenConfig);
+    await refreshGitHubToken();
     // Turns every assertion below from an observation into a proof: none of the
     // artifacts asserted on existed before the product ran.
     await fixture.assertCleanSlate();
   });
 
+  test.beforeEach(refreshGitHubToken);
+
   test.afterAll(async () => {
     const current = fixture;
     fixture = undefined;
     if (!current) return;
+    await refreshGitHubToken();
+    if (untrackedWorkflowDispatch)
+      throw new Error(
+        "A lifecycle workflow was dispatched without a trustworthy run id; leaving fixture state and its lease intact."
+      );
+    await waitForOwnedWorkflowRuns(
+      ports.commands,
+      current.repository,
+      ownedWorkflowRunIds
+    );
     await runCleanupSteps([
-      ...(githubAppTokenConfig ?
-        [
-          {
-            label: "refresh GitHub App token for cleanup",
-            run: () => refreshProcessGitHubToken(githubAppTokenConfig)
-          }
-        ]
-      : []),
       {
         label: "reclaim product-created artifacts",
         run: async () => {
           if (!productOperationStarted) return;
-          // Stage two deletes the GitHub Environment, so on a complete run this
-          // reclaims only the intentionally retained shared app registration
-          // and role assignment. If stage two failed, it also reclaims any
-          // environment-specific state the product did not remove.
+          // The final stage deletes the GitHub Environment and its per-environment
+          // credentials. Reclamation then removes the intentionally retained shared
+          // app registration and role assignment; after an interrupted run it also
+          // removes any environment state the product did not reach.
           const reclaimed = await current.reclaimLeakedProductArtifacts();
           if (reclaimed.length > 0)
             console.info(
@@ -405,7 +546,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         )
       );
       servicePrincipalId = principalId;
-      await cloud.assertRoleAssignmentExists(principalId);
+      roleAssignments = await cloud.assertRoleAssignmentExists(principalId);
 
       await cloud.assertGitHubEnvironmentExists();
       const variables = readEnvironmentVariables(
@@ -418,6 +559,7 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
           "gh api the environment's variables"
         )
       );
+      createdVariables = variables;
       expect(
         findEnvironmentIdentityProblems({
           variables,
@@ -465,7 +607,8 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
             "gh api the repository's open pull requests"
           ),
           cloud.environmentName
-        )
+        ),
+        requiredPaths: REQUIRED_LIFECYCLE_WORKFLOWS
       });
       expect(
         publication.outcome,
@@ -485,15 +628,421 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
     }
   });
 
+  test("deploys the application through Canvas and proves it is running on AKS", async ({
+    page
+  }, testInfo) => {
+    testInfo.setTimeout(DEPLOYMENT_TEST_TIMEOUT_MS);
+    const cloud = fixture;
+    if (!cloud) throw new Error("The cloud fixture was not created.");
+
+    const harness = await CanvasHarness.create({
+      page,
+      title: "cloud-deploy-application",
+      mode: "cloud",
+      workspacePath: cloud.workspacePath,
+      initialPage: "deploying"
+    });
+    let primaryError: unknown;
+
+    try {
+      await harness.seedState(
+        cloudCanvasState({
+          repository: cloud.repository,
+          branch: cloud.defaultBranch,
+          workspacePath: cloud.workspacePath
+        })
+      );
+      await page.goto(`${harness.baseUrl}/?page=deploying`);
+      await page.waitForLoadState("domcontentloaded");
+
+      const applicationListingPath = repositoryListingPath(
+        "/api/list-applications",
+        cloud.repository
+      );
+      const applications = readApplicationNames(
+        await page.evaluate(async (path) => {
+          const response = await fetch(path);
+          return (await response.json()) as unknown;
+        }, applicationListingPath)
+      );
+      deployedApplication = requireSingleApplication(applications);
+      deployedNamespace = applicationNamespace(
+        KUBERNETES_NAMESPACE,
+        deployedApplication
+      );
+
+      await page
+        .locator("#deploy-app-select")
+        .selectOption(deployedApplication);
+      await page
+        .locator("#deploy-env-select")
+        .selectOption(cloud.environmentName);
+      await expect(page.locator("#deploy-branch-select")).toHaveValue(
+        cloud.defaultBranch
+      );
+
+      const deployResponse = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/deploy" &&
+          response.request().method() === "POST"
+      );
+      const deployButton = page.locator("#deploy-now-btn:not([disabled])");
+      await expect(deployButton).toHaveText("Deploy");
+      untrackedWorkflowDispatch = true;
+      await deployButton.click();
+      expect((await deployResponse).ok()).toBe(true);
+
+      const snapshot = async (): Promise<
+        ReturnType<typeof readDeployStatusSnapshot>
+      > =>
+        readDeployStatusSnapshot(
+          await page.evaluate(async () => {
+            const response = await fetch("/api/deploy-status");
+            return (await response.json()) as unknown;
+          })
+        );
+      const trackedSnapshot = async (): Promise<
+        ReturnType<typeof readDeployStatusSnapshot>
+      > => {
+        const current = await snapshot();
+        if (current.runUrl) {
+          try {
+            ownedWorkflowRunIds.add(
+              requireWorkflowRunId(current.runUrl, cloud.repository)
+            );
+            untrackedWorkflowDispatch = false;
+          } catch (error) {
+            untrackedWorkflowDispatch = true;
+            throw error;
+          }
+        }
+        return current;
+      };
+
+      await expect
+        .poll(async () => (await trackedSnapshot()).terminal, {
+          timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS,
+          intervals: [5_000]
+        })
+        .toBe(true);
+      const finished = await trackedSnapshot();
+      try {
+        ownedWorkflowRunIds.add(
+          requireWorkflowRunId(finished.runUrl, cloud.repository)
+        );
+        untrackedWorkflowDispatch = false;
+      } catch (error) {
+        untrackedWorkflowDispatch = true;
+        throw error;
+      }
+      expect(
+        finished.succeeded,
+        describeDeployFailure(finished, finished.logs)
+      ).toBe(true);
+
+      const workloads = await cloud.assertApplicationWorkloadsPresent(
+        deployedApplication,
+        deployedNamespace
+      );
+      const deploymentProblems = findDeployedApplicationProblems({
+        application: deployedApplication,
+        namespace: deployedNamespace,
+        namespaceExists: await cloud.namespaceExists(deployedNamespace),
+        workloads
+      });
+      expect(
+        deploymentProblems,
+        describeDeploymentProblems(
+          "The workflow completed but the application was not running on AKS:",
+          deploymentProblems
+        )
+      ).toEqual([]);
+
+      const deploymentListingPath = repositoryListingPath(
+        "/api/list-deployments",
+        cloud.repository,
+        true
+      );
+      const rows = readDeploymentRows(
+        await page.evaluate(async (path) => {
+          const response = await fetch(path);
+          return (await response.json()) as unknown;
+        }, deploymentListingPath)
+      );
+      expect(
+        classifyDeploymentPresence(
+          rows,
+          deployedApplication,
+          cloud.environmentName
+        ).present
+      ).toBe(true);
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      await runCleanupSteps(
+        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
+        primaryError
+      );
+    }
+  });
+
+  test("refuses to delete the environment while the deployment is live", async ({
+    page
+  }, testInfo) => {
+    testInfo.setTimeout(DELETE_REFUSAL_TEST_TIMEOUT_MS);
+    const cloud = fixture;
+    if (!cloud) throw new Error("The cloud fixture was not created.");
+
+    const harness = await CanvasHarness.create({
+      page,
+      title: "cloud-refuse-live-environment-delete",
+      mode: "cloud",
+      workspacePath: cloud.workspacePath,
+      initialPage: "environment"
+    });
+    let primaryError: unknown;
+
+    try {
+      await harness.seedState(
+        cloudCanvasState({
+          repository: cloud.repository,
+          branch: cloud.defaultBranch,
+          workspacePath: cloud.workspacePath
+        })
+      );
+      await page.goto(`${harness.baseUrl}/?page=environment`);
+      await page.waitForLoadState("domcontentloaded");
+
+      const deleteButton = page.locator(
+        `.js-delete-env[data-env="${cloud.environmentName}"]`
+      );
+      await expect(deleteButton).toBeVisible({ timeout: DELETE_TIMEOUT_MS });
+      await deleteButton.click();
+      const deleteResponse = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === DELETE_ENVIRONMENT_PATH &&
+          response.request().method() === "POST"
+      );
+      await page.locator("#env-confirm-ok").click();
+      const response = await deleteResponse;
+      await cloud.assertGitHubEnvironmentExists();
+      const problems = findDeleteEnvironmentRefusalProblems({
+        status: response.status(),
+        payload: (await response.json()) as unknown,
+        application: deployedApplication,
+        environmentName: cloud.environmentName,
+        environmentExists: true
+      });
+      expect(
+        problems,
+        describeDeploymentProblems(
+          "The product did not safely refuse the live environment delete:",
+          problems
+        )
+      ).toEqual([]);
+      await cloud.assertApplicationWorkloadsPresent(
+        deployedApplication,
+        deployedNamespace
+      );
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      await runCleanupSteps(
+        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
+        primaryError
+      );
+    }
+  });
+
+  test("deletes the deployment while preserving its environment and identity", async ({
+    page
+  }, testInfo) => {
+    testInfo.setTimeout(DEPLOYMENT_TEST_TIMEOUT_MS);
+    const cloud = fixture;
+    const appBefore = appRegistration;
+    if (!cloud) throw new Error("The cloud fixture was not created.");
+    if (!appBefore)
+      throw new Error("The product-created application was not observed.");
+
+    const harness = await CanvasHarness.create({
+      page,
+      title: "cloud-delete-deployment",
+      mode: "cloud",
+      workspacePath: cloud.workspacePath,
+      initialPage: "deploying"
+    });
+    let primaryError: unknown;
+
+    try {
+      await harness.seedState(
+        cloudCanvasState({
+          repository: cloud.repository,
+          branch: cloud.defaultBranch,
+          workspacePath: cloud.workspacePath
+        })
+      );
+      await page.goto(`${harness.baseUrl}/?page=deploying`);
+      await page.waitForLoadState("domcontentloaded");
+
+      const deleteButton = page.locator(
+        `.js-del-dep[data-app="${deployedApplication}"][data-env="${cloud.environmentName}"]`
+      );
+      await expect(deleteButton).toBeVisible({ timeout: DELETE_TIMEOUT_MS });
+      await deleteButton.click();
+      await page
+        .getByRole("button", { name: "I want to delete this deployment" })
+        .click();
+      await page
+        .getByRole("button", { name: /have read and understand/i })
+        .click();
+      await page
+        .locator("#del-confirm-input")
+        .fill(`${deployedApplication}/${cloud.environmentName}`);
+      const runsBefore = await listWorkflowRunIds(
+        ports.commands,
+        cloud.repository,
+        DELETE_DEPLOYMENT_WORKFLOW
+      );
+
+      const deleteResponse = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/delete-deployment" &&
+          response.request().method() === "POST"
+      );
+      untrackedWorkflowDispatch = true;
+      await page.locator("#del-confirm-btn").click();
+      const response = await deleteResponse;
+      const payload = (await response.json()) as unknown;
+      expect(response.ok()).toBe(true);
+      try {
+        const reportedRunId = readOptionalDispatchedWorkflowRunId(
+          payload,
+          cloud.repository
+        );
+        ownedWorkflowRunIds.add(
+          reportedRunId ??
+            (await discoverNewWorkflowRunId(
+              ports.commands,
+              cloud.repository,
+              DELETE_DEPLOYMENT_WORKFLOW,
+              runsBefore
+            ))
+        );
+        untrackedWorkflowDispatch = false;
+      } catch (error) {
+        untrackedWorkflowDispatch = true;
+        throw error;
+      }
+
+      await expect
+        .poll(
+          async () => {
+            const rows = readDeploymentRows(
+              await page.evaluate(
+                async (path) => {
+                  const response = await fetch(path);
+                  return (await response.json()) as unknown;
+                },
+                repositoryListingPath(
+                  "/api/list-deployments",
+                  cloud.repository,
+                  true
+                )
+              )
+            );
+            return classifyDeploymentPresence(
+              rows,
+              deployedApplication,
+              cloud.environmentName
+            ).present;
+          },
+          { timeout: DEPLOYMENT_OPERATION_TIMEOUT_MS, intervals: [5_000] }
+        )
+        .toBe(false);
+
+      await cloud.assertApplicationWorkloadsAbsent(
+        deployedApplication,
+        deployedNamespace
+      );
+      await cloud.assertGitHubEnvironmentExists();
+      for (const subject of federatedSubjects)
+        await cloud.assertFederatedCredentialExists(subject);
+      if (!servicePrincipalId)
+        throw new Error(
+          "The product-created service principal was not observed."
+        );
+      await cloud.assertRoleAssignmentsExist(roleAssignments);
+      const principalAfter = readServicePrincipalObjectId(
+        await runAz(
+          ports.commands,
+          ["ad", "sp", "show", "--id", appBefore.appId, "-o", "json"],
+          `az ad sp show --id ${appBefore.appId} after deployment deletion`
+        )
+      );
+      expect(principalAfter).toBe(servicePrincipalId);
+      const appAfter = await cloud.assertAppRegistrationExists();
+      const variables = readEnvironmentVariables(
+        await runGh(
+          ports.commands,
+          [
+            "api",
+            `repos/${cloud.repository}/environments/${cloud.environmentName}/variables`
+          ],
+          "gh api the surviving environment's variables"
+        )
+      );
+      const remainingWorkloads = await cloud.readApplicationWorkloads(
+        deployedApplication,
+        deployedNamespace
+      );
+      const survivalProblems = findSurvivingArtifactProblems({
+        environmentName: cloud.environmentName,
+        environmentExists: true,
+        expectedVariables: createdVariables,
+        variables,
+        appIdBefore: appBefore.appId,
+        appIdAfter: appAfter.appId,
+        federatedSubjects,
+        expectedFederatedSubjects: federatedSubjects,
+        remainingWorkloads
+      });
+      expect(
+        survivalProblems,
+        describeDeploymentProblems(
+          "Deleting the deployment damaged state owned by the environment:",
+          survivalProblems
+        )
+      ).toEqual([]);
+      await page.reload();
+      await page.waitForLoadState("domcontentloaded");
+      await expect(deleteButton).toHaveCount(0);
+    } catch (error) {
+      primaryError = error;
+      throw error;
+    } finally {
+      await runCleanupSteps(
+        [{ label: "clean up Canvas harness", run: () => harness.cleanup() }],
+        primaryError
+      );
+    }
+  });
+
   test("deletes the GitHub Environment it created", async ({
     page
   }, testInfo) => {
     testInfo.setTimeout(DELETE_TEST_TIMEOUT_MS);
     const cloud = fixture;
+    const appBefore = appRegistration;
+    const principalId = servicePrincipalId;
     if (!cloud) throw new Error("The cloud fixture was not created.");
-    if (!githubAppTokenConfig)
-      throw new Error("GitHub App refresh credentials are unavailable.");
-    await refreshProcessGitHubToken(githubAppTokenConfig);
+    if (!appBefore)
+      throw new Error("The product-created application was not observed.");
+    if (!principalId)
+      throw new Error(
+        "The product-created service principal was not observed."
+      );
 
     const harness = await CanvasHarness.create({
       page,
@@ -538,6 +1087,12 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
           new URL(response.url()).pathname === DELETE_ENVIRONMENT_PATH &&
           response.request().method() === "POST"
       );
+      const runsBefore = await listWorkflowRunIds(
+        ports.commands,
+        cloud.repository,
+        DELETE_ENVIRONMENT_WORKFLOW
+      );
+      untrackedWorkflowDispatch = true;
       await page.locator("#env-confirm-ok").click();
       const response = await deleteResponse;
       const payload = (await response.json()) as unknown;
@@ -579,6 +1134,29 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         })
         .toBe(true);
       const finished = await snapshot();
+      try {
+        const runId =
+          finished.state === "succeeded" ?
+            await discoverNewWorkflowRunId(
+              ports.commands,
+              cloud.repository,
+              DELETE_ENVIRONMENT_WORKFLOW,
+              runsBefore
+            )
+          : findNewWorkflowRunId(
+              runsBefore,
+              await listWorkflowRunIds(
+                ports.commands,
+                cloud.repository,
+                DELETE_ENVIRONMENT_WORKFLOW
+              )
+            );
+        if (runId) ownedWorkflowRunIds.add(runId);
+        untrackedWorkflowDispatch = false;
+      } catch (error) {
+        untrackedWorkflowDispatch = true;
+        throw error;
+      }
       expect(
         finished.state,
         `The delete-environment operation ended ${finished.state}: ${finished.error || "no error was reported."}`
@@ -608,38 +1186,22 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       // The proof. GitHub is asked directly, and the fixture refuses to answer
       // unless stage one observed this same Environment present first.
       await cloud.assertGitHubEnvironmentAbsent();
-      for (const subject of federatedSubjects)
-        await cloud.assertFederatedCredentialAbsent(subject);
-
-      // The app registration and role assignment can be shared, so #398 retains
-      // them deliberately. Re-read both so deleting the shared identity cannot
-      // pass merely because deleting the app also made its credentials absent.
-      if (!appRegistration || !servicePrincipalId)
-        throw new Error(
-          "Stage one did not retain the Azure identity needed for deletion assertions."
-        );
-      const expectedAppRegistration = appRegistration;
-      const expectedServicePrincipalId = servicePrincipalId;
-      await expect(cloud.assertAppRegistrationExists()).resolves.toEqual(
-        expectedAppRegistration
-      );
-      const retainedServicePrincipalId = readServicePrincipalObjectId(
-        await runAz(
-          ports.commands,
-          [
-            "ad",
-            "sp",
-            "show",
-            "--id",
-            expectedAppRegistration.appId,
-            "-o",
-            "json"
-          ],
-          `az ad sp show --id ${expectedAppRegistration.appId}`
-        )
-      );
-      expect(retainedServicePrincipalId).toBe(expectedServicePrincipalId);
-      await cloud.assertRoleAssignmentExists(retainedServicePrincipalId);
+      await assertEnvironmentDeletionIdentityOutcome({
+        assertions: cloud,
+        assertServicePrincipalExists: async () => {
+          const retainedServicePrincipalId = readServicePrincipalObjectId(
+            await runAz(
+              ports.commands,
+              ["ad", "sp", "show", "--id", appBefore.appId, "-o", "json"],
+              `az ad sp show --id ${appBefore.appId}`
+            )
+          );
+          expect(retainedServicePrincipalId).toBe(principalId);
+        },
+        expectedAppRegistration: appBefore,
+        expectedRoleAssignments: roleAssignments,
+        federatedSubjects
+      });
     } catch (error) {
       primaryError = error;
       throw error;

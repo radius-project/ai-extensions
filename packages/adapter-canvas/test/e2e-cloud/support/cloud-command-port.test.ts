@@ -14,6 +14,7 @@ import {
   normalizeCommandResult,
   normalizeGitHubPackageCommandResult,
   parseJsonArray,
+  parseJsonObject,
   type CloudCommandResult
 } from "./cloud-command-port.js";
 
@@ -73,30 +74,30 @@ describe("normalizeCommandResult", () => {
     });
   });
 
-  it("preserves real stderr instead of prepending the callback message", () => {
+  it("does not replace captured stderr with the spawn diagnostic", () => {
     expect(
       normalizeCommandResult(
-        { code: 1, message: "Command failed: gh api repository" },
+        { code: 1, message: "command failed" },
         "",
-        "gh: Not Found (HTTP 404)"
+        "specific stderr"
       )
     ).toEqual({
       code: 1,
       stdout: "",
-      stderr: "gh: Not Found (HTTP 404)"
+      stderr: "specific stderr"
     });
   });
 
-  it("does not inject the callback message when stdout carries the diagnostic", () => {
+  it("does not move an error message into stderr when stdout has output", () => {
     expect(
       normalizeCommandResult(
-        { code: 1, message: "Command failed: az account show" },
-        "ERROR: run az login",
+        { code: 1, message: "command failed" },
+        "specific stdout",
         ""
       )
     ).toEqual({
       code: 1,
-      stdout: "ERROR: run az login",
+      stdout: "specific stdout",
       stderr: ""
     });
   });
@@ -306,6 +307,51 @@ describe("parseJsonArray", () => {
   );
 });
 
+describe("parseJsonObject", () => {
+  const context = "kubectl get deployments -n radius-demo";
+
+  it("parses a JSON object from stdout", () => {
+    expect(
+      parseJsonObject(
+        result({ stdout: '{"items":[{"kind":"Deployment"}]}' }),
+        context
+      )
+    ).toEqual({ items: [{ kind: "Deployment" }] });
+  });
+
+  it("propagates command failures before parsing output", () => {
+    expect(() =>
+      parseJsonObject(
+        result({ code: 1, stderr: "Unable to connect to the server" }),
+        context
+      )
+    ).toThrow(`${context} failed with exit code 1: Unable to connect`);
+  });
+
+  it.each(["", "  \n "])("rejects empty output %j", (stdout) => {
+    expect(() => parseJsonObject(result({ stdout }), context)).toThrow(
+      `${context} returned no output to parse as JSON.`
+    );
+  });
+
+  it("rejects malformed JSON", () => {
+    expect(() =>
+      parseJsonObject(result({ stdout: "{not json" }), context)
+    ).toThrow(/returned output that is not valid JSON/);
+  });
+
+  it.each([
+    ["an array", "[]", "a JSON array"],
+    ["a string", '"nope"', "a JSON string"],
+    ["a number", "12", "a JSON number"],
+    ["null", "null", "null"]
+  ])("rejects %s", (_label, stdout, description) => {
+    expect(() => parseJsonObject(result({ stdout }), context)).toThrow(
+      `${context} returned ${description} where a JSON object was expected.`
+    );
+  });
+});
+
 describe("createNodeCloudFixturePorts", () => {
   it("isolates package commands onto the dedicated token", () => {
     expect(
@@ -469,6 +515,173 @@ describe("createNodeCloudFixturePorts", () => {
       expect(calls).toEqual([["group", "list"]]);
     });
 
+    it("forwards a per-command timeout to the requested Azure command", async () => {
+      const runCommand = vi.fn(
+        (_args: readonly string[], _timeoutMs?: number) =>
+          Promise.resolve(result({ stdout: "ok" }))
+      );
+      const run = createRefreshingAzureCommandRunner({
+        env: {},
+        runCommand
+      });
+
+      await expect(
+        run(["aks", "get-credentials"], 30_000)
+      ).resolves.toMatchObject({ code: 0 });
+      expect(runCommand).toHaveBeenCalledWith(
+        ["aks", "get-credentials"],
+        30_000
+      );
+    });
+
+    it("uses a caller-independent refresh budget before the requested command", async () => {
+      let now = 0;
+      const calls: Array<{
+        args: readonly string[];
+        timeoutMs: number | undefined;
+      }> = [];
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: successfulFetch(),
+        runCommand: (args, timeoutMs) => {
+          calls.push({ args, timeoutMs });
+          now += 10;
+          return Promise.resolve(result({}));
+        }
+      });
+
+      now = 100;
+      await expect(run(["group", "list"], 30)).resolves.toMatchObject({
+        code: 0
+      });
+      expect(calls.map(({ args, timeoutMs }) => [args[0], timeoutMs])).toEqual([
+        ["login", 15 * 60_000],
+        ["account", 15 * 60_000 - 10],
+        ["group", 10]
+      ]);
+    });
+
+    it.each([
+      [5_000, 20_000],
+      [30_000, 20_000]
+    ])(
+      "bounds the OIDC request by a %ims command budget at %ims",
+      async (timeoutMs, expectedSignalTimeoutMs) => {
+        let now = 0;
+        const timeout = vi
+          .spyOn(AbortSignal, "timeout")
+          .mockReturnValue(new AbortController().signal);
+        const run = createRefreshingAzureCommandRunner({
+          env: AZURE_ENV,
+          now: () => now,
+          refreshIntervalMs: 100,
+          fetch: successfulFetch(),
+          runCommand: () => Promise.resolve(result({}))
+        });
+
+        now = 100;
+        await run(["group", "list"], timeoutMs);
+
+        expect(timeout).toHaveBeenCalledWith(expectedSignalTimeoutMs);
+        timeout.mockRestore();
+      }
+    );
+
+    it("lets a shared refresh continue after its first caller times out", async () => {
+      let now = 0;
+      const fetchImpl = successfulFetch();
+      const runCommand = vi.fn((_: readonly string[]) =>
+        Promise.resolve(result({}))
+      );
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: fetchImpl,
+        runCommand
+      });
+
+      now = 100;
+      await expect(run(["group", "list"], 0)).resolves.toMatchObject({
+        code: 1,
+        stderr: expect.stringMatching(/refresh.*exhausted its timeout/i)
+      });
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(runCommand).toHaveBeenCalledTimes(2));
+      expect(runCommand.mock.calls.map(([args]) => args[0])).toEqual([
+        "login",
+        "account"
+      ]);
+    });
+
+    it("does not start the requested command after its timeout expires during renewal", async () => {
+      let now = 0;
+      const runCommand = vi.fn((_: readonly string[]) => {
+        now += 31;
+        return Promise.resolve(result({}));
+      });
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: successfulFetch(),
+        runCommand
+      });
+
+      now = 100;
+      await expect(run(["group", "list"], 30)).resolves.toMatchObject({
+        code: 1,
+        stderr: expect.stringMatching(/exhausted its timeout/)
+      });
+      expect(runCommand).toHaveBeenCalledTimes(2);
+      expect(runCommand.mock.calls.map(([args]) => args[0])).toEqual([
+        "login",
+        "account"
+      ]);
+    });
+
+    it("does not start the requested command when renewal consumes the timeout", async () => {
+      let now = 0;
+      const runCommand = vi.fn((_: readonly string[]) => {
+        now += 10;
+        return Promise.resolve(result({}));
+      });
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: successfulFetch(),
+        runCommand
+      });
+
+      now = 100;
+      await expect(run(["group", "list"], 20)).resolves.toMatchObject({
+        code: 1,
+        stderr: expect.stringMatching(/exhausted its timeout/)
+      });
+      expect(runCommand).toHaveBeenCalledTimes(2);
+      expect(runCommand.mock.calls.map(([args]) => args[0])).toEqual([
+        "login",
+        "account"
+      ]);
+    });
+
+    it("labels requested-command deadline exhaustion separately from refresh failure", async () => {
+      const runCommand = vi.fn(() => Promise.resolve(result({})));
+      const run = createRefreshingAzureCommandRunner({
+        env: {},
+        runCommand
+      });
+
+      await expect(run(["group", "list"], 0)).resolves.toMatchObject({
+        code: 1,
+        stderr: expect.stringMatching(/^Azure command failed:/)
+      });
+      expect(runCommand).not.toHaveBeenCalled();
+    });
+
     it("preserves an existing local Azure CLI session when Actions OIDC is unavailable", async () => {
       let now = 0;
       const runCommand = vi.fn((_: readonly string[]) =>
@@ -628,6 +841,93 @@ describe("createNodeCloudFixturePorts", () => {
         ["group", "list"],
         ["account", "show"]
       ]);
+    });
+
+    it("bounds a caller waiting on another command's unbounded renewal", async () => {
+      vi.useFakeTimers();
+      let now = 0;
+      let resolveFetch: ((response: Response) => void) | undefined;
+      const fetchImpl = vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFetch = resolve;
+          })
+      );
+      const runCommand = vi.fn((_: readonly string[]) =>
+        Promise.resolve(result({}))
+      );
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: fetchImpl,
+        runCommand
+      });
+
+      try {
+        now = 100;
+        const unbounded = run(["group", "list"]);
+        const bounded = run(["group", "show"], 10);
+        await vi.advanceTimersByTimeAsync(10);
+        await expect(bounded).resolves.toMatchObject({
+          code: 1,
+          stderr: expect.stringMatching(/awaiting credential refresh/)
+        });
+
+        resolveFetch?.(
+          new Response(JSON.stringify({ value: "header.payload.signature" }))
+        );
+        await expect(unbounded).resolves.toMatchObject({ code: 0 });
+        expect(
+          runCommand.mock.calls.filter(([args]) => args[1] === "show")
+        ).toHaveLength(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not let a short first caller abort the shared renewal", async () => {
+      vi.useFakeTimers();
+      let now = 0;
+      let resolveFetch: ((response: Response) => void) | undefined;
+      const fetchImpl = vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFetch = resolve;
+          })
+      );
+      const runCommand = vi.fn((_: readonly string[]) =>
+        Promise.resolve(result({}))
+      );
+      const run = createRefreshingAzureCommandRunner({
+        env: AZURE_ENV,
+        now: () => now,
+        refreshIntervalMs: 100,
+        fetch: fetchImpl,
+        runCommand
+      });
+
+      try {
+        now = 100;
+        const bounded = run(["group", "show"], 10);
+        const unbounded = run(["group", "list"]);
+        await vi.advanceTimersByTimeAsync(10);
+        await expect(bounded).resolves.toMatchObject({
+          code: 1,
+          stderr: expect.stringMatching(/awaiting credential refresh/)
+        });
+
+        resolveFetch?.(
+          new Response(JSON.stringify({ value: "header.payload.signature" }))
+        );
+        await expect(unbounded).resolves.toMatchObject({ code: 0 });
+        expect(fetchImpl).toHaveBeenCalledOnce();
+        expect(
+          runCommand.mock.calls.filter(([args]) => args[1] === "show")
+        ).toHaveLength(0);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it.each([
@@ -838,18 +1138,55 @@ describe("createNodeCloudFixturePorts", () => {
     expect(ok.stdout.trim()).toBe("true");
   });
 
-  it("exposes az and gh runners that resolve rather than reject when the tool is absent", async () => {
+  it("exposes cloud runners that resolve rather than reject when a tool is absent", async () => {
     const ports = createNodeCloudFixturePorts();
 
-    // No Azure or GitHub CLI is assumed here. Whether the tool exists or not,
-    // the contract under test is the same: the port resolves with a result.
-    for (const run of [ports.commands.runAz, ports.commands.runGh]) {
+    for (const run of [
+      ports.commands.runAz,
+      ports.commands.runGh,
+      ports.commands.runKubectl
+    ]) {
       const outcome = await run(["--version"]);
       expect(typeof outcome.code).toBe("number");
       expect(typeof outcome.stdout).toBe("string");
       expect(typeof outcome.stderr).toBe("string");
     }
   }, 30_000);
+
+  it("terminates kubectl when its per-probe deadline expires", async () => {
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), "radtest-kubectl-timeout-")
+    );
+    const marker = path.join(directory, "leaked.txt");
+    const executable = path.join(
+      directory,
+      process.platform === "win32" ? "kubectl.exe" : "kubectl"
+    );
+    const priorPath = process.env.PATH;
+    try {
+      if (process.platform === "win32")
+        await fs.copyFile(process.execPath, executable);
+      else await fs.symlink(process.execPath, executable);
+      process.env.PATH = `${directory}${path.delimiter}${priorPath ?? ""}`;
+
+      const ports = createNodeCloudFixturePorts();
+      const outcome = await ports.commands.runKubectl(
+        [
+          "--eval",
+          'setTimeout(() => require("node:fs").writeFileSync(process.argv[1], "leaked"), 500)',
+          marker
+        ],
+        100
+      );
+
+      expect(outcome.code).not.toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      await expect(fs.stat(marker)).rejects.toThrow();
+    } finally {
+      process.env.PATH = priorPath;
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
 
   it("redacts Azure output through the real runAz port wiring", async () => {
     const token = "fake-azure-token-for-port-test";

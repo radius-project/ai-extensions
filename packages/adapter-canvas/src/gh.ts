@@ -4,6 +4,7 @@
 // process-spawning surface besides the deploy monitor and infra modules.
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -128,6 +129,7 @@ export interface SelectedGhExecutor {
 export interface ContentResult {
   content: string | null;
   error: string | null;
+  status: number | null;
 }
 
 export interface ContentBytesTooLarge {
@@ -1009,6 +1011,20 @@ export async function selectedFetchFileFromRepo(
   path: string,
   branch = "main"
 ): Promise<string | null> {
+  return (await selectedFetchFileFromRepoResult(executor, repo, path, branch))
+    .content;
+}
+
+export async function selectedFetchFileFromRepoResult(
+  executor: SelectedGhExecutor,
+  repo: string,
+  path: string,
+  branch = "main"
+): Promise<{
+  content: string | null;
+  error: string | null;
+  status: number | null;
+}> {
   const result = await executor.run(
     [
       "api",
@@ -1018,8 +1034,33 @@ export async function selectedFetchFileFromRepo(
     ],
     { timeout: 15000 }
   );
-  if (result.code !== 0 || !result.stdout.trim()) return null;
-  return Buffer.from(result.stdout.trim(), "base64").toString("utf8");
+  const statusMatch = `${result.stderr}\n${result.stdout}`.match(
+    /\bHTTP\s+(\d{3})\b/i
+  );
+  const status =
+    result.code === 0 ? 200
+    : statusMatch ? Number(statusMatch[1])
+    : null;
+  if (result.code !== 0) {
+    return {
+      content: null,
+      error:
+        (result.stderr || result.stdout || "").trim() || "GitHub API failed.",
+      status
+    };
+  }
+  if (!result.stdout.trim()) {
+    return {
+      content: null,
+      error: "GitHub returned an empty repository file.",
+      status: 200
+    };
+  }
+  return {
+    content: Buffer.from(result.stdout.trim(), "base64").toString("utf8"),
+    error: null,
+    status: 200
+  };
 }
 
 export async function selectedGetDefaultBranch(
@@ -1483,22 +1524,33 @@ export function ghApiGetContentResult(
           const detail = redactGhCredentials(
             (stderr && stderr.trim()) || err.message || String(err)
           );
-          resolve({ content: null, error: detail.trim() });
+          const statusMatch = detail.match(/\bHTTP\s+(\d{3})\b/i);
+          resolve({
+            content: null,
+            error: detail.trim(),
+            status: statusMatch ? Number(statusMatch[1]) : null
+          });
           return;
         }
         if (!stdout || !stdout.trim()) {
-          resolve({ content: null, error: "empty response from gh api" });
+          resolve({
+            content: null,
+            error: "empty response from gh api",
+            status: 200
+          });
           return;
         }
         try {
           resolve({
             content: Buffer.from(stdout.trim(), "base64").toString("utf8"),
-            error: null
+            error: null,
+            status: 200
           });
         } catch (e) {
           resolve({
             content: null,
-            error: `failed to decode response: ${errorMessage(e)}`
+            error: `failed to decode response: ${errorMessage(e)}`,
+            status: 200
           });
         }
       }
@@ -1506,7 +1558,7 @@ export function ghApiGetContentResult(
   });
 }
 
-/** Repo-file variant of ghApiGetContentResult. Resolves `{ content, error }`. */
+/** Repo-file variant of ghApiGetContentResult. */
 export function fetchFileFromRepoResult(
   repo: string,
   path: string,
@@ -1570,7 +1622,7 @@ export const github = {
   getDefaultBranch: (repo: string) => getDefaultBranch(repo)
 };
 
-// Look up a file's blob SHA on a branch; resolves '' when the file is absent.
+// Look up a file's blob SHA on a branch; resolves "" when the file is absent.
 function getRepoFileSha(
   repo: string,
   path: string,
@@ -1589,10 +1641,18 @@ function getRepoFileSha(
   });
 }
 
+function gitBlobSha(content: string): string {
+  const bytes = Buffer.from(content, "utf8");
+  return createHash("sha1")
+    .update(`blob ${bytes.length}\0`)
+    .update(bytes)
+    .digest("hex");
+}
+
 // Create or update a single UTF-8 text file on a repo branch via the GitHub
-// contents API. Reuses the existing blob SHA so a re-commit is an update rather
-// than a rejected create. The commit body is fed over stdin (never argv) so the
-// base64 payload can't collide with shell/CLI parsing. Rejects on failure.
+// contents API. Identical content is a no-op; drift reuses the existing blob SHA
+// so the write is an update rather than a rejected create. The commit body is
+// fed over stdin (never argv) so the base64 payload cannot collide with parsing.
 export async function commitFileToRepo(
   repo: string,
   path: string,
@@ -1602,6 +1662,7 @@ export async function commitFileToRepo(
   timeout = 30000
 ): Promise<boolean> {
   const sha = await getRepoFileSha(repo, path, branch);
+  if (sha && sha === gitBlobSha(content)) return false;
   const body = JSON.stringify({
     message,
     content: Buffer.from(content, "utf8").toString("base64"),

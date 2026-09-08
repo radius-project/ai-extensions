@@ -230,7 +230,7 @@ describe("environment provisioning journey", () => {
         VERIFY_TEMPLATE(platform!.displayName)
       );
       expect(parseYaml(workflow).jobs.verify.environment).toBe(
-        "${{ inputs.environment }}"
+        "${{ inputs.environment || 'production' }}"
       );
       expect(workflow).toContain(`default: "${ENV_NAME}"`);
     }
