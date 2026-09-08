@@ -1,6 +1,10 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "@playwright/test";
+import {
+  CLOUD_SUITE_TIMEOUT_MS,
+  DELETE_TEST_TIMEOUT_MS
+} from "./test/e2e-cloud/support/cloud-timeout-budget.js";
 
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
 
@@ -27,15 +31,10 @@ export default defineConfig({
   // still relies on the same server warm-up and Windows shim.
   globalSetup: "./test/e2e/global-setup.ts",
   globalTeardown: "./test/e2e/global-teardown.ts",
-  // One journey provisions an Entra application, a service principal, two
-  // federated credentials, a role assignment, a GitHub Environment, and its
-  // workflows. The per-test budget has to outlast all of it, or a slow cloud
-  // reports as a product failure.
-  timeout: 55 * 60 * 1000,
-  // The GitHub job allows 125 minutes. Keep the entire serial suite below that
-  // ceiling so suite growth cannot let GitHub cancel an in-flight test before
-  // Playwright writes its trace.
-  globalTimeout: 110 * 60 * 1000,
+  // No single stage may consume the freshly renewed installation token's full
+  // lifetime. The serial suite receives the sum of every declared stage budget.
+  timeout: DELETE_TEST_TIMEOUT_MS,
+  globalTimeout: CLOUD_SUITE_TIMEOUT_MS,
   expect: { timeout: 60_000 },
   // Serializes tests inside one process. Cross-process/cloud-run serialization
   // is enforced by the repository-scoped lease acquired by the cloud fixture.
