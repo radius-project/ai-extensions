@@ -191,6 +191,23 @@ describe("canvas pages over real loopback HTTP", () => {
     expect(response.body).toContain('id="azure-namespace-custom"');
   });
 
+  it("serves accurate required and best-effort Azure role descriptions", async () => {
+    resetState({ contextRepo: "octo/app" });
+
+    const response = await get("/?page=environment");
+
+    expect(response.body).toContain(
+      "granted <strong>Contributor</strong> on the selected resource group"
+    );
+    expect(response.body).toContain(
+      "attempts to grant <strong>Locks Contributor</strong>"
+    );
+    expect(response.body).toContain(
+      "if either optional assignment fails, setup continues with a warning and remediation command"
+    );
+    expect(response.body).not.toContain("User Access Administrator");
+  });
+
   // The diff page carries the worktree branch to the browser so each node can be
   // routed to a local file or a github.com URL; through the real server this is
   // the only place that value is produced.
