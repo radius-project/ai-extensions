@@ -462,12 +462,15 @@ const productionHandlers = {
     planCredentialVerification: () =>
       Promise.resolve({
         shouldDispatch: false,
+        trigger: "none",
         ref: "main",
         defaultBranch: "main",
         pullRequestUrl: "",
         skipReason: ""
       }),
     fetchFileFromRepo: () => Promise.resolve(null),
+    fetchFileFromRepoResult: () =>
+      Promise.resolve({ content: null, error: "HTTP 404", status: 404 }),
     buildVerifyWorkflowDispatchArgs: () => [],
     verifyWorkflowFile: "radius-verify-credentials.yml",
     stageVerify: "verify",
