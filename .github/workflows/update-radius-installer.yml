@@ -1,0 +1,145 @@
+# yaml-language-server: $schema=https://www.schemastore.org/github-workflow.json
+---
+name: Update Radius installer
+
+on:
+  schedule:
+    # Cross-repository release events cannot trigger this workflow directly, so
+    # poll daily and open an update PR whenever Radius publishes a stable release.
+    - cron: "23 8 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: update-radius-installer
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update stable installer pin
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Resolve latest stable Radius installer
+        id: update
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash build/scripts/update-radius-installer.sh
+
+      - name: Install yq
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          YQ_VERSION: v4.53.3
+        run: bash .github/extension/actions/load-contrib-catalog/install-yq.sh
+
+      - name: Verify contrib consumers
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+          bash build/scripts/verify-contrib-consumers.sh
+
+      - name: Create GitHub App token
+        if: steps.update.outputs.changed == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.RADIUS_RELEASE_MANAGER_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RADIUS_RELEASE_MANAGER_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            ai-extensions
+          permission-contents: write
+          permission-pull-requests: write
+
+      # The contents API creates a commit that GitHub signs for the App. A local
+      # git commit on the runner could carry a DCO trailer but would be Unverified.
+      - name: Create or refresh update pull request
+        if: steps.update.outputs.changed == 'true'
+        env:
+          BRANCH: automation/update-radius-installer
+          CHECKSUM: ${{ steps.update.outputs.checksum }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          INSTALLER_PATH: .github/extension/actions/setup-control-plane/action.yml
+          TAG: ${{ steps.update.outputs.tag }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER}"
+          repo="${GITHUB_REPOSITORY}"
+          existing_pr="$(
+            gh api --method GET "repos/$repo/pulls" \
+              -f state=open \
+              -f base=main \
+              -f head="$owner:$BRANCH" \
+              --jq '.[0].number // empty'
+          )"
+
+          if [ -z "$existing_pr" ]; then
+            if gh api "repos/$repo/git/ref/heads/$BRANCH" >/dev/null 2>&1; then
+              gh api --method DELETE "repos/$repo/git/refs/heads/$BRANCH"
+            fi
+            base_sha="$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)"
+            gh api --method POST "repos/$repo/git/refs" \
+              -f ref="refs/heads/$BRANCH" \
+              -f sha="$base_sha" >/dev/null
+          fi
+
+          file_sha="$(gh api "repos/$repo/contents/$INSTALLER_PATH?ref=$BRANCH" --jq .sha)"
+          desired_sha="$(git hash-object "$INSTALLER_PATH")"
+          if [ "$file_sha" = "$desired_sha" ]; then
+            echo "Pull request #$existing_pr already contains the $TAG installer pin."
+            exit 0
+          fi
+          content="$(base64 -w 0 "$INSTALLER_PATH")"
+          message="chore: update Radius installer to $TAG
+
+          Signed-off-by: radius-release-manager[bot] <323233809+radius-release-manager[bot]@users.noreply.github.com>"
+          commit_sha="$(
+            jq -n \
+              --arg branch "$BRANCH" \
+              --arg content "$content" \
+              --arg message "$message" \
+              --arg sha "$file_sha" \
+              '{branch: $branch, content: $content, message: $message, sha: $sha}' |
+              gh api --method PUT "repos/$repo/contents/$INSTALLER_PATH" \
+                --input - --jq .commit.sha
+          )"
+          verified="$(gh api "repos/$repo/commits/$commit_sha" --jq .commit.verification.verified)"
+          [ "$verified" = true ] || {
+            echo "::error::GitHub did not create a verified update commit: $commit_sha"
+            exit 1
+          }
+
+          title="chore: update Radius installer to $TAG"
+          body="$(printf '%s\n' \
+            '## Summary' \
+            '' \
+            "- pin the Radius installer source to stable release \`$TAG\`" \
+            "- verify \`deploy/install.sh\` with SHA-256 \`$CHECKSUM\`" \
+            "- keep the installed Radius CLI channel on \`edge\`" \
+            '' \
+            '## Validation' \
+            '' \
+            "- \`bash build/scripts/verify-contrib-consumers.sh\`")"
+          if [ -n "$existing_pr" ]; then
+            gh api --method PATCH "repos/$repo/pulls/$existing_pr" \
+              -f title="$title" \
+              -f body="$body" >/dev/null
+          else
+            gh api --method POST "repos/$repo/pulls" \
+              -f base=main \
+              -f head="$BRANCH" \
+              -f title="$title" \
+              -f body="$body" \
+              --jq .html_url
+          fi
