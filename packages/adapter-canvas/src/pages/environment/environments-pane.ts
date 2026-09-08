@@ -80,6 +80,11 @@ export function environmentsPaneMarkup(
         <ul id="env-progress-cleanup-warnings" class="env-progress__failure-list"></ul>
       </div>
     </div>
+    <!-- Recovery for a failed credential verification the customer chooses to
+         keep anyway (exception scenarios 4.4 permissions and 4.5 unreachable).
+         The button is built by the verify poller only when the failure is one
+         that can be resolved after the environment record exists. -->
+    <div id="env-progress-verify-bypass" class="env-progress__actions" style="display:none;"></div>
     <!-- Server-projected commands. The page renders whatever the operation
          record says is allowed; it never re-derives eligibility itself. The
          forward action comes first and the destructive one second, and neither
@@ -376,7 +381,7 @@ export function environmentsPaneMarkup(
         <div class="rad-field__help">
           Created in your tenant, federated to <code>repo:${escapeHtml(
             ctxRepo
-          )}</code>, and granted <strong>Contributor</strong> on the selected resource group below, plus <strong>Azure Kubernetes Service RBAC Cluster Admin</strong> on the target cluster (required for clusters using Azure RBAC for Kubernetes, the default for AKS Automatic). If one already exists, you may
+          )}</code>, and granted <strong>Contributor</strong> on the selected resource group below. Setup also attempts to grant <strong>Locks Contributor</strong> on that resource group and <strong>Azure Kubernetes Service RBAC Cluster Admin</strong> on the target cluster (required for clusters using Azure RBAC for Kubernetes, the default for AKS Automatic); if either optional assignment fails, setup continues with a warning and remediation command. If one already exists, you may
          <a href="#" id="az-use-existing-link">use an existing application…</a>
         </div>
         <div id="az-selected-app-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>
