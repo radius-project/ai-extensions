@@ -5,10 +5,13 @@
 // coverage in vitest.config.ts.
 
 const USER_AGENT = "radius-ai-extensions-live-tests";
-const DEFAULT_RETRY_DELAYS_MS = [250, 1000] as const;
+export const DEFAULT_RETRY_DELAYS_MS = [250, 1000] as const;
 // Each attempt is aborted on its own deadline so a stalled connection cannot
-// hang a live suite for the runner's default socket timeout.
-const DEFAULT_ATTEMPT_TIMEOUT_MS = 30_000;
+// hang a live suite for the runner's default socket timeout. The live suites
+// give each test 30s, so the deadline must leave room for the whole budget:
+// three attempts plus 1.25s of backoff is 25.25s, and a single 30s attempt
+// would instead fail the test before any retry or diagnostic could happen.
+export const DEFAULT_ATTEMPT_TIMEOUT_MS = 8_000;
 // Waiting longer than this for a rate limit to lift is worse for CI than
 // failing with a diagnostic, so a longer `Retry-After` is treated as terminal.
 const DEFAULT_MAX_RETRY_AFTER_MS = 15_000;
@@ -87,12 +90,10 @@ async function cancelResponseBody(response: Response): Promise<void> {
   }
 }
 
-// GitHub reports secondary rate limits as 403 or 429 and only then carries
-// rate-limit evidence, so a plain 403 stays permanent.
-function isRateLimited(response: Response): boolean {
-  if (response.headers.get("retry-after") !== null) {
-    return true;
-  }
+// GitHub reports secondary rate limits as 403 or 429. Only a usable
+// `Retry-After` or an exhausted quota counts as evidence, so a plain 403 stays
+// permanent while a malformed header leaves a 429 on the normal transient path.
+function hasExhaustedQuota(response: Response): boolean {
   return response.headers.get("x-ratelimit-remaining") === "0";
 }
 
@@ -139,32 +140,36 @@ function classifyResponse(
   maxRetryAfterMs: number
 ): Extract<AttemptOutcome, { kind: "failure" }> {
   const status = `${response.status} ${response.statusText}`;
+  const retryAfterMs = parseRetryAfterMs(response);
+  const rateLimitStatus = response.status === 403 || response.status === 429;
+  const quotaExhausted = rateLimitStatus && hasExhaustedQuota(response);
   const rateLimited =
-    (response.status === 403 || response.status === 429) &&
-    isRateLimited(response);
+    rateLimitStatus && (retryAfterMs !== undefined || quotaExhausted);
   if (!isTransientStatus(response.status) && !rateLimited) {
     return { kind: "failure", reason: status, retryable: false };
   }
 
-  const retryAfterMs = parseRetryAfterMs(response);
-  if (retryAfterMs === undefined) {
-    if (rateLimited) {
+  if (retryAfterMs !== undefined) {
+    if (retryAfterMs > maxRetryAfterMs) {
       return {
         kind: "failure",
-        reason: `${status} (${describeRateLimitReset(response)})`,
+        reason: `${status} (retry-after ${retryAfterMs}ms exceeds the ${maxRetryAfterMs}ms budget)`,
         retryable: false
       };
     }
-    return { kind: "failure", reason: status, retryable: true };
+    return { kind: "failure", reason: status, retryable: true, retryAfterMs };
   }
-  if (retryAfterMs > maxRetryAfterMs) {
+
+  // An exhausted quota resets far beyond any retry budget worth spending, so
+  // report the reset instead of retrying. Everything else backs off normally.
+  if (quotaExhausted) {
     return {
       kind: "failure",
-      reason: `${status} (retry-after ${retryAfterMs}ms exceeds the ${maxRetryAfterMs}ms budget)`,
+      reason: `${status} (${describeRateLimitReset(response)})`,
       retryable: false
     };
   }
-  return { kind: "failure", reason: status, retryable: true, retryAfterMs };
+  return { kind: "failure", reason: status, retryable: true };
 }
 
 // Run one attempt under its own deadline, reading the body inside the same
@@ -248,13 +253,15 @@ export function githubApiHeaders(accept: string): Record<string, string> {
 }
 
 // Fetch one GitHub REST resource as text, retrying transient failures across the
-// configured budget. Transient means HTTP 408, HTTP 429, 5xx, a rate-limited 403
-// or 429 carrying `Retry-After`, a transport rejection, or a body read that
-// fails mid-stream. Missing files, invalid refs, auth failures, an exhausted
-// primary rate limit, and caller cancellation fail immediately. Total attempts
-// are `retryDelaysMs.length + 1`, so an empty budget means a single attempt.
-// Any `signal` in `init` is replaced by the per-attempt deadline; pass caller
-// cancellation through `options.signal` instead.
+// configured budget. Transient means HTTP 408, HTTP 429, 5xx, a 403 or 429
+// carrying a usable `Retry-After`, a transport rejection, an attempt that
+// exceeds its deadline, or a body read that fails mid-stream. Missing files,
+// invalid refs, auth failures, a 403 with no rate-limit evidence, an exhausted
+// rate-limit quota, a `Retry-After` beyond the wait budget, and caller
+// cancellation fail immediately. Total attempts are `retryDelaysMs.length + 1`,
+// so an empty budget means a single attempt. Any `signal` in `init` is replaced
+// by the per-attempt deadline; pass caller cancellation through
+// `options.signal` instead.
 export async function fetchGitHubText(
   url: string,
   init: RequestInit,

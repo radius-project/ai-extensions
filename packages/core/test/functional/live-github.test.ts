@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  DEFAULT_ATTEMPT_TIMEOUT_MS,
+  DEFAULT_RETRY_DELAYS_MS,
   fetchExtensionFile,
   fetchGitHubText,
   githubApiHeaders
 } from "../support/live-github.js";
+
+// The opt-in live suites give each test 30s. A default budget that cannot
+// finish inside it would fail the test before any retry or diagnostic lands.
+const LIVE_TEST_TIMEOUT_MS = 30_000;
 
 const URL_UNDER_TEST = "https://api.github.com/test";
 const noDelay = async (): Promise<void> => {};
@@ -85,6 +91,18 @@ describe("githubApiHeaders", () => {
 });
 
 describe("fetchGitHubText", () => {
+  it("exhausts its default budget well inside the live suite timeout", () => {
+    const attempts = DEFAULT_RETRY_DELAYS_MS.length + 1;
+    const maximumBackoffMs = DEFAULT_RETRY_DELAYS_MS.reduce(
+      (total, delay) => total + delay * 1.5,
+      0
+    );
+    const worstCaseMs =
+      attempts * DEFAULT_ATTEMPT_TIMEOUT_MS + maximumBackoffMs;
+
+    expect(worstCaseMs).toBeLessThan(LIVE_TEST_TIMEOUT_MS);
+  });
+
   it("returns the body on the first attempt without sleeping", async () => {
     const { fetchImpl, calls } = respondInOrder([new Response("contents")]);
     const { sleep, delays } = recordDelays();
@@ -512,16 +530,20 @@ describe("fetchGitHubText", () => {
     });
 
     it.each([
-      { header: "soon", label: "non-numeric" },
-      { header: "-5", label: "negative" },
-      { header: "   ", label: "blank" }
+      { status: 503, statusText: "Service Unavailable", header: "soon" },
+      { status: 503, statusText: "Service Unavailable", header: "-5" },
+      { status: 503, statusText: "Service Unavailable", header: "   " },
+      { status: 429, statusText: "Too Many Requests", header: "soon" },
+      { status: 429, statusText: "Too Many Requests", header: "-5" },
+      { status: 429, statusText: "Too Many Requests", header: "   " },
+      { status: 408, statusText: "Request Timeout", header: "soon" }
     ])(
-      "ignores a $label Retry-After header and uses the configured backoff",
-      async ({ header }) => {
+      "ignores an unusable Retry-After '$header' on $status and backs off normally",
+      async ({ status, statusText, header }) => {
         const { fetchImpl } = respondInOrder([
           new Response("busy", {
-            status: 503,
-            statusText: "Service Unavailable",
+            status,
+            statusText,
             headers: { "retry-after": header }
           }),
           new Response("contents")
@@ -538,6 +560,75 @@ describe("fetchGitHubText", () => {
         expect(delays).toEqual([7]);
       }
     );
+
+    it.each(["soon", "-5", "   "])(
+      "keeps a 403 permanent when Retry-After '%s' is unusable and quota remains",
+      async (header) => {
+        const { fetchImpl, calls } = respondInOrder([
+          new Response("no access", {
+            status: 403,
+            statusText: "Forbidden",
+            headers: { "retry-after": header, "x-ratelimit-remaining": "17" }
+          })
+        ]);
+
+        await expect(
+          fetchGitHubText(
+            URL_UNDER_TEST,
+            {},
+            { fetchImpl, sleep: noDelay, random: noJitter }
+          )
+        ).rejects.toThrow(
+          `failed to fetch ${URL_UNDER_TEST} after 1 attempt: 403 Forbidden`
+        );
+        expect(calls()).toBe(1);
+      }
+    );
+
+    it("still reports exhausted quota when Retry-After is unusable", async () => {
+      const { fetchImpl, calls } = respondInOrder([
+        new Response("no quota", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: {
+            "retry-after": "soon",
+            "x-ratelimit-remaining": "0",
+            "x-ratelimit-reset": "1700000000"
+          }
+        })
+      ]);
+
+      await expect(
+        fetchGitHubText(
+          URL_UNDER_TEST,
+          {},
+          { fetchImpl, sleep: noDelay, random: noJitter }
+        )
+      ).rejects.toThrow(
+        "after 1 attempt: 429 Too Many Requests (rate limit exhausted until 2023-11-14T22:13:20.000Z)"
+      );
+      expect(calls()).toBe(1);
+    });
+
+    it("ignores an exhausted quota header on a plain server error", async () => {
+      const { fetchImpl, calls } = respondInOrder([
+        new Response("busy", {
+          status: 500,
+          statusText: "Internal Server Error",
+          headers: { "x-ratelimit-remaining": "0" }
+        }),
+        new Response("contents")
+      ]);
+
+      const result = await fetchGitHubText(
+        URL_UNDER_TEST,
+        {},
+        { fetchImpl, sleep: noDelay, retryDelaysMs: [7], random: noJitter }
+      );
+
+      expect(result.text).toBe("contents");
+      expect(calls()).toBe(2);
+    });
   });
 
   describe("timeouts and cancellation", () => {
