@@ -25,8 +25,8 @@ name: Cloud E2E Cleanup
 # using its own state.
 #
 # See docs/eng/CLOUD_E2E_RUNBOOK.md. Like cloud-e2e.yml, this has never
-# executed: the fixture repository does not exist yet, and the pin below is
-# still a placeholder, so every run so far would no-op by design.
+# executed. The fixture is pinned, but the remaining external identity,
+# credentials, and published-variable prerequisites still prevent a real run.
 
 on:
   # Never `pull_request_target`, and never any pull-request trigger at all.
@@ -78,11 +78,10 @@ jobs:
           node-version-file: .node-version
 
       # The pin is read from the suite's own source rather than restated here.
-      # `FIXTURE_BASELINE_SHA` is `"0".repeat(40)` today, so a copy in YAML
-      # could not even express it, and a second copy of a reset target is
-      # exactly the kind of drift that turns a cleanup job into a destructive
-      # operation against the wrong scope. Node 24 strips the types natively,
-      # so this needs no build and no dependency install.
+      # A second copy of a reset target is exactly the kind of drift that turns
+      # a cleanup job into a destructive operation against the wrong scope.
+      # Node 24 strips the types natively, so this needs no build and no
+      # dependency install.
       - name: Resolve the pinned fixture repository
         id: pin
         shell: bash

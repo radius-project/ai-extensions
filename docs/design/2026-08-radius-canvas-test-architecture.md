@@ -139,21 +139,24 @@ Already testable modules such as `operations.ts`, `verification-plan.ts`, `bicep
 
 ### Layers
 
-| Layer                 | What it proves                                                                                | Main boundary                                      |
-|-----------------------|-----------------------------------------------------------------------------------------------|----------------------------------------------------|
-| Unit                  | Rules, parsing, state transitions, escaping, serialization, and error propagation             | One production module with controlled dependencies |
-| Runtime integration   | Real canvas and tool registration, lifecycle, branch context, callbacks, and keepalive        | Real runtime with a fake SDK session               |
-| HTTP integration      | Methods, paths, bodies, status, headers, streaming, caches, cleanup, and fail-closed behavior | Real server on an OS-assigned loopback port        |
-| Built-extension smoke | Registration, bundle completeness, SDK externalization, startup, and shutdown                 | Real production build in a subprocess              |
-| Browser component     | One browser unit in a real DOM                                                                | Vitest Browser Mode in Chromium                    |
-| Browser functional    | A page fragment or interaction across browser modules                                         | Chromium with controlled network responses         |
-| Critical journey      | A supported workflow across page, browser, HTTP, and server state                             | Playwright with real renderers and loopback HTTP   |
-| Accessibility         | Automated WCAG 2.2 A/AA semantics in material states                                          | Playwright and axe                                 |
-| Keyboard              | Pointer-free operation, focus movement, and announcements                                     | Playwright                                         |
-| Visual                | Selected stable layout, theme, graph, and status states                                       | Reviewed Playwright screenshots                    |
-| Real-host             | Installation, discovery, panel lifecycle, focus, and reconnect                                | A controlled supported Copilot host                |
+| Layer                 | What it proves                                                                                             | Main boundary                                      |
+|-----------------------|------------------------------------------------------------------------------------------------------------|----------------------------------------------------|
+| Unit                  | Rules, parsing, state transitions, escaping, serialization, and error propagation                          | One production module with controlled dependencies |
+| Runtime integration   | Real canvas and tool registration, lifecycle, branch context, callbacks, and keepalive                     | Real runtime with a fake SDK session               |
+| HTTP integration      | Methods, paths, bodies, status, headers, streaming, caches, cleanup, and fail-closed behavior              | Real server on an OS-assigned loopback port        |
+| Built-extension smoke | Registration, bundle completeness, SDK externalization, startup, and shutdown                              | Real production build in a subprocess              |
+| Browser component     | One browser unit in a real DOM                                                                             | Vitest Browser Mode in Chromium                    |
+| Browser functional    | A page fragment or interaction across browser modules                                                      | Chromium with controlled network responses         |
+| Critical journey      | A supported workflow across page, browser, HTTP, and server state                                          | Playwright with real renderers and loopback HTTP   |
+| Accessibility         | Automated WCAG 2.2 A/AA semantics in material states                                                       | Playwright and axe                                 |
+| Keyboard              | Pointer-free operation, focus movement, and announcements                                                  | Playwright                                         |
+| Visual                | Selected stable layout, theme, graph, and status states                                                    | Reviewed Playwright screenshots                    |
+| Real-host             | Installation, discovery, panel lifecycle, focus, and reconnect                                             | A controlled supported Copilot host                |
+| Cloud E2E             | Real GitHub, Azure, Entra, and Kubernetes accept the extension's requests and reflect the expected changes | Scheduled Playwright journey against live services |
 
 Higher-level tests complement unit tests; they do not replace them. A policy belongs in a unit test, its HTTP representation belongs in HTTP integration, and a critical journey is added only when the failure can escape across the interface and server boundary.
+
+Every layer except Cloud E2E is offline: it contacts no network, credential, or mutable external resource. Cloud E2E is the deliberate exception because a fake can prove that Canvas sent a command, but not that a real service accepted it or produced usable state. The tier therefore stays off the pull request path and runs only on a schedule or by manual dispatch. See the [Cloud E2E design](./2026-08-cloud-e2e-environment-lifecycle.md).
 
 ### Regression classes and prevention
 
@@ -176,6 +179,7 @@ Required browser and higher-level gates begin only when their test boundary exis
 | Controlled browser HTTP                   | Mock Service Worker                          | Controls network outcomes without replacing fetch internals                |
 | Journeys, keyboard, accessibility, visual | Playwright Test                              | One Chromium stack for fixtures, traces, screenshots, and server lifecycle |
 | Automated accessibility                   | `@axe-core/playwright`                       | Repeatable WCAG-tagged checks                                              |
+| Live cloud journeys                       | Playwright Test with real command-line tools | Reuses the journey harness by replacing only its fake external seams       |
 
 ## Compatibility and packaging
 

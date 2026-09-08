@@ -24,13 +24,12 @@ import {
 } from "./fixture-repository.js";
 
 describe("pinned baseline constants", () => {
-  it("pins the baseline commit as a single 40-character SHA", () => {
-    expect(FIXTURE_BASELINE_SHA).toMatch(/^[0-9a-f]{40}$/);
-  });
-
-  it("names a default branch and a composed owner/name repository", () => {
-    expect(FIXTURE_REPO_DEFAULT_BRANCH).not.toBe("");
-    expect(FIXTURE_REPOSITORY.split("/")).toHaveLength(2);
+  it("pins the provisioned fixture repository and exact baseline commit", () => {
+    expect(FIXTURE_REPOSITORY).toBe("radius-project/ai-extensions-fixture");
+    expect(FIXTURE_REPO_DEFAULT_BRANCH).toBe("main");
+    expect(FIXTURE_BASELINE_SHA).toBe(
+      "07deb510c0a663047eca085f429e51c8bea384f1"
+    );
   });
 
   it("uses a resource group prefix the Radius purge job still sweeps as a safety net", () => {
@@ -83,21 +82,14 @@ describe("pinned baseline constants", () => {
 });
 
 describe("isFixtureRepositoryProvisioned", () => {
-  // The repository is deliberately not provisioned on this branch. Asserting
-  // the predicate reports that keeps a placeholder from ever reading as a real
-  // cloud result, and this expectation is what fails loudly at the moment
-  // someone bumps the constants without also updating the suite.
-  it("reports the placeholder constants as unprovisioned", () => {
-    expect(isFixtureRepositoryProvisioned()).toBe(false);
+  it("reports the pinned fixture constants as provisioned", () => {
+    expect(isFixtureRepositoryProvisioned()).toBe(true);
   });
 
-  it("names every constant still holding a placeholder", () => {
-    const description = describeUnprovisionedFixtureRepository();
-
-    expect(description).toContain("FIXTURE_REPO_OWNER");
-    expect(description).toContain("FIXTURE_REPO_NAME");
-    expect(description).toContain("FIXTURE_BASELINE_SHA");
-    expect(description).toContain("fixture-repository.ts");
+  it("describes the pinned fixture as provisioned", () => {
+    expect(describeUnprovisionedFixtureRepository()).toBe(
+      "The fixture repository is provisioned."
+    );
   });
 });
 

@@ -477,7 +477,7 @@ describe("createCloudFixture", () => {
               "api",
               "--method",
               "POST",
-              "repos/TODO-owner/TODO-repo/git/refs"
+              "repos/radius-project/ai-extensions-fixture/git/refs"
             ],
             respond: {}
           },
@@ -489,9 +489,11 @@ describe("createCloudFixture", () => {
         ports: fake.ports
       });
 
-      expect(fixture.repository).toBe("TODO-owner/TODO-repo");
+      expect(fixture.repository).toBe("radius-project/ai-extensions-fixture");
       expect(fixture.defaultBranch).toBe("main");
-      expect(fixture.baselineSha).toBe("0".repeat(40));
+      expect(fixture.baselineSha).toBe(
+        "07deb510c0a663047eca085f429e51c8bea384f1"
+      );
     });
 
     it("rejects a blank subscription id before issuing any command", async () => {

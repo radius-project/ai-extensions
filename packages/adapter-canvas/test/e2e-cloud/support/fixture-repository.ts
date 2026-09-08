@@ -14,26 +14,19 @@
 //    *fixture* chooses are run-scoped so two runs never collide.
 
 /**
- * The fixture repository does not exist yet.
+ * The private repository dedicated to the mutable Cloud E2E baseline.
  *
- * These are placeholders. Layer 4 cannot run until the repository is created
- * with a committed `.radius/` baseline and this file is updated in the same
- * change that switches the suite on. `isFixtureRepositoryProvisioned()` is what
- * stops a placeholder from masquerading as a passing cloud check.
+ * Its README owns the update procedure. Every baseline change must replace the
+ * SHA below with the resulting fixture commit so setup and cleanup use the same
+ * reviewed state.
  */
-// TODO(#639): replace with the real fixture repository owner once provisioned.
-export const FIXTURE_REPO_OWNER = "TODO-owner";
-// TODO(#639): replace with the real fixture repository name once provisioned.
-export const FIXTURE_REPO_NAME = "TODO-repo";
-// TODO(#639): confirm the default branch of the provisioned repository.
+export const FIXTURE_REPO_OWNER = "radius-project";
+export const FIXTURE_REPO_NAME = "ai-extensions-fixture";
 export const FIXTURE_REPO_DEFAULT_BRANCH = "main";
 /**
  * The commit the fixture repository is reset to before and after every run.
- *
- * TODO(#639): replace with the real baseline commit once the repository carries
- * `.radius/app.bicep`, `.radius/bicepconfig.json`, and `.radius/app.origin.json`.
  */
-export const FIXTURE_BASELINE_SHA = "0".repeat(40);
+export const FIXTURE_BASELINE_SHA = "07deb510c0a663047eca085f429e51c8bea384f1";
 
 /** `owner/name`, the form both `gh` and the product's OIDC lookup use. */
 export const FIXTURE_REPOSITORY = `${FIXTURE_REPO_OWNER}/${FIXTURE_REPO_NAME}`;

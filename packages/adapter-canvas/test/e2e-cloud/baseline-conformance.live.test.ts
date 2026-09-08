@@ -4,7 +4,7 @@
 // collected on every run but skipped unless explicitly enabled. Unlike those
 // files, this check is deliberately gated on `RADIUS_CLOUD_E2E` and is not run
 // by `live-tests.yml`, because it needs the provisioned fixture repository, not
-// only a live CLI. Provisioning placeholders keep the normal suite skipped too.
+// only a live CLI.
 //
 // The compile port is the product's own `buildGraphViaRad` rather than a second
 // Bicep invocation, so a baseline this check accepts is one the product can
@@ -119,7 +119,7 @@ describe.skipIf(!ENABLED)(
 // Always runs, credentials or not: the guard that keeps a placeholder from
 // masquerading as a passing cloud check is itself worth a test.
 describe("live conformance gating", () => {
-  it("stays disabled until the fixture repository is provisioned", () => {
+  it("reports whether the pinned fixture is available to an enabled run", () => {
     if (isFixtureRepositoryProvisioned()) {
       expect(describeUnprovisionedFixtureRepository()).toBe(
         "The fixture repository is provisioned."

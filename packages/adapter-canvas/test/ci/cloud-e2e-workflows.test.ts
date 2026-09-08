@@ -488,10 +488,9 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(ENVIRONMENT_NAME_PREFIX).toBe("radtest-");
   });
 
-  it("purges nothing until the fixture repository is provisioned", async () => {
-    // Today the pin is a placeholder, so every destructive step is gated off.
-    // The gate is the reason this workflow can be merged before its
-    // prerequisites exist without being a hazard.
+  it("gates every destructive step on a provisioned fixture pin", async () => {
+    // Keep this defense even after provisioning so a future placeholder or
+    // malformed pin cannot turn cleanup against an ambiguous scope.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const destructive = steps(workflow.jobs?.purge).filter(
       (step) =>
