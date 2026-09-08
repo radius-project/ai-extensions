@@ -13,6 +13,7 @@ import {
   cleanupAzureSetupArtifacts,
   cleanupProviderRecoveryDisposition,
   cleanupGitHubEnvironmentArtifact,
+  createInstanceRequestCoordinator,
   rollbackCommittedWorkflowFiles,
   rollbackGitHubEnvironmentVariableArtifacts,
   guardStopBoundary,
@@ -47,13 +48,16 @@ import {
   resolveDeploymentEnvironment,
   resolveDeployStatus,
   resolveDeployRepairLoop,
+  onEnvironmentTasksSettled,
   setDeployRepairHandoff,
   triggerDeployRepairHandoff,
   setDeployFailureNotice,
+  setSessionPromptHandler,
   triggerDeployFailureNotice,
   classifyDeployDispatchFailure,
   DEPLOY_BRANCH_NOT_PUSHED_KIND,
   DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND,
+  DEPLOY_CLOUD_AUTH_DRIFT_KIND,
   DEPLOY_RUN_UNCONFIRMED_KIND
 } from "./server.js";
 import { DEPLOY_REPAIR_ATTEMPT_CAP } from "./runtime/hooks.js";
@@ -61,6 +65,7 @@ import {
   createOperation,
   finish,
   prepareProviderMutation,
+  setStageState,
   settleProviderMutation,
   getSetupArtifactLedger,
   recordAzureApp,
@@ -80,10 +85,16 @@ import {
   canStartRollback,
   canRetryCleanup,
   canExitSetup,
+  buildDeleteStages,
   requestStop,
   toClientView,
   cleanupTargetKey,
-  unresolvedCleanupTargets
+  unresolvedCleanupTargets,
+  operations,
+  STAGE_DELETE_CREDENTIAL,
+  STAGE_DELETE_GITHUB_ENV,
+  STAGE_DELETE_RADIUS_ENV,
+  STAGE_DELETE_STATE_PACKAGE
 } from "./operations.js";
 import { createHash } from "node:crypto";
 import type { CanvasState } from "./shared.js";
@@ -4819,6 +4830,22 @@ describe("triggerDeployRepairHandoff", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("does not hand off a cloud-auth-drift failure, which only re-verifying can fix", () => {
+    const calls: DeployRepairHandoffInput[] = [];
+    setDeployRepairHandoff((payload) => {
+      calls.push(payload);
+    });
+    // Exception 5.2: the credentials drifted since the environment verified, so
+    // redeploying the same model would only fail login again — the user must
+    // re-verify first.
+    expect(
+      triggerDeployRepairHandoff(
+        failedEntry({ deployErrorKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND })
+      )
+    ).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
   it("does not hand off unless the deploy actually failed", () => {
     const calls: DeployRepairHandoffInput[] = [];
     setDeployRepairHandoff((payload) => {
@@ -5888,6 +5915,113 @@ describe("invokeSessionPrompt", () => {
     }, message);
     expect(seen).toEqual([message]);
     expect(result).toEqual({ status: 200 });
+  });
+});
+
+describe("environment deletion session reporting coordinator", () => {
+  afterEach(() => {
+    setSessionPromptHandler(null);
+    operations.clear();
+  });
+
+  it.each([
+    ["forwards the failure prompt", false],
+    ["preserves the deletion result when session delivery fails", true]
+  ])("%s", async (_description, rejectSessionPrompt) => {
+    const instanceId = `ghcr-report-${rejectSessionPrompt ? "failure" : "success"}`;
+    const operation = createOperation({
+      operationId: `op-${instanceId}`,
+      kind: "delete",
+      provider: "azure",
+      repo: "octo/app",
+      environment: "dev",
+      stages: buildDeleteStages({ includeAzureCleanup: true })
+    });
+    for (const stage of [
+      STAGE_DELETE_RADIUS_ENV,
+      STAGE_DELETE_CREDENTIAL,
+      STAGE_DELETE_GITHUB_ENV
+    ]) {
+      setStageState(operation, stage, "succeeded");
+    }
+    operation.currentStage = STAGE_DELETE_STATE_PACKAGE;
+    operations.put(operation);
+
+    const sessionPromptHandler = vi.fn(async () => {
+      if (rejectSessionPrompt) throw new Error("session delivery failed");
+    });
+    setSessionPromptHandler(sessionPromptHandler);
+    const persistedFailures: unknown[] = [];
+    const persist = vi.fn(async () => {
+      persistedFailures.push(structuredClone(operation.failure));
+    });
+    const log = vi.fn();
+    const coordinator = createInstanceRequestCoordinator(
+      instanceId,
+      () => "http://127.0.0.1:0",
+      {
+        deleteRadiusEnvironment: vi.fn(async () => ({
+          outcome: "deleted" as const
+        })),
+        runAz: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+        readAzureIdentity: vi.fn(async () => ({
+          tenantId: "tenant-1",
+          applicationObjectId: "application-1"
+        })),
+        deleteGitHubEnvironment: vi.fn(async () => ({
+          outcome: "deleted" as const
+        })),
+        deleteStatePackage: vi.fn(async () => {
+          throw new Error("missing delete:packages");
+        }),
+        withCredentialProvenanceLock: (work) => work(),
+        readCredentialProvenance: vi.fn(() => []),
+        removeCredentialProvenance: vi.fn(async () => {}),
+        clearEnvironmentCredentialProvenance: vi.fn(async () => {}),
+        persist,
+        errorMessage: (error) =>
+          error instanceof Error ? error.message : String(error),
+        log
+      }
+    );
+    const settled = new Promise<void>((resolve) => {
+      let stop = (): void => {};
+      stop = onEnvironmentTasksSettled(instanceId, () => {
+        stop();
+        resolve();
+      });
+    });
+
+    coordinator.scheduleEnvironmentOperation(operation);
+    await settled;
+
+    expect(operation).toMatchObject({
+      state: "failed_partial",
+      failure: {
+        code: "state-package-delete-failed",
+        message: expect.stringContaining("missing delete:packages")
+      }
+    });
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(persistedFailures.at(-1)).toMatchObject({
+      code: "state-package-delete-failed",
+      message: expect.stringContaining("missing delete:packages")
+    });
+    expect(sessionPromptHandler).toHaveBeenCalledOnce();
+    expect(sessionPromptHandler).toHaveBeenCalledWith({
+      prompt: expect.stringContaining("missing delete:packages"),
+      displayPrompt:
+        'Resolving the failed GHCR cleanup for environment "dev" in octo/app.'
+    });
+    if (rejectSessionPrompt) {
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "Could not report the GHCR package deletion failure to Copilot chat"
+        )
+      );
+    } else {
+      expect(log).not.toHaveBeenCalled();
+    }
   });
 });
 

@@ -6,6 +6,7 @@ import { addLegacyStep } from "../../../src/operations.js";
 import { ENTRA_APP_RETENTION_NOTICE } from "../../../src/server/routes/azure-auto-setup-application.js";
 import { createAzureAutoSetupRoutes } from "../../../src/server/routes/azure-auto-setup.js";
 import { buildRadiusAppProvenanceTags } from "../../../src/azure-oidc.js";
+import { deterministicProviderUuid } from "../../../src/server/services/provider-mutation-recovery.js";
 import type {
   AzureAutoSetupCommandResult,
   AzureAutoSetupDependencies,
@@ -389,6 +390,16 @@ describe("POST /api/azure-auto-setup real-loopback HTTP contracts (RF-03)", () =
         (line) => line === `ad app show --id ${APP_ID} --query id -o tsv`
       )
     ).toHaveLength(2);
+    const resourceGroupScope = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-radius`;
+    const clusterScope = `/subscriptions/${SUBSCRIPTION}/resourceGroups/rg-radius/providers/Microsoft.ContainerService/managedClusters/aks-radius`;
+    expect(
+      azCalls.filter((line) => line.startsWith("role assignment create "))
+    ).toEqual([
+      `role assignment create --name ${deterministicProviderUuid(`op-http-reuse\0${OBJECT_ID}\0Contributor\0${resourceGroupScope}`)} --assignee-object-id ${OBJECT_ID} --assignee-principal-type ServicePrincipal --role Contributor --scope ${resourceGroupScope} --subscription ${SUBSCRIPTION} --output none`,
+      `role assignment create --name ${deterministicProviderUuid(`op-http-reuse\0${OBJECT_ID}\0Azure Kubernetes Service RBAC Cluster Admin\0${clusterScope}`)} --assignee-object-id ${OBJECT_ID} --assignee-principal-type ServicePrincipal --role Azure Kubernetes Service RBAC Cluster Admin --scope ${clusterScope} --subscription ${SUBSCRIPTION} --output none`,
+      `role assignment create --name ${deterministicProviderUuid(`op-http-reuse\0${OBJECT_ID}\0Locks Contributor\0${resourceGroupScope}`)} --assignee-object-id ${OBJECT_ID} --assignee-principal-type ServicePrincipal --role Locks Contributor --scope ${resourceGroupScope} --subscription ${SUBSCRIPTION} --output none`
+    ]);
+    expect(azCalls.join("\n")).not.toContain("User Access Administrator");
     expect(unmatchedCalls).toEqual([]);
   });
 

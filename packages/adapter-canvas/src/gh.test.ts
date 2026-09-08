@@ -973,6 +973,106 @@ describe.sequential("cliExec", () => {
   });
 });
 
+describe.sequential("commitFileToRepo", () => {
+  beforeEach(() => {
+    childProcess.execFile.mockReset();
+    childProcess.execFileSync.mockReset();
+  });
+
+  afterEach(() => {
+    restorePlatform();
+  });
+
+  it("commits missing files", async () => {
+    const { commitFileToRepo } = await loadGh("linux");
+    let requestBody = "";
+    childProcess.execFile.mockImplementation((_file, args, _opts, callback) => {
+      const readingFile = !args?.includes("--method");
+      callback(
+        readingFile ? new Error("not found") : null,
+        "",
+        readingFile ? "HTTP 404: Not Found" : ""
+      );
+      return {
+        stdin: {
+          end(value?: string) {
+            if (value) requestBody = value;
+          }
+        }
+      };
+    });
+
+    await expect(
+      commitFileToRepo(
+        "octo/app",
+        ".github/workflows/radius.yml",
+        "on: workflow_dispatch",
+        "main",
+        "Update Radius workflow"
+      )
+    ).resolves.toBe(true);
+
+    expect(JSON.parse(requestBody)).toEqual({
+      message: "Update Radius workflow",
+      content: Buffer.from("on: workflow_dispatch").toString("base64"),
+      branch: "main"
+    });
+  });
+
+  it("does not commit a workflow whose content already matches", async () => {
+    const { commitFileToRepo } = await loadGh("linux");
+    const content = "on: workflow_dispatch";
+    const sha = "0ed39ed01473b7fb142b9b1d2fb06bb03b7791b2";
+    childProcess.execFile.mockImplementation(
+      (_file, _args, _opts, callback) => {
+        callback(null, sha, "");
+        return { stdin: { end: vi.fn() } };
+      }
+    );
+
+    await expect(
+      commitFileToRepo(
+        "octo/app",
+        ".github/workflows/radius.yml",
+        content,
+        "main",
+        "Update Radius workflow"
+      )
+    ).resolves.toBe(false);
+    expect(childProcess.execFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("updates a workflow when its existing content has drifted", async () => {
+    const { commitFileToRepo } = await loadGh("linux");
+    let requestBody = "";
+    childProcess.execFile.mockImplementation((_file, args, _opts, callback) => {
+      if (!args?.includes("--method")) {
+        callback(null, "existing-sha", "");
+      } else {
+        callback(null, "", "");
+      }
+      return {
+        stdin: {
+          end(value?: string) {
+            if (value) requestBody = value;
+          }
+        }
+      };
+    });
+
+    await expect(
+      commitFileToRepo(
+        "octo/app",
+        ".github/workflows/radius.yml",
+        "current",
+        "main",
+        "Update Radius workflow"
+      )
+    ).resolves.toBe(true);
+    expect(JSON.parse(requestBody)).toMatchObject({ sha: "existing-sha" });
+  });
+});
+
 describe.sequential("ghApiJson", () => {
   beforeEach(() => {
     childProcess.execFile.mockReset();
@@ -1600,18 +1700,104 @@ describe.sequential("selected GitHub executor", () => {
     const executor = await gh.createSelectedGhExecutor("tokuser");
     childProcess.execFile.mockClear();
 
-    await gh.selectedFetchFileFromRepo(
-      executor,
-      "octo/app",
-      "app.bicep",
-      "main"
-    );
+    await expect(
+      gh.selectedFetchFileFromRepo(executor, "octo/app", "app.bicep", "main")
+    ).resolves.toBe("main");
+    await expect(
+      gh.selectedFetchFileFromRepoResult(
+        executor,
+        "octo/app",
+        "app.bicep",
+        "main"
+      )
+    ).resolves.toEqual({
+      content: "main",
+      error: null,
+      status: 200
+    });
     await gh.selectedGetDefaultBranch(executor, "octo/app");
     await gh.selectedGetBranchHeadSha(executor, "octo/app", "main");
 
     expect(
       childProcess.execFile.mock.calls.map(([, , options]) => options.timeout)
-    ).toEqual([15000, 15000, 15000, 15000]);
+    ).toEqual([15000, 15000, 15000, 15000, 15000]);
+  });
+
+  it.each([
+    ["stderr", { error: "HTTP 404", stderr: "HTTP 404: Not Found" }],
+    ["stdout", { error: "HTTP 404", stdout: "HTTP 404: Not Found" }]
+  ])(
+    "reports an explicit 404 from %s for a missing selected-account repository file",
+    async (_channel, commandResult) => {
+      const missing = await loadGh("linux", {
+        token: "selected-injected-token",
+        withToken: STATUS.tokenWithWorkflow,
+        keyring: STATUS.keyringWithWorkflow,
+        apiLogin: "tokuser",
+        commandResult
+      });
+      const missingExecutor = await missing.createSelectedGhExecutor("tokuser");
+
+      await expect(
+        missing.selectedFetchFileFromRepoResult(
+          missingExecutor,
+          "octo/app",
+          "missing.yml",
+          "main"
+        )
+      ).resolves.toMatchObject({ content: null, status: 404 });
+    }
+  );
+
+  it("fails closed on an empty selected-account repository file response", async () => {
+    const gh = await loadGh("linux", {
+      token: "selected-injected-token",
+      withToken: STATUS.tokenWithWorkflow,
+      keyring: STATUS.keyringWithWorkflow,
+      apiLogin: "tokuser",
+      commandResult: { stdout: "" }
+    });
+    const executor = await gh.createSelectedGhExecutor("tokuser");
+
+    await expect(
+      gh.selectedFetchFileFromRepoResult(
+        executor,
+        "octo/app",
+        "workflow.yml",
+        "main"
+      )
+    ).resolves.toEqual({
+      content: null,
+      error: "GitHub returned an empty repository file.",
+      status: 200
+    });
+  });
+
+  it("preserves success and failure status on default-account repository reads", async () => {
+    const success = await loadGh("linux", {
+      commandResult: { stdout: "bWFpbg==" }
+    });
+    await expect(
+      success.fetchFileFromRepoResult("octo/app", "workflow.yml", "main")
+    ).resolves.toEqual({
+      content: "main",
+      error: null,
+      status: 200
+    });
+
+    const denied = await loadGh("linux", {
+      commandResult: {
+        error: "HTTP 403",
+        stderr: "HTTP 403: Resource not accessible"
+      }
+    });
+    await expect(
+      denied.fetchFileFromRepoResult("octo/app", "workflow.yml", "main")
+    ).resolves.toEqual({
+      content: null,
+      error: "HTTP 403: Resource not accessible",
+      status: 403
+    });
   });
 });
 

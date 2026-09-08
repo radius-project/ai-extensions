@@ -15,11 +15,22 @@ const DISPATCH_HEADER = `on:
 export const VERIFY_TEMPLATE = (
   provider: string
 ): string => `name: Verify ${provider} credentials
-${DISPATCH_HEADER}
+on:
+  push:
+    branches:
+      - "radius/setup-**"
+    paths:
+      - ".github/workflows/radius-verify-credentials.yml"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deploy environment
+        required: true
+        default: "{{ENV}}"
 jobs:
   verify:
     runs-on: ubuntu-latest
-    environment: \${{ inputs.environment }}
+    environment: \${{ inputs.environment || '{{ENV}}' }}
     permissions:
       id-token: write
       contents: read
