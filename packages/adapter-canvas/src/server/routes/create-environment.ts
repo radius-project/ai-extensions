@@ -1347,7 +1347,7 @@ export async function handleCreateEnvironment(
               workflow: dependencies.verifyWorkflowFile,
               ref: identity.ref,
               environment: identity.environment,
-              event: verifyPlan.trigger,
+              event: "workflow_dispatch",
               operationMarker: identity.operationMarker,
               baselineRunId: identity.baselineRunId,
               runId: run?.runId ?? null,

@@ -1034,7 +1034,9 @@ export async function selectedFetchFileFromRepoResult(
     ],
     { timeout: 15000 }
   );
-  const statusMatch = result.stderr.match(/\bHTTP\s+(\d{3})\b/i);
+  const statusMatch = `${result.stderr}\n${result.stdout}`.match(
+    /\bHTTP\s+(\d{3})\b/i
+  );
   const status =
     result.code === 0 ? 200
     : statusMatch ? Number(statusMatch[1])

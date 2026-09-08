@@ -1723,25 +1723,31 @@ describe.sequential("selected GitHub executor", () => {
     ).toEqual([15000, 15000, 15000, 15000, 15000]);
   });
 
-  it("reports an explicit 404 for a missing selected-account repository file", async () => {
-    const missing = await loadGh("linux", {
-      token: "selected-injected-token",
-      withToken: STATUS.tokenWithWorkflow,
-      keyring: STATUS.keyringWithWorkflow,
-      apiLogin: "tokuser",
-      commandResult: { error: "HTTP 404", stderr: "HTTP 404: Not Found" }
-    });
-    const missingExecutor = await missing.createSelectedGhExecutor("tokuser");
+  it.each([
+    ["stderr", { error: "HTTP 404", stderr: "HTTP 404: Not Found" }],
+    ["stdout", { error: "HTTP 404", stdout: "HTTP 404: Not Found" }]
+  ])(
+    "reports an explicit 404 from %s for a missing selected-account repository file",
+    async (_channel, commandResult) => {
+      const missing = await loadGh("linux", {
+        token: "selected-injected-token",
+        withToken: STATUS.tokenWithWorkflow,
+        keyring: STATUS.keyringWithWorkflow,
+        apiLogin: "tokuser",
+        commandResult
+      });
+      const missingExecutor = await missing.createSelectedGhExecutor("tokuser");
 
-    await expect(
-      missing.selectedFetchFileFromRepoResult(
-        missingExecutor,
-        "octo/app",
-        "missing.yml",
-        "main"
-      )
-    ).resolves.toMatchObject({ content: null, status: 404 });
-  });
+      await expect(
+        missing.selectedFetchFileFromRepoResult(
+          missingExecutor,
+          "octo/app",
+          "missing.yml",
+          "main"
+        )
+      ).resolves.toMatchObject({ content: null, status: 404 });
+    }
+  );
 
   it("fails closed on an empty selected-account repository file response", async () => {
     const gh = await loadGh("linux", {
