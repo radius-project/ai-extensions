@@ -163,7 +163,7 @@ export function initializeDeployedGraphPage(
   let modeledGraphPending = false;
   let controller: GraphController | null = null;
   let renderedBranch = "";
-  let renderedMode = "";
+  let renderedLegend: boolean | null = null;
   let resumeGraphOnVisible = false;
   let graphRequestInFlight = false;
   let progressView: GraphProgressView | null = null;
@@ -271,7 +271,7 @@ export function initializeDeployedGraphPage(
     controller?.destroy();
     controller = null;
     renderedBranch = "";
-    renderedMode = "";
+    renderedLegend = null;
     const container = context.dom.byId("graph-container");
     if (container) {
       container.innerHTML = "";
@@ -399,10 +399,11 @@ export function initializeDeployedGraphPage(
         } else {
           if (status) status.style.display = "none";
           const branch = readString(payload, "branch") || page.graphBranch;
+          const showLegend = lastMode !== "greyed";
           if (
             controller &&
             renderedBranch === branch &&
-            renderedMode === lastMode
+            renderedLegend === showLegend
           ) {
             controller = controller.update(resources) ?? controller;
           } else {
@@ -411,12 +412,12 @@ export function initializeDeployedGraphPage(
               renderGraph("graph-container", resources, {
                 repoUrl: githubRepositoryUrl(page.repo),
                 branch,
-                showLegend: lastMode !== "greyed",
+                showLegend,
                 deployMode: true
               })
             );
             renderedBranch = branch;
-            renderedMode = lastMode;
+            renderedLegend = showLegend;
           }
           setModeNote(
             describeMode(

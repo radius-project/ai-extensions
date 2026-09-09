@@ -26,6 +26,7 @@ import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environme
 import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
 import { GRAPH_RETRY_MS } from "../../src/browser/pages/graph-page.js";
 import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
+import { DEPLOYED_GRAPH_POLL_MS } from "../../src/browser/pages/deployed-graph-page.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const SOURCE_FILE = "src/web/app.ts";
@@ -57,6 +58,41 @@ async function filesContainingText(
     if (content.includes(Buffer.from(text))) matches.push(filePath);
   }
   return matches;
+}
+
+async function waitForStableComputedTransform(
+  page: Page,
+  viewport: Locator
+): Promise<string> {
+  let previous = "";
+  let current = "";
+  let stableChecks = 0;
+  await expect
+    .poll(async () => {
+      await page.clock.fastForward(50);
+      current = await viewport.evaluate((element) => {
+        const getComputedStyleFromGlobal = Reflect.get(
+          globalThis,
+          "getComputedStyle"
+        );
+        if (typeof getComputedStyleFromGlobal !== "function") return "none";
+        const computedStyle = Reflect.apply(
+          getComputedStyleFromGlobal,
+          globalThis,
+          [element]
+        );
+        if (computedStyle === null || typeof computedStyle !== "object") {
+          return "none";
+        }
+        return String(Reflect.get(computedStyle, "transform"));
+      });
+      if (current === previous && current !== "none") stableChecks++;
+      else stableChecks = 0;
+      previous = current;
+      return stableChecks;
+    })
+    .toBeGreaterThanOrEqual(2);
+  return current;
 }
 
 // The environment-deletion route refuses (409 app-deployed) while an
@@ -1351,6 +1387,115 @@ test.describe("Radius Canvas in Chromium", () => {
       "Repository <strong>administrator access</strong> is required."
     );
     await expect(table.locator("strong")).toHaveCount(0);
+    await expectNoWcagViolations(page);
+  });
+
+  test("shows escaped action-required server guidance before the pull request fallback in Chromium @safety", async ({
+    page,
+    canvas
+  }) => {
+    const environment = "action-required-env";
+    const selected = {
+      id: "aks-action-required",
+      name: "AKS Action Required",
+      resourceGroup: "rg-action-required"
+    };
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      ...azureDiscoveryCommands({
+        subscriptionId: PROFILE_SUBSCRIPTION_ID,
+        clusters: [selected],
+        selected,
+        namespaces: ["default"]
+      })
+    );
+    await canvas.setScenario(scenario);
+
+    let setupStarted = false;
+    let polls = 0;
+    const operation = (terminalState: "action_required" | null) => ({
+      operation: {
+        operationId: "op_action_required_message",
+        environment,
+        provider: "azure",
+        state: terminalState === null ? "running" : "finished",
+        terminalState,
+        summary: `Creating ${environment}...`,
+        currentStage: "verify",
+        stages: [{ state: "running", label: "Verify credentials" }],
+        steps: [{ state: "running", label: "Waiting for verification" }],
+        failure: null,
+        cleanup: null,
+        verification: null,
+        inputRequired: null,
+        startedAt: new Date(0).toISOString(),
+        endedAt: terminalState === null ? null : new Date(1000).toISOString(),
+        terminal:
+          terminalState === null ? null : (
+            {
+              reason: "pr-merge-required",
+              pullRequestUrl: "https://github.com/fixture/radius-app/pull/7",
+              userMessage:
+                "Merge <strong>this setup pull request</strong> before retrying verification."
+            }
+          )
+      }
+    });
+    await page.route("**/api/operations**", async (route) => {
+      const request = route.request();
+      if (request.method() === "POST") {
+        setupStarted = true;
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ operationId: "op_action_required_message" })
+        });
+        return;
+      }
+      if (request.method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      if (!setupStarted) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ operation: null })
+        });
+        return;
+      }
+      polls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(operation(polls === 1 ? null : "action_required"))
+      });
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+    await openEnvironmentWizard(page);
+    await page.getByLabel("Environment name").fill(environment);
+    const resourceGroup = page.getByLabel("Resource Group", { exact: true });
+    await expect(
+      resourceGroup.locator('option[value="__custom__"]')
+    ).toHaveCount(0);
+    await resourceGroup.selectOption(selected.resourceGroup);
+    const createEnvironment = page.locator("#deploy-btn:not([disabled])");
+    await expect(createEnvironment).toHaveText("Create Environment");
+    await createEnvironment.click();
+
+    const banner = page.locator("#env-action-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText(
+      "Merge <strong>this setup pull request</strong> before retrying verification."
+    );
+    await expect(banner.locator("strong")).toHaveCount(2);
+    await expect(
+      banner.getByRole("link", { name: "Review the pull request →" })
+    ).toHaveAttribute("href", "https://github.com/fixture/radius-app/pull/7");
+    await expect(banner).not.toContainText(
+      "Radius could not push the deploy workflows to the default branch"
+    );
     await expectNoWcagViolations(page);
   });
 
@@ -2940,6 +3085,67 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(
       page.getByRole("button", { name: "Stop tracking deployment" })
     ).toBeVisible();
+  });
+
+  test("preserves graph zoom while a deployment refreshes in Chromium", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let graphRequests = 0;
+    await routeDeployedPage(page, () => "pending");
+    await page.unroute("**/api/deployed-graph**");
+    await page.route("**/api/deployed-graph**", async (route) => {
+      graphRequests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [
+            {
+              id: "app/web",
+              name: "web",
+              type: "Radius.Compute/containers",
+              deployStatus: graphRequests === 1 ? "pending" : "success"
+            },
+            {
+              id: "app/db",
+              name: "db",
+              type: "Radius.Data/sqlDatabases",
+              deployStatus: graphRequests === 1 ? "pending" : "success"
+            }
+          ],
+          mode: "live",
+          branch: WORKTREE_BRANCH,
+          application: "radius-app",
+          updatedAt: "2026-09-03T19:00:00Z"
+        })
+      });
+    });
+    await gotoCanvas(page, canvas, "deployed");
+    await expect(page.getByAltText("In progress")).toHaveCount(2);
+
+    const viewport = page.locator(".react-flow__viewport");
+    const zoomOut = page.locator(".react-flow__controls-zoomout");
+    const fittedTransform = await waitForStableComputedTransform(
+      page,
+      viewport
+    );
+    await zoomOut.click();
+    const zoomedTransform = await waitForStableComputedTransform(
+      page,
+      viewport
+    );
+    // The refresh assertion below is only meaningful if the zoom control
+    // actually moved the viewport first.
+    expect(zoomedTransform).not.toBe(fittedTransform);
+
+    await page.clock.fastForward(DEPLOYED_GRAPH_POLL_MS);
+    await expect.poll(() => graphRequests).toBe(2);
+    await expect(page.getByAltText("Deployed")).toHaveCount(2);
+    expect(await waitForStableComputedTransform(page, viewport)).toBe(
+      zoomedTransform
+    );
   });
 
   test("confirms stop-tracking recovery by keyboard and sends the failed teardown identity @safety", async ({
