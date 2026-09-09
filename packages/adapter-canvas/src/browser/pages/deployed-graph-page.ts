@@ -171,10 +171,17 @@ export function initializeDeployedGraphPage(
   let resumeGraphOnVisible = false;
   let graphRequestInFlight = false;
   let progressView: GraphProgressView | null = null;
-  // What the last successful graph load says is actually deployed, so the delete
-  // confirmation can name it. Cleared whenever the graph stops standing for a
-  // real deployment.
-  let deployedResources: readonly unknown[] = [];
+  // What the last successful graph load says is actually deployed, tagged with
+  // the selection it describes. The tag is what makes it safe to read while a
+  // refresh is in flight: a list left over from a superseded selection can never
+  // be mistaken for the current one.
+  let deployedGraph: { key: string; resources: readonly unknown[] } = {
+    key: "",
+    resources: []
+  };
+  const forgetDeployedResources = (): void => {
+    deployedGraph = { key: "", resources: [] };
+  };
 
   const stopProgress = (): void => {
     progressView?.stop();
@@ -196,6 +203,18 @@ export function initializeDeployedGraphPage(
     deployments.get(
       deploymentKey(selectedApplication(), selectedEnvironment())
     ) ?? "";
+
+  // Only the target's own resources may be named. A refresh that is still in
+  // flight leaves the previous selection's list in place, so the tag is checked
+  // against the pair the dialog is opening for rather than trusting whatever
+  // loaded last.
+  const deployedResourcesFor = (
+    application: string,
+    environment: string
+  ): readonly unknown[] =>
+    deployedGraph.key === deploymentKey(application, environment) ?
+      deployedGraph.resources
+    : [];
 
   const stopStatePolling = (): void => {
     if (stateTimer !== null) entry.cancel(stateTimer);
@@ -276,7 +295,7 @@ export function initializeDeployedGraphPage(
 
   const showNothing = (message: string): void => {
     if (status) status.style.display = "none";
-    deployedResources = [];
+    forgetDeployedResources();
     controller?.destroy();
     controller = null;
     renderedBranch = "";
@@ -374,6 +393,12 @@ export function initializeDeployedGraphPage(
     const requestGeneration = ++graphGeneration;
     graphRequestInFlight = true;
     let url = `/api/deployed-graph?repo=${encodeURIComponent(page.repo)}`;
+    // The selection this request describes, captured now: it may change again
+    // before the response lands, and the result belongs to the one it asked for.
+    const requestedKey = deploymentKey(
+      selectedApplication(),
+      selectedEnvironment()
+    );
     if (selectedApplication()) {
       url += `&application=${encodeURIComponent(selectedApplication())}`;
     }
@@ -388,7 +413,7 @@ export function initializeDeployedGraphPage(
         stopProgress();
         const loadError = readString(payload, "error");
         if (loadError) {
-          deployedResources = [];
+          forgetDeployedResources();
           modeledGraphPending = isRecord(payload) && payload.retry === true;
           if (!controller && status) {
             status.style.display = "";
@@ -405,7 +430,10 @@ export function initializeDeployedGraphPage(
         lastMode = readString(payload, "mode") || "greyed";
         // A greyed graph is the modeled application rather than a deployment, so
         // it must never be offered as the list a delete would destroy.
-        deployedResources = lastMode === "greyed" ? [] : resources;
+        deployedGraph =
+          lastMode === "greyed" ?
+            { key: "", resources: [] }
+          : { key: requestedKey, resources };
         if (resources.length === 0) {
           showNothing("Nothing deployed yet");
           setModeNote("");
@@ -447,7 +475,7 @@ export function initializeDeployedGraphPage(
         // The selection may have changed since the last successful load, so a
         // failed refresh must not leave another application's resources behind
         // for the delete confirmation to name.
-        deployedResources = [];
+        forgetDeployedResources();
         context.logger.error("Radius deployed graph request failed.", error);
         const message = "The deployed application graph could not be loaded.";
         // Report the failure once: in the status banner when there is one, and
@@ -794,7 +822,11 @@ export function initializeDeployedGraphPage(
     const application = selectedApplication();
     const environment = selectedEnvironment();
     if (selectedStatus() !== DELETE_FAILED_STATUS) {
-      target.open(application, environment, deployedResources);
+      target.open(
+        application,
+        environment,
+        deployedResourcesFor(application, environment)
+      );
       return;
     }
     if (deleteProbeInFlight) return;
@@ -812,7 +844,11 @@ export function initializeDeployedGraphPage(
       // page may since have had reason to keep disabled.
       refreshControls();
       if (!result.conflict || !forceConfirm) {
-        target.open(application, environment, deployedResources);
+        target.open(
+          application,
+          environment,
+          deployedResourcesFor(application, environment)
+        );
         return;
       }
       forceConfirm.show({

@@ -3001,6 +3001,75 @@ describe("deployed graph delete dialog resources", () => {
     expect(dialog.opens).toEqual([["app", "dev", []]]);
   });
 
+  // The window between issuing a refresh and receiving it is the one case a
+  // failure clear cannot cover: nothing has gone wrong yet, but the retained
+  // list still describes the selection the user just navigated away from.
+  it("names no resources while a refresh for a new selection is pending", async () => {
+    const pending = createDeferred<HttpResponse>();
+    const page = fixture({
+      deployments: [
+        { app: "app", environment: "dev", status: "success" },
+        { app: "other-app", environment: "dev", status: "success" }
+      ]
+    });
+    const { browser, action, appSelect, envSelect } = page;
+    const dialog = recordingDialog();
+    browser.net.handle(GRAPH_URL, () =>
+      jsonResponse({
+        resources: [{ id: "app/web", name: "web" }],
+        mode: "live"
+      })
+    );
+    browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=other-app&environment=dev",
+      () => pending.promise
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: dialog.createDialog })
+    );
+    await flushPromises();
+
+    appSelect.value = "other-app";
+    envSelect.value = "dev";
+    appSelect.dispatch("change");
+    await flushPromises();
+    action.dispatch("click");
+    await flushPromises();
+
+    expect(dialog.opens).toEqual([["other-app", "dev", []]]);
+  });
+
+  // The counterpart guarantee: a routine refresh of the same selection must not
+  // degrade the confirmation to the generic sentence for the duration of every
+  // poll, so the retained list survives while that request is in flight.
+  it("still names the resources while the same selection refreshes", async () => {
+    const resources = [{ id: "app/web", name: "web" }];
+    const pending = createDeferred<HttpResponse>();
+    const responses: NetworkHandler[] = [
+      () => jsonResponse({ resources, mode: "live" }),
+      () => pending.promise
+    ];
+    const page = fixture();
+    const { browser, action, appSelect, envSelect } = page;
+    const dialog = recordingDialog();
+    browser.net.handle(GRAPH_URL, () => (responses.shift() ?? responses[0])());
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: dialog.createDialog })
+    );
+    await flushPromises();
+
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    appSelect.dispatch("change");
+    await flushPromises();
+    action.dispatch("click");
+    await flushPromises();
+
+    expect(dialog.opens).toEqual([["app", "dev", resources]]);
+  });
+
   it("carries the resources through the delete-conflict probe", async () => {
     const resources = [{ id: "app/web", name: "web" }];
     const { opens } = await openDelete(
