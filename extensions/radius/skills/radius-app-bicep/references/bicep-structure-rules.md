@@ -174,11 +174,8 @@ param registryUsername string
 @secure()
 param registryPassword string
 
-// Do not rename this Secret. The resource name MUST remain exactly
-// 'radius-ghcr-registry-creds' to match the recipe pack's
-// containerImagesRegistrySecretName — the recipe reads the push credentials
-// from a Secret of that name on the target cluster. Omit this resource entirely
-// when pushing to an unauthenticated registry.
+// Do not change this Secret's name value from 'radius-ghcr-registry-creds'.
+// The containerImages recipe looks up registry credentials by that fixed name.
 resource registryCreds 'Radius.Security/secrets@2025-08-01-preview' = {
   name: 'radius-ghcr-registry-creds'
   properties: {
@@ -216,8 +213,8 @@ resource myImage 'Radius.Compute/containerImages@2025-08-01-preview' = {
 Registry-credentials rules:
 
 - Author the registry Secret only when the push registry requires authentication. For an unauthenticated registry, omit the Secret, the `registryUsername`/`registryPassword` params, and the `dependsOn` — the recipe pack registers the recipe with an empty `containerImagesRegistrySecretName` in that case
-- WHEN the Secret is authored, its resource name MUST be exactly `radius-ghcr-registry-creds` — it is not free-form. It is the fixed `containerImagesRegistrySecretName` the recipe pack registers the recipe with; any other name means the recipe can't find the push credentials
-- Emit the warning comment shown above immediately before the Secret so users know its resource name must remain `radius-ghcr-registry-creds`; do not omit the warning from generated `app.bicep`
+- WHEN the Secret is authored, its `name` property value MUST be exactly `radius-ghcr-registry-creds` — it is not free-form. It is the fixed `containerImagesRegistrySecretName` the recipe pack registers the recipe with; any other value means the recipe can't find the push credentials
+- Emit the exact two-line warning comment shown above immediately before the Secret; do not vary its wording or omit it from generated `app.bicep`. Do not emit the example's explanatory comment above `dependsOn`
 - Author it with the two keys `username` and `password` (lowercase, exactly these keys — the recipe reads them by name)
 - Populate the keys from a plain `param registryUsername string` and an `@secure() param registryPassword string`. Do NOT hardcode the credentials
 - Add `dependsOn: [registryCreds]` on the `containerImages` resource so the Secret exists on the target cluster before the build/push runs
@@ -417,7 +414,7 @@ These are commonly hallucinated. They will cause deployment errors:
 
 ## Output rules
 
-- Do NOT include comments explaining skill rules in generated Bicep
+- Apart from the exact two-line `radius-ghcr-registry-creds` warning required above, do NOT include comments explaining skill rules in generated Bicep
 - Do NOT set readOnly properties
 - Reference read-only outputs only when the exact schema declares the value and the exact target Recipe maps it
 - Do NOT add `@description` decorators unless the user asks for them
