@@ -7,8 +7,11 @@ import {
   buildDeployStatusMap,
   confirmArtifactIdentity,
   createDeployStatusReader,
+  DEPLOY_CANCELLED_MESSAGE,
+  DEPLOY_FAILED_MESSAGE,
   DEPLOY_STATUS_ARTIFACT_PREFIX,
   DEPLOY_STATUS_FILES,
+  DEPLOY_TIMED_OUT_MESSAGE,
   deployStatusArtifactPrefix,
   isLiveSlotArtifactName,
   MAX_ARTIFACT_CANDIDATES,
@@ -18,7 +21,8 @@ import {
   resolveResourceStatus,
   sanitizeArtifactSegment,
   selectDeployStatusArtifacts,
-  settleDeployStatuses
+  settleDeployStatuses,
+  unfinishedDeployMessage
 } from "./deploy-artifacts.js";
 import type {
   ArtifactFiles,
@@ -707,6 +711,125 @@ describe("settleDeployStatuses", () => {
     const resources = [{ deployStatus: "in_progress" as DeployStatus }];
     settleDeployStatuses(resources, "cancelled");
     expect(resources[0].deployStatus).toBe("failed");
+  });
+
+  it("ignores a non-array argument rather than throwing", () => {
+    expect(() =>
+      settleDeployStatuses(
+        undefined as unknown as { deployStatus?: DeployStatus }[],
+        "failure"
+      )
+    ).not.toThrow();
+  });
+});
+
+describe("settleDeployStatuses messages (Exception 5.1)", () => {
+  it("says a cancelled run was cancelled", () => {
+    const resources = [{ deployStatus: "in_progress" as DeployStatus }];
+    settleDeployStatuses(resources, "cancelled");
+    expect(resources[0].deployMessage).toBe(DEPLOY_CANCELLED_MESSAGE);
+  });
+
+  it("says a timed-out run timed out", () => {
+    const resources = [{ deployStatus: "pending" as DeployStatus }];
+    settleDeployStatuses(resources, "timed_out");
+    expect(resources[0].deployMessage).toBe(DEPLOY_TIMED_OUT_MESSAGE);
+  });
+
+  it("passes the exact Radius error through on an ordinary failure", () => {
+    const resources = [{ deployStatus: "pending" as DeployStatus }];
+    settleDeployStatuses(
+      resources,
+      "failure",
+      "  Error: containers.demo failed to provision\n"
+    );
+    expect(resources[0].deployMessage).toBe(
+      "Error: containers.demo failed to provision"
+    );
+  });
+
+  it("falls back to a plain statement when there is no Radius error to show", () => {
+    const resources = [
+      { deployStatus: "pending" as DeployStatus },
+      { deployStatus: "in_progress" as DeployStatus }
+    ];
+    settleDeployStatuses(resources, "failure", "   ");
+    expect(resources.map((r) => r.deployMessage)).toEqual([
+      DEPLOY_FAILED_MESSAGE,
+      DEPLOY_FAILED_MESSAGE
+    ]);
+  });
+
+  it("keeps the producer's own message, which names the resource that failed", () => {
+    const resources = [
+      {
+        deployStatus: "failed" as DeployStatus,
+        deployMessage: "recipe execution failed for db"
+      },
+      { deployStatus: "pending" as DeployStatus }
+    ];
+    settleDeployStatuses(resources, "failure", "run-level error");
+    expect(resources.map((r) => r.deployMessage)).toEqual([
+      "recipe execution failed for db",
+      "run-level error"
+    ]);
+  });
+
+  it("explains a node the producer reported failed without a message", () => {
+    const resources = [{ deployStatus: "failed" as DeployStatus }];
+    settleDeployStatuses(resources, "cancelled");
+    expect(resources[0].deployMessage).toBe(DEPLOY_CANCELLED_MESSAGE);
+  });
+
+  it("leaves a node the producer already finished alone", () => {
+    const resources = [
+      {
+        deployStatus: "success" as DeployStatus,
+        deployMessage: "provisioned"
+      }
+    ];
+    settleDeployStatuses(resources, "failure", "run-level error");
+    expect(resources[0]).toEqual({
+      deployStatus: "success",
+      deployMessage: "provisioned"
+    });
+  });
+
+  it("clears a stale failure message when the run ultimately succeeded", () => {
+    const resources = [
+      {
+        deployStatus: "failed" as DeployStatus,
+        deployMessage: "transient provisioning error"
+      }
+    ];
+    settleDeployStatuses(resources, "success");
+    expect(resources[0].deployStatus).toBe("success");
+    expect(resources[0].deployMessage).toBeUndefined();
+  });
+
+  it("upgrades to the exact error when settled a second time with one", () => {
+    // The monitor settles on its own timeout; the outcome stage settles again
+    // once it has read the run log. The second pass must not be a no-op.
+    const resources = [{ deployStatus: "pending" as DeployStatus }];
+    settleDeployStatuses(resources, "failure");
+    expect(resources[0].deployMessage).toBe(DEPLOY_FAILED_MESSAGE);
+    resources[0].deployMessage = undefined;
+    settleDeployStatuses(resources, "failure", "rad: deployment rejected");
+    expect(resources[0].deployMessage).toBe("rad: deployment rejected");
+  });
+});
+
+describe("unfinishedDeployMessage", () => {
+  it.each([
+    ["cancelled", undefined, DEPLOY_CANCELLED_MESSAGE],
+    ["timed_out", undefined, DEPLOY_TIMED_OUT_MESSAGE],
+    ["cancelled", "ignored detail", DEPLOY_CANCELLED_MESSAGE],
+    ["failure", "rad error", "rad error"],
+    ["failure", undefined, DEPLOY_FAILED_MESSAGE],
+    [undefined, undefined, DEPLOY_FAILED_MESSAGE],
+    [null, undefined, DEPLOY_FAILED_MESSAGE]
+  ] as const)("maps %s / %s", (conclusion, radiusError, expected) => {
+    expect(unfinishedDeployMessage(conclusion, radiusError)).toBe(expected);
   });
 });
 

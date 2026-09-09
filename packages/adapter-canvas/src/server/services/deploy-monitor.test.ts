@@ -66,6 +66,7 @@ function dependencies(
     buildDeployMessageMap: () => new Map<string, string>(),
     applyDeployMessages: () => {},
     applyDeployStatusToResources: () => [],
+    settleDeployStatuses: () => {},
     generatePortalUrl: (resourceType, provider) =>
       `https://portal.test/${provider}/${resourceType}`,
     optionalString: (value) => (typeof value === "string" ? value : ""),
@@ -134,6 +135,7 @@ describe("deploy monitor construction", () => {
     "buildDeployMessageMap",
     "applyDeployMessages",
     "applyDeployStatusToResources",
+    "settleDeployStatuses",
     "generatePortalUrl",
     "optionalString",
     "errorMessage",
@@ -1157,6 +1159,51 @@ describe("deploy monitor settlement", () => {
       "⚠ Timed out waiting for the deploy workflow to complete."
     );
   });
+
+  it("settles the graph when it gives up watching, so no node is left in flight", async () => {
+    // Exception 5.1: this path never reaches the outcome service's terminal
+    // settle, so the nodes would otherwise stay pending forever.
+    const resources = [
+      { id: "r1", name: "db", deployStatus: "in_progress" as const },
+      { id: "r2", name: "api", deployStatus: "pending" as const }
+    ];
+    const settled: (string | undefined | null)[] = [];
+    const { request: input, state } = request({ resources });
+    const service = createDeployMonitorService(
+      dependencies({
+        plannedGraph: { recover: () => Promise.resolve(null) },
+        getRunDetail: () =>
+          Promise.resolve({
+            status: "in_progress",
+            conclusion: null,
+            steps: []
+          }),
+        settleDeployStatuses: (list, conclusion) => {
+          settled.push(conclusion);
+          list.forEach((resource) => {
+            resource.deployStatus = "failed";
+            resource.deployMessage = "Deployment timed out";
+          });
+        },
+        outcome: {
+          settle: () => {
+            throw new Error("an unfinished run must not be settled");
+          }
+        }
+      })
+    );
+
+    await service.run(input);
+
+    expect(settled).toEqual(["timed_out"]);
+    expect(resources.map((r) => r.deployStatus)).toEqual(["failed", "failed"]);
+    expect(resources.map((r) => r.deployMessage)).toEqual([
+      "Deployment timed out",
+      "Deployment timed out"
+    ]);
+    // The run may still be going, so a repair redeploy must stay refused.
+    expect(state.deployErrorKind).toBe("run-unconfirmed");
+  });
 });
 
 // ── Composed-pipeline parity ────────────────────────────────────────────────
@@ -1367,6 +1414,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       buildDeployMessageMap: () => new Map<string, string>(),
       applyDeployMessages: () => {},
       applyDeployStatusToResources: () => [],
+      settleDeployStatuses: () => {},
       generatePortalUrl: () => "https://portal.test/azure/db",
       optionalString: (value) => (typeof value === "string" ? value : ""),
       errorMessage: (error) => String(error),

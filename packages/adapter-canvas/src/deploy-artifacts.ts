@@ -621,6 +621,39 @@ export function applyDeployStatusToResources(
 }
 
 /**
+ * The messages a node carries when the run's conclusion — not the producer —
+ * decided its outcome (Exception 5.1). A cancelled or timed-out run publishes no
+ * per-resource failure, so without these the graph turns red and says nothing.
+ */
+export const DEPLOY_CANCELLED_MESSAGE = "Deployment cancelled";
+export const DEPLOY_TIMED_OUT_MESSAGE = "Deployment timed out";
+export const DEPLOY_FAILED_MESSAGE = "Deployment failed";
+
+/**
+ * unfinishedDeployMessage - the message for a node the run's conclusion failed.
+ *
+ * Cancellation and timeout are reported verbatim because they are what happened
+ * to the run, not to the resource. Any other non-success conclusion prefers the
+ * exact Radius error the caller extracted from the run, and falls back to a
+ * plain statement only when there is none — the graph never invents detail it
+ * does not have.
+ */
+export function unfinishedDeployMessage(
+  conclusion?: string | null,
+  radiusError?: string
+): string {
+  if (conclusion === "cancelled") return DEPLOY_CANCELLED_MESSAGE;
+  if (conclusion === "timed_out") return DEPLOY_TIMED_OUT_MESSAGE;
+  const detail = typeof radiusError === "string" ? radiusError.trim() : "";
+  return detail || DEPLOY_FAILED_MESSAGE;
+}
+
+export interface SettleableResource {
+  deployStatus?: DeployStatus;
+  deployMessage?: string;
+}
+
+/**
  * settleDeployStatuses - apply the run's terminal conclusion to the graph.
  *
  * On success every node is forced green: the run concluded successfully, so
@@ -633,21 +666,48 @@ export function applyDeployStatusToResources(
  * while nodes already terminal keep the status the producer reported — the run
  * conclusion decides the overall label, not an individual resource's outcome
  * that was already observed.
+ *
+ * Every node this leaves red also gets a message, because a red node with no
+ * explanation is the one state the user most needs detail in (Exception 5.1).
+ * A message the producer already published always wins: it names the resource's
+ * own failure, which is more specific than anything derived from the run's
+ * conclusion. Only nodes left without one fall back to the message derived from
+ * the run's conclusion and, for an ordinary failure, `radiusError`.
+ *
+ * Filling messages is idempotent and independent of the status change, so a
+ * caller that settles once to fix the graph quickly and again once it has read
+ * the exact Radius error gets the better message without disturbing anything
+ * else. Output resources are not walked here: they take their status from their
+ * parent through the caller's own propagation.
  */
 export function settleDeployStatuses(
-  resources: Array<{ deployStatus?: DeployStatus }>,
-  conclusion?: string | null
+  resources: SettleableResource[],
+  conclusion?: string | null,
+  radiusError?: string
 ): void {
   if (!Array.isArray(resources)) return;
   const succeeded = conclusion === "success";
+  const message =
+    succeeded ? "" : unfinishedDeployMessage(conclusion, radiusError);
   for (const resource of resources) {
     if (succeeded) {
       resource.deployStatus = "success";
+      // Documented above: a green node must not carry a stale failure message
+      // from an earlier snapshot of this same run.
+      delete resource.deployMessage;
       continue;
     }
     const current = resource.deployStatus || "pending";
     if (current === "pending" || current === "in_progress")
       resource.deployStatus = "failed";
+    // Also covers a node the producer reported failed without a message
+    // (incomplete artifact reporting), which would otherwise be red and silent.
+    // Never overwrites a message that is already there.
+    if (
+      resource.deployStatus === "failed" &&
+      !(resource.deployMessage ?? "").trim()
+    )
+      resource.deployMessage = message;
   }
 }
 

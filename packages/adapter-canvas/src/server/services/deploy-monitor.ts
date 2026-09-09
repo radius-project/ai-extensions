@@ -82,6 +82,13 @@ export interface DeployMonitorDependencies {
     resources: CanvasGraphResource[],
     statuses: Map<string, DeployResourceStatus>
   ): DeployStatusChange[];
+  // Used only on the monitoring-timeout path: the terminal settle belongs to
+  // the outcome service, but a run this loop stops watching never reaches it.
+  settleDeployStatuses(
+    resources: CanvasGraphResource[],
+    conclusion: string | null | undefined,
+    radiusError?: string
+  ): void;
   generatePortalUrl(resourceType: string, provider: string): string;
   optionalString(value: unknown): string;
   errorMessage(error: unknown): string;
@@ -111,6 +118,7 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployMonitorDependencies)[] = [
   "buildDeployMessageMap",
   "applyDeployMessages",
   "applyDeployStatusToResources",
+  "settleDeployStatuses",
   "generatePortalUrl",
   "optionalString",
   "errorMessage",
@@ -453,6 +461,16 @@ export function createDeployMonitorService(
         await dependencies.sleep(POLL_INTERVAL_MS);
       }
       log("⚠ Timed out waiting for the deploy workflow to complete.");
+      // Monitoring stopped watching, so nothing else will ever move these
+      // nodes: the terminal settle lives in the outcome service, which this
+      // path never reaches. Leaving them gray or yellow would show a deployment
+      // that looks perpetually in flight, so settle them here with the
+      // "Deployment timed out" message Exception 5.1 requires. Resources the
+      // producer already reported terminal keep their own status and message.
+      dependencies.settleDeployStatuses(resources, "timed_out");
+      for (const resource of resources) {
+        if (resource.deployStatus) setStatus(resource, resource.deployStatus);
+      }
       entry.state.deployError =
         "Timed out waiting for the deploy workflow to complete. It may still be running — view it at https://github.com/" +
         repo +
