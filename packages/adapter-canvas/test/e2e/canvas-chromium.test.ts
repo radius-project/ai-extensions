@@ -1390,6 +1390,115 @@ test.describe("Radius Canvas in Chromium", () => {
     await expectNoWcagViolations(page);
   });
 
+  test("shows escaped action-required server guidance before the pull request fallback in Chromium @safety", async ({
+    page,
+    canvas
+  }) => {
+    const environment = "action-required-env";
+    const selected = {
+      id: "aks-action-required",
+      name: "AKS Action Required",
+      resourceGroup: "rg-action-required"
+    };
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      ...azureDiscoveryCommands({
+        subscriptionId: PROFILE_SUBSCRIPTION_ID,
+        clusters: [selected],
+        selected,
+        namespaces: ["default"]
+      })
+    );
+    await canvas.setScenario(scenario);
+
+    let setupStarted = false;
+    let polls = 0;
+    const operation = (terminalState: "action_required" | null) => ({
+      operation: {
+        operationId: "op_action_required_message",
+        environment,
+        provider: "azure",
+        state: terminalState === null ? "running" : "finished",
+        terminalState,
+        summary: `Creating ${environment}...`,
+        currentStage: "verify",
+        stages: [{ state: "running", label: "Verify credentials" }],
+        steps: [{ state: "running", label: "Waiting for verification" }],
+        failure: null,
+        cleanup: null,
+        verification: null,
+        inputRequired: null,
+        startedAt: new Date(0).toISOString(),
+        endedAt: terminalState === null ? null : new Date(1000).toISOString(),
+        terminal:
+          terminalState === null ? null : (
+            {
+              reason: "pr-merge-required",
+              pullRequestUrl: "https://github.com/fixture/radius-app/pull/7",
+              userMessage:
+                "Merge <strong>this setup pull request</strong> before retrying verification."
+            }
+          )
+      }
+    });
+    await page.route("**/api/operations**", async (route) => {
+      const request = route.request();
+      if (request.method() === "POST") {
+        setupStarted = true;
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ operationId: "op_action_required_message" })
+        });
+        return;
+      }
+      if (request.method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      if (!setupStarted) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ operation: null })
+        });
+        return;
+      }
+      polls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(operation(polls === 1 ? null : "action_required"))
+      });
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+    await openEnvironmentWizard(page);
+    await page.getByLabel("Environment name").fill(environment);
+    const resourceGroup = page.getByLabel("Resource Group", { exact: true });
+    await expect(
+      resourceGroup.locator('option[value="__custom__"]')
+    ).toHaveCount(0);
+    await resourceGroup.selectOption(selected.resourceGroup);
+    const createEnvironment = page.locator("#deploy-btn:not([disabled])");
+    await expect(createEnvironment).toHaveText("Create Environment");
+    await createEnvironment.click();
+
+    const banner = page.locator("#env-action-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText(
+      "Merge <strong>this setup pull request</strong> before retrying verification."
+    );
+    await expect(banner.locator("strong")).toHaveCount(2);
+    await expect(
+      banner.getByRole("link", { name: "Review the pull request →" })
+    ).toHaveAttribute("href", "https://github.com/fixture/radius-app/pull/7");
+    await expect(banner).not.toContainText(
+      "Radius could not push the deploy workflows to the default branch"
+    );
+    await expectNoWcagViolations(page);
+  });
+
   test("plans a deployment for an existing environment from its row", async ({
     page,
     canvas
