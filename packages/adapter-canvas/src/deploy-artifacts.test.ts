@@ -27,6 +27,7 @@ import {
 import type {
   ArtifactFiles,
   DeployProgress,
+  SettleableResource,
   WorkflowArtifact
 } from "./deploy-artifacts.js";
 import {
@@ -725,19 +726,25 @@ describe("settleDeployStatuses", () => {
 
 describe("settleDeployStatuses messages (Exception 5.1)", () => {
   it("says a cancelled run was cancelled", () => {
-    const resources = [{ deployStatus: "in_progress" as DeployStatus }];
+    const resources: SettleableResource[] = [
+      { deployStatus: "in_progress" as DeployStatus }
+    ];
     settleDeployStatuses(resources, "cancelled");
     expect(resources[0].deployMessage).toBe(DEPLOY_CANCELLED_MESSAGE);
   });
 
   it("says a timed-out run timed out", () => {
-    const resources = [{ deployStatus: "pending" as DeployStatus }];
+    const resources: SettleableResource[] = [
+      { deployStatus: "pending" as DeployStatus }
+    ];
     settleDeployStatuses(resources, "timed_out");
     expect(resources[0].deployMessage).toBe(DEPLOY_TIMED_OUT_MESSAGE);
   });
 
   it("passes the exact Radius error through on an ordinary failure", () => {
-    const resources = [{ deployStatus: "pending" as DeployStatus }];
+    const resources: SettleableResource[] = [
+      { deployStatus: "pending" as DeployStatus }
+    ];
     settleDeployStatuses(
       resources,
       "failure",
@@ -749,7 +756,7 @@ describe("settleDeployStatuses messages (Exception 5.1)", () => {
   });
 
   it("falls back to a plain statement when there is no Radius error to show", () => {
-    const resources = [
+    const resources: SettleableResource[] = [
       { deployStatus: "pending" as DeployStatus },
       { deployStatus: "in_progress" as DeployStatus }
     ];
@@ -761,7 +768,7 @@ describe("settleDeployStatuses messages (Exception 5.1)", () => {
   });
 
   it("keeps the producer's own message, which names the resource that failed", () => {
-    const resources = [
+    const resources: SettleableResource[] = [
       {
         deployStatus: "failed" as DeployStatus,
         deployMessage: "recipe execution failed for db"
@@ -776,13 +783,15 @@ describe("settleDeployStatuses messages (Exception 5.1)", () => {
   });
 
   it("explains a node the producer reported failed without a message", () => {
-    const resources = [{ deployStatus: "failed" as DeployStatus }];
+    const resources: SettleableResource[] = [
+      { deployStatus: "failed" as DeployStatus }
+    ];
     settleDeployStatuses(resources, "cancelled");
     expect(resources[0].deployMessage).toBe(DEPLOY_CANCELLED_MESSAGE);
   });
 
   it("leaves a node the producer already finished alone", () => {
-    const resources = [
+    const resources: SettleableResource[] = [
       {
         deployStatus: "success" as DeployStatus,
         deployMessage: "provisioned"
@@ -796,7 +805,7 @@ describe("settleDeployStatuses messages (Exception 5.1)", () => {
   });
 
   it("clears a stale failure message when the run ultimately succeeded", () => {
-    const resources = [
+    const resources: SettleableResource[] = [
       {
         deployStatus: "failed" as DeployStatus,
         deployMessage: "transient provisioning error"
@@ -810,7 +819,9 @@ describe("settleDeployStatuses messages (Exception 5.1)", () => {
   it("upgrades to the exact error when settled a second time with one", () => {
     // The monitor settles on its own timeout; the outcome stage settles again
     // once it has read the run log. The second pass must not be a no-op.
-    const resources = [{ deployStatus: "pending" as DeployStatus }];
+    const resources: SettleableResource[] = [
+      { deployStatus: "pending" as DeployStatus }
+    ];
     settleDeployStatuses(resources, "failure");
     expect(resources[0].deployMessage).toBe(DEPLOY_FAILED_MESSAGE);
     resources[0].deployMessage = undefined;

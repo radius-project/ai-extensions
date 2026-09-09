@@ -1163,9 +1163,9 @@ describe("deploy monitor settlement", () => {
   it("settles the graph when it gives up watching, so no node is left in flight", async () => {
     // Exception 5.1: this path never reaches the outcome service's terminal
     // settle, so the nodes would otherwise stay pending forever.
-    const resources = [
-      { id: "r1", name: "db", deployStatus: "in_progress" as const },
-      { id: "r2", name: "api", deployStatus: "pending" as const }
+    const resources: CanvasGraphResource[] = [
+      { id: "r1", name: "db", deployStatus: "in_progress" },
+      { id: "r2", name: "api", deployStatus: "pending" }
     ];
     const settled: (string | undefined | null)[] = [];
     const { request: input, state } = request({ resources });
