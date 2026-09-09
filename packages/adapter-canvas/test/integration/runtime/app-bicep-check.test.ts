@@ -546,6 +546,237 @@ function containerEnv(env: object, containerKey = "web") {
   });
 }
 
+function containerConnections(connections: unknown) {
+  return radiusResource(containersType, {
+    containers: { web: { image: "example/web:latest" } },
+    connections
+  });
+}
+
+describe("managed Secret connection sources", () => {
+  const managedSecretName = "[reference('cache').properties.secrets.name]";
+
+  it.each([
+    managedSecretName,
+    "[reference('cache', '2025-08-01-preview', 'full').properties.secrets.name]"
+  ])("rejects a direct managed Secret name connection source", (source) => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: containerConnections({
+        cache: { source }
+      })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /connection-source/u);
+    assert.match(result.stderr, /web\.properties\.connections\.cache\.source/u);
+    assert.match(result.stderr, /managed Kubernetes Secret name/u);
+    assert.match(result.stderr, /producer resource ID \(<producer>\.id\)/u);
+    assert.doesNotMatch(result.stderr, /reference\('cache'/u);
+  });
+
+  it("resolves a top-level parameter default", () => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template(
+      {
+        web: containerConnections({
+          cache: { source: "[parameters('cacheSource')]" }
+        })
+      },
+      {
+        cacheSource: { type: "string", defaultValue: managedSecretName }
+      }
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /connection-source/u);
+  });
+
+  it("resolves a local module parameter", () => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      service: localModuleResources(
+        {
+          web: containerConnections({
+            cache: { source: "[parameters('cacheSource')]" }
+          })
+        },
+        { cacheSource: { type: "string" } },
+        { cacheSource: { value: managedSecretName } }
+      )
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /service\.web\.properties\.connections\.cache\.source/u
+    );
+  });
+
+  it("resolves parameter pass-through across nested local modules", () => {
+    const directory = temporaryDirectory();
+    const innerModule = localModuleResources(
+      {
+        web: containerConnections({
+          cache: { source: "[parameters('innerSource')]" }
+        })
+      },
+      { innerSource: { type: "string" } },
+      { innerSource: { value: "[parameters('outerSource')]" } }
+    );
+    const outerModule = localModuleResources(
+      { inner: innerModule },
+      { outerSource: { type: "string" } },
+      { outerSource: { value: "[parameters('rootSource')]" } }
+    );
+    const compiledOutput = template(
+      { outer: outerModule },
+      { rootSource: { type: "string", defaultValue: managedSecretName } }
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /outer\.inner\.web\.properties\.connections\.cache\.source/u
+    );
+  });
+
+  it.each([
+    {
+      name: "a producer resource ID",
+      source: "[reference('cache').id]"
+    },
+    {
+      name: "an authored Secret resource ID",
+      source: "[reference('credentials').id]"
+    },
+    { name: "a literal", source: "cache" },
+    { name: "a URL", source: "https://example.test/cache" },
+    {
+      name: "an unresolved parameter",
+      source: "[parameters('unknownSource')]"
+    },
+    {
+      name: "a concat expression",
+      source: "[concat(reference('cache').properties.secrets.name, '-suffix')]"
+    },
+    {
+      name: "a condition expression",
+      source:
+        "[if(parameters('enabled'), reference('cache').properties.secrets.name, resourceId('Radius.Data/redisCaches', 'cache'))]"
+    },
+    {
+      name: "a different reference property",
+      source: "[reference('cache').properties.secrets.id]"
+    },
+    { name: "a non-string source", source: 42 }
+  ])("accepts $name", ({ source }) => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: containerConnections({ cache: { source } })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it.each([
+    { name: "a non-object connections value", connections: "cache" },
+    { name: "a non-object connection entry", connections: { cache: null } }
+  ])("ignores $name", ({ connections }) => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: containerConnections(connections)
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it("ignores source fields outside Radius container connections", () => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      queue: radiusResource("Radius.Messaging/rabbitMQ@2025-08-01-preview", {
+        source: managedSecretName
+      }),
+      deployment: {
+        type: "Microsoft.Resources/deployments",
+        properties: { source: managedSecretName, template: "not a template" }
+      }
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+
+  it("accepts managed and authored Secret names in secretKeyRef", () => {
+    const directory = temporaryDirectory();
+    const compiledOutput = template({
+      web: containerEnv({
+        MANAGED_PASSWORD: {
+          valueFrom: {
+            secretKeyRef: {
+              secretName: managedSecretName,
+              key: "password"
+            }
+          }
+        },
+        AUTHORED_PASSWORD: {
+          valueFrom: {
+            secretKeyRef: {
+              secretName: "[reference('credentials').name]",
+              key: "password"
+            }
+          }
+        }
+      })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
+    );
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  });
+});
+
 test("fails when a plain value reads a plain helper that does not sort before it", () => {
   const directory = temporaryDirectory();
   const compiledOutput = template({
