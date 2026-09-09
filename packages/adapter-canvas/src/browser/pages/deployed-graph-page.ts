@@ -57,7 +57,11 @@ interface DeploymentState {
 }
 
 interface DeleteDialog {
-  open(application: string, environment: string): void;
+  open(
+    application: string,
+    environment: string,
+    resources?: readonly unknown[]
+  ): void;
   teardown?: () => void;
 }
 
@@ -66,8 +70,8 @@ function asDeleteDialog(value: unknown): DeleteDialog | null {
   const open = value.open;
   const teardown = value.teardown;
   return {
-    open: (application, environment) => {
-      open(application, environment);
+    open: (application, environment, resources) => {
+      open(application, environment, resources);
     },
     teardown:
       isCallable(teardown) ?
@@ -167,6 +171,10 @@ export function initializeDeployedGraphPage(
   let resumeGraphOnVisible = false;
   let graphRequestInFlight = false;
   let progressView: GraphProgressView | null = null;
+  // What the last successful graph load says is actually deployed, so the delete
+  // confirmation can name it. Cleared whenever the graph stops standing for a
+  // real deployment.
+  let deployedResources: readonly unknown[] = [];
 
   const stopProgress = (): void => {
     progressView?.stop();
@@ -268,6 +276,7 @@ export function initializeDeployedGraphPage(
 
   const showNothing = (message: string): void => {
     if (status) status.style.display = "none";
+    deployedResources = [];
     controller?.destroy();
     controller = null;
     renderedBranch = "";
@@ -379,6 +388,7 @@ export function initializeDeployedGraphPage(
         stopProgress();
         const loadError = readString(payload, "error");
         if (loadError) {
+          deployedResources = [];
           modeledGraphPending = isRecord(payload) && payload.retry === true;
           if (!controller && status) {
             status.style.display = "";
@@ -393,6 +403,9 @@ export function initializeDeployedGraphPage(
         modeledGraphPending = false;
         const resources = parseGraphResources(readArray(payload, "resources"));
         lastMode = readString(payload, "mode") || "greyed";
+        // A greyed graph is the modeled application rather than a deployment, so
+        // it must never be offered as the list a delete would destroy.
+        deployedResources = lastMode === "greyed" ? [] : resources;
         if (resources.length === 0) {
           showNothing("Nothing deployed yet");
           setModeNote("");
@@ -431,6 +444,10 @@ export function initializeDeployedGraphPage(
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== graphGeneration) return;
+        // The selection may have changed since the last successful load, so a
+        // failed refresh must not leave another application's resources behind
+        // for the delete confirmation to name.
+        deployedResources = [];
         context.logger.error("Radius deployed graph request failed.", error);
         const message = "The deployed application graph could not be loaded.";
         // Report the failure once: in the status banner when there is one, and
@@ -777,7 +794,7 @@ export function initializeDeployedGraphPage(
     const application = selectedApplication();
     const environment = selectedEnvironment();
     if (selectedStatus() !== DELETE_FAILED_STATUS) {
-      target.open(application, environment);
+      target.open(application, environment, deployedResources);
       return;
     }
     if (deleteProbeInFlight) return;
@@ -795,7 +812,7 @@ export function initializeDeployedGraphPage(
       // page may since have had reason to keep disabled.
       refreshControls();
       if (!result.conflict || !forceConfirm) {
-        target.open(application, environment);
+        target.open(application, environment, deployedResources);
         return;
       }
       forceConfirm.show({

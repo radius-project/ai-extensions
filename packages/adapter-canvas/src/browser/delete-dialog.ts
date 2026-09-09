@@ -8,6 +8,7 @@
 // step stays disabled until the typed token matches exactly.
 
 import { buildElement } from "./dom.js";
+import { readString } from "./json.js";
 import type { ElementSpec } from "./dom.js";
 import type {
   BrowserContext,
@@ -24,6 +25,10 @@ export const DELETE_DIALOG_IDS = {
   environment: "deploy-delete-env",
   close: "deploy-delete-close"
 } as const;
+
+// A destructive dialog is only useful if the confirmation control stays on
+// screen with it, so a long deployment is summarised rather than listed whole.
+export const DELETE_DIALOG_RESOURCE_LIMIT = 8;
 
 export const DELETE_DIALOG_STEP1_BUTTON_ID = "del-step1-btn";
 export const DELETE_DIALOG_STEP2_BUTTON_ID = "del-step2-btn";
@@ -43,14 +48,24 @@ export interface DeleteDialogOptions {
 }
 
 export interface DeleteDialogHandle {
-  open(app: string, environment: string): void;
+  open(app: string, environment: string, resources?: readonly unknown[]): void;
   close(): void;
   teardown(): void;
+}
+
+// A structural subset of the graph's resource shape, so the deployed graph page
+// can hand over what it already parsed without an adapter in between. The list
+// itself arrives as `unknown[]` because it originates in a server payload whose
+// entries are never field-validated before the graph renders them.
+export interface DeleteTargetResource {
+  readonly name: string;
+  readonly type: string;
 }
 
 export interface DeleteTarget {
   readonly app: string;
   readonly environment: string;
+  readonly resources?: readonly unknown[];
 }
 
 interface Registration {
@@ -104,6 +119,68 @@ export function deleteDialogIntentSpecs(
       attrs: { type: "button" },
       text: "I want to delete this deployment"
     }
+  ];
+}
+
+// An entry the user cannot read is worse than no entry: a nameless resource
+// would render as an empty bullet, so it is dropped rather than shown. Order and
+// duplicates are preserved because they are what the deployment actually holds.
+export function deleteDialogResourceSummary(
+  resources: readonly unknown[] | undefined
+): readonly DeleteTargetResource[] {
+  const summary: DeleteTargetResource[] = [];
+  for (const entry of resources ?? []) {
+    const name = readString(entry, "name").trim();
+    if (name === "") continue;
+    summary.push({
+      name,
+      type:
+        readString(entry, "displayType").trim() ||
+        readString(entry, "type").trim()
+    });
+  }
+  return summary;
+}
+
+function deleteDialogResourceSpecs(
+  resources: readonly unknown[] | undefined
+): readonly ElementSpec[] {
+  const summary = deleteDialogResourceSummary(resources);
+  if (summary.length === 0) return [];
+  const shown = summary.slice(0, DELETE_DIALOG_RESOURCE_LIMIT);
+  const hidden = summary.length - shown.length;
+  const items: ElementSpec[] = shown.map((resource) => ({
+    tag: "li",
+    className: "rad-ddlg__resource",
+    children:
+      resource.type === "" ?
+        [{ tag: "strong", text: resource.name }]
+      : [
+          { tag: "strong", text: resource.name },
+          {
+            tag: "span",
+            className: "rad-ddlg__resource-type",
+            text: resource.type
+          }
+        ]
+  }));
+  if (hidden > 0) {
+    items.push({
+      tag: "li",
+      className: "rad-ddlg__resource-more",
+      text: `+${hidden} more`
+    });
+  }
+  return [
+    {
+      tag: "p",
+      className: "rad-ddlg__resource-caption",
+      text:
+        summary.length === 1 ?
+          "1 resource will be deleted:"
+        : `${summary.length} resources will be deleted:`
+    },
+    { tag: "ul", className: "rad-ddlg__resources", children: items }
   ];
 }
 
@@ -183,6 +260,7 @@ export function deleteDialogEffectsSpecs(
         }
       ]
     },
+    ...deleteDialogResourceSpecs(target.resources),
     {
       tag: "button",
       id: DELETE_DIALOG_STEP2_BUTTON_ID,
@@ -326,7 +404,9 @@ export function createDeleteDeploymentDialog(
 
   const showEffects = (target: DeleteTarget): void => {
     const nodes = renderStep(deleteDialogEffectsSpecs(target, variant));
-    bind(stepBindings, nodes[2], "click", () => {
+    // The continue control is always last: the resource list rendered above it
+    // is variable-length, so a fixed index would bind the wrong node.
+    bind(stepBindings, nodes[nodes.length - 1], "click", () => {
       showConfirm(target);
     });
     focusFirstControl();
@@ -355,14 +435,18 @@ export function createDeleteDeploymentDialog(
     input.focus();
   };
 
-  const open = (app: string, environment: string): void => {
+  const open = (
+    app: string,
+    environment: string,
+    resources?: readonly unknown[]
+  ): void => {
     returnFocusTo = context.focus.active();
     if (appEl) appEl.textContent = app;
     if (envEl) envEl.textContent = environment;
     // The modal has to be visible before the first step renders: a control
     // inside a hidden subtree cannot take focus.
     modal.style.display = "flex";
-    showIntent({ app, environment });
+    showIntent({ app, environment, resources });
   };
 
   if (closeEl) bind(owned, closeEl, "click", close);

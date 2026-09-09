@@ -982,7 +982,11 @@ describe("initializeDeployedGraphPage", () => {
       () => jsonResponse({ resources: [{ id: "app/web" }], mode: "live" })
     );
     browser.net.handle("/api/deploy-status?since=0", () =>
-      jsonResponse({ logsNew: ["ignored"], logTotal: 1, status: "in_progress" })
+      jsonResponse({
+        logsNew: ["ignored"],
+        logTotal: 1,
+        status: "in_progress"
+      })
     );
     expect(() => {
       initializeDeployedGraphPage(browser.context, globals());
@@ -2884,5 +2888,148 @@ describe("initializeDeployedGraphPage", () => {
       ]);
       expect(fakeText(progressHost)).not.toContain("graph service down");
     });
+  });
+});
+
+describe("deployed graph delete dialog resources", () => {
+  const GRAPH_URL =
+    "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev";
+
+  // Captures exactly what the page hands the dialog, including the optional
+  // resource list, so the assertions are about the call and not the rendering.
+  function recordingDialog() {
+    const opens: Array<[string, string, readonly unknown[] | undefined]> = [];
+    const createDialog = vi.fn(() => ({
+      open: (
+        application: string,
+        environment: string,
+        resources?: readonly unknown[]
+      ) => {
+        opens.push([application, environment, resources]);
+      }
+    }));
+    return { createDialog, opens };
+  }
+
+  async function openDelete(
+    graph: () => Promise<HttpResponse>,
+    options: Parameters<typeof fixture>[0] = {}
+  ) {
+    const page = fixture(options);
+    const { browser, action, appSelect, envSelect } = page;
+    const dialog = recordingDialog();
+    browser.net.handle(GRAPH_URL, graph);
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: dialog.createDialog })
+    );
+    await flushPromises();
+
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    action.dispatch("click");
+    await flushPromises();
+    return { ...page, ...dialog };
+  }
+
+  it("hands the deployed resources to the delete confirmation", async () => {
+    const resources = [
+      { id: "app/web", name: "web", type: "Applications.Core/containers" },
+      { id: "app/cache", name: "cache", type: "Radius.Data/redis" }
+    ];
+    const { opens } = await openDelete(() =>
+      jsonResponse({ resources, mode: "live" })
+    );
+
+    expect(opens).toEqual([["app", "dev", resources]]);
+  });
+
+  it("names no resources for a graph that is only modeled", async () => {
+    const { opens } = await openDelete(() =>
+      jsonResponse({
+        resources: [{ id: "app/web", name: "web" }],
+        mode: "greyed"
+      })
+    );
+
+    expect(opens).toEqual([["app", "dev", []]]);
+  });
+
+  it("names no resources when nothing is deployed", async () => {
+    const { opens } = await openDelete(() =>
+      jsonResponse({ resources: [], mode: "live" })
+    );
+
+    expect(opens).toEqual([["app", "dev", []]]);
+  });
+
+  it("names no resources when the graph reports an error", async () => {
+    const { opens } = await openDelete(() =>
+      jsonResponse({ error: "graph unavailable" })
+    );
+
+    expect(opens).toEqual([["app", "dev", []]]);
+  });
+
+  // A refresh may fail after the selection changed, so a stale list must not
+  // survive to name another application's resources in the confirmation.
+  it("names no resources after a failed graph refresh", async () => {
+    const responses: Array<() => Promise<HttpResponse>> = [
+      () => jsonResponse({ resources: [{ name: "web" }], mode: "live" }),
+      () => Promise.reject(new Error("graph service down"))
+    ];
+    const page = fixture();
+    const { browser, action, appSelect, envSelect } = page;
+    const dialog = recordingDialog();
+    browser.net.handle(GRAPH_URL, () => (responses.shift() ?? responses[0])());
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: dialog.createDialog })
+    );
+    await flushPromises();
+
+    appSelect.value = "app";
+    envSelect.value = "dev";
+    appSelect.dispatch("change");
+    await flushPromises();
+    action.dispatch("click");
+    await flushPromises();
+
+    expect(dialog.opens).toEqual([["app", "dev", []]]);
+  });
+
+  it("carries the resources through the delete-conflict probe", async () => {
+    const resources = [{ id: "app/web", name: "web" }];
+    const { opens } = await openDelete(
+      () => jsonResponse({ resources, mode: "live" }),
+      {
+        deployments: [
+          { app: "app", environment: "dev", status: "delete-failed" }
+        ]
+      }
+    );
+
+    expect(opens).toEqual([["app", "dev", resources]]);
+  });
+
+  it("leaves the stop-tracking dialog without a resource list", async () => {
+    const page = fixture({
+      deployments: [{ app: "app", environment: "dev", status: "delete-failed" }]
+    });
+    const { browser, stopTrackingAction } = page;
+    const dialog = recordingDialog();
+    browser.net.handle(GRAPH_URL, () =>
+      jsonResponse({ resources: [{ name: "web" }], mode: "live" })
+    );
+    initializeDeployedGraphPage(
+      browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: dialog.createDialog })
+    );
+    await flushPromises();
+
+    stopTrackingAction.dispatch("click");
+    await flushPromises();
+
+    expect(dialog.opens).toEqual([["app", "dev", undefined]]);
   });
 });
