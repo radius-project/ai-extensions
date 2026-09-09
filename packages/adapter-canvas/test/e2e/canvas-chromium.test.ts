@@ -26,6 +26,7 @@ import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environme
 import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
 import { GRAPH_RETRY_MS } from "../../src/browser/pages/graph-page.js";
 import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
+import { DEPLOYED_GRAPH_POLL_MS } from "../../src/browser/pages/deployed-graph-page.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const SOURCE_FILE = "src/web/app.ts";
@@ -57,6 +58,41 @@ async function filesContainingText(
     if (content.includes(Buffer.from(text))) matches.push(filePath);
   }
   return matches;
+}
+
+async function waitForStableComputedTransform(
+  page: Page,
+  viewport: Locator
+): Promise<string> {
+  let previous = "";
+  let current = "";
+  let stableChecks = 0;
+  await expect
+    .poll(async () => {
+      await page.clock.fastForward(50);
+      current = await viewport.evaluate((element) => {
+        const getComputedStyleFromGlobal = Reflect.get(
+          globalThis,
+          "getComputedStyle"
+        );
+        if (typeof getComputedStyleFromGlobal !== "function") return "none";
+        const computedStyle = Reflect.apply(
+          getComputedStyleFromGlobal,
+          globalThis,
+          [element]
+        );
+        if (computedStyle === null || typeof computedStyle !== "object") {
+          return "none";
+        }
+        return String(Reflect.get(computedStyle, "transform"));
+      });
+      if (current === previous && current !== "none") stableChecks++;
+      else stableChecks = 0;
+      previous = current;
+      return stableChecks;
+    })
+    .toBeGreaterThanOrEqual(2);
+  return current;
 }
 
 // The environment-deletion route refuses (409 app-deployed) while an
@@ -3049,6 +3085,67 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(
       page.getByRole("button", { name: "Stop tracking deployment" })
     ).toBeVisible();
+  });
+
+  test("preserves graph zoom while a deployment refreshes in Chromium", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let graphRequests = 0;
+    await routeDeployedPage(page, () => "pending");
+    await page.unroute("**/api/deployed-graph**");
+    await page.route("**/api/deployed-graph**", async (route) => {
+      graphRequests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [
+            {
+              id: "app/web",
+              name: "web",
+              type: "Radius.Compute/containers",
+              deployStatus: graphRequests === 1 ? "pending" : "success"
+            },
+            {
+              id: "app/db",
+              name: "db",
+              type: "Radius.Data/sqlDatabases",
+              deployStatus: graphRequests === 1 ? "pending" : "success"
+            }
+          ],
+          mode: "live",
+          branch: WORKTREE_BRANCH,
+          application: "radius-app",
+          updatedAt: "2026-09-03T19:00:00Z"
+        })
+      });
+    });
+    await gotoCanvas(page, canvas, "deployed");
+    await expect(page.getByAltText("In progress")).toHaveCount(2);
+
+    const viewport = page.locator(".react-flow__viewport");
+    const zoomOut = page.locator(".react-flow__controls-zoomout");
+    const fittedTransform = await waitForStableComputedTransform(
+      page,
+      viewport
+    );
+    await zoomOut.click();
+    const zoomedTransform = await waitForStableComputedTransform(
+      page,
+      viewport
+    );
+    // The refresh assertion below is only meaningful if the zoom control
+    // actually moved the viewport first.
+    expect(zoomedTransform).not.toBe(fittedTransform);
+
+    await page.clock.fastForward(DEPLOYED_GRAPH_POLL_MS);
+    await expect.poll(() => graphRequests).toBe(2);
+    await expect(page.getByAltText("Deployed")).toHaveCount(2);
+    expect(await waitForStableComputedTransform(page, viewport)).toBe(
+      zoomedTransform
+    );
   });
 
   test("confirms stop-tracking recovery by keyboard and sends the failed teardown identity @safety", async ({
