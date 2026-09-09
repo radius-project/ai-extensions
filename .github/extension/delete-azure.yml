@@ -19,13 +19,23 @@ on:
         type: string
         required: true
       resource_type:
-        description: 'What to delete: application or environment'
+        description: 'What to delete: application, environment, or resource'
         type: string
         required: true
       name:
-        description: 'Name of the application or environment to delete'
+        description: 'Name of the application, environment, or single resource to delete'
         type: string
         required: true
+      application:
+        description: 'Application that owns the resource (required when resource_type is resource)'
+        type: string
+        required: false
+        default: ''
+      radius_resource_type:
+        description: 'Fully-qualified Radius resource type (required when resource_type is resource)'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   id-token: write
@@ -172,7 +182,26 @@ jobs:
         with:
           resource-type: ${{ inputs.resource_type }}
           name: ${{ inputs.name }}
+          application: ${{ inputs.application }}
+          environment: ${{ inputs.environment }}
+          radius-resource-type: ${{ inputs.radius_resource_type }}
           azure-oidc-token-refresh: "${{ vars.AZURE_CLIENT_ID != '' }}"
+
+      # Republish the application's resource inventory while the restored
+      # control plane is still up. Only for a single-resource delete, and only
+      # when it succeeded: this is the authoritative post-delete answer to "what
+      # does this application still own", and without it the canvas would keep
+      # reading the pre-delete deploy artifact and go on offering the resource it
+      # just removed. Published as a resource-delete snapshot, so the canvas
+      # never reads it as a deployment result.
+      - name: Publish post-delete resource inventory
+        if: ${{ inputs.resource_type == 'resource' }}
+        uses: radius-project/ai-extensions/.github/extension/actions/publish-deploy-status@{{RADIUS_REF}}
+        with:
+          environment: ${{ inputs.environment }}
+          application: ${{ inputs.application }}
+          operation: resource-delete
+          run-state: succeeded
 
       - name: Teardown
         if: always()

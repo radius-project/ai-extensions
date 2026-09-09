@@ -28,6 +28,11 @@ import { GRAPH_RETRY_MS } from "../../src/browser/pages/graph-page.js";
 import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
+// A single graph build spawns the fake `gh` fan-out, stages artifacts and
+// compiles the model in-process before it ever reaches `rad app graph`, which
+// takes several seconds on a loaded machine. Journeys that wait for a build to
+// finish need a budget sized to that work rather than the 5s expect default.
+const GRAPH_BUILD_TIMEOUT_MS = 20_000;
 const SOURCE_FILE = "src/web/app.ts";
 const SOURCE_LINE = 12;
 const REMOVED_SOURCE_FILE = "src/web/worker.ts";
@@ -201,10 +206,31 @@ function bodyFor(canvas: CanvasHarness, pathName: string): unknown {
   )?.body;
 }
 
+interface DeployedPageRoutes {
+  graph?: {
+    resources: unknown[];
+    removedResources?: unknown[];
+    deployedInventory?: {
+      revision: string;
+      complete: boolean;
+      resources: unknown[];
+    };
+    mode: string;
+  };
+  // Called for each graph read so a journey can change what the server reports
+  // once the delete run has finished.
+  onGraphRead?: () => void;
+  deleteResource?: (body: unknown, nonce: string) => void;
+  // The terminal status the browser polls for after dispatch. Called once per
+  // poll so a journey can move the run from in-flight to concluded.
+  deleteRunStatus?: () => unknown;
+}
+
 async function routeDeployedPage(
   page: Page,
   deploymentStatus: () => string,
-  abandon?: (body: unknown, nonce: string) => void
+  abandon?: (body: unknown, nonce: string) => void,
+  routes: DeployedPageRoutes = {}
 ): Promise<void> {
   await page.route("**/api/list-applications**", async (route) => {
     await route.fulfill({
@@ -244,10 +270,35 @@ async function routeDeployedPage(
     });
   });
   await page.route("**/api/deployed-graph**", async (route) => {
+    routes.onGraphRead?.();
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ resources: [], mode: "greyed" })
+      body: JSON.stringify(routes.graph ?? { resources: [], mode: "greyed" })
+    });
+  });
+  await page.route("**/api/delete-resource", async (route) => {
+    routes.deleteResource?.(
+      route.request().postDataJSON(),
+      route.request().headers()["x-radius-mutation-nonce"] ?? ""
+    );
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        success: true,
+        runUrl: "https://github.com/octo/app/actions/runs/9",
+        resource: { name: "cache", type: "Radius.Data/redisCaches" }
+      })
+    });
+  });
+  await page.route("**/api/delete-run-status**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(
+        routes.deleteRunStatus?.() ?? { state: "in_progress", outcome: null }
+      )
     });
   });
   await page.route("**/api/deploy-status**", async (route) => {
@@ -305,6 +356,173 @@ async function openEnvironmentWizard(page: Page): Promise<void> {
 test.describe("Radius Canvas in Chromium", () => {
   test.beforeEach(async ({ canvas }) => {
     await seed(canvas);
+  });
+
+  test("deletes one removed-but-still-deployed resource and follows the run to its outcome @safety", async ({
+    canvas,
+    page
+  }) => {
+    // Exception 7.1 end to end in a real browser: the deployed graph reports a
+    // resource the definition no longer declares, deleting it passes through
+    // the same three-step typed confirmation as an application delete, carries
+    // the browser mutation nonce and the graph revision, and the page then
+    // FOLLOWS the run rather than stopping at the dispatch.
+    const dispatched: Array<{ body: unknown; nonce: string }> = [];
+    const deployedResource = {
+      id: "res-cache",
+      name: "cache",
+      type: "Radius.Data/redisCaches"
+    };
+    const modeled = {
+      id: "res-api",
+      name: "api",
+      type: "Radius.Compute/containers",
+      deployStatus: "success"
+    };
+    const withOrphan = {
+      resources: [modeled],
+      removedResources: [deployedResource],
+      deployedInventory: {
+        revision: "a1b2c3d4",
+        complete: true,
+        resources: [modeled, deployedResource]
+      },
+      mode: "terminal"
+    };
+    // Once the run concludes the resource is genuinely gone, so the refreshed
+    // graph no longer reports it.
+    const withoutOrphan = {
+      resources: [modeled],
+      removedResources: [],
+      deployedInventory: {
+        revision: "b2c3d4e5",
+        complete: true,
+        resources: [modeled]
+      },
+      mode: "terminal"
+    };
+    const routes: DeployedPageRoutes = {
+      graph: withOrphan,
+      deleteResource: (body, nonce) => dispatched.push({ body, nonce }),
+      deleteRunStatus: () => {
+        if (dispatched.length === 0) {
+          return { state: "in_progress", outcome: null };
+        }
+        routes.graph = withoutOrphan;
+        return {
+          state: "completed",
+          outcome: "succeeded",
+          outcomeMessage: "Deletion succeeded",
+          stateWarning: null
+        };
+      }
+    };
+    await routeDeployedPage(page, () => "success", undefined, routes);
+    await gotoCanvas(page, canvas, "deployed");
+
+    const removed = page.locator("#deployed-removed-section");
+    await expect(removed).toBeVisible();
+    await expect(removed).toContainText("cache");
+    await expect(removed).toContainText("Radius.Data/redisCaches");
+
+    await page.locator("#deployed-removed-list button").first().click();
+    await expect(page.locator("#deploy-resource-modal")).toBeVisible();
+    await page.locator(`#${"del-step1-btn"}`).click();
+    await expect(page.locator("#deploy-resource-body")).toContainText(
+      "The rest of the application is left running."
+    );
+    await page.locator(`#${"del-step2-btn"}`).click();
+
+    const confirmButton = page.locator("#del-confirm-btn");
+    await expect(confirmButton).toBeDisabled();
+    await page.locator("#del-confirm-input").fill("radius-app");
+    await expect(confirmButton).toBeDisabled();
+    await page.locator("#del-confirm-input").fill("cache");
+    await expect(confirmButton).toBeEnabled();
+    await confirmButton.click();
+
+    await expect.poll(() => dispatched.length).toBe(1);
+    expect(dispatched[0].body).toEqual({
+      repo: REPOSITORY,
+      environment: "fixture-environment",
+      application: "radius-app",
+      resourceName: "cache",
+      resourceType: "Radius.Data/redisCaches",
+      revision: "a1b2c3d4"
+    });
+    expect(dispatched[0].nonce).not.toBe("");
+
+    // Beyond the dispatch: while the run is tracked the control is held, and
+    // when the run concludes the page reports the real outcome and the
+    // refreshed graph no longer lists the resource.
+    await expect(page.locator("#deployed-inline-status")).toContainText(
+      "Deleting cache"
+    );
+    await expect(
+      page.locator("#deployed-removed-list button").first()
+    ).toBeDisabled();
+    await expect(page.locator("#deployed-inline-status")).toContainText(
+      "cache was deleted.",
+      { timeout: 20_000 }
+    );
+    await expect(removed).toBeHidden({ timeout: 20_000 });
+  });
+
+  test("reports a removed-resource delete that did not succeed @safety", async ({
+    canvas,
+    page
+  }) => {
+    // Part 8: a dispatch is not an outcome. A cancelled run has to say so, and
+    // the controls have to come back so the user can retry.
+    const deployedResource = {
+      id: "res-cache",
+      name: "cache",
+      type: "Radius.Data/redisCaches"
+    };
+    let dispatched = 0;
+    await routeDeployedPage(page, () => "success", undefined, {
+      graph: {
+        resources: [],
+        removedResources: [deployedResource],
+        deployedInventory: {
+          revision: "a1b2c3d4",
+          complete: true,
+          resources: [deployedResource]
+        },
+        mode: "terminal"
+      },
+      deleteResource: () => {
+        dispatched += 1;
+      },
+      deleteRunStatus: () =>
+        dispatched === 0 ?
+          { state: "in_progress", outcome: null }
+        : {
+            state: "completed",
+            outcome: "cancelled",
+            outcomeMessage: "Deletion cancelled",
+            stateWarning:
+              "The deletion ran, but Radius could not save its state."
+          }
+    });
+    await gotoCanvas(page, canvas, "deployed");
+
+    await page.locator("#deployed-removed-list button").first().click();
+    await page.locator(`#${"del-step1-btn"}`).click();
+    await page.locator(`#${"del-step2-btn"}`).click();
+    await page.locator("#del-confirm-input").fill("cache");
+    await page.locator("#del-confirm-btn").click();
+
+    await expect(page.locator("#deployed-inline-status")).toContainText(
+      "Deletion cancelled for cache.",
+      { timeout: 20_000 }
+    );
+    await expect(page.locator("#deployed-inline-status")).toContainText(
+      "Radius could not save its state."
+    );
+    await expect(
+      page.locator("#deployed-removed-list button").first()
+    ).toBeEnabled();
   });
 
   test("deletes an Azure environment through the tracked operation and keeps a dismissed panel gone across a reload @safety", async ({
@@ -498,6 +716,18 @@ test.describe("Radius Canvas in Chromium", () => {
     page,
     canvas
   }) => {
+    // The graph build is genuinely slow: the route fans out to `gh` for the
+    // model, stages the artifacts, compiles the Bicep in-process and only then
+    // spawns `rad app graph`. Waiting on the route's own response is the causal
+    // completion signal, so the `rad` assertion below is checked against a
+    // finished build instead of against the implicit 5s poll budget, which the
+    // real work overruns.
+    const graphLoaded = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/load-graph" &&
+        response.request().method() === "POST",
+      { timeout: GRAPH_BUILD_TIMEOUT_MS }
+    );
     await gotoCanvas(page, canvas, "graph");
 
     await expect(page.getByLabel("Branch")).toHaveValue(WORKTREE_BRANCH);
@@ -516,6 +746,7 @@ test.describe("Radius Canvas in Chromium", () => {
       branch: WORKTREE_BRANCH,
       restartWait: true
     });
+    expect((await graphLoaded).status()).toBe(200);
     await expect
       .poll(async () =>
         (await canvas.cliCalls()).some(
@@ -710,7 +941,9 @@ test.describe("Radius Canvas in Chromium", () => {
   }) => {
     await gotoCanvas(page, canvas, "graph");
     await page.selectOption("#graph-branch", WORKTREE_BRANCH);
-    await expect(page.locator(".rad-node")).toHaveCount(3);
+    await expect(page.locator(".rad-node")).toHaveCount(3, {
+      timeout: GRAPH_BUILD_TIMEOUT_MS
+    });
 
     const panel = page.locator("#node-popup");
     await expect(panel).toBeHidden();
@@ -747,7 +980,9 @@ test.describe("Radius Canvas in Chromium", () => {
   }) => {
     await gotoCanvas(page, canvas, "graph");
     await page.selectOption("#graph-branch", WORKTREE_BRANCH);
-    await expect(page.locator(".rad-node")).toHaveCount(3);
+    await expect(page.locator(".rad-node")).toHaveCount(3, {
+      timeout: GRAPH_BUILD_TIMEOUT_MS
+    });
 
     const webCard = page
       .locator(".rad-node")
@@ -2027,7 +2262,7 @@ test.describe("Radius Canvas in Chromium", () => {
           "view",
           "41",
           "--json",
-          "status,conclusion,jobs",
+          "status,conclusion,attempt,jobs",
           "--repo",
           REPOSITORY
         ],
@@ -2035,6 +2270,7 @@ test.describe("Radius Canvas in Chromium", () => {
         stdout: JSON.stringify({
           status: "completed",
           conclusion: "success",
+          attempt: 1,
           jobs: []
         })
       }

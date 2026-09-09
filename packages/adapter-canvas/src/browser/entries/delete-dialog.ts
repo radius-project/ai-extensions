@@ -7,6 +7,15 @@ import type { DeleteDialogOptions } from "../delete-dialog.js";
 export const DELETE_DIALOG_FACTORY_GLOBAL =
   "radiusCreateDeleteDeploymentDialog";
 
+function readVariant(value: unknown): DeleteDialogOptions["variant"] {
+  const variant = readString(value, "variant");
+  return (
+    variant === "abandon" ? "abandon"
+    : variant === "resource" ? "resource"
+    : "delete"
+  );
+}
+
 function readOptions(value: unknown): DeleteDialogOptions {
   if (!isRecord(value)) return {};
   const onConfirm = value.onConfirm;
@@ -16,7 +25,7 @@ function readOptions(value: unknown): DeleteDialogOptions {
     appId: readString(value, "appId") || undefined,
     envId: readString(value, "envId") || undefined,
     closeId: readString(value, "closeId") || undefined,
-    variant: readString(value, "variant") === "abandon" ? "abandon" : "delete",
+    variant: readVariant(value),
     onConfirm:
       isCallable(onConfirm) ?
         (app, environment) => {

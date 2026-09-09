@@ -1153,9 +1153,42 @@ describe("deployment listings", () => {
         app: "store",
         environment: "dev",
         status: "pending",
-        runUrl: "https://example.test/run"
+        runUrl: "https://example.test/run",
+        runId: "",
+        statusDetail: ""
       }
     ]);
+  });
+
+  // The run identity a destructive operation is tracked by: reported directly
+  // when the server knows it, otherwise recovered from the run URL so an older
+  // listing shape is still identifiable.
+  it("reads the run identity from the row, falling back to its run URL", () => {
+    expect(
+      parseDeploymentListing({
+        deployments: [
+          {
+            app: "store",
+            environment: "dev",
+            status: "delete-failed",
+            runUrl: "https://github.com/octo/app/actions/runs/900",
+            runId: "901"
+          },
+          {
+            app: "store",
+            environment: "prod",
+            status: "delete-failed",
+            runUrl: "https://github.com/octo/app/actions/runs/900"
+          },
+          {
+            app: "store",
+            environment: "stage",
+            status: "success",
+            runUrl: "https://example.test/not-a-run"
+          }
+        ]
+      }).map((entry) => entry.runId)
+    ).toEqual(["901", "900", ""]);
   });
 
   it.each([
@@ -1186,7 +1219,10 @@ describe("deployment listings", () => {
             app: "store",
             environment: "dev",
             status: "pending",
-            runUrl: ""
+            runUrl: "",
+            // Part 8: a failed delete carries its exact outcome alongside the
+            // status; an ordinary record simply has none.
+            statusDetail: "Deletion cancelled"
           }
         ]
       })
@@ -1196,7 +1232,9 @@ describe("deployment listings", () => {
           app: "store",
           environment: "dev",
           status: "pending",
-          runUrl: ""
+          runUrl: "",
+          runId: "",
+          statusDetail: "Deletion cancelled"
         }
       ],
       error: ""
@@ -1207,8 +1245,12 @@ describe("deployment listings", () => {
     ["pending", true],
     ["in_progress", true],
     ["deleting", true],
+    // Exception 7.1: a single-resource cleanup is destructive and in flight.
+    ["resource-deleting", true],
     ["success", false],
     ["failed", false],
+    ["delete-failed", false],
+    ["deleted-state-warning", false],
     ["", false]
   ])("treats %s as mutation-blocking=%s", (status, blocked) => {
     expect(deploymentStatusBlocksMutation(status)).toBe(blocked);

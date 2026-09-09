@@ -31,6 +31,7 @@ import {
 } from "../repositories.js";
 import {
   DELETE_DEPLOYMENT_PATH,
+  DEPLOYED_GRAPH_PATH,
   DELETE_POLL_LIMIT,
   DELETE_POLL_MS,
   DEPLOY_AUTO_HIDE_MS,
@@ -44,7 +45,9 @@ import {
   buildDeployApplicationOptions,
   buildDeployBranchOptions,
   deploymentStatusMarkup,
+  describesDispatchedDelete,
   initializeDeployingPage,
+  isTerminalDeleteStatus,
   opKey,
   parseDeploymentRecords
 } from "./page.js";
@@ -228,11 +231,13 @@ function deployRowButton(app: string, environment: string, id = "row-del") {
   return button;
 }
 
-function confirmDeleteDialog(
+async function confirmDeleteDialog(
   deleteBody: FakeElement,
   app: string,
   environment: string
-): void {
+): Promise<void> {
+  // The dialog opens only after the deployed-resource enumeration resolves.
+  await flushPromises();
   fakeById(deleteBody, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
   fakeById(deleteBody, DELETE_DIALOG_STEP2_BUTTON_ID).dispatch("click");
   const input = fakeInputById(deleteBody, DELETE_DIALOG_CONFIRM_INPUT_ID);
@@ -810,12 +815,115 @@ describe("delete flow", () => {
     void button;
   });
 
-  it("opens the shared confirmation dialog naming the target", async () => {
+  it("opens the shared confirmation dialog naming the target and its resources", async () => {
     const { page, button } = await readyWithRow("app", "dev");
+    page.browser.net.handle(
+      `${DEPLOYED_GRAPH_PATH}?repo=${encodeURIComponent(page.repo)}&application=app&environment=dev`,
+      () =>
+        jsonResponse({
+          // Modeled resources alone would undercount: the authoritative
+          // inventory is what the deletion actually removes.
+          resources: [{ name: "frontend", type: "Radius.Compute/containers" }],
+          deployedInventory: {
+            revision: "a1b2c3d4",
+            complete: true,
+            resources: [
+              { name: "frontend", type: "Radius.Compute/containers" },
+              { name: "cache", type: "Radius.Data/redisCaches" },
+              { name: "" }
+            ]
+          }
+        })
+    );
     button.dispatch("click");
+    await flushPromises();
+
     expect(page.deleteModal.style.display).toBe("flex");
     expect(page.deleteApp.textContent).toBe("app");
     expect(page.deleteEnv.textContent).toBe("dev");
+    fakeById(page.deleteBody, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
+    // Part 8: the confirmation names the resources the deletion removes,
+    // including one the definition no longer declares, and skips an entry the
+    // inventory could not identify.
+    expect(fakeText(page.deleteBody)).toContain(
+      "2 deployed resources will be deleted:"
+    );
+    expect(fakeText(page.deleteBody)).toContain("frontend");
+    expect(fakeText(page.deleteBody)).toContain("cache");
+  });
+
+  it("reports an incomplete inventory instead of an exact count", async () => {
+    const { page, button } = await readyWithRow("app", "dev");
+    page.browser.net.handle(
+      `${DEPLOYED_GRAPH_PATH}?repo=${encodeURIComponent(page.repo)}&application=app&environment=dev`,
+      () =>
+        jsonResponse({
+          resources: [{ name: "frontend", type: "Radius.Compute/containers" }],
+          deployedInventory: { revision: "r", complete: false, resources: [] }
+        })
+    );
+    button.dispatch("click");
+    await flushPromises();
+    fakeById(page.deleteBody, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
+
+    expect(fakeText(page.deleteBody)).toContain(
+      "The list of resources could not be read"
+    );
+  });
+
+  it("reports an unreadable resource inventory instead of an empty one", async () => {
+    const { page, button } = await readyWithRow("app", "dev");
+    page.browser.net.handle(
+      `${DEPLOYED_GRAPH_PATH}?repo=${encodeURIComponent(page.repo)}&application=app&environment=dev`,
+      () => Promise.reject(new Error("offline"))
+    );
+    button.dispatch("click");
+    await flushPromises();
+    fakeById(page.deleteBody, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
+
+    expect(page.deleteModal.style.display).toBe("flex");
+    expect(fakeText(page.deleteBody)).toContain(
+      "The list of resources could not be read"
+    );
+  });
+
+  it.each([
+    ["resolves", false],
+    ["fails", true]
+  ])(
+    "does not open the confirmation when the page is torn down before the inventory %s",
+    async (_label, shouldFail) => {
+      const { page, button, teardown } = await readyWithRow("app", "dev");
+      const pending = createDeferred<HttpResponse>();
+      page.browser.net.handle(
+        `${DEPLOYED_GRAPH_PATH}?repo=${encodeURIComponent(page.repo)}&application=app&environment=dev`,
+        () => pending.promise
+      );
+      button.dispatch("click");
+      teardown();
+
+      if (shouldFail) pending.reject(new Error("offline"));
+      else pending.resolve(jsonResponse({ resources: [] }));
+      await flushPromises();
+
+      expect(page.deleteModal.style.display).not.toBe("flex");
+    }
+  );
+
+  it("reports an unreadable resource inventory instead of an empty one", async () => {
+    const { page, button } = await readyWithRow("app", "dev");
+    page.browser.net.handle(
+      `${DEPLOYED_GRAPH_PATH}?repo=${encodeURIComponent(page.repo)}&application=app&environment=dev`,
+      () => Promise.reject(new Error("offline"))
+    );
+    button.dispatch("click");
+    await flushPromises();
+    fakeById(page.deleteBody, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
+
+    expect(page.deleteModal.style.display).toBe("flex");
+    expect(fakeText(page.deleteBody)).toContain(
+      "The list of resources could not be read"
+    );
   });
 
   it("dispatches delete, marks the row Deleting, and resolves on completion", async () => {
@@ -826,7 +934,7 @@ describe("delete flow", () => {
       return jsonResponse({ ok: true });
     });
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
     expect(page.tableBody.innerHTML).toContain("Deleting");
     expect(JSON.parse(String(deleteCalled))).toEqual({
@@ -845,49 +953,446 @@ describe("delete flow", () => {
     expect(inlineMessage(page.inlineStatus)).toContain("successfully deleted");
   });
 
-  it("fails closed and never dispatches when the application identity is missing", async () => {
-    const page = fixture({
-      deploymentsPayload: {
-        deployments: [{ app: "app", environment: "dev", status: "success" }]
-      }
-    });
-    const button = createFakeInput("row-no-app");
-    button.setAttribute("data-env", "dev");
-    page.browser.document.addSelectorAll(".js-del-dep", [button]);
-    init(page);
-    await flushPromises();
-    let dispatched = false;
-    page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () => {
-      dispatched = true;
-      return jsonResponse({ ok: true });
-    });
+  // Part 8: a delete that finishes without the row disappearing is terminal
+  // too. The optimistic "Deleting…" override has to come off at once —
+  // otherwise the row renders as busy forever and its statusDetail, the only
+  // place the exact outcome and the orphan guidance appear, stays hidden.
+  it.each([
+    [
+      "a cancelled delete",
+      "delete-failed",
+      "Deletion cancelled",
+      "Delete failed"
+    ],
+    [
+      "a timed-out delete",
+      "delete-failed",
+      "Deletion timed out",
+      "Delete failed"
+    ],
+    ["a failed delete", "delete-failed", "Deletion failed", "Delete failed"],
+    [
+      "a delete that could not save state",
+      "deleted-state-warning",
+      "Deletion succeeded\n\nThe deletion ran, but Radius could not save its state. Orphaned cloud resources may exist.",
+      "Deleted — state not saved"
+    ]
+  ])(
+    "clears the deleting override and surfaces %s",
+    async (_label, status, statusDetail, label) => {
+      const { page, button } = await readyWithRow("app", "dev");
+      page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+        jsonResponse({ ok: true })
+      );
+      button.dispatch("click");
+      await confirmDeleteDialog(page.deleteBody, "app", "dev");
+      await flushPromises();
+      expect(page.tableBody.innerHTML).toContain("Deleting");
+
+      page.browser.net.handle(
+        `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+        () =>
+          jsonResponse({
+            deployments: [
+              {
+                app: "app",
+                environment: "dev",
+                status,
+                runUrl: "https://github.com/octo/app/actions/runs/9",
+                statusDetail
+              }
+            ]
+          })
+      );
+      page.browser.clock.tick(DELETE_POLL_MS);
+      await flushPromises();
+
+      // The row reports what actually happened, including the detail.
+      expect(page.tableBody.innerHTML).toContain(label);
+      expect(page.tableBody.innerHTML).not.toContain("Deleting…");
+      expect(page.tableBody.innerHTML).toContain(statusDetail.split("\n")[0]);
+      // And the actionable message reaches the user rather than only the row.
+      expect(inlineMessage(page.inlineStatus)).toContain(
+        statusDetail.split("\n")[0]
+      );
+      expect(page.inlineStatus.className).toContain("error");
+      // Terminal: nothing is left polling.
+      expect(page.browser.clock.pending).toBe(0);
+    }
+  );
+
+  it.each([
+    [
+      "a failed delete with no detail",
+      "delete-failed",
+      "failed. Check the workflow run on GitHub."
+    ],
+    [
+      "a state-save warning with no detail",
+      "deleted-state-warning",
+      "Radius could not save its state"
+    ]
+  ])("still reports %s", async (_label, status, message) => {
+    const { page, button } = await readyWithRow("app", "dev");
+    page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+      jsonResponse({ ok: true, runId: "9" })
+    );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
-    expect(dispatched).toBe(false);
+
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () =>
+        jsonResponse({
+          deployments: [{ app: "app", environment: "dev", status, runId: "9" }]
+        })
+    );
+    page.browser.clock.tick(DELETE_POLL_MS);
+    await flushPromises();
+
+    expect(inlineMessage(page.inlineStatus)).toContain(message);
+    expect(page.browser.clock.pending).toBe(0);
   });
 
-  it("fails closed and never dispatches when the environment identity is missing", async () => {
+  // A retried delete: the environment's row still reports the PREVIOUS
+  // attempt's failure until the new run publishes its own deployment record.
+  // Stopping there would replay an outcome the user already saw and abandon the
+  // delete that is actually running.
+  it("keeps polling past the previous attempt's failed row and reports the retried run", async () => {
     const page = fixture({
       deploymentsPayload: {
-        deployments: [{ app: "app", environment: "dev", status: "success" }]
+        deployments: [
+          {
+            app: "app",
+            environment: "dev",
+            status: "delete-failed",
+            runId: "100",
+            runUrl: "https://github.com/octo/app/actions/runs/100",
+            statusDetail: "Deletion failed"
+          }
+        ]
       }
     });
-    const button = createFakeInput("row-no-env");
-    button.setAttribute("data-app", "app");
+    const button = deployRowButton("app", "dev");
     page.browser.document.addSelectorAll(".js-del-dep", [button]);
     init(page);
     await flushPromises();
-    let dispatched = false;
-    page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () => {
-      dispatched = true;
-      return jsonResponse({ ok: true });
-    });
+
+    page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+      jsonResponse({
+        ok: true,
+        runId: "101",
+        runUrl: "https://github.com/octo/app/actions/runs/101"
+      })
+    );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
-    expect(dispatched).toBe(false);
+
+    // Poll 1: GitHub still serves the old attempt's terminal row.
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () =>
+        jsonResponse({
+          deployments: [
+            {
+              app: "app",
+              environment: "dev",
+              status: "delete-failed",
+              runId: "100",
+              runUrl: "https://github.com/octo/app/actions/runs/100",
+              statusDetail: "Deletion failed"
+            }
+          ]
+        })
+    );
+    page.browser.clock.tick(DELETE_POLL_MS);
+    await flushPromises();
+
+    expect(inlineMessage(page.inlineStatus)).toContain("has started");
+    expect(inlineMessage(page.inlineStatus)).not.toContain("Deletion failed");
+    // Still tracking, because the dispatched run has not reported anything yet.
+    expect(page.browser.clock.pending).toBe(1);
+
+    // Poll 2: the new run's record appears, still in flight.
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () =>
+        jsonResponse({
+          deployments: [
+            {
+              app: "app",
+              environment: "dev",
+              status: "deleting",
+              runId: "101",
+              runUrl: "https://github.com/octo/app/actions/runs/101"
+            }
+          ]
+        })
+    );
+    page.browser.clock.tick(DELETE_POLL_MS);
+    await flushPromises();
+
+    expect(inlineMessage(page.inlineStatus)).not.toContain("Deletion failed");
+    expect(page.browser.clock.pending).toBe(1);
+
+    // Poll 3: the retry succeeded, so the row is gone.
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () => jsonResponse({ deployments: [] })
+    );
+    page.browser.clock.tick(DELETE_POLL_MS);
+    await flushPromises();
+
+    expect(inlineMessage(page.inlineStatus)).toContain("successfully deleted");
   });
+
+  it("reports the retried run's own failure once its record appears", async () => {
+    const page = fixture({
+      deploymentsPayload: {
+        deployments: [
+          {
+            app: "app",
+            environment: "dev",
+            status: "delete-failed",
+            runId: "100",
+            runUrl: "https://github.com/octo/app/actions/runs/100",
+            statusDetail: "Deletion failed"
+          }
+        ]
+      }
+    });
+    const button = deployRowButton("app", "dev");
+    page.browser.document.addSelectorAll(".js-del-dep", [button]);
+    init(page);
+    await flushPromises();
+
+    page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+      jsonResponse({ ok: true, runId: "101" })
+    );
+    button.dispatch("click");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await flushPromises();
+
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () =>
+        jsonResponse({
+          deployments: [
+            {
+              app: "app",
+              environment: "dev",
+              status: "delete-failed",
+              runId: "101",
+              runUrl: "https://github.com/octo/app/actions/runs/101",
+              statusDetail: "Deletion cancelled"
+            }
+          ]
+        })
+    );
+    page.browser.clock.tick(DELETE_POLL_MS);
+    await flushPromises();
+
+    expect(inlineMessage(page.inlineStatus)).toContain("Deletion cancelled");
+    expect(page.browser.clock.pending).toBe(0);
+  });
+
+  // The dispatch could not identify its run (discovery refuses to guess), so
+  // the only thing that can be trusted is "a run other than the one the row
+  // carried before". The previous attempt's row is still refused.
+  it("ignores the pre-dispatch run when the dispatch reported no run", async () => {
+    const page = fixture({
+      deploymentsPayload: {
+        deployments: [
+          {
+            app: "app",
+            environment: "dev",
+            status: "delete-failed",
+            runId: "100",
+            runUrl: "https://github.com/octo/app/actions/runs/100",
+            statusDetail: "Deletion failed"
+          }
+        ]
+      }
+    });
+    const button = deployRowButton("app", "dev");
+    page.browser.document.addSelectorAll(".js-del-dep", [button]);
+    init(page);
+    await flushPromises();
+
+    page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+      jsonResponse({ ok: true, runId: "", runUrl: "" })
+    );
+    button.dispatch("click");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await flushPromises();
+
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () =>
+        jsonResponse({
+          deployments: [
+            {
+              app: "app",
+              environment: "dev",
+              status: "delete-failed",
+              runId: "100",
+              runUrl: "https://github.com/octo/app/actions/runs/100",
+              statusDetail: "Deletion failed"
+            }
+          ]
+        })
+    );
+    page.browser.clock.tick(DELETE_POLL_MS);
+    await flushPromises();
+
+    expect(inlineMessage(page.inlineStatus)).not.toContain("Deletion failed");
+    expect(page.browser.clock.pending).toBe(1);
+
+    // A different run's terminal row is this dispatch's, since nothing else
+    // could have produced it.
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () =>
+        jsonResponse({
+          deployments: [
+            {
+              app: "app",
+              environment: "dev",
+              status: "delete-failed",
+              runId: "102",
+              runUrl: "https://github.com/octo/app/actions/runs/102",
+              statusDetail: "Deletion timed out"
+            }
+          ]
+        })
+    );
+    page.browser.clock.tick(DELETE_POLL_MS);
+    await flushPromises();
+
+    expect(inlineMessage(page.inlineStatus)).toContain("Deletion timed out");
+    expect(page.browser.clock.pending).toBe(0);
+  });
+
+  // After a successful delete the row is gone, but the (now stale) button stays
+  // bound. Deleting again from it has no prior run to compare against, so any
+  // identified run is this dispatch's.
+  it("tracks a delete started from a row the listing no longer has", async () => {
+    const { page, button } = await readyWithRow("app", "dev");
+    page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+      jsonResponse({ ok: true, runId: "76" })
+    );
+    button.dispatch("click");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await flushPromises();
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () => jsonResponse({ deployments: [] })
+    );
+    page.browser.clock.tick(DELETE_POLL_MS);
+    await flushPromises();
+    expect(inlineMessage(page.inlineStatus)).toContain("successfully deleted");
+
+    // Second delete, dispatched with no row in the listing at all.
+    page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () =>
+      jsonResponse({ ok: true, runId: "77" })
+    );
+    button.dispatch("click");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await flushPromises();
+
+    page.browser.net.handle(
+      `${LIST_DEPLOYMENTS_PATH}?repo=${encodeURIComponent(page.repo)}&fresh=1`,
+      () =>
+        jsonResponse({
+          deployments: [
+            {
+              app: "app",
+              environment: "dev",
+              status: "delete-failed",
+              runId: "77",
+              runUrl: "https://github.com/octo/app/actions/runs/77",
+              statusDetail: "Deletion failed"
+            }
+          ]
+        })
+    );
+    page.browser.clock.tick(DELETE_POLL_MS);
+    await flushPromises();
+
+    expect(inlineMessage(page.inlineStatus)).toContain("Deletion failed");
+    expect(page.browser.clock.pending).toBe(0);
+  });
+
+  // Exception 7.1: a single-resource cleanup blocks the application delete
+  // while it runs, so its row keeps the destructive control disabled and says
+  // what is actually happening.
+  it("disables the delete control while a resource cleanup is in flight", async () => {
+    const page = fixture({
+      deploymentsPayload: {
+        deployments: [
+          { app: "app", environment: "dev", status: "resource-deleting" }
+        ]
+      }
+    });
+    init(page);
+    await flushPromises();
+
+    expect(page.tableBody.innerHTML).toContain("Removing a resource…");
+    expect(page.tableBody.innerHTML).toContain('js-del-dep" disabled');
+  });
+
+  it.each([
+    ["application", "row-no-app", "data-env", "dev", "/dev"],
+    ["environment", "row-no-env", "data-app", "app", "app/"]
+  ])(
+    "fails closed and never dispatches when the %s identity is missing",
+    async (_label, id, attribute, value, token) => {
+      const page = fixture({
+        deploymentsPayload: {
+          deployments: [{ app: "app", environment: "dev", status: "success" }]
+        }
+      });
+      const button = createFakeInput(id);
+      button.setAttribute(attribute, value);
+      page.browser.document.addSelectorAll(".js-del-dep", [button]);
+      init(page);
+      await flushPromises();
+      let dispatched = false;
+      page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () => {
+        dispatched = true;
+        return jsonResponse({ ok: true });
+      });
+      button.dispatch("click");
+      await flushPromises();
+
+      // The confirmation opens with no inventory it could read, and the
+      // confirmed delete still refuses the incomplete identity.
+      expect(page.deleteModal.style.display).toBe("flex");
+      fakeById(page.deleteBody, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch(
+        "click"
+      );
+      expect(fakeText(page.deleteBody)).toContain(
+        "The list of resources could not be read"
+      );
+      fakeById(page.deleteBody, DELETE_DIALOG_STEP2_BUTTON_ID).dispatch(
+        "click"
+      );
+      const input = fakeInputById(
+        page.deleteBody,
+        DELETE_DIALOG_CONFIRM_INPUT_ID
+      );
+      input.value = token;
+      input.dispatch("input");
+      fakeInputById(page.deleteBody, DELETE_DIALOG_CONFIRM_BUTTON_ID).dispatch(
+        "click"
+      );
+      await flushPromises();
+
+      expect(dispatched).toBe(false);
+    }
+  );
 
   it("shows the server error and reverts the override on dispatch failure", async () => {
     const { page, button } = await readyWithRow("app", "dev");
@@ -895,7 +1400,7 @@ describe("delete flow", () => {
       jsonResponse({ error: "workflow busy" }, false, 409)
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toContain("workflow busy");
   });
@@ -906,7 +1411,7 @@ describe("delete flow", () => {
       jsonResponse({}, false, 500)
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toContain(
       "Could not start the delete workflow."
@@ -919,7 +1424,7 @@ describe("delete flow", () => {
       Promise.reject(new Error("offline"))
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toContain(
       "Could not delete the deployment. Please try again."
@@ -932,7 +1437,7 @@ describe("delete flow", () => {
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
 
     let pollCount = 0;
@@ -966,7 +1471,7 @@ describe("delete flow", () => {
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
 
     page.browser.net.handle(
@@ -990,7 +1495,7 @@ describe("delete flow", () => {
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
 
     let attempts = 0;
@@ -1016,7 +1521,7 @@ describe("delete flow", () => {
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
 
     page.browser.net.handle(
@@ -1038,7 +1543,7 @@ describe("delete flow", () => {
     const dispatchDef = createDeferred<HttpResponse>();
     page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () => dispatchDef.promise);
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     teardown();
     dispatchDef.resolve(jsonResponse({ ok: true }));
     await flushPromises();
@@ -1050,7 +1555,7 @@ describe("delete flow", () => {
     const dispatchDef = createDeferred<HttpResponse>();
     page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () => dispatchDef.promise);
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     teardown();
     dispatchDef.reject(new Error("offline"));
     await flushPromises();
@@ -1063,7 +1568,7 @@ describe("delete flow", () => {
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
 
     const pollDef = createDeferred<HttpResponse>();
@@ -1084,7 +1589,7 @@ describe("delete flow", () => {
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
 
     const pollDef = createDeferred<HttpResponse>();
@@ -1107,7 +1612,7 @@ describe("delete flow", () => {
     );
     const before = page.tableBody.innerHTML;
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
     expect(page.tableBody.innerHTML).not.toContain("Could not load");
     expect(page.tableBody.innerHTML).toBe(before);
@@ -1121,7 +1626,7 @@ describe("delete flow", () => {
     );
     const before = page.tableBody.innerHTML;
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
     expect(page.tableBody.innerHTML).not.toContain("Could not load");
     expect(page.tableBody.innerHTML).toBe(before);
@@ -1373,6 +1878,35 @@ describe("deploy flow", () => {
     expect(page.progressModal.style.display).toBe("flex");
     page.browser.clock.tick(DEPLOY_AUTO_HIDE_MS);
     expect(page.progressModal.style.display).toBe("none");
+  });
+
+  it("warns about unsaved Radius state on an otherwise successful deploy", async () => {
+    // Exception 5.4: the deploy ran, but its teardown could not persist state.
+    // The success path must report the possible orphans instead of quietly
+    // auto-hiding the panel.
+    const page = fixture();
+    init(page);
+    await flushPromises();
+    page.browser.net.handle(DEPLOY_PATH, () => jsonResponse({ ok: true }));
+    page.browser.net.handle(DEPLOY_STATUS_PATH, () =>
+      jsonResponse({
+        status: "success",
+        deployRunUrl: "https://example.test/run/1",
+        stateWarning:
+          "The deployment ran, but Radius could not save its state. Orphaned cloud resources may exist."
+      })
+    );
+
+    page.deployBtn.dispatch("click");
+    await flushPromises();
+    page.browser.clock.tick(DEPLOY_WORKFLOW_POLL_MS);
+    await flushPromises();
+
+    expect(inlineMessage(page.inlineStatus)).toContain(
+      "Orphaned cloud resources may exist."
+    );
+    page.browser.clock.tick(DEPLOY_AUTO_HIDE_MS);
+    expect(page.progressModal.style.display).toBe("flex");
   });
 
   it("dismisses the inline status banner when its close button is clicked", async () => {
@@ -2830,10 +3364,52 @@ describe("pure helpers", () => {
     ["pending", "Pending"],
     ["deleting", "Deleting…"],
     ["delete-failed", "Delete failed"],
+    ["deleted-state-warning", "Deleted — state not saved"],
     ["unknown-status", "Pending"]
   ])("renders %s as text without a colored circle", (status, label) => {
     expect(deploymentStatusMarkup(status)).toBe(label);
   });
+
+  it.each([
+    ["a failed delete", "delete-failed", "Delete failed", "Deletion cancelled"],
+    [
+      "a successful delete that could not save state",
+      "deleted-state-warning",
+      "Deleted — state not saved",
+      "Orphaned cloud resources may exist."
+    ],
+    // Exception 5.4 on the cleanup path: the application is still deployed, so
+    // its row is the only place the orphan warning can appear. Reopening the
+    // page must show it, which is exactly what rendering the listing does.
+    [
+      "a still-deployed application whose resource cleanup could not save state",
+      "success",
+      "Success",
+      "Removing a resource from this application succeeded."
+    ]
+  ])(
+    "renders the exact outcome detail of %s",
+    async (_label, status, label, detail) => {
+      const page = fixture({
+        deploymentsPayload: {
+          deployments: [
+            {
+              app: "app",
+              environment: "dev",
+              status,
+              statusDetail: detail
+            }
+          ]
+        }
+      });
+      init(page);
+      await flushPromises();
+
+      expect(page.tableBody.innerHTML).toContain(label);
+      expect(page.tableBody.innerHTML).toContain('class="rad-status-detail"');
+      expect(page.tableBody.innerHTML).toContain(detail);
+    }
+  );
 
   it("parses deployments defensively, dropping incomplete entries", () => {
     expect(parseDeploymentRecords(null)).toEqual([]);
@@ -2846,7 +3422,70 @@ describe("pure helpers", () => {
           "not-an-object"
         ]
       })
-    ).toEqual([{ app: "a", environment: "b", status: "success", runUrl: "u" }]);
+    ).toEqual([
+      {
+        app: "a",
+        environment: "b",
+        status: "success",
+        runUrl: "u",
+        runId: "",
+        statusDetail: ""
+      }
+    ]);
+  });
+
+  // The pure half of the run-identity binding, so each branch is pinned
+  // independently of the polling loop that uses it.
+  describe("describesDispatchedDelete", () => {
+    const record = (overrides: Record<string, string> = {}) => ({
+      app: "app",
+      environment: "dev",
+      status: "delete-failed",
+      runUrl: "",
+      runId: "",
+      statusDetail: "",
+      ...overrides
+    });
+
+    it.each([
+      ["the exact dispatched run", { runId: "101" }, "101", "100", true],
+      ["the previous attempt's run", { runId: "100" }, "101", "100", false],
+      [
+        "a run recovered from the row's URL",
+        { runUrl: "https://github.com/octo/app/actions/runs/101" },
+        "101",
+        "100",
+        true
+      ],
+      ["a row with no run at all", {}, "101", "100", false],
+      [
+        "any new run when the dispatch reported none",
+        { runId: "102" },
+        "",
+        "100",
+        true
+      ],
+      [
+        "the pre-dispatch run when the dispatch reported none",
+        { runId: "100" },
+        "",
+        "100",
+        false
+      ]
+    ])("matches %s", (_label, overrides, runId, priorRunId, expected) => {
+      expect(
+        describesDispatchedDelete(record(overrides), { runId, priorRunId })
+      ).toBe(expected);
+    });
+  });
+
+  it.each([
+    ["delete-failed", true],
+    ["deleted-state-warning", true],
+    ["deleting", false],
+    ["success", false]
+  ])("classifies %s as terminal=%s", (status, expected) => {
+    expect(isTerminalDeleteStatus(status)).toBe(expected);
   });
 
   it("builds application options, inserting a redirected app not in the list", () => {
@@ -2907,7 +3546,7 @@ describe("stale response identity across independent operations", () => {
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
     expect(page.tableBody.innerHTML).toContain("Deleting");
   });

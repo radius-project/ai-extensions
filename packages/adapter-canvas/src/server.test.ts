@@ -20,6 +20,8 @@ import {
   DEPLOY_RAD_COMMANDS_STEP,
   deleteNewlyCreatedGitHubEnvironment,
   deploymentStatusBlocksMutation,
+  cachedDeployStatusReader,
+  invalidateDeployStatusReaders,
   DEPLOYMENT_MUTATION_LEASE_MS,
   deployHandoffStatus,
   DEPLOY_HANDOFF_MAX_ATTEMPTS,
@@ -4500,19 +4502,68 @@ describe("isCrossSiteMutation", () => {
 });
 
 describe("deploymentStatusBlocksMutation", () => {
-  it.each(["pending", "in_progress", "deleting"])(
+  it.each(["pending", "in_progress", "deleting", "resource-deleting"])(
     "blocks the non-terminal status %s",
     (status) => {
       expect(deploymentStatusBlocksMutation(status)).toBe(true);
     }
   );
 
-  it.each(["success", "failed", "unknown", "", undefined])(
-    "allows the terminal status %s",
-    (status) => {
-      expect(deploymentStatusBlocksMutation(status)).toBe(false);
-    }
-  );
+  it.each([
+    "success",
+    "failed",
+    "delete-failed",
+    "deleted-state-warning",
+    "unknown",
+    "",
+    undefined
+  ])("allows the terminal status %s", (status) => {
+    expect(deploymentStatusBlocksMutation(status)).toBe(false);
+  });
+});
+
+// Exception 7.1: a delete run republishes what the application owns, so the
+// reader that cached the pre-delete artifact must not answer the read that
+// follows it.
+describe("deploy status reader cache", () => {
+  const options = {
+    repo: "octo/todolist",
+    environment: "dev",
+    application: "todolist",
+    listArtifacts: async () => [],
+    downloadArtifact: async () => null
+  };
+
+  it("shares one reader per deployment identity", () => {
+    expect(cachedDeployStatusReader(options)).toBe(
+      cachedDeployStatusReader(options)
+    );
+  });
+
+  it("replaces the readers of a repository whose deployment changed", () => {
+    const before = cachedDeployStatusReader(options);
+    const other = cachedDeployStatusReader({
+      ...options,
+      repo: "octo/other"
+    });
+
+    invalidateDeployStatusReaders("octo/todolist");
+
+    expect(cachedDeployStatusReader(options)).not.toBe(before);
+    // Scoped: another repository's reader keeps its cache and its accepted
+    // sequence.
+    expect(cachedDeployStatusReader({ ...options, repo: "octo/other" })).toBe(
+      other
+    );
+  });
+
+  it("invalidates nothing without a repository", () => {
+    const reader = cachedDeployStatusReader(options);
+
+    invalidateDeployStatusReaders("");
+
+    expect(cachedDeployStatusReader(options)).toBe(reader);
+  });
 });
 
 describe("deployment mutation reservations", () => {

@@ -69,6 +69,13 @@ export interface DeploymentInfo {
   environment: string;
   status: string;
   runUrl: string;
+  // The workflow run this row's status came from, when the server could
+  // identify it. A page that dispatched a delete tracks its own run by this id,
+  // so a terminal row belonging to an EARLIER run is recognisable as stale
+  // rather than reported as the new delete's outcome.
+  runId: string;
+  // The exact terminal outcome of a failed delete, plus any orphan guidance.
+  statusDetail: string;
 }
 
 export interface DeploymentListing {
@@ -85,8 +92,28 @@ export function deploymentKey(
 
 export function deploymentStatusBlocksMutation(status: string): boolean {
   return (
-    status === "pending" || status === "in_progress" || status === "deleting"
+    status === "pending" ||
+    status === "in_progress" ||
+    status === "deleting" ||
+    // Exception 7.1: a single-resource cleanup is destructive and runs against
+    // this very deployment, so it blocks another mutation exactly as an
+    // application delete does — including one started from another canvas
+    // instance, which is only visible through this status.
+    status === "resource-deleting"
   );
+}
+
+/**
+ * runIdFromUrl - the GitHub Actions run id inside a run URL, or "" when the URL
+ * names no run.
+ *
+ * Shared by the listing parser and the delete tracker: a dispatch reports its
+ * run as a URL, a listing row reports it as an id, and a destructive operation
+ * may only be matched to its own run when the two are compared on the same
+ * value.
+ */
+export function runIdFromUrl(runUrl: string): string {
+  return /actions\/runs\/(\d+)/.exec(runUrl)?.[1] ?? "";
 }
 
 // A page hands this object in and only this module writes to it, so values are
@@ -158,7 +185,12 @@ export function parseDeploymentListing(payload: unknown): DeploymentInfo[] {
       app: readString(entry, "app"),
       environment: readString(entry, "environment"),
       status: readString(entry, "status"),
-      runUrl: readString(entry, "runUrl")
+      runUrl: readString(entry, "runUrl"),
+      // Falls back to the id embedded in the run URL so a row from a server
+      // that reports only the URL is still identifiable.
+      runId:
+        readString(entry, "runId") || runIdFromUrl(readString(entry, "runUrl")),
+      statusDetail: readString(entry, "statusDetail")
     }))
     .filter((entry) => entry.app !== "" && entry.environment !== "");
 }

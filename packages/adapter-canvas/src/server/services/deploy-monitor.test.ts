@@ -12,6 +12,7 @@ import { createDeployOutcomeService } from "./deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./deploy-planned-graph.js";
 import type { DeployOutcomeRequest } from "./deploy-outcome.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import { settleDeployStatuses } from "../../deploy-artifacts.js";
 
 // A deterministic clock: every read advances by one tick, so the heartbeat and
 // the pending-node fallback can be driven without a real timer.
@@ -66,6 +67,7 @@ function dependencies(
     buildDeployMessageMap: () => new Map<string, string>(),
     applyDeployMessages: () => {},
     applyDeployStatusToResources: () => [],
+    settleDeployStatuses,
     generatePortalUrl: (resourceType, provider) =>
       `https://portal.test/${provider}/${resourceType}`,
     optionalString: (value) => (typeof value === "string" ? value : ""),
@@ -134,6 +136,7 @@ describe("deploy monitor construction", () => {
     "buildDeployMessageMap",
     "applyDeployMessages",
     "applyDeployStatusToResources",
+    "settleDeployStatuses",
     "generatePortalUrl",
     "optionalString",
     "errorMessage",
@@ -1123,9 +1126,24 @@ describe("deploy monitor settlement", () => {
     expect(progressReads).toBe(0);
   });
 
-  it("marks a run it followed to the poll cap as unconfirmed", async () => {
+  it("marks a run it followed to the poll cap as unconfirmed and settles its graph", async () => {
     let polls = 0;
-    const { request: input, state, logs } = request({ resources: [] });
+    const resources: CanvasGraphResource[] = [
+      {
+        id: "a",
+        name: "api",
+        deployStatus: "in_progress",
+        outputResources: [{ id: "a-out", name: "deployment" }]
+      },
+      { id: "b", name: "db", deployStatus: "pending" },
+      {
+        id: "c",
+        name: "queue",
+        deployStatus: "failed",
+        deployMessage: "Recipe failed: quota exceeded"
+      }
+    ];
+    const { request: input, state, logs } = request({ resources });
     const service = createDeployMonitorService(
       dependencies({
         plannedGraph: { recover: () => Promise.resolve(null) },
@@ -1156,6 +1174,50 @@ describe("deploy monitor settlement", () => {
     expect(logs).toContain(
       "⚠ Timed out waiting for the deploy workflow to complete."
     );
+    // No node is left mid-flight, and the exact Radius error a resource already
+    // reported survives the settle.
+    expect(resources.map((resource) => resource.deployStatus)).toEqual([
+      "failed",
+      "failed",
+      "failed"
+    ]);
+    expect(resources.map((resource) => resource.deployMessage)).toEqual([
+      "Deployment timed out",
+      "Deployment timed out",
+      "Recipe failed: quota exceeded"
+    ]);
+    expect(resources[0].outputResources?.[0].deployStatus).toBe("failed");
+    // The exact outcome, so `/api/deployed-graph` can reproduce it rather than
+    // reporting a plain failure.
+    expect(state.deployOutcome).toBe("timed_out");
+  });
+
+  it("passes the run's attempt to the terminal stage", async () => {
+    let settled: DeployOutcomeRequest | undefined;
+    const { request: input } = request({ resources: [] });
+    const service = createDeployMonitorService(
+      dependencies({
+        plannedGraph: { recover: () => Promise.resolve(null) },
+        getRunDetail: () =>
+          Promise.resolve({
+            status: "completed",
+            conclusion: "success",
+            attempt: 3,
+            steps: []
+          }),
+        outcome: {
+          settle: (settleRequest) => {
+            settled = settleRequest;
+            return Promise.resolve();
+          }
+        }
+      })
+    );
+
+    await service.run(input);
+
+    expect(settled).toBeDefined();
+    expect(settled?.runAttempt).toBe(3);
   });
 });
 
@@ -1317,6 +1379,10 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       extractGitHubActionsStepLog: () => "",
       explainOidcEnterpriseClaim: () => "",
       extractRadDeployError: () => "",
+      readStateSaveFailure: () => {
+        record("read-state-save-diagnostic");
+        return Promise.resolve(null);
+      },
       sleep: () => Promise.resolve(),
       now: () => 1_700_000_060_000
     });
@@ -1365,6 +1431,7 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       buildDeployMessageMap: () => new Map<string, string>(),
       applyDeployMessages: () => {},
       applyDeployStatusToResources: () => [],
+      settleDeployStatuses,
       generatePortalUrl: () => "https://portal.test/azure/db",
       optionalString: (value) => (typeof value === "string" ? value : ""),
       errorMessage: (error) => String(error),
@@ -1409,7 +1476,8 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
       "get-run-detail",
       "read-graph",
       "read-progress",
-      "settle-statuses"
+      "settle-statuses",
+      "read-state-save-diagnostic"
     ]);
     expect(state.deployStatus).toBe("complete");
     expect(state.deployEnvName).toBe("production");

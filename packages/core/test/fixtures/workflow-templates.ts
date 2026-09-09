@@ -95,6 +95,30 @@ jobs:
     uses: ./.github/workflows/delete-aws.yml
 `;
 
+// The single-resource cleanup dispatcher. Structurally identical to the
+// application dispatcher and pointed at the same provider workflows; it is a
+// distinct file so a resource cleanup's GitHub deployment record can never be
+// read as a whole-application teardown.
+export const DELETE_RESOURCE_DISPATCHER_TEMPLATE = `name: Delete resource
+${DISPATCH_HEADER}
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      provider: \${{ steps.detect.outputs.provider }}
+    steps:
+      - id: detect
+        run: echo "provider=azure" >> "$GITHUB_OUTPUT"
+  azure:
+    needs: detect
+    if: needs.detect.outputs.provider == 'azure'
+    uses: ./.github/workflows/delete-azure.yml
+  aws:
+    needs: detect
+    if: needs.detect.outputs.provider == 'aws'
+    uses: ./.github/workflows/delete-aws.yml
+`;
+
 export const DELETE_PROVIDER_TEMPLATE = (
   provider: string
 ): string => `name: Delete on ${provider}

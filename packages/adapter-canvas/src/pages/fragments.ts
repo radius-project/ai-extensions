@@ -1,7 +1,7 @@
 // Canvas adapter — markup fragments shared by more than one page renderer.
 
 function deploymentDialogHtml(
-  action: "delete" | "abandon",
+  action: "delete" | "abandon" | "resource",
   opening: string,
   title: string
 ): string {
@@ -37,6 +37,16 @@ export const ABANDON_DEPLOYMENT_DIALOG_HTML = deploymentDialogHtml(
   "abandon",
   '<div id="deploy-abandon-modal"',
   "Stop Tracking Deployment"
+);
+
+// Exception 7.1: deleting one deployed resource the application definition no
+// longer declares. Reuses the same three-step type-to-confirm dialog as the
+// application delete rather than introducing a lighter confirmation for a
+// smaller blast radius — it is still irreversible infrastructure teardown.
+export const DELETE_RESOURCE_DIALOG_HTML = deploymentDialogHtml(
+  "resource",
+  '<div id="deploy-resource-modal"',
+  "Delete Removed Resource"
 );
 
 // Shared by both render paths of the Diff pane (empty selection and rendered

@@ -4,7 +4,8 @@ import { pageShell } from "./shell.js";
 import { graphHeader, graphHeaderClose } from "./graph-header.js";
 import {
   ABANDON_DEPLOYMENT_DIALOG_HTML,
-  DELETE_DEPLOYMENT_DIALOG_HTML
+  DELETE_DEPLOYMENT_DIALOG_HTML,
+  DELETE_RESOURCE_DIALOG_HTML
 } from "./fragments.js";
 import { inlineJson } from "./encoding.js";
 
@@ -50,12 +51,18 @@ ${graphHeader("deployed")}
   <div id="deployed-progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>
   <div id="graph-container"></div>
 </div>
+<div id="deployed-removed-section" class="rad-card" style="margin:16px 0 0; display:none;">
+  <div style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:6px;">Removed resources still deployed</div>
+  <p class="rad-lede" id="deployed-removed-lede" style="margin:0 0 12px; font-size:13px;">Deployment is incremental, so these resources stay deployed after the application definition stopped declaring them. Delete each one you no longer need.</p>
+  <ul id="deployed-removed-list" class="rad-removed-list"></ul>
+</div>
 <div id="deployed-log-section" class="rad-card" style="margin:16px 0 0; display:none;">
   <div style="font-size:15px; font-weight:600; color:var(--rad-text); margin-bottom:10px;">Deployment Logs</div>
   <div id="deployed-log-output" style="background:var(--rad-code-bg); color:var(--rad-code-text); border:1px solid var(--rad-stroke); font-family:var(--rad-mono); font-size:12px; padding:12px; border-radius:6px; max-height:280px; overflow-y:auto; white-space:pre-wrap; line-height:1.6;"></div>
 </div>
 ${DELETE_DEPLOYMENT_DIALOG_HTML}
 ${ABANDON_DEPLOYMENT_DIALOG_HTML}
+${DELETE_RESOURCE_DIALOG_HTML}
 <div id="deployed-deleting-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:60; align-items:center; justify-content:center;">
   <div class="rad-card" style="max-width:520px; width:90%; margin:0; display:flex; align-items:center; gap:18px;">
     <div class="rad-spinner-lg" aria-hidden="true"></div>
@@ -69,6 +76,10 @@ ${ABANDON_DEPLOYMENT_DIALOG_HTML}
   .rad-deployed-controls { display:flex; align-items:flex-end; gap:20px; flex-wrap:wrap; margin:8px 0 16px; }
   .rad-deployed-controls .rad-field label { font-size:15px; font-weight:600; color:var(--rad-text); }
   .rad-deployed-controls .rad-btn { align-self:flex-end; flex:0 0 auto; }
+  .rad-removed-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; }
+  .rad-removed-item { display:flex; align-items:center; justify-content:space-between; gap:16px; border:1px solid var(--rad-stroke); border-radius:6px; padding:10px 12px; }
+  .rad-removed-item__name { font-size:14px; font-weight:600; color:var(--rad-text); }
+  .rad-removed-item__type { font-size:12px; color:var(--rad-text-secondary); }
 </style>
 <div hidden id="radius-deployed-graph-state">${escapeHtml(
       inlineJson({

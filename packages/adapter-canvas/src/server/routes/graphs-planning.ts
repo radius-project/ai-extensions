@@ -6,7 +6,18 @@ import {
   asGraphModelingFailure,
   GraphModelingFailure
 } from "../../graph-modeling-failure.js";
-import type { DeployStatus } from "@radius-project/core";
+import {
+  lifecycleOutcomeMessage,
+  unfinishedNodeMessage,
+  type DeployStatus,
+  type LifecycleOutcome
+} from "@radius-project/core";
+import {
+  buildDeployedInventory,
+  ownedDeployedResources,
+  type DeployedInventory
+} from "../services/deployed-inventory.js";
+import { resolveDeployedGraphBranch } from "../services/deployed-graph-branch.js";
 import type {
   DeployProgress,
   WorkflowArtifact
@@ -102,8 +113,9 @@ export interface GraphsPlanningReadsDependencies {
     messageMap: Map<string, string>
   ): void;
   settleDeployStatuses(
-    resources: Array<{ deployStatus?: DeployStatus }>,
-    conclusion?: string | null
+    resources: Array<{ deployStatus?: DeployStatus; deployMessage?: string }>,
+    conclusion?: string | null,
+    options?: { unfinishedMessage?: string | null }
   ): void;
   errorMessage(error: unknown): string;
   repoMatchesWorkspace(state: CanvasState, repo: string): boolean;
@@ -278,15 +290,11 @@ export async function handleDeployedGraph(
   }
   const state = entry?.state || {};
   if (entry?.state) entry.state.progressMessages = [];
-  const branch =
-    state.workspaceBranch && dependencies.repoMatchesWorkspace(state, repo) ?
-      state.workspaceBranch
-    : state.contextRepo === repo && state.contextBranch ? state.contextBranch
-    : state.deployingRepo === repo && state.deployingBranch ?
-      state.deployingBranch
-    : state.plannedRepo === repo && state.plannedBranch ? state.plannedBranch
-    : state.graphTargetRepo === repo && state.graphBranch ? state.graphBranch
-    : "main";
+  const branch = resolveDeployedGraphBranch(
+    state,
+    repo,
+    dependencies.repoMatchesWorkspace
+  );
 
   const modeledGraphMatchesSelection =
     state.graphTargetRepo === repo &&
@@ -446,26 +454,58 @@ export async function handleDeployedGraph(
     state.deployRunId == null ||
     String(progress.runId) === String(state.deployRunId);
 
-  const terminalConclusion =
-    (
-      !deploying &&
-      sessionMatchesSelection &&
-      artifactMatchesSessionRun &&
-      state.deployStatus === "complete"
-    ) ?
-      "success"
+  // Monitor-side per-node messages are session state, not artifact state, so
+  // they would otherwise never reach this route: a cancelled or timed-out run
+  // settles its nodes red with an exact message that only `state` carries.
+  //
+  // Bound to the artifact's run identity for the same reason the statuses are:
+  // a message from the session's own (cancelled) run must never annotate a
+  // newer run's snapshot. Seeded AFTER the artifact so an authoritative Radius
+  // resource error the producer published always wins.
+  if (
+    sessionMatchesSelection &&
+    artifactMatchesSessionRun &&
+    Array.isArray(state.deployingResources)
+  ) {
+    for (const resource of state.deployingResources) {
+      const message = (resource?.deployMessage || "").trim();
+      if (!message) continue;
+      for (const key of dependencies.deployStatusKeys(resource)) {
+        if (!messageByKey.has(key)) messageByKey.set(key, message);
+      }
+    }
+  }
+
+  const sessionIsTerminal =
+    !deploying && sessionMatchesSelection && artifactMatchesSessionRun;
+  // The session's own outcome is exact ("cancelled", "timed_out", …); the
+  // artifact fallback only knows success from failure.
+  const sessionOutcome: LifecycleOutcome | null =
+    sessionIsTerminal && state.deployStatus === "complete" ? "succeeded"
     : (
-      !deploying &&
-      sessionMatchesSelection &&
-      artifactMatchesSessionRun &&
+      sessionIsTerminal &&
       state.deployStatus === "failed" &&
       state.deployRunId != null &&
       !state.deployErrorKind
     ) ?
-      "failure"
-    : !deploying && progress?.state === "succeeded" ? "success"
-    : !deploying && progress?.state === "failed" ? "failure"
+      state.deployOutcome || "failed"
     : null;
+  const outcome: LifecycleOutcome | null =
+    sessionOutcome ??
+    // A resource-delete snapshot republishes the application's inventory from
+    // the live control plane, so it is authoritative about what is deployed —
+    // but it is not a deployment result, and reading its state as one would
+    // report a deployment outcome for an operation that was not a deployment.
+    (progress?.operation === "resource-delete" ? null
+    : !deploying && progress?.state === "succeeded" ? "succeeded"
+    : !deploying && progress?.state === "failed" ? "failed"
+    : null);
+  // `settleDeployStatuses` only distinguishes "success" from everything else,
+  // so the exact outcome is carried separately rather than encoded here.
+  const terminalConclusion =
+    outcome === null ? null
+    : outcome === "succeeded" ? "success"
+    : "failure";
 
   // A deployment is "terminal" when its status is known, which is not the same
   // as having a published graph: the producer only attaches deploy-graph.json to
@@ -520,12 +560,57 @@ export async function handleDeployedGraph(
   // in the popup instead of just being red.
   dependencies.applyDeployMessages(resources, messageByKey);
   if (terminalConclusion) {
-    dependencies.settleDeployStatuses(resources, terminalConclusion);
+    // The settle message explains a node the producer never got to report on —
+    // "Deployment cancelled" / "Deployment timed out" — and never replaces an
+    // exact Radius error that did arrive, which `applyDeployMessages` above has
+    // already attached.
+    dependencies.settleDeployStatuses(resources, terminalConclusion, {
+      unfinishedMessage:
+        outcome ? unfinishedNodeMessage("deployment", outcome) : null
+    });
   }
+  // Exception 7.1 / Part 8: deployment is incremental, so a resource dropped
+  // from the definition stays deployed. The inventory is derived only from
+  // OWNERSHIP-VERIFIED records — the producer's application-scoped resource
+  // list, or the graph records that name this application as their owner —
+  // because a connected graph also contains environment-scoped and external
+  // resources this application must never offer to delete. It is never derived
+  // while a deploy is in flight, when the deployed set is mid-change.
+  const inventoryApplication = resolvedApp || requestedApp;
+  const inventory: DeployedInventory = buildDeployedInventory({
+    repo,
+    branch,
+    environment: requestedEnv,
+    application: inventoryApplication,
+    modeled: providerResolvedTopology,
+    deployed:
+      deploying ? null : (
+        ownedDeployedResources({
+          application: inventoryApplication,
+          environment: requestedEnv,
+          resourceList: progress ? progress.resources : null,
+          graph: deploymentMetadata
+        })
+      ),
+    now: dependencies.now()
+  });
+  // Record the snapshot the page is about to render. The per-resource delete
+  // route requires this exact revision and re-derives the removal from the
+  // current definition, rather than trusting the client's claim.
+  if (entry?.state) entry.state.deployedInventory = inventory;
   response.writeHead(200);
   response.end(
     JSON.stringify({
       resources,
+      removedResources: inventory.removed,
+      deployedInventory: {
+        revision: inventory.revision,
+        complete: inventory.complete,
+        resources: inventory.resources
+      },
+      outcome,
+      outcomeMessage:
+        outcome ? lifecycleOutcomeMessage("deployment", outcome) : null,
       repo,
       branch,
       mode,

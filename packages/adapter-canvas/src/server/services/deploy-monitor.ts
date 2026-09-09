@@ -1,4 +1,5 @@
 import type { DeployProgress } from "../../deploy-artifacts.js";
+import { unfinishedNodeMessage } from "@radius-project/core";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
 import type { DeployDispatchService } from "./deploy-dispatch.js";
 import type {
@@ -27,6 +28,9 @@ export interface DeployMonitorInstanceEntry {
 export interface DeployRunDetail {
   status?: string;
   conclusion?: string | null;
+  // GitHub's run attempt, needed to scope the run's state-save diagnostic to
+  // this attempt rather than to an earlier one of the same run.
+  attempt?: number;
   steps: DeployRunStep[];
 }
 
@@ -82,6 +86,13 @@ export interface DeployMonitorDependencies {
     resources: CanvasGraphResource[],
     statuses: Map<string, DeployResourceStatus>
   ): DeployStatusChange[];
+  // Exception 5.1: when monitoring itself gives up, unfinished nodes must be
+  // settled red with the timed-out message rather than left pending forever.
+  settleDeployStatuses(
+    resources: CanvasGraphResource[],
+    conclusion: string | null | undefined,
+    options?: { unfinishedMessage?: string | null }
+  ): void;
   generatePortalUrl(resourceType: string, provider: string): string;
   optionalString(value: unknown): string;
   errorMessage(error: unknown): string;
@@ -111,6 +122,7 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployMonitorDependencies)[] = [
   "buildDeployMessageMap",
   "applyDeployMessages",
   "applyDeployStatusToResources",
+  "settleDeployStatuses",
   "generatePortalUrl",
   "optionalString",
   "errorMessage",
@@ -438,6 +450,7 @@ export function createDeployMonitorService(
             entry,
             repo,
             runId: dRunId,
+            runAttempt: detail.attempt,
             provider,
             resources,
             conclusion: detail.conclusion,
@@ -453,6 +466,19 @@ export function createDeployMonitorService(
         await dependencies.sleep(POLL_INTERVAL_MS);
       }
       log("⚠ Timed out waiting for the deploy workflow to complete.");
+      // The graph must not be left mid-flight. Every node that never reached a
+      // terminal status settles red carrying the exact "Deployment timed out"
+      // message, while a node the producer already reported keeps its own exact
+      // Radius status and message.
+      dependencies.settleDeployStatuses(resources, "timed_out", {
+        unfinishedMessage: unfinishedNodeMessage("deployment", "timed_out")
+      });
+      for (const resource of resources) {
+        if (resource.deployStatus) setStatus(resource, resource.deployStatus);
+      }
+      // The exact outcome, so `/api/deployed-graph` reproduces "Deployment
+      // timed out" rather than flattening it into a plain failure.
+      entry.state.deployOutcome = "timed_out";
       entry.state.deployError =
         "Timed out waiting for the deploy workflow to complete. It may still be running — view it at https://github.com/" +
         repo +

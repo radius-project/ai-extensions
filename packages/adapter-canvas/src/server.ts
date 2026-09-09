@@ -244,6 +244,7 @@ import {
   createDeployStatusReader,
   settleDeployStatuses
 } from "./deploy-artifacts.js";
+import { createStateSaveFailureReader } from "./state-save-diagnostics.js";
 import { graphPage } from "./pages/graph-page.js";
 import { plannedGraphPage } from "./pages/planned-graph-page.js";
 import { graphDiffPage } from "./pages/graph-diff-page.js";
@@ -391,6 +392,7 @@ import type {
 } from "./server/services/environment-deletion.js";
 import { createDeploymentAbandonmentService } from "./server/services/deployment-abandonment.js";
 import { resolveEnvironmentDeployment } from "./server/services/deployment-resolver.js";
+import { RESOURCE_DELETING_STATUS } from "./server/services/deployment-resolver.js";
 import type { DeploymentRow } from "./server/services/deployment-resolver.js";
 import { runEnvironmentOperationWorkflow } from "./server/services/environment-operation.js";
 import type { RemediationReference } from "./server/services/environment-operation.js";
@@ -930,7 +932,29 @@ const deploymentsRoutes = createDeploymentsRoutes({
     localDeploymentBlocksMutation(state),
   ensureWorkflowsCurrent: (repo, environment, provider, only) =>
     ensureWorkflowsCurrent(repo, environment, provider, only),
-  findWorkflowRun,
+  findWorkflowRun: (
+    repo,
+    workflowFile,
+    sinceMs,
+    knownId,
+    afterRunId,
+    correlationId
+  ) =>
+    findWorkflowRun(
+      repo,
+      workflowFile,
+      sinceMs,
+      knownId,
+      undefined,
+      afterRunId,
+      correlationId
+    ),
+  latestWorkflowRunId: (repo, workflowFile) =>
+    latestWorkflowRunId(repo, workflowFile),
+  // Random rather than sequential: the id is echoed into a public run name, and
+  // a guessable one would let an unrelated run be mistaken for this dispatch.
+  newCorrelationId: () =>
+    `del-${Date.now().toString(36)}-${randomUUID().replace(/-/g, "").slice(0, 12)}`,
   runGh: (args, timeout = 20000, extraEnv) =>
     new Promise((resolve) => {
       const opts: CliOptions = { timeout };
@@ -941,6 +965,19 @@ const deploymentsRoutes = createDeploymentsRoutes({
     }),
   readProcessEnv: () => process.env,
   setTimer: (callback, ms) => setTimeout(callback, ms),
+  repoMatchesWorkspace,
+  // Deferred through an arrow rather than referenced directly: the shared
+  // modeled-graph loader is declared further down, with the graph workflow
+  // service it calls, and would be in the temporal dead zone here.
+  reloadModeledGraph: (instanceId, repo, branch) =>
+    loadModeledGraphForRoutes(instanceId, repo, branch),
+  invalidateDeployedGraphCache: (repo) => invalidateDeployStatusReaders(repo),
+  readStateSaveFailure: (targetRepo, runId, runAttempt) =>
+    createStateSaveFailureReader({
+      repo: targetRepo,
+      runId,
+      runAttempt
+    }).read(),
   // Declared as a getter for the same temporal-dead-zone reason as the cache
   // above: the deploy services are composed further down, after the workflow
   // file names and the instance container they narrow over exist.
@@ -1295,6 +1332,31 @@ function triggerGraphRepairHandoff(
   return attempt;
 }
 
+// The modeled-graph load, as both the Deployed read route and the per-resource
+// delete see it. One definition, one workflow, one cache: a second derivation
+// would let the route that authorizes a destructive delete and the route that
+// renders the graph disagree about what the definition currently says.
+const loadModeledGraphForRoutes = async (
+  instanceId: string,
+  repo: string,
+  branch: string
+): Promise<{ status: number; retry?: boolean; error?: string }> => {
+  const outcome = await graphPlanningWorkflows.loadGraph({
+    instanceId,
+    body: JSON.stringify({ repo, branch, refresh: true })
+  });
+  const workflowError = optionalString(outcome.payload.error);
+  return {
+    status: outcome.status,
+    retry: outcome.payload.needsAppBicep === true,
+    error:
+      workflowError ||
+      (outcome.status >= 400 ?
+        `Modeled graph load failed with status ${outcome.status}.`
+      : undefined)
+  };
+};
+
 // Composition root for the read-only half of the `graphs-planning` family. The
 // Deployed route reads status through the cached artifact reader, but obtains its
 // fixed topology through the same modeled-graph workflow and cache as the Graph
@@ -1302,22 +1364,7 @@ function triggerGraphRepairHandoff(
 const graphsPlanningRoutes = createGraphsPlanningRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
   createDeployStatusReader: (options) => cachedDeployStatusReader(options),
-  loadModeledGraph: async (instanceId, repo, branch) => {
-    const outcome = await graphPlanningWorkflows.loadGraph({
-      instanceId,
-      body: JSON.stringify({ repo, branch, refresh: true })
-    });
-    const workflowError = optionalString(outcome.payload.error);
-    return {
-      status: outcome.status,
-      retry: outcome.payload.needsAppBicep === true,
-      error:
-        workflowError ||
-        (outcome.status >= 400 ?
-          `Modeled graph load failed with status ${outcome.status}.`
-        : undefined)
-    };
-  },
+  loadModeledGraph: loadModeledGraphForRoutes,
   buildDeployStatusMap,
   buildDeployMessageMap,
   deployStatusKeys,
@@ -1912,7 +1959,11 @@ const deployStatusReaders = new Map<
 >();
 const MAX_DEPLOY_STATUS_READERS = 32;
 
-function cachedDeployStatusReader(
+// Exported for the same reason `invalidateDeployStatusReaders` below is: the
+// cache's identity behavior (one reader per deployment, replaced when the
+// deployment changes) is what keeps a stale artifact from being replayed, and
+// it is only observable through these two together.
+export function cachedDeployStatusReader(
   options: Parameters<typeof createDeployStatusReader>[0]
 ): ReturnType<typeof createDeployStatusReader> {
   const key = [
@@ -1939,6 +1990,22 @@ function cachedDeployStatusReader(
     deployStatusReaders.delete(oldest);
   }
   return reader;
+}
+
+/**
+ * invalidateDeployStatusReaders - drop every cached reader for one repository.
+ *
+ * A reader holds a TTL cache, an accepted-sequence guard and the artifact it
+ * last downloaded, all of which describe the deployment as it was. After a run
+ * that changes what is deployed — a resource delete republishes the
+ * application's inventory — keeping them would answer the next read from the
+ * state the operation just invalidated.
+ */
+export function invalidateDeployStatusReaders(repo: string): void {
+  if (!repo) return;
+  for (const key of [...deployStatusReaders.keys()]) {
+    if (key.startsWith(`${repo}\n`)) deployStatusReaders.delete(key);
+  }
 }
 
 // Short-lived cache for the /api/list-environments listing to keep the planned
@@ -2025,7 +2092,14 @@ export function releaseDeploymentMutation(
 
 export function deploymentStatusBlocksMutation(status: unknown): boolean {
   return (
-    status === "pending" || status === "in_progress" || status === "deleting"
+    status === "pending" ||
+    status === "in_progress" ||
+    status === "deleting" ||
+    // Exception 7.1: a single-resource cleanup is a destructive operation
+    // against this deployment. It leaves the application deployed, but nothing
+    // else may mutate it while the run is in flight — and this status is how a
+    // cleanup started from another canvas instance becomes visible here.
+    status === RESOURCE_DELETING_STATUS
   );
 }
 
@@ -2564,6 +2638,12 @@ export function beginDeployAttempt(
   // notification dismissed for the first would hide the second.
   state.deployGeneration = (state.deployGeneration || 0) + 1;
   state.deployError = null;
+  state.deployStateWarning = null;
+  state.deployOutcome = null;
+  // Exception 7.1: a new deploy invalidates every derived view of what is
+  // deployed, including the removed-resource confirmation the user may already
+  // have open.
+  state.deployedInventory = null;
   state.deployErrorKind = null;
   state.deployErrorBranch = null;
   state.deployErrorPaths = null;
@@ -2813,6 +2893,10 @@ const LEGACY_DEPLOY_WORKFLOW_FILE = "radius-deploy.yml";
 // are not real application deployments and are filtered out.
 const DEPLOY_WORKFLOW_FILE = "run-rad-commands.yml";
 const DELETE_WORKFLOW_FILE = "delete-application.yml";
+// Exception 7.1: the single-resource cleanup dispatcher. Distinct from the
+// application dispatcher so a resource cleanup's GitHub deployment record can
+// never be read as a whole-application teardown.
+const DELETE_RESOURCE_WORKFLOW_FILE = "delete-resource.yml";
 
 // Name of the step inside the run-rad-commands composite action that executes
 // the `rad` commands (and therefore `rad deploy`). The deploy monitor keys its
@@ -3149,6 +3233,8 @@ const deployOutcomeService = createDeployOutcomeService({
   extractGitHubActionsStepLog,
   explainOidcEnterpriseClaim,
   extractRadDeployError: (logText) => extractRadDeployError(logText),
+  readStateSaveFailure: (repo, runId, runAttempt) =>
+    createStateSaveFailureReader({ repo, runId, runAttempt }).read(),
   sleep: (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
   now: () => Date.now()
@@ -3176,6 +3262,7 @@ const deployMonitorService = createDeployMonitorService({
   buildDeployMessageMap,
   applyDeployMessages,
   applyDeployStatusToResources,
+  settleDeployStatuses,
   generatePortalUrl,
   optionalString,
   errorMessage,
@@ -5162,7 +5249,14 @@ async function resolveEnvDeployment(
     ghOrThrow,
     deployWorkflowFile: DEPLOY_WORKFLOW_FILE,
     deleteWorkflowFile: DELETE_WORKFLOW_FILE,
-    maxParallelRecords: DEPLOY_MAX_PARALLEL_RECORDS
+    deleteResourceWorkflowFile: DELETE_RESOURCE_WORKFLOW_FILE,
+    maxParallelRecords: DEPLOY_MAX_PARALLEL_RECORDS,
+    readStateSaveFailure: (targetRepo, runId, runAttempt) =>
+      createStateSaveFailureReader({
+        repo: targetRepo,
+        runId,
+        runAttempt
+      }).read()
   });
 }
 

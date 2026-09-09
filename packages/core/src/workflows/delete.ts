@@ -10,6 +10,14 @@ export const DELETE_RADIUS_REF = process.env.RADIUS_DELETE_REF || RADIUS_REF;
 // `.github/workflows/`. The dispatcher references both provider files by path
 // and the provider is chosen at runtime by its `detect` job, so both must exist.
 export const DELETE_APP_DISPATCHER_FILE = "delete-application.yml";
+// The single-resource delete dispatcher. It calls the same reusable provider
+// workflows as the application dispatcher, but is a distinct committed file on
+// purpose: a job that binds a GitHub Environment makes GitHub create a
+// deployment record for it, and the canvas resolves an environment's deployment
+// state from those records by workflow path. Sharing the application-delete file
+// would make a successful single-resource cleanup indistinguishable from a
+// successful whole-application teardown.
+export const DELETE_RESOURCE_DISPATCHER_FILE = "delete-resource.yml";
 export const DELETE_AZURE_FILE = "delete-azure.yml";
 export const DELETE_AWS_FILE = "delete-aws.yml";
 // The environment-delete dispatcher. Unlike the application-delete dispatcher
@@ -38,12 +46,12 @@ export type DeleteWorkflowFiles = Record<string, string>;
  * structure of radius-project/ai-extensions.
  *
  * Returns the files committed to the target repo's `.github/workflows/`: the
- * `delete-application.yml` and `delete-environment.yml` dispatchers plus the
- * reusable provider workflows — `delete-azure.yml` / `delete-aws.yml` for the
- * application-delete path and `delete-environment-azure.yml` for the
- * environment-delete path. The dispatchers only fill `{{ENV}}` (the dispatch
- * default); the provider workflows also pin their composite actions to
- * `{{RADIUS_REF}}`.
+ * `delete-application.yml`, `delete-resource.yml` and `delete-environment.yml`
+ * dispatchers plus the reusable provider workflows — `delete-azure.yml` /
+ * `delete-aws.yml` for the application- and resource-delete paths and
+ * `delete-environment-azure.yml` for the environment-delete path. The
+ * dispatchers only fill `{{ENV}}` (the dispatch default); the provider workflows
+ * also pin their composite actions to `{{RADIUS_REF}}`.
  *
  * `templates` maps the committed file name to the raw template body fetched
  * from `radius-project/ai-extensions`. The caller must supply every file;
@@ -65,6 +73,10 @@ export function generateDeleteWorkflow(
   const files: DeleteWorkflowFiles = {
     [DELETE_APP_DISPATCHER_FILE]: fillTemplate(
       pick(DELETE_APP_DISPATCHER_FILE),
+      { ENV: env }
+    ),
+    [DELETE_RESOURCE_DISPATCHER_FILE]: fillTemplate(
+      pick(DELETE_RESOURCE_DISPATCHER_FILE),
       { ENV: env }
     ),
     [DELETE_ENV_DISPATCHER_FILE]: fillTemplate(

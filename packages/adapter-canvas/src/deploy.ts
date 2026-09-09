@@ -61,6 +61,10 @@ interface WorkflowRun {
 interface WorkflowRunDetail extends WorkflowRun {
   jobs: WorkflowJob[];
   steps: WorkflowStep[];
+  // GitHub's run attempt. Rerunning a workflow keeps the run id and increments
+  // this, so it is the only thing that separates one attempt's artifacts from
+  // another's.
+  attempt?: number;
 }
 
 export class SelectedGhAuthorizationError extends Error {
@@ -106,6 +110,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function stringField(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+// A run attempt is only meaningful as a whole number >= 1; anything else is
+// "unknown", which the state-save reader treats as "no diagnostic".
+function numberField(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 1 ?
+      Math.trunc(value)
+    : undefined;
 }
 
 function parseWorkflowRun(value: unknown): WorkflowRun | null {
@@ -410,11 +422,18 @@ export async function findWorkflowRun(
 
 /**
  * Pick the database id of the workflow run this caller dispatched from a
- * `gh run list` payload. Runs are newest-first; accept the first created within
- * ~60s before dispatch (clock-skew tolerance) so stale prior runs are ignored.
- * When a correlation id is supplied the run's display title must also contain it
- * (the dispatcher echoes it via `run-name:`), so a concurrent or manual deletion
- * of a different environment is never mistaken for this one.
+ * `gh run list` payload. Runs are newest-first.
+ *
+ * A correlation id, when supplied, is the run's identity: the dispatcher echoes
+ * it into the run name (`run-name:`), so only a run whose display title carries
+ * it can be this dispatch. It is required, never merely preferred — a
+ * concurrent or manual delete of another environment must resolve to no run at
+ * all rather than to the wrong one. A run-id baseline captured just before the
+ * dispatch narrows it further (the run has to be newer than every run that
+ * already existed) and is the sole selector when no correlation is available,
+ * where it keeps a redeploy's "view run" link pointing at its newly started run
+ * instead of the last one. With neither, the fallback is a created-at window:
+ * the newest run created within ~60s before dispatch (clock-skew tolerance).
  */
 export function selectWorkflowRunId(
   runs: unknown,
@@ -423,12 +442,26 @@ export function selectWorkflowRunId(
   afterRunId?: number | string | null
 ): number | string | null {
   if (!Array.isArray(runs)) return null;
-  // Prefer a monotonic run-id baseline when the caller captured one just before
-  // dispatch: accept the smallest run id that exceeds it, which is the first run
-  // created after the baseline rather than a later overlapping dispatch. This is
-  // what keeps a redeploy's "view run" link pointing at its newly started run
-  // instead of the last one.
   const baseline = numericRunId(afterRunId);
+  const correlation = (correlationId || "").trim();
+  const cutoff = (sinceMs || 0) - 60000;
+  if (correlation) {
+    // Exact identity. The baseline is an additional filter here, never a
+    // substitute: without it a rerun of an older correlated run would still be
+    // rejected by the created-at window below.
+    for (const value of runs) {
+      const r = parseWorkflowRun(value);
+      if (!r || r.databaseId === undefined) continue;
+      if (!(r.displayTitle || "").includes(correlation)) continue;
+      if (baseline !== null) {
+        if (r.databaseId <= baseline) continue;
+      } else if ((Date.parse(r.createdAt || "") || 0) < cutoff) {
+        continue;
+      }
+      return r.databaseId;
+    }
+    return null;
+  }
   if (baseline !== null) {
     let firstRunId: number | null = null;
     for (const value of runs) {
@@ -446,15 +479,11 @@ export function selectWorkflowRunId(
   // No baseline (e.g. it could not be captured): fall back to a created-at
   // window, accepting the newest run created within ~60s before dispatch (clock
   // skew tolerance) to avoid picking up clearly stale prior runs.
-  const cutoff = (sinceMs || 0) - 60000;
   for (const value of runs) {
     const r = parseWorkflowRun(value);
     if (!r) continue;
     const created = Date.parse(r.createdAt || "") || 0;
     if (created < cutoff || r.databaseId === undefined) continue;
-    if (correlationId && !(r.displayTitle || "").includes(correlationId)) {
-      continue;
-    }
     return r.databaseId;
   }
   return null;
@@ -470,7 +499,7 @@ export async function getRunDetail(
     "view",
     String(runId),
     "--json",
-    "status,conclusion,jobs",
+    "status,conclusion,attempt,jobs",
     "--repo",
     repo
   ];
@@ -496,7 +525,7 @@ export async function getRunDetail(
       "view",
       String(runId),
       "--json",
-      "status,conclusion",
+      "status,conclusion,attempt",
       "--repo",
       repo
     ];
@@ -516,6 +545,7 @@ export async function getRunDetail(
         typeof data.conclusion === "string" || data.conclusion === null ?
           data.conclusion
         : undefined,
+      attempt: numberField(data.attempt),
       jobs: [],
       steps: []
     };
@@ -536,6 +566,7 @@ export async function getRunDetail(
       typeof data.conclusion === "string" || data.conclusion === null ?
         data.conclusion
       : undefined,
+    attempt: numberField(data.attempt),
     jobs,
     steps
   };

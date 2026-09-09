@@ -131,6 +131,7 @@ function progressPayload(
     environment: DEPLOY_ENV,
     sequence: 1,
     updatedAt: UPDATED_AT,
+    operation: "deploy",
     resources,
     ...overrides
   };
@@ -192,6 +193,7 @@ const KNOWN_STATE_FIELDS: readonly (keyof CanvasState)[] = [
   "deployAppName",
   "deployStatus",
   "deployErrorKind",
+  "deployOutcome",
   "deployingResources",
   "deployStartedAt",
   "deployFinishedAt",
@@ -380,17 +382,31 @@ function fakes(
         if (message) resource.deployMessage = message;
       }
     },
-    settleDeployStatuses: (resources, conclusion) => {
-      calls.log.push(`settleDeployStatuses(${conclusion})`);
+    settleDeployStatuses: (resources, conclusion, settleOptions) => {
+      calls.log.push(
+        `settleDeployStatuses(${conclusion}|${
+          settleOptions?.unfinishedMessage ?? ""
+        })`
+      );
+      const unfinished = (settleOptions?.unfinishedMessage ?? "").trim();
       for (const resource of resources) {
         if (conclusion === "success") {
           resource.deployStatus = "success";
-        } else if (
+          continue;
+        }
+        if (
           resource.deployStatus === undefined ||
           resource.deployStatus === "pending" ||
           resource.deployStatus === "in_progress"
         ) {
           resource.deployStatus = "failed";
+        }
+        if (
+          unfinished &&
+          resource.deployStatus === "failed" &&
+          !(resource.deployMessage ?? "").trim()
+        ) {
+          resource.deployMessage = unfinished;
         }
       }
     },
@@ -452,6 +468,14 @@ const SET_THEN_WRITE = [
 
 interface DeployedGraphPayload {
   resources: CanvasGraphResource[];
+  removedResources?: Array<{ id: string; name: string; type: string }>;
+  deployedInventory?: {
+    revision: string;
+    complete: boolean;
+    resources: Array<{ id: string; name: string; type: string }>;
+  };
+  outcome?: string | null;
+  outcomeMessage?: string | null;
   repo: string;
   branch?: string;
   mode: string;
@@ -1419,7 +1443,7 @@ describe("graphs-planning read routes (SU-09)", () => {
       "success",
       "success"
     ]);
-    expect(calls.log).toContain("settleDeployStatuses(success)");
+    expect(calls.log).toContain("settleDeployStatuses(success|)");
   });
 
   it("lets a demonstrably newer artifact run supersede terminal monitor state", async () => {
@@ -1469,8 +1493,10 @@ describe("graphs-planning read routes (SU-09)", () => {
     );
 
     expect(payload.resources[0].deployStatus).toBe("failed");
-    expect(calls.log).toContain("settleDeployStatuses(failure)");
-    expect(calls.log).not.toContain("settleDeployStatuses(success)");
+    expect(calls.log).toContain(
+      "settleDeployStatuses(failure|Deployment failed)"
+    );
+    expect(calls.log).not.toContain("settleDeployStatuses(success|)");
   });
 
   it.each([
@@ -1553,8 +1579,10 @@ describe("graphs-planning read routes (SU-09)", () => {
       expect(payload.resources[0].outputResources).toEqual(currentOutputs);
       expect(payload.application).toBe(DEPLOY_APP);
       expect(payload.updatedAt).toBeNull();
-      expect(calls.log).toContain("settleDeployStatuses(success)");
-      expect(calls.log).not.toContain("settleDeployStatuses(failure)");
+      expect(calls.log).toContain("settleDeployStatuses(success|)");
+      expect(calls.log).not.toContain(
+        "settleDeployStatuses(failure|Deployment failed)"
+      );
     }
   );
 
@@ -1605,7 +1633,9 @@ describe("graphs-planning read routes (SU-09)", () => {
       "success",
       "failed"
     ]);
-    expect(calls.log).toContain("settleDeployStatuses(failure)");
+    expect(calls.log).toContain(
+      "settleDeployStatuses(failure|Deployment failed)"
+    );
   });
 
   it("skips pending and statusless monitor resources when seeding", async () => {
@@ -2117,5 +2147,515 @@ describe("graphs-planning read routes (SU-09)", () => {
     );
     expect(state).toBeUndefined();
     expect(payloadOf(recording).mode).toBe("greyed");
+  });
+});
+
+describe("handleDeployedGraph deployed inventory (PG-07, exception 7.1)", () => {
+  const MODELED: CanvasGraphResource[] = [
+    { id: "res-api", name: "api", type: "Radius.Compute/containers" }
+  ];
+  // Ownership is stated the way `rad app graph` states it: in the node's own
+  // resource id. A node that does not name this application is not this
+  // application's to delete, however connected it is.
+  const owned = (name: string, type: string) => ({
+    id: `/planes/radius/local/resourcegroups/default/providers/Applications.Core/applications/${ARTIFACT_APP}/resources/${name}`,
+    name,
+    type
+  });
+  const PUBLISHED_WITH_ORPHAN = [
+    owned("api", "Radius.Compute/containers"),
+    owned("cache", "Radius.Data/redisCaches")
+  ];
+  const CACHE_ID = PUBLISHED_WITH_ORPHAN[1].id;
+
+  it("reports a deployed resource the definition no longer declares", async () => {
+    const calls: Calls = { log: [] };
+    const { deps, state } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "complete",
+        deployAppName: ARTIFACT_APP,
+        deployEnvName: DEPLOY_ENV
+      },
+      modeledResources: MODELED,
+      reader: {
+        graph: { graph: PUBLISHED_WITH_ORPHAN, status: "ok", artifact: null }
+      }
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.removedResources).toEqual([
+      { id: CACHE_ID, name: "cache", type: "Radius.Data/redisCaches" }
+    ]);
+    // The authoritative inventory names every deployed resource, including the
+    // removed one, so a delete confirmation can be exact rather than modeled.
+    expect(payload.deployedInventory?.complete).toBe(true);
+    expect(payload.deployedInventory?.resources.map((r) => r.name)).toEqual([
+      "api",
+      "cache"
+    ]);
+    expect(payload.deployedInventory?.revision).toMatch(/^[0-9a-f]{8}$/);
+    // Recorded server-side, with the branch and revision the delete route
+    // requires, so a destructive call can never act on a client's claim.
+    expect(state?.deployedInventory).toMatchObject({
+      repo: CONTEXT_REPO,
+      branch: "main",
+      complete: true,
+      revision: payload.deployedInventory?.revision,
+      removed: [
+        { id: CACHE_ID, name: "cache", type: "Radius.Data/redisCaches" }
+      ]
+    });
+  });
+
+  // Graph membership is not ownership: the graph also carries the
+  // environment-scoped and other-application resources this application talks
+  // to, and neither may be counted or offered for deletion.
+  it("excludes connected resources the application does not own", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "complete",
+        deployAppName: ARTIFACT_APP,
+        deployEnvName: DEPLOY_ENV
+      },
+      modeledResources: MODELED,
+      reader: {
+        graph: {
+          graph: [
+            ...PUBLISHED_WITH_ORPHAN,
+            {
+              id: `/planes/radius/local/resourcegroups/default/providers/Applications.Core/applications/other-app/resources/ledger`,
+              name: "ledger",
+              type: "Radius.Data/postgreSQLDatabases"
+            },
+            {
+              id: `/planes/radius/local/resourcegroups/default/providers/Applications.Core/environments/${DEPLOY_ENV}/resources/gateway`,
+              name: "gateway",
+              type: "Radius.Core/gateways"
+            }
+          ],
+          status: "ok",
+          artifact: null
+        }
+      }
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.deployedInventory?.resources.map((r) => r.name)).toEqual([
+      "api",
+      "cache"
+    ]);
+    expect(payload.removedResources).toEqual([
+      { id: CACHE_ID, name: "cache", type: "Radius.Data/redisCaches" }
+    ]);
+  });
+
+  // The producer's `rad resource list --application` output is the control
+  // plane's own answer to "what does this application own", so a newer
+  // resource-delete snapshot replaces the deploy graph the session remembers
+  // instead of being merged with it.
+  it("takes the newer resource-delete inventory over the session's snapshot", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "complete",
+        deployAppName: ARTIFACT_APP,
+        deployEnvName: DEPLOY_ENV,
+        deployRunId: 77,
+        deployStartedAt: 1_000,
+        deployFinishedAt: 2_000,
+        // The pre-delete snapshot. It still lists the deleted resource, and the
+        // authoritative delete-run inventory must win over it.
+        deployedGraph: PUBLISHED_WITH_ORPHAN
+      },
+      modeledResources: MODELED,
+      reader: {
+        graph: {
+          graph: null,
+          status: "ok",
+          artifact: {
+            id: 9,
+            name: `radius-deploy-status-${DEPLOY_ENV}-${ARTIFACT_APP}`,
+            created_at: "2026-08-14T00:00:00.000Z"
+          }
+        },
+        progress: progressPayload([owned("api", "Radius.Compute/containers")], {
+          runId: 88,
+          operation: "resource-delete",
+          state: "succeeded"
+        })
+      },
+      nowMs: 3_000
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.deployedInventory?.complete).toBe(true);
+    expect(payload.deployedInventory?.resources.map((r) => r.name)).toEqual([
+      "api"
+    ]);
+    expect(payload.removedResources).toEqual([]);
+    // A resource delete is not a deployment result, so it never reports one.
+    expect(payload.outcome).toBeNull();
+    expect(payload.outcomeMessage).toBeNull();
+    expect(payload.mode).toBe("terminal");
+  });
+
+  it("reports an incomplete inventory while a deploy is still in flight", async () => {
+    const calls: Calls = { log: [] };
+    const { deps, state } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "in_progress",
+        deployingRepo: CONTEXT_REPO
+      },
+      modeledResources: MODELED,
+      reader: {
+        graph: { graph: PUBLISHED_WITH_ORPHAN, status: "ok", artifact: null }
+      }
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.removedResources).toEqual([]);
+    expect(payload.deployedInventory?.complete).toBe(false);
+    expect(state?.deployedInventory?.removed).toEqual([]);
+  });
+
+  it("reports an incomplete inventory when no deployed graph could be read", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: { contextRepo: CONTEXT_REPO },
+      modeledResources: MODELED
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.removedResources).toEqual([]);
+    expect(payload.deployedInventory).toEqual({
+      revision: expect.any(String),
+      complete: false,
+      resources: []
+    });
+  });
+
+  it("records an empty removal set when the definition declares everything deployed", async () => {
+    const calls: Calls = { log: [] };
+    const { deps, state } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "complete",
+        deployAppName: ARTIFACT_APP,
+        deployEnvName: DEPLOY_ENV
+      },
+      modeledResources: MODELED,
+      reader: {
+        graph: {
+          graph: [PUBLISHED_WITH_ORPHAN[0]],
+          status: "ok",
+          artifact: null
+        }
+      }
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.removedResources).toEqual([]);
+    expect(payload.deployedInventory?.complete).toBe(true);
+    expect(state?.deployedInventory?.removed).toEqual([]);
+  });
+
+  // Ownership cannot be verified against an application the selection never
+  // resolved, so the inventory says "unknown" instead of "nothing is owned".
+  it("reports an incomplete inventory when the application is unknown", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: { contextRepo: CONTEXT_REPO, deployStatus: "complete" },
+      modeledResources: MODELED,
+      reader: {
+        graph: { graph: PUBLISHED_WITH_ORPHAN, status: "ok", artifact: null }
+      }
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.deployedInventory?.complete).toBe(false);
+    expect(payload.removedResources).toEqual([]);
+  });
+
+  it("changes the revision when the deployed graph changes", async () => {
+    const read = async (graph: unknown[]) => {
+      const calls: Calls = { log: [] };
+      const { deps } = fakes(calls, {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployStatus: "complete",
+          deployAppName: ARTIFACT_APP,
+          deployEnvName: DEPLOY_ENV
+        },
+        modeledResources: MODELED,
+        reader: { graph: { graph, status: "ok", artifact: null } }
+      });
+      return payloadOf(
+        await run("/api/deployed-graph", handleDeployedGraph, deps)
+      ).deployedInventory?.revision;
+    };
+
+    const before = await read(PUBLISHED_WITH_ORPHAN);
+    const stable = await read(PUBLISHED_WITH_ORPHAN);
+    const after = await read([PUBLISHED_WITH_ORPHAN[0]]);
+
+    expect(before).toBe(stable);
+    expect(after).not.toBe(before);
+  });
+
+  it("reports no inventory contents for a request with no repository", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, { state: {} });
+
+    const recording = await run(
+      "/api/deployed-graph",
+      handleDeployedGraph,
+      deps
+    );
+
+    expect(JSON.parse(recording.body)).toEqual({
+      resources: [],
+      repo: "",
+      mode: "greyed"
+    });
+  });
+});
+
+// Exception 5.1 at the monitor-to-HTTP boundary: the exact outcome and the
+// monitor's own per-node messages have to survive the graph projection.
+describe("handleDeployedGraph terminal outcome (exception 5.1)", () => {
+  const MODELED: CanvasGraphResource[] = [
+    { id: "res-api", name: "api", type: "Radius.Compute/containers" },
+    { id: "res-db", name: "db", type: "Radius.Data/sqlDatabases" }
+  ];
+
+  const scenario = (overrides: Partial<CanvasState>) => ({
+    contextRepo: CONTEXT_REPO,
+    deployingRepo: CONTEXT_REPO,
+    deployStatus: "failed",
+    deployRunId: 77,
+    ...overrides
+  });
+
+  it.each([
+    ["cancelled", "Deployment cancelled"],
+    ["timed_out", "Deployment timed out"],
+    ["failed", "Deployment failed"]
+  ])(
+    "settles unfinished nodes with the exact %s message",
+    async (outcome, message) => {
+      const calls: Calls = { log: [] };
+      const { deps } = fakes(calls, {
+        state: scenario({ deployOutcome: outcome as never }),
+        modeledResources: MODELED
+      });
+
+      const payload = payloadOf(
+        await run("/api/deployed-graph", handleDeployedGraph, deps)
+      );
+
+      expect(payload.outcome).toBe(outcome);
+      expect(payload.outcomeMessage).toBe(message);
+      expect(
+        payload.resources.map((resource) => resource.deployMessage)
+      ).toEqual([message, message]);
+      expect(calls.log).toContain(`settleDeployStatuses(failure|${message})`);
+    }
+  );
+
+  it("carries the monitor's own per-node message through the projection", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: scenario({
+        deployOutcome: "cancelled",
+        deployingResources: [
+          {
+            id: "res-api",
+            name: "api",
+            deployStatus: "failed",
+            deployMessage: "Recipe redis-azure failed: quota exceeded"
+          }
+        ]
+      }),
+      modeledResources: MODELED
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    // The Radius error the monitor recorded wins; the node it never reached
+    // still explains itself with the run's exact outcome.
+    expect(payload.resources.map((resource) => resource.deployMessage)).toEqual(
+      ["Recipe redis-azure failed: quota exceeded", "Deployment cancelled"]
+    );
+  });
+
+  it("lets an authoritative published Radius error win over the session message", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: scenario({
+        deployOutcome: "cancelled",
+        deployingResources: [
+          {
+            id: "res-api",
+            name: "api",
+            deployStatus: "failed",
+            deployMessage: "stale session message"
+          }
+        ]
+      }),
+      modeledResources: MODELED,
+      reader: {
+        progress: {
+          runId: 77,
+          state: "failed",
+          resources: [
+            {
+              id: "res-api",
+              name: "api",
+              status: "failed",
+              message: "published error"
+            }
+          ]
+        } as never
+      }
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.resources[0].deployMessage).toBe("published error");
+  });
+
+  // Session messages belong to the session's own run. A newer run's artifact
+  // describes a different deployment, so the cancelled attempt's per-node
+  // messages must not annotate it — the same rule the statuses already follow.
+  it("keeps a cancelled attempt's messages off a newer run's artifact", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: scenario({
+        deployOutcome: "cancelled",
+        deployStartedAt: 1_000,
+        deployFinishedAt: 2_000,
+        deployingResources: [
+          {
+            id: "res-api",
+            name: "api",
+            deployStatus: "failed",
+            deployMessage: "Deployment cancelled"
+          }
+        ]
+      }),
+      modeledResources: MODELED,
+      reader: {
+        graph: {
+          graph: null,
+          status: "ok",
+          artifact: {
+            id: 12,
+            name: "radius-deploy-status-prod-env-session-app",
+            created_at: "2026-08-15T00:00:00.000Z"
+          }
+        },
+        progress: progressPayload(
+          [
+            { id: "res-api", name: "api", type: "Radius.Compute/containers" },
+            { id: "res-db", name: "db", type: "Radius.Data/sqlDatabases" }
+          ],
+          { runId: 91, state: "succeeded" }
+        )
+      },
+      nowMs: 3_000
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.outcome).toBe("succeeded");
+    expect(payload.outcomeMessage).toBe("Deployment succeeded");
+    expect(
+      payload.resources.map((resource) => resource.deployMessage ?? null)
+    ).toEqual([null, null]);
+    expect(payload.resources.map((resource) => resource.deployStatus)).toEqual([
+      "success",
+      "success"
+    ]);
+  });
+
+  it("reports a successful deployment with no unfinished message", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: scenario({ deployStatus: "complete", deployOutcome: "succeeded" }),
+      modeledResources: MODELED
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.outcome).toBe("succeeded");
+    expect(payload.outcomeMessage).toBe("Deployment succeeded");
+    expect(calls.log).toContain("settleDeployStatuses(success|)");
+    expect(payload.resources.every((resource) => !resource.deployMessage)).toBe(
+      true
+    );
+  });
+
+  it("falls back to a plain failure when the session recorded no exact outcome", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: scenario({}),
+      modeledResources: MODELED
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.outcome).toBe("failed");
+    expect(payload.outcomeMessage).toBe("Deployment failed");
+  });
+
+  it("reports no outcome while a deploy is in flight", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: scenario({ deployStatus: "in_progress" }),
+      modeledResources: MODELED
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.outcome).toBeNull();
+    expect(payload.outcomeMessage).toBeNull();
   });
 });

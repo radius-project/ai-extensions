@@ -46,6 +46,7 @@ function notification(overrides: Record<string, unknown> = {}) {
     application: "storefront",
     environment: "dev",
     error: "",
+    stateWarning: "",
     runUrl: "",
     repairing: false,
     finishedAt: 0,
@@ -62,6 +63,7 @@ function status(overrides: Partial<DeployJobStatus> = {}): DeployJobStatus {
     application: "storefront",
     environment: "dev",
     error: "",
+    stateWarning: "",
     runUrl: "",
     repairing: false,
     finishedAt: 0,
@@ -103,6 +105,7 @@ describe("deploy notification payload parsing", () => {
       application: "",
       environment: "",
       error: "",
+      stateWarning: "",
       runUrl: "",
       repairing: false,
       finishedAt: 0
@@ -128,10 +131,25 @@ describe("deploy notification payload parsing", () => {
       application: "storefront",
       environment: "dev",
       error: "Bicep template failed to compile",
+      stateWarning: "",
       runUrl: RUN_URL,
       repairing: true,
       finishedAt: 1700
     });
+  });
+
+  // Exception 5.4: the chip is often the only surface a user who navigated away
+  // ever sees, so an orphan warning has to survive the parse.
+  it("reads the state-save warning of an otherwise successful deploy", () => {
+    expect(
+      parseDeployJobStatus(
+        notification({
+          status: "success",
+          stateWarning:
+            "The deployment ran, but Radius could not save its state."
+        })
+      )?.stateWarning
+    ).toBe("The deployment ran, but Radius could not save its state.");
   });
 
   it.each([
@@ -234,6 +252,29 @@ describe("deploy chip labelling", () => {
   ])("tones %s", (_name, value, expected) => {
     expect(deployChipTone(value)).toBe(expected);
   });
+
+  // Exception 5.4: a deploy that could not persist Radius state is not a clean
+  // success, so the chip must neither read nor look green.
+  it.each([
+    ["success", "success"],
+    ["complete", "complete"]
+  ])(
+    "reports a %s deploy that could not save state as a warning",
+    (_name, state) => {
+      const warned = status({
+        status: state,
+        stateWarning:
+          "The deployment ran, but Radius could not save its state. Orphaned cloud resources may exist."
+      });
+
+      expect(deployChipLabel(warned)).toBe(
+        "storefront deployed — Radius state not saved"
+      );
+      expect(deployChipTone(warned)).toBe("rad-opchip--warn");
+      // Still terminal and still dismissible: it is one outcome, not a new state.
+      expect(deployChipTerminal(warned)).toBe(true);
+    }
+  );
 });
 
 describe("deploy chip outcome identity", () => {

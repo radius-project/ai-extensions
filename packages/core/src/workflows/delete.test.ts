@@ -8,6 +8,7 @@ import {
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_ENV_GUARD_STEP_NAME,
   DELETE_RADIUS_REF,
+  DELETE_RESOURCE_DISPATCHER_FILE,
   RADIUS_REF,
   generateDeleteWorkflow
 } from "./delete.js";
@@ -33,6 +34,18 @@ jobs:
           \${{ github.sha }}
 `,
   [DELETE_ENV_DISPATCHER_FILE]: `name: delete-environment
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        default: "{{ENV}}"
+jobs:
+  detect:
+    steps:
+      - run: echo \
+          \${{ github.sha }}
+`,
+  [DELETE_RESOURCE_DISPATCHER_FILE]: `name: delete-resource
 on:
   workflow_dispatch:
     inputs:
@@ -80,6 +93,7 @@ jobs:
 
 const ALL_FILES = [
   DELETE_APP_DISPATCHER_FILE,
+  DELETE_RESOURCE_DISPATCHER_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_ENV_AZURE_FILE,
   DELETE_AZURE_FILE,
@@ -98,6 +112,7 @@ afterEach(() => {
 describe("delete workflow constants", () => {
   it("names the committed dispatcher and provider workflow files", () => {
     expect(DELETE_APP_DISPATCHER_FILE).toBe("delete-application.yml");
+    expect(DELETE_RESOURCE_DISPATCHER_FILE).toBe("delete-resource.yml");
     expect(DELETE_AZURE_FILE).toBe("delete-azure.yml");
     expect(DELETE_AWS_FILE).toBe("delete-aws.yml");
     expect(DELETE_ENV_DISPATCHER_FILE).toBe("delete-environment.yml");
@@ -147,7 +162,7 @@ describe("DELETE_RADIUS_REF override", () => {
 });
 
 describe("generateDeleteWorkflow", () => {
-  it("emits both dispatchers plus every provider workflow", () => {
+  it("emits every dispatcher plus every provider workflow", () => {
     const files = generateDeleteWorkflow("prod", BASE_TEMPLATES);
 
     expect(Object.keys(files).sort()).toEqual([...ALL_FILES].sort());
@@ -157,6 +172,10 @@ describe("generateDeleteWorkflow", () => {
     const files = generateDeleteWorkflow("staging", BASE_TEMPLATES);
 
     expect(files[DELETE_APP_DISPATCHER_FILE]).toContain('default: "staging"');
+    expect(files[DELETE_RESOURCE_DISPATCHER_FILE]).toContain(
+      'default: "staging"'
+    );
+    expect(files[DELETE_RESOURCE_DISPATCHER_FILE]).not.toContain("{{ENV}}");
     expect(files[DELETE_ENV_DISPATCHER_FILE]).toContain('default: "staging"');
     expect(files[DELETE_ENV_DISPATCHER_FILE]).not.toContain("{{ENV}}");
     expect(files[DELETE_AZURE_FILE]).toContain('ENVIRONMENT: "staging"');

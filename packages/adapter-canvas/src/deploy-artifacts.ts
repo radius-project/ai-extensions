@@ -82,7 +82,19 @@ export interface DeployProgressResource {
   provisioningState?: string;
   status?: DeployStatus;
   message?: string;
+  // Ownership, as the control plane reported it. The producer publishes the
+  // application and environment each record declares so the canvas can verify
+  // ownership per record instead of inferring it from graph membership, which
+  // is not ownership at all.
+  application?: string;
+  environment?: string;
 }
+
+// Which operation published a snapshot. A resource delete republishes the
+// application's inventory from the live control plane, so its payload is
+// authoritative for "what is deployed" — but it is not a deployment result, and
+// reading its `state` as one would report "Deployment succeeded" for a delete.
+export type DeployProgressOperation = "deploy" | "resource-delete";
 
 export interface DeployProgress {
   schemaVersion: number;
@@ -92,6 +104,9 @@ export interface DeployProgress {
   sequence: number;
   updatedAt?: string;
   state?: string;
+  // Absent in payloads published before the field existed, which were always
+  // deploys; `parseDeployProgressArtifact` normalizes it to "deploy".
+  operation?: DeployProgressOperation;
   resources: DeployProgressResource[];
 }
 
@@ -300,7 +315,15 @@ export function parseDeployProgressArtifact(
           raw.provisioningState
         : undefined,
       status: normalizeDeployStatusField(raw.status),
-      message: typeof raw.message === "string" ? raw.message : undefined
+      message: typeof raw.message === "string" ? raw.message : undefined,
+      application:
+        typeof raw.application === "string" && raw.application.trim() !== "" ?
+          raw.application.trim()
+        : undefined,
+      environment:
+        typeof raw.environment === "string" && raw.environment.trim() !== "" ?
+          raw.environment.trim()
+        : undefined
     });
   }
   return {
@@ -322,6 +345,11 @@ export function parseDeployProgressArtifact(
     updatedAt:
       typeof parsed.updatedAt === "string" ? parsed.updatedAt : undefined,
     state: typeof parsed.state === "string" ? parsed.state : undefined,
+    // An unrecognized operation is read as a deploy: the field only ever
+    // withholds a deployment verdict, so guessing "deploy" is the conservative
+    // direction, and the payload is a deploy in every version that omits it.
+    operation:
+      parsed.operation === "resource-delete" ? "resource-delete" : "deploy",
     resources
   };
 }
@@ -633,13 +661,22 @@ export function applyDeployStatusToResources(
  * while nodes already terminal keep the status the producer reported — the run
  * conclusion decides the overall label, not an individual resource's outcome
  * that was already observed.
+ *
+ * `options.unfinishedMessage` is the exact per-node explanation for a
+ * non-success conclusion ("Deployment cancelled", "Deployment timed out", and
+ * their delete equivalents). It is attached to every node this call settles as
+ * failed and to any node already reported failed with no message of its own, so
+ * a red node always explains itself. An exact per-resource Radius error the
+ * producer published is never overwritten.
  */
 export function settleDeployStatuses(
-  resources: Array<{ deployStatus?: DeployStatus }>,
-  conclusion?: string | null
+  resources: Array<{ deployStatus?: DeployStatus; deployMessage?: string }>,
+  conclusion?: string | null,
+  options: { unfinishedMessage?: string | null } = {}
 ): void {
   if (!Array.isArray(resources)) return;
   const succeeded = conclusion === "success";
+  const unfinishedMessage = (options.unfinishedMessage || "").trim();
   for (const resource of resources) {
     if (succeeded) {
       resource.deployStatus = "success";
@@ -648,6 +685,13 @@ export function settleDeployStatuses(
     const current = resource.deployStatus || "pending";
     if (current === "pending" || current === "in_progress")
       resource.deployStatus = "failed";
+    if (
+      unfinishedMessage &&
+      resource.deployStatus === "failed" &&
+      !(resource.deployMessage || "").trim()
+    ) {
+      resource.deployMessage = unfinishedMessage;
+    }
   }
 }
 

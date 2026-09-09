@@ -20,8 +20,33 @@ inputs:
     description: Radius environment name.
     required: true
   app-file:
-    description: Application bicep file used for deploy.
-    required: true
+    description: >-
+      Application bicep file used for deploy. Optional when `application` is
+      supplied: a run that has no app file (a resource delete dispatched from the
+      default branch) republishes the application's resource inventory without a
+      deployed graph.
+    required: false
+    default: ""
+  application:
+    description: >-
+      Application name, when the caller already knows it. Skips resolving it from
+      the app file, which a run without one cannot do.
+    required: false
+    default: ""
+  operation:
+    description: >-
+      Which operation is publishing -- "deploy" (default) or "resource-delete".
+      The canvas reads an inventory published by a resource delete as
+      authoritative about what is deployed, but never as a deployment result.
+    required: false
+    default: "deploy"
+  run-state:
+    description: >-
+      Explicit run state for the published snapshot ("succeeded", "failed", or
+      "in_progress"). Defaults to deriving it from the rad command result file,
+      which a run that did not execute rad commands does not have.
+    required: false
+    default: ""
 
 outputs:
   artifact-name:
@@ -37,6 +62,9 @@ runs:
       env:
         ENVIRONMENT: ${{ inputs.environment }}
         APP_FILE: ${{ inputs.app-file }}
+        APPLICATION: ${{ inputs.application }}
+        OPERATION: ${{ inputs.operation }}
+        RUN_STATE_OVERRIDE: ${{ inputs.run-state }}
       run: |
         set -euo pipefail
         # shellcheck source=.github/extension/actions/deploy-progress/progress.sh
@@ -78,23 +106,37 @@ runs:
 
         # Resolve only a literal application name from the deployed template.
         # Global control-plane state can contain unrelated restored applications.
-        APP_NAME=$(radius_resolve_application_name "$APP_FILE")
+        # A caller that already knows the name (a resource delete, which is
+        # dispatched with it) supplies it instead: that run has no app file.
+        APP_NAME="${APPLICATION:-}"
+        if [ -z "${APP_NAME//[[:space:]]/}" ] && [ -n "${APP_FILE:-}" ]; then
+          APP_NAME=$(radius_resolve_application_name "$APP_FILE")
+        fi
 
-        if [ -z "$APP_NAME" ]; then
+        if [ -z "${APP_NAME//[[:space:]]/}" ]; then
           echo "::warning::Could not determine application name; skipping deployed graph publish."
           emit_outputs "" false
           exit 0
         fi
 
-        echo "Generating deployed graph for app '$APP_NAME' in environment '$ENVIRONMENT'..."
-        # Keep stderr out of STATUS_DIR: that directory is uploaded wholesale as the
-        # artifact, so anything written there becomes part of the published payload.
-        GRAPH_STDERR=$(mktemp)
-        if ! rad app graph "$APP_FILE" --application "$APP_NAME" --preview --include-icons --output json > "$STATUS_DIR/deploy-graph.json" 2> "$GRAPH_STDERR"; then
-          echo "::warning::Failed to generate deployed graph; skipping publish."
-          cat "$GRAPH_STDERR" || true
-          emit_outputs "" false
-          exit 0
+        # The deployed graph needs the app file. Without one — a resource delete
+        # runs from the default branch and models nothing — the inventory below
+        # is still published, because `rad resource list` is what the canvas
+        # derives ownership and removals from; the graph only enriches display.
+        if [ -n "${APP_FILE:-}" ]; then
+          echo "Generating deployed graph for app '$APP_NAME' in environment '$ENVIRONMENT'..."
+          # Keep stderr out of STATUS_DIR: that directory is uploaded wholesale as the
+          # artifact, so anything written there becomes part of the published payload.
+          GRAPH_STDERR=$(mktemp)
+          if ! rad app graph "$APP_FILE" --application "$APP_NAME" --preview --include-icons --output json > "$STATUS_DIR/deploy-graph.json" 2> "$GRAPH_STDERR"; then
+            echo "::warning::Failed to generate deployed graph; skipping publish."
+            cat "$GRAPH_STDERR" || true
+            emit_outputs "" false
+            exit 0
+          fi
+        else
+          echo "No app file supplied; publishing the resource inventory for '$APP_NAME' without a deployed graph."
+          rm -f "$STATUS_DIR/deploy-graph.json"
         fi
 
         # Write sibling status files the canvas reads with deploy-graph.json.
@@ -126,6 +168,27 @@ runs:
           succeeded|success) RUN_STATE="succeeded" ;;
           unknown)           RUN_STATE="in_progress" ;;
           *)                 RUN_STATE="failed" ;;
+        esac
+        # A caller that knows the run state states it. A resource delete executes
+        # no rad *deploy* commands, so deriving its state from a deploy result
+        # file it never wrote would report "no verdict" for an operation whose
+        # verdict is known — and the inventory it publishes is exactly the
+        # authoritative post-delete one.
+        if [ -n "${RUN_STATE_OVERRIDE:-}" ]; then
+          case "${RUN_STATE_OVERRIDE}" in
+            succeeded|failed|in_progress) RUN_STATE="$RUN_STATE_OVERRIDE" ;;
+            *)
+              echo "::warning::Ignoring unsupported run-state '$(escape_workflow_command "$RUN_STATE_OVERRIDE")'."
+              ;;
+          esac
+        fi
+
+        # Which operation published this snapshot. The canvas reads a
+        # resource-delete inventory as authoritative about what is deployed, but
+        # never as a deployment result.
+        case "${OPERATION:-deploy}" in
+          resource-delete) PUBLISHED_OPERATION="resource-delete" ;;
+          *)               PUBLISHED_OPERATION="deploy" ;;
         esac
 
         # deploy-progress.json - per-resource status, the signal that paints the
@@ -163,6 +226,7 @@ runs:
           --argjson sequence "$TERMINAL_SEQUENCE" \
           --arg updatedAt "$NOW_UTC" \
           --arg state "$RUN_STATE" \
+          --arg operation "$PUBLISHED_OPERATION" \
           '{
             schemaVersion: 1,
             application: $application,
@@ -171,6 +235,7 @@ runs:
             sequence: $sequence,
             updatedAt: $updatedAt,
             state: $state,
+            operation: $operation,
             resources: $resources
           }' > "$STATUS_DIR/deploy-progress.json"
 

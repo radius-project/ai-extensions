@@ -9,7 +9,13 @@ import { remediationView } from "@radius-project/core/remediations";
 import { createCommandAction } from "../command-action.js";
 import { createDeleteDeploymentDialog } from "../delete-dialog.js";
 import { escapeBrowserHtml } from "../html.js";
-import { isRecord, readBoolean, readRecord, readString } from "../json.js";
+import {
+  isRecord,
+  readArray,
+  readBoolean,
+  readRecord,
+  readString
+} from "../json.js";
 import { beginEntry, NOOP_TEARDOWN } from "../lifecycle.js";
 import { queryValue } from "../query.js";
 import { DEPLOYING_PAGE_STATE_ID } from "../../pages/browser-state-ids.js";
@@ -29,7 +35,8 @@ import {
   parseApplicationListing,
   parseBranchListing,
   parseDeploymentListing,
-  parseEnvironmentListing
+  parseEnvironmentListing,
+  runIdFromUrl
 } from "../repositories.js";
 import type { CommandActionHandle } from "../command-action.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
@@ -53,6 +60,9 @@ export { DEPLOYING_PAGE_STATE_ID };
 export const LIST_DEPLOYMENTS_PATH = DEPLOYMENTS_PATH;
 export const DELETE_DEPLOYMENT_PATH = "/api/delete-deployment";
 export const DEPLOY_STATUS_PATH = "/api/deploy-status";
+// Read only to enumerate what an application delete would remove, so the
+// confirmation can name the resources rather than only the app and environment.
+export const DEPLOYED_GRAPH_PATH = "/api/deployed-graph";
 
 // Safety caps mirror the legacy script exactly: a deploy-status poll that
 // never reaches a terminal state falls back to whatever the deployments
@@ -108,6 +118,7 @@ interface DeployHandoff {
 interface DeployStatusPayload {
   status: string;
   error: string;
+  stateWarning: string;
   deployRunUrl: string;
   errorKind: string;
   errorBranch: string;
@@ -168,9 +179,85 @@ export function deploymentStatusMarkup(status: string): string {
     failed: "Failed",
     pending: "Pending",
     deleting: "Deleting…",
-    "delete-failed": "Delete failed"
+    "delete-failed": "Delete failed",
+    // Exception 7.1: one resource of this application is being deleted. The
+    // application itself is still deployed, which is why it keeps its row.
+    "resource-deleting": "Removing a resource…",
+    // Exception 5.4: the delete itself succeeded, but the run could not persist
+    // Radius state. The row is retained precisely so this can be said out loud.
+    "deleted-state-warning": "Deleted — state not saved"
   };
   return labels[status] ?? labels.pending;
+}
+
+/**
+ * isTerminalDeleteStatus - true for a listing status that means the delete run
+ * this page dispatched has finished without the row disappearing.
+ *
+ * Both cases are actionable and neither is in flight, so the optimistic
+ * "Deleting…" override has to come off: while it is on, the row renders as busy
+ * and its `statusDetail` — the exact outcome, plus any orphan guidance — is
+ * suppressed.
+ */
+export function isTerminalDeleteStatus(status: string): boolean {
+  return status === "delete-failed" || status === "deleted-state-warning";
+}
+
+/**
+ * The identity of one dispatched delete, as the page knows it: the run the
+ * POST reported, plus the run the row carried BEFORE the dispatch.
+ */
+export interface DeleteRunBinding {
+  runId: string;
+  priorRunId: string;
+}
+
+/**
+ * describesDispatchedDelete - whether a listing row's terminal outcome belongs
+ * to the delete this page just dispatched.
+ *
+ * A retried delete is the case this exists for: the environment's row still
+ * reports the PREVIOUS attempt's `delete-failed` until the new run publishes
+ * its own deployment record, and reading that as the new outcome ends the
+ * tracking on an outcome that has already been seen and dismissed.
+ *
+ * When the dispatch reported its run (the normal path) only that exact run
+ * counts. When it could not — discovery refuses to guess rather than return a
+ * stranger's run — the fallback is "any run other than the one this row carried
+ * before the dispatch", which still refuses the stale terminal row while
+ * accepting a genuinely new one. Neither branch ever accepts an unidentified
+ * row, so an unresolvable delete ends at the poll bound instead of on somebody
+ * else's verdict.
+ */
+export function describesDispatchedDelete(
+  row: DeploymentRecord,
+  binding: DeleteRunBinding
+): boolean {
+  const rowRunId = row.runId || runIdFromUrl(row.runUrl);
+  if (!rowRunId) return false;
+  if (binding.runId) return rowRunId === binding.runId;
+  return rowRunId !== binding.priorRunId;
+}
+
+// The inline message for such a row. The server's `statusDetail` already names
+// the exact outcome ("Deletion cancelled", "Deletion timed out", …) and carries
+// the orphan-recovery guidance when the run could not save state, so it is
+// reported verbatim rather than being restated less precisely here.
+function terminalDeleteMessage(
+  app: string,
+  environment: string,
+  row: DeploymentRecord
+): string {
+  const scope =
+    `application <strong>${escapeBrowserHtml(app)}</strong> in environment ` +
+    `<strong>${escapeBrowserHtml(environment)}</strong>`;
+  const detail = row.statusDetail.trim();
+  if (detail) {
+    return `Deleting ${scope}: ${escapeBrowserHtml(detail)}`;
+  }
+  return row.status === "deleted-state-warning" ?
+      `Deleting ${scope} finished, but Radius could not save its state. Check the workflow run on GitHub.`
+    : `Deleting ${scope} failed. Check the workflow run on GitHub.`;
 }
 
 function hasDeploymentsArray(payload: unknown): boolean {
@@ -194,6 +281,7 @@ function parseDeployStatus(payload: unknown): DeployStatusPayload {
   return {
     status: readString(payload, "status"),
     error: readString(payload, "error"),
+    stateWarning: readString(payload, "stateWarning"),
     deployRunUrl: readString(payload, "deployRunUrl"),
     errorKind: readString(payload, "errorKind"),
     errorBranch: readString(payload, "errorBranch"),
@@ -283,6 +371,8 @@ function buildDeploymentRows(
       environment: override.environment,
       status: override.status,
       runUrl: "",
+      runId: "",
+      statusDetail: "",
       synthetic: true
     });
   }
@@ -315,6 +405,15 @@ function renderDeploymentRow(
   const forced = overrides.get(opKey(row.app, row.environment))?.status;
   const status = forced ?? row.status;
   const statusHtml = deploymentStatusMarkup(status);
+  // Part 8 failure parity: a delete that did not simply succeed says which
+  // terminal outcome it had and, when the run also failed to persist state,
+  // what to do about the resources it may have left behind. Only shown when the
+  // row's own status is still the reported one, so an optimistic override
+  // cannot contradict it.
+  const detail =
+    status === row.status && row.statusDetail ?
+      `<div class="rad-status-detail">${escapeBrowserHtml(row.statusDetail)}</div>`
+    : "";
   const deployedHref = `/?page=deployed&environment=${encodeURIComponent(row.environment)}&application=${encodeURIComponent(row.app)}`;
   const monitorCell = `<a class="rad-monitor-link" href="${escapeBrowserHtml(deployedHref)}" title="Monitor the deployed application graph">Monitor Graph</a>`;
   const workflowCell =
@@ -322,16 +421,14 @@ function renderDeploymentRow(
       `<a class="rad-deploy-applink" href="${escapeBrowserHtml(row.runUrl)}" target="_blank" rel="noopener noreferrer" title="View workflow run on GitHub">${ARROW_SVG}View Run</a>`
     : '<span class="rad-cell-empty">—</span>';
   const deleteDisabled =
-    status === "pending" || status === "deleting" || row.synthetic ?
-      " disabled"
-    : "";
+    deploymentStatusBlocksMutation(status) || row.synthetic ? " disabled" : "";
   const appName = escapeBrowserHtml(row.app);
   const envName = escapeBrowserHtml(row.environment);
   return (
     "<tr>" +
     `<td class="rad-table__env"><a class="rad-deploy-applink" href="${escapeBrowserHtml(deployedHref)}" title="View deployed application graph">${ARROW_SVG}${appName}</a></td>` +
     `<td>${envName}</td>` +
-    `<td>${statusHtml}</td>` +
+    `<td>${statusHtml}${detail}</td>` +
     `<td>${monitorCell}</td>` +
     `<td>${workflowCell}</td>` +
     `<td class="rad-table__actions"><button class="rad-btn rad-btn--danger-outline js-del-dep"${deleteDisabled} data-env="${envName}" data-app="${appName}" style="margin:0;">Delete Deployment</button></td>` +
@@ -672,8 +769,52 @@ export function initializeDeployingPage(
       });
   };
 
+  // Part 8: the confirmation has to name what the deletion actually removes, so
+  // the server's authoritative deployed inventory is resolved before the dialog
+  // opens. That inventory includes resources the application definition no
+  // longer declares but that are still deployed — the modeled graph alone would
+  // undercount them. A failed read, or an inventory the server could not
+  // complete, opens the dialog with no inventory, which the dialog reports as
+  // "could not be read" rather than as "nothing will be deleted".
   const openDeleteModal = (app: string, environment: string): void => {
-    dialog?.open(app, environment);
+    if (!dialog) return;
+    // Without a repository or a full selection there is no inventory to read.
+    // The dialog still opens — it reports the unknown inventory honestly, and
+    // `runDelete` below is the one that refuses an incomplete identity.
+    if (!options.repo || app === "" || environment === "") {
+      dialog.open(app, environment);
+      return;
+    }
+    const url =
+      `${DEPLOYED_GRAPH_PATH}?repo=${encodeURIComponent(options.repo)}` +
+      `&application=${encodeURIComponent(app)}` +
+      `&environment=${encodeURIComponent(environment)}`;
+    void context.net
+      .fetch(url)
+      .then((response) => response.json())
+      .then((payload) => {
+        if (!entry.active) return;
+        const inventory = readRecord(payload, "deployedInventory");
+        if (!readBoolean(inventory, "complete")) {
+          dialog.open(app, environment);
+          return;
+        }
+        const resources = readArray(inventory, "resources")
+          .map((resource) => ({
+            name: readString(resource, "name"),
+            type: readString(resource, "type") || undefined
+          }))
+          .filter((resource) => resource.name !== "");
+        dialog.open(app, environment, resources);
+      })
+      .catch((error: unknown) => {
+        if (!entry.active) return;
+        context.logger.error(
+          "Radius deployed resources could not be listed for the delete confirmation.",
+          error
+        );
+        dialog.open(app, environment);
+      });
   };
 
   // Dispatch the delete, then let the row reflect "Deleting…" while the
@@ -682,6 +823,15 @@ export function initializeDeployingPage(
   const runDelete = (app: string, environment: string): void => {
     if (!options.repo || app === "" || environment === "") return;
     const key = opKey(app, environment);
+    // The run this environment's row reports right now, i.e. the previous
+    // delete's if there was one. Captured before the dispatch so a terminal row
+    // left behind by that attempt can be told apart from this one's outcome.
+    // The listing parser already normalizes a row's run identity, so no second
+    // derivation is needed here.
+    const priorRunId =
+      lastRecords.find(
+        (record) => record.app === app && record.environment === environment
+      )?.runId ?? "";
     overrides.set(key, { app, environment, status: "deleting" });
     void loadDeployments(true, true);
     showInline(
@@ -714,7 +864,14 @@ export function initializeDeployingPage(
           );
           return;
         }
-        pollDeleteCompletion(app, environment, 0);
+        // Track THIS run. The server reports it exactly or not at all, so an
+        // empty id means "unknown", never "some other run".
+        pollDeleteCompletion(app, environment, 0, {
+          runId:
+            readString(result.payload, "runId") ||
+            runIdFromUrl(readString(result.payload, "runUrl")),
+          priorRunId
+        });
       })
       .catch(() => {
         if (!entry.active) return;
@@ -728,13 +885,15 @@ export function initializeDeployingPage(
   };
 
   // Poll the deployments listing until the target app/env is gone (a
-  // successful delete removes it). Bounded so a stuck or failed delete never
+  // successful delete removes it) or until its row reports a terminal delete
+  // outcome FOR THE RUN THIS PAGE DISPATCHED. Bounded so a stuck delete never
   // polls forever; on timeout the override is cleared and the row reverts to
   // its real status.
   const pollDeleteCompletion = (
     app: string,
     environment: string,
-    tries: number
+    tries: number,
+    binding: DeleteRunBinding
   ): void => {
     if (tries > DELETE_POLL_LIMIT) {
       overrides.delete(opKey(app, environment));
@@ -758,15 +917,15 @@ export function initializeDeployingPage(
             readString(result.payload, "error") ||
             !hasDeploymentsArray(result.payload)
           ) {
-            pollDeleteCompletion(app, environment, tries + 1);
+            pollDeleteCompletion(app, environment, tries + 1, binding);
             return;
           }
           const deployments = parseDeploymentRecords(result.payload);
-          const stillThere = deployments.some(
+          const current = deployments.find(
             (deployment) =>
               deployment.app === app && deployment.environment === environment
           );
-          if (!stillThere) {
+          if (!current) {
             overrides.delete(opKey(app, environment));
             void loadDeployments(true, true);
             showInline(
@@ -776,12 +935,36 @@ export function initializeDeployingPage(
             );
             return;
           }
-          void loadDeployments(true, true);
-          pollDeleteCompletion(app, environment, tries + 1);
+          // Part 8: a delete that ended in anything other than a clean
+          // disappearance is terminal too. The optimistic "Deleting…" override
+          // must come off immediately, or it would keep painting the row as
+          // in-flight — and hide the row's own statusDetail, which is the only
+          // place the exact outcome and any orphan guidance is shown.
+          //
+          // Only for THIS run, though: a retried delete finds the previous
+          // attempt's failed row still in the listing until the new run
+          // publishes its own record, and stopping on it would report an
+          // outcome the user already saw instead of the delete now running.
+          if (
+            isTerminalDeleteStatus(current.status) &&
+            describesDispatchedDelete(current, binding)
+          ) {
+            overrides.delete(opKey(app, environment));
+            lastRecords = deployments;
+            renderDeployments();
+            showInline(
+              "error",
+              terminalDeleteMessage(app, environment, current)
+            );
+            return;
+          }
+          lastRecords = deployments;
+          renderDeployments();
+          pollDeleteCompletion(app, environment, tries + 1, binding);
         })
         .catch(() => {
           if (!entry.active) return;
-          pollDeleteCompletion(app, environment, tries + 1);
+          pollDeleteCompletion(app, environment, tries + 1, binding);
         });
     });
   };
@@ -1185,7 +1368,15 @@ export function initializeDeployingPage(
           if (status.status === "success" || status.status === "complete") {
             entry.cancel(wfPoll);
             overrides.delete(key);
-            scheduleAutoHide();
+            // Exception 5.4: a deployment can succeed and still fail to persist
+            // Radius state. Report it here, because the success path otherwise
+            // closes the panel and the user would never learn about the
+            // possible orphans or how to recover from them.
+            if (status.stateWarning) {
+              showInline("error", escapeBrowserHtml(status.stateWarning));
+            } else {
+              scheduleAutoHide();
+            }
             void loadDeployments(true);
             return;
           }

@@ -351,6 +351,16 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       repo: "octo/app",
       branch: "feature/x",
       mode: "terminal",
+      removedResources: [],
+      deployedInventory: {
+        revision: expect.any(String),
+        complete: true,
+        resources: [
+          { id: "res-a", name: "api", type: "Radius.Compute/containers" }
+        ]
+      },
+      outcome: null,
+      outcomeMessage: null,
       updatedAt: "2026-08-13T00:00:00.000Z",
       application: "billing-resolved"
     });
@@ -870,6 +880,14 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       repo: "octo/app",
       branch: "main",
       mode: "greyed",
+      removedResources: [],
+      deployedInventory: {
+        revision: expect.any(String),
+        complete: false,
+        resources: []
+      },
+      outcome: null,
+      outcomeMessage: null,
       updatedAt: null,
       application: null
     });

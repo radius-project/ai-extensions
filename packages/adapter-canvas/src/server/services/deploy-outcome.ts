@@ -1,4 +1,12 @@
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import {
+  classifyLifecycleConclusion,
+  lifecycleOutcomeMessage,
+  stateSaveFailureWarning,
+  unfinishedNodeMessage
+} from "@radius-project/core";
+import { describeStateSaveFailure } from "../../state-save-diagnostics.js";
+import type { StateSaveFailure } from "../../state-save-diagnostics.js";
 import { assertDeployDependencies } from "./deploy-service-dependencies.js";
 
 // Final runtime stage of a background deploy: turn a completed workflow run
@@ -35,7 +43,8 @@ export interface DeployOutcomeStatusReader {
 export interface DeployOutcomeDependencies {
   settleDeployStatuses(
     resources: CanvasGraphResource[],
-    conclusion: string | null | undefined
+    conclusion: string | null | undefined,
+    options?: { unfinishedMessage?: string | null }
   ): void;
   fetchRunLog(repo: string, runId: number | string): Promise<string | null>;
   extractGitHubActionsStepLog(
@@ -44,6 +53,14 @@ export interface DeployOutcomeDependencies {
   ): string;
   explainOidcEnterpriseClaim(logText: string | null | undefined): string;
   extractRadDeployError(logText: string | null | undefined): string;
+  // Exception 5.4: the teardown action's state-save diagnostic for this run
+  // attempt, or null when it published none. Best-effort by contract — a read
+  // failure is reported as "no diagnostic", never as a state-save failure.
+  readStateSaveFailure(
+    repo: string,
+    runId: number | string,
+    runAttempt: number | undefined
+  ): Promise<StateSaveFailure | null>;
   sleep(milliseconds: number): Promise<void>;
   now(): number;
 }
@@ -52,6 +69,10 @@ export interface DeployOutcomeRequest {
   entry: DeployOutcomeInstanceEntry;
   repo: string;
   runId: number | string;
+  // GitHub's attempt number for `runId`. Undefined when the run detail did not
+  // report one, which makes the state-save read a no-op rather than letting a
+  // previous attempt's diagnostic through.
+  runAttempt?: number;
   provider: string;
   resources: CanvasGraphResource[];
   conclusion: string | null | undefined;
@@ -78,6 +99,7 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployOutcomeDependencies)[] = [
   "extractGitHubActionsStepLog",
   "explainOidcEnterpriseClaim",
   "extractRadDeployError",
+  "readStateSaveFailure",
   "sleep",
   "now"
 ];
@@ -115,16 +137,16 @@ export function createDeployOutcomeService(
   };
 
   const describeFailure = async (
-    request: DeployOutcomeRequest
+    request: DeployOutcomeRequest,
+    headline: string
   ): Promise<string> => {
-    const { repo, runId, conclusion, steps, statusReader, log } = request;
+    const { repo, runId, steps, statusReader, log } = request;
     // Build a user-facing error from the failed step(s) + log.
     const failedSteps = steps.filter(
       (s) =>
         s.conclusion && s.conclusion !== "success" && s.conclusion !== "skipped"
     );
-    let dErr =
-      "Deployment failed" + (conclusion ? " (" + conclusion + ")" : "") + ".";
+    let dErr = headline;
     if (failedSteps.length)
       dErr +=
         " Failed step: " + failedSteps.map((s) => s.name).join(", ") + ".";
@@ -182,6 +204,28 @@ export function createDeployOutcomeService(
     return dErr;
   };
 
+  // Exception 5.4. Best-effort by construction: a run that saved its state
+  // publishes no diagnostic, and an unreadable one is reported as "none".
+  const readStateSaveWarning = async (
+    request: DeployOutcomeRequest
+  ): Promise<string | null> => {
+    let failure: StateSaveFailure | null;
+    try {
+      failure = await dependencies.readStateSaveFailure(
+        request.repo,
+        request.runId,
+        request.runAttempt
+      );
+    } catch {
+      return null;
+    }
+    if (!failure) return null;
+    return stateSaveFailureWarning(
+      "deployment",
+      describeStateSaveFailure(failure)
+    );
+  };
+
   return {
     async settle(request) {
       const {
@@ -196,6 +240,15 @@ export function createDeployOutcomeService(
         setStatus,
         pollDeployStatus
       } = request;
+      // One classification for the whole terminal stage: the per-node message,
+      // the log line, and the error headline must never disagree about whether
+      // this run failed, was cancelled, timed out, or was never concluded.
+      const outcome = classifyLifecycleConclusion(conclusion);
+      const outcomeLabel = lifecycleOutcomeMessage("deployment", outcome);
+      // Persist the exact outcome, not just "failed": `/api/deployed-graph`
+      // reads it back to reproduce "Deployment cancelled" / "Deployment timed
+      // out" on nodes the producer never reported on.
+      entry.state.deployOutcome = outcome;
 
       log("🗺  Retrieving deploy status and application graph…");
       const { deployed, graphStatus } = await readDeployedGraph(statusReader);
@@ -219,8 +272,13 @@ export function createDeployOutcomeService(
 
       // The run's own conclusion is authoritative for the overall outcome: it
       // decides anything the published status left unfinished, without
-      // overwriting a resource the producer already reported as terminal.
-      dependencies.settleDeployStatuses(resources, conclusion);
+      // overwriting a resource the producer already reported as terminal. The
+      // settle message explains a node the producer never got to report on —
+      // "Deployment cancelled" / "Deployment timed out" — and never replaces an
+      // exact Radius error that did arrive.
+      dependencies.settleDeployStatuses(resources, conclusion, {
+        unfinishedMessage: unfinishedNodeMessage("deployment", outcome)
+      });
       // Propagate onto output resources and generate portal links.
       for (const resource of resources) {
         if (resource.deployStatus) setStatus(resource, resource.deployStatus);
@@ -247,6 +305,21 @@ export function createDeployOutcomeService(
         );
       }
 
+      // A state-save failure is orthogonal to the run's conclusion: a deploy
+      // that succeeded can still have failed to persist its state, and that is
+      // exactly the case a user would otherwise never learn about.
+      const stateWarning = await readStateSaveWarning(request);
+      entry.state.deployStateWarning = stateWarning;
+      if (stateWarning) {
+        log("");
+        log("⚠ " + stateWarning.split("\n")[0]);
+        stateWarning
+          .split("\n")
+          .slice(1)
+          .filter((line) => line.trim())
+          .forEach((line) => log("  " + line));
+      }
+
       if (conclusion === "success") {
         entry.state.deployStatus = "complete";
         log("");
@@ -263,7 +336,14 @@ export function createDeployOutcomeService(
         return;
       }
       log("");
-      log("❌ Deployment failed. Conclusion: " + conclusion);
+      log("❌ " + outcomeLabel + ". Conclusion: " + conclusion);
+      // The headline keeps the raw conclusion only when it adds information the
+      // outcome label does not already carry, so a cancelled run reads
+      // "Deployment cancelled." rather than "Deployment cancelled (cancelled)".
+      const headline =
+        outcome === "failed" && conclusion ?
+          `${outcomeLabel} (${conclusion}).`
+        : `${outcomeLabel}.`;
       // Assemble the error BEFORE flipping the status to "failed". The webview's
       // /api/deploy-status poll fires triggerDeployRepairHandoff the instant it
       // observes "failed", and describeFailure awaits network reads (run log +
@@ -281,17 +361,22 @@ export function createDeployOutcomeService(
       // down the informational notice path and telling the user it could not be
       // confirmed, instead of down the repair path it belongs to.
       try {
-        entry.state.deployError = await describeFailure(request);
+        entry.state.deployError = await describeFailure(request, headline);
       } catch {
         entry.state.deployError =
-          "Deployment failed" +
-          (conclusion ? " (" + conclusion + ")" : "") +
-          ". The failure details could not be read; see the full run: " +
+          headline +
+          " The failure details could not be read; see the full run: " +
           "https://github.com/" +
           repo +
           "/actions/runs/" +
           request.runId +
           ".";
+      }
+      // The state-save warning belongs to the reported error too: a failed
+      // deploy that also failed to persist state is the case most likely to
+      // leave orphans behind, and the repair handoff only carries deployError.
+      if (stateWarning) {
+        entry.state.deployError = `${entry.state.deployError}\n\n${stateWarning}`;
       }
       entry.state.deployStatus = "failed";
     }

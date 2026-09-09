@@ -8,7 +8,9 @@ import {
   isCallable,
   isRecord,
   readArray,
+  readBoolean,
   readNumber,
+  readRecord,
   readString,
   readStringArray
 } from "../json.js";
@@ -18,7 +20,8 @@ import {
   createDeployedState,
   deployDeployedApp,
   parseApplicationListing,
-  parseEnvironmentListing
+  parseEnvironmentListing,
+  runIdFromUrl
 } from "../repositories.js";
 import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type { GraphController } from "../graph/surface.js";
@@ -34,6 +37,14 @@ export const DEPLOYED_PROGRESS_STEPS_ID = "deployed-progress-steps";
 export const DEPLOYED_STATE_POLL_MS = 4_000;
 export const DEPLOYED_LOG_POLL_MS = 1_500;
 export const DEPLOYED_STATE_POLL_LIMIT = 45;
+export const DELETE_RESOURCE_PATH = "/api/delete-resource";
+export const DELETE_RUN_STATUS_PATH = "/api/delete-run-status";
+// Bounded terminal tracking for a dispatched resource delete: a delete run
+// takes minutes, and an unbounded poll would keep a torn-down page's controls
+// hostage forever. 5s × 240 ≈ 20 minutes, after which the page says so instead
+// of implying success.
+export const DELETE_RUN_POLL_MS = 5_000;
+export const DELETE_RUN_POLL_LIMIT = 240;
 
 interface DeployedPageState {
   repo: string;
@@ -50,17 +61,42 @@ interface DeploymentState {
 }
 
 interface DeleteDialog {
-  open(application: string, environment: string): void;
+  open(
+    application: string,
+    environment: string,
+    resources?: readonly { name: string; type?: string }[]
+  ): void;
   teardown?: () => void;
 }
+
+interface RemovedResource {
+  id: string;
+  name: string;
+  type: string;
+}
+
+// The authoritative deployed inventory the server derived for the current
+// selection. `complete` is false when no deployed graph could be read, which
+// the delete confirmation reports as "unknown" rather than as "nothing".
+interface DeployedInventoryView {
+  revision: string;
+  complete: boolean;
+  resources: { name: string; type?: string }[];
+}
+
+const EMPTY_INVENTORY: DeployedInventoryView = {
+  revision: "",
+  complete: false,
+  resources: []
+};
 
 function asDeleteDialog(value: unknown): DeleteDialog | null {
   if (!isRecord(value) || !isCallable(value.open)) return null;
   const open = value.open;
   const teardown = value.teardown;
   return {
-    open: (application, environment) => {
-      open(application, environment);
+    open: (application, environment, resources) => {
+      open(application, environment, resources);
     },
     teardown:
       isCallable(teardown) ?
@@ -68,6 +104,39 @@ function asDeleteDialog(value: unknown): DeleteDialog | null {
           teardown();
         }
       : undefined
+  };
+}
+
+// Exception 7.1: the deployed resources the current definition no longer
+// declares, exactly as the server derived them. Entries missing a name or type
+// are dropped, because a delete cannot be dispatched without both.
+function parseRemovedResources(payload: unknown): RemovedResource[] {
+  return readArray(payload, "removedResources")
+    .map((resource) => ({
+      id: readString(resource, "id"),
+      name: readString(resource, "name"),
+      type: readString(resource, "type")
+    }))
+    .filter((resource) => resource.name !== "" && resource.type !== "");
+}
+
+// Part 8: the deployed inventory a delete confirmation names. Only a `complete`
+// inventory carries an exact list; anything else is reported as unknown.
+function parseDeployedInventory(payload: unknown): DeployedInventoryView {
+  const inventory = readRecord(payload, "deployedInventory");
+  const complete = readBoolean(inventory, "complete");
+  return {
+    revision: readString(inventory, "revision"),
+    complete,
+    resources:
+      complete ?
+        readArray(inventory, "resources")
+          .map((resource) => ({
+            name: readString(resource, "name"),
+            type: readString(resource, "type") || undefined
+          }))
+          .filter((resource) => resource.name !== "")
+      : []
   };
 }
 
@@ -131,6 +200,8 @@ export function initializeDeployedGraphPage(
   const note = context.dom.byId("deployed-mode-note");
   const logSection = context.dom.byId("deployed-log-section");
   const logOutput = context.dom.byId("deployed-log-output");
+  const removedSection = context.dom.byId("deployed-removed-section");
+  const removedList = context.dom.byId("deployed-removed-list");
   const renderGraph = requireBrowserFunction(globalScope, "radiusRenderGraph");
   const entry = beginEntry(context, ENTRY_KEY);
   if (!entry) return NOOP_TEARDOWN;
@@ -160,6 +231,17 @@ export function initializeDeployedGraphPage(
   let resumeGraphOnVisible = false;
   let graphRequestInFlight = false;
   let progressView: GraphProgressView | null = null;
+  let removedResources: RemovedResource[] = [];
+  let deployedInventory: DeployedInventoryView = EMPTY_INVENTORY;
+  // The resource a confirmation is currently about. Cleared as soon as the
+  // confirmed delete reads it, so a dismissed dialog can never leave an
+  // identity behind for the next confirmation to reuse.
+  let pendingResource: RemovedResource | null = null;
+  // The removed-resource delete currently in flight, if any. One at a time: the
+  // server refuses a second concurrent mutation anyway, and a page that let the
+  // user start two would just be lying about it.
+  let resourceDeleteInFlight = false;
+  let resourceDeleteTimer: ScopeTimer | null = null;
 
   const stopProgress = (): void => {
     progressView?.stop();
@@ -385,6 +467,9 @@ export function initializeDeployedGraphPage(
         }
         modeledGraphPending = false;
         const resources = parseGraphResources(readArray(payload, "resources"));
+        removedResources = parseRemovedResources(payload);
+        deployedInventory = parseDeployedInventory(payload);
+        renderRemovedResources();
         lastMode = readString(payload, "mode") || "greyed";
         if (resources.length === 0) {
           showNothing("Nothing deployed yet");
@@ -628,6 +713,218 @@ export function initializeDeployedGraphPage(
         markEnvironmentsUnavailable(error);
       });
 
+  // Exception 7.1. Each row is built from element specs rather than markup, so a
+  // resource name or type can never re-enter the page as HTML, and each delete
+  // button carries its own resource by closure rather than by a parsed data
+  // attribute — a destructive action must not depend on re-reading the DOM.
+  //
+  // While a delete is tracked the rows re-render disabled, so the list cannot
+  // start a second destructive operation the server would refuse anyway.
+  const renderRemovedResources = (): void => {
+    if (!removedSection || !removedList) return;
+    removedList.replaceChildren();
+    if (removedResources.length === 0) {
+      removedSection.style.display = "none";
+      return;
+    }
+    removedSection.style.display = "block";
+    for (const resource of removedResources) {
+      const item = context.dom.createElement("li");
+      item.className = "rad-removed-item";
+      const text = context.dom.createElement("div");
+      const name = context.dom.createElement("div");
+      name.className = "rad-removed-item__name";
+      name.textContent = resource.name;
+      const type = context.dom.createElement("div");
+      type.className = "rad-removed-item__type";
+      type.textContent = resource.type;
+      text.appendChild(name);
+      text.appendChild(type);
+      const button = context.dom.createElement("button");
+      button.className = "rad-btn rad-btn--danger-outline";
+      button.textContent =
+        resourceDeleteInFlight ? "Deleting…" : "Delete resource";
+      if (resourceDeleteInFlight) button.setAttribute("disabled", "disabled");
+      entry.on(button, "click", () => {
+        if (!resourceDialog || resourceDeleteInFlight) return;
+        const application = selectedApplication();
+        const environment = selectedEnvironment();
+        if (!application || !environment) return;
+        pendingResource = resource;
+        resourceDialog.open(application, environment, [
+          { name: resource.name, type: resource.type }
+        ]);
+      });
+      item.appendChild(text);
+      item.appendChild(button);
+      removedList.appendChild(item);
+    }
+  };
+
+  const setRemovedControlsBusy = (busy: boolean): void => {
+    resourceDeleteInFlight = busy;
+    renderRemovedResources();
+  };
+
+  const finishResourceDelete = (
+    kind: "info" | "error",
+    message: string
+  ): void => {
+    if (resourceDeleteTimer) {
+      entry.cancel(resourceDeleteTimer);
+      resourceDeleteTimer = null;
+    }
+    setRemovedControlsBusy(false);
+    setInline(context, kind, message);
+  };
+
+  // Exception 5.1/5.4 for a per-resource delete: a dispatch is not an outcome.
+  // Poll the run's terminal state within a bound, then say exactly what
+  // happened — including a state-save warning on an otherwise successful run —
+  // and refresh the deployed graph so the row disappears only once the resource
+  // is actually gone.
+  const trackResourceDelete = (runId: string, resourceName: string): void => {
+    if (!runId) {
+      // Without a run there is nothing to track. Say so rather than implying the
+      // delete completed.
+      finishResourceDelete(
+        "info",
+        `Deleting ${resourceName} has started, but its workflow run could not be identified, so its result cannot be tracked here. Check the Actions tab on GitHub.`
+      );
+      return;
+    }
+    let polls = 0;
+    const poll = (): void => {
+      polls += 1;
+      if (polls > DELETE_RUN_POLL_LIMIT) {
+        finishResourceDelete(
+          "error",
+          `Deleting ${resourceName} did not finish within ${Math.round(
+            (DELETE_RUN_POLL_LIMIT * DELETE_RUN_POLL_MS) / 60000
+          )} minutes. It may still be running — check the workflow run on GitHub.`
+        );
+        return;
+      }
+      void context.net
+        .fetch(
+          `${DELETE_RUN_STATUS_PATH}?repo=${encodeURIComponent(page.repo)}` +
+            `&runId=${encodeURIComponent(runId)}`,
+          { cache: "no-store" }
+        )
+        .then((response) =>
+          response.ok ? response.json() : Promise.reject(new Error("status"))
+        )
+        .then((payload) => {
+          if (!entry.active || !resourceDeleteInFlight) return;
+          const state = readString(payload, "state");
+          if (state !== "completed") {
+            resourceDeleteTimer = entry.after(DELETE_RUN_POLL_MS, poll);
+            return;
+          }
+          const outcome = readString(payload, "outcome");
+          const stateWarning = readString(payload, "stateWarning");
+          if (outcome === "succeeded") {
+            finishResourceDelete(
+              stateWarning ? "error" : "info",
+              stateWarning ?
+                `${resourceName} was deleted, but ${stateWarning}`
+              : `${resourceName} was deleted.`
+            );
+            // Only now is the deployed graph actually different.
+            loadGraph();
+            return;
+          }
+          const outcomeMessage =
+            readString(payload, "outcomeMessage") || "Deletion failed";
+          finishResourceDelete(
+            "error",
+            `${outcomeMessage} for ${resourceName}. ${
+              stateWarning ? `${stateWarning} ` : ""
+            }See the workflow run on GitHub for details.`
+          );
+        })
+        .catch(() => {
+          if (!entry.active || !resourceDeleteInFlight) return;
+          // A dropped poll is not an outcome; keep trying within the bound.
+          resourceDeleteTimer = entry.after(DELETE_RUN_POLL_MS, poll);
+        });
+    };
+    resourceDeleteTimer = entry.after(DELETE_RUN_POLL_MS, poll);
+  };
+
+  const runResourceDelete = (
+    application: string,
+    environment: string
+  ): void => {
+    const resource = pendingResource;
+    pendingResource = null;
+    // Fails closed: without a confirmed selection there is no identity to
+    // delete, and the server would refuse the request anyway. Consuming
+    // `pendingResource` here is also what makes one confirmation dispatch at
+    // most once — a repeated confirm of the same dialog finds nothing left.
+    if (!resource || !application || !environment) return;
+    setRemovedControlsBusy(true);
+    setInline(
+      context,
+      "info",
+      `Deleting ${resource.name} from ${application} in ${environment}…`
+    );
+    void context.net
+      .fetch(DELETE_RESOURCE_PATH, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Radius-Mutation-Nonce": page.mutationNonce
+        },
+        body: JSON.stringify({
+          repo: page.repo,
+          environment,
+          application,
+          resourceName: resource.name,
+          resourceType: resource.type,
+          // Binds the request to the exact deployed graph this page rendered.
+          // The server re-derives the removal and rejects a stale revision.
+          revision: deployedInventory.revision
+        })
+      })
+      .then((response) =>
+        response.json().then((payload) => ({ response, payload }))
+      )
+      .then(({ response, payload }) => {
+        if (!entry.active) return;
+        if (!response.ok) {
+          finishResourceDelete(
+            "error",
+            response.status === 403 ?
+              "This Radius Canvas page is out of date. Reload it and try again."
+            : readString(payload, "error") ||
+                "Could not start the resource delete workflow."
+          );
+          // A refused delete usually means the page's view is stale, so refresh
+          // it rather than leaving the same rejected row on screen.
+          loadGraph();
+          return;
+        }
+        // The resource stays deployed until the run completes, so the row is
+        // left in place and the controls stay disabled while it is tracked.
+        // The server reports the run it dispatched exactly or not at all, so
+        // the id is used directly and the URL is only a fallback.
+        trackResourceDelete(
+          readString(payload, "runId") ||
+            runIdFromUrl(readString(payload, "runUrl")),
+          resource.name
+        );
+      })
+      .catch((error: unknown) => {
+        if (!entry.active) return;
+        context.logger.error("Radius resource delete failed.", error);
+        finishResourceDelete(
+          "error",
+          "Could not delete the resource. Please try again."
+        );
+      });
+  };
+
   const runDelete = (application: string, environment: string): void => {
     const modal = context.dom.byId("deployed-deleting-modal");
     const text = context.dom.byId("deployed-deleting-text");
@@ -758,8 +1055,23 @@ export function initializeDeployedGraphPage(
         })
       )
     : null;
+  const resourceDialog =
+    createDialog ?
+      asDeleteDialog(
+        createDialog({
+          modalId: "deploy-resource-modal",
+          bodyId: "deploy-resource-body",
+          appId: "deploy-resource-app",
+          envId: "deploy-resource-env",
+          closeId: "deploy-resource-close",
+          variant: "resource",
+          onConfirm: runResourceDelete
+        })
+      )
+    : null;
   if (dialog?.teardown) entry.onTeardown(dialog.teardown);
   if (abandonDialog?.teardown) entry.onTeardown(abandonDialog.teardown);
+  if (resourceDialog?.teardown) entry.onTeardown(resourceDialog.teardown);
 
   if (appSelect) {
     entry.on(appSelect, "change", () => {
@@ -789,7 +1101,17 @@ export function initializeDeployedGraphPage(
           () => entry.active
         );
       } else if (dialog && selectedApplication() && selectedEnvironment()) {
-        dialog.open(selectedApplication(), selectedEnvironment());
+        // Part 8: the confirmation names the resources the deletion actually
+        // removes, taken from the server's authoritative deployed inventory —
+        // which includes resources the definition no longer declares but that
+        // are still deployed. An inventory the server could not complete is
+        // passed as "unknown", which the dialog reports honestly instead of
+        // presenting an exact count it does not have.
+        dialog.open(
+          selectedApplication(),
+          selectedEnvironment(),
+          deployedInventory.complete ? deployedInventory.resources : undefined
+        );
       }
     });
   }

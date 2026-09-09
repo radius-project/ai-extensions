@@ -8,6 +8,9 @@ import { createDeploymentAbandonmentService } from "../../../src/server/services
 import { createDeployRequestService } from "../../../src/server/services/deploy-request.js";
 import { createDeployDispatchService } from "../../../src/server/services/deploy-dispatch.js";
 import { resolveEnvironmentDeployment } from "../../../src/server/services/deployment-resolver.js";
+import { selectWorkflowRunId } from "../../../src/deploy.js";
+import { buildDeployedInventory } from "../../../src/server/services/deployed-inventory.js";
+import type { StateSaveFailure } from "../../../src/state-save-diagnostics.js";
 import {
   createDeployMonitorService,
   type DeployMonitorService
@@ -34,6 +37,11 @@ import type { DeployMonitorRequest } from "../../../src/server/services/deploy-m
 import type { CanvasState } from "../../../src/shared.js";
 
 let container: CanvasServerContainer | undefined;
+
+// The correlation id every delete dispatch in this suite carries. Production
+// mints a random one per dispatch; pinning it here keeps the argv and run-name
+// assertions exact.
+const DISPATCH_CORRELATION = "del-http-0001";
 
 afterEach(async () => {
   await container?.stopAll();
@@ -63,6 +71,25 @@ interface Harness {
   processEnv: NodeJS.ProcessEnv;
   timeOutDispatch(): void;
   failDispatchWith(stderr: string): void;
+  // The run detail the delete-run status route reads, and the attempt-scoped
+  // state-save diagnostic it consults for a concluded run.
+  setRunDetail(detail: string): void;
+  setStateSaveFailure(failure: StateSaveFailure | null): void;
+  // The dispatch-time definition reload the per-resource delete performs, and
+  // the failure a scenario can force on it.
+  modelReloads: unknown[][];
+  // What discovery asked for after each dispatch, and the `gh run list` answer
+  // it is resolved against. Both are here so a scenario can put a concurrent,
+  // newer run of another environment in the same timestamp window.
+  runLookups: {
+    afterRunId?: number | string | null;
+    correlationId?: string | null;
+  }[];
+  setBaselineRunId(runId: number | string | null): void;
+  setWorkflowRuns(runs: (correlationId: string) => unknown[]): void;
+  // The repositories whose cached deployed-graph reads were dropped.
+  graphCacheInvalidations: string[];
+  failModelReloadWith(error: string): void;
 }
 
 function row(environment: string, status = "deployed"): DeploymentRow {
@@ -89,6 +116,25 @@ function start(): Harness {
   let deploymentStatus = "deployed";
   let dispatchTimedOut = false;
   let dispatchStderr = "";
+  let runDetail = "completed\tsuccess\t1";
+  let stateSaveFailure: StateSaveFailure | null = null;
+  const modelReloads: unknown[][] = [];
+  const graphCacheInvalidations: string[] = [];
+  const runLookups: {
+    afterRunId?: number | string | null;
+    correlationId?: string | null;
+  }[] = [];
+  let baselineRunId: number | string | null = null;
+  // The default `gh run list` answer: only the run this dispatch started, named
+  // after its own correlation id the way the committed dispatcher names it.
+  let listWorkflowRuns = (correlationId: string): unknown[] => [
+    {
+      databaseId: 7,
+      createdAt: new Date().toISOString(),
+      displayTitle: `Radius - Delete Application todo-app (dev) ${correlationId}`
+    }
+  ];
+  let reloadOutcome: { status: number; error?: string } = { status: 200 };
   let deploymentResolver: (
     repo: string,
     environment: string,
@@ -105,6 +151,12 @@ function start(): Harness {
     deploymentResolver(repo, environment, application);
   const ghOrThrow = (args: string[]): Promise<string> => {
     ghApiCalls.push(args);
+    const path = args[1] ?? "";
+    // The delete-run status route reads one run's terminal state; everything
+    // else in this harness reads the environment listing.
+    if (/\/actions\/runs\/\d+$/.test(path)) {
+      return Promise.resolve(runDetail);
+    }
     return Promise.resolve(
       args.includes("--method") ? "" : environments.join("\n")
     );
@@ -127,6 +179,18 @@ function start(): Harness {
   const routes = createTestRouteTable(
     createDeploymentsRoutes({
       isValidRepoSlug,
+      repoMatchesWorkspace: () => false,
+      // The delete-resource route re-reads the definition immediately before
+      // dispatch. The harness models a reload that changes nothing, so the
+      // state a scenario set up is what the dispatch is authorized against.
+      reloadModeledGraph: (...args) => {
+        modelReloads.push(args);
+        return Promise.resolve(reloadOutcome);
+      },
+      readStateSaveFailure: () => Promise.resolve(stateSaveFailure),
+      invalidateDeployedGraphCache: (repo) => {
+        graphCacheInvalidations.push(repo);
+      },
       readInstanceEntry: () => (entryMissing ? undefined : { state }),
       triggerDeployRepairHandoff: () => false,
       triggerDeployFailureNotice: () => false,
@@ -157,7 +221,28 @@ function start(): Harness {
         workflowSyncs.push(args);
         return Promise.resolve({ created: [], failed: [] });
       },
-      findWorkflowRun: () => Promise.resolve(7),
+      findWorkflowRun: (
+        _repo,
+        _workflowFile,
+        sinceMs,
+        _knownId,
+        afterRunId,
+        correlationId
+      ) => {
+        runLookups.push({ afterRunId, correlationId });
+        // The real selector over a harness-controlled `gh run list` payload, so
+        // the correlation contract is exercised rather than stubbed away.
+        return Promise.resolve(
+          selectWorkflowRunId(
+            listWorkflowRuns(correlationId || ""),
+            sinceMs,
+            correlationId,
+            afterRunId
+          )
+        );
+      },
+      latestWorkflowRunId: () => Promise.resolve(baselineRunId),
+      newCorrelationId: () => DISPATCH_CORRELATION,
       runGh: (args) => {
         dispatches.push(args);
         return Promise.resolve(
@@ -172,7 +257,12 @@ function start(): Harness {
         );
       },
       readProcessEnv: () => processEnv,
-      setTimer: () => ({}),
+      // Dispatch and run-discovery waits run inline; the reservation lease
+      // (twice the listing TTL) stays pending, as a real timer would.
+      setTimer: (callback, ms) => {
+        if (ms <= 5000) callback();
+        return {};
+      },
       // The deploy route has its own harness below, which drives the real
       // admission service. Reaching it from this one is a wiring bug.
       deployRequest: {
@@ -228,12 +318,81 @@ function start(): Harness {
     },
     failDispatchWith(stderr) {
       dispatchStderr = stderr;
+    },
+    setRunDetail(detail) {
+      runDetail = detail;
+    },
+    setStateSaveFailure(failure) {
+      stateSaveFailure = failure;
+    },
+    modelReloads,
+    runLookups,
+    setBaselineRunId(runId) {
+      baselineRunId = runId;
+    },
+    setWorkflowRuns(runs) {
+      listWorkflowRuns = runs;
+    },
+    graphCacheInvalidations,
+    failModelReloadWith(error) {
+      reloadOutcome = { status: 400, error };
     }
   };
 }
 
 function post(baseUrl: string, path: string, body: string): Promise<Response> {
   return fetch(`${baseUrl}${path}`, { method: "POST", body });
+}
+
+// One deployed resource the definition no longer declares, recorded exactly as
+// `/api/deployed-graph` records it: the branch's definition plus the derived
+// inventory and its revision.
+function seedRemovedResource(harness: Harness) {
+  const modeled = [
+    {
+      id: "/planes/radius/local/api",
+      name: "api",
+      type: "Radius.Compute/containers"
+    }
+  ];
+  // The canvas must still hold the branch's definition, because the route
+  // re-derives the removal from it immediately before dispatching.
+  harness.state.graphTargetRepo = "octo/todo";
+  harness.state.graphBranch = "main";
+  harness.state.graphResources = modeled;
+  harness.state.contextRepo = "octo/todo";
+  harness.state.contextBranch = "main";
+  const inventory = buildDeployedInventory({
+    repo: "octo/todo",
+    branch: "main",
+    environment: "dev",
+    application: "todo-app",
+    modeled,
+    deployed: {
+      resources: [
+        ...modeled,
+        {
+          id: "/planes/radius/local/cache",
+          name: "cache",
+          type: "Radius.Data/redisCaches"
+        }
+      ]
+    },
+    now: 1
+  });
+  harness.state.deployedInventory = inventory;
+  return inventory;
+}
+
+function deleteResourceBody(revision: string): string {
+  return JSON.stringify({
+    repo: "octo/todo",
+    environment: "dev",
+    application: "todo-app",
+    resourceName: "cache",
+    resourceType: "Radius.Data/redisCaches",
+    revision
+  });
 }
 
 describe("deployments routes real-loopback HIT (RF-05)", () => {
@@ -295,6 +454,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       application: "todolist",
       environment: "dev",
       error: "Bicep template failed to compile",
+      stateWarning: "",
       runUrl: "https://github.com/octo/todolist/actions/runs/3",
       repairing: false,
       finishedAt: 1700
@@ -316,6 +476,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       application: "",
       environment: "",
       error: "",
+      stateWarning: "",
       runUrl: "",
       repairing: false,
       finishedAt: 0
@@ -370,6 +531,82 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
       `${entry.baseUrl}/api/list-deployments?repo=octo/todolist&fresh=1`
     );
     expect(await fresh.json()).toEqual({ deployments: [row("dev")] });
+  });
+
+  // Exception 5.4 through the real resolver and a real socket: reopening the
+  // page after a resource cleanup that could not persist Radius state must show
+  // the warning, and must still show the application as deployed.
+  it("serves the state-save warning of a terminal resource cleanup on the application's row", async () => {
+    const harness = start();
+    harness.environments.push("dev");
+    harness.setDeploymentResolver((repo, environment, application) =>
+      resolveEnvironmentDeployment(repo, environment, application, {
+        ghOrThrow: (args) => {
+          const path = args[1] ?? "";
+          if (path.includes("/variables?")) return Promise.resolve("");
+          if (path.includes("/deployments?")) {
+            return Promise.resolve("cleanup\ndeploy");
+          }
+          if (path.includes("/deployments/cleanup/statuses?per_page=1")) {
+            return Promise.resolve(
+              "success\thttps://github.com/octo/todo/actions/runs/310\t"
+            );
+          }
+          if (path.includes("/deployments/deploy/statuses?per_page=1")) {
+            return Promise.resolve(
+              "success\thttps://github.com/octo/todo/actions/runs/200\t"
+            );
+          }
+          if (path.includes("/actions/runs/310")) {
+            return Promise.resolve(
+              ".github/workflows/delete-resource.yml\tcompleted\tsuccess\t1"
+            );
+          }
+          if (path.includes("/actions/runs/200")) {
+            return Promise.resolve(
+              ".github/workflows/run-rad-commands.yml\tcompleted\tsuccess\t1"
+            );
+          }
+          return Promise.reject(new Error(`unexpected path: ${path}`));
+        },
+        deployWorkflowFile: "run-rad-commands.yml",
+        deleteWorkflowFile: "delete-application.yml",
+        deleteResourceWorkflowFile: "delete-resource.yml",
+        maxParallelRecords: 10,
+        readStateSaveFailure: (_repo, runId, runAttempt) =>
+          Promise.resolve(
+            runId === "310" && runAttempt === "1" ?
+              {
+                attempts: 3,
+                runAttempt: 1,
+                error: "rad shutdown: connection refused"
+              }
+            : null
+          )
+      })
+    );
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/list-deployments?repo=octo/todolist`
+    );
+    const payload = (await response.json()) as {
+      deployments: { status: string; runId: string; statusDetail: string }[];
+    };
+
+    expect(response.status).toBe(200);
+    // The application is still deployed — a resource cleanup never retires it.
+    expect(payload.deployments[0].status).toBe("success");
+    expect(payload.deployments[0].runId).toBe("200");
+    expect(payload.deployments[0].statusDetail).toContain(
+      "Removing a resource from this application succeeded."
+    );
+    expect(payload.deployments[0].statusDetail).toContain(
+      "Orphaned cloud resources may exist."
+    );
+    expect(payload.deployments[0].statusDetail).toContain(
+      "Cleanup run: https://github.com/octo/todolist/actions/runs/310"
+    );
   });
 
   it("resets the deploy view for the requested attempt and rejects a malformed body", async () => {
@@ -436,6 +673,7 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(response.headers.get("content-type")).toBe("application/json");
     expect(await response.json()).toEqual({
       success: true,
+      runId: "7",
       runUrl: "https://github.com/octo/todo/actions/runs/7"
     });
     expect(harness.dispatches).toEqual([
@@ -447,6 +685,8 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         "environment=dev",
         "-f",
         "application=todo-app",
+        "-f",
+        `correlation_id=${DISPATCH_CORRELATION}`,
         "--repo",
         "octo/todo"
       ]
@@ -454,6 +694,83 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     // The within-slice invalidation: the reader and the invalidator now live in
     // the same module, so this is proven rather than assumed.
     expect(harness.cache.has("octo/todo")).toBe(false);
+  });
+
+  // The reported run is the identity the page tracks the delete by, so a run
+  // that merely landed in the same window — another environment's delete,
+  // started concurrently and therefore newer — must never be returned.
+  it("returns only the correlated run when another environment is deleted at the same time", async () => {
+    const harness = start();
+    harness.environments.push("dev");
+    harness.setBaselineRunId(100);
+    harness.setWorkflowRuns((correlationId) => [
+      {
+        databaseId: 103,
+        createdAt: new Date().toISOString(),
+        displayTitle: "Radius - Delete Application billing (prod) del-other"
+      },
+      {
+        databaseId: 102,
+        createdAt: new Date().toISOString(),
+        displayTitle: `Radius - Delete Application todo-app (dev) ${correlationId}`
+      }
+    ]);
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+
+    expect(await response.json()).toEqual({
+      success: true,
+      runId: "102",
+      runUrl: "https://github.com/octo/todo/actions/runs/102"
+    });
+    expect(harness.runLookups[0]).toEqual({
+      afterRunId: 100,
+      correlationId: DISPATCH_CORRELATION
+    });
+  });
+
+  it("reports no run at all rather than a stranger's run", async () => {
+    const harness = start();
+    harness.environments.push("dev");
+    harness.setBaselineRunId(100);
+    // Only another environment's concurrent delete is listed: newer than the
+    // baseline, inside the timestamp window, and not this dispatch.
+    harness.setWorkflowRuns(() => [
+      {
+        databaseId: 103,
+        createdAt: new Date().toISOString(),
+        displayTitle: "Radius - Delete Application billing (prod) del-other"
+      }
+    ]);
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-deployment",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app"
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      success: true,
+      runId: "",
+      runUrl: ""
+    });
+    // Discovery kept looking within its bound before answering "unknown".
+    expect(harness.runLookups).toHaveLength(3);
   });
 
   it("does not re-dispatch a delete whose first attempt timed out", async () => {
@@ -499,6 +816,220 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
     expect(await response.json()).toEqual({
       error: "A valid repo, environment, and application are required."
     });
+  });
+
+  it("deletes one removed resource the server itself confirmed is orphaned", async () => {
+    const harness = start();
+    const inventory = seedRemovedResource(harness);
+    const entry = await container!.getOrCreate("panel-a");
+    await fetch(`${entry.baseUrl}/api/list-deployments?repo=octo/todo`);
+    expect(harness.cache.has("octo/todo")).toBe(true);
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-resource",
+      deleteResourceBody(inventory.revision)
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(await response.json()).toEqual({
+      success: true,
+      runId: "7",
+      runUrl: "https://github.com/octo/todo/actions/runs/7",
+      resource: { name: "cache", type: "Radius.Data/redisCaches" }
+    });
+    // Its own dispatcher, so a successful cleanup can never be read as a
+    // whole-application teardown by the deployment resolver.
+    expect(harness.dispatches).toEqual([
+      [
+        "workflow",
+        "run",
+        "delete-resource.yml",
+        "-f",
+        "environment=dev",
+        "-f",
+        "application=todo-app",
+        "-f",
+        "resource_name=cache",
+        "-f",
+        "radius_resource_type=Radius.Data/redisCaches",
+        "-f",
+        `correlation_id=${DISPATCH_CORRELATION}`,
+        "--repo",
+        "octo/todo"
+      ]
+    ]);
+    expect(harness.cache.has("octo/todo")).toBe(false);
+  });
+
+  it("fails closed over a real socket when the server derived no such removed resource", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-resource",
+      JSON.stringify({
+        repo: "octo/todo",
+        environment: "dev",
+        application: "todo-app",
+        resourceName: "cache",
+        resourceType: "Radius.Data/redisCaches",
+        revision: "a1b2c3d4"
+      })
+    );
+
+    expect(response.status).toBe(409);
+    expect(((await response.json()) as { error: string }).error).toContain(
+      "has not been read on this canvas"
+    );
+    expect(harness.dispatches).toEqual([]);
+    expect(harness.workflowSyncs).toEqual([]);
+  });
+
+  it("refuses an incomplete single-resource delete over a real socket", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-resource",
+      JSON.stringify({ repo: "octo/todo", environment: "dev" })
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error:
+        "A valid repo, environment, application, resource name, resource type, and deployed-graph revision are required."
+    });
+    expect(harness.dispatches).toEqual([]);
+  });
+
+  // Two cross-instance guards, over a real socket: GitHub's own record of a
+  // cleanup another canvas started, and the definition reload that happens
+  // after every awaited preflight step and immediately before the dispatch.
+  it("refuses over a real socket while GitHub reports a resource cleanup in flight", async () => {
+    const harness = start();
+    const inventory = seedRemovedResource(harness);
+    harness.setDeploymentResolver((_repo, environment) =>
+      Promise.resolve(row(environment, "resource-deleting"))
+    );
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-resource",
+      deleteResourceBody(inventory.revision)
+    );
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error:
+        "A resource of this application is being deleted. Wait for that cleanup to finish before deleting one of its resources."
+    });
+    expect(harness.dispatches).toEqual([]);
+  });
+
+  it("re-reads the definition before dispatch and refuses a branch that moved", async () => {
+    const harness = start();
+    const inventory = seedRemovedResource(harness);
+    // The switch happens inside the awaited deployment-state read, which is
+    // exactly the window an authorization taken at request time cannot see.
+    harness.setDeploymentResolver(() => {
+      harness.state.contextBranch = "feature/remove-cache";
+      harness.state.graphBranch = "feature/remove-cache";
+      return Promise.resolve(null);
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-resource",
+      deleteResourceBody(inventory.revision)
+    );
+
+    expect(response.status).toBe(409);
+    expect(((await response.json()) as { error: string }).error).toContain(
+      'This confirmation was made against branch "main", but the canvas is now on "feature/remove-cache"'
+    );
+    expect(harness.dispatches).toEqual([]);
+    // The workflows were synced before the refusal; the dispatch itself never
+    // happened, which is what "fails closed" means here.
+    expect(harness.modelReloads).toEqual([
+      ["panel-a", "octo/todo", "feature/remove-cache"]
+    ]);
+  });
+
+  it("fails closed over a real socket when the definition cannot be re-read", async () => {
+    const harness = start();
+    const inventory = seedRemovedResource(harness);
+    harness.failModelReloadWith("app.bicep could not be compiled");
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await post(
+      entry.baseUrl,
+      "/api/delete-resource",
+      deleteResourceBody(inventory.revision)
+    );
+
+    expect(response.status).toBe(503);
+    expect(((await response.json()) as { error: string }).error).toContain(
+      "app.bicep could not be compiled"
+    );
+    expect(harness.dispatches).toEqual([]);
+  });
+
+  it("reports a delete run's terminal outcome and orphan warning over a real socket", async () => {
+    const harness = start();
+    harness.setRunDetail("completed\tcancelled\t2");
+    harness.setStateSaveFailure({
+      attempts: 3,
+      runAttempt: 2,
+      error: "rad shutdown: push rejected"
+    });
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/delete-run-status?repo=octo/todo&runId=99`
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const payload = (await response.json()) as {
+      state: string;
+      outcome: string;
+      outcomeMessage: string;
+      stateWarning: string;
+      runUrl: string;
+    };
+    expect(payload.state).toBe("completed");
+    expect(payload.outcome).toBe("cancelled");
+    expect(payload.outcomeMessage).toBe("Deletion cancelled");
+    expect(payload.stateWarning).toContain(
+      "Orphaned cloud resources may exist."
+    );
+    expect(payload.runUrl).toBe("https://github.com/octo/todo/actions/runs/99");
+    expect(
+      harness.ghApiCalls.some((call) =>
+        call.includes("/repos/octo/todo/actions/runs/99")
+      )
+    ).toBe(true);
+  });
+
+  it("refuses a delete-run status request with no usable run identity", async () => {
+    const harness = start();
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(
+      `${entry.baseUrl}/api/delete-run-status?repo=octo/todo&runId=abc`
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: "A valid repo and numeric runId are required."
+    });
+    expect(harness.ghApiCalls).toEqual([]);
   });
 
   it("stops tracking a failed teardown without synchronizing or dispatching a workflow", async () => {
@@ -607,7 +1138,9 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         },
         deployWorkflowFile: "run-rad-commands.yml",
         deleteWorkflowFile: "delete-application.yml",
-        maxParallelRecords: 10
+        deleteResourceWorkflowFile: "delete-resource.yml",
+        maxParallelRecords: 10,
+        readStateSaveFailure: () => Promise.resolve(null)
       })
     );
     const entry = await container!.getOrCreate("panel-a");
@@ -673,7 +1206,9 @@ describe("deployments routes real-loopback HIT (RF-05)", () => {
         },
         deployWorkflowFile: "run-rad-commands.yml",
         deleteWorkflowFile: "delete-application.yml",
-        maxParallelRecords: 10
+        deleteResourceWorkflowFile: "delete-resource.yml",
+        maxParallelRecords: 10,
+        readStateSaveFailure: () => Promise.resolve(null)
       })
     );
     const entry = await container!.getOrCreate("panel-a");
@@ -826,10 +1361,18 @@ function startDeploy(monitorOverride?: DeployMonitorService): DeployHarness {
       ensureWorkflowsCurrent: () =>
         Promise.resolve({ created: [], failed: [] }),
       findWorkflowRun: () => Promise.resolve(null),
+      latestWorkflowRunId: () => Promise.resolve(null),
+      newCorrelationId: () => "http-harness-correlation",
       runGh: () => {
         throw new Error("the deploy harness must not run gh");
       },
       readProcessEnv: () => ({}),
+      repoMatchesWorkspace: () => false,
+      reloadModeledGraph: () => {
+        throw new Error("the deploy harness must not reload the definition");
+      },
+      invalidateDeployedGraphCache: () => {},
+      readStateSaveFailure: () => Promise.resolve(null),
       setTimer: () => ({}),
       deployRequest,
       abandonment: {
@@ -1041,6 +1584,9 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       buildDeployMessageMap: () => new Map(),
       applyDeployMessages: () => {},
       applyDeployStatusToResources: () => [],
+      settleDeployStatuses: () => {
+        throw new Error("an undispatched workflow settles no graph");
+      },
       generatePortalUrl: () => "",
       optionalString: (value) => (typeof value === "string" ? value : ""),
       errorMessage: (error) =>

@@ -44,6 +44,8 @@ const { h, BASE_UPSTREAM } = vi.hoisted<{
       "name: deploy-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\nenv:\n  APP_FILE: '{{APP_FILE}}'\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/run-rad-commands@{{RADIUS_REF}}\n",
     "delete-application.yml":
       "name: delete\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/delete-azure.yml\n  aws:\n    uses: ./.github/workflows/delete-aws.yml\n",
+    "delete-resource.yml":
+      "name: delete-resource\non:\n  workflow_dispatch:\n    inputs:\n      environment:\n        default: '{{ENV}}'\njobs:\n  detect:\n    run: echo hi\n  azure:\n    uses: ./.github/workflows/delete-azure.yml\n  aws:\n    uses: ./.github/workflows/delete-aws.yml\n",
     "delete-azure.yml":
       "name: delete-azure\non:\n  workflow_call:\n    inputs:\n      environment:\n        type: string\n        required: true\njobs:\n  a:\n    uses: radius-project/ai-extensions/.github/extension/actions/delete-resource@{{RADIUS_REF}}\n"
   };
@@ -453,13 +455,14 @@ describe("generateDeleteWorkflow", () => {
     expireTemplateCache();
   });
 
-  it("emits both dispatchers plus the app and environment Azure providers, never AWS", async () => {
+  it("emits every dispatcher plus the app and environment Azure providers, never AWS", async () => {
     const files = await generateDeleteWorkflow("dev");
     expect(Object.keys(files).sort()).toEqual([
       "delete-application.yml",
       "delete-azure.yml",
       "delete-environment-azure.yml",
-      "delete-environment.yml"
+      "delete-environment.yml",
+      "delete-resource.yml"
     ]);
     expect(files["delete-aws.yml"]).toBeUndefined();
   });
@@ -467,6 +470,10 @@ describe("generateDeleteWorkflow", () => {
   it("strips the aws job from the application dispatcher so GitHub can parse it", async () => {
     const files = await generateDeleteWorkflow("dev");
     expect(files["delete-application.yml"]).not.toContain("delete-aws.yml");
+    // Exception 7.1: the single-resource dispatcher is a distinct committed
+    // file that reuses the same Azure provider workflow.
+    expect(files["delete-resource.yml"]).toContain("delete-azure.yml");
+    expect(files["delete-resource.yml"]).not.toContain("delete-aws.yml");
     // The environment dispatcher is authored Azure-only and reuses the static,
     // ai-extensions-owned environment provider rather than delete-azure.yml.
     expect(files["delete-environment.yml"]).toContain(
@@ -504,6 +511,7 @@ describe("generateDeleteWorkflow", () => {
         "run-rad-commands.yml",
         "run-rad-commands-azure.yml",
         "delete-application.yml",
+        "delete-resource.yml",
         "delete-azure.yml",
         "delete-environment.yml",
         "delete-environment-azure.yml"

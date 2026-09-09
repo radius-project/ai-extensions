@@ -4,6 +4,7 @@ import {
   DELETE_DIALOG_CONFIRM_INPUT_ID,
   DELETE_DIALOG_FOCUSABLE_SELECTOR,
   DELETE_DIALOG_IDS,
+  DELETE_DIALOG_RESOURCE_LIMIT,
   DELETE_DIALOG_STEP1_BUTTON_ID,
   DELETE_DIALOG_STEP2_BUTTON_ID,
   createDeleteDeploymentDialog,
@@ -500,5 +501,176 @@ describe("delete deployment dialog", () => {
     expect(() =>
       fakeById(browser.body, DELETE_DIALOG_STEP2_BUTTON_ID).dispatch("click")
     ).toThrow(/could not create the "del-confirm-input" control/);
+  });
+});
+
+describe("delete dialog resource inventory (Part 8 confirmation)", () => {
+  const target = { app: "store", environment: "prod" };
+
+  it("names every resource the deletion removes", () => {
+    const specs = deleteDialogEffectsSpecs({
+      ...target,
+      resources: [
+        { name: "frontend", type: "Radius.Compute/containers" },
+        { name: "cache" }
+      ]
+    });
+    const summary = specs[2].children ?? [];
+    expect(summary.map((child) => child.text)).toEqual([
+      "2 deployed resources will be deleted:"
+    ]);
+    const items = specs[3].children ?? [];
+    expect(
+      items.map((item) => item.children?.map((child) => child.text))
+    ).toEqual([["frontend", " — Radius.Compute/containers"], ["cache"]]);
+    // The continue control stays last so the dialog can bind it regardless of
+    // how many resources the inventory listed.
+    expect(specs[specs.length - 1].id).toBe(DELETE_DIALOG_STEP2_BUTTON_ID);
+  });
+
+  it("summarizes the remainder beyond the readable limit", () => {
+    const resources = Array.from(
+      { length: DELETE_DIALOG_RESOURCE_LIMIT + 3 },
+      (_unused, index) => ({ name: `resource-${index}` })
+    );
+    const specs = deleteDialogEffectsSpecs({ ...target, resources });
+    const items = specs[3].children ?? [];
+
+    expect(items).toHaveLength(DELETE_DIALOG_RESOURCE_LIMIT + 1);
+    expect(items[items.length - 1].text).toBe("…and 3 more resources");
+  });
+
+  it("uses the singular form for a single hidden resource", () => {
+    const resources = Array.from(
+      { length: DELETE_DIALOG_RESOURCE_LIMIT + 1 },
+      (_unused, index) => ({ name: `resource-${index}` })
+    );
+    const specs = deleteDialogEffectsSpecs({ ...target, resources });
+    const items = specs[3].children ?? [];
+
+    expect(items[items.length - 1].text).toBe("…and 1 more resource");
+    expect(specs[2].children?.[0].text).toBe(
+      `${DELETE_DIALOG_RESOURCE_LIMIT + 1} deployed resources will be deleted:`
+    );
+  });
+
+  it("uses the singular form for exactly one resource", () => {
+    const specs = deleteDialogEffectsSpecs({
+      ...target,
+      resources: [{ name: "only" }]
+    });
+
+    expect(specs[2].children?.[0].text).toBe(
+      "1 deployed resource will be deleted:"
+    );
+  });
+
+  it("says the inventory is unknown rather than empty when it could not be read", () => {
+    const specs = deleteDialogEffectsSpecs(target);
+
+    expect(specs[2].children?.[0].text).toContain(
+      "The list of resources could not be read"
+    );
+  });
+
+  it("distinguishes an application with no deployed resources", () => {
+    const specs = deleteDialogEffectsSpecs({ ...target, resources: [] });
+
+    expect(specs[2].children?.[0].text).toContain(
+      "No deployed resources were found"
+    );
+  });
+
+  it("keeps resource names as text rather than markup", () => {
+    const specs = deleteDialogEffectsSpecs({
+      ...target,
+      resources: [{ name: HOSTILE, type: HOSTILE }]
+    });
+    const items = specs[3].children ?? [];
+
+    expect(items[0].children?.map((child) => child.text)).toEqual([
+      HOSTILE,
+      ` — ${HOSTILE}`
+    ]);
+  });
+});
+
+describe("delete dialog resource variant (exception 7.1)", () => {
+  const target = {
+    app: "store",
+    environment: "prod",
+    resources: [{ name: "cache", type: "Radius.Data/redisCaches" }]
+  };
+
+  it("explains that only the named resource is removed", () => {
+    const intent = deleteDialogIntentSpecs("resource");
+    const effects = deleteDialogEffectsSpecs(target, "resource");
+
+    expect(intent[0].text).toContain(
+      "the application definition no longer declares it"
+    );
+    expect(intent[1].text).toBe("I want to delete this removed resource");
+    expect(
+      effects[1].children?.[0].children?.map((child) => child.text)
+    ).toEqual([
+      "This will permanently delete ",
+      "cache",
+      " (",
+      "Radius.Data/redisCaches",
+      ")",
+      " from application ",
+      "store",
+      " in environment ",
+      "prod",
+      ". The rest of the application is left running."
+    ]);
+    expect(effects[effects.length - 1].id).toBe(DELETE_DIALOG_STEP2_BUTTON_ID);
+  });
+
+  it("confirms on the resource's own name", () => {
+    expect(deleteDialogConfirmToken("store", "prod", "resource", "cache")).toBe(
+      "cache"
+    );
+    const confirm = deleteDialogConfirmSpecs(target, "resource");
+    expect(confirm[0].text).toBe('To confirm, type "cache" in the box below');
+    expect(confirm[2].text).toBe("Delete this resource");
+  });
+
+  it("falls back to the app/environment token when no resource is named", () => {
+    expect(deleteDialogConfirmToken("store", "prod", "resource")).toBe(
+      "store/prod"
+    );
+    const effects = deleteDialogEffectsSpecs(
+      { app: "store", environment: "prod" },
+      "resource"
+    );
+    expect(effects[1].children?.[0].children?.[1].text).toBe("store");
+  });
+
+  it("only confirms once the resource name is typed exactly", () => {
+    const browser = setup();
+    const confirmed: Array<[string, string]> = [];
+    const dialog = createDeleteDeploymentDialog(browser.context, {
+      variant: "resource",
+      onConfirm: (app, environment) => confirmed.push([app, environment])
+    });
+
+    dialog?.open("store", "prod", [
+      { name: "cache", type: "Radius.Data/redisCaches" }
+    ]);
+    const { input, confirm } = advanceToConfirmation(browser);
+
+    expect(confirm.disabled).toBe(true);
+    input.value = "store/prod";
+    input.dispatch("input");
+    expect(confirm.disabled).toBe(true);
+    confirm.dispatch("click");
+    expect(confirmed).toEqual([]);
+
+    input.value = "cache";
+    input.dispatch("input");
+    expect(confirm.disabled).toBe(false);
+    confirm.dispatch("click");
+    expect(confirmed).toEqual([["store", "prod"]]);
   });
 });

@@ -17,6 +17,8 @@ import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
 import {
+  DELETE_RUN_POLL_LIMIT,
+  DELETE_RUN_POLL_MS,
   DEPLOYED_GRAPH_POLL_MS,
   DEPLOYED_GRAPH_STATE_ID,
   DEPLOYED_LOG_POLL_MS,
@@ -44,6 +46,7 @@ interface FixtureOptions {
   withInlineStatus?: boolean;
   withModal?: boolean;
   withModalText?: boolean;
+  withRemovedSection?: boolean;
   appListing?: Listing;
   envListing?: Listing;
   deploymentsListing?: Listing;
@@ -69,6 +72,7 @@ function fixture(options: FixtureOptions = {}) {
     withInlineStatus = true,
     withModal = true,
     withModalText = true,
+    withRemovedSection = true,
     appListing = "ok",
     envListing = "ok",
     deploymentsListing = "ok",
@@ -101,6 +105,8 @@ function fixture(options: FixtureOptions = {}) {
   const container = createFakeElement("graph-container");
   const modal = createFakeElement("deployed-deleting-modal");
   const modalText = createFakeElement("deployed-deleting-text");
+  const removedSection = createFakeElement("deployed-removed-section");
+  const removedList = createFakeElement("deployed-removed-list");
 
   const elements = [state];
   const progressHost = createFakeElement("deployed-progress-steps");
@@ -118,6 +124,7 @@ function fixture(options: FixtureOptions = {}) {
   if (withContainer) elements.push(container);
   if (withModal) elements.push(modal);
   if (withModalText) elements.push(modalText);
+  if (withRemovedSection) elements.push(removedSection, removedList);
   for (const element of elements) browser.document.add(element);
 
   const appPayload: Record<string, unknown> =
@@ -173,6 +180,8 @@ function fixture(options: FixtureOptions = {}) {
     container,
     modal,
     modalText,
+    removedSection,
+    removedList,
     progressHost
   };
 }
@@ -387,7 +396,7 @@ describe("initializeDeployedGraphPage", () => {
     );
     await flushPromises();
 
-    expect(createDialog).toHaveBeenCalledTimes(2);
+    expect(createDialog).toHaveBeenCalledTimes(3);
     expect(action.dataset.mode).toBe("delete");
     appSelect.value = "app";
     envSelect.value = "dev";
@@ -395,7 +404,7 @@ describe("initializeDeployedGraphPage", () => {
 
     expect(opens).toEqual([["app", "dev"]]);
     teardown();
-    expect(dialogTeardown).toHaveBeenCalledTimes(2);
+    expect(dialogTeardown).toHaveBeenCalledTimes(3);
   });
 
   it("ignores an invalid delete dialog factory result", async () => {
@@ -2561,4 +2570,718 @@ describe("initializeDeployedGraphPage", () => {
       expect(fakeText(progressHost)).not.toContain("graph service down");
     });
   });
+});
+
+describe("initializeDeployedGraphPage removed resources (exception 7.1)", () => {
+  const REMOVED_PAYLOAD = {
+    resources: [
+      { id: "res-api", name: "api", type: "Radius.Compute/containers" }
+    ],
+    removedResources: [
+      { id: "res-cache", name: "cache", type: "Radius.Data/redisCaches" }
+    ],
+    deployedInventory: {
+      revision: "a1b2c3d4",
+      complete: true,
+      resources: [
+        { id: "res-api", name: "api", type: "Radius.Compute/containers" },
+        { id: "res-cache", name: "cache", type: "Radius.Data/redisCaches" }
+      ]
+    },
+    mode: "terminal"
+  };
+
+  function removedFixture(payload: unknown = REMOVED_PAYLOAD) {
+    const harness = fixture();
+    let current = payload;
+    harness.browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () => jsonResponse(current)
+    );
+    return {
+      ...harness,
+      // Lets a scenario model the server answering a NEWER inventory on the
+      // refresh that follows a completed delete.
+      setGraphPayload(next: unknown) {
+        current = next;
+      }
+    };
+  }
+
+  // A dialog double that records what it was opened with and confirms on demand,
+  // so the resource identity crossing the confirmation boundary is observable.
+  function dialogFactory() {
+    const opens: Array<{
+      variant: string;
+      app: string;
+      environment: string;
+      resources: unknown;
+    }> = [];
+    const confirms: Array<() => void> = [];
+    const createDialog = vi.fn(
+      (options: {
+        variant?: string;
+        onConfirm?: (app: string, environment: string) => void;
+      }) => ({
+        open: (app: string, environment: string, resources?: unknown) => {
+          opens.push({
+            variant: options.variant ?? "delete",
+            app,
+            environment,
+            resources
+          });
+          confirms.push(() => options.onConfirm?.(app, environment));
+        },
+        teardown: () => {}
+      })
+    );
+    return { opens, confirms, createDialog };
+  }
+
+  const RUN_URL = "https://github.com/octo/app/actions/runs/4242";
+  const STATUS_URL = "/api/delete-run-status?repo=octo%2Fapp&runId=4242";
+
+  function isHttpResponse(value: unknown): value is HttpResponse {
+    return (
+      typeof value === "object" &&
+      value !== null &&
+      typeof (value as HttpResponse).ok === "boolean" &&
+      typeof (value as HttpResponse).json === "function"
+    );
+  }
+
+  // Drives one confirmed removed-resource delete end to end in the browser
+  // module: dispatch, then whatever terminal statuses the test scripts.
+  async function startDelete(
+    harness: ReturnType<typeof removedFixture>,
+    options: {
+      dispatch?: () => HttpResponse;
+      statuses?: unknown[];
+    } = {}
+  ) {
+    const { opens, confirms, createDialog } = dialogFactory();
+    let statusReads = 0;
+    harness.browser.net.handle("/api/delete-resource", () =>
+      options.dispatch ?
+        options.dispatch()
+      : jsonResponse({ success: true, runUrl: RUN_URL })
+    );
+    harness.browser.net.handle(STATUS_URL, () => {
+      const scripted = options.statuses ?? [];
+      const next = scripted[Math.min(statusReads, scripted.length - 1)];
+      statusReads += 1;
+      if (next instanceof Error) throw next;
+      // A scripted entry is either a ready-made response (for a non-200 case)
+      // or the JSON body of a successful read.
+      if (isHttpResponse(next)) return next;
+      return jsonResponse(next ?? { state: "in_progress", outcome: null });
+    });
+    initializeDeployedGraphPage(
+      harness.browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+    harness.appSelect.value = "app";
+    harness.envSelect.value = "dev";
+    harness.removedList.children[0].children[1].dispatch("click");
+    confirms[confirms.length - 1]();
+    await flushPromises();
+    return { opens, statusReads: () => statusReads };
+  }
+
+  async function tick(
+    harness: ReturnType<typeof removedFixture>,
+    times = 1
+  ): Promise<void> {
+    for (let index = 0; index < times; index += 1) {
+      harness.browser.clock.tick(DELETE_RUN_POLL_MS);
+      await flushPromises();
+    }
+  }
+
+  function removedButton(harness: ReturnType<typeof removedFixture>) {
+    return harness.removedList.children[0].children[1];
+  }
+
+  it("lists each removed resource with a delete control", async () => {
+    const harness = removedFixture();
+    initializeDeployedGraphPage(harness.browser.context, globals());
+    await flushPromises();
+
+    expect(harness.removedSection.style.display).toBe("block");
+    expect(harness.removedList.children).toHaveLength(1);
+    expect(fakeText(harness.removedList)).toContain("cache");
+    expect(fakeText(harness.removedList)).toContain("Radius.Data/redisCaches");
+  });
+
+  it("hides the panel when the definition still declares everything deployed", async () => {
+    const harness = removedFixture({
+      resources: [],
+      removedResources: [],
+      mode: "terminal"
+    });
+    initializeDeployedGraphPage(harness.browser.context, globals());
+    await flushPromises();
+
+    expect(harness.removedSection.style.display).toBe("none");
+    expect(harness.removedList.children).toHaveLength(0);
+  });
+
+  it("drops a removed entry that cannot be identified precisely", async () => {
+    const harness = removedFixture({
+      resources: [],
+      removedResources: [
+        { id: "no-type", name: "cache" },
+        { id: "no-name", type: "Radius.Data/redisCaches" }
+      ],
+      mode: "terminal"
+    });
+    initializeDeployedGraphPage(harness.browser.context, globals());
+    await flushPromises();
+
+    expect(harness.removedSection.style.display).toBe("none");
+  });
+
+  it("deletes a confirmed removed resource with the nonce and graph revision", async () => {
+    const harness = removedFixture();
+    const { opens } = await startDelete(harness);
+
+    expect(opens).toContainEqual({
+      variant: "resource",
+      app: "app",
+      environment: "dev",
+      resources: [{ name: "cache", type: "Radius.Data/redisCaches" }]
+    });
+    const call = harness.browser.net.calls.find(
+      (candidate) => candidate.url === "/api/delete-resource"
+    );
+    expect(call?.init?.method).toBe("POST");
+    expect(
+      (call?.init?.headers as Record<string, string>)["X-Radius-Mutation-Nonce"]
+    ).toBe("nonce-1");
+    // The revision binds the request to the exact deployed graph on screen.
+    expect(JSON.parse(String(call?.init?.body))).toEqual({
+      repo: "octo/app",
+      environment: "dev",
+      application: "app",
+      resourceName: "cache",
+      resourceType: "Radius.Data/redisCaches",
+      revision: "a1b2c3d4"
+    });
+    expect(fakeText(harness.inlineStatus)).toContain("Deleting cache");
+    // The control is held while the run is tracked, so the list cannot start a
+    // second destructive operation.
+    expect(removedButton(harness).getAttribute("disabled")).toBe("disabled");
+    expect(fakeText(removedButton(harness))).toBe("Deleting…");
+  });
+
+  it("keeps polling an in-flight delete without claiming an outcome", async () => {
+    const harness = removedFixture();
+    const tracked = await startDelete(harness, {
+      statuses: [{ state: "in_progress", outcome: null }]
+    });
+
+    await tick(harness, 3);
+
+    expect(tracked.statusReads()).toBe(3);
+    expect(fakeText(harness.inlineStatus)).toContain("Deleting cache");
+    expect(removedButton(harness).getAttribute("disabled")).toBe("disabled");
+  });
+
+  it("reports a successful delete and refreshes the deployed graph", async () => {
+    const harness = removedFixture();
+    await startDelete(harness, {
+      statuses: [
+        { state: "in_progress", outcome: null },
+        {
+          state: "completed",
+          outcome: "succeeded",
+          outcomeMessage: "Deletion succeeded",
+          stateWarning: null
+        }
+      ]
+    });
+    const graphReadsBefore = harness.browser.net.calls.filter((call) =>
+      call.url.startsWith("/api/deployed-graph")
+    ).length;
+
+    await tick(harness, 2);
+
+    expect(fakeText(harness.inlineStatus)).toBe("cache was deleted.");
+    expect(harness.inlineStatus.className).toBe("status info");
+    // Only now is the deployed graph actually different.
+    expect(
+      harness.browser.net.calls.filter((call) =>
+        call.url.startsWith("/api/deployed-graph")
+      ).length
+    ).toBeGreaterThan(graphReadsBefore);
+    expect(removedButton(harness).getAttribute("disabled")).toBeNull();
+    expect(fakeText(removedButton(harness))).toBe("Delete resource");
+  });
+
+  // Exception 7.1: the delete run republishes the application's inventory, so
+  // the refresh that follows a successful delete must render THAT inventory —
+  // the row disappears because the resource is gone, not because the page
+  // guessed it would be.
+  it("renders the post-delete inventory the refresh returns", async () => {
+    const harness = removedFixture();
+    await startDelete(harness, {
+      statuses: [
+        {
+          state: "completed",
+          outcome: "succeeded",
+          outcomeMessage: "Deletion succeeded",
+          stateWarning: null
+        }
+      ]
+    });
+    harness.setGraphPayload({
+      resources: [
+        { id: "res-api", name: "api", type: "Radius.Compute/containers" }
+      ],
+      removedResources: [],
+      deployedInventory: {
+        revision: "99887766",
+        complete: true,
+        resources: [
+          { id: "res-api", name: "api", type: "Radius.Compute/containers" }
+        ]
+      },
+      mode: "terminal"
+    });
+
+    await tick(harness);
+
+    expect(fakeText(harness.inlineStatus)).toBe("cache was deleted.");
+    expect(harness.removedSection.style.display).toBe("none");
+    expect(harness.removedList.children).toHaveLength(0);
+  });
+
+  it.each([
+    ["failed", "Deletion failed"],
+    ["cancelled", "Deletion cancelled"],
+    ["timed_out", "Deletion timed out"],
+    ["unknown", "Deletion outcome unknown"]
+  ])("reports a %s delete run", async (outcome, message) => {
+    const harness = removedFixture();
+    await startDelete(harness, {
+      statuses: [
+        {
+          state: "completed",
+          outcome,
+          outcomeMessage: message,
+          stateWarning: null
+        }
+      ]
+    });
+
+    await tick(harness);
+
+    expect(harness.inlineStatus.className).toBe("status error");
+    expect(fakeText(harness.inlineStatus)).toContain(`${message} for cache`);
+    expect(removedButton(harness).getAttribute("disabled")).toBeNull();
+  });
+
+  it("warns about orphans when a successful delete could not save state", async () => {
+    const harness = removedFixture();
+    await startDelete(harness, {
+      statuses: [
+        {
+          state: "completed",
+          outcome: "succeeded",
+          outcomeMessage: "Deletion succeeded",
+          stateWarning:
+            "the deletion ran, but Radius could not save its state. Orphaned cloud resources may exist."
+        }
+      ]
+    });
+
+    await tick(harness);
+
+    expect(harness.inlineStatus.className).toBe("status error");
+    expect(fakeText(harness.inlineStatus)).toContain(
+      "cache was deleted, but the deletion ran, but Radius could not save its state."
+    );
+  });
+
+  it("carries the state warning of a failed delete too", async () => {
+    const harness = removedFixture();
+    await startDelete(harness, {
+      statuses: [
+        {
+          state: "completed",
+          outcome: "failed",
+          outcomeMessage: "Deletion failed",
+          stateWarning: "Orphaned cloud resources may exist."
+        }
+      ]
+    });
+
+    await tick(harness);
+
+    expect(fakeText(harness.inlineStatus)).toContain(
+      "Deletion failed for cache. Orphaned cloud resources may exist."
+    );
+  });
+
+  it("keeps polling through a dropped status read", async () => {
+    const harness = removedFixture();
+    const tracked = await startDelete(harness, {
+      statuses: [
+        new Error("offline"),
+        {
+          state: "completed",
+          outcome: "succeeded",
+          outcomeMessage: "Deletion succeeded"
+        }
+      ]
+    });
+
+    await tick(harness);
+    expect(fakeText(harness.inlineStatus)).toContain("Deleting cache");
+
+    await tick(harness);
+    expect(tracked.statusReads()).toBe(2);
+    expect(fakeText(harness.inlineStatus)).toBe("cache was deleted.");
+  });
+
+  it("keeps polling through a non-200 status response", async () => {
+    const harness = removedFixture();
+    await startDelete(harness, {
+      statuses: [jsonResponse({ error: "boom" }, false, 500)]
+    });
+
+    await tick(harness, 2);
+
+    expect(fakeText(harness.inlineStatus)).toContain("Deleting cache");
+    expect(removedButton(harness).getAttribute("disabled")).toBe("disabled");
+  });
+
+  it("gives up on a bounded schedule rather than tracking forever", async () => {
+    const harness = removedFixture();
+    await startDelete(harness, {
+      statuses: [{ state: "in_progress", outcome: null }]
+    });
+
+    await tick(harness, DELETE_RUN_POLL_LIMIT + 1);
+
+    expect(harness.inlineStatus.className).toBe("status error");
+    expect(fakeText(harness.inlineStatus)).toContain(
+      "did not finish within 20 minutes"
+    );
+    expect(removedButton(harness).getAttribute("disabled")).toBeNull();
+    expect(harness.browser.clock.pending).toBeLessThanOrEqual(2);
+  });
+
+  it("says so when the dispatched run cannot be identified", async () => {
+    const harness = removedFixture();
+    await startDelete(harness, {
+      dispatch: () => jsonResponse({ success: true, runUrl: "" })
+    });
+
+    expect(fakeText(harness.inlineStatus)).toContain(
+      "its workflow run could not be identified"
+    );
+    expect(removedButton(harness).getAttribute("disabled")).toBeNull();
+  });
+
+  it("refuses to start a second delete while one is tracked", async () => {
+    const harness = removedFixture();
+    const { opens } = await startDelete(harness, {
+      statuses: [{ state: "in_progress", outcome: null }]
+    });
+
+    removedButton(harness).dispatch("click");
+
+    expect(opens.filter((open) => open.variant === "resource")).toHaveLength(1);
+  });
+
+  it("surfaces a refused resource delete and reloads the graph", async () => {
+    const harness = removedFixture();
+    await startDelete(harness, {
+      dispatch: () =>
+        jsonResponse(
+          { error: "not in the list of removed resources" },
+          false,
+          409
+        )
+    });
+
+    expect(fakeText(harness.inlineStatus)).toContain(
+      "not in the list of removed resources"
+    );
+    expect(removedButton(harness).getAttribute("disabled")).toBeNull();
+  });
+
+  it("reports a stale page when the nonce is rejected", async () => {
+    const harness = removedFixture();
+    await startDelete(harness, {
+      dispatch: () => jsonResponse({ error: "stale" }, false, 403)
+    });
+
+    expect(fakeText(harness.inlineStatus)).toContain(
+      "This Radius Canvas page is out of date."
+    );
+  });
+
+  it("reports a transport failure without claiming the resource was deleted", async () => {
+    const harness = removedFixture();
+    await startDelete(harness, {
+      dispatch: () => {
+        throw new Error("offline");
+      }
+    });
+
+    expect(fakeText(harness.inlineStatus)).toContain(
+      "Could not delete the resource."
+    );
+    expect(removedButton(harness).getAttribute("disabled")).toBeNull();
+  });
+
+  it("does not open the confirmation without a selected application and environment", async () => {
+    const harness = removedFixture();
+    const { opens, createDialog } = dialogFactory();
+    initializeDeployedGraphPage(
+      harness.browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+    harness.appSelect.value = "";
+    harness.envSelect.value = "";
+
+    harness.removedList.children[0].children[1].dispatch("click");
+
+    expect(opens.filter((open) => open.variant === "resource")).toEqual([]);
+  });
+
+  // Part 8: the application delete names what it actually removes, which
+  // includes resources the definition no longer declares.
+  it("names the authoritative deployed inventory in the application delete confirmation", async () => {
+    const harness = removedFixture();
+    const { opens, createDialog } = dialogFactory();
+    initializeDeployedGraphPage(
+      harness.browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+    harness.appSelect.value = "app";
+    harness.envSelect.value = "dev";
+
+    harness.action.dispatch("click");
+
+    expect(opens.filter((open) => open.variant === "delete")).toEqual([
+      {
+        variant: "delete",
+        app: "app",
+        environment: "dev",
+        resources: [
+          { name: "api", type: "Radius.Compute/containers" },
+          { name: "cache", type: "Radius.Data/redisCaches" }
+        ]
+      }
+    ]);
+  });
+
+  it.each([
+    [
+      "an inventory the server could not complete",
+      {
+        resources: [{ id: "res-api", name: "api", type: "t" }],
+        deployedInventory: { revision: "r", complete: false, resources: [] },
+        mode: "terminal"
+      }
+    ],
+    ["no inventory at all", { resources: [], mode: "greyed" }]
+  ])(
+    "reports an unenumerated application delete for %s",
+    async (_label, payload) => {
+      const harness = removedFixture(payload);
+      const { opens, createDialog } = dialogFactory();
+      initializeDeployedGraphPage(
+        harness.browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
+      harness.appSelect.value = "app";
+      harness.envSelect.value = "dev";
+
+      harness.action.dispatch("click");
+
+      expect(
+        opens.find((open) => open.variant === "delete")?.resources
+      ).toBeUndefined();
+    }
+  );
+
+  it("renders nothing when the page has no removed-resources section", async () => {
+    const harness = fixture({ withRemovedSection: false });
+    harness.browser.net.handle(
+      "/api/deployed-graph?repo=octo%2Fapp&application=app&environment=dev",
+      () => jsonResponse(REMOVED_PAYLOAD)
+    );
+
+    expect(() => {
+      initializeDeployedGraphPage(harness.browser.context, globals());
+    }).not.toThrow();
+    await flushPromises();
+  });
+
+  it("keeps an inventory entry whose type the server could not resolve", async () => {
+    const harness = removedFixture({
+      resources: [],
+      removedResources: [],
+      deployedInventory: {
+        revision: "r",
+        complete: true,
+        resources: [{ id: "res-api", name: "api" }]
+      },
+      mode: "terminal"
+    });
+    const { opens, createDialog } = dialogFactory();
+    initializeDeployedGraphPage(
+      harness.browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+    harness.appSelect.value = "app";
+    harness.envSelect.value = "dev";
+
+    harness.action.dispatch("click");
+
+    expect(opens.find((open) => open.variant === "delete")?.resources).toEqual([
+      { name: "api", type: undefined }
+    ]);
+  });
+
+  it("ignores a confirmation that carries no resource identity", async () => {
+    const harness = removedFixture();
+    const { confirms, createDialog } = dialogFactory();
+    harness.browser.net.handle("/api/delete-resource", () => {
+      throw new Error("a confirmation with no identity must not dispatch");
+    });
+    initializeDeployedGraphPage(
+      harness.browser.context,
+      globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+    );
+    await flushPromises();
+    harness.appSelect.value = "app";
+    harness.envSelect.value = "dev";
+    removedButton(harness).dispatch("click");
+
+    // Confirming the same dialog twice must dispatch at most once: the first
+    // confirm consumes the identity, and the second finds none.
+    harness.browser.net.handle("/api/delete-resource", () =>
+      jsonResponse({ success: true, runUrl: "" })
+    );
+    confirms[confirms.length - 1]();
+    await flushPromises();
+    const dispatches = harness.browser.net.calls.filter(
+      (call) => call.url === "/api/delete-resource"
+    ).length;
+    confirms[confirms.length - 1]();
+    await flushPromises();
+
+    expect(
+      harness.browser.net.calls.filter(
+        (call) => call.url === "/api/delete-resource"
+      ).length
+    ).toBe(dispatches);
+  });
+
+  it("falls back to a generic message when the run reports no outcome text", async () => {
+    const harness = removedFixture();
+    await startDelete(harness, {
+      statuses: [{ state: "completed", outcome: "failed" }]
+    });
+
+    await tick(harness);
+
+    expect(fakeText(harness.inlineStatus)).toContain(
+      "Deletion failed for cache"
+    );
+  });
+
+  it("falls back to a generic message when a refusal carries no error text", async () => {
+    const harness = removedFixture();
+    await startDelete(harness, {
+      dispatch: () => jsonResponse({}, false, 409)
+    });
+
+    expect(fakeText(harness.inlineStatus)).toContain(
+      "Could not start the resource delete workflow."
+    );
+  });
+
+  it.each([
+    ["resolves", false],
+    ["fails", true]
+  ])(
+    "abandons a dispatch that %s after the page is torn down",
+    async (_label, shouldFail) => {
+      const harness = removedFixture();
+      const { confirms, createDialog } = dialogFactory();
+      const pending = createDeferred<HttpResponse>();
+      harness.browser.net.handle("/api/delete-resource", () => pending.promise);
+      const teardown = initializeDeployedGraphPage(
+        harness.browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
+      harness.appSelect.value = "app";
+      harness.envSelect.value = "dev";
+      removedButton(harness).dispatch("click");
+      confirms[confirms.length - 1]();
+      teardown();
+
+      if (shouldFail) pending.reject(new Error("offline"));
+      else pending.resolve(jsonResponse({ success: true, runUrl: RUN_URL }));
+      await flushPromises();
+
+      expect(fakeText(harness.inlineStatus)).not.toContain("was deleted");
+      expect(fakeText(harness.inlineStatus)).not.toContain("Could not delete");
+    }
+  );
+
+  it.each([
+    ["resolves", false],
+    ["fails", true]
+  ])(
+    "abandons a tracked run whose status %s after the page is torn down",
+    async (_label, shouldFail) => {
+      const harness = removedFixture();
+      const { confirms, createDialog } = dialogFactory();
+      const pending = createDeferred<HttpResponse>();
+      harness.browser.net.handle("/api/delete-resource", () =>
+        jsonResponse({ success: true, runUrl: RUN_URL })
+      );
+      harness.browser.net.handle(STATUS_URL, () => pending.promise);
+      const teardown = initializeDeployedGraphPage(
+        harness.browser.context,
+        globals({ radiusCreateDeleteDeploymentDialog: createDialog })
+      );
+      await flushPromises();
+      harness.appSelect.value = "app";
+      harness.envSelect.value = "dev";
+      removedButton(harness).dispatch("click");
+      confirms[confirms.length - 1]();
+      await flushPromises();
+      harness.browser.clock.tick(DELETE_RUN_POLL_MS);
+      teardown();
+
+      if (shouldFail) pending.reject(new Error("offline"));
+      else {
+        pending.resolve(
+          jsonResponse({
+            state: "completed",
+            outcome: "succeeded",
+            outcomeMessage: "Deletion succeeded"
+          })
+        );
+      }
+      await flushPromises();
+
+      expect(fakeText(harness.inlineStatus)).toContain("Deleting cache");
+      expect(harness.browser.clock.pending).toBe(0);
+    }
+  );
 });

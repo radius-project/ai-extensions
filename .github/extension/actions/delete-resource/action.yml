@@ -3,20 +3,51 @@
 # Provider-agnostic resource delete shared by delete-azure.yml and delete-aws.yml.
 # Runs after restore-state (rad startup) has brought back the control-plane state,
 # so the environment, its recipe packs, the application, and the Terraform recipe
-# state all exist and recipe deletes can run. Deletes a single application or
-# environment with the Radius.Core preview surface, then writes a rad-delete-result
-# artifact. State is persisted again by the separate `teardown` action (rad shutdown),
-# which runs unconditionally after this step.
+# state all exist and recipe deletes can run. Deletes a single application, a single
+# environment, or one application-scoped resource, then writes a rad-delete-result
+# artifact. State is persisted again by the separate `teardown` action
+# (rad shutdown), which runs unconditionally after this step.
+#
+# Command surfaces, verified against the Radius CLI this pipeline installs:
+#   * `rad app delete <name> --yes --preview`  — preview-wired (Radius.Core).
+#   * `rad env delete <name> --yes --preview`  — preview-wired (Radius.Core).
+#   * `rad resource show <type> <name> -o json` and
+#     `rad resource delete <type> <name> --yes` — the generic UCP surface. Neither
+#     command is preview-wired and neither accepts `--application`, so passing
+#     either flag aborts the run with "unknown flag" instead of deleting anything.
+#     Ownership is therefore verified here, explicitly, with `rad resource show`
+#     before the delete is issued.
 name: Radius - Delete resource
-description: Delete a Radius application or environment (Radius.Core preview) and write a result artifact.
+description: Delete a Radius application, environment, or single application-scoped resource and write a result artifact.
 
 inputs:
   resource-type:
-    description: What to delete -- "application" or "environment".
+    description: What to delete -- "application", "environment", or "resource" (a single Radius resource inside an application).
     required: true
   name:
-    description: Name of the application or environment to delete.
+    description: Name of the application, environment, or single resource to delete.
     required: true
+  application:
+    description: >-
+      Application that owns the resource, required only when resource-type is
+      "resource". The resource's own `properties.application` must resolve to
+      this name, so a name shared by two applications can never resolve to the
+      wrong one.
+    required: false
+    default: ""
+  environment:
+    description: >-
+      Environment that owns the resource, used only when resource-type is
+      "resource". When supplied and the resource reports an environment, the two
+      must match or the delete is refused.
+    required: false
+    default: ""
+  radius-resource-type:
+    description: >-
+      Fully-qualified Radius resource type (for example
+      Radius.Data/redisCaches), required only when resource-type is "resource".
+    required: false
+    default: ""
   azure-oidc-token-refresh:
     description: Periodically refresh the Azure workload identity token while deletion runs.
     required: false
@@ -30,6 +61,9 @@ runs:
       env:
         RESOURCE_TYPE: ${{ inputs.resource-type }}
         RESOURCE_NAME: ${{ inputs.name }}
+        APPLICATION: ${{ inputs.application }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        RADIUS_RESOURCE_TYPE: ${{ inputs.radius-resource-type }}
         REFRESH_AZURE_OIDC_TOKEN: ${{ inputs.azure-oidc-token-refresh }}
       run: |
         # pipefail so a failed `rad` whose output is piped through `tee` is detected
@@ -53,14 +87,20 @@ runs:
         EXIT=0
         OIDC_REFRESH_PID=""
         OUTFILE=$(mktemp)
+        # jq --arg JSON-encodes untrusted values safely. The `:-` defaults keep
+        # `set -u` from aborting the result write if a caller ever omits the
+        # optional single-resource inputs entirely.
         write_result() {
           jq -n \
             --arg outcome "$OUTCOME" \
             --argjson exitCode "$EXIT" \
             --arg resourceType "$RESOURCE_TYPE" \
             --arg name "$RESOURCE_NAME" \
+            --arg application "${APPLICATION:-}" \
+            --arg environment "${ENVIRONMENT:-}" \
+            --arg radiusResourceType "${RADIUS_RESOURCE_TYPE:-}" \
             --rawfile output "$OUTFILE" \
-            '{schemaVersion:"1.0", outcome:$outcome, exitCode:$exitCode, resourceType:$resourceType, name:$name, output:$output}' \
+            '{schemaVersion:"1.0", outcome:$outcome, exitCode:$exitCode, resourceType:$resourceType, name:$name, application:$application, environment:$environment, radiusResourceType:$radiusResourceType, output:$output}' \
             > "$RESULT_FILE"
         }
         cleanup() {
@@ -79,6 +119,9 @@ runs:
         # `rad` and to write_result (jq --arg JSON-encodes them safely).
         SAFE_TYPE=$(printf '%s' "$RESOURCE_TYPE" | tr -d '[:cntrl:]')
         SAFE_NAME=$(printf '%s' "$RESOURCE_NAME" | tr -d '[:cntrl:]')
+        SAFE_APPLICATION=$(printf '%s' "${APPLICATION:-}" | tr -d '[:cntrl:]')
+        SAFE_ENVIRONMENT=$(printf '%s' "${ENVIRONMENT:-}" | tr -d '[:cntrl:]')
+        SAFE_RADIUS_TYPE=$(printf '%s' "${RADIUS_RESOURCE_TYPE:-}" | tr -d '[:cntrl:]')
 
         if [ -z "${RESOURCE_NAME//[[:space:]]/}" ]; then
           echo "No resource name supplied to delete." >&2
@@ -87,13 +130,38 @@ runs:
           exit 2
         fi
 
-        # Map the resource type to its rad command. Only application and environment
-        # are supported; anything else fails fast without touching the control plane.
+        # Map the resource type to its rad command. Only application, environment
+        # and a single application-scoped resource are supported; anything else
+        # fails fast without touching the control plane.
+        #
+        # `--yes` bypasses the interactive confirmation prompt on every verb.
+        # `--preview` selects the Radius.Core implementation the deploy workflow
+        # provisions, and is added ONLY to the verbs the CLI preview-wires
+        # (`app delete` / `env delete`). `rad resource delete` has no preview
+        # variant and no `--application` flag: it deletes by fully-qualified type
+        # and name within the workspace scope, so adding either flag would abort
+        # the run with "unknown flag" rather than delete anything.
+        DELETE_FLAGS=(--yes --preview)
         case "$RESOURCE_TYPE" in
           application) VERB=(app delete) ;;
           environment) VERB=(env delete) ;;
+          resource)
+            # A single-resource delete is only ever safe when it is fully
+            # identified: without both the Radius type and the owning
+            # application, ownership cannot be verified below and a same-named
+            # resource in another application could be destroyed. Fail closed.
+            if [ -z "${RADIUS_RESOURCE_TYPE:-}" ] || [ -z "${APPLICATION:-}" ] ||
+               [ -z "${RADIUS_RESOURCE_TYPE//[[:space:]]/}" ] || [ -z "${APPLICATION//[[:space:]]/}" ]; then
+              echo "A single-resource delete requires both radius-resource-type and application." >&2
+              OUTCOME="invalid_input"
+              EXIT=2
+              exit 2
+            fi
+            VERB=(resource delete "$RADIUS_RESOURCE_TYPE")
+            DELETE_FLAGS=(--yes)
+            ;;
           *)
-            echo "Unsupported resource type: '$SAFE_TYPE' (expected 'application' or 'environment')." >&2
+            echo "Unsupported resource type: '$SAFE_TYPE' (expected 'application', 'environment', or 'resource')." >&2
             OUTCOME="invalid_input"
             EXIT=2
             exit 2
@@ -111,18 +179,69 @@ runs:
           OIDC_REFRESH_PID=$!
         fi
 
-        # --yes bypasses the interactive confirmation prompt; --preview selects the
-        # Radius.Core implementation the deploy workflow provisions (without it the
-        # base command dispatches to the legacy, non-Radius.Core surface).
+        # Ownership verification for a single-resource delete. `rad resource
+        # delete` resolves by type and name inside the workspace scope and has no
+        # application filter, so this is the ONLY thing standing between the
+        # request and a resource that belongs to a different application. It runs
+        # against the same control plane the delete will use, immediately before
+        # it, and every failure path refuses the delete.
+        #
+        # `properties.application` / `properties.environment` are full UCP
+        # resource IDs; the owning name is the last path segment.
+        if [ "$RESOURCE_TYPE" = "resource" ]; then
+          SHOWFILE=$(mktemp)
+          echo "::group::rad resource show ${SAFE_RADIUS_TYPE}"
+          set +e
+          rad resource show "$RADIUS_RESOURCE_TYPE" "$RESOURCE_NAME" -o json > "$SHOWFILE" 2>>"$OUTFILE"
+          SHOW_EXIT=$?
+          set -e
+          echo "::endgroup::"
+          if [ "$SHOW_EXIT" -ne 0 ]; then
+            {
+              echo "Could not read $SAFE_RADIUS_TYPE '$SAFE_NAME' from the Radius control plane;" \
+                   "refusing to delete a resource whose ownership cannot be verified."
+            } | tee -a "$OUTFILE" >&2
+            OUTCOME="ownership_unverified"
+            EXIT="$SHOW_EXIT"
+            exit "$EXIT"
+          fi
+          OWNER_APP_ID=$(jq -r '.properties.application // ""' "$SHOWFILE" 2>/dev/null || echo "")
+          OWNER_ENV_ID=$(jq -r '.properties.environment // ""' "$SHOWFILE" 2>/dev/null || echo "")
+          OWNER_APP=${OWNER_APP_ID##*/}
+          OWNER_ENV=${OWNER_ENV_ID##*/}
+          # `${var,,}` lowercases: UCP names are case-insensitive, and the canvas
+          # and the workflow derive them independently.
+          if [ -z "$OWNER_APP" ] || [ "${OWNER_APP,,}" != "${APPLICATION,,}" ]; then
+            {
+              echo "Refusing to delete $SAFE_RADIUS_TYPE '$SAFE_NAME': it is owned by application" \
+                   "'$(printf '%s' "${OWNER_APP:-<none>}" | tr -d '[:cntrl:]')', not '$SAFE_APPLICATION'."
+            } | tee -a "$OUTFILE" >&2
+            OUTCOME="ownership_mismatch"
+            EXIT=3
+            exit 3
+          fi
+          if [ -n "${ENVIRONMENT//[[:space:]]/}" ] && [ -n "$OWNER_ENV" ] &&
+             [ "${OWNER_ENV,,}" != "${ENVIRONMENT,,}" ]; then
+            {
+              echo "Refusing to delete $SAFE_RADIUS_TYPE '$SAFE_NAME': it is owned by environment" \
+                   "'$(printf '%s' "$OWNER_ENV" | tr -d '[:cntrl:]')', not '$SAFE_ENVIRONMENT'."
+            } | tee -a "$OUTFILE" >&2
+            OUTCOME="ownership_mismatch"
+            EXIT=3
+            exit 3
+          fi
+          echo "Verified $SAFE_RADIUS_TYPE '$SAFE_NAME' belongs to application '$SAFE_APPLICATION'."
+        fi
+
         # Keep the group label constant: RESOURCE_NAME is untrusted and a newline
         # or workflow-command-like text in it could corrupt log rendering or inject
         # workflow commands. The actual `rad` invocation below still carries the name.
-        echo "::group::rad ${VERB[*]} --yes --preview"
+        echo "::group::rad ${VERB[*]} ${DELETE_FLAGS[*]}"
         # Relax -e only for the pipeline so a non-zero `rad` exit is captured via
         # PIPESTATUS and reported below, rather than aborting the step before we
         # can write the result artifact. -e is restored immediately after.
         set +e
-        rad "${VERB[@]}" "$RESOURCE_NAME" --yes --preview 2>&1 | tee "$OUTFILE"
+        rad "${VERB[@]}" "$RESOURCE_NAME" "${DELETE_FLAGS[@]}" 2>&1 | tee -a "$OUTFILE"
         EXIT=${PIPESTATUS[0]}
         set -e
         echo "::endgroup::"

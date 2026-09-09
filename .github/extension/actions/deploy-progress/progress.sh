@@ -89,6 +89,12 @@ radius_normalize_resources() {
             name: (.name // ""),
             type: (.type // ""),
             provisioningState: (.properties.provisioningState // ""),
+            # Ownership, verbatim from the control plane. The canvas derives the
+            # deletable inventory from ownership rather than from graph
+            # membership, so a record that cannot state its owner is one the
+            # canvas will not offer for deletion.
+            application: (.properties.application // ""),
+            environment: (.properties.environment // ""),
             outputResourceIds: (
                 [
                     (.properties.status.outputResources // [])[]?

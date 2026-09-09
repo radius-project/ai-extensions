@@ -1,14 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ABANDONED_DEPLOYMENT_DESCRIPTION,
+  RESOURCE_DELETING_STATUS,
   resolveDeployStatus,
   resolveEnvironmentDeployment
 } from "./deployment-resolver.js";
+import { deploymentStatusBlocksMutation } from "../../browser/repositories.js";
+import type { StateSaveFailure } from "../../state-save-diagnostics.js";
 
 const REPO = "octo/app";
 const ENVIRONMENT = "dev";
 const DEPLOY_WORKFLOW = "run-rad-commands.yml";
 const DELETE_WORKFLOW = "delete-application.yml";
+const DELETE_RESOURCE_WORKFLOW = "delete-resource.yml";
 
 interface RecordFixture {
   state: string;
@@ -18,12 +22,19 @@ interface RecordFixture {
   runPath?: string;
   runStatus?: string;
   runConclusion?: string;
+  runAttempt?: string;
 }
 
 function resolver(
   ids: string[],
   records: Record<string, RecordFixture>,
-  options: { variables?: string | Error; maxParallelRecords?: number } = {}
+  options: {
+    variables?: string | Error;
+    maxParallelRecords?: number;
+    // Keyed by `<runId>#<runAttempt>`, mirroring the attempt-scoped diagnostic
+    // the teardown action publishes.
+    stateSaveFailures?: Record<string, StateSaveFailure>;
+  } = {}
 ) {
   const ghOrThrow = vi.fn((args: string[]) => {
     const path = args[1] ?? "";
@@ -56,7 +67,8 @@ function resolver(
         [
           record.runPath ?? "",
           record.runStatus ?? "",
-          record.runConclusion ?? ""
+          record.runConclusion ?? "",
+          record.runAttempt ?? "1"
         ].join("\t")
       );
     }
@@ -70,7 +82,12 @@ function resolver(
         ghOrThrow,
         deployWorkflowFile: DEPLOY_WORKFLOW,
         deleteWorkflowFile: DELETE_WORKFLOW,
-        maxParallelRecords: options.maxParallelRecords ?? 10
+        deleteResourceWorkflowFile: DELETE_RESOURCE_WORKFLOW,
+        maxParallelRecords: options.maxParallelRecords ?? 10,
+        readStateSaveFailure: (_repo, runId, runAttempt) =>
+          Promise.resolve(
+            options.stateSaveFailures?.[`${runId}#${runAttempt}`] ?? null
+          )
       })
   };
 }
@@ -107,7 +124,8 @@ describe("resolveEnvironmentDeployment", () => {
       provider: "azure",
       status: "failed",
       deploymentId: "20",
-      runUrl: "https://github.com/octo/app/actions/runs/200"
+      runUrl: "https://github.com/octo/app/actions/runs/200",
+      runId: "200"
     });
     expect(harness.ghOrThrow).toHaveBeenCalledWith([
       "api",
@@ -463,7 +481,8 @@ describe("resolveEnvironmentDeployment", () => {
       provider: "",
       status: "success",
       deploymentId: "20",
-      runUrl: "https://github.com/octo/app/actions/runs/200"
+      runUrl: "https://github.com/octo/app/actions/runs/200",
+      runId: "200"
     });
     expect(harness.ghOrThrow).toHaveBeenCalledWith([
       "api",
@@ -527,8 +546,564 @@ describe("resolveEnvironmentDeployment", () => {
         ghOrThrow,
         deployWorkflowFile: DEPLOY_WORKFLOW,
         deleteWorkflowFile: DELETE_WORKFLOW,
-        maxParallelRecords: 10
+        deleteResourceWorkflowFile: DELETE_RESOURCE_WORKFLOW,
+        maxParallelRecords: 10,
+        readStateSaveFailure: () => Promise.resolve(null)
       })
     ).rejects.toBe(failure);
+  });
+});
+
+describe("failed delete outcome parity (Part 8)", () => {
+  const failedDelete = (conclusion: string) => ({
+    "30": {
+      state: "inactive",
+      logUrl: "https://github.com/octo/app/actions/runs/300",
+      runPath: `.github/workflows/${DELETE_WORKFLOW}`,
+      runStatus: "completed",
+      runConclusion: conclusion
+    }
+  });
+
+  it.each([
+    ["failure", "Deletion failed"],
+    ["cancelled", "Deletion cancelled"],
+    ["timed_out", "Deletion timed out"],
+    ["startup_failure", "Deletion failed"]
+  ])(
+    "reports the exact outcome of a %s delete run",
+    async (conclusion, expected) => {
+      const harness = resolver(["30"], failedDelete(conclusion));
+
+      await expect(harness.resolve()).resolves.toMatchObject({
+        status: "delete-failed",
+        statusDetail: expected
+      });
+    }
+  );
+
+  it("adds orphan-recovery guidance when the delete run could not save state", async () => {
+    const harness = resolver(["30"], failedDelete("failure"), {
+      stateSaveFailures: {
+        "300#1": {
+          attempts: 3,
+          runAttempt: 1,
+          error: "rad shutdown: connection refused"
+        }
+      }
+    });
+
+    const row = await harness.resolve();
+
+    expect(row?.statusDetail).toContain("Deletion failed");
+    expect(row?.statusDetail).toContain(
+      "The deletion ran, but Radius could not save its state."
+    );
+    expect(row?.statusDetail).toContain("Orphaned cloud resources may exist.");
+    expect(row?.statusDetail).toContain(
+      "rad shutdown failed after 3 attempts."
+    );
+  });
+
+  it("keeps the outcome when the state-save diagnostic cannot be read", async () => {
+    const harness = resolver(["30"], failedDelete("cancelled"));
+    const row = await resolveEnvironmentDeployment(REPO, ENVIRONMENT, "app", {
+      ghOrThrow: harness.ghOrThrow,
+      deployWorkflowFile: DEPLOY_WORKFLOW,
+      deleteWorkflowFile: DELETE_WORKFLOW,
+      deleteResourceWorkflowFile: DELETE_RESOURCE_WORKFLOW,
+      maxParallelRecords: 10,
+      readStateSaveFailure: () => Promise.reject(new Error("gh down"))
+    });
+
+    expect(row?.statusDetail).toBe("Deletion cancelled");
+  });
+
+  it("reads no diagnostic for a delete that is still running", async () => {
+    const reads: string[] = [];
+    const harness = resolver(["30"], {
+      "30": {
+        state: "in_progress",
+        logUrl: "https://github.com/octo/app/actions/runs/300",
+        runPath: `.github/workflows/${DELETE_WORKFLOW}`,
+        runStatus: "in_progress"
+      }
+    });
+    const row = await resolveEnvironmentDeployment(REPO, ENVIRONMENT, "app", {
+      ghOrThrow: harness.ghOrThrow,
+      deployWorkflowFile: DEPLOY_WORKFLOW,
+      deleteWorkflowFile: DELETE_WORKFLOW,
+      deleteResourceWorkflowFile: DELETE_RESOURCE_WORKFLOW,
+      maxParallelRecords: 10,
+      readStateSaveFailure: (_repo, runId) => {
+        reads.push(runId);
+        return Promise.resolve(null);
+      }
+    });
+
+    expect(row?.status).toBe("deleting");
+    expect(row?.statusDetail).toBeUndefined();
+    expect(reads).toEqual([]);
+  });
+
+  it("reads no diagnostic for a successful deployment row", async () => {
+    const reads: string[] = [];
+    const harness = resolver(["20"], {
+      "20": {
+        state: "success",
+        logUrl: "https://github.com/octo/app/actions/runs/200",
+        runPath: `.github/workflows/${DEPLOY_WORKFLOW}`,
+        runStatus: "completed",
+        runConclusion: "success"
+      }
+    });
+    const row = await resolveEnvironmentDeployment(REPO, ENVIRONMENT, "app", {
+      ghOrThrow: harness.ghOrThrow,
+      deployWorkflowFile: DEPLOY_WORKFLOW,
+      deleteWorkflowFile: DELETE_WORKFLOW,
+      deleteResourceWorkflowFile: DELETE_RESOURCE_WORKFLOW,
+      maxParallelRecords: 10,
+      readStateSaveFailure: (_repo, runId) => {
+        reads.push(runId);
+        return Promise.resolve(null);
+      }
+    });
+
+    expect(row?.status).toBe("success");
+    expect(reads).toEqual([]);
+  });
+
+  it("scopes the state-save read to the run attempt that concluded", async () => {
+    const reads: Array<[string, string]> = [];
+    const harness = resolver(["30"], {
+      "30": {
+        state: "inactive",
+        logUrl: "https://github.com/octo/app/actions/runs/300",
+        runPath: `.github/workflows/${DELETE_WORKFLOW}`,
+        runStatus: "completed",
+        runConclusion: "failure",
+        runAttempt: "2"
+      }
+    });
+
+    await resolveEnvironmentDeployment(REPO, ENVIRONMENT, "app", {
+      ghOrThrow: harness.ghOrThrow,
+      deployWorkflowFile: DEPLOY_WORKFLOW,
+      deleteWorkflowFile: DELETE_WORKFLOW,
+      deleteResourceWorkflowFile: DELETE_RESOURCE_WORKFLOW,
+      maxParallelRecords: 10,
+      readStateSaveFailure: (_repo, runId, runAttempt) => {
+        reads.push([runId, runAttempt]);
+        return Promise.resolve(null);
+      }
+    });
+
+    expect(reads).toEqual([["300", "2"]]);
+  });
+});
+
+// Exception 7.1: a single-resource cleanup runs its own dispatcher, so its
+// GitHub deployment record must never be read as a whole-application teardown —
+// and while it is running it must still block another mutation of the same
+// deployment, including one started from a different canvas instance.
+describe("single-resource cleanup records", () => {
+  const resourceDelete = (runConclusion?: string) => ({
+    "31": {
+      state: runConclusion ? "inactive" : "in_progress",
+      logUrl: "https://github.com/octo/app/actions/runs/310",
+      runPath: `.github/workflows/${DELETE_RESOURCE_WORKFLOW}`,
+      runStatus: runConclusion ? "completed" : "in_progress",
+      runConclusion
+    }
+  });
+  const deployedApp = {
+    "20": {
+      state: "success",
+      logUrl: "https://github.com/octo/app/actions/runs/200",
+      runPath: `.github/workflows/${DEPLOY_WORKFLOW}`,
+      runStatus: "completed",
+      runConclusion: "success"
+    }
+  };
+
+  it.each([
+    ["succeeded", "success"],
+    ["was cancelled", "cancelled"],
+    ["failed", "failure"]
+  ])(
+    "keeps the application deployed when the resource cleanup %s",
+    async (_label, conclusion) => {
+      const harness = resolver(["31", "20"], {
+        ...resourceDelete(conclusion),
+        ...deployedApp
+      });
+
+      await expect(harness.resolve()).resolves.toMatchObject({
+        status: "success",
+        deploymentId: "20"
+      });
+    }
+  );
+
+  // The blocking case: a cleanup in flight is a destructive operation against
+  // this deployment, so the row reports it instead of the application's older
+  // (non-blocking) deploy status.
+  it("reports a running resource cleanup as a blocking state", async () => {
+    const harness = resolver(["31", "20"], {
+      ...resourceDelete(),
+      ...deployedApp
+    });
+
+    const row = await harness.resolve();
+
+    expect(row).toEqual({
+      app: "radius-app",
+      environment: ENVIRONMENT,
+      provider: "azure",
+      status: RESOURCE_DELETING_STATUS,
+      deploymentId: "31",
+      runUrl: "https://github.com/octo/app/actions/runs/310",
+      runId: "310",
+      statusDetail:
+        "Removing a resource from this application. The application itself stays deployed."
+    });
+    // The listing's own reader treats it as blocking, which is what stops a
+    // second destructive operation on the same deployment.
+    expect(deploymentStatusBlocksMutation(row?.status ?? "")).toBe(true);
+  });
+
+  it("reports a queued resource cleanup as blocking too", async () => {
+    const harness = resolver(["31"], {
+      "31": {
+        state: "queued",
+        logUrl: "https://github.com/octo/app/actions/runs/310",
+        runPath: `.github/workflows/${DELETE_RESOURCE_WORKFLOW}`,
+        runStatus: "queued"
+      }
+    });
+
+    await expect(harness.resolve()).resolves.toMatchObject({
+      status: RESOURCE_DELETING_STATUS,
+      deploymentId: "31"
+    });
+  });
+
+  // Terminal, so it no longer blocks — but a cleanup that did not succeed is
+  // still reported on the application's own row rather than disappearing.
+  it.each([
+    ["failure", "failed"],
+    ["cancelled", "was cancelled"],
+    ["timed_out", "timed out"]
+  ])(
+    "annotates the application row when a %s cleanup fell through",
+    async (conclusion, label) => {
+      const harness = resolver(["31", "20"], {
+        ...resourceDelete(conclusion),
+        ...deployedApp
+      });
+
+      const row = await harness.resolve();
+
+      expect(row).toMatchObject({ status: "success", deploymentId: "20" });
+      expect(row?.statusDetail).toBe(
+        `Removing a resource from this application ${label}. The application is still deployed; see the workflow run for details.\nCleanup run: https://github.com/octo/app/actions/runs/310`
+      );
+      expect(deploymentStatusBlocksMutation(row?.status ?? "")).toBe(false);
+    }
+  );
+
+  it("adds no note when the cleanup succeeded and saved its state", async () => {
+    const harness = resolver(["31", "20"], {
+      ...resourceDelete("success"),
+      ...deployedApp
+    });
+
+    await expect(harness.resolve()).resolves.not.toHaveProperty("statusDetail");
+  });
+
+  // Exception 5.4 on the cleanup path: the resource was deleted, but the run
+  // could not persist Radius state, so the resource's cloud infrastructure may
+  // still exist. The application row is the only place left to say so — the
+  // cleanup's own record is skipped, and the application must stay listed.
+  it("warns on the application row when a successful cleanup could not save state", async () => {
+    const harness = resolver(
+      ["31", "20"],
+      { ...resourceDelete("success"), ...deployedApp },
+      {
+        stateSaveFailures: {
+          "310#1": {
+            attempts: 3,
+            runAttempt: 1,
+            error: "rad shutdown: connection refused"
+          }
+        }
+      }
+    );
+
+    const row = await harness.resolve();
+
+    // The application is untouched: still deployed, still its own run.
+    expect(row).toMatchObject({
+      app: "radius-app",
+      status: "success",
+      deploymentId: "20",
+      runUrl: "https://github.com/octo/app/actions/runs/200"
+    });
+    expect(row?.statusDetail).toContain(
+      "Removing a resource from this application succeeded. The application is still deployed."
+    );
+    expect(row?.statusDetail).toContain("Orphaned cloud resources may exist.");
+    expect(row?.statusDetail).toContain(
+      "rad shutdown failed after 3 attempts."
+    );
+    // The cleanup's own run, not the application's, so the warning is
+    // actionable from the listing.
+    expect(row?.statusDetail).toContain(
+      "Cleanup run: https://github.com/octo/app/actions/runs/310"
+    );
+    expect(deploymentStatusBlocksMutation(row?.status ?? "")).toBe(false);
+  });
+
+  // Both diagnostics at once: the cleanup failed AND its run could not persist
+  // state, which is the case with the most orphan risk.
+  it("reports the outcome and the orphan warning of a failed cleanup together", async () => {
+    const harness = resolver(
+      ["31", "20"],
+      { ...resourceDelete("failure"), ...deployedApp },
+      {
+        stateSaveFailures: {
+          "310#1": {
+            attempts: 3,
+            runAttempt: 1,
+            error: "rad shutdown: connection refused"
+          }
+        }
+      }
+    );
+
+    const row = await harness.resolve();
+
+    expect(row).toMatchObject({ status: "success", deploymentId: "20" });
+    expect(row?.statusDetail).toBe(
+      "Removing a resource from this application failed. The application is still deployed; see the workflow run for details.\n\n" +
+        "The deletion ran, but Radius could not save its state. Orphaned cloud resources may exist. " +
+        "To recover, redeploy the application so Radius reconciles the state; if it still cannot be reconciled, delete the deployment and redeploy it.\n\n" +
+        "rad shutdown failed after 3 attempts.\nrad shutdown: connection refused\n" +
+        "Cleanup run: https://github.com/octo/app/actions/runs/310"
+    );
+  });
+
+  it("reads the diagnostic for the cleanup's own run attempt", async () => {
+    const harness = resolver(
+      ["31", "20"],
+      {
+        ...resourceDelete("success"),
+        "31": {
+          state: "inactive",
+          logUrl: "https://github.com/octo/app/actions/runs/310",
+          runPath: `.github/workflows/${DELETE_RESOURCE_WORKFLOW}`,
+          runStatus: "completed",
+          runConclusion: "success",
+          runAttempt: "2"
+        },
+        ...deployedApp
+      },
+      {
+        stateSaveFailures: {
+          // The FIRST attempt's diagnostic must not be reported for a rerun
+          // that saved its state.
+          "310#1": {
+            attempts: 3,
+            runAttempt: 1,
+            error: "rad shutdown: connection refused"
+          }
+        }
+      }
+    );
+
+    await expect(harness.resolve()).resolves.not.toHaveProperty("statusDetail");
+  });
+
+  it("reports the cleanup failure alone when its diagnostic cannot be read", async () => {
+    const harness = resolver(["31", "20"], {
+      ...resourceDelete("failure"),
+      ...deployedApp
+    });
+
+    const row = await resolveEnvironmentDeployment(
+      REPO,
+      ENVIRONMENT,
+      "radius-app",
+      {
+        ghOrThrow: harness.ghOrThrow,
+        deployWorkflowFile: DEPLOY_WORKFLOW,
+        deleteWorkflowFile: DELETE_WORKFLOW,
+        deleteResourceWorkflowFile: DELETE_RESOURCE_WORKFLOW,
+        maxParallelRecords: 10,
+        readStateSaveFailure: () => Promise.reject(new Error("artifact gone"))
+      }
+    );
+
+    expect(row?.statusDetail).toBe(
+      "Removing a resource from this application failed. The application is still deployed; see the workflow run for details.\nCleanup run: https://github.com/octo/app/actions/runs/310"
+    );
+  });
+
+  it("keeps the delete diagnostic first when both are present", async () => {
+    const harness = resolver(
+      ["31", "30"],
+      {
+        ...resourceDelete("failure"),
+        "30": {
+          state: "inactive",
+          logUrl: "https://github.com/octo/app/actions/runs/300",
+          runPath: `.github/workflows/${DELETE_WORKFLOW}`,
+          runStatus: "completed",
+          runConclusion: "cancelled",
+          runAttempt: "1"
+        }
+      },
+      {}
+    );
+
+    const row = await harness.resolve();
+
+    expect(row?.status).toBe("delete-failed");
+    expect(row?.statusDetail).toBe(
+      "Deletion cancelled\n\nRemoving a resource from this application failed. The application is still deployed; see the workflow run for details.\nCleanup run: https://github.com/octo/app/actions/runs/310"
+    );
+  });
+
+  it("annotates a row resolved on the sequential path too", async () => {
+    const harness = resolver(
+      ["31", "20"],
+      { ...resourceDelete("failure"), ...deployedApp },
+      { maxParallelRecords: 1 }
+    );
+
+    await expect(harness.resolve()).resolves.toMatchObject({
+      deploymentId: "20",
+      statusDetail:
+        "Removing a resource from this application failed. The application is still deployed; see the workflow run for details.\nCleanup run: https://github.com/octo/app/actions/runs/310"
+    });
+  });
+
+  // Newest first: two failed cleanups report the most recent one rather than
+  // stacking notes onto the row until the useful one is buried.
+  it("reports only the newest failed cleanup", async () => {
+    const harness = resolver(["32", "31", "20"], {
+      "32": {
+        state: "inactive",
+        logUrl: "https://github.com/octo/app/actions/runs/320",
+        runPath: `.github/workflows/${DELETE_RESOURCE_WORKFLOW}`,
+        runStatus: "completed",
+        runConclusion: "timed_out"
+      },
+      ...resourceDelete("failure"),
+      ...deployedApp
+    });
+
+    await expect(harness.resolve()).resolves.toMatchObject({
+      deploymentId: "20",
+      statusDetail:
+        "Removing a resource from this application timed out. The application is still deployed; see the workflow run for details.\nCleanup run: https://github.com/octo/app/actions/runs/320"
+    });
+  });
+
+  it("does not report a deployment when only a resource cleanup exists", async () => {
+    const harness = resolver(["31"], resourceDelete("success"));
+
+    await expect(harness.resolve()).resolves.toBeNull();
+  });
+});
+
+// Exception 5.4: a successful application delete normally retires the row. It
+// must not do so silently when the run could not persist Radius state.
+describe("successful delete with an exhausted state save", () => {
+  const succeededDelete = {
+    "30": {
+      state: "inactive",
+      logUrl: "https://github.com/octo/app/actions/runs/300",
+      runPath: `.github/workflows/${DELETE_WORKFLOW}`,
+      runStatus: "completed",
+      runConclusion: "success",
+      runAttempt: "1"
+    }
+  };
+
+  it("retires the row when the delete saved its state", async () => {
+    const harness = resolver(["30"], succeededDelete);
+
+    await expect(harness.resolve()).resolves.toBeNull();
+  });
+
+  it("retains a warning row when the delete could not save its state", async () => {
+    const harness = resolver(["30"], succeededDelete, {
+      stateSaveFailures: {
+        "300#1": {
+          attempts: 3,
+          runAttempt: 1,
+          error: "rad shutdown: connection refused"
+        }
+      }
+    });
+
+    const row = await harness.resolve();
+
+    expect(row).toMatchObject({
+      app: "radius-app",
+      environment: ENVIRONMENT,
+      status: "deleted-state-warning",
+      deploymentId: "30",
+      runUrl: "https://github.com/octo/app/actions/runs/300"
+    });
+    expect(row?.statusDetail).toContain("Deletion succeeded");
+    expect(row?.statusDetail).toContain("Orphaned cloud resources may exist.");
+    expect(row?.statusDetail).toContain(
+      "rad shutdown failed after 3 attempts."
+    );
+  });
+
+  it("still retires the row when the diagnostic cannot be read", async () => {
+    const harness = resolver(["30"], succeededDelete);
+
+    await expect(
+      resolveEnvironmentDeployment(REPO, ENVIRONMENT, "app", {
+        ghOrThrow: harness.ghOrThrow,
+        deployWorkflowFile: DEPLOY_WORKFLOW,
+        deleteWorkflowFile: DELETE_WORKFLOW,
+        deleteResourceWorkflowFile: DELETE_RESOURCE_WORKFLOW,
+        maxParallelRecords: 10,
+        readStateSaveFailure: () => Promise.reject(new Error("gh down"))
+      })
+    ).resolves.toBeNull();
+  });
+
+  it("retains the warning row when the record is resolved sequentially", async () => {
+    // Beyond `maxParallelRecords` the resolver walks records one at a time; the
+    // same decision has to be reached on that path.
+    const harness = resolver(
+      ["99", "30"],
+      {
+        "99": {
+          state: "success",
+          logUrl: "https://github.com/octo/app/actions/runs/990",
+          runPath: ".github/workflows/unrelated.yml",
+          runStatus: "completed",
+          runConclusion: "success"
+        },
+        ...succeededDelete
+      },
+      {
+        maxParallelRecords: 1,
+        stateSaveFailures: {
+          "300#1": { attempts: 2, runAttempt: 1, error: "push rejected" }
+        }
+      }
+    );
+
+    await expect(harness.resolve()).resolves.toMatchObject({
+      status: "deleted-state-warning"
+    });
   });
 });

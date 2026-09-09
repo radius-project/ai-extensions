@@ -7,8 +7,21 @@ export { computeGraphDiff } from "./diff.js";
 export { filterGraphVisualizationResources } from "./visualization.js";
 export {
   deployStatusKeys,
+  findRemovedDeployedResources,
   lookupDeployStatus,
   mergeDeployedGraphMetadata,
-  projectDeployedGraph
+  projectDeployedGraph,
+  selectApplicationOwnedResources
 } from "./deployed.js";
-export type { DeployStatus } from "./deployed.js";
+export type {
+  ApplicationResourceScope,
+  DeployStatus,
+  RemovedDeployedResource
+} from "./deployed.js";
+export {
+  classifyLifecycleConclusion,
+  lifecycleOutcomeMessage,
+  stateSaveFailureWarning,
+  unfinishedNodeMessage
+} from "./lifecycle.js";
+export type { LifecycleOperation, LifecycleOutcome } from "./lifecycle.js";

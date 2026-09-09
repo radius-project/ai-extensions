@@ -887,9 +887,9 @@ export function defaultFakeCliScenario(): FakeCliScenario {
           "api",
           `/repos/${REPOSITORY}/actions/runs/1`,
           "--jq",
-          '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "")'
+          '(.path // "") + "\\t" + (.status // "") + "\\t" + (.conclusion // "") + "\\t" + ((.run_attempt // 1) | tostring)'
         ],
-        stdout: ".github/workflows/run-rad-commands.yml\tcompleted\tsuccess"
+        stdout: ".github/workflows/run-rad-commands.yml\tcompleted\tsuccess\t1"
       },
       appBicep404,
       missingGhContent(
@@ -903,6 +903,9 @@ export function defaultFakeCliScenario(): FakeCliScenario {
       ),
       missingGhContent(
         "/repos/radius-project/radius/contents/.github/extension/delete-application.yml?ref=main"
+      ),
+      missingGhContent(
+        "/repos/radius-project/radius/contents/.github/extension/delete-resource.yml?ref=main"
       ),
       missingGhContent(
         "/repos/radius-project/radius/contents/.github/extension/delete-azure.yml?ref=main"

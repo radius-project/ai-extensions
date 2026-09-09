@@ -36,6 +36,10 @@ export interface DeployJobStatus {
   application: string;
   environment: string;
   error: string;
+  // Exception 5.4: the run persisted no Radius state. Orthogonal to `error` —
+  // a deploy that SUCCEEDED can carry this — so it is reported separately and
+  // must not be collapsed into a green "deployed" chip.
+  stateWarning: string;
   runUrl: string;
   repairing: boolean;
   finishedAt: number;
@@ -60,6 +64,7 @@ export function parseDeployJobStatus(payload: unknown): DeployJobStatus | null {
     application: readString(payload, "application"),
     environment: readString(payload, "environment"),
     error: readString(payload, "error"),
+    stateWarning: readString(payload, "stateWarning"),
     // Refused here rather than at the click, so a non-https value never reaches
     // the anchor's href either.
     runUrl: safeExternalUrl(readString(payload, "runUrl")),
@@ -96,6 +101,12 @@ export function deployChipLabel(status: DeployJobStatus): string {
       return `Deploying ${application}…`;
     case "success":
     case "complete":
+      // Exception 5.4: a deploy that could not persist Radius state is not a
+      // clean success. The chip is often the ONLY surface a user who navigated
+      // away ever sees, so it must not report this one as green and done.
+      if (status.stateWarning) {
+        return `${application} deployed — Radius state not saved`;
+      }
       return status.environment ?
           `${application} deployed to ${status.environment}`
         : `${application} deployed`;
@@ -109,7 +120,7 @@ export function deployChipLabel(status: DeployJobStatus): string {
 export function deployChipTone(status: DeployJobStatus): string {
   if (status.status === "in_progress") return "rad-opchip--running";
   if (status.status === "success" || status.status === "complete") {
-    return "rad-opchip--done";
+    return status.stateWarning ? "rad-opchip--warn" : "rad-opchip--done";
   }
   if (status.status === "failed") return "rad-opchip--failed";
   return "";
@@ -237,8 +248,10 @@ export function initializeDeployChip(
     const key = deployChipKey(status);
     if (key !== "" && acknowledged(key)) return hide();
     // The failure's own message goes in the tooltip and the accessible name, so
-    // the three-word chip is never the only thing on offer.
-    const summary = status.error || text;
+    // the three-word chip is never the only thing on offer. A state-save
+    // warning takes that slot on an otherwise-successful run, because it is the
+    // only actionable thing about it.
+    const summary = status.error || status.stateWarning || text;
     // A failed run points at the job on GitHub, which is where the error
     // actually lives; everything else points back at the Deployments page. The
     // run URL is also the href so the chip stays a real, copyable link.

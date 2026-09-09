@@ -183,7 +183,8 @@ describe("compiled page entry API contracts", () => {
         "/api/list-deployments",
         "/api/deploy",
         "/api/delete-deployment",
-        "/api/deploy-status"
+        "/api/deploy-status",
+        "/api/deployed-graph"
       ]
     ],
     [
@@ -532,6 +533,8 @@ describe("compiled graph page network contracts", () => {
       "deployed-graph-page",
       [
         "/api/deploy",
+        "/api/delete-resource",
+        "/api/delete-run-status",
         "/api/list-deployments",
         "/api/deployed-graph",
         "/api/deploy-status",

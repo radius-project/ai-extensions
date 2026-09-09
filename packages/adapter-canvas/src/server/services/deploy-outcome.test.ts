@@ -7,6 +7,7 @@ import {
   type DeployGraphRead
 } from "./deploy-outcome.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import { settleDeployStatuses } from "../../deploy-artifacts.js";
 
 function dependencies(
   overrides: Partial<DeployOutcomeDependencies> = {}
@@ -17,6 +18,7 @@ function dependencies(
     extractGitHubActionsStepLog: () => "",
     explainOidcEnterpriseClaim: () => "",
     extractRadDeployError: () => "",
+    readStateSaveFailure: () => Promise.resolve(null),
     sleep: () => Promise.resolve(),
     now: () => 1_700_000_060_000,
     ...overrides
@@ -92,6 +94,7 @@ describe("deploy outcome construction", () => {
     "extractGitHubActionsStepLog",
     "explainOidcEnterpriseClaim",
     "extractRadDeployError",
+    "readStateSaveFailure",
     "sleep",
     "now"
   ] as const)("refuses to construct without %s", (name) => {
@@ -414,13 +417,13 @@ describe("deploy outcome on failure", () => {
     );
   });
 
-  it("reports a conclusion-less failure without inventing one", async () => {
+  it("reports a conclusion-less failure as unknown rather than as a failure", async () => {
     const { request, state } = outcomeRequest({ conclusion: null, steps: [] });
     const service = createDeployOutcomeService(dependencies());
 
     await service.settle(request);
 
-    expect(state.deployError).toContain("Deployment failed.");
+    expect(state.deployError).toContain("Deployment outcome unknown.");
     expect(state.deployError).not.toContain("Failed step:");
   });
 
@@ -466,5 +469,188 @@ describe("deploy outcome on failure", () => {
     expect(state.deployError).toContain("line-59");
     expect(state.deployError).toContain("line-20");
     expect(state.deployError).not.toContain("line-19");
+  });
+});
+
+describe("deploy outcome for a cancelled or timed-out run", () => {
+  it.each([
+    ["cancelled", "Deployment cancelled"],
+    ["timed_out", "Deployment timed out"]
+  ] as const)(
+    "settles unfinished nodes with the exact %s message",
+    async (conclusion, message) => {
+      const { request, state, logs } = outcomeRequest({ conclusion });
+      const service = createDeployOutcomeService(
+        dependencies({ settleDeployStatuses })
+      );
+      const resources: CanvasGraphResource[] = [
+        { id: "a", name: "api", deployStatus: "in_progress" },
+        { id: "b", name: "db", deployStatus: "pending" }
+      ];
+      request.resources = resources;
+
+      await service.settle(request);
+
+      expect(resources.map((resource) => resource.deployStatus)).toEqual([
+        "failed",
+        "failed"
+      ]);
+      expect(resources.map((resource) => resource.deployMessage)).toEqual([
+        message,
+        message
+      ]);
+      expect(state.deployStatus).toBe("failed");
+      expect(state.deployError).toContain(`${message}.`);
+      expect(state.deployError).not.toContain(`(${conclusion})`);
+      expect(logs).toContain(`❌ ${message}. Conclusion: ${conclusion}`);
+    }
+  );
+
+  it("retains the exact Radius error a resource already reported", async () => {
+    const { request } = outcomeRequest({ conclusion: "cancelled" });
+    const service = createDeployOutcomeService(
+      dependencies({ settleDeployStatuses })
+    );
+    const resources: CanvasGraphResource[] = [
+      {
+        id: "a",
+        name: "api",
+        deployStatus: "failed",
+        deployMessage: "Recipe redis-azure failed: quota exceeded"
+      },
+      { id: "b", name: "db", deployStatus: "success" }
+    ];
+    request.resources = resources;
+
+    await service.settle(request);
+
+    expect(resources[0].deployMessage).toBe(
+      "Recipe redis-azure failed: quota exceeded"
+    );
+    expect(resources[1].deployStatus).toBe("success");
+    expect(resources[1].deployMessage).toBeUndefined();
+  });
+
+  it("keeps the raw conclusion visible for an unspecific failure", async () => {
+    const { request, state } = outcomeRequest({
+      conclusion: "startup_failure"
+    });
+    const service = createDeployOutcomeService(dependencies());
+
+    await service.settle(request);
+
+    expect(state.deployError).toContain("Deployment failed (startup_failure).");
+  });
+});
+
+describe("deploy outcome state-save diagnostics", () => {
+  const failure = {
+    attempts: 3,
+    runAttempt: 1,
+    error: "rad shutdown: connection refused"
+  };
+
+  it("warns about possible orphans on an otherwise successful deployment", async () => {
+    const { request, state, logs } = outcomeRequest({ conclusion: "success" });
+    const service = createDeployOutcomeService(
+      dependencies({ readStateSaveFailure: () => Promise.resolve(failure) })
+    );
+
+    await service.settle(request);
+
+    expect(state.deployStatus).toBe("complete");
+    expect(state.deployStateWarning).toContain(
+      "The deployment ran, but Radius could not save its state."
+    );
+    expect(state.deployStateWarning).toContain(
+      "Orphaned cloud resources may exist."
+    );
+    expect(state.deployStateWarning).toContain(
+      "rad shutdown failed after 3 attempts."
+    );
+    expect(state.deployStateWarning).toContain(
+      "rad shutdown: connection refused"
+    );
+    expect(
+      logs.some((line) =>
+        line.startsWith("⚠ The deployment ran, but Radius could not save")
+      )
+    ).toBe(true);
+  });
+
+  it("appends the warning to the reported error of a failed deployment", async () => {
+    const { request, state } = outcomeRequest({ conclusion: "failure" });
+    const service = createDeployOutcomeService(
+      dependencies({ readStateSaveFailure: () => Promise.resolve(failure) })
+    );
+
+    await service.settle(request);
+
+    expect(state.deployStatus).toBe("failed");
+    expect(state.deployError).toContain("Deployment failed (failure).");
+    expect(state.deployError).toContain("Orphaned cloud resources may exist.");
+  });
+
+  it("reports no warning when the run saved its state", async () => {
+    const { request, state } = outcomeRequest({ conclusion: "success" });
+    const service = createDeployOutcomeService(dependencies());
+
+    await service.settle(request);
+
+    expect(state.deployStateWarning).toBeNull();
+  });
+
+  it("reports no warning when the diagnostic read fails", async () => {
+    const { request, state } = outcomeRequest({ conclusion: "success" });
+    const service = createDeployOutcomeService(
+      dependencies({
+        readStateSaveFailure: () => Promise.reject(new Error("gh down"))
+      })
+    );
+
+    await expect(service.settle(request)).resolves.toBeUndefined();
+
+    expect(state.deployStateWarning).toBeNull();
+    expect(state.deployStatus).toBe("complete");
+  });
+
+  it("scopes the diagnostic read to this run's attempt", async () => {
+    const reads: Array<[string, number | string, number | undefined]> = [];
+    const { request } = outcomeRequest({
+      conclusion: "success",
+      runAttempt: 2
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        readStateSaveFailure: (repo, runId, runAttempt) => {
+          reads.push([repo, runId, runAttempt]);
+          return Promise.resolve(null);
+        }
+      })
+    );
+
+    await service.settle(request);
+
+    expect(reads).toEqual([["acme/widgets", 42, 2]]);
+  });
+});
+
+// Exception 5.1: `/api/deployed-graph` reads this back to reproduce the exact
+// per-node message, so a cancelled run must not be recorded as a plain failure.
+describe("deploy outcome exact terminal outcome", () => {
+  it.each([
+    ["success", "succeeded"],
+    ["failure", "failed"],
+    ["cancelled", "cancelled"],
+    ["timed_out", "timed_out"],
+    ["startup_failure", "failed"],
+    [null, "unknown"]
+  ])("records %s as the %s outcome", async (conclusion, expected) => {
+    const { request, state } = outcomeRequest({ conclusion });
+    const service = createDeployOutcomeService(dependencies());
+
+    await service.settle(request);
+
+    expect(state.deployOutcome).toBe(expected);
   });
 });

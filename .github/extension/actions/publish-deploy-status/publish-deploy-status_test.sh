@@ -243,6 +243,8 @@ case "${1:-} ${2:-}" in
           {"id":"/planes/radius/local/rg/web","name":"web",
            "type":"Radius.Compute/containers",
            "properties":{"provisioningState":"Succeeded",
+                         "application":"/planes/radius/local/rg/providers/Applications.Core/applications/todolist",
+                         "environment":"/planes/radius/local/rg/providers/Applications.Core/environments/aks-dev",
                          "status":{"message":"container ready",
                            "outputResources":[
                              {"id":"/planes/kubernetes/local/providers/core/Service/web"},
@@ -443,9 +445,14 @@ $(cat "${file}")"
     # graph, and the raw one to recover if the mapping goes stale.
     progress_jq 'all(.resources[]; has("id") and has("name") and has("type")
         and has("provisioningState") and has("outputResourceIds")
-        and has("status") and has("message"))' ||
+        and has("status") and has("message")
+        and has("application") and has("environment"))' ||
         fail "every .resources[] entry needs id, name, type, provisioningState,\
- outputResourceIds, status and message; got: $(jq -c '.resources' "${file}")"
+ outputResourceIds, status, message, application and environment; got: \
+$(jq -c '.resources' "${file}")"
+    progress_jq '.operation == "deploy" or .operation == "resource-delete"' ||
+        fail "expected .operation to name the publishing operation, got: \
+$(jq -c '.operation' "${file}")"
     progress_jq 'all(.resources[]; .outputResourceIds | type == "array")' ||
         fail "every .resources[].outputResourceIds must be an array"
     progress_jq 'all(.resources[];
@@ -491,6 +498,9 @@ reset_environment() {
     export GITHUB_SHA="deadbeefcafe"
     export GITHUB_RUN_ID="4242"
     export APP_FILE="${LITERAL_APP_FILE}"
+    export APPLICATION=""
+    export OPERATION="deploy"
+    export RUN_STATE_OVERRIDE=""
     unset RAD_GRAPH_SHOULD_FAIL RAD_APP_LIST_NAME
     unset RAD_RESOURCE_LIST_SHOULD_FAIL
     printf '{"outcome":"success","exitCode":0}\n' >"${RESULT_FILE}"
@@ -739,6 +749,66 @@ assert_step_outputs "radius-deploy-status-aks-dev-todolist" "true" \
 assert_status_dir_contains_exactly "${EXPECTED_STATUS_FILES}" \
     "${FALLBACK_STATUS_DIR}"
 rm -rf "${FALLBACK_STATUS_DIR}"
+
+# ---------------------------------------------------------------------------
+# Exception 7.1: a resource delete republishes what the application still owns,
+# from the live control plane, while the restored state is up. It runs from the
+# default branch with no app file and no rad-commands result, so the app name,
+# the operation and the run state are all stated by the caller.
+# ---------------------------------------------------------------------------
+readonly INVENTORY_STATUS_FILES="deploy-activity.log
+deploy-controlplane.log
+deploy-progress.json
+deploy-state.txt"
+
+reset_environment
+export APP_FILE=""
+export APPLICATION="todolist"
+export OPERATION="resource-delete"
+export RUN_STATE_OVERRIDE="succeeded"
+rm -f "${RESULT_FILE}"
+run_publisher
+assert_exit_zero "resource-delete republish"
+assert_step_outputs "radius-deploy-status-aks-dev-todolist" "true"
+# No app file means no deployed graph — the inventory is what the canvas needs,
+# and claiming a graph it could not generate would be worse than omitting one.
+assert_status_dir_contains_exactly "${INVENTORY_STATUS_FILES}"
+assert_progress_contract
+assert_run_state "succeeded"
+progress_jq '.operation == "resource-delete"' ||
+    fail "expected the publishing operation to be recorded"
+# shellcheck disable=SC2016
+progress_jq --arg app "todolist" '.application == $app' ||
+    fail "expected the caller-supplied application name"
+progress_jq '.resources | length == 3' ||
+    fail "expected the post-delete inventory to list what the app still owns"
+# Ownership, verbatim, so the canvas can verify it per record instead of
+# inferring it from graph membership.
+progress_jq 'any(.resources[]; .name == "web"
+    and .application ==
+      "/planes/radius/local/rg/providers/Applications.Core/applications/todolist"
+    and .environment ==
+      "/planes/radius/local/rg/providers/Applications.Core/environments/aks-dev")' ||
+    fail "expected each record to carry the ownership the control plane reported"
+progress_jq 'any(.resources[]; .name == "queue" and .application == "")' ||
+    fail "a record with no declared owner must publish an empty owner, not null"
+
+# An unsupported run-state is ignored rather than published: a value the canvas
+# does not understand would be read as no verdict at all.
+reset_environment
+export RUN_STATE_OVERRIDE="totally-bogus"
+run_publisher
+assert_exit_zero "unsupported run-state"
+assert_output_contains "Ignoring unsupported run-state"
+assert_run_state "succeeded"
+
+# Without an app file AND without an application there is nothing to publish.
+reset_environment
+export APP_FILE=""
+run_publisher
+assert_exit_zero "no application identity"
+assert_output_contains "Could not determine application name"
+assert_step_outputs "" "false"
 
 # ---------------------------------------------------------------------------
 # The wiring between the two composite steps. These three expressions are the

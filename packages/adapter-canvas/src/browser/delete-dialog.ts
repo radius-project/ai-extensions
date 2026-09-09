@@ -30,7 +30,11 @@ export const DELETE_DIALOG_STEP2_BUTTON_ID = "del-step2-btn";
 export const DELETE_DIALOG_CONFIRM_INPUT_ID = "del-confirm-input";
 export const DELETE_DIALOG_CONFIRM_BUTTON_ID = "del-confirm-btn";
 
-export type DeploymentDialogVariant = "delete" | "abandon";
+export type DeploymentDialogVariant = "delete" | "abandon" | "resource";
+
+// How many resources the effects step names individually before summarizing the
+// remainder. A confirmation the user cannot read is not a confirmation.
+export const DELETE_DIALOG_RESOURCE_LIMIT = 8;
 
 export interface DeleteDialogOptions {
   modalId?: string;
@@ -43,14 +47,30 @@ export interface DeleteDialogOptions {
 }
 
 export interface DeleteDialogHandle {
-  open(app: string, environment: string): void;
+  // `resources` is what the deletion actually removes, as the caller resolved
+  // it. Passing an empty list is meaningful and distinct from omitting it: it
+  // says "nothing was enumerated", which the dialog reports honestly rather
+  // than presenting as "nothing will be deleted".
+  open(
+    app: string,
+    environment: string,
+    resources?: readonly DeleteResourceSummary[]
+  ): void;
   close(): void;
   teardown(): void;
+}
+
+export interface DeleteResourceSummary {
+  readonly name: string;
+  readonly type?: string;
 }
 
 export interface DeleteTarget {
   readonly app: string;
   readonly environment: string;
+  // Undefined when the caller could not enumerate the resources at all, which
+  // reads differently from an application that genuinely has none.
+  readonly resources?: readonly DeleteResourceSummary[];
 }
 
 interface Registration {
@@ -67,8 +87,13 @@ export const DELETE_DIALOG_FOCUSABLE_SELECTOR = FOCUSABLE_SELECTOR;
 export function deleteDialogConfirmToken(
   app: string,
   environment: string,
-  _variant: DeploymentDialogVariant = "delete"
+  _variant: DeploymentDialogVariant = "delete",
+  resourceName?: string
 ): string {
+  // A single-resource delete confirms on the resource's own name: it is the
+  // exact thing being torn down, and typing the application name would let a
+  // user confirm the wrong resource in a list of several.
+  if (_variant === "resource" && resourceName) return resourceName;
   return `${app}/${environment}`;
 }
 
@@ -91,6 +116,22 @@ export function deleteDialogIntentSpecs(
       }
     ];
   }
+  if (variant === "resource") {
+    return [
+      {
+        tag: "p",
+        className: "rad-ddlg__text",
+        text: "This resource is still deployed even though the application definition no longer declares it. Deleting it tears down the running resource. To proceed, please confirm your intention."
+      },
+      {
+        tag: "button",
+        id: DELETE_DIALOG_STEP1_BUTTON_ID,
+        className: "rad-ddlg__btn",
+        attrs: { type: "button" },
+        text: "I want to delete this removed resource"
+      }
+    ];
+  }
   return [
     {
       tag: "p",
@@ -104,6 +145,73 @@ export function deleteDialogIntentSpecs(
       attrs: { type: "button" },
       text: "I want to delete this deployment"
     }
+  ];
+}
+
+// The resource inventory the effects step shows, so the confirmation names what
+// is actually being torn down rather than only the application and environment.
+function resourceSummarySpecs(target: DeleteTarget): ElementSpec[] {
+  if (target.resources === undefined) {
+    return [
+      {
+        tag: "div",
+        className: "rad-ddlg__bullet",
+        children: [
+          {
+            tag: "span",
+            text: "The list of resources could not be read, so this deletion's exact contents are unknown. Every resource deployed for this application will be deleted."
+          }
+        ]
+      }
+    ];
+  }
+  if (target.resources.length === 0) {
+    return [
+      {
+        tag: "div",
+        className: "rad-ddlg__bullet",
+        children: [
+          {
+            tag: "span",
+            text: "No deployed resources were found for this application. Deleting it will still remove anything the control plane still tracks."
+          }
+        ]
+      }
+    ];
+  }
+  const shown = target.resources.slice(0, DELETE_DIALOG_RESOURCE_LIMIT);
+  const remaining = target.resources.length - shown.length;
+  const items: ElementSpec[] = shown.map((resource) => ({
+    tag: "li",
+    className: "rad-ddlg__resource",
+    children: [
+      { tag: "strong", text: resource.name },
+      ...(resource.type ?
+        [{ tag: "span" as const, text: ` — ${resource.type}` }]
+      : [])
+    ]
+  }));
+  if (remaining > 0) {
+    items.push({
+      tag: "li",
+      className: "rad-ddlg__resource",
+      text: `…and ${remaining} more resource${remaining === 1 ? "" : "s"}`
+    });
+  }
+  return [
+    {
+      tag: "div",
+      className: "rad-ddlg__bullet",
+      children: [
+        {
+          tag: "span",
+          text: `${target.resources.length} deployed resource${
+            target.resources.length === 1 ? "" : "s"
+          } will be deleted:`
+        }
+      ]
+    },
+    { tag: "ul", className: "rad-ddlg__resources", children: items }
   ];
 }
 
@@ -152,6 +260,57 @@ export function deleteDialogEffectsSpecs(
       }
     ];
   }
+  if (variant === "resource") {
+    const [resource] = target.resources ?? [];
+    return [
+      {
+        tag: "div",
+        className: "rad-ddlg__warn",
+        children: [
+          { tag: "span", attrs: { "aria-hidden": "true" }, text: "⚠" },
+          {
+            tag: "span",
+            text: "This action cannot be undone. Please read carefully!"
+          }
+        ]
+      },
+      {
+        tag: "div",
+        className: "rad-ddlg__bullet",
+        children: [
+          {
+            tag: "span",
+            children: [
+              { tag: "span", text: "This will permanently delete " },
+              { tag: "strong", text: resource?.name ?? target.app },
+              ...(resource?.type ?
+                [
+                  { tag: "span" as const, text: " (" },
+                  { tag: "strong" as const, text: resource.type },
+                  { tag: "span" as const, text: ")" }
+                ]
+              : []),
+              { tag: "span", text: " from application " },
+              { tag: "strong", text: target.app },
+              { tag: "span", text: " in environment " },
+              { tag: "strong", text: target.environment },
+              {
+                tag: "span",
+                text: ". The rest of the application is left running."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        tag: "button",
+        id: DELETE_DIALOG_STEP2_BUTTON_ID,
+        className: "rad-ddlg__btn",
+        attrs: { type: "button" },
+        text: "I have read and understand these effects"
+      }
+    ];
+  }
   return [
     {
       tag: "div",
@@ -183,6 +342,7 @@ export function deleteDialogEffectsSpecs(
         }
       ]
     },
+    ...resourceSummarySpecs(target),
     {
       tag: "button",
       id: DELETE_DIALOG_STEP2_BUTTON_ID,
@@ -200,7 +360,8 @@ export function deleteDialogConfirmSpecs(
   const token = deleteDialogConfirmToken(
     target.app,
     target.environment,
-    variant
+    variant,
+    target.resources?.[0]?.name
   );
   return [
     {
@@ -226,8 +387,8 @@ export function deleteDialogConfirmSpecs(
       className: "rad-ddlg__delete",
       attrs: { type: "button" },
       text:
-        variant === "abandon" ?
-          "Stop tracking deployment"
+        variant === "abandon" ? "Stop tracking deployment"
+        : variant === "resource" ? "Delete this resource"
         : "Delete this deployment"
     }
   ];
@@ -326,7 +487,9 @@ export function createDeleteDeploymentDialog(
 
   const showEffects = (target: DeleteTarget): void => {
     const nodes = renderStep(deleteDialogEffectsSpecs(target, variant));
-    bind(stepBindings, nodes[2], "click", () => {
+    // The continue button is always the step's last node; its index moves with
+    // the resource inventory, which varies in length with the deletion.
+    bind(stepBindings, nodes[nodes.length - 1], "click", () => {
       showConfirm(target);
     });
     focusFirstControl();
@@ -337,7 +500,8 @@ export function createDeleteDeploymentDialog(
     const token = deleteDialogConfirmToken(
       target.app,
       target.environment,
-      variant
+      variant,
+      target.resources?.[0]?.name
     );
     const input = asInput(nodes[1]);
     const confirm = asInput(nodes[2]);
@@ -355,14 +519,18 @@ export function createDeleteDeploymentDialog(
     input.focus();
   };
 
-  const open = (app: string, environment: string): void => {
+  const open = (
+    app: string,
+    environment: string,
+    resources?: readonly DeleteResourceSummary[]
+  ): void => {
     returnFocusTo = context.focus.active();
     if (appEl) appEl.textContent = app;
     if (envEl) envEl.textContent = environment;
     // The modal has to be visible before the first step renders: a control
     // inside a hidden subtree cannot take focus.
     modal.style.display = "flex";
-    showIntent({ app, environment });
+    showIntent({ app, environment, resources });
   };
 
   if (closeEl) bind(owned, closeEl, "click", close);

@@ -21,7 +21,11 @@ import {
 } from "./delete-dialog.js";
 
 interface OpenableDialog {
-  open(app: string, environment: string): void;
+  open(
+    app: string,
+    environment: string,
+    resources?: readonly { name: string; type?: string }[]
+  ): void;
   close(): void;
 }
 
@@ -151,6 +155,48 @@ describe("delete dialog browser entry", () => {
     expect(fakeText(body)).toContain("does not delete cloud resources");
     fakeById(body, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
     expect(fakeText(body)).toContain("may remain");
+  });
+
+  it("forwards the single-resource variant to its own confirmation state", () => {
+    const browser = createFakeBrowserScope();
+    const { body } = dialogMarkup(browser);
+    installDeleteDialogEntry(browser.scope);
+    const dialog = asDialog(
+      requireBrowserFunction(
+        browser.scope,
+        DELETE_DIALOG_FACTORY_GLOBAL
+      )({
+        variant: "resource"
+      })
+    );
+
+    dialog.open("store", "prod", [
+      { name: "cache", type: "Radius.Data/redisCaches" }
+    ]);
+    expect(fakeText(body)).toContain(
+      "the application definition no longer declares it"
+    );
+    fakeById(body, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
+    expect(fakeText(body)).toContain(
+      "The rest of the application is left running."
+    );
+  });
+
+  it("falls back to the application delete variant for an unknown value", () => {
+    const browser = createFakeBrowserScope();
+    const { body } = dialogMarkup(browser);
+    installDeleteDialogEntry(browser.scope);
+    const dialog = asDialog(
+      requireBrowserFunction(
+        browser.scope,
+        DELETE_DIALOG_FACTORY_GLOBAL
+      )({
+        variant: "sideways"
+      })
+    );
+
+    dialog.open("store", "prod");
+    expect(fakeText(body)).toContain("I want to delete this deployment");
   });
 
   it("ignores malformed option fields and non-callable handlers", () => {

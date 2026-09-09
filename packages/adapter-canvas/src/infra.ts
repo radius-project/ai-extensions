@@ -18,6 +18,7 @@ import {
   generateDeleteWorkflow as coreGenerateDeleteWorkflow,
   DELETE_RADIUS_REF,
   DELETE_APP_DISPATCHER_FILE,
+  DELETE_RESOURCE_DISPATCHER_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_ENV_AZURE_FILE,
   DELETE_AZURE_FILE,
@@ -268,6 +269,7 @@ function assertTrustedGeneratedWorkflow(
 export { DEPLOY_DISPATCHER_FILE, DEPLOY_AZURE_FILE, DEPLOY_AWS_FILE };
 export {
   DELETE_APP_DISPATCHER_FILE,
+  DELETE_RESOURCE_DISPATCHER_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_ENV_AZURE_FILE,
   DELETE_AZURE_FILE,
@@ -506,6 +508,7 @@ export async function generateDeleteWorkflow(
 ): Promise<Record<string, string>> {
   const fetched = [
     DELETE_APP_DISPATCHER_FILE,
+    DELETE_RESOURCE_DISPATCHER_FILE,
     DELETE_AZURE_FILE,
     DELETE_ENV_DISPATCHER_FILE,
     DELETE_ENV_AZURE_FILE
@@ -526,6 +529,7 @@ export async function generateDeleteWorkflow(
   // it, but running it keeps both dispatchers guarded the same way.
   for (const dispatcher of [
     DELETE_APP_DISPATCHER_FILE,
+    DELETE_RESOURCE_DISPATCHER_FILE,
     DELETE_ENV_DISPATCHER_FILE
   ]) {
     if (typeof generated[dispatcher] === "string") {
@@ -535,9 +539,11 @@ export async function generateDeleteWorkflow(
   for (const [file, workflow] of Object.entries(generated)) {
     const isDispatcher =
       file === DELETE_APP_DISPATCHER_FILE ||
+      file === DELETE_RESOURCE_DISPATCHER_FILE ||
       file === DELETE_ENV_DISPATCHER_FILE;
     const providerWorkflow =
       file === DELETE_APP_DISPATCHER_FILE ? DELETE_AZURE_FILE
+      : file === DELETE_RESOURCE_DISPATCHER_FILE ? DELETE_AZURE_FILE
       : file === DELETE_ENV_DISPATCHER_FILE ? DELETE_ENV_AZURE_FILE
       : undefined;
     assertTrustedGeneratedWorkflow(

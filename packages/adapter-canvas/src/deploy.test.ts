@@ -789,11 +789,79 @@ describe("selectWorkflowRunId", () => {
     expect(selectWorkflowRunId(runs, since, "del-missing")).toBeNull();
   });
 
+  // A concurrent delete of ANOTHER environment lands in the same timestamp
+  // window and is newer than the baseline, so neither guard alone is enough:
+  // without the correlation being decisive, discovery attaches the stranger's
+  // run to this dispatch.
+  it("never returns a newer uncorrelated run, even with a run-id baseline", () => {
+    const runs = [
+      {
+        databaseId: 12,
+        createdAt: "2026-08-20T10:00:07Z",
+        displayTitle: "Radius - Delete Application billing (prod) del-other"
+      },
+      {
+        databaseId: 11,
+        createdAt: "2026-08-20T10:00:05Z",
+        displayTitle: "Radius - Delete Application todolist (dev) del-mine"
+      }
+    ];
+    expect(selectWorkflowRunId(runs, since, "del-mine", 10)).toBe(11);
+    expect(selectWorkflowRunId(runs, since, "del-absent", 10)).toBeNull();
+  });
+
+  it("refuses a correlated run that is not newer than the baseline", () => {
+    const runs = [
+      {
+        databaseId: 9,
+        createdAt: "2026-08-20T10:00:05Z",
+        displayTitle: "Radius - Delete Application todolist (dev) del-mine"
+      }
+    ];
+    expect(selectWorkflowRunId(runs, since, "del-mine", 9)).toBeNull();
+    expect(selectWorkflowRunId(runs, since, "del-mine", 8)).toBe(9);
+  });
+
+  it("keeps the timestamp window for a correlated run when no baseline was captured", () => {
+    const runs = [
+      {
+        databaseId: 6,
+        createdAt: "2026-08-20T09:58:00Z",
+        displayTitle: "Radius - Delete Application todolist (dev) del-mine"
+      }
+    ];
+    expect(selectWorkflowRunId(runs, since, "del-mine")).toBeNull();
+  });
+
+  it("ignores an empty correlation id and falls back to the baseline", () => {
+    const runs = [
+      { databaseId: 12, createdAt: "2026-08-20T10:00:07Z" },
+      { databaseId: 11, createdAt: "2026-08-20T10:00:05Z" }
+    ];
+    expect(selectWorkflowRunId(runs, since, "  ", 10)).toBe(11);
+  });
+
   it("skips entries missing a databaseId", () => {
     const runs = [
       { createdAt: "2026-08-20T10:00:06Z" },
       { databaseId: 8, createdAt: "2026-08-20T10:00:05Z" }
     ];
     expect(selectWorkflowRunId(runs, since)).toBe(8);
+  });
+
+  it("skips a correlated entry missing a databaseId", () => {
+    const runs = [
+      {
+        createdAt: "2026-08-20T10:00:06Z",
+        displayTitle: "Radius - Delete Application todolist (dev) del-mine"
+      },
+      {
+        databaseId: 8,
+        createdAt: "2026-08-20T10:00:05Z",
+        displayTitle: "Radius - Delete Application todolist (dev) del-mine"
+      }
+    ];
+    expect(selectWorkflowRunId(runs, since, "del-mine")).toBe(8);
+    expect(selectWorkflowRunId([null], since, "del-mine")).toBeNull();
   });
 });

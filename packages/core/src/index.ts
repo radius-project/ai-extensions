@@ -15,14 +15,26 @@
 
 export {
   applicationGraphToResources,
+  classifyLifecycleConclusion,
   computeGraphDiff,
   deployStatusKeys,
   filterGraphVisualizationResources,
+  findRemovedDeployedResources,
+  lifecycleOutcomeMessage,
   lookupDeployStatus,
   mergeDeployedGraphMetadata,
-  projectDeployedGraph
+  projectDeployedGraph,
+  selectApplicationOwnedResources,
+  stateSaveFailureWarning,
+  unfinishedNodeMessage
 } from "./graph/index.js";
-export type { DeployStatus } from "./graph/index.js";
+export type {
+  ApplicationResourceScope,
+  DeployStatus,
+  LifecycleOperation,
+  LifecycleOutcome,
+  RemovedDeployedResource
+} from "./graph/index.js";
 export {
   APP_ORIGIN_REPO_PATH,
   APP_ORIGIN_ROOT_PATH,
@@ -102,6 +114,7 @@ export {
   generateDeleteWorkflow,
   DELETE_RADIUS_REF,
   DELETE_APP_DISPATCHER_FILE,
+  DELETE_RESOURCE_DISPATCHER_FILE,
   DELETE_ENV_DISPATCHER_FILE,
   DELETE_ENV_AZURE_FILE,
   DELETE_ENV_GUARD_STEP_NAME,

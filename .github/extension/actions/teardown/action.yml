@@ -22,6 +22,7 @@ runs:
   using: composite
   steps:
     - name: Persist Radius state (rad shutdown)
+      id: persist-state
       if: always()
       shell: bash
       env:
@@ -42,7 +43,90 @@ runs:
         fi
         git config --global user.email "radius-deploy@users.noreply.github.com"
         git config --global user.name "radius-deploy"
-        rad shutdown
+
+        # `rad shutdown` pushes the control-plane databases to the durable state
+        # archive, so it fails for the same transient reasons any registry push
+        # does (throttling, a token refresh, a brief network partition). Retry it
+        # with a bounded backoff rather than losing the run's state on the first
+        # blip -- exception 5.4.
+        #
+        # A deterministic directory (not `mktemp -d`), because the upload step
+        # below is a separate composite step that must reference this path.
+        STATE_SAVE_DIR="${RUNNER_TEMP:-/tmp}/radius-state-save"
+        rm -rf "$STATE_SAVE_DIR"
+        mkdir -p "$STATE_SAVE_DIR"
+        SHUTDOWN_LOG="$STATE_SAVE_DIR/rad-shutdown.log"
+        : > "$SHUTDOWN_LOG"
+
+        MAX_ATTEMPTS=3
+        # One delay per retry, so the schedule and the attempt cap cannot drift
+        # apart: attempts 1->2 waits 5s, attempts 2->3 waits 15s.
+        RETRY_DELAYS=(5 15)
+        ATTEMPT=0
+        STATUS=1
+        while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
+          ATTEMPT=$((ATTEMPT + 1))
+          # Relax -e around the pipeline so a failed `rad shutdown` is captured via
+          # PIPESTATUS (tee's exit code would mask it) and retried, rather than
+          # aborting the step before the diagnostic below can be written.
+          set +e
+          rad shutdown 2>&1 | tee -a "$SHUTDOWN_LOG"
+          STATUS=${PIPESTATUS[0]}
+          set -e
+          if [ "$STATUS" -eq 0 ]; then
+            break
+          fi
+          echo "::warning title=Radius state save retrying::rad shutdown attempt ${ATTEMPT} of ${MAX_ATTEMPTS} failed (exit ${STATUS})."
+          if [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; then
+            sleep "${RETRY_DELAYS[$((ATTEMPT - 1))]}"
+          fi
+        done
+
+        if [ "$STATUS" -eq 0 ]; then
+          echo "state-save-failed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Every attempt failed. The deploy/delete itself already ran, so failing
+        # the job here would misreport that operation's own outcome; instead
+        # publish a machine-readable diagnostic the canvas reads for this run and
+        # warn with the recovery path. Keep the tail bounded: the canvas renders
+        # this text, and a full shutdown log can be very large.
+        #
+        # The diagnostic is scoped to the run ATTEMPT, not just the run: GitHub
+        # keeps an artifact uploaded by attempt 1 visible to attempt 2, so a
+        # rerun that saved its state would otherwise still be reported as a
+        # state-save failure. The attempt is carried in both the artifact name
+        # and the payload so the reader can require an exact match.
+        RUN_ATTEMPT="${GITHUB_RUN_ATTEMPT:-1}"
+        tail -c 2000 "$SHUTDOWN_LOG" > "$STATE_SAVE_DIR/rad-shutdown-tail.log"
+        jq -n \
+          --argjson attempts "$MAX_ATTEMPTS" \
+          --argjson exitCode "$STATUS" \
+          --arg runId "${GITHUB_RUN_ID:-}" \
+          --arg runAttempt "$RUN_ATTEMPT" \
+          --rawfile error "$STATE_SAVE_DIR/rad-shutdown-tail.log" \
+          '{schemaVersion:"1.0", outcome:"state_save_failed", attempts:$attempts, exitCode:$exitCode, runId:$runId, runAttempt:$runAttempt, error:$error}' \
+          > "$STATE_SAVE_DIR/state-save-failure.json"
+        echo "state-save-failed=true" >> "$GITHUB_OUTPUT"
+        echo "state-save-dir=${STATE_SAVE_DIR}" >> "$GITHUB_OUTPUT"
+        echo "state-save-artifact=radius-state-save-failure-attempt-${RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+        echo "::error title=Radius state was not saved::The operation ran, but rad shutdown failed after ${MAX_ATTEMPTS} attempts, so Radius state was not saved. Orphaned cloud resources may exist. To recover, redeploy the application so Radius reconciles the state; if it still cannot be reconciled, delete the deployment and redeploy it."
+
+    # The canvas reads this artifact for the run attempt it is monitoring and
+    # turns it into the user-facing orphan warning, so its name and the file
+    # inside it are a contract with `src/state-save-diagnostics.ts`. Uploaded
+    # only when state was genuinely not saved: its presence IS the signal.
+    - name: Upload state-save diagnostic
+      if: always() && steps.persist-state.outputs.state-save-failed == 'true'
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ steps.persist-state.outputs.state-save-artifact }}
+        path: ${{ steps.persist-state.outputs.state-save-dir }}
+        retention-days: 7
+        if-no-files-found: warn
+        overwrite: true
 
     - name: Show application status
       if: always()

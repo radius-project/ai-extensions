@@ -213,6 +213,61 @@ describe("parseDeployProgressArtifact", () => {
     expect(parsed?.resources).toHaveLength(1);
   });
 
+  // Exception 7.1: the producer publishes which operation wrote the snapshot,
+  // and the ownership each record declares. Both are additive: a payload from
+  // before they existed parses as a deploy with no per-record ownership.
+  it("reads the publishing operation, defaulting to a deploy", () => {
+    expect(parseDeployProgressArtifact(progressPayload())?.operation).toBe(
+      "deploy"
+    );
+    expect(
+      parseDeployProgressArtifact(
+        progressPayload({ operation: "resource-delete" })
+      )?.operation
+    ).toBe("resource-delete");
+    expect(
+      parseDeployProgressArtifact(
+        progressPayload({ operation: "something-else" } as never)
+      )?.operation
+    ).toBe("deploy");
+  });
+
+  it("carries the ownership each record declares", () => {
+    const parsed = parseDeployProgressArtifact(
+      progressPayload({
+        resources: [
+          {
+            id: "cache",
+            name: "cache",
+            type: "Radius.Data/redisCaches",
+            application:
+              " /planes/radius/local/resourcegroups/default/providers/Applications.Core/applications/todolist ",
+            environment:
+              "/planes/radius/local/resourcegroups/default/providers/Applications.Core/environments/dev"
+          },
+          { id: "api", name: "api", type: "Radius.Compute/containers" },
+          {
+            id: "blank",
+            name: "blank",
+            type: "Radius.Compute/containers",
+            application: "   ",
+            environment: 7
+          }
+        ]
+      } as never)
+    );
+
+    expect(parsed?.resources[0].application).toBe(
+      "/planes/radius/local/resourcegroups/default/providers/Applications.Core/applications/todolist"
+    );
+    expect(parsed?.resources[0].environment).toBe(
+      "/planes/radius/local/resourcegroups/default/providers/Applications.Core/environments/dev"
+    );
+    expect(parsed?.resources[1].application).toBeUndefined();
+    expect(parsed?.resources[2].application).toBeUndefined();
+    expect(parsed?.resources[2].environment).toBeUndefined();
+  });
+
   describe("parseDeployGraphArtifact", () => {
     const graph = {
       resources: [
@@ -708,6 +763,69 @@ describe("settleDeployStatuses", () => {
     settleDeployStatuses(resources, "cancelled");
     expect(resources[0].deployStatus).toBe("failed");
   });
+
+  it("explains every node it settles red with the supplied message", () => {
+    const resources: Array<{
+      deployStatus: DeployStatus;
+      deployMessage?: string;
+    }> = [
+      { deployStatus: "pending" },
+      { deployStatus: "in_progress" },
+      { deployStatus: "failed" },
+      { deployStatus: "success" }
+    ];
+    settleDeployStatuses(resources, "cancelled", {
+      unfinishedMessage: "Deployment cancelled"
+    });
+    expect(resources.map((r) => r.deployMessage)).toEqual([
+      "Deployment cancelled",
+      "Deployment cancelled",
+      "Deployment cancelled",
+      undefined
+    ]);
+  });
+
+  it("never overwrites an exact per-resource error the producer reported", () => {
+    const resources: Array<{
+      deployStatus: DeployStatus;
+      deployMessage?: string;
+    }> = [
+      {
+        deployStatus: "failed",
+        deployMessage: "Recipe redis-azure failed: quota exceeded"
+      },
+      { deployStatus: "in_progress", deployMessage: "   " }
+    ];
+    settleDeployStatuses(resources, "timed_out", {
+      unfinishedMessage: "Deployment timed out"
+    });
+    expect(resources.map((r) => r.deployMessage)).toEqual([
+      "Recipe redis-azure failed: quota exceeded",
+      "Deployment timed out"
+    ]);
+  });
+
+  it("leaves messages untouched when no settle message is supplied", () => {
+    const resources: Array<{
+      deployStatus: DeployStatus;
+      deployMessage?: string;
+    }> = [{ deployStatus: "pending" }];
+    settleDeployStatuses(resources, "failure", { unfinishedMessage: "  " });
+    expect(resources[0].deployStatus).toBe("failed");
+    expect(resources[0].deployMessage).toBeUndefined();
+  });
+
+  it("attaches no settle message to a successful run", () => {
+    const resources: Array<{
+      deployStatus: DeployStatus;
+      deployMessage?: string;
+    }> = [{ deployStatus: "pending" }];
+    settleDeployStatuses(resources, "success", {
+      unfinishedMessage: "Deployment cancelled"
+    });
+    expect(resources[0].deployStatus).toBe("success");
+    expect(resources[0].deployMessage).toBeUndefined();
+  });
 });
 
 // A real payload, captured verbatim from a run of the producer's
@@ -959,6 +1077,62 @@ describe("createDeployStatusReader", () => {
     expect(progress?.application).toBe("todolist");
     const { graph } = await reader.graph();
     expect(graph).toEqual({ resources: [{ name: "frontend" }] });
+  });
+
+  // Exception 7.1: a resource delete republishes the application's inventory
+  // under the same artifact name from a different run. A repo-wide read is not
+  // scoped to a run, so the newest artifact has to win — otherwise the deleted
+  // resource keeps coming back from the previous deploy's snapshot.
+  it("selects the newer resource-delete inventory over the previous deploy", async () => {
+    const downloads: number[] = [];
+    const reader = createDeployStatusReader({
+      ...baseOptions,
+      listArtifacts: async () => [
+        // Deliberately oldest-first, so ordering is decided by created_at
+        // rather than by the order GitHub happened to answer in.
+        artifact("radius-deploy-status-dev-todolist", {
+          id: 1,
+          created_at: "2026-08-06T18:00:00Z",
+          workflow_run: { id: 100 }
+        }),
+        artifact("radius-deploy-status-dev-todolist", {
+          id: 2,
+          created_at: "2026-08-06T19:30:00Z",
+          workflow_run: { id: 200 }
+        })
+      ],
+      downloadArtifact: async (_repo, candidate) => {
+        downloads.push(candidate.id);
+        return candidate.id === 2 ?
+            {
+              [DEPLOY_STATUS_FILES.progress]: progressPayload({
+                runId: 200,
+                sequence: 1,
+                operation: "resource-delete",
+                state: "succeeded",
+                resources: [
+                  {
+                    id: "api",
+                    name: "api",
+                    type: "Radius.Compute/containers"
+                  }
+                ]
+              })
+            }
+          : okFiles({ runId: 100, sequence: 9 });
+      }
+    });
+
+    const progress = await reader.progress();
+
+    // Both are inspected — a repo-wide read cannot know in advance which one
+    // confirms the identity — but the newest is considered first and wins.
+    expect(downloads).toEqual([2, 1]);
+    expect(progress?.runId).toBe(200);
+    expect(progress?.operation).toBe("resource-delete");
+    expect(progress?.resources.map((resource) => resource.name)).toEqual([
+      "api"
+    ]);
   });
 
   it("reads portal metadata when Rad prefixes graph JSON with build progress", async () => {

@@ -199,6 +199,15 @@ export const SERVER_ROUTE_DECLARATIONS: readonly RouteDeclaration[] = [
   declare("GET", "/api/list-applications", "exact", "none", "deployments"),
   declare("GET", "/api/list-deployments", "exact", "none", "deployments"),
   legacyPost("/api/delete-deployment", "exact", "json", "deployments"),
+  // Exception 7.1: deleting one deployed resource the definition no longer
+  // declares. Declared with the modern mutation policy rather than the legacy
+  // exemption its application-scoped sibling carries: it is a new destructive
+  // route, so it requires the browser mutation nonce from the start.
+  declare("POST", "/api/delete-resource", "exact", "json", "deployments"),
+  // The terminal outcome of one dispatched delete run. Read-only, so it needs
+  // no mutation nonce, and it is what turns the removed-resource delete from a
+  // fire-and-forget dispatch into a tracked operation.
+  declare("GET", "/api/delete-run-status", "exact", "none", "deployments"),
   declare("POST", "/api/abandon-deployment", "exact", "json", "deployments"),
   declare("GET", "/api/verify-status", "exact", "none", "environments"),
   declare("GET", "/api/user-repos", "exact", "none", "repositories"),

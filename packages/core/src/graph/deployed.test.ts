@@ -1,9 +1,11 @@
 import { describe, it, expect } from "vitest";
 import {
   deployStatusKeys,
+  findRemovedDeployedResources,
   lookupDeployStatus,
   mergeDeployedGraphMetadata,
-  projectDeployedGraph
+  projectDeployedGraph,
+  selectApplicationOwnedResources
 } from "./deployed.js";
 import type { DeployStatus } from "./deployed.js";
 import { buildResourceID } from "../../test/support/resource-id.js";
@@ -316,5 +318,214 @@ describe("mergeDeployedGraphMetadata", () => {
       { id: modeled[0].id, outputResources: "invalid" }
     ]);
     expect(merged[0].outputResources).toEqual(modeled[0].outputResources);
+  });
+});
+
+describe("findRemovedDeployedResources", () => {
+  const frontend = makeResource("Radius.Compute/containers", "frontend");
+  const cache = makeResource("Radius.Data/redisCaches", "cache");
+
+  it("reports a deployed resource the definition no longer declares", () => {
+    expect(findRemovedDeployedResources([frontend], [frontend, cache])).toEqual(
+      [{ id: cache.id, name: cache.name, type: cache.type }]
+    );
+  });
+
+  it("accepts the wrapped { resources } graph shape", () => {
+    expect(
+      findRemovedDeployedResources([frontend], { resources: [cache] })
+    ).toEqual([{ id: cache.id, name: cache.name, type: cache.type }]);
+  });
+
+  it("treats a resource still modeled under any identity key as retained", () => {
+    const renamedId = { ...cache, id: "/planes/radius/local/other" };
+    expect(findRemovedDeployedResources([cache], [renamedId])).toEqual([]);
+  });
+
+  it("treats a modeled output resource as retained", () => {
+    const modeled = [
+      { ...frontend, outputResources: [{ id: "/subscriptions/x/deployment" }] }
+    ];
+    const deployed = [
+      { id: "/subscriptions/x/deployment", name: "deployment", type: "K8s" }
+    ];
+    expect(findRemovedDeployedResources(modeled, deployed)).toEqual([]);
+  });
+
+  it("skips deployed entries that cannot be identified precisely", () => {
+    expect(
+      findRemovedDeployedResources(
+        [],
+        [
+          { id: "no-name", type: "Radius.Data/redisCaches" },
+          { id: "no-type", name: "cache" },
+          { id: "blank", name: "   ", type: "   " },
+          null
+        ]
+      )
+    ).toEqual([]);
+  });
+
+  it("collapses duplicate deployed entries with the same identity", () => {
+    expect(
+      findRemovedDeployedResources([], [cache, { ...cache }])
+    ).toHaveLength(1);
+  });
+
+  it("reports an entry whose id is not a string with an empty id", () => {
+    expect(
+      findRemovedDeployedResources(
+        [],
+        [{ id: 7, name: "cache", type: "Radius.Data/redisCaches" }]
+      )
+    ).toEqual([{ id: "", name: "cache", type: "Radius.Data/redisCaches" }]);
+  });
+
+  it("reports nothing for an absent or empty deployed graph", () => {
+    expect(findRemovedDeployedResources([frontend], null)).toEqual([]);
+    expect(findRemovedDeployedResources([frontend], [])).toEqual([]);
+  });
+
+  it("reports every deployed resource when the definition is unusable", () => {
+    expect(findRemovedDeployedResources(undefined as any, [cache])).toEqual([
+      { id: cache.id, name: cache.name, type: cache.type }
+    ]);
+  });
+});
+
+// Graph membership is not ownership: `rad app graph` also returns the
+// environment-scoped and external resources the application is connected to,
+// and a per-resource delete derived from those would destroy something the
+// application does not own.
+describe("selectApplicationOwnedResources", () => {
+  const owned = makeResource("Radius.Data/redisCaches", "cache", {
+    properties: {
+      application: "/planes/radius/local/resourceGroups/rg/applications/todo",
+      environment: "/planes/radius/local/resourceGroups/rg/environments/dev"
+    }
+  });
+  const connectedButUnowned = makeResource(
+    "Radius.Data/postgreSQLDatabases",
+    "shared-db",
+    {
+      properties: {
+        application:
+          "/planes/radius/local/resourceGroups/rg/applications/billing",
+        environment: "/planes/radius/local/resourceGroups/rg/environments/dev"
+      }
+    }
+  );
+  const environmentScoped = makeResource("Radius.Core/gateways", "gateway", {
+    properties: {
+      environment: "/planes/radius/local/resourceGroups/rg/environments/dev"
+    }
+  });
+
+  it("keeps only the records the application owns", () => {
+    expect(
+      selectApplicationOwnedResources(
+        { resources: [owned, connectedButUnowned, environmentScoped] },
+        { application: "todo", environment: "dev" }
+      )
+    ).toEqual([owned]);
+  });
+
+  it("matches the owner id's last segment case-insensitively", () => {
+    expect(
+      selectApplicationOwnedResources([owned], {
+        application: "/planes/radius/local/resourceGroups/rg/applications/ToDo",
+        environment: "DEV"
+      })
+    ).toEqual([owned]);
+  });
+
+  it("accepts a flattened owner published by the deploy-status producer", () => {
+    const flattened = makeResource("Radius.Data/redisCaches", "cache", {
+      application: "todo",
+      environment: "dev"
+    });
+    expect(
+      selectApplicationOwnedResources([flattened], { application: "todo" })
+    ).toEqual([flattened]);
+  });
+
+  it("excludes a record owned by the app but deployed to another environment", () => {
+    const otherEnvironment = makeResource("Radius.Data/redisCaches", "cache", {
+      properties: { application: "todo", environment: "staging" }
+    });
+    expect(
+      selectApplicationOwnedResources([otherEnvironment], {
+        application: "todo",
+        environment: "dev"
+      })
+    ).toEqual([]);
+  });
+
+  it("keeps an unowned-looking record only from an application-scoped listing", () => {
+    const listed = makeResource("Radius.Data/redisCaches", "cache");
+    // An id that is not a string states no ownership either, so it depends on
+    // the listing's own scope exactly as a missing owner does.
+    const idless = { name: "worker", type: "Radius.Compute/containers", id: 7 };
+    expect(
+      selectApplicationOwnedResources([listed, idless], {
+        application: "todo"
+      })
+    ).toEqual([]);
+    expect(
+      selectApplicationOwnedResources([listed, idless], {
+        application: "todo",
+        applicationScopedList: true
+      })
+    ).toEqual([listed, idless]);
+  });
+
+  it("still excludes a foreign owner inside an application-scoped listing", () => {
+    expect(
+      selectApplicationOwnedResources([connectedButUnowned], {
+        application: "todo",
+        applicationScopedList: true
+      })
+    ).toEqual([]);
+  });
+
+  // `rad app graph` states ownership only through the node's own id, so a graph
+  // read that ignored the id path would find no owned resource at all.
+  it("derives ownership from an application-scoped resource id", () => {
+    const graphNode = {
+      id: "/planes/radius/local/resourcegroups/default/providers/Applications.Core/applications/ToDo/resources/web",
+      name: "web",
+      type: "Radius.Compute/containers"
+    };
+    const otherApplication = {
+      id: "/planes/radius/local/resourcegroups/default/providers/Applications.Core/applications/billing/resources/db",
+      name: "db",
+      type: "Radius.Data/redisCaches"
+    };
+    const environmentScopedId = {
+      id: "/planes/radius/local/resourcegroups/default/providers/Applications.Core/environments/dev/resources/gateway",
+      name: "gateway",
+      type: "Radius.Core/gateways"
+    };
+    expect(
+      selectApplicationOwnedResources(
+        [graphNode, otherApplication, environmentScopedId],
+        { application: "todo", environment: "dev" }
+      )
+    ).toEqual([graphNode]);
+  });
+
+  it("owns nothing without an application scope or a usable payload", () => {
+    expect(
+      selectApplicationOwnedResources([owned], { application: "   " })
+    ).toEqual([]);
+    expect(
+      selectApplicationOwnedResources(null, { application: "todo" })
+    ).toEqual([]);
+    expect(
+      selectApplicationOwnedResources([null, "text", 7], {
+        application: "todo",
+        applicationScopedList: true
+      })
+    ).toEqual([]);
   });
 });

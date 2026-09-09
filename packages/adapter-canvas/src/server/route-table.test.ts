@@ -132,9 +132,15 @@ const productionHandlers = {
     localDeploymentBlocksMutation: () => false,
     ensureWorkflowsCurrent: () => Promise.resolve({ created: [], failed: [] }),
     findWorkflowRun: () => Promise.resolve(null),
+    latestWorkflowRunId: () => Promise.resolve(null),
+    newCorrelationId: () => "route-table-correlation",
     runGh: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
     readProcessEnv: () => ({}),
     setTimer: () => ({}),
+    repoMatchesWorkspace: () => false,
+    reloadModeledGraph: () => Promise.resolve({ status: 200 }),
+    invalidateDeployedGraphCache: () => {},
+    readStateSaveFailure: () => Promise.resolve(null),
     // Construction-only: this suite asserts table shape and ownership, so the
     // deploy admission service is never invoked here. Its behavior is covered
     // by services/deploy-request.test.ts and by the loopback HTTP suite.
@@ -490,6 +496,7 @@ describe("server route ownership boundary", () => {
       "POST /api/run-remediation",
       "POST /api/github-account",
       "POST /api/operations",
+      "POST /api/delete-resource",
       "POST /api/abandon-deployment",
       "POST /api/operations/:operationId/resume/:code",
       "POST /api/operations/:operationId/abandon",

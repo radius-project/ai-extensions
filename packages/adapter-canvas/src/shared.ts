@@ -8,6 +8,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { LifecycleOutcome } from "@radius-project/core";
+import type { DeployedInventory } from "./server/services/deployed-inventory.js";
 
 export interface CredentialProfile {
   [key: string]: unknown;
@@ -282,6 +284,15 @@ export interface CanvasState {
   deployLogBase?: number;
   deployStatus?: string;
   deployError?: string | null;
+  // Exception 5.4: set when the run's teardown could not persist Radius state
+  // after its bounded retries. Independent of `deployError` — a successful
+  // deployment can still have failed to save its state — so it is reported
+  // alongside a success as well as a failure.
+  deployStateWarning?: string | null;
+  // Exception 5.1: the run's EXACT terminal outcome, so a cancelled or
+  // timed-out deploy is not flattened into a plain failure by the time the
+  // deployed-graph projection reads it back.
+  deployOutcome?: LifecycleOutcome | null;
   activeGraphView?: GraphView;
   sourceRefContexts?: Partial<Record<GraphView, SourceRefContext>>;
   pendingSourceRefs?: PendingSourceRef[];
@@ -334,6 +345,13 @@ export interface CanvasState {
   verifyRunUrl?: string;
   deployedGraph?: CanvasGraphResource[] | null;
   deployedGraphRepo?: string;
+  // Exception 7.1 / Part 8: the authoritative deployed inventory for the last
+  // `/api/deployed-graph` selection, the resources the current definition no
+  // longer declares, and the deterministic revision that binds both to that
+  // selection. The per-resource delete route re-derives the removal from the
+  // current definition and requires this exact revision, so a destructive call
+  // can never act on an identity the server has not just re-confirmed.
+  deployedInventory?: DeployedInventory | null;
   resolvedRecipes?: unknown[];
   diffBaseGenerated?: boolean;
   diffHeadGenerated?: boolean;
