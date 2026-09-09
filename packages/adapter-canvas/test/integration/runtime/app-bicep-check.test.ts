@@ -1023,6 +1023,139 @@ test("adds custom-type repair guidance to a codeReference BCP037 diagnostic", ()
   assert.match(result.stderr, /republish custom-types\.tgz/u);
 });
 
+// Bicep reports these without a SARIF `level`, so they print as "warning" while
+// still failing the build. Each case asserts the failing status alongside the
+// remedy, because a model that only saw the word "warning" is exactly the reader
+// the hint exists for.
+test("tells a sensitive property's diagnostic to use a @secure() parameter", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(
+      directory,
+      sarif([
+        {
+          ruleId: "use-secure-value-for-secure-inputs",
+          message: {
+            text: "Property 'password' expects a secure value, but the value provided may not be secure."
+          }
+        }
+      ]),
+      0
+    )
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /marks this property x-radius-sensitive/u);
+  assert.match(
+    result.stderr,
+    /takes the value of a @secure\(\) parameter referenced by name/u
+  );
+  assert.match(result.stderr, /any string interpolation/u);
+});
+
+test("tells a credential-named parameter to carry the @secure() decorator", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(
+      directory,
+      sarif([
+        {
+          ruleId: "secure-secrets-in-params",
+          message: {
+            text: "Parameter 'dbPassword' may represent a secret (according to its name) and must be declared with the @secure() decorator."
+          }
+        }
+      ]),
+      0
+    )
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /declare it with the @secure\(\) decorator/u);
+});
+
+test("tells a secure parameter with a default to drop the default", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(
+      directory,
+      sarif([
+        {
+          ruleId: "secure-parameter-default",
+          message: {
+            text: "Secure parameters should not have hardcoded defaults (except for empty or newGuid())."
+          }
+        }
+      ]),
+      0
+    )
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Remove the default value/u);
+  assert.match(
+    result.stderr,
+    /would commit the credential to the application definition/u
+  );
+});
+
+// The remedies are keyed on the rule that has exactly one correct answer. A
+// diagnostic about something else must report only what Bicep said, or the
+// checker starts inventing fixes for problems it has not diagnosed.
+test("adds no secure-value remedy to an unrelated diagnostic", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(
+      directory,
+      sarif([
+        {
+          ruleId: "BCP035",
+          message: {
+            text: 'The specified "object" declaration is missing the following required properties: "environment".'
+          },
+          level: "error"
+        }
+      ]),
+      1
+    )
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /BCP035/u);
+  assert.doesNotMatch(result.stderr, /x-radius-sensitive/u);
+  assert.doesNotMatch(result.stderr, /@secure\(\)/u);
+});
+
+// The codeReference remedy is the one hint that also inspects the message, so a
+// BCP037 about any other property must not collect it.
+test("adds no custom-type remedy to a BCP037 about another property", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(
+      directory,
+      sarif([
+        {
+          ruleId: "BCP037",
+          message: {
+            text: 'The property "unexpected" is not allowed on objects of type "properties".'
+          },
+          level: "error"
+        }
+      ]),
+      1
+    )
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /BCP037/u);
+  assert.doesNotMatch(result.stderr, /custom-types\.tgz/u);
+});
+
 test("surfaces informational diagnostics without failing", () => {
   const directory = temporaryDirectory();
   const result = runChecker(

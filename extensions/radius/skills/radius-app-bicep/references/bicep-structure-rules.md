@@ -297,6 +297,7 @@ Rules:
   - property marked `x-radius-sensitive: true`: set it on the resource from a `@secure() param` (`Radius.Data/mySqlDatabases.password`)
   - plain, non-sensitive `string` property whose schema description identifies it as the resource ID of a `Radius.Security/secrets` resource: create or reuse that Secret and assign `<secret>.id`, never a `@secure() param` (`Radius.Messaging/rabbitMQ.password`, and likewise a property named `passwordSecret` or `secretName`); assigning the raw credential makes it the Kubernetes Secret name the Recipe looks up and fails the deployment
   - schema has neither: do not invent credentials; inspect the recipe outputs and application auth requirements
+  - sensitivity is not limited to the envelope's own properties: read the schema recursively and give every node marked `x-radius-sensitive: true` a `@secure() param` by name, including a leaf inside an open map (`Radius.Security/secrets.data.<key>.value`), a leaf inside a nested object, and an object that compiles to a `secureObject`. A literal, a plain `param`, and any interpolation are all rejected by `use-secure-value-for-secure-inputs`, which fails the build despite printing as a warning
 - Symbolic name is engine/instance-derived (`mysqlDb`), NOT fixed — so multiple data stores never collide
 - Developer-facing props (`database`, `version`, `size`, `topic`, `queue`, `container`) are derived from source — do NOT hardcode; only set properties the schema defines
 - Do NOT set readOnly properties (`host`, `port`, `connectionString`) — these are recipe outputs

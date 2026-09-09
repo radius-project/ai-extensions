@@ -885,13 +885,47 @@ describe("P0-C built Radius extension artifact", () => {
     // Secret's data key. Layer 1's data-key rule has no mechanical guard, so
     // the guidance must not let "the checker enforces this" read as covering
     // it — that false confidence is the failure mode this stack exists to fix.
+    // The guidance now names two checks, so the caveat has to exclude both.
     const secretsGuidance = readFileSync(
       join(DIST_SKILL, "references", "secrets-handling.md"),
       "utf8"
     );
     expect(secretsGuidance).toContain(
-      "the data-key contract below is not verified by any check"
+      "the data-key contract below is not verified anywhere"
     );
+  });
+
+  it("packages the recursive sensitivity rule and the checker's secure-value remedies", () => {
+    assertCurrentArtifact();
+    const checkerScript = readFileSync(
+      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
+      "utf8"
+    );
+    const secretsGuidance = readFileSync(
+      join(DIST_SKILL, "references", "secrets-handling.md"),
+      "utf8"
+    );
+
+    // Bicep names the rejected property but never the remedy, and Radius emits
+    // these findings with no severity, so they print as a warning while failing
+    // the build. The remedy has to ship with the checker or the model spends a
+    // repair attempt rediscovering it.
+    for (const rule of [
+      "use-secure-value-for-secure-inputs",
+      "secure-secrets-in-params",
+      "secure-parameter-default"
+    ]) {
+      expect(checkerScript).toContain(rule);
+    }
+
+    // The sensitive node is not always a property of the envelope. The packaged
+    // guidance has to carry the nested case, or the model reads sensitivity one
+    // level deep and hardcodes the value that actually holds the credential.
+    expect(secretsGuidance).toContain(
+      "Radius.Security/secrets.data.<key>.value"
+    );
+    expect(secretsGuidance).toContain("secureObject");
+    expect(secretsGuidance).toContain("interpolation discards secureness");
   });
 
   it("packages each page module exactly once", () => {

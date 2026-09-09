@@ -270,6 +270,46 @@ describe("compact model-facing schemas", () => {
     ).toThrow(/value must be a string/u);
   });
 
+  // The `Radius.Security/secrets` shape: `data` is an open map whose entries
+  // hold the sensitive value, so the only marked node sits two levels below the
+  // property the model assigns. The app-modeling guidance tells the model to
+  // read sensitivity recursively, which is sound only while the normalizer
+  // carries the flag out through `additionalProperties`.
+  it("carries sensitivity through an open map's entry type", () => {
+    const types = [
+      { $type: "StringType", sensitive: true },
+      { $type: "StringType" },
+      {
+        $type: "ObjectType",
+        name: "dataAdditionalProperties",
+        properties: {
+          value: { flags: 1, type: { $ref: "#/0" } },
+          encoding: { flags: 0, type: { $ref: "#/1" } }
+        }
+      },
+      {
+        $type: "ObjectType",
+        name: "data",
+        properties: {},
+        additionalProperties: { $ref: "#/2" }
+      }
+    ];
+
+    expect(normalizer.normalizeTypeReference({ $ref: "#/3" }, types)).toEqual({
+      type: "object",
+      properties: {},
+      additionalProperties: {
+        type: "object",
+        required: ["value"],
+        properties: {
+          encoding: { type: "string" },
+          value: { type: "string", sensitive: true }
+        },
+        additionalProperties: false
+      }
+    });
+  });
+
   it("rejects malformed unions and discriminated object variants", () => {
     expect(() =>
       normalizer.normalizeTypeReference({ $ref: "#/0" }, [

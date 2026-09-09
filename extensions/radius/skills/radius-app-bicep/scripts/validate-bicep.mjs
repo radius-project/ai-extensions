@@ -243,6 +243,35 @@ function report(message) {
   console.error(message);
 }
 
+// What to write instead, for the diagnostics that have one correct answer.
+//
+// Bicep says what is wrong but not what to replace it with, and the linter
+// findings below carry no SARIF `level`, so they print as "warning" while
+// `isFailure` still fails the build. A model that reads one as advice spends
+// repair attempts rediscovering a rule the schema already stated, so the remedy
+// travels on the line that reports the problem.
+//
+// The secure-value wording is deliberately exact about what Bicep accepts: a
+// `@secure()` parameter referenced by name, directly or through a variable that
+// aliases it, stays secure, while any interpolation loses secureness even when
+// every operand is secure. Saying "use a variable" or "never use a variable"
+// would both send the model at a fix that does not compile.
+function repairHint(ruleId, text) {
+  if (ruleId === "BCP037" && /\bcodeReference\b/u.test(text)) {
+    return " For a Radius.Resources custom type, add the optional codeReference string property to custom-types.yaml and republish custom-types.tgz before compiling again.";
+  }
+  if (ruleId === "use-secure-value-for-secure-inputs") {
+    return " The resolved schema marks this property x-radius-sensitive, so it takes the value of a @secure() parameter referenced by name. A literal, a parameter declared without @secure(), and any string interpolation — including one whose operands are all secure — are not secure values. Declare a @secure() parameter and assign it directly; build any composed value, such as a connection string, where it is consumed rather than here.";
+  }
+  if (ruleId === "secure-secrets-in-params") {
+    return " This parameter's name identifies it as a credential, so declare it with the @secure() decorator.";
+  }
+  if (ruleId === "secure-parameter-default") {
+    return " Remove the default value: a @secure() parameter is supplied at deployment time, and a default would commit the credential to the application definition.";
+  }
+  return "";
+}
+
 function printDiagnostic(result) {
   const physical = result.locations?.[0]?.physicalLocation;
   const source = physical?.artifactLocation?.uri;
@@ -262,12 +291,8 @@ function printDiagnostic(result) {
     typeof result.message?.text === "string" && result.message.text ?
       result.message.text
     : "Bicep reported a diagnostic.";
-  const customTypeHint =
-    result.ruleId === "BCP037" && /\bcodeReference\b/u.test(text) ?
-      " For a Radius.Resources custom type, add the optional codeReference string property to custom-types.yaml and republish custom-types.tgz before compiling again."
-    : "";
   report(
-    `${location ? `${location}: ` : ""}${level}${rule}: ${text}${customTypeHint}`
+    `${location ? `${location}: ` : ""}${level}${rule}: ${text}${repairHint(result.ruleId, text)}`
   );
 }
 
