@@ -669,16 +669,16 @@ export interface SettleableResource {
  *
  * Every node this leaves red also gets a message, because a red node with no
  * explanation is the one state the user most needs detail in (Exception 5.1).
- * A message the producer already published always wins: it names the resource's
- * own failure, which is more specific than anything derived from the run's
- * conclusion. Only nodes left without one fall back to the message derived from
- * the run's conclusion and, for an ordinary failure, `radiusError`.
+ * Which message depends on who decided the outcome. A node the producer already
+ * reported `failed` keeps its own message: it names that resource's own failure,
+ * which is more specific than anything derived from the run's conclusion. A node
+ * this function flips from pending or in progress had its outcome decided by the
+ * run, so it takes the conclusion's message even if it already carried one — the
+ * message it carried describes work in flight ("creating…"), and leaving that on
+ * a red node would report progress on a resource that never finished.
  *
- * Filling messages is idempotent and independent of the status change, so a
- * caller that settles once to fix the graph quickly and again once it has read
- * the exact Radius error gets the better message without disturbing anything
- * else. Output resources are not walked here: they take their status from their
- * parent through the caller's own propagation.
+ * Output resources are not walked here: they take their status from their parent
+ * through the caller's own propagation.
  */
 export function settleDeployStatuses(
   resources: SettleableResource[],
@@ -698,15 +698,15 @@ export function settleDeployStatuses(
       continue;
     }
     const current = resource.deployStatus || "pending";
-    if (current === "pending" || current === "in_progress")
-      resource.deployStatus = "failed";
-    // Also covers a node the producer reported failed without a message
-    // (incomplete artifact reporting), which would otherwise be red and silent.
-    // Never overwrites a message that is already there.
-    if (
-      resource.deployStatus === "failed" &&
-      !(resource.deployMessage ?? "").trim()
-    )
+    const unfinished = current === "pending" || current === "in_progress";
+    if (unfinished) resource.deployStatus = "failed";
+    if (resource.deployStatus !== "failed") continue;
+    // A node the run just failed takes the run's message, replacing any
+    // in-flight progress text. A node the producer already reported failed keeps
+    // its own message, and one it reported failed without a message — incomplete
+    // artifact reporting — finally gets an explanation instead of being red and
+    // silent.
+    if (unfinished || !(resource.deployMessage ?? "").trim())
       resource.deployMessage = message;
   }
 }

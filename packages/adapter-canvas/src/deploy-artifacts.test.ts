@@ -782,6 +782,32 @@ describe("settleDeployStatuses messages (Exception 5.1)", () => {
     ]);
   });
 
+  it.each(["cancelled", "timed_out", "failure"] as const)(
+    "replaces in-flight progress text on a node the %s run failed",
+    (conclusion) => {
+      // The producer's last snapshot describes work in flight. Once the run's
+      // conclusion decides that work never finished, reporting progress on a red
+      // node would tell the user the opposite of what happened.
+      const resources: SettleableResource[] = [
+        {
+          deployStatus: "in_progress" as DeployStatus,
+          deployMessage: "creating"
+        },
+        { deployStatus: "pending" as DeployStatus, deployMessage: "queued" }
+      ];
+      settleDeployStatuses(resources, conclusion);
+      expect(resources.map((r) => r.deployStatus)).toEqual([
+        "failed",
+        "failed"
+      ]);
+      const expected = unfinishedDeployMessage(conclusion);
+      expect(resources.map((r) => r.deployMessage)).toEqual([
+        expected,
+        expected
+      ]);
+    }
+  );
+
   it("explains a node the producer reported failed without a message", () => {
     const resources: SettleableResource[] = [
       { deployStatus: "failed" as DeployStatus }
@@ -816,17 +842,18 @@ describe("settleDeployStatuses messages (Exception 5.1)", () => {
     expect(resources[0].deployMessage).toBeUndefined();
   });
 
-  it("upgrades to the exact error when settled a second time with one", () => {
-    // The monitor settles on its own timeout; the outcome stage settles again
-    // once it has read the run log. The second pass must not be a no-op.
+  it("does not disturb an already-settled node when settled again", () => {
+    // The monitor settles on its own timeout and the outcome stage settles on a
+    // conclusion. Whichever ran first has already decided this node, so a second
+    // pass must leave its message alone rather than relabel a settled failure.
     const resources: SettleableResource[] = [
       { deployStatus: "pending" as DeployStatus }
     ];
     settleDeployStatuses(resources, "failure");
     expect(resources[0].deployMessage).toBe(DEPLOY_FAILED_MESSAGE);
-    resources[0].deployMessage = undefined;
     settleDeployStatuses(resources, "failure", "rad: deployment rejected");
-    expect(resources[0].deployMessage).toBe("rad: deployment rejected");
+    expect(resources[0].deployMessage).toBe(DEPLOY_FAILED_MESSAGE);
+    expect(resources[0].deployStatus).toBe("failed");
   });
 });
 
