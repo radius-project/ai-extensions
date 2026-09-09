@@ -24,7 +24,7 @@ body:
         - Documentation
         - Not sure
     validations:
-      required: true
+      required: false
   - type: textarea
     id: steps-to-reproduce
     attributes:

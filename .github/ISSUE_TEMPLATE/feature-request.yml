@@ -26,7 +26,7 @@ body:
         - Documentation
         - Not sure
     validations:
-      required: true
+      required: false
   - type: textarea
     id: proposal
     attributes:
