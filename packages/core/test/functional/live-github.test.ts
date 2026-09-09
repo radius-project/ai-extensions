@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_ATTEMPT_TIMEOUT_MS,
   DEFAULT_RETRY_DELAYS_MS,
+  DEFAULT_TOTAL_BUDGET_MS,
   fetchExtensionFile,
   fetchGitHubText,
   githubApiHeaders
@@ -91,16 +92,120 @@ describe("githubApiHeaders", () => {
 });
 
 describe("fetchGitHubText", () => {
-  it("exhausts its default budget well inside the live suite timeout", () => {
-    const attempts = DEFAULT_RETRY_DELAYS_MS.length + 1;
-    const maximumBackoffMs = DEFAULT_RETRY_DELAYS_MS.reduce(
-      (total, delay) => total + delay * 1.5,
-      0
-    );
-    const worstCaseMs =
-      attempts * DEFAULT_ATTEMPT_TIMEOUT_MS + maximumBackoffMs;
+  it("bounds its default budget inside the live suite timeout", () => {
+    expect(DEFAULT_TOTAL_BUDGET_MS).toBeLessThan(LIVE_TEST_TIMEOUT_MS);
+    // A single attempt must not be able to spend the whole budget, or a stalled
+    // connection would leave no room for a retry.
+    expect(DEFAULT_ATTEMPT_TIMEOUT_MS).toBeLessThan(DEFAULT_TOTAL_BUDGET_MS);
+    expect(DEFAULT_RETRY_DELAYS_MS.length).toBeGreaterThan(0);
+  });
 
-    expect(worstCaseMs).toBeLessThan(LIVE_TEST_TIMEOUT_MS);
+  it("keeps total elapsed time inside the budget when every wait runs long", async () => {
+    // The reviewer's scenario: `Retry-After: 15` on each attempt would sleep 30s
+    // in total. The budget must stop the second wait rather than let the caller's
+    // timeout kill the call before the diagnostic lands.
+    let clock = 0;
+    const totalBudgetMs = 25_000;
+    let calls = 0;
+    const fetchImpl: typeof fetch = async () => {
+      calls += 1;
+      clock += 100;
+      return new Response("slow down", {
+        status: 429,
+        statusText: "Too Many Requests",
+        headers: { "retry-after": "15" }
+      });
+    };
+
+    await expect(
+      fetchGitHubText(
+        URL_UNDER_TEST,
+        {},
+        {
+          fetchImpl,
+          sleep: async (milliseconds) => {
+            clock += milliseconds;
+          },
+          retryDelaysMs: [250, 1000],
+          attemptTimeoutMs: 8_000,
+          totalBudgetMs,
+          now: () => clock,
+          random: noJitter
+        }
+      )
+    ).rejects.toThrow(
+      "after 2 attempts: 429 Too Many Requests (retrying in 15000ms would exceed the 25000ms budget, 9800ms left)"
+    );
+    // One 15s wait fitted, the second did not, and the retry budget still had an
+    // attempt left — the clock is what stopped it.
+    expect(calls).toBe(2);
+    expect(clock).toBeLessThanOrEqual(totalBudgetMs);
+  });
+
+  it("caps an attempt to the time left rather than its own timeout", async () => {
+    let clock = 0;
+    const timeouts: number[] = [];
+    const fetchImpl: typeof fetch = (_url, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => {
+            reject(init.signal?.reason);
+          },
+          { once: true }
+        );
+      });
+
+    await expect(
+      fetchGitHubText(
+        URL_UNDER_TEST,
+        {},
+        {
+          fetchImpl: async (url, init) => {
+            const started = clock;
+            try {
+              return await fetchImpl(url, init);
+            } finally {
+              timeouts.push(clock - started);
+            }
+          },
+          sleep: async (milliseconds) => {
+            clock += milliseconds;
+          },
+          retryDelaysMs: [],
+          attemptTimeoutMs: 8_000,
+          totalBudgetMs: 3_000,
+          now: () => clock,
+          random: noJitter
+        }
+      )
+    ).rejects.toThrow("after 1 attempt: timed out after 3000ms");
+  });
+
+  it("retries normally while the budget still has room", async () => {
+    let clock = 0;
+    const { fetchImpl, calls } = respondInOrder([
+      new Response("busy", { status: 503, statusText: "Unavailable" }),
+      new Response("contents")
+    ]);
+
+    const result = await fetchGitHubText(
+      URL_UNDER_TEST,
+      {},
+      {
+        fetchImpl,
+        sleep: async (milliseconds) => {
+          clock += milliseconds;
+        },
+        retryDelaysMs: [250],
+        totalBudgetMs: 25_000,
+        now: () => clock,
+        random: noJitter
+      }
+    );
+
+    expect(result).toEqual({ text: "contents", attempts: 2 });
+    expect(calls()).toBe(2);
   });
 
   it("returns the body on the first attempt without sleeping", async () => {
@@ -754,6 +859,227 @@ describe("fetchGitHubText", () => {
           }
         )
       ).rejects.toThrow("after 1 attempt: cancelled by caller: caller gave up");
+      expect(calls).toBe(1);
+    });
+
+    it("settles immediately when the caller cancels during the backoff", async () => {
+      const caller = new AbortController();
+      let calls = 0;
+      let sleepSettled = false;
+      let sleepStarted!: () => void;
+      const waitStarted = new Promise<void>((resolve) => {
+        sleepStarted = resolve;
+      });
+      const fetchImpl: typeof fetch = async () => {
+        calls += 1;
+        return new Response("busy", {
+          status: 503,
+          statusText: "Service Unavailable"
+        });
+      };
+
+      const pending = fetchGitHubText(
+        URL_UNDER_TEST,
+        {},
+        {
+          fetchImpl,
+          // A long wait that only ends on abort proves the retry does not sit
+          // out the full delay before noticing the cancellation.
+          sleep: (milliseconds, signal) =>
+            new Promise((resolve) => {
+              const timer = setTimeout(() => {
+                sleepSettled = true;
+                resolve();
+              }, milliseconds);
+              signal?.addEventListener(
+                "abort",
+                () => {
+                  clearTimeout(timer);
+                  resolve();
+                },
+                { once: true }
+              );
+              sleepStarted();
+            }),
+          retryDelaysMs: [60_000, 60_000],
+          totalBudgetMs: 600_000,
+          signal: caller.signal,
+          random: noJitter
+        }
+      );
+
+      // Cancel only once the wait is underway, so this exercises the backoff
+      // rather than the in-flight-attempt cancellation path.
+      await waitStarted;
+      caller.abort(new Error("caller stopped"));
+
+      await expect(pending).rejects.toThrow(
+        `failed to fetch ${URL_UNDER_TEST} after 1 attempt: cancelled by caller: caller stopped`
+      );
+      // No further request, and the wait was cut short rather than completed.
+      expect(calls).toBe(1);
+      expect(sleepSettled).toBe(false);
+    });
+
+    it("does not start another attempt when cancelled during a Retry-After wait", async () => {
+      const caller = new AbortController();
+      let calls = 0;
+      const fetchImpl: typeof fetch = async () => {
+        calls += 1;
+        return new Response("slow down", {
+          status: 429,
+          statusText: "Too Many Requests",
+          headers: { "retry-after": "10" }
+        });
+      };
+
+      const pending = fetchGitHubText(
+        URL_UNDER_TEST,
+        {},
+        {
+          fetchImpl,
+          sleep: (milliseconds, signal) =>
+            new Promise((resolve) => {
+              const timer = setTimeout(resolve, milliseconds);
+              signal?.addEventListener(
+                "abort",
+                () => {
+                  clearTimeout(timer);
+                  resolve();
+                },
+                { once: true }
+              );
+            }),
+          retryDelaysMs: [5, 10],
+          totalBudgetMs: 60_000,
+          random: noJitter,
+          signal: caller.signal
+        }
+      );
+
+      await vi.waitFor(() => {
+        expect(calls).toBe(1);
+      });
+      caller.abort(new Error("caller stopped"));
+
+      await expect(pending).rejects.toThrow(
+        "after 1 attempt: cancelled by caller: caller stopped"
+      );
+      expect(calls).toBe(1);
+    });
+
+    it("reports cancellation without a reason during the backoff", async () => {
+      const caller = new AbortController();
+      const { fetchImpl } = respondInOrder([
+        new Response("busy", { status: 503, statusText: "Unavailable" }),
+        new Response("contents")
+      ]);
+
+      const pending = fetchGitHubText(
+        URL_UNDER_TEST,
+        {},
+        {
+          fetchImpl,
+          sleep: () => new Promise(() => {}),
+          retryDelaysMs: [5],
+          signal: caller.signal,
+          random: noJitter
+        }
+      );
+      await Promise.resolve();
+      caller.abort();
+
+      await expect(pending).rejects.toThrow("cancelled by caller");
+    });
+
+    it("skips the wait when the caller signal aborts before the backoff starts", async () => {
+      const caller = new AbortController();
+      let calls = 0;
+      const sleep = vi.fn(async () => {});
+      const fetchImpl: typeof fetch = async () => {
+        calls += 1;
+        caller.abort(new Error("caller stopped"));
+        return new Response("busy", {
+          status: 503,
+          statusText: "Service Unavailable"
+        });
+      };
+
+      await expect(
+        fetchGitHubText(
+          URL_UNDER_TEST,
+          {},
+          {
+            fetchImpl,
+            sleep,
+            retryDelaysMs: [5],
+            signal: caller.signal,
+            random: noJitter
+          }
+        )
+      ).rejects.toThrow("after 1 attempt: cancelled by caller: caller stopped");
+      expect(calls).toBe(1);
+      expect(sleep).not.toHaveBeenCalled();
+    });
+
+    it("waits with a real abortable timer when no sleep is injected", async () => {
+      const { fetchImpl, calls } = respondInOrder([
+        new Response("busy", { status: 503, statusText: "Unavailable" }),
+        new Response("contents")
+      ]);
+      const caller = new AbortController();
+
+      const result = await fetchGitHubText(
+        URL_UNDER_TEST,
+        {},
+        {
+          fetchImpl,
+          retryDelaysMs: [1],
+          signal: caller.signal,
+          random: noJitter
+        }
+      );
+
+      expect(result).toEqual({ text: "contents", attempts: 2 });
+      expect(calls()).toBe(2);
+    });
+
+    it("cancels the real backoff timer when the caller aborts", async () => {
+      const caller = new AbortController();
+      let calls = 0;
+      const fetchImpl: typeof fetch = async () => {
+        calls += 1;
+        return new Response("busy", {
+          status: 503,
+          statusText: "Service Unavailable"
+        });
+      };
+
+      // No injected sleep, so the default timer runs. A 60s backoff would hang
+      // the test if the abort did not clear it.
+      const pending = fetchGitHubText(
+        URL_UNDER_TEST,
+        {},
+        {
+          fetchImpl,
+          retryDelaysMs: [60_000],
+          totalBudgetMs: 600_000,
+          signal: caller.signal,
+          random: noJitter
+        }
+      );
+
+      // Yield through a macrotask so the helper is parked in the backoff timer,
+      // not still finishing the attempt, before cancelling.
+      await vi.waitFor(() => {
+        expect(calls).toBe(1);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      caller.abort(new Error("caller stopped"));
+
+      await expect(pending).rejects.toThrow(
+        "after 1 attempt: cancelled by caller: caller stopped"
+      );
       expect(calls).toBe(1);
     });
 

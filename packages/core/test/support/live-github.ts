@@ -6,12 +6,19 @@
 
 const USER_AGENT = "radius-ai-extensions-live-tests";
 export const DEFAULT_RETRY_DELAYS_MS = [250, 1000] as const;
-// Each attempt is aborted on its own deadline so a stalled connection cannot
-// hang a live suite for the runner's default socket timeout. The live suites
-// give each test 30s, so the deadline must leave room for the whole budget:
-// three attempts plus 1.25s of backoff is 25.25s, and a single 30s attempt
-// would instead fail the test before any retry or diagnostic could happen.
+// The whole call is bounded by one wall-clock deadline. The live suites give
+// each test 30s, so everything the helper does — every attempt, every backoff,
+// and every `Retry-After` wait — has to fit inside this budget, or Vitest kills
+// the test before the final diagnostic is emitted. Per-attempt limits alone
+// cannot guarantee that, because waits accumulate across retries.
+export const DEFAULT_TOTAL_BUDGET_MS = 25_000;
+// Each attempt is additionally capped so one stalled connection cannot spend
+// the entire budget before any retry happens. The effective cap is the smaller
+// of this and the time left in the budget.
 export const DEFAULT_ATTEMPT_TIMEOUT_MS = 8_000;
+// Retrying with less than this left is pointless: the attempt would be aborted
+// almost immediately and would replace a useful diagnostic with a timeout.
+const MINIMUM_ATTEMPT_MS = 1_000;
 // Waiting longer than this for a rate limit to lift is worse for CI than
 // failing with a diagnostic, so a longer `Retry-After` is treated as terminal.
 const DEFAULT_MAX_RETRY_AFTER_MS = 15_000;
@@ -24,13 +31,22 @@ export interface LiveGitHubTextResult {
   readonly attempts: number;
 }
 
+// The wait is passed the deadline signal so an injected sleep can abort its own
+// timer when the caller cancels, rather than leaving it pending.
+export type LiveGitHubSleep = (
+  milliseconds: number,
+  signal?: AbortSignal
+) => Promise<void>;
+
 export interface FetchGitHubTextOptions {
   readonly fetchImpl?: typeof fetch;
-  readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly sleep?: LiveGitHubSleep;
   readonly retryDelaysMs?: readonly number[];
   readonly attemptTimeoutMs?: number;
+  readonly totalBudgetMs?: number;
   readonly maxRetryAfterMs?: number;
   readonly random?: () => number;
+  readonly now?: () => number;
   readonly signal?: AbortSignal;
 }
 
@@ -50,16 +66,34 @@ type AttemptOutcome =
 
 interface ResolvedRetryPolicy {
   readonly fetchImpl: typeof fetch;
-  readonly sleep: (milliseconds: number) => Promise<void>;
+  readonly sleep: LiveGitHubSleep;
   readonly retryDelaysMs: readonly number[];
   readonly attemptTimeoutMs: number;
+  readonly totalBudgetMs: number;
   readonly maxRetryAfterMs: number;
   readonly random: () => number;
+  readonly now: () => number;
   readonly signal?: AbortSignal;
 }
 
-function defaultSleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+// Resolve on abort as well as on the timer, clearing the timer when the wait is
+// cancelled so nothing is left pending. Callers guarantee the signal is not
+// already aborted, since an abort listener added afterwards would never fire.
+function defaultSleep(
+  milliseconds: number,
+  signal?: AbortSignal
+): Promise<void> {
+  return new Promise((resolve) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function resolvePolicy(options: FetchGitHubTextOptions): ResolvedRetryPolicy {
@@ -68,8 +102,10 @@ function resolvePolicy(options: FetchGitHubTextOptions): ResolvedRetryPolicy {
     sleep: options.sleep ?? defaultSleep,
     retryDelaysMs: [...(options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS)],
     attemptTimeoutMs: options.attemptTimeoutMs ?? DEFAULT_ATTEMPT_TIMEOUT_MS,
+    totalBudgetMs: options.totalBudgetMs ?? DEFAULT_TOTAL_BUDGET_MS,
     maxRetryAfterMs: options.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS,
     random: options.random ?? Math.random,
+    now: options.now ?? Date.now,
     signal: options.signal
   };
 }
@@ -172,13 +208,15 @@ function classifyResponse(
   return { kind: "failure", reason: status, retryable: true };
 }
 
-// Run one attempt under its own deadline, reading the body inside the same
-// boundary so a connection that drops mid-stream is retried like any other
-// transport failure. Caller cancellation is never retried.
+// Run one attempt under the smaller of its own cap and the time left in the
+// overall budget, reading the body inside the same boundary so a connection
+// that drops mid-stream is retried like any other transport failure. Caller
+// cancellation is never retried.
 async function runAttempt(
   url: string,
   init: RequestInit,
-  policy: ResolvedRetryPolicy
+  policy: ResolvedRetryPolicy,
+  attemptTimeoutMs: number
 ): Promise<AttemptOutcome> {
   const controller = new AbortController();
   const abortForCaller = (): void => {
@@ -190,8 +228,8 @@ async function runAttempt(
     policy.signal?.addEventListener("abort", abortForCaller, { once: true });
   }
   const timeout = setTimeout(() => {
-    controller.abort(new Error(`timed out after ${policy.attemptTimeoutMs}ms`));
-  }, policy.attemptTimeoutMs);
+    controller.abort(new Error(`timed out after ${attemptTimeoutMs}ms`));
+  }, attemptTimeoutMs);
 
   try {
     const response = await policy.fetchImpl(url, {
@@ -233,6 +271,47 @@ function nextDelayMs(
   return Math.max(jittered, retryAfterMs ?? 0);
 }
 
+// Wait out the backoff, but settle as soon as the caller cancels so the wait
+// does not run to completion and start another request. The injected sleep is
+// given a derived signal so it can drop its own timer, and the abort listener is
+// removed either way. `signal.reason` is always set once a signal is aborted.
+async function waitBeforeRetry(
+  delayMs: number,
+  policy: ResolvedRetryPolicy
+): Promise<void> {
+  const signal = policy.signal;
+  if (!signal) {
+    await policy.sleep(delayMs);
+    return;
+  }
+  if (signal.aborted) {
+    throw signal.reason;
+  }
+
+  const waitController = new AbortController();
+  let rejectCancelled!: (reason: unknown) => void;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    rejectCancelled = reject;
+  });
+  const onAbort = (): void => {
+    // Reject before aborting the derived signal: a sleep that resolves on abort
+    // would otherwise win the race and let the retry proceed as if the wait had
+    // simply elapsed.
+    rejectCancelled(signal.reason);
+    waitController.abort(signal.reason);
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    await Promise.race([
+      cancelled,
+      policy.sleep(delayMs, waitController.signal)
+    ]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
 // Build the standard GitHub REST headers, adding `Authorization` when a
 // GITHUB_TOKEN is present. A token is required for the internal ai-extensions
 // repo and, for the public radius repo, avoids the low anonymous rate limit.
@@ -252,16 +331,23 @@ export function githubApiHeaders(accept: string): Record<string, string> {
   return headers;
 }
 
-// Fetch one GitHub REST resource as text, retrying transient failures across the
-// configured budget. Transient means HTTP 408, HTTP 429, 5xx, a 403 or 429
-// carrying a usable `Retry-After`, a transport rejection, an attempt that
-// exceeds its deadline, or a body read that fails mid-stream. Missing files,
-// invalid refs, auth failures, a 403 with no rate-limit evidence, an exhausted
-// rate-limit quota, a `Retry-After` beyond the wait budget, and caller
-// cancellation fail immediately. Total attempts are `retryDelaysMs.length + 1`,
-// so an empty budget means a single attempt. Any `signal` in `init` is replaced
-// by the per-attempt deadline; pass caller cancellation through
-// `options.signal` instead.
+// Fetch one GitHub REST resource as text, retrying transient failures until the
+// retry budget or the overall wall-clock deadline runs out. Transient means HTTP
+// 408, HTTP 429, 5xx, a 403 or 429 carrying a usable `Retry-After`, a transport
+// rejection, an attempt that exceeds its deadline, or a body read that fails
+// mid-stream. Missing files, invalid refs, auth failures, a 403 with no
+// rate-limit evidence, an exhausted rate-limit quota, a `Retry-After` beyond the
+// wait budget, and caller cancellation fail immediately.
+//
+// Two limits apply together. `retryDelaysMs.length + 1` caps the attempt count,
+// so an empty budget means a single attempt. `totalBudgetMs` caps the elapsed
+// wall clock across every attempt and every wait, including a `Retry-After`
+// override, so the call always leaves the caller's own timeout enough room to
+// observe the diagnostic. A retry that cannot fit in the remaining budget is
+// reported instead of started.
+//
+// Any `signal` in `init` is replaced by the per-attempt deadline; pass caller
+// cancellation through `options.signal` instead, which also interrupts a wait.
 export async function fetchGitHubText(
   url: string,
   init: RequestInit,
@@ -269,28 +355,53 @@ export async function fetchGitHubText(
 ): Promise<LiveGitHubTextResult> {
   const policy = resolvePolicy(options);
   const totalAttempts = policy.retryDelaysMs.length + 1;
+  const deadline = policy.now() + policy.totalBudgetMs;
+  const remainingMs = (): number => deadline - policy.now();
 
   for (let index = 0; ; index += 1) {
-    const outcome = await runAttempt(url, init, policy);
+    const attempts = index + 1;
+    const fail = (reason: string, cause?: unknown): Error =>
+      new Error(
+        `failed to fetch ${url} after ${formatAttemptCount(attempts)}: ${reason}`,
+        { cause }
+      );
+
+    const outcome = await runAttempt(
+      url,
+      init,
+      policy,
+      Math.min(policy.attemptTimeoutMs, Math.max(remainingMs(), 0))
+    );
     if (outcome.kind === "text") {
-      return { text: outcome.text, attempts: index + 1 };
+      return { text: outcome.text, attempts };
     }
 
-    const isFinalAttempt = index === totalAttempts - 1;
-    if (isFinalAttempt || !outcome.retryable) {
-      throw new Error(
-        `failed to fetch ${url} after ${formatAttemptCount(index + 1)}: ${outcome.reason}`,
-        { cause: outcome.cause }
+    if (index === totalAttempts - 1 || !outcome.retryable) {
+      throw fail(outcome.reason, outcome.cause);
+    }
+
+    // Decide against the clock rather than the attempt count: a `Retry-After`
+    // wait can be long enough that another attempt would overrun the budget
+    // even though retries remain. Report that instead of starting a request the
+    // caller's timeout would kill first.
+    const delayMs = nextDelayMs(
+      policy.retryDelaysMs[index],
+      outcome.retryAfterMs,
+      policy.random
+    );
+    const remaining = remainingMs();
+    if (delayMs + MINIMUM_ATTEMPT_MS > remaining) {
+      throw fail(
+        `${outcome.reason} (retrying in ${delayMs}ms would exceed the ${policy.totalBudgetMs}ms budget, ${Math.max(remaining, 0)}ms left)`,
+        outcome.cause
       );
     }
 
-    await policy.sleep(
-      nextDelayMs(
-        policy.retryDelaysMs[index],
-        outcome.retryAfterMs,
-        policy.random
-      )
-    );
+    try {
+      await waitBeforeRetry(delayMs, policy);
+    } catch (error) {
+      throw fail(`cancelled by caller: ${describeError(error)}`, error);
+    }
   }
 }
 
