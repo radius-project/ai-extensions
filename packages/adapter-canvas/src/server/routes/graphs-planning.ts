@@ -345,6 +345,7 @@ export async function handleDeployedGraph(
     namedSelectionPartMatches(state.deployAppName || "", requestedApp);
   const deploying =
     state.deployStatus === "in_progress" && sessionMatchesSelection;
+  const monitorRunId = state.deployRunId;
 
   const statusByKey = new Map<string, DeployStatus>();
   // Seed the resources the deploy monitor tracks so an empty artifact read keeps
@@ -423,8 +424,7 @@ export async function handleDeployedGraph(
       for (const [key, status] of dependencies.buildDeployStatusMap(progress)) {
         statusByKey.set(key, status);
       }
-      // Messages have no in-session seed, so first-wins only protects duplicate
-      // weaker identity keys within this one snapshot.
+      // First-wins protects duplicate weaker identity keys in this snapshot.
       for (const [key, message] of dependencies.buildDeployMessageMap(
         progress
       )) {
@@ -449,6 +449,35 @@ export async function handleDeployedGraph(
     progress?.runId == null ||
     state.deployRunId == null ||
     String(progress.runId) === String(state.deployRunId);
+
+  // A terminal monitor snapshot includes the run-level explanation that an
+  // incomplete artifact cannot carry. Overlay it after the read: the monitor
+  // may have finished while that read was pending. A newer deployment's
+  // artifact must still supersede this attempt, and an unconfirmed run keeps
+  // its existing repair guard rather than acquiring a made-up conclusion.
+  if (
+    sessionMatchesSelection &&
+    artifactMatchesSessionRun &&
+    monitorRunId != null &&
+    state.deployRunId === monitorRunId &&
+    (state.deployStatus === "complete" || state.deployStatus === "failed") &&
+    Array.isArray(state.deployingResources)
+  ) {
+    const settledKeys = new Set<string>();
+    for (const resource of state.deployingResources) {
+      const status = resource.deployStatus;
+      if (status !== "success" && status !== "failed") continue;
+      for (const key of dependencies.deployStatusKeys(resource)) {
+        if (settledKeys.has(key)) continue;
+        settledKeys.add(key);
+        statusByKey.set(key, status);
+        messageByKey.delete(key);
+        if (resource.deployMessage?.trim()) {
+          messageByKey.set(key, resource.deployMessage);
+        }
+      }
+    }
+  }
 
   const terminalConclusion =
     (

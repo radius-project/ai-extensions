@@ -1422,6 +1422,215 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(calls.log).toContain("settleDeployStatuses(success)");
   });
 
+  it("overlays settled messages and statuses without reviving stale progress", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "failed",
+        deployErrorKind: "run-unconfirmed",
+        deployRunId: 7,
+        deployingResources: [
+          {
+            id: "db",
+            deployStatus: "failed",
+            deployMessage: "Deployment timed out"
+          },
+          { id: "api", deployStatus: "success" },
+          { id: "empty", deployStatus: "failed", deployMessage: "  " },
+          { id: "pending", deployStatus: "pending" },
+          {
+            id: "db",
+            deployStatus: "failed",
+            deployMessage: "weaker duplicate"
+          }
+        ]
+      },
+      modeledResources: ["db", "api", "empty", "pending"].map((id) => ({ id })),
+      reader: {
+        progress: progressPayload(
+          ["db", "api", "empty", "pending"].map((id) => ({
+            id,
+            name: id,
+            type: "Radius.Compute/containers",
+            status: "in_progress",
+            message: "creating"
+          })),
+          { runId: 7, state: "in_progress" }
+        )
+      }
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.mode).toBe("terminal");
+    expect(
+      payload.resources.map((resource) => [
+        resource.deployStatus,
+        resource.deployMessage
+      ])
+    ).toEqual([
+      ["failed", "Deployment timed out"],
+      ["success", undefined],
+      ["failed", undefined],
+      ["in_progress", "creating"]
+    ]);
+    expect(calls.log).not.toContain("settleDeployStatuses(failure)");
+  });
+
+  it.each([
+    ["live", "in_progress", 7],
+    ["without a tracked run", "failed", undefined]
+  ] as const)(
+    "does not overlay terminal-looking resources when %s",
+    async (_case, deployStatus, deployRunId) => {
+      const calls: Calls = { log: [] };
+      const { deps } = fakes(calls, {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployStatus,
+          deployRunId,
+          deployingResources: [
+            { id: "db", deployStatus: "failed", deployMessage: "old error" }
+          ]
+        },
+        modeledResources: [{ id: "db" }],
+        reader: {
+          progress: progressPayload(
+            [
+              {
+                id: "db",
+                name: "db",
+                type: "Radius.Data/sqlDatabases",
+                status: "success",
+                message: "provisioned"
+              }
+            ],
+            { runId: 7 }
+          )
+        }
+      });
+
+      const payload = payloadOf(
+        await run("/api/deployed-graph", handleDeployedGraph, deps)
+      );
+
+      expect(payload.resources[0]).toMatchObject({
+        deployStatus: "success",
+        deployMessage: "provisioned"
+      });
+    }
+  );
+
+  it.each([
+    ["environment", `?environment=${OTHER_ENV}`],
+    ["application", `?application=${QUERY_APP}`],
+    ["repository", `?repo=${QUERY_REPO}`]
+  ])(
+    "does not overlay a different %s's terminal messages",
+    async (_case, query) => {
+      const calls: Calls = { log: [] };
+      const { deps } = fakes(calls, {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployEnvName: DEPLOY_ENV,
+          deployAppName: DEPLOY_APP,
+          deployStatus: "failed",
+          deployRunId: 7,
+          deployingResources: [
+            {
+              id: "db",
+              deployStatus: "failed",
+              deployMessage: "wrong selection"
+            }
+          ]
+        },
+        modeledResources: [{ id: "db" }],
+        reader: {
+          progress: progressPayload(
+            [
+              {
+                id: "db",
+                name: "db",
+                type: "Radius.Data/sqlDatabases",
+                status: "success",
+                message: "selected deployment"
+              }
+            ],
+            { runId: 7 }
+          )
+        }
+      });
+
+      const payload = payloadOf(
+        await run(`/api/deployed-graph${query}`, handleDeployedGraph, deps)
+      );
+
+      expect(payload.resources[0]).toMatchObject({
+        deployStatus: "success",
+        deployMessage: "selected deployment"
+      });
+    }
+  );
+
+  it.each([
+    [7, "failed", "Deployment timed out"],
+    [8, "in_progress", undefined]
+  ] as const)(
+    "uses only the original attempt when run %s settles during the artifact read",
+    async (runId, expectedStatus, expectedMessage) => {
+      const calls: Calls = { log: [] };
+      const { deps, state } = fakes(calls, {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployStatus: "in_progress",
+          deployRunId: 7,
+          deployingResources: [{ id: "db", deployStatus: "in_progress" }]
+        },
+        modeledResources: [{ id: "db" }]
+      });
+      deps.createDeployStatusReader = () => ({
+        graph: () => Promise.resolve({ graph: null, status: "missing" }),
+        progress: async () => {
+          if (!state)
+            throw new Error("the monitor requires its instance state");
+          state.deployStatus = "failed";
+          state.deployRunId = runId;
+          state.deployErrorKind = "run-unconfirmed";
+          state.deployingResources = [
+            {
+              id: "db",
+              deployStatus: "failed",
+              deployMessage: "Deployment timed out"
+            }
+          ];
+          return progressPayload(
+            [
+              {
+                id: "db",
+                name: "db",
+                type: "Radius.Data/sqlDatabases",
+                status: "in_progress"
+              }
+            ],
+            {
+              runId: 7
+            }
+          );
+        }
+      });
+
+      const payload = payloadOf(
+        await run("/api/deployed-graph", handleDeployedGraph, deps)
+      );
+
+      expect(payload.resources[0].deployStatus).toBe(expectedStatus);
+      expect(payload.resources[0].deployMessage).toBe(expectedMessage);
+    }
+  );
+
   it("lets a demonstrably newer artifact run supersede terminal monitor state", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
@@ -1435,7 +1644,8 @@ describe("graphs-planning read routes (SU-09)", () => {
         deployingResources: [
           {
             ...DEPLOYING_RESOURCES[0],
-            deployStatus: "success"
+            deployStatus: "failed",
+            deployMessage: "old attempt error"
           }
         ]
       },
@@ -1456,7 +1666,8 @@ describe("graphs-planning read routes (SU-09)", () => {
               id: "res-deploying",
               name: "deploying-node",
               type: "Radius.Compute",
-              status: "failed"
+              status: "failed",
+              message: "new attempt error"
             }
           ],
           { runId: 8, state: "failed" }
@@ -1469,6 +1680,7 @@ describe("graphs-planning read routes (SU-09)", () => {
     );
 
     expect(payload.resources[0].deployStatus).toBe("failed");
+    expect(payload.resources[0].deployMessage).toBe("new attempt error");
     expect(calls.log).toContain("settleDeployStatuses(failure)");
     expect(calls.log).not.toContain("settleDeployStatuses(success)");
   });

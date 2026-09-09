@@ -18,6 +18,7 @@ import type {
   WorkflowArtifact
 } from "../../../src/deploy-artifacts.js";
 import {
+  applyDeployMessages,
   buildDeployMessageMap,
   buildDeployStatusMap,
   settleDeployStatuses
@@ -58,11 +59,6 @@ interface Harness {
 // production produces rather than a fixture the fakes invented. Only the
 // artifact reader is scripted: it is the sole seam that would otherwise reach
 // the network.
-function keysOf(resource: unknown): string[] {
-  const value = (resource ?? {}) as { id?: unknown; name?: unknown };
-  return [String(value.id ?? ""), String(value.name ?? "")].filter(Boolean);
-}
-
 function start(): Harness {
   const state: CanvasState = {};
   const reader: ReaderScript = {};
@@ -107,12 +103,7 @@ function start(): Harness {
       mergeDeployedGraphMetadata,
       projectDeployedGraph,
       canvasGraphResources: (values) => values as CanvasGraphResource[],
-      applyDeployMessages: (resources, messageMap) => {
-        for (const resource of resources) {
-          const message = messageMap.get(keysOf(resource)[0] ?? "");
-          if (message) resource.deployMessage = message;
-        }
-      },
+      applyDeployMessages,
       settleDeployStatuses,
       errorMessage: (error) =>
         error instanceof Error ? error.message : String(error),
@@ -163,6 +154,122 @@ function start(): Harness {
 }
 
 describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
+  it.each([
+    ["cancelled", "", undefined, "Deployment cancelled"],
+    ["timed_out", "", undefined, "Deployment timed out"],
+    [
+      "failure",
+      "Error: recipe quota exceeded",
+      undefined,
+      "Error: recipe quota exceeded"
+    ],
+    ["timed_out", "", "run-unconfirmed", "Deployment timed out"]
+  ] as const)(
+    "retains the settled %s message through HTTP with error kind %s",
+    async (conclusion, detail, errorKind, expected) => {
+      const harness = start();
+      harness.state.contextRepo = "octo/app";
+      harness.state.deployRunId = 7;
+      harness.state.deployStatus = "failed";
+      harness.state.deployErrorKind = errorKind;
+      harness.state.deployingResources = [
+        {
+          id: "db",
+          name: "db",
+          deployStatus: "in_progress",
+          deployMessage: "creating"
+        },
+        { id: "api", name: "api", deployStatus: "success" },
+        {
+          id: "cache",
+          name: "cache",
+          deployStatus: "failed",
+          deployMessage: "cache quota exceeded"
+        }
+      ];
+      settleDeployStatuses(
+        harness.state.deployingResources,
+        conclusion,
+        detail
+      );
+      harness.modeledResources.push(
+        ...["db", "api", "cache"].map((id) => ({ id, name: id }))
+      );
+      const entry = await container!.getOrCreate("panel-a");
+
+      const response = await fetch(`${entry.baseUrl}/api/deployed-graph`);
+      const payload = (await response.json()) as {
+        mode: string;
+        resources: CanvasGraphResource[];
+      };
+
+      expect(response.status).toBe(200);
+      expect(payload.mode).toBe("terminal");
+      expect(
+        payload.resources.map((resource) => [
+          resource.deployStatus,
+          resource.deployMessage
+        ])
+      ).toEqual([
+        ["failed", expected],
+        ["success", undefined],
+        ["failed", "cache quota exceeded"]
+      ]);
+      expect(harness.state.deployErrorKind).toBe(errorKind);
+    }
+  );
+
+  it("does not revive timed-out nodes from the last in-progress artifact", async () => {
+    const harness = start();
+    harness.state.contextRepo = "octo/app";
+    harness.state.deployRunId = 7;
+    harness.state.deployStatus = "failed";
+    harness.state.deployErrorKind = "run-unconfirmed";
+    harness.state.deployingResources = [
+      { id: "db", name: "db", deployStatus: "in_progress" },
+      { id: "api", name: "api", deployStatus: "success" }
+    ];
+    settleDeployStatuses(harness.state.deployingResources, "timed_out");
+    harness.modeledResources.push(
+      { id: "db", name: "db" },
+      { id: "api", name: "api" }
+    );
+    harness.reader.progress = {
+      schemaVersion: 1,
+      application: "test-app",
+      environment: "default",
+      sequence: 1,
+      runId: 7,
+      state: "in_progress",
+      resources: ["db", "api"].map((id) => ({
+        id,
+        name: id,
+        type: "Radius.Compute/containers",
+        status: "in_progress",
+        message: "creating"
+      }))
+    };
+    const entry = await container!.getOrCreate("panel-a");
+
+    const response = await fetch(`${entry.baseUrl}/api/deployed-graph`);
+    const payload = (await response.json()) as {
+      mode: string;
+      resources: CanvasGraphResource[];
+    };
+
+    expect(payload.mode).toBe("terminal");
+    expect(
+      payload.resources.map((resource) => [
+        resource.deployStatus,
+        resource.deployMessage
+      ])
+    ).toEqual([
+      ["failed", "Deployment timed out"],
+      ["success", undefined]
+    ]);
+    expect(harness.state.deployErrorKind).toBe("run-unconfirmed");
+  });
+
   it("serves typed graph progress events over a real socket", async () => {
     const harness = start();
     harness.state.progressMessages = ["deployed diagnostic"];
