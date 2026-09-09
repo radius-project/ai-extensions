@@ -68,10 +68,10 @@ body:
         The version, commit SHA, or branch you are on, plus any environment
         details that seem relevant.
       placeholder: |
-        Version: main, v0.1.0, or a commit SHA
-        OS: macOS 15.3
-        Node.js: 22.11.0
-        Copilot CLI: 1.0.80
-        Cloud provider: Azure
+        Version: release tag, branch, or commit SHA
+        OS: name and version
+        Node.js: version
+        Copilot CLI or app: version
+        Cloud provider: Azure or AWS
     validations:
       required: false
