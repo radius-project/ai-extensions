@@ -9,7 +9,10 @@ import {
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
-import type { FakeElement } from "../../../test/support/browser/fakes.js";
+import type {
+  FakeElement,
+  NetworkHandler
+} from "../../../test/support/browser/fakes.js";
 import {
   graphProgressElapsed,
   graphProgressStages
@@ -2912,7 +2915,7 @@ describe("deployed graph delete dialog resources", () => {
   }
 
   async function openDelete(
-    graph: () => Promise<HttpResponse>,
+    graph: NetworkHandler,
     options: Parameters<typeof fixture>[0] = {}
   ) {
     const page = fixture(options);
@@ -2974,7 +2977,7 @@ describe("deployed graph delete dialog resources", () => {
   // A refresh may fail after the selection changed, so a stale list must not
   // survive to name another application's resources in the confirmation.
   it("names no resources after a failed graph refresh", async () => {
-    const responses: Array<() => Promise<HttpResponse>> = [
+    const responses: NetworkHandler[] = [
       () => jsonResponse({ resources: [{ name: "web" }], mode: "live" }),
       () => Promise.reject(new Error("graph service down"))
     ];
