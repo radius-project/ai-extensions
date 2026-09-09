@@ -166,7 +166,8 @@ ${confirmDialogMarkup()}
 .env-action-banner__icon { flex:0 0 auto; width:20px; height:20px; border-radius:10px; background:var(--rad-primary); color:#fff; font-size:12px; font-weight:700; display:flex; align-items:center; justify-content:center; }
 .env-action-banner__text { flex:1 1 auto; font-size:13px; color:var(--rad-text); line-height:1.5; }
 .env-action-banner__text strong { font-weight:600; }
-.env-action-banner__text a { color:var(--rad-primary); }
+.env-action-banner__text a { color:var(--rad-link); text-decoration:underline; }
+.env-action-banner__text a:hover { color:var(--rad-link-hover); }
 .env-action-banner__close { flex:0 0 auto; background:none; border:none; padding:0 4px; font-size:16px; line-height:1; color:var(--rad-text-tertiary); cursor:pointer; }
 .env-action-banner__close:hover { color:var(--rad-text); }
 /* Progress panel — inline, non-blocking, and deliberately not a progress bar. */
