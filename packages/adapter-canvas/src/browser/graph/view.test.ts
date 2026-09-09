@@ -545,8 +545,8 @@ describe("flow application", () => {
     expect(instance.fits).toEqual([{ padding: 0.18 }]);
   });
 
-  it("pushes an update into React state without changing the viewport", () => {
-    const { tree, clock, vendor, updater } = renderApp();
+  it("pushes a status-only update into React state without changing the viewport", () => {
+    const { tree, clock, vendor, updater, built } = renderApp();
     const instance = createFakeFlowInstance();
     (props(tree as RenderedElement).onInit as (value: unknown) => void)(
       instance
@@ -555,14 +555,84 @@ describe("flow application", () => {
     clock.tick(30);
 
     expect(updater.fn).toBeTypeOf("function");
-    updater.fn?.([], []);
+    // The same resources restated, which is what a status poll delivers.
+    updater.fn?.(built.nodes, built.edges);
     expect(vendor.reactFlow.nodeUpdates).toHaveLength(1);
     expect(vendor.reactFlow.edgeUpdates).toHaveLength(1);
-    // An update must not schedule any deferred work. Without this the
-    // assertion below would still pass if a re-fit timer were reintroduced,
-    // because the fake clock would never flush it.
+    // A status-only update must not schedule any deferred work. Without this
+    // the assertion below would still pass if a re-fit timer were
+    // reintroduced, because the fake clock would never flush it.
     expect(clock.timeouts).toBe(0);
     expect(instance.fits).toEqual([{ padding: 0.18 }]);
+  });
+
+  it("re-fits when the update changes which nodes exist", () => {
+    const { tree, clock, vendor, updater } = renderApp();
+    const instance = createFakeFlowInstance();
+    (props(tree as RenderedElement).onInit as (value: unknown) => void)(
+      instance
+    );
+    vendor.react.runEffects();
+    clock.tick(30);
+    expect(instance.fits).toEqual([{ padding: 0.18 }]);
+
+    // Switching application or environment reuses the controller, so an
+    // entirely different resource set arrives through the same update path.
+    const next = buildGraph(resolveGraphSettings(), [
+      { id: "c", name: "c" },
+      { id: "d", name: "d" }
+    ]);
+    updater.fn?.(next.nodes, next.edges);
+    expect(vendor.reactFlow.nodeUpdates).toHaveLength(1);
+    clock.tick(40);
+    expect(instance.fits).toEqual([{ padding: 0.18 }, { padding: 0.18 }]);
+  });
+
+  it("re-fits only once when a changed node set is then restated", () => {
+    const { tree, clock, vendor, updater } = renderApp();
+    const instance = createFakeFlowInstance();
+    (props(tree as RenderedElement).onInit as (value: unknown) => void)(
+      instance
+    );
+    vendor.react.runEffects();
+    clock.tick(30);
+
+    const next = buildGraph(resolveGraphSettings(), [{ id: "c", name: "c" }]);
+    updater.fn?.(next.nodes, next.edges);
+    clock.tick(40);
+    expect(instance.fits).toHaveLength(2);
+
+    // Polling continues against the newly selected graph. Those refreshes are
+    // status-only again, so they must not keep stealing the viewport.
+    updater.fn?.(next.nodes, next.edges);
+    expect(clock.timeouts).toBe(0);
+    clock.tick(40);
+    expect(instance.fits).toHaveLength(2);
+    expect(vendor.reactFlow.nodeUpdates).toHaveLength(2);
+  });
+
+  it("reorders without re-fitting when the same nodes come back shuffled", () => {
+    const { tree, clock, vendor, updater, built } = renderApp();
+    const instance = createFakeFlowInstance();
+    (props(tree as RenderedElement).onInit as (value: unknown) => void)(
+      instance
+    );
+    vendor.react.runEffects();
+    clock.tick(30);
+
+    updater.fn?.([...built.nodes].reverse(), built.edges);
+    expect(clock.timeouts).toBe(0);
+    expect(instance.fits).toEqual([{ padding: 0.18 }]);
+    expect(vendor.reactFlow.nodeUpdates).toHaveLength(1);
+  });
+
+  it("skips the re-fit when the flow has not reported an instance", () => {
+    const { clock, vendor, updater } = renderApp();
+    vendor.react.runEffects();
+
+    const next = buildGraph(resolveGraphSettings(), [{ id: "c", name: "c" }]);
+    expect(() => updater.fn?.(next.nodes, next.edges)).not.toThrow();
+    expect(clock.timeouts).toBe(0);
   });
 
   it("survives a viewport that refuses to fit", () => {

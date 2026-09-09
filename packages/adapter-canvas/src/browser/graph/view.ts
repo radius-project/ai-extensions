@@ -319,6 +319,17 @@ interface AppProps {
 
 const FIT_VIEW_OPTIONS = { padding: 0.18 };
 const FIT_AFTER_MOUNT_MS = 30;
+// A changed node set is re-laid out before it is pushed into React state, so
+// the fit that frames it waits for that render to paint, exactly as the mount
+// fit waits for the initial one.
+const FIT_AFTER_RESHAPE_MS = 40;
+
+// Which nodes the view is showing, independent of their layout order. Dagre may
+// hand back the same resources in a different sequence for an unrelated reason,
+// and that alone must not count as a new graph.
+function nodeSignature(nodes: readonly GraphNode[]): string {
+  return [...nodes.map((node) => node.id)].sort().join("\u0000");
+}
 
 function fitView(
   instance: ReactFlowInstance,
@@ -333,7 +344,10 @@ function fitView(
 }
 
 // The mounted flow application. It binds the updater so the controller can push
-// new nodes and edges into React state while preserving the viewport.
+// new nodes and edges into React state. A refresh that only restates the same
+// resources keeps the viewport, so a user's pan and zoom survives status
+// polling; a refresh that changes which nodes exist re-fits, because the old
+// viewport may not frame the new graph at all.
 export function createGraphApp(
   vendor: GraphVendor,
   clock: ClockPort,
@@ -351,11 +365,22 @@ export function createGraphApp(
     const [edges, setEdges, onEdgesChange] = flow.useEdgesState(
       props.initialEdges
     );
+    const instanceRef = react.useRef<ReactFlowInstance | null>(null);
+    const signatureRef = react.useRef(nodeSignature(props.initialNodes));
 
     react.useEffect(() => {
       updater.fn = (nextNodes, nextEdges) => {
         setNodes(nextNodes);
         setEdges(nextEdges);
+        const signature = nodeSignature(nextNodes);
+        if (signature === signatureRef.current) return;
+        signatureRef.current = signature;
+        const instance = instanceRef.current;
+        if (!instance) return;
+        clock.setTimeout(
+          () => fitView(instance, FIT_VIEW_OPTIONS),
+          FIT_AFTER_RESHAPE_MS
+        );
       };
       return () => {
         updater.fn = null;
@@ -385,6 +410,7 @@ export function createGraphApp(
         elementsSelectable: true,
         proOptions: { hideAttribution: true },
         onInit: (instance: ReactFlowInstance) => {
+          instanceRef.current = instance;
           clock.setTimeout(
             () => fitView(instance, FIT_VIEW_OPTIONS),
             FIT_AFTER_MOUNT_MS

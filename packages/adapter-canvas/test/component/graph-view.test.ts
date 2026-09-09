@@ -542,6 +542,41 @@ describe("graph view in a real browser", () => {
     expect(await waitForStableTransform(viewport)).toBe(zoomedTransform);
   });
 
+  it("re-fits a zoomed viewport when the update changes which nodes exist", async () => {
+    const { graph, host } = mount({ deployMode: true });
+    await card("web");
+    const viewport = host.querySelector(".react-flow__viewport");
+    const zoomOut = host.querySelector(".react-flow__controls-zoomout");
+    if (
+      !(viewport instanceof HTMLElement) ||
+      !(zoomOut instanceof HTMLElement)
+    ) {
+      throw new Error("graph viewport controls did not render");
+    }
+
+    const fittedTransform = await waitForStableTransform(viewport);
+    await userEvent.click(zoomOut);
+    const zoomedTransform = await waitForStableTransform(viewport);
+    expect(zoomedTransform).not.toBe(fittedTransform);
+
+    // Switching application or environment reuses the controller, so a wholly
+    // different resource set arrives through update(). Keeping the old pan and
+    // zoom could leave the new graph off screen entirely.
+    const settings = resolveGraphSettings({
+      localSource: true,
+      deployMode: true
+    });
+    const next = buildGraph(settings, [
+      { id: "other/api", name: "api", deployStatus: "success" },
+      { id: "other/cache", name: "cache", deployStatus: "success" }
+    ]);
+    layoutGraph(realGraphVendor().dagre, next.nodes, next.edges);
+    expect(graph.update(next.nodes, next.edges)).toBe(true);
+
+    await card("api");
+    expect(await waitForStableTransform(viewport)).not.toBe(zoomedTransform);
+  });
+
   it("detaches the real root on unmount and stops answering updates", async () => {
     const { graph, host } = mount();
     await card("web");
