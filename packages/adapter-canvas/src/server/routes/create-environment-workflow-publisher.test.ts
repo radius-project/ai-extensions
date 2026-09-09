@@ -16,6 +16,7 @@ import type {
   CreateEnvironmentOperation,
   WorkflowCommitOutcome
 } from "./create-environment-types.js";
+import { FORK_REPOSITORY_SETUP_GUIDANCE } from "../../repository-access-guidance.js";
 
 function configurationRecorder(
   overrides: Partial<ProviderConfigurationPorts> = {}
@@ -271,8 +272,9 @@ describe("describeWorkflowCommitFailure", () => {
     );
 
     expect(failure.code).toBe("deploy-workflow-commit-failed");
-    expect(failure.error).toContain("protected branch");
+    expect(failure.error).toContain("protected branch. Check that");
     expect(failure.error.endsWith(WRITE_ACCESS_HINT)).toBe(true);
+    expect(failure.error).toContain(FORK_REPOSITORY_SETUP_GUIDANCE);
   });
 
   it.each<[stderr: string | undefined, label: string]>([
