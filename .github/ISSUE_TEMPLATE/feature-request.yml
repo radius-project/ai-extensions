@@ -3,12 +3,6 @@ description: Propose a new capability or an improvement to an existing one.
 labels:
   - enhancement
 body:
-  - type: markdown
-    attributes:
-      value: |
-        Thanks for the suggestion. Please search
-        [existing issues](https://github.com/radius-project/ai-extensions/issues?q=is%3Aissue)
-        first in case someone has already proposed this.
   - type: textarea
     id: problem
     attributes:
@@ -45,12 +39,5 @@ body:
     attributes:
       label: Alternatives considered
       description: Other approaches you thought about, and why they fall short.
-    validations:
-      required: false
-  - type: textarea
-    id: additional-context
-    attributes:
-      label: Additional context
-      description: Links, prior art, or anything else that helps make the case.
     validations:
       required: false

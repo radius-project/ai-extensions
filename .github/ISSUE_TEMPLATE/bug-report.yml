@@ -3,12 +3,6 @@ description: Something is broken or not behaving as documented.
 labels:
   - bug
 body:
-  - type: markdown
-    attributes:
-      value: |
-        Thanks for filing a bug. Please search
-        [existing issues](https://github.com/radius-project/ai-extensions/issues?q=is%3Aissue)
-        first to avoid duplicates.
   - type: textarea
     id: summary
     attributes:
@@ -66,30 +60,18 @@ body:
       render: shell
     validations:
       required: false
-  - type: input
-    id: version
-    attributes:
-      label: Version or commit
-      description: The package, plugin, or extension version, or the commit SHA or branch.
-      placeholder: main, v0.1.0, or a commit SHA
-    validations:
-      required: false
   - type: textarea
     id: environment
     attributes:
-      label: Environment
-      description: OS, Node.js version, Copilot app or CLI version, and cloud provider if relevant.
+      label: Version and environment
+      description: |
+        The version, commit SHA, or branch you are on, plus any environment
+        details that seem relevant.
       placeholder: |
+        Version: main, v0.1.0, or a commit SHA
         OS: macOS 15.3
         Node.js: 22.11.0
         Copilot CLI: 1.0.80
         Cloud provider: Azure
-    validations:
-      required: false
-  - type: textarea
-    id: additional-context
-    attributes:
-      label: Additional context
-      description: Anything else that might help, such as a workaround you found.
     validations:
       required: false

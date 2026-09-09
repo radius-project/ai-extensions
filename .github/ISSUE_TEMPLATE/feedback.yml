@@ -13,27 +13,8 @@ body:
     id: feedback
     attributes:
       label: Your feedback
-      description: What worked well, what did not, and what you were trying to do at the time.
+      description: |
+        What worked well, what did not, and what you were trying to do at the
+        time. Screenshots are welcome — paste them directly into this field.
     validations:
       required: true
-  - type: dropdown
-    id: area
-    attributes:
-      label: Area
-      description: Which part of the repository is this about?
-      options:
-        - Radius plugin or skills
-        - Radius canvas extension
-        - Core packages (core, adapter-shared, adapter-canvas)
-        - Build, CI, or tooling
-        - Documentation
-        - Not sure
-    validations:
-      required: false
-  - type: textarea
-    id: additional-context
-    attributes:
-      label: Screenshots or additional context
-      description: Anything that helps illustrate the feedback.
-    validations:
-      required: false
