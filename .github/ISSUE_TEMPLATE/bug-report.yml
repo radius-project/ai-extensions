@@ -40,7 +40,7 @@ body:
     id: expected-behavior
     attributes:
       label: Expected behavior
-      description: What did you expect to happen? Skip this if it is obvious from the summary.
+      description: What did you expect to happen?
     validations:
       required: false
   - type: textarea
