@@ -16,6 +16,7 @@ import {
   isRecord,
   readArray,
   readNumber,
+  readRecord,
   readString,
   readStringArray
 } from "../json.js";
@@ -171,16 +172,14 @@ export function initializeDeployedGraphPage(
   let resumeGraphOnVisible = false;
   let graphRequestInFlight = false;
   let progressView: GraphProgressView | null = null;
-  // What the last successful graph load says is actually deployed, tagged with
-  // the selection it describes. The tag is what makes it safe to read while a
-  // refresh is in flight: a list left over from a superseded selection can never
-  // be mistaken for the current one.
-  let deployedGraph: { key: string; resources: readonly unknown[] } = {
+  // Keep the target-scoped resource-list snapshot separate from modeled graph
+  // nodes, which can include never-deployed resources and omit removed ones.
+  let deletionInventory: { key: string; resources: readonly unknown[] } = {
     key: "",
     resources: []
   };
   const forgetDeployedResources = (): void => {
-    deployedGraph = { key: "", resources: [] };
+    deletionInventory = { key: "", resources: [] };
   };
 
   const stopProgress = (): void => {
@@ -212,8 +211,8 @@ export function initializeDeployedGraphPage(
     application: string,
     environment: string
   ): readonly unknown[] =>
-    deployedGraph.key === deploymentKey(application, environment) ?
-      deployedGraph.resources
+    deletionInventory.key === deploymentKey(application, environment) ?
+      deletionInventory.resources
     : [];
 
   const stopStatePolling = (): void => {
@@ -295,7 +294,6 @@ export function initializeDeployedGraphPage(
 
   const showNothing = (message: string): void => {
     if (status) status.style.display = "none";
-    forgetDeployedResources();
     controller?.destroy();
     controller = null;
     renderedBranch = "";
@@ -366,6 +364,7 @@ export function initializeDeployedGraphPage(
   const loadGraph = (): void => {
     stopGraphPolling();
     if (!page.repo) {
+      forgetDeployedResources();
       showNothing("Nothing deployed yet");
       return;
     }
@@ -395,15 +394,14 @@ export function initializeDeployedGraphPage(
     let url = `/api/deployed-graph?repo=${encodeURIComponent(page.repo)}`;
     // The selection this request describes, captured now: it may change again
     // before the response lands, and the result belongs to the one it asked for.
-    const requestedKey = deploymentKey(
-      selectedApplication(),
-      selectedEnvironment()
-    );
-    if (selectedApplication()) {
-      url += `&application=${encodeURIComponent(selectedApplication())}`;
+    const application = selectedApplication();
+    const environment = selectedEnvironment();
+    const requestedKey = deploymentKey(application, environment);
+    if (application) {
+      url += `&application=${encodeURIComponent(application)}`;
     }
-    if (selectedEnvironment()) {
-      url += `&environment=${encodeURIComponent(selectedEnvironment())}`;
+    if (environment) {
+      url += `&environment=${encodeURIComponent(environment)}`;
     }
     void context.net
       .fetch(url, graphAbort ? { signal: graphAbort.signal } : undefined)
@@ -428,12 +426,21 @@ export function initializeDeployedGraphPage(
         modeledGraphPending = false;
         const resources = parseGraphResources(readArray(payload, "resources"));
         lastMode = readString(payload, "mode") || "greyed";
-        // A greyed graph is the modeled application rather than a deployment, so
-        // it must never be offered as the list a delete would destroy.
-        deployedGraph =
-          lastMode === "greyed" ?
-            { key: "", resources: [] }
-          : { key: requestedKey, resources };
+        const inventory = readRecord(payload, "deletionInventory");
+        // A successful graph can resolve another application's artifact. Only
+        // the separately verified inventory with matching identity is usable.
+        deletionInventory =
+          (
+            lastMode !== "greyed" &&
+            application !== "" &&
+            environment !== "" &&
+            readString(inventory, "application").toLowerCase() ===
+              application.toLowerCase() &&
+            readString(inventory, "environment").toLowerCase() ===
+              environment.toLowerCase()
+          ) ?
+            { key: requestedKey, resources: readArray(inventory, "resources") }
+          : { key: "", resources: [] };
         if (resources.length === 0) {
           showNothing("Nothing deployed yet");
           setModeNote("");

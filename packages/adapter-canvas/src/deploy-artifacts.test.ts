@@ -1615,9 +1615,46 @@ describe("createDeployStatusReader", () => {
     sequence = 3;
     const stale = await reader.read();
     expect(stale.status).toBe("stale");
+    expect(stale.progressRevalidated).toBe(false);
     expect(reader.sequence).toBe(5);
     expect(stale.progress?.sequence).toBe(5);
   });
+
+  it.each([
+    { changed: false, revalidated: true },
+    { changed: true, revalidated: false }
+  ])(
+    "revalidates only an identical report at the same sequence: $changed",
+    async ({ changed, revalidated }) => {
+      let clock = 0;
+      let failRead = false;
+      const reader = createDeployStatusReader({
+        ...baseOptions,
+        now: () => clock,
+        listArtifacts: async () => {
+          if (failRead) throw new Error("network unavailable");
+          return [artifact("radius-deploy-status-dev-todolist")];
+        },
+        downloadArtifact: async () =>
+          okFiles({
+            state: changed && clock > 0 ? "failed" : "succeeded"
+          })
+      });
+      expect((await reader.read()).status).toBe("ok");
+      for (const time of [10001, 20002]) {
+        clock = time;
+        const snapshot = await reader.read();
+        expect(snapshot.status).toBe("stale");
+        expect(snapshot.progressRevalidated).toBe(revalidated);
+        expect(snapshot.progress?.state).toBe("succeeded");
+      }
+      clock = 30003;
+      failRead = true;
+      const failed = await reader.read();
+      expect(failed.status).toBe("error");
+      expect(failed.progressRevalidated).not.toBe(true);
+    }
+  );
 
   it("accepts a lower sequence from a different run", async () => {
     let clock = 0;

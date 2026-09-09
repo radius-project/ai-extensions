@@ -26,6 +26,11 @@ import type {
   ResolvedWorkspaceBranch,
   WorkspaceBranchResolution
 } from "../../workspace.js";
+import {
+  deletionInventoryFromSnapshot,
+  type DeletionInventory,
+  type DeletionInventorySnapshot
+} from "../services/deletion-inventory.js";
 
 // The two read-only halves of the `graphs-planning` family: the progress log the
 // page polls, and the deployed-graph projection. They are migrated together
@@ -35,10 +40,10 @@ import type {
 // the dispatcher boundary.
 
 // Shaped exactly like the reader `createDeployStatusReader` returns, minus every
-// member these routes do not call. Declaring only `graph` and `progress` keeps a
-// handler from quietly reaching for `read`, `status`, `sequence` or
-// `controlPlaneLog`, none of which the legacy branch touched.
+// member these routes do not call. The inventory uses `read` so status and
+// progress come from one snapshot, without graph/progress's last-good fallback.
 export interface DeployedGraphStatusReader {
+  read(): Promise<DeletionInventorySnapshot>;
   graph(): Promise<{
     graph: unknown | null;
     status: string;
@@ -277,7 +282,14 @@ export async function handleDeployedGraph(
   response.setHeader("Content-Type", "application/json");
   if (!repo) {
     response.writeHead(200);
-    response.end(JSON.stringify({ resources: [], repo: "", mode: "greyed" }));
+    response.end(
+      JSON.stringify({
+        resources: [],
+        repo: "",
+        mode: "greyed",
+        deletionInventory: null
+      })
+    );
     return;
   }
   const state = entry?.state || {};
@@ -363,6 +375,17 @@ export async function handleDeployedGraph(
   let readOk = false;
   let updatedAt: string | null = null;
   let progress: DeployProgress | null = null;
+  let deletionInventory: DeletionInventory | null = null;
+  const inventoryApplication = (
+    url.searchParams.get("application") || ""
+  ).trim();
+  const inventoryEnvironment = (
+    url.searchParams.get("environment") || ""
+  ).trim();
+  const inventorySessionRunId = state.deployRunId;
+  const inventoryDeployStatus = state.deployStatus;
+  const inventoryStartedAt = state.deployStartedAt;
+  const inventoryFinishedAt = state.deployFinishedAt;
   // The app selector is a hint, not a hard filter: the reader falls back to an
   // env-only match when the selected app has no artifact yet (the app name can
   // itself be a guess from the repo short name). Surface the app it actually
@@ -429,6 +452,24 @@ export async function handleDeployedGraph(
         progress
       )) {
         if (!messageByKey.has(key)) messageByKey.set(key, message);
+      }
+      const snapshot = await reader.read();
+      // A concurrent deploy must not turn an earlier snapshot into a delete
+      // inventory. Unlike graph display, selectors cannot fall back to session
+      // identity, and unverified reads cannot reuse last-good resources.
+      if (
+        !deploying &&
+        state.deployStatus === inventoryDeployStatus &&
+        state.deployRunId === inventorySessionRunId &&
+        state.deployStartedAt === inventoryStartedAt &&
+        state.deployFinishedAt === inventoryFinishedAt
+      ) {
+        deletionInventory = deletionInventoryFromSnapshot(
+          snapshot,
+          inventoryApplication,
+          inventoryEnvironment,
+          sessionMatchesSelection ? (inventorySessionRunId ?? null) : null
+        );
       }
     }
   } catch (e) {
@@ -534,7 +575,8 @@ export async function handleDeployedGraph(
       branch,
       mode,
       updatedAt,
-      application: resolvedApp
+      application: resolvedApp,
+      deletionInventory
     })
   );
 }

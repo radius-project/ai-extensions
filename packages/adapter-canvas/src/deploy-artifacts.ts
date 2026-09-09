@@ -121,6 +121,7 @@ export type ReaderStatus =
 
 interface ReadResult {
   status: ReaderStatus;
+  progressRevalidated?: boolean;
   progress: DeployProgress | null;
   graph: unknown | null;
   files: ArtifactFiles | null;
@@ -1041,9 +1042,13 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
           lastGood &&
           result.progress.sequence <= acceptedSequence
         ) {
-          // An older snapshot of the run we are already tracking. Keep what we
-          // have; regressing the graph would flicker resources back to pending.
-          result = { ...lastGood, status: "stale" };
+          // Preserve graph sequencing, but distinguish an identical successful
+          // reread from a regression for consumers that require current proof.
+          const progressRevalidated =
+            result.progress.sequence === acceptedSequence &&
+            JSON.stringify(result.progress) ===
+              JSON.stringify(lastGood.progress);
+          result = { ...lastGood, status: "stale", progressRevalidated };
         } else {
           hasAccepted = true;
           acceptedRunId = incomingRun;

@@ -206,7 +206,13 @@ describe("delete dialog resource list", () => {
       ]
     });
 
-    expect(resourceCaption(specs)).toBe("2 resources will be deleted:");
+    expect(resourceCaption(specs)).toBe(
+      "2 resources last reported for this deployment:"
+    );
+    expect(resourceList(specs)?.attrs).toEqual({
+      tabindex: "0",
+      "aria-label": "Resources to be deleted"
+    });
     expect(resourceItems(specs)).toEqual([
       ["frontend", "Applications.Core/containers"],
       ["cart", "Redis cache"]
@@ -220,7 +226,9 @@ describe("delete dialog resource list", () => {
       environment: "prod",
       resources: [{ name: "frontend" }]
     });
-    expect(resourceCaption(specs)).toBe("1 resource will be deleted:");
+    expect(resourceCaption(specs)).toBe(
+      "1 resource last reported for this deployment:"
+    );
     expect(resourceItems(specs)).toEqual([["frontend"]]);
   });
 
@@ -248,7 +256,9 @@ describe("delete dialog resource list", () => {
       environment: "prod",
       resources: named(250)
     });
-    expect(resourceCaption(many)).toBe("250 resources will be deleted:");
+    expect(resourceCaption(many)).toBe(
+      "250 resources last reported for this deployment:"
+    );
     expect(resourceItems(many)).toHaveLength(DELETE_DIALOG_RESOURCE_LIMIT);
     expect(resourceMore(many)).toBe(
       `+${250 - DELETE_DIALOG_RESOURCE_LIMIT} more`
@@ -269,7 +279,9 @@ describe("delete dialog resource list", () => {
         { name: "  worker  " }
       ]
     });
-    expect(resourceCaption(specs)).toBe("2 resources will be deleted:");
+    expect(resourceCaption(specs)).toBe(
+      "2 resources last reported for this deployment:"
+    );
     expect(resourceItems(specs)).toEqual([["frontend"], ["worker"]]);
   });
 
@@ -374,6 +386,9 @@ describe("delete deployment dialog", () => {
     ]);
     fakeById(browser.body, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
 
+    expect(
+      fakeById(browser.body, DELETE_DIALOG_STEP2_BUTTON_ID).focusCount
+    ).toBe(1);
     const rendered = fakeTree(browser.body);
     expect(
       rendered

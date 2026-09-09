@@ -177,10 +177,15 @@ function deleteDialogResourceSpecs(
       className: "rad-ddlg__resource-caption",
       text:
         summary.length === 1 ?
-          "1 resource will be deleted:"
-        : `${summary.length} resources will be deleted:`
+          "1 resource last reported for this deployment:"
+        : `${summary.length} resources last reported for this deployment:`
     },
-    { tag: "ul", className: "rad-ddlg__resources", children: items }
+    {
+      tag: "ul",
+      className: "rad-ddlg__resources",
+      attrs: { tabindex: "0", "aria-label": "Resources to be deleted" },
+      children: items
+    }
   ];
 }
 
@@ -406,10 +411,11 @@ export function createDeleteDeploymentDialog(
     const nodes = renderStep(deleteDialogEffectsSpecs(target, variant));
     // The continue control is always last: the resource list rendered above it
     // is variable-length, so a fixed index would bind the wrong node.
-    bind(stepBindings, nodes[nodes.length - 1], "click", () => {
+    const next = nodes[nodes.length - 1];
+    bind(stepBindings, next, "click", () => {
       showConfirm(target);
     });
-    focusFirstControl();
+    context.focus.focus(next);
   };
 
   const showConfirm = (target: DeleteTarget): void => {
