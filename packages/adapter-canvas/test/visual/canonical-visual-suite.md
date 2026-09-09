@@ -6,7 +6,7 @@ The canonical Canvas visual suite runs `pnpm run test:visual:canonical`, which b
 playwright test --config packages/adapter-canvas/playwright.visual.config.ts --repeat-each=2 --retries=0
 ```
 
-The suite has 24 unique visual tests. Canonical check mode repeats each test twice with Playwright retries disabled, so a full run executes 48 tests. The tests do not type into text fields; they use seeded fixture state, mocked API routes, button clicks, select/dropdown choices, synthetic change events, and full-page screenshot comparisons.
+Canonical check mode repeats each listed test with Playwright retries disabled, so a mismatch or unstable repeat fails the run. The tests do not type into text fields; they use seeded fixture state, mocked API routes, button clicks, select/dropdown choices, synthetic change events, and full-page screenshot comparisons.
 
 ## Shared fixture state
 
