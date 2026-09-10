@@ -271,7 +271,7 @@ function repairHint(ruleId, text) {
     return " The compiled type marks this property secure — for a Radius type, from x-radius-sensitive in its schema — so it takes the value of a @secure() parameter referenced by name. A literal, a parameter declared without @secure(), and any string interpolation — including one whose operands are all secure — are not secure values. Declare a @secure() parameter and assign it directly. A value that must combine the credential with other parts, such as a connection string, cannot be assembled here: bind the parts separately and compose them only through a path the pinned application source proves it supports, and report the contract gap when it supports none.";
   }
   if (ruleId === "secure-secrets-in-params") {
-    return " This parameter's name identifies it as a credential, so declare it with the @secure() decorator.";
+    return " This rule reads the parameter's name, not its value, so it has two different repairs. If the parameter carries the credential itself, add the @secure() decorator. If it carries the resource ID of a Radius.Security/secrets resource, rename it instead — adding @secure() there only trades this finding for a secure-parameter-target failure, because a reference property is not sensitive and must not receive a secure parameter.";
   }
   if (ruleId === "secure-parameter-default") {
     return " Remove the default value: a @secure() parameter is supplied at deployment time, and a default would commit the credential to the application definition.";

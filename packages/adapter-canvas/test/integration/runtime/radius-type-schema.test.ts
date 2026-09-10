@@ -310,6 +310,32 @@ describe("compact model-facing schemas", () => {
     });
   });
 
+  // A schema may mark one node both sensitive and read-only: the value is a
+  // credential the Recipe produces rather than one the application supplies.
+  // The two flags have to survive independently, because guidance keys the
+  // "assign a @secure() parameter" rule on sensitive AND writable — reading
+  // sensitivity alone would tell the model to set a Recipe output.
+  it("keeps sensitivity and read-only independent on one node", () => {
+    const types = [
+      { $type: "StringType", sensitive: true },
+      {
+        $type: "ObjectType",
+        name: "props",
+        properties: {
+          apiKey: { flags: 0, type: { $ref: "#/0" } },
+          accessToken: { flags: 2, type: { $ref: "#/0" } }
+        }
+      }
+    ];
+
+    expect(
+      normalizer.normalizeTypeReference({ $ref: "#/1" }, types).properties
+    ).toEqual({
+      apiKey: { type: "string", sensitive: true },
+      accessToken: { type: "string", sensitive: true, readOnly: true }
+    });
+  });
+
   it("rejects malformed unions and discriminated object variants", () => {
     expect(() =>
       normalizer.normalizeTypeReference({ $ref: "#/0" }, [

@@ -147,14 +147,16 @@ Authoring that data key as `PASSWORD` fails even though the Bicep compiles and t
 
 ### Sensitivity marks a schema node, not a top-level property
 
-`x-radius-sensitive: true` belongs to the schema node it is written on, which is not always a property of the properties envelope. Read the resolved schema recursively and treat **every** node it marks `"sensitive": true` as taking a secure value, whatever its depth:
+`x-radius-sensitive: true` belongs to the schema node it is written on, which is not always a property of the properties envelope. Read the resolved schema recursively and treat every **writable** node it marks `"sensitive": true` as taking a secure value, whatever its depth:
 
 - a top-level string, as in `Radius.Data/mySqlDatabases.password`;
 - a leaf inside an open map, as in `Radius.Security/secrets.data.<key>.value` — the enclosing `data` is *not* marked, so a rule that reads only the envelope's own properties misses the value that actually holds the credential;
 - a leaf inside a nested object, such as a custom type's `tls.clientKey`; and
 - a whole object, which compiles to a `secureObject` and takes one `@secure() param object` rather than an object literal whose fields are individually secure.
 
-The same rule governs the custom types this skill authors. `x-radius-sensitive` in `custom-types.yaml` is compiled into `custom-types.tgz`, so a generated `Radius.Resources/*` type carries the flag exactly as a predefined type does.
+Sensitivity says how a value is handled, not who supplies it, so it is not on its own an instruction to assign anything. A node the schema also marks `"readOnly": true` is a sensitive **output**: the Recipe populates it, it is never set in `app.bicep`, and it takes no `@secure()` parameter. Read it back through the Recipe's `result.secrets` contract described in [Recipe-generated secret results](#recipe-generated-secret-results). Decide from the two flags together — `sensitive` and `readOnly` — because a schema can and does mark both on one node.
+
+The same rule governs the custom types this skill authors. `x-radius-sensitive` in `custom-types.yaml` is compiled into `custom-types.tgz`, so a generated `Radius.Resources/*` type carries the flag exactly as a predefined type does — including on a `readOnly: true` output, which stays unassigned for the same reason.
 
 ### What counts as a secure value
 
@@ -192,7 +194,7 @@ resource credentials 'Radius.Security/secrets@2025-08-01-preview' = {
 }
 ```
 
-The compiler enforces this for predefined and generated custom types alike: Bicep reports `use-secure-value-for-secure-inputs` for any value it cannot prove secure. Radius emits that finding with no severity, so `validate-bicep.mjs` prints it as a `warning` and still **fails** the build — it is not advisory, and it spends a repair attempt. Two related rules apply to the parameter itself: `secure-secrets-in-params` requires the `@secure()` decorator on a parameter whose name identifies a credential, and `secure-parameter-default` rejects a hardcoded default on a secure parameter.
+The compiler enforces this for predefined and generated custom types alike: Bicep reports `use-secure-value-for-secure-inputs` for any value it cannot prove secure. Radius emits that finding with no severity, so `validate-bicep.mjs` prints it as a `warning` and still **fails** the build — it is not advisory, and it spends a repair attempt. Two related rules apply to the parameter itself. `secure-parameter-default` rejects a hardcoded default on a secure parameter. `secure-secrets-in-params` is a **name** heuristic — it reports that a parameter *may* be a credential "according to its name" — so it has two different repairs: add `@secure()` when the parameter really carries the credential, but rename it when it carries a `Radius.Security/secrets` resource ID instead. Adding `@secure()` to a reference parameter trades this warning for a `secure-parameter-target` failure, because a reference property is not sensitive and must not receive a secure parameter.
 
 ## Recipe-generated secret results
 

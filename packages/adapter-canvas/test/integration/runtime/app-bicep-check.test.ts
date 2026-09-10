@@ -1073,7 +1073,9 @@ test("tells a credential-named parameter to carry the @secure() decorator", () =
   );
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /declare it with the @secure\(\) decorator/u);
+  assert.match(result.stderr, /reads the parameter's name, not its value/u);
+  assert.match(result.stderr, /add the @secure\(\) decorator/u);
+  assert.match(result.stderr, /rename it instead/u);
 });
 
 test("tells a secure parameter with a default to drop the default", () => {
