@@ -32,6 +32,7 @@ import {
   settleDeployStatuses
 } from "../../src/deploy-artifacts.js";
 import type { CanvasGraphResource } from "../../src/shared.js";
+import { DELETE_DIALOG_RESOURCE_LIMIT } from "../../src/browser/delete-dialog.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const SOURCE_FILE = "src/web/app.ts";
@@ -3057,6 +3058,164 @@ test.describe("Radius Canvas in Chromium", () => {
       .poll(() => bodyFor(canvas, "/api/delete-deployment"))
       .toMatchObject({ environment: "fixture-environment" });
   });
+
+  test("reads the full deletion inventory without hidden entries before confirming in Chromium @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.setViewportSize({ width: 480, height: 900 });
+    await routeDeployedPage(page, () => "success");
+    const hostileName = '<img src=x onerror="alert(1)">';
+    const resources = Array.from(
+      { length: DELETE_DIALOG_RESOURCE_LIMIT + 3 },
+      (_, index) => ({
+        name: index === 0 ? hostileName : `reported-resource-${index}`,
+        type: "Applications.Core/containers"
+      })
+    );
+    await page.route("**/api/deployed-graph**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [{ id: "modeled", name: "never-deployed" }],
+          mode: "terminal",
+          deletionInventory: {
+            application: "radius-app",
+            environment: "fixture-environment",
+            resources
+          }
+        })
+      });
+    });
+    const deletes: unknown[] = [];
+    await page.route("**/api/delete-deployment", async (route) => {
+      deletes.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true })
+      });
+    });
+    await gotoCanvas(page, canvas, "deployed");
+    const deleteButton = page.getByRole("button", {
+      name: "Delete Deployment"
+    });
+    await deleteButton.focus();
+    await page.keyboard.press("Enter");
+    const intent = page.getByRole("button", {
+      name: "I want to delete this deployment"
+    });
+    await expect(intent).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    const dialog = page.locator("#deploy-delete-modal");
+    const list = dialog.getByRole("list", { name: "Resources to be deleted" });
+    await expect(list.locator(".rad-ddlg__resource")).toHaveCount(
+      DELETE_DIALOG_RESOURCE_LIMIT
+    );
+    await expect(list.locator("strong").first()).toHaveText(hostileName);
+    await expect(list.locator("img")).toHaveCount(0);
+    await expect(list).not.toContainText("never-deployed");
+    await expect(list).toContainText("+3 more");
+    await expect(list).toContainText("Applications.Core/containers");
+    const next = dialog.getByRole("button", {
+      name: /have read and understand/i
+    });
+    await expect(next).toBeFocused();
+    await expect(next).toBeInViewport();
+    await expectNoWcagViolations(page);
+
+    await page.keyboard.press("Shift+Tab");
+    await expect(list).toBeFocused();
+    // The list stays focusable because a short window can still force it to
+    // scroll, but at this viewport nothing may be hidden: overlay scrollbars
+    // are invisible until interaction, so clipped entries would silently
+    // withhold part of what the user is agreeing to destroy.
+    const hidden = await list.evaluate(
+      (element) =>
+        Number(Reflect.get(element, "scrollHeight")) >
+        Number(Reflect.get(element, "clientHeight"))
+    );
+    expect(hidden).toBe(false);
+    await expect(list.locator(".rad-ddlg__resource-more")).toBeInViewport();
+    await page.keyboard.press("Tab");
+    await expect(next).toBeFocused();
+    await page.keyboard.press("Enter");
+    const input = dialog.locator("#del-confirm-input");
+    const confirm = dialog.locator("#del-confirm-btn");
+    await expect(input).toBeFocused();
+    await expect(confirm).toBeDisabled();
+    await expectNoWcagViolations(page);
+    await page.keyboard.type("radius-app/fixture-environmen");
+    await page.keyboard.press("Enter");
+    expect(deletes).toEqual([]);
+    await expect(confirm).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(deleteButton).toBeFocused();
+
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+    await expect(next).toBeFocused();
+    await page.keyboard.press("Enter");
+    await input.fill("radius-app/fixture-environment");
+    await page.keyboard.press("Enter");
+    await expect
+      .poll(() => deletes)
+      .toEqual([
+        {
+          repo: REPOSITORY,
+          application: "radius-app",
+          environment: "fixture-environment",
+          force: false
+        }
+      ]);
+  });
+
+  for (const scenario of ["mismatched", "unavailable"]) {
+    test(`keeps the deletion inventory fallback for ${scenario} data in Chromium @safety`, async ({
+      page,
+      canvas
+    }) => {
+      await routeDeployedPage(page, () => "success");
+      await page.route("**/api/deployed-graph**", async (route) => {
+        if (scenario === "unavailable") {
+          await route.abort("failed");
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            resources: [{ id: "model", name: "never-deployed" }],
+            mode: "terminal",
+            deletionInventory: {
+              application: "another-app",
+              environment: "fixture-environment",
+              resources: [{ name: "another-app-resource" }]
+            }
+          })
+        });
+      });
+      await gotoCanvas(page, canvas, "deployed");
+      await page.getByRole("button", { name: "Delete Deployment" }).click();
+      await page
+        .getByRole("button", {
+          name: "I want to delete this deployment"
+        })
+        .click();
+      const dialog = page.locator("#deploy-delete-modal");
+      await expect(dialog.getByRole("list")).toHaveCount(0);
+      await expect(dialog).toContainText(
+        "This will permanently delete the deployment of radius-app from environment fixture-environment, including all associated resources."
+      );
+      await expectNoWcagViolations(page);
+      await page.keyboard.press("Enter");
+      await expect(dialog.locator("#del-confirm-input")).toBeFocused();
+      await expect(dialog.locator("#del-confirm-btn")).toBeDisabled();
+    });
+  }
 
   test("offers stop tracking only after teardown fails in Chromium @safety", async ({
     page,
