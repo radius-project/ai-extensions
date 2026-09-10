@@ -1,4 +1,4 @@
-# Phase 7 visual and reliability traceability
+﻿# Phase 7 visual and reliability traceability
 
 Phase 7 adds the Playwright visual suite (P2-A) in `test/visual/canvas-visual.test.ts`, the recurring functional workflow in `.github/workflows/canvas-functional.yml`, and the scheduled extended resilience gate (P2-B) in `.github/workflows/canvas-reliability.yml`. All reuse the Phase 6 real Chromium harness and deterministic fake CLI boundary. No personal credential, live cloud, mutable repository, public content network, or inherited credential store is used.
 
@@ -14,6 +14,8 @@ VI-03 waits for the planned deployment action to become enabled before dispatchi
 
 VI-08 and VI-09 pin command remediation callouts in the credential and environment wizard flows. Both remove the `write:packages` scope from the fake GitHub keyring account so the UI must render the actionable command treatment, including the command text and Copy and Run with Copilot controls, rather than plain prose.
 
+VI-10 pins the delete confirmation dialog's resource list, which is the only surface that tells a user what a teardown destroys before they type the confirmation token. Its fixture reports more resources than the dialog displays, so the baselines capture the truncated list and, after scrolling the height-capped list to its end, the remainder line that reports how many were withheld. The fixture also holds a modeled-only resource that must never appear: the dialog names what was last reported as deployed, not what the application merely declares.
+
 | ID    | Baselines                                                                                                                                                                                                                               | Disposition |
 |-------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------|
 | VI-01 | `vi-01-modeled-graph-light.png`, `vi-01-modeled-graph-dark.png`                                                                                                                                                                         | Covered     |
@@ -25,6 +27,7 @@ VI-08 and VI-09 pin command remediation callouts in the credential and environme
 | VI-07 | `vi-07-deploy-success-light.png`, `vi-07-deploy-success-dark.png`, `vi-07-deploy-failed-light.png`, `vi-07-deploy-failed-dark.png`                                                                                                      | Covered     |
 | VI-08 | `vi-08-run-command-callout-light.png`, `vi-08-run-command-callout-dark.png`                                                                                                                                                             | Covered     |
 | VI-09 | `vi-09-wizard-github-callout-light.png`, `vi-09-wizard-github-callout-dark.png`                                                                                                                                                         | Covered     |
+| VI-10 | `vi-10-delete-resources-light.png`, `vi-10-delete-resources-dark.png`, `vi-10-delete-resources-end-light.png`, `vi-10-delete-resources-end-dark.png`                                                                                    | Covered     |
 
 ### Baseline ownership and update procedure
 
