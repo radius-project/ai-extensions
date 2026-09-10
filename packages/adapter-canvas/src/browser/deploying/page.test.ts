@@ -16,6 +16,7 @@ import {
   createFakeSelect,
   fakeById,
   fakeInputById,
+  fakeTree,
   flushPromises,
   jsonResponse
 } from "../../../test/support/browser/fakes.js";
@@ -258,11 +259,12 @@ function deployRowButton(app: string, environment: string, id = "row-del") {
   return button;
 }
 
-function confirmDeleteDialog(
+async function confirmDeleteDialog(
   deleteBody: FakeElement,
   app: string,
   environment: string
-): void {
+): Promise<void> {
+  await flushPromises();
   fakeById(deleteBody, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
   fakeById(deleteBody, DELETE_DIALOG_STEP2_BUTTON_ID).dispatch("click");
   const input = fakeInputById(deleteBody, DELETE_DIALOG_CONFIRM_INPUT_ID);
@@ -843,9 +845,169 @@ describe("delete flow", () => {
   it("opens the shared confirmation dialog naming the target", async () => {
     const { page, button } = await readyWithRow("app", "dev");
     button.dispatch("click");
+    await flushPromises();
     expect(page.deleteModal.style.display).toBe("flex");
     expect(page.deleteApp.textContent).toBe("app");
     expect(page.deleteEnv.textContent).toBe("dev");
+  });
+
+  describe("deletion inventory on the deployments list", () => {
+    function inventoryUrl(page: { repo: string }, app: string, env: string) {
+      return (
+        `/api/deployed-graph?repo=${encodeURIComponent(page.repo)}` +
+        `&application=${encodeURIComponent(app)}` +
+        `&environment=${encodeURIComponent(env)}`
+      );
+    }
+
+    // The resource list lives on the dialog's second step, so the intent step
+    // has to be dismissed before it exists to read.
+    function renderedResources(deleteBody: FakeElement): string[] {
+      fakeById(deleteBody, DELETE_DIALOG_STEP1_BUTTON_ID).dispatch("click");
+      return fakeTree(deleteBody)
+        .filter(
+          (element) =>
+            element.className === "rad-ddlg__resource" ||
+            element.className === "rad-ddlg__resource-more"
+        )
+        .map((element) => fakeText(element));
+    }
+
+    it("names the resources reported for the row being deleted", async () => {
+      const { page, button } = await readyWithRow("app", "dev");
+      page.browser.net.handle(inventoryUrl(page, "app", "dev"), () =>
+        jsonResponse({
+          mode: "terminal",
+          deletionInventory: {
+            application: "app",
+            environment: "dev",
+            resources: [
+              { name: "web", type: "Applications.Core/containers" },
+              { name: "cache", type: "Radius.Data/redis" }
+            ]
+          }
+        })
+      );
+
+      button.dispatch("click");
+      await flushPromises();
+
+      expect(renderedResources(page.deleteBody)).toEqual([
+        "webApplications.Core/containers",
+        "cacheRadius.Data/redis"
+      ]);
+    });
+
+    it("falls back to the generic warning when the inventory fails", async () => {
+      const { page, button } = await readyWithRow("app", "dev");
+      page.browser.net.handle(inventoryUrl(page, "app", "dev"), () =>
+        Promise.reject(new Error("offline"))
+      );
+
+      button.dispatch("click");
+      await flushPromises();
+
+      expect(page.deleteModal.style.display).toBe("flex");
+      expect(renderedResources(page.deleteBody)).toEqual([]);
+    });
+
+    // The listing shows every deployment at once, so an inventory answering for
+    // a different pair must never reach the dialog that is about to destroy this
+    // one.
+    it("names nothing when the inventory answers for another deployment", async () => {
+      const { page, button } = await readyWithRow("app", "dev");
+      page.browser.net.handle(inventoryUrl(page, "app", "dev"), () =>
+        jsonResponse({
+          mode: "terminal",
+          deletionInventory: {
+            application: "other",
+            environment: "dev",
+            resources: [{ name: "web", type: "Applications.Core/containers" }]
+          }
+        })
+      );
+
+      button.dispatch("click");
+      await flushPromises();
+
+      expect(renderedResources(page.deleteBody)).toEqual([]);
+    });
+
+    it("names the resources on the delete-failed conflict path", async () => {
+      const page = fixture({
+        deploymentsPayload: {
+          deployments: [
+            { app: "app", environment: "dev", status: "delete-failed" }
+          ]
+        }
+      });
+      const button = deployRowButton("app", "dev");
+      page.browser.document.addSelectorAll(".js-del-dep", [button]);
+      init(page);
+      await flushPromises();
+      page.browser.net.handle(inventoryUrl(page, "app", "dev"), () =>
+        jsonResponse({
+          mode: "terminal",
+          deletionInventory: {
+            application: "app",
+            environment: "dev",
+            resources: [{ name: "web", type: "Applications.Core/containers" }]
+          }
+        })
+      );
+      page.browser.net.handle(
+        deleteConflictUrl({
+          repo: page.repo,
+          environment: "dev",
+          application: "app"
+        }),
+        () => jsonResponse({ conflict: false })
+      );
+
+      button.dispatch("click");
+      await flushPromises();
+
+      expect(renderedResources(page.deleteBody)).toEqual([
+        "webApplications.Core/containers"
+      ]);
+    });
+
+    it("ignores a second click while the inventory is loading", async () => {
+      const { page, button } = await readyWithRow("app", "dev");
+      const pending = createDeferred<HttpResponse>();
+      page.browser.net.handle(
+        inventoryUrl(page, "app", "dev"),
+        () => pending.promise
+      );
+
+      button.dispatch("click");
+      button.dispatch("click");
+      pending.resolve(jsonResponse({ mode: "greyed" }));
+      await flushPromises();
+
+      const inventoryCalls = page.browser.net.calls.filter(
+        (call) => call.url === inventoryUrl(page, "app", "dev")
+      );
+      expect(inventoryCalls).toHaveLength(1);
+    });
+
+    // The dialog now opens a round trip after the click, so the page can be torn
+    // down in between and must not raise a modal onto a dead page.
+    it("does not open the dialog when the page is torn down mid-fetch", async () => {
+      const { page, button, teardown } = await readyWithRow("app", "dev");
+      const pending = createDeferred<HttpResponse>();
+      page.browser.net.handle(
+        inventoryUrl(page, "app", "dev"),
+        () => pending.promise
+      );
+
+      button.dispatch("click");
+      teardown();
+      pending.resolve(jsonResponse({ mode: "greyed" }));
+      await flushPromises();
+
+      expect(page.deleteModal.style.display).toBe("");
+    });
   });
 
   it("dispatches delete, marks the row Deleting, and resolves on completion", async () => {
@@ -856,7 +1018,7 @@ describe("delete flow", () => {
       return jsonResponse({ ok: true });
     });
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
     expect(page.tableBody.innerHTML).toContain("Deleting");
     expect(JSON.parse(String(deleteCalled))).toEqual({
@@ -903,7 +1065,7 @@ describe("delete flow", () => {
         })
       );
       button.dispatch("click");
-      confirmDeleteDialog(page.deleteBody, "app", "dev");
+      await confirmDeleteDialog(page.deleteBody, "app", "dev");
       await flushPromises();
       const started = inlineMessage(page.inlineStatus);
       expect(started).toContain("has started");
@@ -930,7 +1092,7 @@ describe("delete flow", () => {
         jsonResponse({ success: true, runUrl: "" })
       );
       button.dispatch("click");
-      confirmDeleteDialog(page.deleteBody, "app", "dev");
+      await confirmDeleteDialog(page.deleteBody, "app", "dev");
       await flushPromises();
       const started = inlineMessage(page.inlineStatus);
       expect(started).toContain("has started");
@@ -1145,7 +1307,7 @@ describe("delete flow", () => {
       await flushPromises();
       expect(fakeText(page.deleteBody)).toContain("confirm your intention");
 
-      confirmDeleteDialog(page.deleteBody, "app", "dev");
+      await confirmDeleteDialog(page.deleteBody, "app", "dev");
       await flushPromises();
       expect(JSON.parse(String(dispatched))).toMatchObject({ force: false });
     });
@@ -1163,7 +1325,7 @@ describe("delete flow", () => {
       await flushPromises();
       expect(fakeText(page.deleteBody)).toContain("confirm your intention");
 
-      confirmDeleteDialog(page.deleteBody, "app", "dev");
+      await confirmDeleteDialog(page.deleteBody, "app", "dev");
       await flushPromises();
       expect(JSON.parse(String(dispatched))).toEqual({
         force: false,
@@ -1245,7 +1407,7 @@ describe("delete flow", () => {
       return jsonResponse({ ok: true });
     });
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "", "dev");
+    await confirmDeleteDialog(page.deleteBody, "", "dev");
     await flushPromises();
     expect(dispatched).toBe(false);
   });
@@ -1267,7 +1429,7 @@ describe("delete flow", () => {
       return jsonResponse({ ok: true });
     });
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "");
+    await confirmDeleteDialog(page.deleteBody, "app", "");
     await flushPromises();
     expect(dispatched).toBe(false);
   });
@@ -1278,7 +1440,7 @@ describe("delete flow", () => {
       jsonResponse({ error: "workflow busy" }, false, 409)
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toContain("workflow busy");
   });
@@ -1289,7 +1451,7 @@ describe("delete flow", () => {
       jsonResponse({}, false, 500)
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toContain(
       "Could not start the delete workflow."
@@ -1302,7 +1464,7 @@ describe("delete flow", () => {
       Promise.reject(new Error("offline"))
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
     expect(inlineMessage(page.inlineStatus)).toContain(
       "Could not delete the deployment. Please try again."
@@ -1315,7 +1477,7 @@ describe("delete flow", () => {
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
 
     let pollCount = 0;
@@ -1349,7 +1511,7 @@ describe("delete flow", () => {
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
 
     page.browser.net.handle(
@@ -1373,7 +1535,7 @@ describe("delete flow", () => {
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
 
     let attempts = 0;
@@ -1399,7 +1561,7 @@ describe("delete flow", () => {
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
 
     page.browser.net.handle(
@@ -1421,7 +1583,7 @@ describe("delete flow", () => {
     const dispatchDef = createDeferred<HttpResponse>();
     page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () => dispatchDef.promise);
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     teardown();
     dispatchDef.resolve(jsonResponse({ ok: true }));
     await flushPromises();
@@ -1433,7 +1595,7 @@ describe("delete flow", () => {
     const dispatchDef = createDeferred<HttpResponse>();
     page.browser.net.handle(DELETE_DEPLOYMENT_PATH, () => dispatchDef.promise);
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     teardown();
     dispatchDef.reject(new Error("offline"));
     await flushPromises();
@@ -1446,7 +1608,7 @@ describe("delete flow", () => {
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
 
     const pollDef = createDeferred<HttpResponse>();
@@ -1467,7 +1629,7 @@ describe("delete flow", () => {
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
 
     const pollDef = createDeferred<HttpResponse>();
@@ -1490,7 +1652,7 @@ describe("delete flow", () => {
     );
     const before = page.tableBody.innerHTML;
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
     expect(page.tableBody.innerHTML).not.toContain("Could not load");
     expect(page.tableBody.innerHTML).toBe(before);
@@ -1504,7 +1666,7 @@ describe("delete flow", () => {
     );
     const before = page.tableBody.innerHTML;
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
     expect(page.tableBody.innerHTML).not.toContain("Could not load");
     expect(page.tableBody.innerHTML).toBe(before);
@@ -3422,7 +3584,7 @@ describe("stale response identity across independent operations", () => {
       jsonResponse({ ok: true })
     );
     button.dispatch("click");
-    confirmDeleteDialog(page.deleteBody, "app", "dev");
+    await confirmDeleteDialog(page.deleteBody, "app", "dev");
     await flushPromises();
     expect(page.tableBody.innerHTML).toContain("Deleting");
   });

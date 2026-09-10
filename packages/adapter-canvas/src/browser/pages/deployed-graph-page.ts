@@ -3,6 +3,7 @@ import { asGraphController } from "../graph/surface.js";
 import { createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl, parseGraphResources } from "../graph/model.js";
 import { createEnvironmentConfirmDialog } from "../environment/confirm-dialog.js";
+import { deletionInventoryResources } from "../deletion-inventory.js";
 import {
   DELETE_FAILED_STATUS,
   FORCE_DELETE_ORPHAN_NOTICE,
@@ -16,7 +17,6 @@ import {
   isRecord,
   readArray,
   readNumber,
-  readRecord,
   readString,
   readStringArray
 } from "../json.js";
@@ -426,20 +426,14 @@ export function initializeDeployedGraphPage(
         modeledGraphPending = false;
         const resources = parseGraphResources(readArray(payload, "resources"));
         lastMode = readString(payload, "mode") || "greyed";
-        const inventory = readRecord(payload, "deletionInventory");
-        // A successful graph can resolve another application's artifact. Only
-        // the separately verified inventory with matching identity is usable.
+        const verified = deletionInventoryResources(
+          payload,
+          application,
+          environment
+        );
         deletionInventory =
-          (
-            lastMode !== "greyed" &&
-            application !== "" &&
-            environment !== "" &&
-            readString(inventory, "application").toLowerCase() ===
-              application.toLowerCase() &&
-            readString(inventory, "environment").toLowerCase() ===
-              environment.toLowerCase()
-          ) ?
-            { key: requestedKey, resources: readArray(inventory, "resources") }
+          verified.length > 0 ?
+            { key: requestedKey, resources: verified }
           : { key: "", resources: [] };
         if (resources.length === 0) {
           showNothing("Nothing deployed yet");
