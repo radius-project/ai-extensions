@@ -67,6 +67,19 @@ describe("deletionInventoryFromSnapshot", () => {
     }
   );
 
+  it("rejects a report the parser had to shorten", () => {
+    // The surviving entry is well-formed, so only the discard marker
+    // distinguishes this from a complete single-resource inventory.
+    expect(
+      deletionInventoryFromSnapshot(
+        { status: "ok", progress: progress({ resourcesDiscarded: true }) },
+        "billing",
+        "prod",
+        42
+      )
+    ).toBeNull();
+  });
+
   it("rejects absent progress", () => {
     expect(
       deletionInventoryFromSnapshot(

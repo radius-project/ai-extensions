@@ -40,7 +40,13 @@ export function deletionInventoryFromSnapshot(
   // Live polls are incomplete while provisioning continues. Terminal reports
   // come from resource-list, not app graph, but their producer also uses [] on
   // list failure. Without a success marker an empty report is unknown.
+  //
+  // A report the parser had to shorten is unknown for the same reason: the
+  // surviving entries are readable but the list no longer accounts for
+  // everything the artifact claimed, and undercounting a teardown is worse
+  // than naming nothing.
   if (
+    progress.resourcesDiscarded === true ||
     progress.resources.length === 0 ||
     progress.resources.some(
       (resource) => !resource.name.trim() || !resource.type.trim()

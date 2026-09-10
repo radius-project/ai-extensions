@@ -93,6 +93,13 @@ export interface DeployProgress {
   updatedAt?: string;
   state?: string;
   resources: DeployProgressResource[];
+  /**
+   * Set only when the artifact carried resource entries this parser could not
+   * read. Consumers that merely annotate a graph can ignore a dropped entry,
+   * but a consumer that presents the list as a complete inventory must not:
+   * a silently shortened list would undercount a destructive action.
+   */
+  resourcesDiscarded?: true;
 }
 
 export interface WorkflowArtifact {
@@ -279,10 +286,17 @@ export function parseDeployProgressArtifact(
     return null;
   const sequence = parsed.sequence;
   const resources: DeployProgressResource[] = [];
+  let discarded = false;
   for (const raw of parsed.resources) {
-    if (!isRecord(raw)) continue;
+    if (!isRecord(raw)) {
+      discarded = true;
+      continue;
+    }
     const name = typeof raw.name === "string" ? raw.name : "";
-    if (!name) continue;
+    if (!name) {
+      discarded = true;
+      continue;
+    }
     resources.push({
       id: typeof raw.id === "string" ? raw.id : undefined,
       name,
@@ -323,7 +337,8 @@ export function parseDeployProgressArtifact(
     updatedAt:
       typeof parsed.updatedAt === "string" ? parsed.updatedAt : undefined,
     state: typeof parsed.state === "string" ? parsed.state : undefined,
-    resources
+    resources,
+    ...(discarded ? { resourcesDiscarded: true as const } : {})
   };
 }
 

@@ -235,6 +235,56 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     expect(await read()).toMatchObject({ deletionInventory: null });
   });
 
+  it("withholds inventory when the artifact carried an unreadable resource entry", async () => {
+    // The malformed entry is dropped during parsing, so the surviving list
+    // looks complete by the time the route validates it. Only the parser's
+    // discard marker can prevent undercounting a destructive action, which
+    // makes this the boundary worth exercising through the real reader.
+    const actualReader = createDeployStatusReader({
+      repo: "octo/app",
+      application: "billing",
+      environment: "prod",
+      now: () => 0,
+      listArtifacts: async () => [
+        {
+          id: 1,
+          name: "radius-deploy-status-prod-billing",
+          workflow_run: { id: 42 }
+        }
+      ],
+      downloadArtifact: async () => ({
+        [DEPLOY_STATUS_FILES.graph]: JSON.stringify({
+          resources: [{ name: "modeled-only" }]
+        }),
+        [DEPLOY_STATUS_FILES.progress]: JSON.stringify({
+          schemaVersion: 1,
+          application: "billing",
+          environment: "prod",
+          runId: 42,
+          sequence: 1,
+          state: "succeeded",
+          resources: [
+            { name: "deployed-only", type: "Radius.Resources/redis" },
+            { type: "Radius.Resources/containers" }
+          ]
+        })
+      })
+    });
+    const harness = start(actualReader);
+    harness.state.contextRepo = "octo/app";
+    harness.modeledResources.push({ name: "modeled-only" });
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await fetch(
+      `${entry.baseUrl}/api/deployed-graph?application=billing&environment=prod`
+    );
+    expect(response.status).toBe(200);
+    // The graph itself still projects: only the inventory claim is withheld.
+    expect(await response.json()).toMatchObject({
+      deletionInventory: null,
+      resources: [{ name: "modeled-only" }]
+    });
+  });
+
   it("adds a scoped resource-list inventory without changing modeled graph projection", async () => {
     const harness = start();
     Object.assign(harness.state, {

@@ -211,6 +211,31 @@ describe("parseDeployProgressArtifact", () => {
     expect(parsed?.environment).toBe("dev");
     expect(parsed?.sequence).toBe(1);
     expect(parsed?.resources).toHaveLength(1);
+    expect(parsed?.resourcesDiscarded).toBeUndefined();
+  });
+
+  it.each([
+    ["a non-object entry", 42],
+    ["a nameless entry", { type: "Radius.Resources/redis" }],
+    ["a non-string name", { name: 7, type: "Radius.Resources/redis" }]
+  ])("reports that %s was dropped from the resource list", (_label, bad) => {
+    // Built inline rather than through progressPayload: that helper is typed
+    // to DeployProgress, which by design cannot express a malformed entry.
+    const parsed = parseDeployProgressArtifact(
+      JSON.stringify({
+        schemaVersion: 1,
+        application: "todolist",
+        environment: "dev",
+        runId: 100,
+        sequence: 1,
+        state: "succeeded",
+        resources: [{ name: "api", type: "Radius.Resources/containers" }, bad]
+      })
+    );
+    // Readable entries still parse, so the count alone cannot tell a consumer
+    // that the list is short. The marker is the only signal.
+    expect(parsed?.resources).toHaveLength(1);
+    expect(parsed?.resourcesDiscarded).toBe(true);
   });
 
   describe("parseDeployGraphArtifact", () => {
