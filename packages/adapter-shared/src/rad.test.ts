@@ -295,52 +295,53 @@ describe("radiusExtensionRefForVersion", () => {
     expect(radiusExtensionRefForVersion(version)).toBe(ref);
   });
 
-  it("pins a release-channel tag for a binary that self-reports a prerelease", () => {
-    // Released binaries have been observed self-reporting an rc string, and
-    // compareVersions treats a prerelease as its core version so such a binary
-    // is never upgraded past it. The channel, not the suffix, identifies the
-    // types it compiles against.
-    expect(radiusExtensionRefForVersion("v0.60.0-rc1")).toBe(
-      "br:biceptypes.azurecr.io/radius:0.60"
-    );
-    expect(radiusExtensionRefForVersion("v0.60.0-rc1-1-gdeadbee")).toBe(
-      "br:biceptypes.azurecr.io/radius:0.60"
-    );
+  it.each([
+    ["v0.60.0-rc1", "br:biceptypes.azurecr.io/radius:0.60.0-rc1"],
+    ["v0.60.0-rc.1", "br:biceptypes.azurecr.io/radius:0.60.0-rc.1"],
+    [
+      "v0.60.0-rc1-1-gdeadbee",
+      "br:biceptypes.azurecr.io/radius:0.60.0-rc1-1-gdeadbee"
+    ]
+  ])("pins prerelease %s to its exact published tag %s", (release, ref) => {
+    expect(radiusExtensionRefForVersion(release)).toBe(ref);
   });
 
-  it("ignores a build suffix", () => {
+  it("maps stable build metadata to the stable release channel", () => {
     expect(radiusExtensionRefForVersion("0.60.0+build.7")).toBe(
       "br:biceptypes.azurecr.io/radius:0.60"
     );
   });
 
-  it.each(["latest", "edge"])(
-    "never derives the mutable %s tag, which floats off the installed release",
-    (version) => {
-      // Regression guard for issue #487: `latest` was observed publishing an
-      // artifact older than the installed release, so a model compiled against
-      // it silently lost schema properties. `edge` is years stale.
-      expect(radiusExtensionRefForVersion(version)).toBeNull();
-    }
-  );
+  it("maps the edge release to the mutable latest tag", () => {
+    expect(radiusExtensionRefForVersion("edge")).toBe(
+      "br:biceptypes.azurecr.io/radius:latest"
+    );
+  });
 
   it.each([
     ["an empty string", ""],
     ["null", null],
     ["undefined", undefined],
     ["a non-numeric version", "vX.Y.Z"],
-    ["a partial version", "0.60"]
+    ["a partial version", "0.60"],
+    ["the stable channel name", "stable"],
+    ["the latest tag name", "latest"],
+    ["a pull-request release", "pr-720"],
+    ["an abbreviated commit", "deadbee"],
+    ["a prerelease numeric identifier with a leading zero", "v0.60.0-rc.01"],
+    ["an empty prerelease identifier", "v0.60.0-rc..1"],
+    ["prerelease build metadata", "v0.60.0-rc.1+build.7"]
   ])("returns null for %s rather than guessing a tag", (_label, version) => {
     expect(radiusExtensionRefForVersion(version)).toBeNull();
   });
 });
 
 describe("resolveRadiusExtensionRef", () => {
-  it("derives the reference from the binary that will run the compile", async () => {
-    const readVersion = vi.fn().mockResolvedValue("v0.60.0-rc1");
+  it("derives the reference from the release of the binary that will run the compile", async () => {
+    const readVersion = vi.fn().mockResolvedValue("v0.60.0-rc.1");
     await expect(
       resolveRadiusExtensionRef({ radPath: "/bin/rad", readVersion })
-    ).resolves.toBe("br:biceptypes.azurecr.io/radius:0.60");
+    ).resolves.toBe("br:biceptypes.azurecr.io/radius:0.60.0-rc.1");
     expect(readVersion).toHaveBeenCalledWith("/bin/rad");
   });
 
@@ -368,19 +369,47 @@ describe("resolveRadiusExtensionRef", () => {
     ).resolves.toBe("br:biceptypes.azurecr.io/radius:0.59");
   });
 
-  it("returns null and reports the version when it cannot be mapped", async () => {
+  it("warns when edge selects mutable latest", async () => {
     const log = vi.fn();
     await expect(
       resolveRadiusExtensionRef({
         log,
         radPath: "/bin/rad",
-        readVersion: async () => "not-a-version"
+        readVersion: async () => "edge"
       })
-    ).resolves.toBeNull();
-    expect(log.mock.calls[0][0]).toContain('it reported "not-a-version"');
+    ).resolves.toBe("br:biceptypes.azurecr.io/radius:latest");
+    expect(log).toHaveBeenCalledWith(
+      expect.stringMatching(/mutable.*latest.*may not match.*binary/iu)
+    );
   });
 
-  it("returns null without a version fragment when the read yields nothing", async () => {
+  it("rejects a pull-request release with a useful diagnostic", async () => {
+    const log = vi.fn();
+    await expect(
+      resolveRadiusExtensionRef({
+        log,
+        radPath: "/bin/rad",
+        readVersion: async () => "pr-720"
+      })
+    ).rejects.toThrow(/pull-request.*no Radius Bicep types.*published/iu);
+    expect(log).toHaveBeenCalledWith(
+      expect.stringMatching(/pull-request.*no Radius Bicep types.*published/iu)
+    );
+  });
+
+  it("returns null and reports the release when it cannot be mapped", async () => {
+    const log = vi.fn();
+    await expect(
+      resolveRadiusExtensionRef({
+        log,
+        radPath: "/bin/rad",
+        readVersion: async () => "stable"
+      })
+    ).resolves.toBeNull();
+    expect(log.mock.calls[0][0]).toContain('it reported "stable"');
+  });
+
+  it("returns null without a release fragment when the read yields nothing", async () => {
     const log = vi.fn();
     await expect(
       resolveRadiusExtensionRef({
@@ -392,6 +421,65 @@ describe("resolveRadiusExtensionRef", () => {
     expect(log.mock.calls[0][0]).toContain("/bin/rad");
     expect(log.mock.calls[0][0]).not.toContain("it reported");
   });
+
+  it("propagates an injected release-reader failure", async () => {
+    await expect(
+      resolveRadiusExtensionRef({
+        radPath: "/bin/rad",
+        readVersion: async () => {
+          throw new Error("release read failed");
+        }
+      })
+    ).rejects.toThrow("release read failed");
+  });
+
+  it.each([
+    [
+      "a flat release",
+      JSON.stringify({ release: "v0.60.0", version: "deadbee" }),
+      "br:biceptypes.azurecr.io/radius:0.60"
+    ],
+    [
+      "an enveloped release",
+      JSON.stringify({
+        cli: { release: "v0.61.0-rc.1", version: "v0.60.0" }
+      }),
+      "br:biceptypes.azurecr.io/radius:0.61.0-rc.1"
+    ],
+    [
+      "a stable channel with a usable version",
+      JSON.stringify({ release: "stable", version: "v0.60.0" }),
+      null
+    ],
+    [
+      "a missing release with a usable version",
+      JSON.stringify({ version: "v0.60.0" }),
+      null
+    ],
+    ["non-object JSON", "[]", null],
+    ["invalid JSON", "not-json", null]
+  ])(
+    "reads %s from rad output without falling back to version",
+    async (_label, output, expected) => {
+      const directory = fs.mkdtempSync(
+        path.join(os.tmpdir(), "rad-release-output-")
+      );
+      const previousDirectory = process.cwd();
+      try {
+        fs.writeFileSync(
+          path.join(directory, "version"),
+          `process.stdout.write(${JSON.stringify(output)});\n`
+        );
+        process.chdir(directory);
+        await expect(
+          resolveRadiusExtensionRef({ radPath: process.execPath })
+        ).resolves.toBe(expected);
+      } finally {
+        process.chdir(previousDirectory);
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  );
 });
 
 describe("MODELED_APP_GRAPH_FLAGS", () => {
@@ -669,6 +757,60 @@ describe("buildGraphViaRad", () => {
   it("returns an empty array for empty content without invoking rad", async () => {
     // Short-circuits before any spawn/download, so this is safe to run offline.
     expect(await buildGraphViaRad("")).toEqual([]);
+  });
+
+  it("rejects a pull-request rad before honoring a pinned extension or invoking graph", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "rad-pr-graph-"));
+    const workspace = path.join(root, "workspace");
+    const preload = path.join(root, "fake-rad.cjs");
+    const graphMarker = path.join(root, "graph-invoked");
+    const previousBinary = process.env.RADIUS_RAD_BINARY;
+    const previousNodeOptions = process.env.NODE_OPTIONS;
+    const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
+    try {
+      fs.mkdirSync(workspace);
+      fs.writeFileSync(
+        path.join(workspace, "bicepconfig.json"),
+        JSON.stringify({
+          experimentalFeaturesEnabled: { extensibility: true },
+          extensions: { radius: "br:biceptypes.azurecr.io/radius:0.60" }
+        })
+      );
+      fs.writeFileSync(
+        preload,
+        [
+          'const fs = require("node:fs");',
+          'const path = require("node:path");',
+          'require("node:module").runMain = () => {',
+          '  if (path.basename(process.argv[1] || "") === "version") {',
+          '    fs.writeSync(1, JSON.stringify({ release: "pr-720", version: "v0.60.0" }));',
+          "    return;",
+          "  }",
+          `  fs.writeFileSync(${JSON.stringify(graphMarker)}, process.argv.join("\\n"));`,
+          "};"
+        ].join("\n")
+      );
+      process.env.RADIUS_RAD_BINARY = process.execPath;
+      process.env.NODE_OPTIONS =
+        previousNodeOptions ?
+          `${previousNodeOptions} ${preloadOption}`
+        : preloadOption;
+
+      await expect(
+        buildGraphViaRad(
+          "resource app 'Radius.Core/applications@2023-10-01-preview' = {}",
+          ".radius/app.bicep",
+          { radArtifactsDir: workspace }
+        )
+      ).rejects.toThrow(/pull-request.*no Radius Bicep types.*published/iu);
+      expect(fs.existsSync(graphMarker)).toBe(false);
+    } finally {
+      if (previousBinary === undefined) delete process.env.RADIUS_RAD_BINARY;
+      else process.env.RADIUS_RAD_BINARY = previousBinary;
+      if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = previousNodeOptions;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

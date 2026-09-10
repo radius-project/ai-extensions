@@ -2,4 +2,4 @@
 "radius": patch
 ---
 
-Resolve application-modeling schemas for Radius prerelease CLI builds from their release identity and exact Bicep extension channel.
+**Fixed:** Select stable and exact release-candidate Radius Bicep types from the CLI's stamped release, warn when edge uses mutable latest, and stop before modeling pull-request builds that have no published types.
