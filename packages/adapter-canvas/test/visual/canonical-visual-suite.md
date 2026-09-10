@@ -12,6 +12,17 @@ Canonical check mode repeats each listed test with Playwright retries disabled, 
 
 Each case starts from the real Canvas harness with fixture repository `fixture/radius-app`, workspace branch `feature/phase-6`, fixture `.radius/app.bicep`, fixture `src/web/app.ts`, deterministic fake CLI responses, locally injected Inter font, deterministic light or dark theme variables, a 1440 by 1000 viewport, reduced motion, hidden carets, and disabled animation and transition timing.
 
+## Deployment outcome details
+
+VI-07 also captures the Deployed graph's resource details in both light and dark themes. These eight cases use the real settlement helper and `/api/deployed-graph` route with retained terminal state, fake artifact CLI responses, and controlled selector listings. Each opens the failed `web` node's details and asserts the exact explanation, no stale `creating` text, no in-progress badges, and a visible green success badge on `db`.
+
+- `VI-07 deployed graph cancelled in <theme>`: an unfinished node displays `Deployment cancelled`. Baselines: `vi-07-deployed-graph-cancelled-light.png` and `vi-07-deployed-graph-cancelled-dark.png`.
+- `VI-07 deployed graph timed-out in <theme>`: monitoring timeout displays `Deployment timed out` while retaining `run-unconfirmed`. Baselines: `vi-07-deployed-graph-timed-out-light.png` and `vi-07-deployed-graph-timed-out-dark.png`.
+- `VI-07 deployed graph radius-error in <theme>`: the supplied Radius quota error survives projection and wraps in the popup. Baselines: `vi-07-deployed-graph-radius-error-light.png` and `vi-07-deployed-graph-radius-error-dark.png`.
+- `VI-07 deployed graph producer-error in <theme>`: an already-failed resource's specific image-pull error survives subsequent run cancellation. Baselines: `vi-07-deployed-graph-producer-error-light.png` and `vi-07-deployed-graph-producer-error-dark.png`.
+
+These are synthetic fixture states, not live deployments. The existing Chromium safety case covers timeout polling and popup keyboard/accessibility behavior; the canonical cases protect the rendered status and message presentation.
+
 ## Tests
 
 | Test                                                  | Page and state                                                                                                                                 | UI actions                                                                                                                                                                                                                                                      | Key assertions before screenshot                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | Screenshot baseline                                                              |
