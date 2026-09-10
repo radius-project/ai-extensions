@@ -97,11 +97,15 @@ recipe_pack_consumers() {
 }
 
 verify_recipe_packs() {
-    local pack file url count=0
+    local pack file url pack_file count=0
     while read -r pack file; do
         [[ -n "${pack}" ]] || continue
         url="$(radius_contrib_recipe_pack_url "${pack}" "${file}")"
-        curl -fsSL "${url}" -o /dev/null
+        pack_file="${TMP_ROOT}/verified_pack_${pack}_$(basename "${file}")"
+        curl -fsSL "${url}" -o "${pack_file}"
+        if grep -Eqi 'Radius\.Core/environments' "${pack_file}"; then
+            fail "Recipe pack file ${pack}/${file} provisions a Radius.Core/environments resource."
+        fi
         echo "  Verified recipe pack file ${pack}/${file}"
         ((count += 1))
     done < <(recipe_pack_consumers)

@@ -383,7 +383,10 @@ describe("committed recipe-pack snapshots", () => {
   ])(
     "resolves every entry in the $provider pack to a concrete resource",
     ({ provider, fixture, expected }) => {
-      const entries = parseRecipePack(readFixture(fixture));
+      const source = readFixture(fixture);
+      const entries = parseRecipePack(source);
+
+      expect(source).not.toContain("Radius.Core/environments");
 
       // Every entry the pack declares must derive a concrete resource: an
       // unresolved entry means the curated SOURCE_CONCRETE_MAP is missing a source.
