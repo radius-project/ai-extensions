@@ -168,7 +168,7 @@ Only a `@secure()` parameter referenced **by name** — directly, or through a `
 | `password: plainPassword` where `plainPassword` is a plain `param` | no — not marked `@secure()`                                               |
 | `password: '${dbPassword}'`                                        | no — interpolation discards secureness, even when every operand is secure |
 
-Because interpolation discards secureness, never assemble a credential-bearing string such as a connection URL in Bicep. Bind the credential on its own and compose the final value where it is consumed, as [Runtime composition](#runtime-composition) describes.
+Because interpolation discards secureness, never assemble a credential-bearing string such as a connection URL in Bicep. Bind the credential on its own and compose the final value only through a path the pinned application source proves it supports, as [Runtime composition](#runtime-composition) describes. That path is not guaranteed to exist: the application is not yours to change, so when it accepts only one credential-bearing value and no verified entrypoint or helper can compose it safely, report the contract gap rather than falling back to interpolation.
 
 Give a `@secure()` parameter no default value: a default would commit the credential to the application definition, which is the outcome the parameter exists to prevent.
 

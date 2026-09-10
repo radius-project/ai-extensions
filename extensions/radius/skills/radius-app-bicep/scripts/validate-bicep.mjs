@@ -261,7 +261,7 @@ function repairHint(ruleId, text) {
     return " For a Radius.Resources custom type, add the optional codeReference string property to custom-types.yaml and republish custom-types.tgz before compiling again.";
   }
   if (ruleId === "use-secure-value-for-secure-inputs") {
-    return " The resolved schema marks this property x-radius-sensitive, so it takes the value of a @secure() parameter referenced by name. A literal, a parameter declared without @secure(), and any string interpolation — including one whose operands are all secure — are not secure values. Declare a @secure() parameter and assign it directly; build any composed value, such as a connection string, where it is consumed rather than here.";
+    return " The resolved schema marks this property x-radius-sensitive, so it takes the value of a @secure() parameter referenced by name. A literal, a parameter declared without @secure(), and any string interpolation — including one whose operands are all secure — are not secure values. Declare a @secure() parameter and assign it directly. A value that must combine the credential with other parts, such as a connection string, cannot be assembled here: bind the parts separately and compose them only through a path the pinned application source proves it supports, and report the contract gap when it supports none.";
   }
   if (ruleId === "secure-secrets-in-params") {
     return " This parameter's name identifies it as a credential, so declare it with the @secure() decorator.";
