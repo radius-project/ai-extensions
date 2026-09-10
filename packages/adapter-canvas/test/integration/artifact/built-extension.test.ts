@@ -697,9 +697,6 @@ describe("P0-C built Radius extension artifact", () => {
     expect(skillGuidance).toMatch(
       /show-radius-type\.mjs` fails while locating, querying, or validating.*stop the modeling run.*promote-app-model\.mjs.*--abort.*report the exact error/su
     );
-    expect(skillGuidance).toMatch(
-      /missing binary.*invalid or incomplete version JSON.*noncanonical commit.*unsupported development, edge, or pull-request version/su
-    );
     for (const guidance of [skillGuidance, graphGuidance]) {
       expect(guidance).toMatch(
         /never (?:download|install).*(?:rename|back up).*(?:delete|replace) a `rad` binary/isu

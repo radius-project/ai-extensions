@@ -17,6 +17,12 @@ import {
   managedBicepEnv,
   spawnRad
 } from "../../../../../packages/adapter-shared/src/rad-process.mjs";
+import {
+  isRadiusEdgeRelease,
+  isRadiusPullRequestRelease,
+  radiusCliIdentity,
+  radiusExtensionRefForRelease
+} from "../../../../../packages/adapter-shared/src/rad-release.ts";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -98,89 +104,6 @@ function requireObject(value, context) {
   return value;
 }
 
-function isAsciiDigit(character) {
-  return character >= "0" && character <= "9";
-}
-
-function isAsciiLetter(character) {
-  return (
-    (character >= "A" && character <= "Z") ||
-    (character >= "a" && character <= "z")
-  );
-}
-
-function isNumericIdentifier(value) {
-  return (
-    value.length > 0 &&
-    [...value].every(isAsciiDigit) &&
-    (value === "0" || !value.startsWith("0"))
-  );
-}
-
-function hasOnlySemverCharacters(value) {
-  return (
-    value.length > 0 &&
-    [...value].every(
-      (character) =>
-        isAsciiDigit(character) || isAsciiLetter(character) || character === "-"
-    )
-  );
-}
-
-function isPrereleaseIdentifier(value) {
-  return (
-    hasOnlySemverCharacters(value) &&
-    (![...value].every(isAsciiDigit) || isNumericIdentifier(value))
-  );
-}
-
-function hasValidIdentifiers(value, validate) {
-  return value.split(".").every(validate);
-}
-
-function parseRadiusRelease(release) {
-  const buildParts = release.split("+");
-  const [version, buildMetadata] = buildParts;
-  if (
-    buildParts.length > 2 ||
-    (buildMetadata !== undefined &&
-      !hasValidIdentifiers(buildMetadata, hasOnlySemverCharacters))
-  ) {
-    return undefined;
-  }
-
-  const prereleaseAt = version.indexOf("-");
-  const core = prereleaseAt === -1 ? version : version.slice(0, prereleaseAt);
-  const prerelease =
-    prereleaseAt === -1 ? undefined : version.slice(prereleaseAt + 1);
-  const coreParts = core.split(".");
-  if (coreParts.length !== 3 || !coreParts.every(isNumericIdentifier)) {
-    return undefined;
-  }
-  if (
-    prerelease !== undefined &&
-    !hasValidIdentifiers(prerelease, isPrereleaseIdentifier)
-  ) {
-    return undefined;
-  }
-  // Prerelease channels are published verbatim, but OCI tags cannot contain
-  // the "+" separator that introduces build metadata.
-  if (prerelease !== undefined && buildMetadata !== undefined) return undefined;
-
-  return {
-    major: coreParts[0],
-    minor: coreParts[1],
-    patch: coreParts[2],
-    prerelease
-  };
-}
-
-function isPullRequestRelease(release) {
-  if (!release.startsWith("pr-")) return false;
-  const number = release.slice(3);
-  return number !== "0" && isNumericIdentifier(number);
-}
-
 export function parseResourceSelector(value) {
   const match =
     /^(Radius(?:\.[A-Za-z][A-Za-z0-9]*)+)\/([A-Za-z][A-Za-z0-9]*)(?:@([A-Za-z0-9][A-Za-z0-9.-]*))?$/u.exec(
@@ -226,32 +149,20 @@ function parseArguments(args) {
   return { help: false, stagingDir, selectors };
 }
 
-export function deriveExtensionReference(
-  release,
-  allowUnpinnedExtension = false
-) {
-  const normalized = typeof release === "string" ? release.trim() : "";
-  if (normalized === "edge" || isPullRequestRelease(normalized)) {
-    if (!allowUnpinnedExtension) {
-      throw new Error(
-        `Radius release "${normalized}" has no exact published Bicep extension. Use a released Radius CLI.`
-      );
-    }
-    return "br:biceptypes.azurecr.io/radius:latest";
-  }
-  const version = parseRadiusRelease(normalized);
-  if (version !== undefined) {
-    if (version.prerelease !== undefined) {
-      return `br:biceptypes.azurecr.io/radius:${version.major}.${version.minor}.${version.patch}-${version.prerelease}`;
-    }
-    return `br:biceptypes.azurecr.io/radius:${version.major}.${version.minor}`;
+export function deriveExtensionReference(release) {
+  const extension = radiusExtensionRefForRelease(release);
+  if (extension !== null) return extension;
+  if (isRadiusPullRequestRelease(release)) {
+    throw new Error(
+      `Radius release "${release}" is a pull-request build; no Radius Bicep types are published for pull-request releases. Do not replace or modify the configured Radius CLI; report this error and stop modeling.`
+    );
   }
   throw new Error(
     `Unsupported Radius release "${release ?? ""}". Do not replace or modify the configured Radius CLI; report this error and stop modeling.`
   );
 }
 
-export function parseRadiusIdentity(output, allowUnpinnedExtension = false) {
+function parseManagedRadiusIdentity(output) {
   let parsed;
   try {
     parsed = JSON.parse(output);
@@ -259,22 +170,30 @@ export function parseRadiusIdentity(output, allowUnpinnedExtension = false) {
     throw new Error("Managed Radius returned invalid version JSON.");
   }
   requireObject(parsed, "Managed Radius version JSON");
-  if (typeof parsed.release !== "string" || parsed.release.trim() === "") {
+  const { release, commit } = radiusCliIdentity(parsed);
+  if (release === null) {
     throw new Error('Managed Radius version JSON is missing "release".');
   }
-  if (typeof parsed.commit !== "string" || parsed.commit.trim() === "") {
+  if (commit === null) {
     throw new Error('Managed Radius version JSON is missing "commit".');
   }
-  const release = parsed.release.trim();
-  const commit = parsed.commit.trim();
   if (!/^[0-9a-f]{40}$/iu.test(commit)) {
     throw new Error(
       `Managed Radius commit "${commit}" is not a full 40-character SHA.`
     );
   }
   return {
+    release,
     commit: commit.toLowerCase(),
-    extension: deriveExtensionReference(release, allowUnpinnedExtension)
+    extension: deriveExtensionReference(release)
+  };
+}
+
+export function parseRadiusIdentity(output) {
+  const identity = parseManagedRadiusIdentity(output);
+  return {
+    commit: identity.commit,
+    extension: identity.extension
   };
 }
 
@@ -507,7 +426,8 @@ async function queryManagedRadiusIdentity({
   env = process.env,
   home = os.homedir(),
   processTimeoutMs = 10_000,
-  runRadImpl = spawnRad
+  runRadImpl = spawnRad,
+  warn = console.error
 } = {}) {
   const binaries = managedBinaries(home);
   const rad =
@@ -525,10 +445,16 @@ async function queryManagedRadiusIdentity({
         label: "Managed Radius version query"
       }
     );
-    return parseRadiusIdentity(
-      stdout,
-      env.RADIUS_ALLOW_UNPINNED_EXTENSION === "1"
-    );
+    const identity = parseManagedRadiusIdentity(stdout);
+    if (isRadiusEdgeRelease(identity.release)) {
+      warn(
+        `Warning: Radius release "edge" uses the mutable Radius Bicep extension "${identity.extension}", which may not match the configured Radius binary.`
+      );
+    }
+    return {
+      commit: identity.commit,
+      extension: identity.extension
+    };
   } catch (error) {
     const detail = error?.stderr?.trim() || message(error);
     throw new Error(`Managed Radius version query failed: ${detail}`, {
@@ -618,7 +544,7 @@ async function fetchText(
       }
       if (!response.ok) {
         const error = new Error(
-          `Source request failed with HTTP ${response.status}.`
+          `Source request failed with HTTP ${response.status}.${response.status === 404 ? ` No source is published at "${url}".` : ""}`
         );
         error.noRetry = !(
           response.status === 408 ||
