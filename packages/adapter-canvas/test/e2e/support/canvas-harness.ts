@@ -949,7 +949,11 @@ export function defaultFakeCliScenario(): FakeCliScenario {
         // reference underivable and fail the compile closed.
         tool: "rad",
         args: ["version", "--cli", "--output", "json"],
-        stdout: JSON.stringify({ version: "v0.60.0", bicep: "0.41.2" })
+        stdout: JSON.stringify({
+          release: "v0.60.0",
+          version: "v0.60.0",
+          bicep: "0.41.2"
+        })
       },
       {
         tool: "rad",
