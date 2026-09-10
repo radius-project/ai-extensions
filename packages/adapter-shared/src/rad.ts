@@ -402,6 +402,19 @@ export function resolveExistingRadBinary(
   return null;
 }
 
+function isSelectedExecutableRadOverride(radPath: string): boolean {
+  const override = process.env.RADIUS_RAD_BINARY;
+  if (!override || path.resolve(override) !== path.resolve(radPath)) {
+    return false;
+  }
+  try {
+    const stat = fs.statSync(override);
+    return stat.isFile() && (IS_WIN || (stat.mode & 0o111) !== 0);
+  } catch {
+    return false;
+  }
+}
+
 export function parseRadVersionOutput(stdout: string): string | null {
   try {
     const parsed: unknown = JSON.parse(stdout);
@@ -580,6 +593,15 @@ export async function resolveRadiusExtensionRef({
     return null;
   }
   if (isRadiusEdgeRelease(release)) {
+    if (!isSelectedExecutableRadOverride(binary)) {
+      const detail =
+        'Radius release "edge" may use the mutable Radius Bicep extension ' +
+        `"${ref}" only when the selected executable is a valid ` +
+        "RADIUS_RAD_BINARY developer override. Set RADIUS_RAD_BINARY to the " +
+        "edge rad executable and retry.";
+      log(detail);
+      throw new Error(detail);
+    }
     log(
       `Radius release "edge" uses the mutable Radius Bicep extension "${ref}", which may not match the rad binary at ${binary}.`
     );
@@ -817,9 +839,7 @@ async function reconcileWithLatest(
   }
 
   // An explicit override is developer-owned and is never updated in place.
-  const overridden =
-    process.env.RADIUS_RAD_BINARY &&
-    path.resolve(process.env.RADIUS_RAD_BINARY) === path.resolve(existing);
+  const overridden = isSelectedExecutableRadOverride(existing);
   if (overridden) {
     log(
       `Warning: RADIUS_RAD_BINARY rad ${localVersion} is older than the latest release ${latest.tag}; using it anyway. Unset RADIUS_RAD_BINARY to auto-upgrade.`
