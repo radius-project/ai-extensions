@@ -11,8 +11,7 @@ import {
   deleteDialogConfirmSpecs,
   deleteDialogConfirmToken,
   deleteDialogEffectsSpecs,
-  deleteDialogIntentSpecs,
-  deleteDialogResourceSummary
+  deleteDialogIntentSpecs
 } from "./delete-dialog.js";
 import type { ElementSpec } from "./dom.js";
 import type { DomEvent } from "./ports.js";
@@ -321,17 +320,16 @@ describe("delete dialog resource list", () => {
     }
   });
 
-  it("summarises the resources the list is built from", () => {
-    expect(deleteDialogResourceSummary(undefined)).toEqual([]);
-    expect(
-      deleteDialogResourceSummary([
+  it("trims surrounding whitespace and tolerates a missing type", () => {
+    const specs = deleteDialogEffectsSpecs({
+      app: "store",
+      environment: "prod",
+      resources: [
         { name: " cart ", displayType: " Redis cache " },
         { name: "worker" }
-      ])
-    ).toEqual([
-      { name: "cart", type: "Redis cache" },
-      { name: "worker", type: "" }
-    ]);
+      ]
+    });
+    expect(resourceItems(specs)).toEqual([["cart", "Redis cache"], ["worker"]]);
   });
 
   it("leaves the stop-tracking step without a resource list", () => {

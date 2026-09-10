@@ -53,10 +53,10 @@ export interface DeleteDialogHandle {
   teardown(): void;
 }
 
-// A structural subset of the graph's resource shape, so the deployed graph page
-// can hand over what it already parsed without an adapter in between. The list
-// itself arrives as `unknown[]` because it originates in a server payload whose
-// entries are never field-validated before the graph renders them.
+// What the dialog needs from one entry of the server's deletion inventory,
+// which reports resources that were last observed to exist rather than the ones
+// the application merely models. The list arrives as `unknown[]` because it
+// crosses the HTTP boundary unvalidated, so every field is re-read defensively.
 export interface DeleteTargetResource {
   readonly name: string;
   readonly type: string;
@@ -125,7 +125,9 @@ export function deleteDialogIntentSpecs(
 // An entry the user cannot read is worse than no entry: a nameless resource
 // would render as an empty bullet, so it is dropped rather than shown. Order and
 // duplicates are preserved because they are what the deployment actually holds.
-export function deleteDialogResourceSummary(
+// `displayType` wins over `type` to match how the graph labels the same
+// resources, so the two views never disagree about what a resource is called.
+function deleteDialogResourceSummary(
   resources: readonly unknown[] | undefined
 ): readonly DeleteTargetResource[] {
   const summary: DeleteTargetResource[] = [];
