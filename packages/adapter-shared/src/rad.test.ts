@@ -369,19 +369,54 @@ describe("resolveRadiusExtensionRef", () => {
     ).resolves.toBe("br:biceptypes.azurecr.io/radius:0.59");
   });
 
-  it("warns when edge selects mutable latest", async () => {
+  it("allows an executable RADIUS_RAD_BINARY edge override and warns that latest is mutable", async () => {
     const log = vi.fn();
-    await expect(
-      resolveRadiusExtensionRef({
-        log,
-        radPath: "/bin/rad",
-        readVersion: async () => "edge"
-      })
-    ).resolves.toBe("br:biceptypes.azurecr.io/radius:latest");
-    expect(log).toHaveBeenCalledWith(
-      expect.stringMatching(/mutable.*latest.*may not match.*binary/iu)
-    );
+    const previousBinary = process.env.RADIUS_RAD_BINARY;
+    try {
+      process.env.RADIUS_RAD_BINARY = process.execPath;
+      await expect(
+        resolveRadiusExtensionRef({
+          log,
+          radPath: process.execPath,
+          readVersion: async () => "edge"
+        })
+      ).resolves.toBe("br:biceptypes.azurecr.io/radius:latest");
+      expect(log).toHaveBeenCalledWith(
+        expect.stringMatching(/mutable.*latest.*may not match.*binary/iu)
+      );
+    } finally {
+      if (previousBinary === undefined) delete process.env.RADIUS_RAD_BINARY;
+      else process.env.RADIUS_RAD_BINARY = previousBinary;
+    }
   });
+
+  const itPosix = process.platform === "win32" ? it.skip : it;
+  itPosix(
+    "rejects a non-executable RADIUS_RAD_BINARY edge override",
+    async () => {
+      const directory = fs.mkdtempSync(
+        path.join(os.tmpdir(), "rad-edge-override-")
+      );
+      const override = path.join(directory, "rad");
+      const previousBinary = process.env.RADIUS_RAD_BINARY;
+      try {
+        fs.writeFileSync(override, "edge rad");
+        fs.chmodSync(override, 0o644);
+        process.env.RADIUS_RAD_BINARY = override;
+
+        await expect(
+          resolveRadiusExtensionRef({
+            radPath: override,
+            readVersion: async () => "edge"
+          })
+        ).rejects.toThrow(/RADIUS_RAD_BINARY/u);
+      } finally {
+        if (previousBinary === undefined) delete process.env.RADIUS_RAD_BINARY;
+        else process.env.RADIUS_RAD_BINARY = previousBinary;
+        fs.rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  );
 
   it("rejects a pull-request release with a useful diagnostic", async () => {
     const log = vi.fn();
@@ -573,6 +608,89 @@ describe("parseRadVersionOutput", () => {
     expect(parseRadVersionOutput('{"cli":{}}')).toBeNull();
     expect(parseRadVersionOutput("not-json")).toBeNull();
   });
+});
+
+it("rejects a managed edge binary before honoring a repository extension or invoking graph", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "rad-edge-managed-"));
+  const home = path.join(root, "home");
+  const workspace = path.join(root, "workspace");
+  const preload = path.join(root, "fake-rad.cjs");
+  const graphMarker = path.join(root, "graph-invoked");
+  const previousHome = process.env.HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  const previousNodeOptions = process.env.NODE_OPTIONS;
+  const previousRadBinary = process.env.RADIUS_RAD_BINARY;
+  try {
+    fs.mkdirSync(home, { recursive: true });
+    fs.mkdirSync(workspace);
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    delete process.env.RADIUS_RAD_BINARY;
+    vi.resetModules();
+    const mod = await import("./rad.js");
+    const managedRadPath = mod.MANAGED_RAD_PATH;
+    expect(managedRadPath).toBe(
+      path.join(home, ".radius", "ai-extensions", "bin", RAD)
+    );
+    expect(mod.MANAGED_BICEP_PATH).toBe(
+      path.join(home, ".radius", "ai-extensions", "bin", BICEP)
+    );
+
+    fs.writeFileSync(
+      path.join(workspace, "bicepconfig.json"),
+      JSON.stringify({
+        experimentalFeaturesEnabled: { extensibility: true },
+        extensions: { radius: "br:biceptypes.azurecr.io/radius:0.60" }
+      })
+    );
+    fs.mkdirSync(path.dirname(managedRadPath), { recursive: true });
+    fs.copyFileSync(process.execPath, managedRadPath);
+    if (process.platform !== "win32") fs.chmodSync(managedRadPath, 0o755);
+    fs.writeFileSync(
+      preload,
+      [
+        'const fs = require("node:fs");',
+        'const path = require("node:path");',
+        'require("node:module").runMain = () => {',
+        '  if (path.basename(process.argv[1] || "") === "version") {',
+        '    fs.writeSync(1, JSON.stringify({ release: "edge", version: "deadbee" }));',
+        "    return;",
+        "  }",
+        `  fs.writeFileSync(${JSON.stringify(graphMarker)}, process.argv.join("\\n"));`,
+        '  process.stderr.write("graph must not run");',
+        "  process.exitCode = 3;",
+        "};"
+      ].join("\n")
+    );
+    const preloadOption = `--require="${preload.replaceAll("\\", "/")}"`;
+    process.env.NODE_OPTIONS =
+      previousNodeOptions ?
+        `${previousNodeOptions} ${preloadOption}`
+      : preloadOption;
+
+    await expect(
+      mod.buildGraphViaRad(
+        "resource app 'Radius.Core/applications@2023-10-01-preview' = {}",
+        ".radius/app.bicep",
+        { radArtifactsDir: workspace }
+      )
+    ).rejects.toThrow(/edge.*RADIUS_RAD_BINARY/iu);
+    expect(fs.existsSync(graphMarker)).toBe(false);
+    expect(fs.statSync(managedRadPath).size).toBe(
+      fs.statSync(process.execPath).size
+    );
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = previousUserProfile;
+    if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS;
+    else process.env.NODE_OPTIONS = previousNodeOptions;
+    if (previousRadBinary === undefined) delete process.env.RADIUS_RAD_BINARY;
+    else process.env.RADIUS_RAD_BINARY = previousRadBinary;
+    vi.resetModules();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 describe("resolveRadForGraph", () => {

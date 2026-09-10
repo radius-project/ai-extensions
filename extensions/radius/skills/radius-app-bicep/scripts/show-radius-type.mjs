@@ -430,8 +430,8 @@ async function queryManagedRadiusIdentity({
   warn = console.error
 } = {}) {
   const binaries = managedBinaries(home);
-  const rad =
-    isExecutable(env.RADIUS_RAD_BINARY) ? env.RADIUS_RAD_BINARY : binaries.rad;
+  const usesExecutableOverride = isExecutable(env.RADIUS_RAD_BINARY);
+  const rad = usesExecutableOverride ? env.RADIUS_RAD_BINARY : binaries.rad;
   if (!isExecutable(rad)) {
     throw new Error(`Extension-managed Radius binary not found at "${rad}".`);
   }
@@ -447,6 +447,14 @@ async function queryManagedRadiusIdentity({
     );
     const identity = parseManagedRadiusIdentity(stdout);
     if (isRadiusEdgeRelease(identity.release)) {
+      if (!usesExecutableOverride) {
+        throw new Error(
+          'Radius release "edge" may use the mutable Radius Bicep extension ' +
+            `"${identity.extension}" only when the selected executable is a valid ` +
+            "RADIUS_RAD_BINARY developer override. Set RADIUS_RAD_BINARY to the " +
+            "edge Radius CLI executable and retry."
+        );
+      }
       warn(
         `Warning: Radius release "edge" uses the mutable Radius Bicep extension "${identity.extension}", which may not match the configured Radius binary.`
       );

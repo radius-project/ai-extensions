@@ -324,7 +324,7 @@ describe("resource selection and release identity", () => {
     );
   });
 
-  it("warns that edge uses mutable latest", async () => {
+  it("allows edge from an executable RADIUS_RAD_BINARY override and warns that latest is mutable", async () => {
     const cacheRoot = temporaryDirectory();
     const warn = vi.fn();
     seedCache(cacheRoot);
@@ -1515,6 +1515,79 @@ describe("command boundary", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("fails closed when the managed binary reports edge without an executable RADIUS_RAD_BINARY override", async () => {
+    const root = temporaryDirectory();
+    const staging = stagingDirectory(root);
+    const managedBinary = path.join(
+      root,
+      ".radius",
+      "ai-extensions",
+      "bin",
+      `rad${process.platform === "win32" ? ".exe" : ""}`
+    );
+    const binaryContents = "extension-managed edge rad";
+    fs.mkdirSync(path.dirname(managedBinary), { recursive: true });
+    fs.writeFileSync(managedBinary, binaryContents);
+    if (process.platform !== "win32") fs.chmodSync(managedBinary, 0o755);
+    const stagedConfig = JSON.stringify({
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
+    });
+    const stagedConfigPath = path.join(staging, "bicepconfig.json");
+    fs.writeFileSync(stagedConfigPath, stagedConfig);
+    const fetchCalls: string[] = [];
+    const runRadImpl = vi.fn(() =>
+      Promise.resolve({
+        stdout: JSON.stringify({
+          release: "edge",
+          version: "deadbee",
+          commit
+        }),
+        stderr: ""
+      })
+    );
+    const env = { ...process.env };
+    delete env.RADIUS_RAD_BINARY;
+    let stdout = "";
+    let stderr = "";
+
+    const status = await resolver.main(
+      ["--staging", staging, "Radius.Core/applications"],
+      {
+        stdout: { write: (value: string) => (stdout += value) },
+        stderr: { write: (value: string) => (stderr += value) },
+        resolve: (
+          selectors: unknown[],
+          options: { warn?: (text: string) => void }
+        ) =>
+          resolver.resolveRadiusTypes(selectors, {
+            ...options,
+            env,
+            home: root,
+            cacheRoot: path.join(root, "cache"),
+            fetchImpl: fixtureFetch(fetchCalls),
+            runRadImpl
+          })
+      }
+    );
+
+    expect(status).toBe(1);
+    expect(stderr).toMatch(/edge.*RADIUS_RAD_BINARY/iu);
+    expect(stderr).not.toContain("Warning:");
+    expect(stdout).toBe("");
+    expect(fetchCalls).toEqual([]);
+    expect(runRadImpl).toHaveBeenCalledExactlyOnceWith(
+      managedBinary,
+      ["version", "--cli", "--output", "json"],
+      expect.any(Object)
+    );
+    expect(fs.readFileSync(stagedConfigPath, "utf8")).toBe(stagedConfig);
+    expect(fs.existsSync(path.join(staging, "resolved-types.json"))).toBe(
+      false
+    );
+    expect(fs.readFileSync(managedBinary, "utf8")).toBe(binaryContents);
+  });
+
   it.each([
     [
       "pull-request release",
@@ -1807,7 +1880,7 @@ describe("command boundary", () => {
     expect(configured).toBe(identity.extension);
   });
 
-  it("routes an edge release warning while staging mutable latest", async () => {
+  it("routes an edge override warning while staging mutable latest", async () => {
     const staging = stagingDirectory();
     const cacheRoot = temporaryDirectory();
     const calls: string[] = [];
