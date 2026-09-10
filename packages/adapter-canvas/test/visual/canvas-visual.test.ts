@@ -742,17 +742,23 @@ test.describe("Radius Canvas visual baselines", () => {
         dialog.getByRole("button", { name: /have read and understand/i })
       ).toBeVisible();
 
-      await screenshot(page, `vi-10-delete-resources-${theme}.png`);
+      // Nothing may be hidden on a destructive confirmation: overlay scrollbars
+      // are invisible until interaction, so a clipped list would silently
+      // withhold part of what the user is agreeing to destroy. The entry count
+      // is already bounded, so the list is sized to show all of it.
+      const overflows = await list.evaluate((element) => {
+        const box = element as unknown as {
+          scrollHeight: number;
+          clientHeight: number;
+        };
+        return box.scrollHeight > box.clientHeight;
+      });
+      expect(overflows).toBe(false);
 
-      // The list is height-capped so the confirmation control stays on screen,
-      // which puts the remainder line below the fold. Scroll to it explicitly:
-      // truncation is the behaviour this scenario exists to pin, and the first
-      // capture cannot show it.
       const remainder = list.locator(".rad-ddlg__resource-more");
-      await remainder.scrollIntoViewIfNeeded();
       await expect(remainder).toBeInViewport();
 
-      await screenshot(page, `vi-10-delete-resources-end-${theme}.png`);
+      await screenshot(page, `vi-10-delete-resources-${theme}.png`);
     });
   }
 });

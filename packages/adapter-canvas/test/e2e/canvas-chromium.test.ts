@@ -3054,7 +3054,7 @@ test.describe("Radius Canvas in Chromium", () => {
       .toMatchObject({ environment: "fixture-environment" });
   });
 
-  test("reads deletion inventory with keyboard scrolling before confirming in Chromium @safety", async ({
+  test("reads the full deletion inventory without hidden entries before confirming in Chromium @safety", async ({
     page,
     canvas
   }) => {
@@ -3123,12 +3123,17 @@ test.describe("Radius Canvas in Chromium", () => {
 
     await page.keyboard.press("Shift+Tab");
     await expect(list).toBeFocused();
-    await page.keyboard.press("End");
-    await expect
-      .poll(() =>
-        list.evaluate((element) => Number(Reflect.get(element, "scrollTop")))
-      )
-      .toBeGreaterThan(0);
+    // The list stays focusable because a short window can still force it to
+    // scroll, but at this viewport nothing may be hidden: overlay scrollbars
+    // are invisible until interaction, so clipped entries would silently
+    // withhold part of what the user is agreeing to destroy.
+    const hidden = await list.evaluate(
+      (element) =>
+        Number(Reflect.get(element, "scrollHeight")) >
+        Number(Reflect.get(element, "clientHeight"))
+    );
+    expect(hidden).toBe(false);
+    await expect(list.locator(".rad-ddlg__resource-more")).toBeInViewport();
     await page.keyboard.press("Tab");
     await expect(next).toBeFocused();
     await page.keyboard.press("Enter");
