@@ -991,6 +991,26 @@ describe("delete flow", () => {
       expect(inventoryCalls).toHaveLength(1);
     });
 
+    // Regression guard: the row's button is disabled while the inventory loads,
+    // which drops focus to the document. The dialog captures its return-focus
+    // target as it opens, so without handing focus back first, Escape would
+    // strand the user at the top of the page.
+    it("restores focus to the invoking button before opening", async () => {
+      const { page, button } = await readyWithRow("app", "dev");
+      page.browser.net.handle(inventoryUrl(page, "app", "dev"), () =>
+        jsonResponse({ mode: "greyed" })
+      );
+      const focused = vi.spyOn(page.browser.context.focus, "focus");
+
+      button.dispatch("click");
+      await flushPromises();
+
+      // The dialog focuses its own first control once open, so the invoking
+      // button has to be the first thing focused for the capture to see it.
+      expect(focused.mock.calls[0]?.[0]).toBe(button);
+      expect(page.deleteModal.style.display).toBe("flex");
+    });
+
     // The dialog now opens a round trip after the click, so the page can be torn
     // down in between and must not raise a modal onto a dead page.
     it("does not open the dialog when the page is torn down mid-fetch", async () => {

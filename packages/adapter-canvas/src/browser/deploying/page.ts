@@ -44,6 +44,7 @@ import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type {
   AbortHandle,
   BrowserContext,
+  DomElement,
   DomEventListener,
   DomEventTarget,
   OptionSpec
@@ -610,7 +611,8 @@ export function initializeDeployingPage(
       bind(rowBindings, button, "click", () => {
         openDeleteModal(
           button.getAttribute("data-app") ?? "",
-          button.getAttribute("data-env") ?? ""
+          button.getAttribute("data-env") ?? "",
+          button
         );
       });
     }
@@ -755,18 +757,29 @@ export function initializeDeployingPage(
       });
   };
 
-  const openDeleteModal = (app: string, environment: string): void => {
+  const openDeleteModal = (
+    app: string,
+    environment: string,
+    invoker: DomElement
+  ): void => {
     if (!dialog) return;
     const key = opKey(app, environment);
     if (probing.has(key)) return;
     probing.add(key);
     setDeleteBusy(app, environment, true);
+    // Disabling the row's button while the inventory loads drops focus to the
+    // document, and the dialog captures what to restore on close as it opens.
+    // Hand focus back to the invoking button first so Escape returns there.
+    const openDialog = (resources: readonly unknown[]): void => {
+      context.focus.focus(invoker);
+      dialog.open(app, environment, resources);
+    };
     void loadDeletionInventory(app, environment).then((resources) => {
       if (rowStatus(app, environment) !== DELETE_FAILED_STATUS) {
         probing.delete(key);
         setDeleteBusy(app, environment, false);
         if (!entry.active) return;
-        dialog.open(app, environment, resources);
+        openDialog(resources);
         return;
       }
       void probeDeleteConflict(context, {
@@ -780,7 +793,7 @@ export function initializeDeployingPage(
         // A delete that failed for any other reason is an ordinary delete again,
         // and forcing is never offered without the server's proof.
         if (!result.conflict || !forceConfirm) {
-          dialog.open(app, environment, resources);
+          openDialog(resources);
           return;
         }
         forceConfirm.show({
