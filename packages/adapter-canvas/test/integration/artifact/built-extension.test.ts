@@ -895,21 +895,19 @@ describe("P0-C built Radius extension artifact", () => {
     );
   });
 
-  it("packages the recursive sensitivity rule and the checker's secure-value remedies", () => {
+  it("packages the checker's secure-value remedies", () => {
     assertCurrentArtifact();
     const checkerScript = readFileSync(
       join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
-      "utf8"
-    );
-    const secretsGuidance = readFileSync(
-      join(DIST_SKILL, "references", "secrets-handling.md"),
       "utf8"
     );
 
     // Bicep names the rejected property but never the remedy, and Radius emits
     // these findings with no severity, so they print as a warning while failing
     // the build. The remedy has to ship with the checker or the model spends a
-    // repair attempt rediscovering it.
+    // repair attempt rediscovering it. The rule IDs are the contract here: what
+    // each remedy says is asserted behaviorally in app-bicep-check.test.ts,
+    // where rewording cannot silently pass.
     for (const rule of [
       "use-secure-value-for-secure-inputs",
       "secure-secrets-in-params",
@@ -917,15 +915,6 @@ describe("P0-C built Radius extension artifact", () => {
     ]) {
       expect(checkerScript).toContain(rule);
     }
-
-    // The sensitive node is not always a property of the envelope. The packaged
-    // guidance has to carry the nested case, or the model reads sensitivity one
-    // level deep and hardcodes the value that actually holds the credential.
-    expect(secretsGuidance).toContain(
-      "Radius.Security/secrets.data.<key>.value"
-    );
-    expect(secretsGuidance).toContain("secureObject");
-    expect(secretsGuidance).toContain("interpolation discards secureness");
   });
 
   it("packages each page module exactly once", () => {

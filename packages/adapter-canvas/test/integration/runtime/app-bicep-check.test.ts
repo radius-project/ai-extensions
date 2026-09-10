@@ -1046,7 +1046,7 @@ test("tells a sensitive property's diagnostic to use a @secure() parameter", () 
   );
 
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /marks this property x-radius-sensitive/u);
+  assert.match(result.stderr, /compiled type marks this property secure/u);
   assert.match(
     result.stderr,
     /takes the value of a @secure\(\) parameter referenced by name/u

@@ -256,12 +256,19 @@ function report(message) {
 // aliases it, stays secure, while any interpolation loses secureness even when
 // every operand is secure. Saying "use a variable" or "never use a variable"
 // would both send the model at a fix that does not compile.
+//
+// It is also careful about what it claims to know. These hints key on the rule
+// Bicep reported, not on the staged schema, so the remedy describes the
+// compiled type's own annotation and names `x-radius-sensitive` only as what
+// produces it for a Radius type. Asserting the schema flag outright would state
+// a fact this function never checked, and would misattribute the cause for any
+// secure-annotated type that does not derive it from `x-radius-sensitive`.
 function repairHint(ruleId, text) {
   if (ruleId === "BCP037" && /\bcodeReference\b/u.test(text)) {
     return " For a Radius.Resources custom type, add the optional codeReference string property to custom-types.yaml and republish custom-types.tgz before compiling again.";
   }
   if (ruleId === "use-secure-value-for-secure-inputs") {
-    return " The resolved schema marks this property x-radius-sensitive, so it takes the value of a @secure() parameter referenced by name. A literal, a parameter declared without @secure(), and any string interpolation — including one whose operands are all secure — are not secure values. Declare a @secure() parameter and assign it directly. A value that must combine the credential with other parts, such as a connection string, cannot be assembled here: bind the parts separately and compose them only through a path the pinned application source proves it supports, and report the contract gap when it supports none.";
+    return " The compiled type marks this property secure — for a Radius type, from x-radius-sensitive in its schema — so it takes the value of a @secure() parameter referenced by name. A literal, a parameter declared without @secure(), and any string interpolation — including one whose operands are all secure — are not secure values. Declare a @secure() parameter and assign it directly. A value that must combine the credential with other parts, such as a connection string, cannot be assembled here: bind the parts separately and compose them only through a path the pinned application source proves it supports, and report the contract gap when it supports none.";
   }
   if (ruleId === "secure-secrets-in-params") {
     return " This parameter's name identifies it as a credential, so declare it with the @secure() decorator.";
