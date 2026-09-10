@@ -37,10 +37,9 @@ const checker = path.join(
 const executable = process.platform === "win32" ? "bicep.exe" : "bicep";
 const temporaryDirectories = new Set<string>();
 
-// A wrong relative depth here would not fail loudly: every case would spawn Node
-// against a missing script, which exits 1 with a message on stderr, and that is
-// all `fails closed when the managed Bicep executable is missing` asserts. Check
-// the path once rather than letting the suite pass for the wrong reason.
+// A wrong relative depth here would spawn Node against a missing script, which
+// exits 1 rather than the checker's exit 2 for a missing managed Bicep binary.
+// Check the path explicitly so that failure names the broken test setup.
 assert.ok(fs.existsSync(checker), `checker script not found: ${checker}`);
 
 afterEach(() => {
@@ -1023,26 +1022,75 @@ test("adds custom-type repair guidance to a codeReference BCP037 diagnostic", ()
   assert.match(result.stderr, /republish custom-types\.tgz/u);
 });
 
-test("surfaces informational diagnostics without failing", () => {
-  const directory = temporaryDirectory();
-  const result = runChecker(
-    directory,
-    fakeBicep(
+test.each(["note", "none"])(
+  "surfaces %s diagnostics without failing",
+  (level) => {
+    const directory = temporaryDirectory();
+    const result = runChecker(
       directory,
-      sarif([
-        {
-          level: "note",
-          ruleId: "no-unused-vars",
-          message: { text: "Variable 'unused' is declared but never used." }
-        }
-      ]),
-      0
-    )
-  );
+      fakeBicep(
+        directory,
+        sarif([
+          {
+            level,
+            ruleId: "no-unused-vars",
+            message: { text: "Variable 'unused' is declared but never used." }
+          }
+        ]),
+        0
+      )
+    );
 
-  assert.equal(result.status, 0);
-  assert.match(result.stderr, /note no-unused-vars/u);
+    assert.equal(result.status, 0);
+    assert.match(result.stderr, new RegExp(`${level} no-unused-vars`, "u"));
+  }
+);
+
+test("treats an ID-backed informational diagnostic as unavailable", () => {
+  const directory = temporaryDirectory();
+  const output = sarif([
+    {
+      level: "note",
+      ruleId: "compiler-note",
+      message: { id: "compiler-note-message", arguments: ["unused"] }
+    }
+  ]);
+  const result = runChecker(directory, fakeBicep(directory, output, 0));
+
+  assert.equal(result.status, 2);
+  assert.equal(result.stderr, `${output}\n`);
+  assert.doesNotMatch(result.stderr, /Bicep reported a diagnostic/u);
 });
+
+test.each(["warning", "error"])(
+  "treats an ID-backed %s as unavailable without repair guidance",
+  (level) => {
+    const directory = temporaryDirectory();
+    stagedRun(directory, {
+      attempts: REPAIR_COMPILE_LIMIT - 1,
+      fingerprint: "previous model error"
+    });
+    const output = sarif([
+      {
+        level,
+        ruleId: "compiler-message",
+        message: { id: "compiler-message-id" }
+      }
+    ]);
+
+    const result = runChecker(directory, fakeBicep(directory, output, 1));
+
+    assert.equal(result.status, 2);
+    assert.equal(result.stderr, `${output}\n`);
+    assert.deepEqual(readRepair(directory), {
+      attempts: REPAIR_COMPILE_LIMIT,
+      fingerprint: null
+    });
+    assert.doesNotMatch(result.stderr, /same compiler failure/u);
+    assert.doesNotMatch(result.stderr, /materially different fix/u);
+    assert.doesNotMatch(result.stderr, /repair budget is now spent/u);
+  }
+);
 
 test("preserves a Bicep compiler failure", () => {
   const directory = temporaryDirectory();
@@ -1068,6 +1116,80 @@ test("preserves a Bicep compiler failure", () => {
   );
 });
 
+test("normalizes a Bicep error with child exit 2 to a model failure", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(
+      directory,
+      sarif([
+        {
+          level: "error",
+          ruleId: "BCP007",
+          message: { text: "This declaration type is not recognized." }
+        }
+      ]),
+      2
+    )
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /error BCP007: This declaration type is not recognized\./u
+  );
+  assert.doesNotMatch(result.stderr, /exited with status/u);
+});
+
+test("reports a nonzero child exit without actionable diagnostics as unavailable", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(
+      directory,
+      sarif([
+        {
+          level: "note",
+          ruleId: "compiler-note",
+          message: { text: "Compilation stopped before producing a verdict." }
+        }
+      ]),
+      7
+    )
+  );
+
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /note compiler-note/u);
+  assert.match(
+    result.stderr,
+    /Bicep exited with status 7 without returning an actionable warning or error diagnostic\./u
+  );
+});
+
+test.runIf(process.platform !== "win32")(
+  "reports a signaled child without actionable diagnostics as unavailable",
+  () => {
+    const directory = temporaryDirectory();
+    const env = fakeBicep(directory, sarif([]), 0);
+    fs.writeFileSync(
+      path.join(directory, "build"),
+      [
+        `process.stderr.write(${JSON.stringify(sarif([]))});`,
+        'process.kill(process.pid, "SIGTERM");',
+        ""
+      ].join("\n")
+    );
+
+    const result = runChecker(directory, env);
+
+    assert.equal(result.status, 2);
+    assert.match(
+      result.stderr,
+      /Bicep exited with status null after receiving signal SIGTERM without returning an actionable warning or error diagnostic\./u
+    );
+  }
+);
+
 test("fails closed when Bicep diagnostics are not valid SARIF", () => {
   const directory = temporaryDirectory();
   const result = runChecker(
@@ -1075,8 +1197,19 @@ test("fails closed when Bicep diagnostics are not valid SARIF", () => {
     fakeBicep(directory, "warning: boom", 0)
   );
 
-  assert.equal(result.status, 1);
+  assert.equal(result.status, 2);
   assert.equal(result.stderr, "warning: boom\n");
+});
+
+test("accepts a SARIF run with omitted results", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(directory, JSON.stringify({ runs: [{}] }), 0)
+  );
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
 });
 
 it.each([
@@ -1088,6 +1221,10 @@ it.each([
     output: JSON.stringify({ runs: [{ results: {} }] })
   },
   {
+    name: "null results",
+    output: JSON.stringify({ runs: [{ results: null }] })
+  },
+  {
     name: "a null result",
     output: JSON.stringify({ runs: [{ results: [null] }] })
   }
@@ -1095,15 +1232,84 @@ it.each([
   const directory = temporaryDirectory();
   const result = runChecker(directory, fakeBicep(directory, output, 0));
 
-  assert.equal(result.status, 1);
+  assert.equal(result.status, 2);
   assert.notEqual(result.stderr, "");
+});
+
+it.each([
+  { name: "a missing message", result: { level: "note" } },
+  { name: "a null message", result: { level: "note", message: null } },
+  {
+    name: "a string message",
+    result: { level: "note", message: "compiler note" }
+  },
+  {
+    name: "a message without text",
+    result: { level: "note", message: { markdown: "Compiler note." } }
+  },
+  {
+    name: "non-string message text",
+    result: { level: "note", message: { text: null } }
+  },
+  {
+    name: "empty message text",
+    result: { level: "note", message: { text: "" } }
+  },
+  {
+    name: "blank message text",
+    result: { level: "note", message: { text: " \n\t" } }
+  },
+  {
+    name: "an unsupported level",
+    result: { level: "info", message: { text: "Compiler note." } }
+  },
+  {
+    name: "a non-string rule ID",
+    result: { level: "note", ruleId: 7, message: { text: "Compiler note." } }
+  }
+])("fails closed for a SARIF result with $name", ({ result }) => {
+  const directory = temporaryDirectory();
+  const output = sarif([result]);
+  const checked = runChecker(directory, fakeBicep(directory, output, 0));
+
+  assert.equal(checked.status, 2);
+  assert.equal(checked.stderr, `${output}\n`);
+  assert.doesNotMatch(checked.stderr, /Bicep reported a diagnostic/u);
+});
+
+it.each([
+  { name: "a numeric message ID", metadata: { id: 7 } },
+  { name: "null Markdown", metadata: { markdown: null } },
+  { name: "non-string arguments", metadata: { arguments: [1] } }
+])("preserves useful text despite $name", ({ metadata }) => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(
+      directory,
+      sarif([
+        {
+          level: "warning",
+          ruleId: "compiler-warning",
+          message: { text: "Useful compiler warning.", ...metadata }
+        }
+      ]),
+      0
+    )
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /warning compiler-warning: Useful compiler warning\./u
+  );
 });
 
 test("reports the fallback when Bicep returns no diagnostics output", () => {
   const directory = temporaryDirectory();
   const result = runChecker(directory, fakeBicep(directory, "", 0));
 
-  assert.equal(result.status, 1);
+  assert.equal(result.status, 2);
   assert.equal(
     result.stderr,
     "Bicep did not return valid SARIF diagnostics.\n"
@@ -1166,7 +1372,7 @@ test("fails closed when compiled output is not valid JSON", () => {
     fakeBicep(directory, sarif([]), 0, "not json")
   );
 
-  assert.equal(result.status, 1);
+  assert.equal(result.status, 2);
   assert.match(result.stderr, /Bicep did not return valid compiled JSON/u);
 });
 
@@ -1182,7 +1388,7 @@ it.each([
     fakeBicep(directory, sarif([]), 0, output)
   );
 
-  assert.equal(result.status, 1);
+  assert.equal(result.status, 2);
   assert.match(result.stderr, /Bicep did not return valid compiled JSON/u);
 });
 
@@ -1194,7 +1400,7 @@ test("fails closed when the managed Bicep executable is missing", () => {
     USERPROFILE: missingHome
   });
 
-  assert.equal(result.status, 1);
+  assert.equal(result.status, 2);
   assert.notEqual(result.stderr, "");
 });
 
@@ -1854,6 +2060,13 @@ describe("repair budget", () => {
     assert.equal(result.status, 1);
     assert.match(result.stderr, /BCP057/u);
     assert.match(result.stderr, /repair budget is now spent/u);
+
+    const refused = runChecker(directory, fakeBicep(directory, failure, 1));
+    assert.equal(refused.status, 2);
+    assert.match(
+      refused.stderr,
+      new RegExp(`limit of ${REPAIR_COMPILE_LIMIT} has been reached`, "u")
+    );
   });
 
   it("refuses a compile past the budget without running Bicep at all", () => {
@@ -1862,7 +2075,7 @@ describe("repair budget", () => {
       attempts: REPAIR_COMPILE_LIMIT,
       fingerprint: "abc"
     });
-    // A compiler that would pass, so a status of 1 can only come from the
+    // A compiler that would pass, so exit 2 can only come from the
     // refusal rather than from the compile.
     const env = fakeBicep(directory, sarif([]), 0);
     const before = fs.readFileSync(path.join(directory, "build"), "utf8");
@@ -1873,12 +2086,25 @@ describe("repair budget", () => {
 
     const result = runChecker(directory, env);
 
-    assert.equal(result.status, 1);
+    assert.equal(result.status, 2);
     assert.match(
       result.stderr,
-      new RegExp(`repair budget of ${REPAIR_ATTEMPT_BUDGET} is spent`, "u")
+      new RegExp(`reserved ${REPAIR_COMPILE_LIMIT} validation attempts`, "u")
     );
+    assert.match(
+      result.stderr,
+      new RegExp(`limit of ${REPAIR_COMPILE_LIMIT} has been reached`, "u")
+    );
+    assert.match(result.stderr, /No new validation was run/u);
+    assert.match(result.stderr, /Abort the staged run/u);
+    assert.match(result.stderr, /do not write the origin record/u);
+    assert.match(result.stderr, /do not publish the run/u);
+    assert.match(result.stderr, /Report this exact refusal/u);
     assert.match(result.stderr, /no application definition was written/u);
+    assert.doesNotMatch(
+      result.stderr,
+      /still does not build|compiler rejected|last compiler output/u
+    );
     assert.equal(fs.existsSync(path.join(directory, "spawned")), false);
     assert.deepEqual(readRepair(directory), {
       attempts: REPAIR_COMPILE_LIMIT,
@@ -1914,6 +2140,117 @@ describe("repair budget", () => {
     assert.equal(second.status, 1);
     assert.doesNotMatch(second.stderr, /same compiler failure/u);
     assert.equal((readRepair(directory) as { attempts: number }).attempts, 2);
+  });
+
+  it("counts repeated unavailable checks without treating them as model failures", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory, { attempts: 1, fingerprint: "previous model error" });
+
+    const first = runChecker(directory, fakeBicep(directory, sarif([]), 7));
+    const second = runChecker(directory, fakeBicep(directory, sarif([]), 7));
+
+    assert.equal(first.status, 2);
+    assert.equal(second.status, 2);
+    assert.deepEqual(readRepair(directory), {
+      attempts: 3,
+      fingerprint: null
+    });
+    for (const result of [first, second]) {
+      assert.match(result.stderr, /Bicep exited with status 7/u);
+      assert.doesNotMatch(result.stderr, /same compiler failure/u);
+      assert.doesNotMatch(result.stderr, /materially different fix/u);
+      assert.doesNotMatch(result.stderr, /repair budget is now spent/u);
+    }
+  });
+
+  it("records malformed SARIF without model-failure guidance", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory, { attempts: 1, fingerprint: "previous model error" });
+    const malformed = sarif([{ level: "note" }]);
+
+    const result = runChecker(directory, fakeBicep(directory, malformed, 0));
+
+    assert.equal(result.status, 2);
+    assert.deepEqual(readRepair(directory), {
+      attempts: 2,
+      fingerprint: null
+    });
+    assert.equal(result.stderr, `${malformed}\n`);
+    assert.doesNotMatch(result.stderr, /same compiler failure/u);
+    assert.doesNotMatch(result.stderr, /materially different fix/u);
+    assert.doesNotMatch(result.stderr, /repair budget is now spent/u);
+  });
+
+  it("refuses a seventh check after unavailable attempts without inventing a model failure", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    const env = fakeBicep(directory, sarif([]), 7);
+    const driver = path.join(directory, "build");
+    const spawned = path.join(directory, "spawn-count");
+    fs.writeFileSync(
+      driver,
+      [
+        'const fs = require("node:fs");',
+        `const spawned = ${JSON.stringify(spawned)};`,
+        'const count = fs.existsSync(spawned) ? Number(fs.readFileSync(spawned, "utf8")) : 0;',
+        "fs.writeFileSync(spawned, String(count + 1));",
+        fs.readFileSync(driver, "utf8")
+      ].join("\n")
+    );
+
+    const unavailable = Array.from({ length: REPAIR_COMPILE_LIMIT }, () =>
+      runChecker(directory, env)
+    );
+    const refused = runChecker(directory, env);
+
+    assert.deepEqual(
+      unavailable.map((result) => result.status),
+      Array(REPAIR_COMPILE_LIMIT).fill(2)
+    );
+    for (const result of unavailable) {
+      assert.match(result.stderr, /Bicep exited with status 7/u);
+      assert.doesNotMatch(result.stderr, /same compiler failure/u);
+      assert.doesNotMatch(result.stderr, /materially different fix/u);
+      assert.doesNotMatch(result.stderr, /repair budget is now spent/u);
+    }
+    assert.equal(refused.status, 2);
+    assert.match(
+      refused.stderr,
+      new RegExp(`reserved ${REPAIR_COMPILE_LIMIT} validation attempts`, "u")
+    );
+    assert.match(refused.stderr, /No new validation was run/u);
+    assert.match(refused.stderr, /Report this exact refusal/u);
+    assert.doesNotMatch(
+      refused.stderr,
+      /still does not build|compiler rejected|last compiler output|same compiler failure|materially different fix/u
+    );
+    assert.equal(
+      fs.readFileSync(spawned, "utf8"),
+      String(REPAIR_COMPILE_LIMIT)
+    );
+    assert.deepEqual(readRepair(directory), {
+      attempts: REPAIR_COMPILE_LIMIT,
+      fingerprint: null
+    });
+  });
+
+  it("uses the last attempt for an unavailable check without model-failure guidance", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory, {
+      attempts: REPAIR_COMPILE_LIMIT - 1,
+      fingerprint: "previous model error"
+    });
+
+    const result = runChecker(directory, fakeBicep(directory, sarif([]), 7));
+
+    assert.equal(result.status, 2);
+    assert.deepEqual(readRepair(directory), {
+      attempts: REPAIR_COMPILE_LIMIT,
+      fingerprint: null
+    });
+    assert.doesNotMatch(result.stderr, /same compiler failure/u);
+    assert.doesNotMatch(result.stderr, /materially different fix/u);
+    assert.doesNotMatch(result.stderr, /repair budget is now spent/u);
   });
 
   it("recognizes a repeated source-reference validation failure", () => {
@@ -1974,9 +2311,10 @@ describe("repair budget", () => {
     assert.deepEqual(statuses, Array(REPAIR_COMPILE_LIMIT).fill(1));
 
     const refused = runChecker(directory, fakeBicep(directory, failure, 1));
+    assert.equal(refused.status, 2);
     assert.match(
       refused.stderr,
-      new RegExp(`repair budget of ${REPAIR_ATTEMPT_BUDGET} is spent`, "u")
+      new RegExp(`limit of ${REPAIR_COMPILE_LIMIT} has been reached`, "u")
     );
     assert.equal(
       (readRepair(directory) as { attempts: number }).attempts,
@@ -2010,8 +2348,16 @@ describe("repair budget", () => {
 
     // Fail closed: an unreadable counter is indistinguishable from a spent
     // one, so compiling would hand the run an unlimited budget.
-    assert.equal(result.status, 1);
+    assert.equal(result.status, 2);
     assert.match(result.stderr, /could not be recorded/u);
+    assert.match(result.stderr, /Abort the staged run/u);
+    assert.match(result.stderr, /do not retry validation/u);
+    assert.match(result.stderr, /do not modify the current model/u);
+    assert.match(result.stderr, /do not start another modeling run/u);
+    assert.match(result.stderr, /do not write the origin record/u);
+    assert.match(result.stderr, /do not publish the run/u);
+    assert.match(result.stderr, /Report this exact failure/u);
+    assert.doesNotMatch(result.stderr, /promote-app-model\.mjs --begin/u);
     assert.doesNotMatch(result.stderr, /BCP057/u);
     // The unusable record is left alone rather than overwritten, because it
     // may still hold the baseline the publish check needs.
@@ -2069,7 +2415,7 @@ describe("repair budget", () => {
 
         // A compile that cannot be counted is refused rather than run: letting
         // it through leaves the budget stuck and the loop unbounded.
-        assert.equal(result.status, 1);
+        assert.equal(result.status, 2);
         assert.match(result.stderr, /could not be recorded/u);
       } finally {
         fs.chmodSync(directory, 0o755);
@@ -2097,7 +2443,37 @@ describe("repair budget", () => {
           () => rerunChecker(directory, env).status
         );
 
-        assert.deepEqual(statuses, Array(attempts).fill(1));
+        assert.deepEqual(statuses, Array(attempts).fill(2));
+      } finally {
+        fs.chmodSync(directory, 0o755);
+      }
+    }
+  );
+
+  it.runIf(unwritable)(
+    "keeps a successful exit when its fingerprint cannot be recorded",
+    () => {
+      const directory = temporaryDirectory();
+      stagedRun(directory);
+      const env = fakeBicep(directory, sarif([]), 0);
+      const driver = path.join(directory, "build");
+      fs.writeFileSync(
+        driver,
+        `require("node:fs").chmodSync(process.cwd(), 0o555);\n${fs.readFileSync(driver, "utf8")}`
+      );
+
+      try {
+        const result = runChecker(directory, env);
+
+        assert.equal(result.status, 0);
+        assert.match(
+          result.stderr,
+          /Could not record what this compile reported/u
+        );
+        assert.equal(
+          (readRepair(directory) as { attempts: number }).attempts,
+          1
+        );
       } finally {
         fs.chmodSync(directory, 0o755);
       }
@@ -2107,7 +2483,7 @@ describe("repair budget", () => {
   it("counts a run that never leaves a staging directory separately", () => {
     const first = temporaryDirectory();
     stagedRun(first, { attempts: REPAIR_COMPILE_LIMIT, fingerprint: "abc" });
-    assert.equal(runChecker(first, fakeBicep(first, failure, 1)).status, 1);
+    assert.equal(runChecker(first, fakeBicep(first, failure, 1)).status, 2);
 
     // A different run, with its own record: the previous run's spent budget
     // must not refuse it.
@@ -2135,7 +2511,16 @@ describe("agreement with the core repair rules", () => {
     assert.equal(REPAIR_ATTEMPT_BUDGET, DEPLOY_REPAIR_ATTEMPT_CAP);
   });
 
-  const attemptCases = [0, 1, 2, 3, 4];
+  const attemptCases = [
+    0,
+    1,
+    2,
+    3,
+    4,
+    REPAIR_COMPILE_LIMIT - 1,
+    REPAIR_COMPILE_LIMIT,
+    REPAIR_COMPILE_LIMIT + 1
+  ];
 
   it.each(attemptCases)(
     "agrees on whether a compile is allowed after %i attempts",
@@ -2430,7 +2815,10 @@ describe("secure parameter targets", () => {
 
   it("fails closed when the staged resolved types are not valid JSON", () => {
     const directory = temporaryDirectory();
-    stagedRun(directory);
+    stagedRun(directory, {
+      attempts: 1,
+      fingerprint: "previous model error"
+    });
     stagedResolvedTypes(directory, "{not json");
     // No secure parameter anywhere: the refusal comes from the unreadable
     // contract rather than from anything in the model.
@@ -2443,10 +2831,61 @@ describe("secure parameter targets", () => {
       fakeBicep(directory, sarif([]), 0, compiledOutput)
     );
 
-    assert.equal(result.status, 1);
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /error checker-unavailable/u);
     assert.match(result.stderr, /could not be read: it is not valid JSON/u);
     assert.match(result.stderr, new RegExp(escapeRegExp(RESOLVED_TYPES), "u"));
+    assert.match(result.stderr, /Abort the staged run/u);
+    assert.match(result.stderr, /do not retry validation/u);
+    assert.match(result.stderr, /do not modify the current model/u);
+    assert.match(result.stderr, /do not start another modeling run/u);
+    assert.match(result.stderr, /do not write the origin record/u);
+    assert.match(result.stderr, /do not publish the run/u);
+    assert.match(result.stderr, /Report this exact failure/u);
+    assert.doesNotMatch(result.stderr, /secure-parameter-target/u);
+    assert.doesNotMatch(result.stderr, /Rerun show-radius-type\.mjs/u);
+    assert.doesNotMatch(result.stderr, /promote-app-model\.mjs --begin/u);
+    assert.deepEqual(readRepair(directory), {
+      attempts: 2,
+      fingerprint: null
+    });
+    assert.doesNotMatch(result.stderr, /same compiler failure/u);
+    assert.doesNotMatch(result.stderr, /materially different fix/u);
+    assert.doesNotMatch(result.stderr, /repair budget is now spent/u);
   });
+
+  it.each(["warning", "error"])(
+    "preserves a compiler %s before reading malformed policy evidence",
+    (level) => {
+      const directory = temporaryDirectory();
+      stagedRun(directory);
+      stagedResolvedTypes(directory, "{not json");
+      const message = `Actionable compiler ${level}.`;
+
+      const result = runChecker(
+        directory,
+        fakeBicep(
+          directory,
+          sarif([
+            {
+              level,
+              ruleId: "BCP415",
+              message: { text: message }
+            }
+          ]),
+          1
+        )
+      );
+
+      assert.equal(result.status, 1);
+      assert.match(
+        result.stderr,
+        new RegExp(`${level} BCP415: ${escapeRegExp(message)}`, "u")
+      );
+      assert.doesNotMatch(result.stderr, /checker-unavailable/u);
+      assert.doesNotMatch(result.stderr, /resolved type schemas/u);
+    }
+  );
 
   it.each([
     {
@@ -2489,23 +2928,36 @@ describe("secure parameter targets", () => {
         fakeBicep(directory, sarif([]), 0, rabbitMqWithRawPassword())
       );
 
-      assert.equal(result.status, 1);
+      assert.equal(result.status, 2);
       assert.match(result.stderr, expected);
     }
   );
 
   it("fails closed when the staged resolved types cannot be read at all", () => {
     const directory = temporaryDirectory();
-    stagedRun(directory);
+    stagedRun(directory, {
+      attempts: REPAIR_COMPILE_LIMIT - 1,
+      fingerprint: "previous model error"
+    });
     fs.mkdirSync(path.join(directory, RESOLVED_TYPES));
+    const compiledOutput = template({
+      rabbitmq: radiusResource(rabbitMqType, { queue: "orders" })
+    });
 
     const result = runChecker(
       directory,
-      fakeBicep(directory, sarif([]), 0, rabbitMqWithRawPassword())
+      fakeBicep(directory, sarif([]), 0, compiledOutput)
     );
 
-    assert.equal(result.status, 1);
+    assert.equal(result.status, 2);
     assert.match(result.stderr, /could not be read/u);
+    assert.deepEqual(readRepair(directory), {
+      attempts: REPAIR_COMPILE_LIMIT,
+      fingerprint: null
+    });
+    assert.doesNotMatch(result.stderr, /same compiler failure/u);
+    assert.doesNotMatch(result.stderr, /materially different fix/u);
+    assert.doesNotMatch(result.stderr, /repair budget is now spent/u);
   });
 
   it("reports a secure parameter on a type this run never resolved", () => {

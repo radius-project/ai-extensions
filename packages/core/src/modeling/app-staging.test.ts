@@ -444,8 +444,14 @@ describe("evaluateRepairAttempt", () => {
     expect(decision.verdict).toBe("exhausted");
     expect(decision.allowed).toBe(false);
     expect(decision.attempt).toBe(REPAIR_COMPILE_LIMIT + 1);
-    expect(decision.reason).toContain(String(REPAIR_ATTEMPT_BUDGET));
+    expect(decision.reason).toContain(
+      `limit of ${REPAIR_COMPILE_LIMIT} has been reached`
+    );
+    expect(decision.reason).toContain("No new validation was run");
     expect(decision.reason).toContain("no application definition was written");
+    expect(decision.reason).not.toMatch(
+      /still does not build|compiler rejected|last compiler output/u
+    );
   });
 
   it("stays refused beyond the budget", () => {
@@ -484,7 +490,7 @@ describe("nextRepairState", () => {
     );
   });
 
-  it("clears the fingerprint when the compile passed", () => {
+  it("clears the fingerprint when validation has no model diagnostic", () => {
     expect(nextRepairState({ attempts: 2, fingerprint: "old" }, null)).toEqual({
       attempts: 3,
       fingerprint: null
@@ -561,8 +567,23 @@ describe("fingerprintCompilerOutput", () => {
 });
 
 describe("repair messages", () => {
-  it("states how many compiles were spent", () => {
-    expect(repairBudgetSpentMessage(5)).toContain("compiled 5 times");
+  it("reports a history-neutral validation refusal", () => {
+    const message = repairBudgetSpentMessage(REPAIR_COMPILE_LIMIT);
+
+    expect(message).toContain(
+      `reserved ${REPAIR_COMPILE_LIMIT} validation attempts`
+    );
+    expect(message).toContain(
+      `limit of ${REPAIR_COMPILE_LIMIT} has been reached`
+    );
+    expect(message).toContain("No new validation was run");
+    expect(message).toContain("Abort the staged run");
+    expect(message).toContain("do not write the origin record");
+    expect(message).toContain("do not publish the run");
+    expect(message).toContain("Report this exact refusal");
+    expect(message).not.toMatch(
+      /compiled|still does not build|compiler rejected|last compiler output/u
+    );
   });
 
   it("tells the agent to make a materially different fix", () => {
