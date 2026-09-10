@@ -1480,6 +1480,71 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(calls.log).not.toContain("settleDeployStatuses(failure)");
   });
 
+  it.each(["failed", "succeeded"] as const)(
+    "lets a same-run %s artifact supersede the monitor timeout",
+    async (artifactState) => {
+      const calls: Calls = { log: [] };
+      const { deps, state } = fakes(calls, {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployStatus: "failed",
+          deployErrorKind: "run-unconfirmed",
+          deployRunId: 7,
+          deployingResources: [
+            {
+              id: "db",
+              deployStatus: "failed",
+              deployMessage: "Deployment timed out"
+            },
+            { id: "api", deployStatus: "success" }
+          ]
+        },
+        modeledResources: [{ id: "db" }, { id: "api" }],
+        reader: {
+          progress: progressPayload(
+            [
+              {
+                id: "db",
+                name: "db",
+                type: "Radius.Data/sqlDatabases",
+                status: artifactState === "failed" ? "failed" : "success",
+                message:
+                  artifactState === "failed" ?
+                    "Radius quota exceeded"
+                  : undefined
+              },
+              {
+                id: "api",
+                name: "api",
+                type: "Radius.Compute/containers",
+                status: "success"
+              }
+            ],
+            { runId: 7, state: artifactState }
+          )
+        }
+      });
+
+      const payload = payloadOf(
+        await run("/api/deployed-graph", handleDeployedGraph, deps)
+      );
+
+      expect(payload.mode).toBe("terminal");
+      expect(
+        payload.resources.map((resource) => [
+          resource.deployStatus,
+          resource.deployMessage
+        ])
+      ).toEqual([
+        artifactState === "failed" ?
+          ["failed", "Radius quota exceeded"]
+        : ["success", undefined],
+        ["success", undefined]
+      ]);
+      expect(state?.deployErrorKind).toBe("run-unconfirmed");
+    }
+  );
+
   it.each([
     ["live", "in_progress", 7],
     ["without a tracked run", "failed", undefined]

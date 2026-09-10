@@ -452,12 +452,14 @@ export async function handleDeployedGraph(
 
   // A terminal monitor snapshot includes the run-level explanation that an
   // incomplete artifact cannot carry. Overlay it after the read: the monitor
-  // may have finished while that read was pending. A newer deployment's
-  // artifact must still supersede this attempt, and an unconfirmed run keeps
-  // its existing repair guard rather than acquiring a made-up conclusion.
+  // may have finished while that read was pending. A terminal artifact from
+  // this run or a newer deployment must supersede the snapshot. An unconfirmed
+  // run keeps its existing repair guard rather than acquiring a made-up conclusion.
   if (
     sessionMatchesSelection &&
     artifactMatchesSessionRun &&
+    progress?.state !== "failed" &&
+    progress?.state !== "succeeded" &&
     monitorRunId != null &&
     state.deployRunId === monitorRunId &&
     (state.deployStatus === "complete" || state.deployStatus === "failed") &&

@@ -270,6 +270,80 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     expect(harness.state.deployErrorKind).toBe("run-unconfirmed");
   });
 
+  it.each(["failed", "succeeded"] as const)(
+    "replaces the timeout presentation when the same run publishes a %s artifact",
+    async (artifactState) => {
+      const harness = start();
+      harness.state.contextRepo = "octo/app";
+      harness.state.deployRunId = 7;
+      harness.state.deployStatus = "failed";
+      harness.state.deployErrorKind = "run-unconfirmed";
+      harness.state.deployingResources = [
+        { id: "db", name: "db", deployStatus: "in_progress" },
+        { id: "api", name: "api", deployStatus: "success" }
+      ];
+      settleDeployStatuses(harness.state.deployingResources, "timed_out");
+      harness.modeledResources.push(
+        { id: "db", name: "db" },
+        { id: "api", name: "api" }
+      );
+      const entry = await container!.getOrCreate("panel-a");
+      const before = await fetch(`${entry.baseUrl}/api/deployed-graph`);
+      expect(before.status).toBe(200);
+      expect(await before.json()).toMatchObject({
+        resources: [
+          { deployStatus: "failed", deployMessage: "Deployment timed out" },
+          { deployStatus: "success" }
+        ]
+      });
+
+      harness.reader.progress = {
+        schemaVersion: 1,
+        application: "test-app",
+        environment: "default",
+        sequence: 2,
+        runId: 7,
+        state: artifactState,
+        resources: [
+          {
+            id: "db",
+            name: "db",
+            type: "Radius.Data/sqlDatabases",
+            status: artifactState === "failed" ? "failed" : "success",
+            message:
+              artifactState === "failed" ? "Radius quota exceeded" : undefined
+          },
+          {
+            id: "api",
+            name: "api",
+            type: "Radius.Compute/containers",
+            status: "success"
+          }
+        ]
+      };
+      const after = await fetch(`${entry.baseUrl}/api/deployed-graph`);
+      const payload = (await after.json()) as {
+        mode: string;
+        resources: CanvasGraphResource[];
+      };
+
+      expect(after.status).toBe(200);
+      expect(payload.mode).toBe("terminal");
+      expect(
+        payload.resources.map((resource) => [
+          resource.deployStatus,
+          resource.deployMessage
+        ])
+      ).toEqual([
+        artifactState === "failed" ?
+          ["failed", "Radius quota exceeded"]
+        : ["success", undefined],
+        ["success", undefined]
+      ]);
+      expect(harness.state.deployErrorKind).toBe("run-unconfirmed");
+    }
+  );
+
   it("serves typed graph progress events over a real socket", async () => {
     const harness = start();
     harness.state.progressMessages = ["deployed diagnostic"];
