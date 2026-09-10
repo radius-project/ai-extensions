@@ -15,6 +15,7 @@ import {
 } from "../e2e/support/canvas-harness.js";
 import type { Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
+import { DELETE_DIALOG_RESOURCE_LIMIT } from "../../src/browser/delete-dialog.js";
 import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
 
 type Theme = "dark" | "light";
@@ -267,6 +268,64 @@ async function routeDeployments(
       });
     }
   );
+}
+
+// The deployed page's delete dialog names what was last reported as deployed,
+// which is a different collection from the modeled graph. One resource over the
+// display limit is enough to pin both the bounded list and its remainder line.
+const INVENTORY_RESOURCES = Array.from({ length: 10 }, (_, index) => ({
+  name: `reported-resource-${index + 1}`,
+  type:
+    index % 2 === 0 ?
+      "Applications.Core/containers"
+    : "Applications.Datastores/redisCaches"
+}));
+
+async function routeDeletionInventory(
+  page: Page,
+  canvas: CanvasHarness
+): Promise<void> {
+  await page.route(
+    `${canvas.baseUrl}/api/list-applications?*`,
+    async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ applications: [{ name: "radius-app" }] })
+      });
+    }
+  );
+  await page.route(
+    `${canvas.baseUrl}/api/list-environments?*`,
+    async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          environments: [
+            {
+              name: "fixture-environment",
+              provider: "azure",
+              status: "success"
+            }
+          ]
+        })
+      });
+    }
+  );
+  await routeDeployments(page, canvas, "success");
+  await page.route(`${canvas.baseUrl}/api/deployed-graph?*`, async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        resources: [{ id: "app/modeled", name: "never-deployed" }],
+        mode: "terminal",
+        deletionInventory: {
+          application: "radius-app",
+          environment: "fixture-environment",
+          resources: INVENTORY_RESOURCES
+        }
+      })
+    });
+  });
 }
 
 async function routeGraphControls(
@@ -646,6 +705,60 @@ test.describe("Radius Canvas visual baselines", () => {
       await expect(repair.getByRole("button", { name: "Copy" })).toBeVisible();
 
       await screenshot(page, `vi-09-wizard-github-callout-${theme}.png`);
+    });
+
+    test(`VI-10 delete dialog resource list in ${theme}`, async ({
+      page,
+      canvas
+    }) => {
+      test.setTimeout(45_000);
+      await seed(canvas);
+      await routeDeletionInventory(page, canvas);
+      await gotoVisual(page, canvas, "deployed", theme);
+
+      await page.getByRole("button", { name: "Delete Deployment" }).click();
+      await page
+        .getByRole("button", { name: "I want to delete this deployment" })
+        .click();
+
+      const dialog = page.locator("#deploy-delete-modal");
+      const list = dialog.getByRole("list", {
+        name: "Resources to be deleted"
+      });
+      await expect(list).toBeVisible({ timeout: 15_000 });
+
+      // The list is bounded and the remainder is counted, so the baseline pins
+      // the truncated shape rather than however many resources the fixture has.
+      await expect(list.locator(".rad-ddlg__resource")).toHaveCount(
+        DELETE_DIALOG_RESOURCE_LIMIT
+      );
+      await expect(list).toContainText(
+        `+${INVENTORY_RESOURCES.length - DELETE_DIALOG_RESOURCE_LIMIT} more`
+      );
+      // The modeled-only resource must never appear: the dialog names what was
+      // reported as deployed, not what the application merely declares.
+      await expect(list).not.toContainText("never-deployed");
+      await expect(
+        dialog.getByRole("button", { name: /have read and understand/i })
+      ).toBeVisible();
+
+      // Nothing may be hidden on a destructive confirmation: overlay scrollbars
+      // are invisible until interaction, so a clipped list would silently
+      // withhold part of what the user is agreeing to destroy. The entry count
+      // is already bounded, so the list is sized to show all of it.
+      const overflows = await list.evaluate((element) => {
+        const box = element as unknown as {
+          scrollHeight: number;
+          clientHeight: number;
+        };
+        return box.scrollHeight > box.clientHeight;
+      });
+      expect(overflows).toBe(false);
+
+      const remainder = list.locator(".rad-ddlg__resource-more");
+      await expect(remainder).toBeInViewport();
+
+      await screenshot(page, `vi-10-delete-resources-${theme}.png`);
     });
   }
 });

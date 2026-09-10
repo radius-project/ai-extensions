@@ -3,6 +3,7 @@ import { asGraphController } from "../graph/surface.js";
 import { createGraphProgress } from "../graph/progress.js";
 import { githubRepositoryUrl, parseGraphResources } from "../graph/model.js";
 import { createEnvironmentConfirmDialog } from "../environment/confirm-dialog.js";
+import { deletionInventoryResources } from "../deletion-inventory.js";
 import {
   DELETE_FAILED_STATUS,
   FORCE_DELETE_ORPHAN_NOTICE,
@@ -57,7 +58,11 @@ interface DeploymentState {
 }
 
 interface DeleteDialog {
-  open(application: string, environment: string): void;
+  open(
+    application: string,
+    environment: string,
+    resources?: readonly unknown[]
+  ): void;
   teardown?: () => void;
 }
 
@@ -66,8 +71,8 @@ function asDeleteDialog(value: unknown): DeleteDialog | null {
   const open = value.open;
   const teardown = value.teardown;
   return {
-    open: (application, environment) => {
-      open(application, environment);
+    open: (application, environment, resources) => {
+      open(application, environment, resources);
     },
     teardown:
       isCallable(teardown) ?
@@ -167,6 +172,15 @@ export function initializeDeployedGraphPage(
   let resumeGraphOnVisible = false;
   let graphRequestInFlight = false;
   let progressView: GraphProgressView | null = null;
+  // Keep the target-scoped resource-list snapshot separate from modeled graph
+  // nodes, which can include never-deployed resources and omit removed ones.
+  let deletionInventory: { key: string; resources: readonly unknown[] } = {
+    key: "",
+    resources: []
+  };
+  const forgetDeployedResources = (): void => {
+    deletionInventory = { key: "", resources: [] };
+  };
 
   const stopProgress = (): void => {
     progressView?.stop();
@@ -188,6 +202,18 @@ export function initializeDeployedGraphPage(
     deployments.get(
       deploymentKey(selectedApplication(), selectedEnvironment())
     ) ?? "";
+
+  // Only the target's own resources may be named. A refresh that is still in
+  // flight leaves the previous selection's list in place, so the tag is checked
+  // against the pair the dialog is opening for rather than trusting whatever
+  // loaded last.
+  const deployedResourcesFor = (
+    application: string,
+    environment: string
+  ): readonly unknown[] =>
+    deletionInventory.key === deploymentKey(application, environment) ?
+      deletionInventory.resources
+    : [];
 
   const stopStatePolling = (): void => {
     if (stateTimer !== null) entry.cancel(stateTimer);
@@ -338,6 +364,7 @@ export function initializeDeployedGraphPage(
   const loadGraph = (): void => {
     stopGraphPolling();
     if (!page.repo) {
+      forgetDeployedResources();
       showNothing("Nothing deployed yet");
       return;
     }
@@ -365,11 +392,16 @@ export function initializeDeployedGraphPage(
     const requestGeneration = ++graphGeneration;
     graphRequestInFlight = true;
     let url = `/api/deployed-graph?repo=${encodeURIComponent(page.repo)}`;
-    if (selectedApplication()) {
-      url += `&application=${encodeURIComponent(selectedApplication())}`;
+    // The selection this request describes, captured now: it may change again
+    // before the response lands, and the result belongs to the one it asked for.
+    const application = selectedApplication();
+    const environment = selectedEnvironment();
+    const requestedKey = deploymentKey(application, environment);
+    if (application) {
+      url += `&application=${encodeURIComponent(application)}`;
     }
-    if (selectedEnvironment()) {
-      url += `&environment=${encodeURIComponent(selectedEnvironment())}`;
+    if (environment) {
+      url += `&environment=${encodeURIComponent(environment)}`;
     }
     void context.net
       .fetch(url, graphAbort ? { signal: graphAbort.signal } : undefined)
@@ -379,6 +411,7 @@ export function initializeDeployedGraphPage(
         stopProgress();
         const loadError = readString(payload, "error");
         if (loadError) {
+          forgetDeployedResources();
           modeledGraphPending = isRecord(payload) && payload.retry === true;
           if (!controller && status) {
             status.style.display = "";
@@ -393,6 +426,15 @@ export function initializeDeployedGraphPage(
         modeledGraphPending = false;
         const resources = parseGraphResources(readArray(payload, "resources"));
         lastMode = readString(payload, "mode") || "greyed";
+        const verified = deletionInventoryResources(
+          payload,
+          application,
+          environment
+        );
+        deletionInventory =
+          verified.length > 0 ?
+            { key: requestedKey, resources: verified }
+          : { key: "", resources: [] };
         if (resources.length === 0) {
           showNothing("Nothing deployed yet");
           setModeNote("");
@@ -432,6 +474,10 @@ export function initializeDeployedGraphPage(
       })
       .catch((error: unknown) => {
         if (!entry.active || requestGeneration !== graphGeneration) return;
+        // The selection may have changed since the last successful load, so a
+        // failed refresh must not leave another application's resources behind
+        // for the delete confirmation to name.
+        forgetDeployedResources();
         context.logger.error("Radius deployed graph request failed.", error);
         const message = "The deployed application graph could not be loaded.";
         // Report the failure once: in the status banner when there is one, and
@@ -778,7 +824,11 @@ export function initializeDeployedGraphPage(
     const application = selectedApplication();
     const environment = selectedEnvironment();
     if (selectedStatus() !== DELETE_FAILED_STATUS) {
-      target.open(application, environment);
+      target.open(
+        application,
+        environment,
+        deployedResourcesFor(application, environment)
+      );
       return;
     }
     if (deleteProbeInFlight) return;
@@ -796,7 +846,11 @@ export function initializeDeployedGraphPage(
       // page may since have had reason to keep disabled.
       refreshControls();
       if (!result.conflict || !forceConfirm) {
-        target.open(application, environment);
+        target.open(
+          application,
+          environment,
+          deployedResourcesFor(application, environment)
+        );
         return;
       }
       forceConfirm.show({

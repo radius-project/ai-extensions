@@ -232,6 +232,7 @@ const productionHandlers = {
   ...createGraphsPlanningRoutes({
     readInstanceEntry: () => undefined,
     createDeployStatusReader: () => ({
+      read: () => Promise.resolve({ status: "missing", progress: null }),
       graph: () => Promise.resolve({ graph: null, status: "missing" }),
       progress: () => Promise.resolve(null)
     }),

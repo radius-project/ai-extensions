@@ -9,7 +9,8 @@ import { createCanvasServer } from "../../../src/server/create-canvas-server.js"
 import { createRequestHandler } from "../../../src/server/create-request-handler.js";
 import {
   createGraphsPlanningRoutes,
-  type DeployedGraphReaderOptions
+  type DeployedGraphReaderOptions,
+  type DeployedGraphStatusReader
 } from "../../../src/server/routes/graphs-planning.js";
 import { createTestRouteTable } from "../../support/server/route-table.js";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
@@ -20,6 +21,8 @@ import type {
 import {
   buildDeployMessageMap,
   buildDeployStatusMap,
+  createDeployStatusReader,
+  DEPLOY_STATUS_FILES,
   settleDeployStatuses
 } from "../../../src/deploy-artifacts.js";
 import type { CanvasGraphResource, CanvasState } from "../../../src/shared.js";
@@ -63,7 +66,7 @@ function keysOf(resource: unknown): string[] {
   return [String(value.id ?? ""), String(value.name ?? "")].filter(Boolean);
 }
 
-function start(): Harness {
+function start(actualReader?: DeployedGraphStatusReader): Harness {
   const state: CanvasState = {};
   const reader: ReaderScript = {};
   const readerOptions: DeployedGraphReaderOptions[] = [];
@@ -81,7 +84,13 @@ function start(): Harness {
       readInstanceEntry: () => (entryMissing ? undefined : { state }),
       createDeployStatusReader: (options) => {
         readerOptions.push(options);
+        if (actualReader) return actualReader;
         return {
+          read: () =>
+            Promise.resolve({
+              status: reader.graph?.status ?? "missing",
+              progress: reader.progress ?? null
+            }),
           graph: () => {
             if (reader.graphThrows) return Promise.reject(reader.graphThrows);
             return Promise.resolve({
@@ -163,6 +172,197 @@ function start(): Harness {
 }
 
 describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
+  it("keeps revalidated inventory across reader TTLs but rejects regressions and failed refreshes", async () => {
+    let clock = 0;
+    let sequence = 2;
+    let failure = false;
+    const actualReader = createDeployStatusReader({
+      repo: "octo/app",
+      application: "billing",
+      environment: "prod",
+      now: () => clock,
+      listArtifacts: async () => {
+        if (failure) throw new Error("artifact service unavailable");
+        return [
+          {
+            id: 1,
+            name: "radius-deploy-status-prod-billing",
+            workflow_run: { id: 42 }
+          }
+        ];
+      },
+      downloadArtifact: async () => ({
+        [DEPLOY_STATUS_FILES.graph]: JSON.stringify({
+          resources: [{ name: "modeled-only" }]
+        }),
+        [DEPLOY_STATUS_FILES.progress]: JSON.stringify({
+          schemaVersion: 1,
+          application: "billing",
+          environment: "prod",
+          runId: 42,
+          sequence,
+          state: "succeeded",
+          resources: [{ name: "deployed-only", type: "Radius.Resources/redis" }]
+        })
+      })
+    });
+    const harness = start(actualReader);
+    harness.state.contextRepo = "octo/app";
+    harness.modeledResources.push({ name: "modeled-only" });
+    const entry = await container!.getOrCreate("panel-a");
+    const read = async (): Promise<unknown> => {
+      const response = await fetch(
+        `${entry.baseUrl}/api/deployed-graph?application=billing&environment=prod`
+      );
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+    for (const time of [0, 10001, 20002]) {
+      clock = time;
+      expect(await read()).toMatchObject({
+        deletionInventory: {
+          application: "billing",
+          environment: "prod",
+          resources: [{ name: "deployed-only", type: "Radius.Resources/redis" }]
+        }
+      });
+    }
+    clock = 30003;
+    sequence = 1;
+    expect(await read()).toMatchObject({ deletionInventory: null });
+    clock = 40004;
+    failure = true;
+    expect(await read()).toMatchObject({ deletionInventory: null });
+  });
+
+  it("withholds inventory when the artifact carried an unreadable resource entry", async () => {
+    // The malformed entry is dropped during parsing, so the surviving list
+    // looks complete by the time the route validates it. Only the parser's
+    // discard marker can prevent undercounting a destructive action, which
+    // makes this the boundary worth exercising through the real reader.
+    const actualReader = createDeployStatusReader({
+      repo: "octo/app",
+      application: "billing",
+      environment: "prod",
+      now: () => 0,
+      listArtifacts: async () => [
+        {
+          id: 1,
+          name: "radius-deploy-status-prod-billing",
+          workflow_run: { id: 42 }
+        }
+      ],
+      downloadArtifact: async () => ({
+        [DEPLOY_STATUS_FILES.graph]: JSON.stringify({
+          resources: [{ name: "modeled-only" }]
+        }),
+        [DEPLOY_STATUS_FILES.progress]: JSON.stringify({
+          schemaVersion: 1,
+          application: "billing",
+          environment: "prod",
+          runId: 42,
+          sequence: 1,
+          state: "succeeded",
+          resources: [
+            { name: "deployed-only", type: "Radius.Resources/redis" },
+            { type: "Radius.Resources/containers" }
+          ]
+        })
+      })
+    });
+    const harness = start(actualReader);
+    harness.state.contextRepo = "octo/app";
+    harness.modeledResources.push({ name: "modeled-only" });
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await fetch(
+      `${entry.baseUrl}/api/deployed-graph?application=billing&environment=prod`
+    );
+    expect(response.status).toBe(200);
+    // The graph itself still projects: only the inventory claim is withheld.
+    expect(await response.json()).toMatchObject({
+      deletionInventory: null,
+      resources: [{ name: "modeled-only" }]
+    });
+  });
+
+  it("adds a scoped resource-list inventory without changing modeled graph projection", async () => {
+    const harness = start();
+    Object.assign(harness.state, {
+      contextRepo: "octo/app",
+      contextBranch: "feature/current",
+      graphTargetRepo: "octo/app",
+      graphBranch: "feature/current",
+      graphResources: [
+        { name: "never-created", type: "Radius.Resources/containers" }
+      ]
+    });
+    harness.reader.graph = {
+      status: "ok",
+      graph: [
+        { name: "published-model-only", type: "Radius.Resources/containers" }
+      ]
+    };
+    harness.reader.progress = {
+      schemaVersion: 1,
+      application: "Billing",
+      environment: "Prod",
+      runId: 42,
+      sequence: 1,
+      state: "failed",
+      updatedAt: "2026-09-09T00:00:00Z",
+      resources: [
+        {
+          name: "removed-from-model",
+          type: "Radius.Resources/redis",
+          id: "actual-resource-id",
+          message: "Internal-only detail"
+        }
+      ]
+    };
+    const entry = await container!.getOrCreate("panel-a");
+    const response = await fetch(
+      `${entry.baseUrl}/api/deployed-graph?application=billing&environment=PROD`
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(await response.json()).toEqual({
+      repo: "octo/app",
+      branch: "feature/current",
+      mode: "terminal",
+      application: "Billing",
+      updatedAt: "2026-09-09T00:00:00Z",
+      resources: [
+        {
+          name: "never-created",
+          type: "Radius.Resources/containers",
+          deployStatus: "failed",
+          connections: [],
+          outputResources: []
+        }
+      ],
+      deletionInventory: {
+        application: "Billing",
+        environment: "Prod",
+        resources: [
+          { name: "removed-from-model", type: "Radius.Resources/redis" }
+        ]
+      }
+    });
+
+    // Retained progress may still paint a useful graph after authentication
+    // fails, but cannot authorize the resource names shown before deletion.
+    harness.reader.graph.status = "auth";
+    const failedRead = await fetch(
+      `${entry.baseUrl}/api/deployed-graph?application=billing&environment=PROD`
+    );
+    expect(failedRead.status).toBe(200);
+    expect(await failedRead.json()).toMatchObject({
+      mode: "terminal",
+      deletionInventory: null,
+      resources: [{ name: "never-created", deployStatus: "failed" }]
+    });
+  });
+
   it("serves typed graph progress events over a real socket", async () => {
     const harness = start();
     harness.state.progressMessages = ["deployed diagnostic"];
@@ -252,7 +452,7 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("application/json");
     expect(await response.text()).toBe(
-      '{"resources":[],"repo":"","mode":"greyed"}'
+      '{"resources":[],"repo":"","mode":"greyed","deletionInventory":null}'
     );
     expect(harness.readerOptions).toEqual([]);
 
@@ -352,7 +552,8 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       branch: "feature/x",
       mode: "terminal",
       updatedAt: "2026-08-13T00:00:00.000Z",
-      application: "billing-resolved"
+      application: "billing-resolved",
+      deletionInventory: null
     });
     // The selectors reach the reader as the page sent them.
     expect(harness.readerOptions).toEqual([
@@ -871,7 +1072,8 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       branch: "main",
       mode: "greyed",
       updatedAt: null,
-      application: null
+      application: null,
+      deletionInventory: null
     });
   });
 });
