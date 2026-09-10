@@ -2,4 +2,4 @@
 "radius": patch
 ---
 
-**Fixed:** Select stable and exact release-candidate Radius Bicep types from the CLI's stamped release, warn when edge uses mutable latest, and stop before modeling pull-request builds that have no published types.
+**Fixed:** Select stable and exact release-candidate Radius Bicep types from the CLI's stamped release, allow edge's mutable latest types only for an executable `RADIUS_RAD_BINARY` developer override, and stop before modeling edge managed binaries or pull-request builds.
