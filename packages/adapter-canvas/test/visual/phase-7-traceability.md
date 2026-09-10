@@ -1,4 +1,4 @@
-﻿# Phase 7 visual and reliability traceability
+# Phase 7 visual and reliability traceability
 
 Phase 7 adds the Playwright visual suite (P2-A) in `test/visual/canvas-visual.test.ts`, the recurring functional workflow in `.github/workflows/canvas-functional.yml`, and the scheduled extended resilience gate (P2-B) in `.github/workflows/canvas-reliability.yml`. All reuse the Phase 6 real Chromium harness and deterministic fake CLI boundary. No personal credential, live cloud, mutable repository, public content network, or inherited credential store is used.
 
