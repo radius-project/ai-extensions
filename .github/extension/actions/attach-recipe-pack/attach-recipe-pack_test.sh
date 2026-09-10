@@ -31,6 +31,10 @@ case "${1:-} ${2:-}" in
         [[ "${SHOW_FAIL:-false}" != true ]]
         printf '%s\n' "${PACK_JSON}"
         ;;
+    "env show")
+        [[ "${ENV_SHOW_FAIL:-false}" != true ]]
+        printf '%s\n' "${ENV_JSON}"
+        ;;
     "env update")
         [[ "${UPDATE_FAIL:-false}" != true ]]
         ;;
@@ -46,7 +50,11 @@ run_script() {
     local expected_exit="$1"
     shift
     : >"${CALLS}"
-    if env PATH="${BIN}:${PATH}" CALLS="${CALLS}" "$@" \
+    if env \
+        PATH="${BIN}:${PATH}" \
+        CALLS="${CALLS}" \
+        ENV_JSON='{"properties":{"recipePacks":[]}}' \
+        "$@" \
         bash "${SCRIPT}" >"${OUTPUT}" 2>&1; then
         [[ "${expected_exit}" == success ]] ||
             fail "script unexpectedly succeeded"
@@ -73,12 +81,25 @@ assert_output() {
 }
 
 PACK_ID="/planes/radius/local/resourceGroups/default/providers/Radius.Core/recipePacks/azure-avm"
+CUSTOM_PACK_ID="/planes/radius/local/resourceGroups/default/providers/Radius.Core/recipePacks/custom"
 run_script success \
     ENVIRONMENT=production \
     RECIPE_PACK=azure-avm \
-    PACK_JSON="{\"id\":\"${PACK_ID}\"}"
+    PACK_JSON="{\"id\":\"${PACK_ID}\"}" \
+    ENV_JSON="{\"properties\":{\"recipePacks\":[\"${CUSTOM_PACK_ID}\"]}}"
 assert_call "rad recipe-pack show azure-avm -o json"
-assert_call "rad env update production --recipe-packs ${PACK_ID} --preview"
+assert_call "rad env show production --preview -o json"
+assert_call \
+    "rad env update production --recipe-packs ${CUSTOM_PACK_ID},${PACK_ID} --preview"
+
+run_script success \
+    ENVIRONMENT=production \
+    RECIPE_PACK=azure-avm \
+    PACK_JSON="{\"id\":\"${PACK_ID}\"}" \
+    ENV_JSON="{\"properties\":{\"recipePacks\":[\"${PACK_ID}\",\"${CUSTOM_PACK_ID}\",\"${PACK_ID}\"]}}"
+assert_call "rad env show production --preview -o json"
+assert_call \
+    "rad env update production --recipe-packs ${PACK_ID},${CUSTOM_PACK_ID} --preview"
 
 run_script failure RECIPE_PACK=azure-avm PACK_JSON='{"id":"pack"}'
 assert_output "Radius environment name is required"
@@ -95,6 +116,7 @@ for invalid_json in '{}' '{"id":""}' '{"id":42}' 'not-json'; do
         PACK_JSON="${invalid_json}"
     assert_output "returned an invalid resource ID"
     assert_call "rad recipe-pack show azure-avm -o json"
+    assert_no_call "rad env show"
     assert_no_call "rad env update"
 done
 
@@ -104,13 +126,41 @@ run_script failure \
     PACK_JSON='{"id":"pack"}' \
     SHOW_FAIL=true
 assert_call "rad recipe-pack show azure-avm -o json"
+assert_no_call "rad env show"
 assert_no_call "rad env update"
 
 run_script failure \
     ENVIRONMENT=production \
     RECIPE_PACK=azure-avm \
     PACK_JSON='{"id":"pack"}' \
+    ENV_SHOW_FAIL=true
+assert_call "rad env show production --preview -o json"
+assert_no_call "rad env update"
+
+for invalid_env_json in \
+    '{}' \
+    '{"properties":{}}' \
+    '{"properties":{"recipePacks":null}}' \
+    '{"properties":{"recipePacks":"pack"}}' \
+    '{"properties":{"recipePacks":[42]}}' \
+    '{"properties":{"recipePacks":[""]}}' \
+    'not-json'; do
+    run_script failure \
+        ENVIRONMENT=production \
+        RECIPE_PACK=azure-avm \
+        PACK_JSON='{"id":"pack"}' \
+        ENV_JSON="${invalid_env_json}"
+    assert_output "returned invalid recipe-pack data"
+    assert_call "rad env show production --preview -o json"
+    assert_no_call "rad env update"
+done
+
+run_script failure \
+    ENVIRONMENT=production \
+    RECIPE_PACK=azure-avm \
+    PACK_JSON='{"id":"pack"}' \
     UPDATE_FAIL=true
+assert_call "rad env show production --preview -o json"
 assert_call "rad env update production --recipe-packs pack --preview"
 
 for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do
