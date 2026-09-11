@@ -261,7 +261,8 @@ jobs:
           fi
           echo "✅ Cloud credentials registered with Radius."
 
-      - name: Create Radius environment and recipe pack
+      - name: Create Radius environment and deploy provider recipe pack
+        id: provider-setup
         run: |
           # load-contrib-catalog exports the catalog and generic accessors from
           # the same Radius ref as this generated workflow.
@@ -314,19 +315,35 @@ jobs:
           )
           echo "Selected recipe pack: $PACK_NAME"
 
-          # Generate a Bicep file that defines a recipe pack bundling every
-          # recipe and a Radius.Core/environments resource that references it.
-          # Write it next to the app file so `rad deploy` resolves the repo's own
+          # Generate separate environment and recipe-pack Bicep files. Write both
+          # next to the app file so `rad deploy` resolves the repo's own
           # bicepconfig.json (which declares the `radius` extension). bicep resolves
           # the config nearest the .bicep file, so writing to $APP_DIR (e.g. .radius/)
           # picks up .radius/bicepconfig.json instead of the workspace root.
           APP_DIR=$(dirname "$APP_FILE")
-          ENV_BICEP="$APP_DIR/radius-env.bicep"
+          ENV_BICEP="$APP_DIR/radius-environment.bicep"
+          RECIPE_PACK_BICEP="$APP_DIR/radius-recipe-pack.bicep"
           # Ensure the destination directory exists before writing. The checkout
           # branch may not contain the app's directory (e.g. .radius/), in which
           # case the redirect below would fail with "No such file or directory".
           mkdir -p "$APP_DIR"
           cat > "$ENV_BICEP" <<EOF
+          extension radius
+
+          resource env 'Radius.Core/environments@2025-08-01-preview' = {
+            name: '$ENVIRONMENT'
+            properties: {
+              providers: {
+                kubernetes: {
+                  namespace: '$NAMESPACE'
+                }
+          $CLOUD_PROVIDER
+              }
+            }
+          }
+          EOF
+
+          cat > "$RECIPE_PACK_BICEP" <<EOF
           extension radius
 
           resource recipePack 'Radius.Core/recipePacks@2025-08-01-preview' = {
@@ -369,29 +386,28 @@ jobs:
               }
             }
           }
-
-          resource env 'Radius.Core/environments@2025-08-01-preview' = {
-            name: '$ENVIRONMENT'
-            properties: {
-              recipePacks: [
-                recipePack.id
-              ]
-              providers: {
-                kubernetes: {
-                  namespace: '$NAMESPACE'
-                }
-          $CLOUD_PROVIDER
-              }
-            }
-          }
           EOF
 
-          echo "Generated radius-env.bicep:"
+          echo "Generated Radius environment file:"
           cat "$ENV_BICEP"
           echo ""
-          echo "Deploying Radius.Core/environments and recipe pack..."
+          echo "Deploying Radius.Core/environments..."
           rad deploy "$ENV_BICEP"
-          echo "✅ Environment '$ENVIRONMENT' created with recipe pack."
+          echo "✅ Environment '$ENVIRONMENT' created."
+
+          echo "Generated provider recipe pack file:"
+          cat "$RECIPE_PACK_BICEP"
+          echo ""
+          echo "Deploying provider recipe pack..."
+          rad deploy "$RECIPE_PACK_BICEP" --environment "$ENVIRONMENT"
+          echo "✅ Provider recipe pack deployed."
+          echo "provider-pack=${PACK_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Attach provider recipe pack
+        uses: radius-project/ai-extensions/.github/extension/actions/attach-recipe-pack@{{RADIUS_REF}}
+        with:
+          environment: ${{ inputs.environment }}
+          recipe-pack: ${{ steps.provider-setup.outputs.provider-pack }}
 
       - name: Apply custom recipe packs
         uses: radius-project/ai-extensions/.github/extension/actions/apply-custom-recipe-packs@{{RADIUS_REF}}
