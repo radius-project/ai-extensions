@@ -41,11 +41,16 @@ const resolver = await import(pathToFileURL(script).href);
 const temporaryDirectories = new Set<string>();
 const commit = "0123456789abcdef0123456789abcdef01234567";
 const identity = {
+  release: "v0.60.0",
   version: "v0.60.0",
   commit,
   extension: "br:biceptypes.azurecr.io/radius:0.60"
 };
-const managedVersion = { version: identity.version, commit: identity.commit };
+const managedVersion = {
+  release: identity.release,
+  version: identity.version,
+  commit: identity.commit
+};
 const generatedRoot = "https://raw.githubusercontent.com/radius-project/radius";
 const fixtureIndex = JSON.parse(
   fs.readFileSync(path.join(fixtureRoot, "index.json"), "utf8")
@@ -254,29 +259,23 @@ describe("resource selection and release identity", () => {
     );
   });
 
-  it("derives the release-channel extension from parseable versions", () => {
+  it("uses the shared canonical release policy", () => {
     expect(resolver.deriveExtensionReference("0.60.0")).toBe(
       "br:biceptypes.azurecr.io/radius:0.60"
     );
     expect(resolver.deriveExtensionReference("v0.61.0-rc.1")).toBe(
-      "br:biceptypes.azurecr.io/radius:0.61"
+      "br:biceptypes.azurecr.io/radius:0.61.0-rc.1"
     );
-    expect(resolver.deriveExtensionReference("0.61.0+build.7")).toBe(
-      "br:biceptypes.azurecr.io/radius:0.61"
-    );
-    expect(() => resolver.deriveExtensionReference("latest")).toThrow(
-      /Unsupported Radius version.*Do not replace or modify the configured Radius CLI.*stop modeling/u
-    );
-    expect(() => resolver.deriveExtensionReference("edge")).toThrow(
-      /Unsupported Radius version/u
+    expect(() => resolver.deriveExtensionReference("pr-720")).toThrow(
+      /pull-request.*no Radius Bicep types.*published/iu
     );
   });
 
-  it("requires only the identity fields used for immutable resolution", () => {
+  it("requires release and commit but not version for immutable resolution", () => {
     expect(
       resolver.parseRadiusIdentity(
         JSON.stringify({
-          version: "v0.60.0",
+          release: "v0.60.0",
           commit
         })
       )
@@ -284,15 +283,26 @@ describe("resource selection and release identity", () => {
     expect(
       resolver.parseRadiusIdentity(
         JSON.stringify({
-          version: "v0.61.0-rc.1",
+          release: "v0.61.0-rc.1",
+          version: "v9.9.9-1-gdeadbee",
           commit
         })
       ).extension
-    ).toBe("br:biceptypes.azurecr.io/radius:0.61");
+    ).toBe("br:biceptypes.azurecr.io/radius:0.61.0-rc.1");
+    expect(
+      resolver.parseRadiusIdentity(
+        JSON.stringify({
+          cli: {
+            release: "v0.60.0",
+            commit
+          }
+        })
+      )
+    ).toEqual({ commit, extension: identity.extension });
     expect(() =>
       resolver.parseRadiusIdentity(
         JSON.stringify({
-          version: "v0.60.0",
+          release: "v0.60.0",
           commit: commit.slice(0, 12)
         })
       )
@@ -303,13 +313,41 @@ describe("resource selection and release identity", () => {
     for (const [output, expected] of [
       ["not-json", /invalid version JSON/u],
       ["[]", /must be an object/u],
-      [JSON.stringify({ commit }), /missing "version"/u],
-      [JSON.stringify({ version: "v0.60.0" }), /missing "commit"/u]
+      [JSON.stringify({ commit }), /missing "release"/u],
+      [JSON.stringify({ version: "v0.60.0", commit }), /missing "release"/u],
+      [JSON.stringify({ release: "v0.60.0" }), /missing "commit"/u]
     ] as const) {
       expect(() => resolver.parseRadiusIdentity(output)).toThrow(expected);
     }
     expect(() => resolver.deriveExtensionReference(undefined)).toThrow(
-      /Unsupported Radius version/u
+      /Unsupported Radius release/u
+    );
+  });
+
+  it("allows edge from an executable RADIUS_RAD_BINARY override and warns that latest is mutable", async () => {
+    const cacheRoot = temporaryDirectory();
+    const warn = vi.fn();
+    seedCache(cacheRoot);
+
+    const contract = await resolver.resolveRadiusTypes(
+      ["Radius.Core/applications"],
+      {
+        ...managedIdentityOptions({
+          radiusIdentity: {
+            release: "edge",
+            version: "deadbee",
+            commit
+          }
+        }),
+        cacheRoot,
+        fetchImpl: fixtureFetch([]),
+        warn
+      }
+    );
+
+    expect(contract.extension).toBe("br:biceptypes.azurecr.io/radius:latest");
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringMatching(/mutable.*latest.*may not match.*binary/iu)
     );
   });
 
@@ -786,7 +824,11 @@ describe("network and cache behavior", () => {
     });
     await resolver.resolveRadiusTypes(["Radius.Core/applications"], {
       ...managedIdentityOptions({
-        radiusIdentity: { version: identity.version, commit: previousCommit }
+        radiusIdentity: {
+          release: identity.release,
+          version: identity.version,
+          commit: previousCommit
+        }
       }),
       cacheRoot,
       fetchImpl: offline
@@ -1473,6 +1515,241 @@ describe("command boundary", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it("fails closed when the managed binary reports edge without an executable RADIUS_RAD_BINARY override", async () => {
+    const root = temporaryDirectory();
+    const staging = stagingDirectory(root);
+    const managedBinary = path.join(
+      root,
+      ".radius",
+      "ai-extensions",
+      "bin",
+      `rad${process.platform === "win32" ? ".exe" : ""}`
+    );
+    const binaryContents = "extension-managed edge rad";
+    fs.mkdirSync(path.dirname(managedBinary), { recursive: true });
+    fs.writeFileSync(managedBinary, binaryContents);
+    if (process.platform !== "win32") fs.chmodSync(managedBinary, 0o755);
+    const stagedConfig = JSON.stringify({
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: { radius: "br:biceptypes.azurecr.io/radius:latest" }
+    });
+    const stagedConfigPath = path.join(staging, "bicepconfig.json");
+    fs.writeFileSync(stagedConfigPath, stagedConfig);
+    const fetchCalls: string[] = [];
+    const runRadImpl = vi.fn(() =>
+      Promise.resolve({
+        stdout: JSON.stringify({
+          release: "edge",
+          version: "deadbee",
+          commit
+        }),
+        stderr: ""
+      })
+    );
+    const env = { ...process.env };
+    delete env.RADIUS_RAD_BINARY;
+    let stdout = "";
+    let stderr = "";
+
+    const status = await resolver.main(
+      ["--staging", staging, "Radius.Core/applications"],
+      {
+        stdout: { write: (value: string) => (stdout += value) },
+        stderr: { write: (value: string) => (stderr += value) },
+        resolve: (
+          selectors: unknown[],
+          options: { warn?: (text: string) => void }
+        ) =>
+          resolver.resolveRadiusTypes(selectors, {
+            ...options,
+            env,
+            home: root,
+            cacheRoot: path.join(root, "cache"),
+            fetchImpl: fixtureFetch(fetchCalls),
+            runRadImpl
+          })
+      }
+    );
+
+    expect(status).toBe(1);
+    expect(stderr).toMatch(/edge.*RADIUS_RAD_BINARY/iu);
+    expect(stderr).not.toContain("Warning:");
+    expect(stdout).toBe("");
+    expect(fetchCalls).toEqual([]);
+    expect(runRadImpl).toHaveBeenCalledExactlyOnceWith(
+      managedBinary,
+      ["version", "--cli", "--output", "json"],
+      expect.any(Object)
+    );
+    expect(fs.readFileSync(stagedConfigPath, "utf8")).toBe(stagedConfig);
+    expect(fs.existsSync(path.join(staging, "resolved-types.json"))).toBe(
+      false
+    );
+    expect(fs.readFileSync(managedBinary, "utf8")).toBe(binaryContents);
+  });
+
+  it.each([
+    [
+      "pull-request release",
+      JSON.stringify({ release: "pr-720", version: "v0.60.0", commit }),
+      /pull-request.*no Radius Bicep types.*published/iu
+    ],
+    [
+      "stable channel name",
+      JSON.stringify({ release: "stable", version: "v0.60.0", commit }),
+      /Unsupported Radius release "stable"/u
+    ],
+    [
+      "missing release",
+      JSON.stringify({ version: "v0.60.0", commit }),
+      /missing "release"/u
+    ],
+    ["invalid JSON", "not-json", /invalid version JSON/u]
+  ])(
+    "fails closed for %s before fetch or staged writes and preserves the configured binary",
+    async (_label, output, expected) => {
+      const root = temporaryDirectory();
+      const staging = stagingDirectory(root);
+      const binary = path.join(root, "configured-rad");
+      const binaryContents = "developer-owned rad";
+      fs.writeFileSync(binary, binaryContents);
+      if (process.platform !== "win32") fs.chmodSync(binary, 0o755);
+      const fetchImpl = vi.fn();
+      const versionArgs = ["version", "--cli", "--output", "json"];
+      let runRadInvocationCount = 0;
+      const runRadImpl = vi.fn(
+        async (invokedBinary: string, invokedArgs: string[]) => {
+          runRadInvocationCount += 1;
+          if (
+            runRadInvocationCount !== 1 ||
+            invokedBinary !== binary ||
+            invokedArgs.length !== versionArgs.length ||
+            invokedArgs.some((value, index) => value !== versionArgs[index])
+          ) {
+            throw new Error("Unexpected managed Radius version invocation.");
+          }
+          return { stdout: output, stderr: "" };
+        }
+      );
+      let stdout = "";
+      let stderr = "";
+
+      const status = await resolver.main(
+        ["--staging", staging, "Radius.Core/applications"],
+        {
+          stdout: { write: (value: string) => (stdout += value) },
+          stderr: { write: (value: string) => (stderr += value) },
+          resolve: (
+            selectors: unknown[],
+            options: { warn?: (text: string) => void }
+          ) =>
+            resolver.resolveRadiusTypes(selectors, {
+              ...options,
+              env: { ...process.env, RADIUS_RAD_BINARY: binary },
+              home: root,
+              cacheRoot: path.join(root, "cache"),
+              fetchImpl,
+              runRadImpl
+            })
+        }
+      );
+
+      expect(status).toBe(1);
+      expect(stderr).toMatch(expected);
+      expect(stdout).toBe("");
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(runRadImpl).toHaveBeenCalledExactlyOnceWith(
+        binary,
+        versionArgs,
+        expect.any(Object)
+      );
+      expect(fs.existsSync(path.join(staging, "bicepconfig.json"))).toBe(false);
+      expect(fs.existsSync(path.join(staging, "resolved-types.json"))).toBe(
+        false
+      );
+      expect(fs.readFileSync(binary, "utf8")).toBe(binaryContents);
+    }
+  );
+
+  it("reports the unpublished commit-pinned source for an edge build without staging output", async () => {
+    const edgeCommit = "fedcba9876543210fedcba9876543210fedcba98";
+    const root = temporaryDirectory();
+    const staging = stagingDirectory(root);
+    const binary = path.join(root, "configured-rad");
+    const binaryContents = "developer-owned edge rad";
+    const sourceUrl = `${generatedRoot}/${edgeCommit}/hack/bicep-types-radius/generated/index.json`;
+    const fetchCalls: string[] = [];
+    fs.writeFileSync(binary, binaryContents);
+    if (process.platform !== "win32") fs.chmodSync(binary, 0o755);
+    const versionArgs = ["version", "--cli", "--output", "json"];
+    let runRadInvocationCount = 0;
+    const runRadImpl = vi.fn(
+      async (invokedBinary: string, invokedArgs: string[]) => {
+        runRadInvocationCount += 1;
+        if (
+          runRadInvocationCount !== 1 ||
+          invokedBinary !== binary ||
+          invokedArgs.length !== versionArgs.length ||
+          invokedArgs.some((value, index) => value !== versionArgs[index])
+        ) {
+          throw new Error("Unexpected managed Radius version invocation.");
+        }
+        return {
+          stdout: JSON.stringify({
+            release: "edge",
+            version: edgeCommit.slice(0, 7),
+            commit: edgeCommit
+          }),
+          stderr: ""
+        };
+      }
+    );
+    let stdout = "";
+    let stderr = "";
+
+    const status = await resolver.main(
+      ["--staging", staging, "Radius.Core/applications"],
+      {
+        stdout: { write: (value: string) => (stdout += value) },
+        stderr: { write: (value: string) => (stderr += value) },
+        resolve: (
+          selectors: unknown[],
+          options: { warn?: (text: string) => void }
+        ) =>
+          resolver.resolveRadiusTypes(selectors, {
+            ...options,
+            env: { ...process.env, RADIUS_RAD_BINARY: binary },
+            home: root,
+            cacheRoot: path.join(root, "cache"),
+            fetchImpl: async (url: string) => {
+              fetchCalls.push(url);
+              if (url === sourceUrl) {
+                return new Response("missing", { status: 404 });
+              }
+              throw new Error(`Unexpected source request: ${url}`);
+            },
+            runRadImpl
+          })
+      }
+    );
+
+    expect(status).toBe(1);
+    expect(stderr).toContain(edgeCommit);
+    expect(stderr).toMatch(/No source is published at/u);
+    expect(runRadImpl).toHaveBeenCalledExactlyOnceWith(
+      binary,
+      versionArgs,
+      expect.any(Object)
+    );
+    expect(fetchCalls).toEqual([sourceUrl]);
+    expect(stdout).toBe("");
+    expect(fs.existsSync(path.join(staging, "bicepconfig.json"))).toBe(false);
+    expect(fs.existsSync(path.join(staging, "resolved-types.json"))).toBe(
+      false
+    );
+    expect(fs.readFileSync(binary, "utf8")).toBe(binaryContents);
+  });
+
   it("queries the configured managed binary through the importable resolver seam", async () => {
     const home = temporaryDirectory();
     const fakeVersion = path.join(home, "version");
@@ -1601,6 +1878,89 @@ describe("command boundary", () => {
     expect(stdout).toBe('{"contractVersion":1,"resources":[],"notFound":[]}\n');
     expect(stderr).toBe("");
     expect(configured).toBe(identity.extension);
+  });
+
+  it("routes an edge override warning while staging mutable latest", async () => {
+    const staging = stagingDirectory();
+    const cacheRoot = temporaryDirectory();
+    const calls: string[] = [];
+    const versionArgs = ["version", "--cli", "--output", "json"];
+    let runRadInvocationCount = 0;
+    const runRadImpl = vi.fn(
+      async (invokedBinary: string, invokedArgs: string[]) => {
+        runRadInvocationCount += 1;
+        if (
+          runRadInvocationCount !== 1 ||
+          invokedBinary !== process.execPath ||
+          invokedArgs.length !== versionArgs.length ||
+          invokedArgs.some((value, index) => value !== versionArgs[index])
+        ) {
+          throw new Error("Unexpected managed Radius version invocation.");
+        }
+        return {
+          stdout: JSON.stringify({
+            release: "edge",
+            version: "deadbee",
+            commit
+          }),
+          stderr: ""
+        };
+      }
+    );
+    const identityOptions = { ...managedIdentityOptions(), runRadImpl };
+    let stdout = "";
+    let stderr = "";
+
+    const status = await resolver.main(
+      ["--staging", staging, "Radius.Core/applications"],
+      {
+        stdout: { write: (value: string) => (stdout += value) },
+        stderr: { write: (value: string) => (stderr += value) },
+        resolve: (
+          selectors: unknown[],
+          options: { warn?: (text: string) => void }
+        ) =>
+          resolver.resolveRadiusTypes(selectors, {
+            ...identityOptions,
+            ...options,
+            cacheRoot,
+            fetchImpl: fixtureFetch(calls)
+          })
+      }
+    );
+
+    expect(status).toBe(0);
+    expect(stderr).toMatch(
+      /Warning:.*edge.*mutable.*latest.*may not match.*configured Radius binary/iu
+    );
+    expect(runRadImpl).toHaveBeenCalledExactlyOnceWith(
+      process.execPath,
+      versionArgs,
+      expect.any(Object)
+    );
+    const contract: unknown = JSON.parse(stdout);
+    expect(contract).toEqual({
+      contractVersion: 1,
+      resources: [
+        expect.objectContaining({ type: "Radius.Core/applications" })
+      ],
+      notFound: []
+    });
+    const stagedConfig: unknown = JSON.parse(
+      fs.readFileSync(path.join(staging, "bicepconfig.json"), "utf8")
+    );
+    expect(stagedConfig).toEqual({
+      experimentalFeaturesEnabled: { extensibility: true },
+      extensions: {
+        radius: "br:biceptypes.azurecr.io/radius:latest"
+      }
+    });
+    expect(calls).toEqual(
+      expect.arrayContaining([
+        `${generatedRoot}/${commit}/hack/bicep-types-radius/generated/index.json`,
+        `${generatedRoot}/${commit}/${defaultsPath}`
+      ])
+    );
   });
 
   it("routes nonfatal resolver warnings through command stderr", async () => {

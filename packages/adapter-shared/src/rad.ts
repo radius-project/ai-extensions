@@ -44,9 +44,17 @@ import {
   spawnRad
 } from "./rad-process.mjs";
 import type { ProcessResult, SpawnRadOptions } from "./rad-process.mjs";
+import {
+  RADIUS_EXTENSION_REGISTRY,
+  isRadiusEdgeRelease,
+  isRadiusPullRequestRelease,
+  radiusCliIdentity,
+  radiusExtensionRefForRelease
+} from "./rad-release.js";
 
 export { killChildTree, RadProcessError, spawnRad };
 export type { ProcessResult, SpawnRadOptions };
+export { RADIUS_EXTENSION_REGISTRY };
 
 // --- Shared named types -----------------------------------------------------
 //
@@ -145,7 +153,10 @@ export interface ResolveRadiusExtensionRefOptions {
   radPath?: string;
   /** Injected locator so tests need not depend on the machine's install. */
   locateRadBinary?: () => string | null;
-  /** Injected version reader so tests need not spawn a real binary. */
+  /**
+   * Injected release-identity reader so tests need not spawn a real binary.
+   * The compatibility option name is retained for existing callers.
+   */
   readVersion?: (radPath: string) => Promise<string | null>;
 }
 
@@ -221,15 +232,6 @@ export function managedBicepEnv(
 ): NodeJS.ProcessEnv {
   return processManagedBicepEnv(env, bicepPath);
 }
-
-// The ACR repository that publishes the Radius Bicep extension: the `Radius.*`
-// type index bicep resolves `extension radius` against. `rad app graph` compiles
-// Bicep offline, but bicep still needs a bicepconfig.json beside the .bicep
-// naming this extension, or compilation fails with `BCP204: Extension "radius"
-// is not recognized`. A tag is always appended — see
-// {@link radiusExtensionRefForVersion}; this registry is never referenced
-// untagged.
-export const RADIUS_EXTENSION_REGISTRY = "br:biceptypes.azurecr.io/radius";
 
 // The Bicep settings a Radius compile needs regardless of which extension tag is
 // selected. `extensibility` gates the `extension` keyword itself.
@@ -400,6 +402,19 @@ export function resolveExistingRadBinary(
   return null;
 }
 
+function isSelectedExecutableRadOverride(radPath: string): boolean {
+  const override = process.env.RADIUS_RAD_BINARY;
+  if (!override || path.resolve(override) !== path.resolve(radPath)) {
+    return false;
+  }
+  try {
+    const stat = fs.statSync(override);
+    return stat.isFile() && (IS_WIN || (stat.mode & 0o111) !== 0);
+  } catch {
+    return false;
+  }
+}
+
 export function parseRadVersionOutput(stdout: string): string | null {
   try {
     const parsed: unknown = JSON.parse(stdout);
@@ -416,21 +431,17 @@ export function parseRadVersionOutput(stdout: string): string | null {
   }
 }
 
-/**
- * radBinaryVersion - best-effort read of a rad binary's own CLI version by
- * running `rad version --cli --output json` and returning its `version` string
- * (e.g. "v0.44.0", or an edge build like "v0.60.0-rc1-1-gdeadbee"), or null when
- * it can't be determined. `rad version --cli` skips the control-plane check but
- * still shells out to Bicep (getCliVersionInfo -> bicep.Version() ->
- * `bicep --version`), so BICEP is pinned to the managed path even during version
- * checks. A timeout plus process-tree kill is a hard backstop so a
- * wedged rad can never stall binary resolution beyond `timeout`. (If bicep isn't
- * installed, rad returns fast with a "bicep not installed" note and still emits
- * `version`.) Never throws — a null result means "version unknown", which callers
- * treat as "leave the existing binary in place".
- */
-export function radBinaryVersion(
+function parseRadReleaseOutput(stdout: string): string | null {
+  try {
+    return radiusCliIdentity(JSON.parse(stdout)).release;
+  } catch {
+    return null;
+  }
+}
+
+function readRadBinaryIdentity(
   radPath: string,
+  parseOutput: (stdout: string) => string | null,
   { timeout = 10000 }: { timeout?: number } = {}
 ): Promise<string | null> {
   return new Promise((resolve) => {
@@ -464,13 +475,29 @@ export function radBinaryVersion(
     child.stderr?.resume();
     child.on("error", () => finish(null));
     child.on("close", (code) => {
-      if (code !== 0) {
-        finish(null);
-        return;
-      }
-      finish(parseRadVersionOutput(stdout));
+      finish(code === 0 ? parseOutput(stdout) : null);
     });
   });
+}
+
+/**
+ * radBinaryVersion - best-effort read of a rad binary's own CLI version by
+ * running `rad version --cli --output json` and returning its `version` string
+ * (e.g. "v0.44.0", or an edge build like "v0.60.0-rc1-1-gdeadbee"), or null when
+ * it can't be determined. `rad version --cli` skips the control-plane check but
+ * still shells out to Bicep (getCliVersionInfo -> bicep.Version() ->
+ * `bicep --version`), so BICEP is pinned to the managed path even during version
+ * checks. A timeout plus process-tree kill is a hard backstop so a
+ * wedged rad can never stall binary resolution beyond `timeout`. (If bicep isn't
+ * installed, rad returns fast with a "bicep not installed" note and still emits
+ * `version`.) Never throws — a null result means "version unknown", which callers
+ * treat as "leave the existing binary in place".
+ */
+export function radBinaryVersion(
+  radPath: string,
+  options: { timeout?: number } = {}
+): Promise<string | null> {
+  return readRadBinaryIdentity(radPath, parseRadVersionOutput, options);
 }
 
 // Parses the numeric major.minor.patch core out of a version string
@@ -510,76 +537,74 @@ export function compareVersions(
 }
 
 /**
- * radiusExtensionRefForVersion - map a rad CLI version to the Radius Bicep
- * extension reference that matches it, e.g. "v0.60.0-rc1" ->
- * "br:biceptypes.azurecr.io/radius:0.60".
+ * radiusExtensionRefForVersion - compatibility entry point for mapping a rad
+ * release identity to the matching Radius Bicep extension reference.
  *
- * The registry publishes one `major.minor` release-channel tag per Radius
- * release, so the extension is pinned to the release channel of the very binary
- * that will run the compile. Prerelease and build suffixes are ignored, matching
- * {@link compareVersions}: released binaries have been observed self-reporting a
- * prerelease string (a `v0.60.0-rc1` install serving the 0.60 line), and
- * `reconcileWithLatest` treats such a binary as equal to its release rather than
- * upgrading it, so the channel — not the suffix — is what identifies the types.
- *
- * Known limitation: the `major.minor` channel tag is published at GA, so a
- * genuinely pre-GA binary used during a release-candidate window derives a tag
- * that does not exist yet and the compile fails to restore the extension. That
- * is a development/`RADIUS_RAD_BINARY` scenario, the failure names the exact
- * reference it tried (see `buildGraphViaRad`), and pinning `extensions.radius`
- * in `.radius/bicepconfig.json` overrides it.
- *
- * The mutable `latest` and `edge` tags are deliberately never produced. Both
- * float independently of the installed binary — `latest` has been observed
- * lagging the current release, and `edge` is years stale — so either can
- * silently compile a model against a schema the installed toolchain does not
- * have, dropping valid properties or accepting invalid ones.
- *
- * Returns null when the version has no parseable major.minor.patch core.
+ * Stable releases use their `major.minor` channel, prereleases use their exact
+ * published tag, and `edge` uses mutable `latest`. Pull-request releases and
+ * unsupported identities return null.
  */
 export function radiusExtensionRefForVersion(
   version: string | null | undefined
 ): string | null {
-  const parsed = parseVersion(version);
-  if (!parsed) return null;
-  return `${RADIUS_EXTENSION_REGISTRY}:${parsed[0]}.${parsed[1]}`;
+  return radiusExtensionRefForRelease(version);
 }
 
 /**
  * resolveRadiusExtensionRef - the Radius Bicep extension reference to compile
- * with when the repository does not pin one itself, derived from the version of
+ * with when the repository does not pin one itself, derived from the release of
  * the `rad` binary that will run the compile.
  *
- * Reading the version is a local spawn, so this stays correct offline and in
+ * Reading the release is a local spawn, so this stays correct offline and in
  * air-gapped use: no releases API call is involved. Returns null when no binary
- * can be located or its version is unreadable, which callers treat as "fail
- * closed" rather than substituting a floating tag.
+ * can be located or its release is unreadable, which callers treat as "fail
+ * closed" rather than substituting a floating tag. A recognized pull-request
+ * release rejects because no Radius Bicep types are published for it.
  *
- * `readVersion` is injected so tests can drive the mapping deterministically
- * without spawning a real binary, and `locateRadBinary` so they do not depend on
- * whether the machine happens to have one installed.
+ * `readVersion` retains its compatibility name but reads the canonical release
+ * identity. It is injected so tests can drive the mapping deterministically.
  */
 export async function resolveRadiusExtensionRef({
   log = noop,
   radPath = "",
   locateRadBinary = () => resolveExistingRadBinary(),
-  readVersion = (binary: string) => radBinaryVersion(binary)
+  readVersion = (binary: string) =>
+    readRadBinaryIdentity(binary, parseRadReleaseOutput)
 }: ResolveRadiusExtensionRefOptions = {}): Promise<string | null> {
   const binary = radPath || locateRadBinary();
   if (!binary) {
     log(
-      "Could not locate a rad binary to derive the Radius Bicep extension version from."
+      "Could not locate a rad binary to derive the Radius Bicep extension release from."
     );
     return null;
   }
-  const version = await readVersion(binary);
-  const ref = radiusExtensionRefForVersion(version);
+  const release = await readVersion(binary);
+  const ref = radiusExtensionRefForVersion(release);
   if (!ref) {
-    const reported = version ? ` (it reported "${version}")` : "";
+    if (isRadiusPullRequestRelease(release)) {
+      const detail = `Radius release "${release}" is a pull-request build; no Radius Bicep types are published for pull-request releases.`;
+      log(detail);
+      throw new Error(detail);
+    }
+    const reported = release ? ` (it reported "${release}")` : "";
     log(
       `Could not determine the Radius release of ${binary}${reported}; the Radius Bicep extension cannot be derived from it.`
     );
     return null;
+  }
+  if (isRadiusEdgeRelease(release)) {
+    if (!isSelectedExecutableRadOverride(binary)) {
+      const detail =
+        'Radius release "edge" may use the mutable Radius Bicep extension ' +
+        `"${ref}" only when the selected executable is a valid ` +
+        "RADIUS_RAD_BINARY developer override. Set RADIUS_RAD_BINARY to the " +
+        "edge rad executable and retry.";
+      log(detail);
+      throw new Error(detail);
+    }
+    log(
+      `Radius release "edge" uses the mutable Radius Bicep extension "${ref}", which may not match the rad binary at ${binary}.`
+    );
   }
   return ref;
 }
@@ -814,9 +839,7 @@ async function reconcileWithLatest(
   }
 
   // An explicit override is developer-owned and is never updated in place.
-  const overridden =
-    process.env.RADIUS_RAD_BINARY &&
-    path.resolve(process.env.RADIUS_RAD_BINARY) === path.resolve(existing);
+  const overridden = isSelectedExecutableRadOverride(existing);
   if (overridden) {
     log(
       `Warning: RADIUS_RAD_BINARY rad ${localVersion} is older than the latest release ${latest.tag}; using it anyway. Unset RADIUS_RAD_BINARY to auto-upgrade.`
@@ -1580,7 +1603,7 @@ export async function buildGraphViaRad(
     // Resolve the binary up front and reuse it for the compile. resolveRadForGraph
     // waits for any in-flight load-time reconciliation, so the release read here
     // cannot be superseded by an upgrade mid-build, and passing the path to
-    // runRadAppGraph keeps the version read and the spawn on one binary.
+    // runRadAppGraph keeps the release read and the spawn on one binary.
     const radPath = await resolveRadForGraph({ log });
     const radiusExtensionRef =
       (await resolveRadiusExtensionRef({ log, radPath })) ?? "";

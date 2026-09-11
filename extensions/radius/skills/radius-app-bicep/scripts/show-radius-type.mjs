@@ -17,6 +17,12 @@ import {
   managedBicepEnv,
   spawnRad
 } from "../../../../../packages/adapter-shared/src/rad-process.mjs";
+import {
+  isRadiusEdgeRelease,
+  isRadiusPullRequestRelease,
+  radiusCliIdentity,
+  radiusExtensionRefForRelease
+} from "../../../../../packages/adapter-shared/src/rad-release.ts";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
@@ -143,20 +149,20 @@ function parseArguments(args) {
   return { help: false, stagingDir, selectors };
 }
 
-export function deriveExtensionReference(version) {
-  const match =
-    /^v?(\d+)\.(\d+)\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.exec(
-      typeof version === "string" ? version.trim() : ""
-    );
-  if (match === null) {
+export function deriveExtensionReference(release) {
+  const extension = radiusExtensionRefForRelease(release);
+  if (extension !== null) return extension;
+  if (isRadiusPullRequestRelease(release)) {
     throw new Error(
-      `Unsupported Radius version "${version ?? ""}". Do not replace or modify the configured Radius CLI; report this error and stop modeling.`
+      `Radius release "${release}" is a pull-request build; no Radius Bicep types are published for pull-request releases. Do not replace or modify the configured Radius CLI; report this error and stop modeling.`
     );
   }
-  return `br:biceptypes.azurecr.io/radius:${match[1]}.${match[2]}`;
+  throw new Error(
+    `Unsupported Radius release "${release ?? ""}". Do not replace or modify the configured Radius CLI; report this error and stop modeling.`
+  );
 }
 
-export function parseRadiusIdentity(output) {
+function parseManagedRadiusIdentity(output) {
   let parsed;
   try {
     parsed = JSON.parse(output);
@@ -164,22 +170,30 @@ export function parseRadiusIdentity(output) {
     throw new Error("Managed Radius returned invalid version JSON.");
   }
   requireObject(parsed, "Managed Radius version JSON");
-  if (typeof parsed.version !== "string" || parsed.version.trim() === "") {
-    throw new Error('Managed Radius version JSON is missing "version".');
+  const { release, commit } = radiusCliIdentity(parsed);
+  if (release === null) {
+    throw new Error('Managed Radius version JSON is missing "release".');
   }
-  if (typeof parsed.commit !== "string" || parsed.commit.trim() === "") {
+  if (commit === null) {
     throw new Error('Managed Radius version JSON is missing "commit".');
   }
-  const version = parsed.version.trim();
-  const commit = parsed.commit.trim();
   if (!/^[0-9a-f]{40}$/iu.test(commit)) {
     throw new Error(
       `Managed Radius commit "${commit}" is not a full 40-character SHA.`
     );
   }
   return {
+    release,
     commit: commit.toLowerCase(),
-    extension: deriveExtensionReference(version)
+    extension: deriveExtensionReference(release)
+  };
+}
+
+export function parseRadiusIdentity(output) {
+  const identity = parseManagedRadiusIdentity(output);
+  return {
+    commit: identity.commit,
+    extension: identity.extension
   };
 }
 
@@ -412,11 +426,12 @@ async function queryManagedRadiusIdentity({
   env = process.env,
   home = os.homedir(),
   processTimeoutMs = 10_000,
-  runRadImpl = spawnRad
+  runRadImpl = spawnRad,
+  warn = console.error
 } = {}) {
   const binaries = managedBinaries(home);
-  const rad =
-    isExecutable(env.RADIUS_RAD_BINARY) ? env.RADIUS_RAD_BINARY : binaries.rad;
+  const usesExecutableOverride = isExecutable(env.RADIUS_RAD_BINARY);
+  const rad = usesExecutableOverride ? env.RADIUS_RAD_BINARY : binaries.rad;
   if (!isExecutable(rad)) {
     throw new Error(`Extension-managed Radius binary not found at "${rad}".`);
   }
@@ -430,7 +445,24 @@ async function queryManagedRadiusIdentity({
         label: "Managed Radius version query"
       }
     );
-    return parseRadiusIdentity(stdout);
+    const identity = parseManagedRadiusIdentity(stdout);
+    if (isRadiusEdgeRelease(identity.release)) {
+      if (!usesExecutableOverride) {
+        throw new Error(
+          'Radius release "edge" may use the mutable Radius Bicep extension ' +
+            `"${identity.extension}" only when the selected executable is a valid ` +
+            "RADIUS_RAD_BINARY developer override. Set RADIUS_RAD_BINARY to the " +
+            "edge Radius CLI executable and retry."
+        );
+      }
+      warn(
+        `Warning: Radius release "edge" uses the mutable Radius Bicep extension "${identity.extension}", which may not match the configured Radius binary.`
+      );
+    }
+    return {
+      commit: identity.commit,
+      extension: identity.extension
+    };
   } catch (error) {
     const detail = error?.stderr?.trim() || message(error);
     throw new Error(`Managed Radius version query failed: ${detail}`, {
@@ -520,7 +552,7 @@ async function fetchText(
       }
       if (!response.ok) {
         const error = new Error(
-          `Source request failed with HTTP ${response.status}.`
+          `Source request failed with HTTP ${response.status}.${response.status === 404 ? ` No source is published at "${url}".` : ""}`
         );
         error.noRetry = !(
           response.status === 408 ||
