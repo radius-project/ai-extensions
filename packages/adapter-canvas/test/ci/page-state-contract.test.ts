@@ -55,6 +55,11 @@ describe("page-state architecture contract", () => {
       text: 'const html = `<input type="hidden" id="repo" value="${escapeHtml(repo)}"><div id="status">${escapeHtml(message)}</div>`;'
     },
     {
+      name: "ordinary hidden inputs with a state-named form field",
+      fileName: "pages/new-page.ts",
+      text: 'const html = `<input hidden id="form-state" value="${escapeHtml(value)}">`;'
+    },
+    {
       name: "aria-hidden presentation elements",
       fileName: "pages/new-page.ts",
       text: 'const html = `<div aria-hidden="true" id="decoration">${icon}</div>`;'
@@ -115,6 +120,11 @@ describe("page-state architecture contract", () => {
       text: 'const label = context.dom.byId("status").textContent; const state = JSON.parse(response);'
     },
     {
+      name: "ordinary form value reads",
+      fileName: "browser/future.ts",
+      text: 'const repo = context.dom.byId("repo").value; const branch = document.getElementById("branch").value;'
+    },
+    {
       name: "state presence checks for lifecycle and heartbeat",
       fileName: "browser/future.ts",
       text: `${idImport} if (!context.dom.byId(ID)) return; const exists = document.getElementById(ID) !== null;`
@@ -132,6 +142,21 @@ describe("page-state architecture contract", () => {
     {
       name: "manual hidden state",
       text: `${idImport} const html = \`<div hidden id="\${ID}">\${escapeHtml(JSON.stringify(state))}</div>\`;`,
+      message: "Use renderPageState"
+    },
+    {
+      name: "a hidden input with an imported state ID",
+      text: `${idImport} const html = \`<input type="hidden" id="\${ID}" value="\${escapeHtml(JSON.stringify(state))}">\`;`,
+      message: "Use renderPageState"
+    },
+    {
+      name: "a self-closing mixed-case input with an imported state ID",
+      text: `${idImport} const html = \`<INPUT id="\${ID}" hidden value="\${value}" />\`;`,
+      message: "Use renderPageState"
+    },
+    {
+      name: "a hidden input with a literal canonical state ID",
+      text: `const html = '<input type="hidden" id="${stateId}" value="state">';`,
       message: "Use renderPageState"
     },
     {
@@ -273,6 +298,8 @@ describe("page-state architecture contract", () => {
   it.each([
     "context.dom.byId(ID).textContent;",
     "document.getElementById(ID).textContent;",
+    "context.dom.byId(ID).value;",
+    "document.getElementById(ID).value;",
     'import { readPageState } from "./pages/state.js"; readPageState(context, otherId);',
     'import { readPageState } from "./pages/state.js"; readPageState(context);',
     'import { readPageState } from "./other-reader.js"; readPageState(context, ID);'

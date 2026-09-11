@@ -1,4 +1,7 @@
 import path from "node:path";
+// These test-only APIs are locked by pnpm-lock.yaml. TypeScript upgrades must
+// pass typecheck and this suite's positive/negative fixtures; import/API failures
+// fail the gate rather than disabling the check.
 import * as ts from "typescript/unstable/ast";
 import { createVirtualFileSystem } from "typescript/unstable/fs";
 import { API } from "typescript/unstable/sync";
@@ -241,11 +244,8 @@ function checkSource(
               position < contentEnd &&
               containsJsonSerialization(expression)
           );
-        const stateElement =
+        const canonicalStateId =
           stateIds.has(idValue) ||
-          (idValue !== "" && serializedContent) ||
-          (/(?:^|[-_])state(?:$|[-_])/i.test(idValue) &&
-            /(?:^|\s)hidden(?:\s|=|$)/i.test(attributes)) ||
           (idValue.includes("\u0000") &&
             [...expressions].some(
               ([position, expression]) =>
@@ -253,7 +253,12 @@ function checkSource(
                 position < contentStart &&
                 isStateId(expression)
             ));
-        if (name !== "input" && stateElement) {
+        const stateElement =
+          canonicalStateId ||
+          (idValue !== "" && serializedContent) ||
+          (/(?:^|[-_])state(?:$|[-_])/i.test(idValue) &&
+            /(?:^|\s)hidden(?:\s|=|$)/i.test(attributes));
+        if (stateElement && (name !== "input" || canonicalStateId)) {
           report(
             node,
             "Use renderPageState(id, state), not handwritten hidden state markup."
@@ -366,7 +371,7 @@ function checkSource(
         first &&
         isStateId(first) &&
         ts.isPropertyAccessExpression(node.parent) &&
-        ["textContent", "innerHTML", "innerText"].includes(
+        ["textContent", "innerHTML", "innerText", "value"].includes(
           node.parent.name.text
         )
       ) {

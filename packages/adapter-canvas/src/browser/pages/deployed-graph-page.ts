@@ -37,7 +37,6 @@ import { readPageState } from "./state.js";
 import { DEPLOYED_GRAPH_STATE_ID } from "../../pages/browser-state-ids.js";
 
 const ENTRY_KEY = "deployed-graph-page";
-export { DEPLOYED_GRAPH_STATE_ID };
 export const DEPLOYED_GRAPH_POLL_MS = 15_000;
 export const DEPLOYED_PROGRESS_STEPS_ID = "deployed-progress-steps";
 export const DEPLOYED_STATE_POLL_MS = 4_000;

@@ -21,9 +21,9 @@ import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { DELETE_CONFLICT_PATH, deleteConflictUrl } from "../force-delete.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { HttpResponse } from "../ports.js";
+import { DEPLOYED_GRAPH_STATE_ID } from "../../pages/browser-state-ids.js";
 import {
   DEPLOYED_GRAPH_POLL_MS,
-  DEPLOYED_GRAPH_STATE_ID,
   DEPLOYED_LOG_POLL_MS,
   DEPLOYED_STATE_POLL_LIMIT,
   DEPLOYED_STATE_POLL_MS,

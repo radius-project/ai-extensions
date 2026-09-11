@@ -24,7 +24,6 @@ import {
 } from "./graph-modeling-failure.js";
 
 const ENTRY_KEY = "planned-graph-page";
-export { PLANNED_GRAPH_STATE_ID };
 export const PLAN_DEBOUNCE_MS = 150;
 export const PLAN_PROGRESS_MS = 800;
 // How long to wait before asking again while Copilot authors the model. The

@@ -21,7 +21,6 @@ import {
 } from "./graph-modeling-failure.js";
 
 const ENTRY_KEY = "graph-diff-page";
-export { GRAPH_DIFF_STATE_ID };
 export const DIFF_DEBOUNCE_MS = 500;
 export const DIFF_PROGRESS_MS = 800;
 // How long to wait before asking again while Copilot authors the model. The
