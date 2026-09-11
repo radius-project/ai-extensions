@@ -464,10 +464,10 @@ export function createDeployMonitorService(
       // Monitoring stopped watching, so nothing else will ever move these
       // nodes: the terminal settle lives in the outcome service, which this
       // path never reaches. Leaving them gray or yellow would show a deployment
-      // that looks perpetually in flight, so settle them here with the
-      // "Deployment timed out" message Exception 5.1 requires. Resources the
+      // that looks perpetually in flight, so settle them here with a warning
+      // that monitoring stopped, not the workflow itself. Resources the
       // producer already reported terminal keep their own status and message.
-      dependencies.settleDeployStatuses(resources, "timed_out");
+      dependencies.settleDeployStatuses(resources, "monitor_timed_out");
       for (const resource of resources) {
         if (resource.deployStatus) setStatus(resource, resource.deployStatus);
       }

@@ -29,6 +29,7 @@ import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
 import { DEPLOYED_GRAPH_POLL_MS } from "../../src/browser/pages/deployed-graph-page.js";
 import {
   ARTIFACT_PAGE_SIZE,
+  DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
   settleDeployStatuses
 } from "../../src/deploy-artifacts.js";
 import type { CanvasGraphResource } from "../../src/shared.js";
@@ -3278,7 +3279,7 @@ test.describe("Radius Canvas in Chromium", () => {
       type,
       codeReference
     }));
-    settleDeployStatuses(resources, "timed_out");
+    settleDeployStatuses(resources, "monitor_timed_out");
     await canvas.seedState({
       ...baseCanvasState(canvas.workspacePath),
       graphResources: topology,
@@ -3327,7 +3328,7 @@ test.describe("Radius Canvas in Chromium", () => {
     await details.focus();
     await page.keyboard.press("Enter");
     await expect(page.locator("#node-popup")).toContainText(
-      "Deployment timed out"
+      DEPLOY_MONITOR_TIMED_OUT_MESSAGE
     );
     const detailsAccessibility = await new AxeBuilder({ page })
       .include("#node-popup")

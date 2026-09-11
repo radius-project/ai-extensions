@@ -1653,7 +1653,7 @@ describe("graphs-planning read routes (SU-09)", () => {
             deployStatus: "failed",
             deployMessage: "Deployment timed out"
           },
-          { id: "api", deployStatus: "success" },
+          { id: "api", deployStatus: "success", deployMessage: "creating" },
           { id: "empty", deployStatus: "failed", deployMessage: "  " },
           { id: "pending", deployStatus: "pending" },
           {
@@ -1696,6 +1696,76 @@ describe("graphs-planning read routes (SU-09)", () => {
     ]);
     expect(calls.log).not.toContain("settleDeployStatuses(failure)");
   });
+
+  it.each([
+    ["failed", undefined, undefined, false],
+    ["succeeded", undefined, undefined, false],
+    ["failed", 6, undefined, false],
+    ["failed", 7, undefined, true],
+    ["succeeded", 7, undefined, true],
+    ["failed", 8, "2026-09-11T00:02:00Z", true]
+  ] as const)(
+    "requires terminal %s artifact identity %s without a payload run ID",
+    async (artifactState, artifactRunId, createdAt, accepted) => {
+      const calls: Calls = { log: [] };
+      const { deps } = fakes(calls, {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployStatus: "failed",
+          deployErrorKind: "run-unconfirmed",
+          deployRunId: 7,
+          deployFinishedAt: Date.parse("2026-09-11T00:01:00Z"),
+          deployingResources: [
+            {
+              id: "db",
+              deployStatus: "failed",
+              deployMessage: "Monitoring stopped"
+            }
+          ]
+        },
+        modeledResources: [{ id: "db" }],
+        reader: {
+          graph: {
+            graph: null,
+            status: "ok",
+            artifact: {
+              id: 1,
+              name: "radius-deploy-status",
+              workflow_run:
+                artifactRunId == null ? undefined : { id: artifactRunId },
+              created_at: createdAt
+            }
+          },
+          progress: progressPayload(
+            [
+              {
+                id: "db",
+                name: "db",
+                type: "Radius.Data/sqlDatabases",
+                status: artifactState === "failed" ? "failed" : "success",
+                message:
+                  artifactState === "failed" ? "Final Radius error" : undefined
+              }
+            ],
+            { state: artifactState }
+          )
+        }
+      });
+
+      const payload = payloadOf(
+        await run("/api/deployed-graph", handleDeployedGraph, deps)
+      );
+
+      expect(payload.resources[0].deployStatus).toBe(
+        accepted && artifactState === "succeeded" ? "success" : "failed"
+      );
+      expect(payload.resources[0].deployMessage).toBe(
+        !accepted ? "Monitoring stopped"
+        : artifactState === "failed" ? "Final Radius error"
+        : undefined
+      );
+    }
+  );
 
   it.each(["failed", "succeeded"] as const)(
     "lets a same-run %s artifact supersede the monitor timeout",

@@ -376,6 +376,7 @@ export async function handleDeployedGraph(
   let readOk = false;
   let updatedAt: string | null = null;
   let progress: DeployProgress | null = null;
+  let artifactRunId: string | number | null = null;
   let deletionInventory: DeletionInventory | null = null;
   const inventoryApplication = (
     url.searchParams.get("application") || ""
@@ -410,11 +411,13 @@ export async function handleDeployedGraph(
     publishedGraph = result.graph;
     readOk = result.status === "ok" || result.status === "stale";
     progress = await reader.progress();
+    artifactRunId =
+      progress?.runId ?? result.artifact?.workflow_run?.id ?? null;
     const artifactRunMismatchesSession =
       sessionMatchesSelection &&
       state.deployRunId != null &&
-      progress?.runId != null &&
-      String(progress.runId) !== String(state.deployRunId);
+      artifactRunId != null &&
+      String(artifactRunId) !== String(state.deployRunId);
     const attemptBoundary = Math.max(
       state.deployStartedAt ?? 0,
       state.deployFinishedAt ?? 0
@@ -426,18 +429,25 @@ export async function handleDeployedGraph(
         attemptBoundary > 0 &&
         Number.isFinite(artifactCreatedAt) &&
         artifactCreatedAt > attemptBoundary);
+    const terminalArtifactNeedsIdentity =
+      sessionMatchesSelection &&
+      state.deployRunId != null &&
+      state.deployErrorKind === "run-unconfirmed" &&
+      (progress?.state === "failed" || progress?.state === "succeeded");
     const activeArtifactMatchesRun =
       deploying ?
         state.deployRunId != null &&
-        progress?.runId != null &&
-        String(progress.runId) === String(state.deployRunId)
-      : mismatchedArtifactIsNewer;
+        artifactRunId != null &&
+        String(artifactRunId) === String(state.deployRunId)
+      : mismatchedArtifactIsNewer &&
+        (!terminalArtifactNeedsIdentity || artifactRunId != null);
     if (!activeArtifactMatchesRun) {
-      // Run discovery has not completed, or an unscoped read found a previous
-      // run. Keep the active monitor state and do not expose stale graph metadata.
+      // Unknown or older artifact identity cannot establish the tracked run's
+      // outcome. Keep monitor state without exposing unrelated graph metadata.
       publishedGraph = null;
       readOk = false;
       progress = null;
+      artifactRunId = null;
     } else {
       updatedAt = progress?.updatedAt || null;
       if (progress?.application) resolvedApp = progress.application;
@@ -487,9 +497,9 @@ export async function handleDeployedGraph(
     publishedGraph != null ||
     (sessionMatchesSelection && state.deployedGraph != null);
   const artifactMatchesSessionRun =
-    progress?.runId == null ||
+    artifactRunId == null ||
     state.deployRunId == null ||
-    String(progress.runId) === String(state.deployRunId);
+    String(artifactRunId) === String(state.deployRunId);
 
   // A terminal monitor snapshot includes the run-level explanation that an
   // incomplete artifact cannot carry. Overlay it after the read: the monitor
@@ -515,7 +525,7 @@ export async function handleDeployedGraph(
         settledKeys.add(key);
         statusByKey.set(key, status);
         messageByKey.delete(key);
-        if (resource.deployMessage?.trim()) {
+        if (status === "failed" && resource.deployMessage?.trim()) {
           messageByKey.set(key, resource.deployMessage);
         }
       }

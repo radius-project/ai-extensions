@@ -17,6 +17,7 @@ import type { Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
 import {
   ARTIFACT_PAGE_SIZE,
+  DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
   settleDeployStatuses
 } from "../../src/deploy-artifacts.js";
 import { DELETE_DIALOG_RESOURCE_LIMIT } from "../../src/browser/delete-dialog.js";
@@ -33,7 +34,7 @@ type GraphRequests = {
 
 const DEPLOY_OUTCOMES: {
   name: string;
-  conclusion: "cancelled" | "timed_out" | "failure";
+  conclusion: "cancelled" | "timed_out" | "monitor_timed_out" | "failure";
   expectedMessage: string;
   radiusError?: string;
   producerMessage?: string;
@@ -49,12 +50,24 @@ const DEPLOY_OUTCOMES: {
     expectedMessage: "Deployment timed out"
   },
   {
+    name: "monitoring-timed-out",
+    conclusion: "monitor_timed_out",
+    expectedMessage: DEPLOY_MONITOR_TIMED_OUT_MESSAGE
+  },
+  {
     name: "radius-error",
     conclusion: "failure",
     radiusError:
       "Radius deployment failed: recipe could not provision container web (quota exceeded).",
     expectedMessage:
       "Radius deployment failed: recipe could not provision container web (quota exceeded)."
+  },
+  {
+    name: "bounded-radius-error",
+    conclusion: "failure",
+    radiusError: "Quota exceeded for the deployment.\n".repeat(120),
+    expectedMessage:
+      "Quota exceeded for the deployment.\n".repeat(120).slice(0, 497) + "..."
   },
   {
     name: "producer-error",
@@ -703,7 +716,7 @@ test.describe("Radius Canvas visual baselines", () => {
             deployStatus: outcome.producerMessage ? "failed" : "in_progress",
             deployMessage: outcome.producerMessage ?? "creating"
           },
-          { ...topology[1], deployStatus: "success" }
+          { ...topology[1], deployStatus: "success", deployMessage: "creating" }
         ];
         settleDeployStatuses(
           resources,
@@ -715,7 +728,9 @@ test.describe("Radius Canvas visual baselines", () => {
           deployingResources: resources,
           deployStatus: "failed",
           deployErrorKind:
-            outcome.conclusion === "timed_out" ? "run-unconfirmed" : undefined,
+            outcome.conclusion === "monitor_timed_out" ?
+              "run-unconfirmed"
+            : undefined,
           deployRunId: 7,
           deployEnvName: "fixture-environment",
           deployAppName: "radius-app"

@@ -12,6 +12,10 @@ import { createDeployOutcomeService } from "./deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./deploy-planned-graph.js";
 import type { DeployOutcomeRequest } from "./deploy-outcome.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import {
+  DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
+  settleDeployStatuses
+} from "../../deploy-artifacts.js";
 
 // A deterministic clock: every read advances by one tick, so the heartbeat and
 // the pending-node fallback can be driven without a real timer.
@@ -1165,7 +1169,19 @@ describe("deploy monitor settlement", () => {
     // settle, so the nodes would otherwise stay pending forever.
     const resources: CanvasGraphResource[] = [
       { id: "r1", name: "db", deployStatus: "in_progress" },
-      { id: "r2", name: "api", deployStatus: "pending" }
+      { id: "r2", name: "api", deployStatus: "pending" },
+      {
+        id: "r3",
+        name: "queue",
+        deployStatus: "failed",
+        deployMessage: "queue provisioning failed"
+      },
+      {
+        id: "r4",
+        name: "cache",
+        deployStatus: "success",
+        deployMessage: "provisioned"
+      }
     ];
     const settled: (string | undefined | null)[] = [];
     const { request: input, state } = request({ resources });
@@ -1180,10 +1196,7 @@ describe("deploy monitor settlement", () => {
           }),
         settleDeployStatuses: (list, conclusion) => {
           settled.push(conclusion);
-          list.forEach((resource) => {
-            resource.deployStatus = "failed";
-            resource.deployMessage = "Deployment timed out";
-          });
+          settleDeployStatuses(list, conclusion);
         },
         outcome: {
           settle: () => {
@@ -1195,11 +1208,18 @@ describe("deploy monitor settlement", () => {
 
     await service.run(input);
 
-    expect(settled).toEqual(["timed_out"]);
-    expect(resources.map((r) => r.deployStatus)).toEqual(["failed", "failed"]);
+    expect(settled).toEqual(["monitor_timed_out"]);
+    expect(resources.map((r) => r.deployStatus)).toEqual([
+      "failed",
+      "failed",
+      "failed",
+      "success"
+    ]);
     expect(resources.map((r) => r.deployMessage)).toEqual([
-      "Deployment timed out",
-      "Deployment timed out"
+      DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
+      DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
+      "queue provisioning failed",
+      "provisioned"
     ]);
     // The run may still be going, so a repair redeploy must stay refused.
     expect(state.deployErrorKind).toBe("run-unconfirmed");

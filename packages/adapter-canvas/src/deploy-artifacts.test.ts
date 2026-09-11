@@ -9,12 +9,14 @@ import {
   createDeployStatusReader,
   DEPLOY_CANCELLED_MESSAGE,
   DEPLOY_FAILED_MESSAGE,
+  DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
   DEPLOY_STATUS_ARTIFACT_PREFIX,
   DEPLOY_STATUS_FILES,
   DEPLOY_TIMED_OUT_MESSAGE,
   deployStatusArtifactPrefix,
   isLiveSlotArtifactName,
   MAX_ARTIFACT_CANDIDATES,
+  MAX_DEPLOY_MESSAGE_LENGTH,
   normalizeProvisioningState,
   parseDeployGraphArtifact,
   parseDeployProgressArtifact,
@@ -807,7 +809,7 @@ describe("settleDeployStatuses messages (Exception 5.1)", () => {
     ]);
   });
 
-  it.each(["cancelled", "timed_out", "failure"] as const)(
+  it.each(["cancelled", "timed_out", "monitor_timed_out", "failure"] as const)(
     "replaces in-flight progress text on a node the %s run failed",
     (conclusion) => {
       // The producer's last snapshot describes work in flight. Once the run's
@@ -886,13 +888,61 @@ describe("unfinishedDeployMessage", () => {
   it.each([
     ["cancelled", undefined, DEPLOY_CANCELLED_MESSAGE],
     ["timed_out", undefined, DEPLOY_TIMED_OUT_MESSAGE],
+    ["monitor_timed_out", undefined, DEPLOY_MONITOR_TIMED_OUT_MESSAGE],
+    ["monitor_timed_out", "ignored detail", DEPLOY_MONITOR_TIMED_OUT_MESSAGE],
+    ["timed_out", "ignored detail", DEPLOY_TIMED_OUT_MESSAGE],
     ["cancelled", "ignored detail", DEPLOY_CANCELLED_MESSAGE],
     ["failure", "rad error", "rad error"],
     ["failure", undefined, DEPLOY_FAILED_MESSAGE],
+    ["failure", "", DEPLOY_FAILED_MESSAGE],
+    ["failure", " \t\r\n ", DEPLOY_FAILED_MESSAGE],
+    ["failure", " \t\r\n Radius error \t\r\n ", "Radius error"],
+    ["unknown", "rad error", "rad error"],
     [undefined, undefined, DEPLOY_FAILED_MESSAGE],
     [null, undefined, DEPLOY_FAILED_MESSAGE]
   ] as const)("maps %s / %s", (conclusion, radiusError, expected) => {
     expect(unfinishedDeployMessage(conclusion, radiusError)).toBe(expected);
+  });
+
+  it.each([
+    MAX_DEPLOY_MESSAGE_LENGTH - 1,
+    MAX_DEPLOY_MESSAGE_LENGTH,
+    MAX_DEPLOY_MESSAGE_LENGTH + 1
+  ])("bounds a %i-character run-level error after trimming", (length) => {
+    const detail = "x".repeat(length);
+    const message = unfinishedDeployMessage("failure", ` \n${detail}\t `);
+    expect(message).toBe(
+      length > MAX_DEPLOY_MESSAGE_LENGTH ?
+        "x".repeat(MAX_DEPLOY_MESSAGE_LENGTH - 3) + "..."
+      : detail
+    );
+    expect(message.length).toBe(Math.min(length, MAX_DEPLOY_MESSAGE_LENGTH));
+  });
+
+  it("bounds multiline run-level copies without shortening producer failures", () => {
+    const radiusError = "Error: recipe failed\n".repeat(200);
+    const producerError = "Resource-specific diagnostic\n".repeat(40);
+    const resources: SettleableResource[] = [
+      {},
+      { deployStatus: "pending" },
+      { deployStatus: "in_progress", deployMessage: "creating" },
+      { deployStatus: "failed", deployMessage: " \t\n " },
+      { deployStatus: "failed", deployMessage: producerError }
+    ];
+
+    settleDeployStatuses(resources, "failure", radiusError);
+
+    const expected =
+      radiusError.slice(0, MAX_DEPLOY_MESSAGE_LENGTH - 3) + "...";
+    expect(resources.map((resource) => resource.deployMessage)).toEqual([
+      expected,
+      expected,
+      expected,
+      expected,
+      producerError
+    ]);
+    expect(expected).toHaveLength(MAX_DEPLOY_MESSAGE_LENGTH);
+    expect(expected).toContain("\n");
   });
 });
 

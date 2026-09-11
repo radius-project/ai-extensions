@@ -643,16 +643,18 @@ export function applyDeployStatusToResources(
  */
 export const DEPLOY_CANCELLED_MESSAGE = "Deployment cancelled";
 export const DEPLOY_TIMED_OUT_MESSAGE = "Deployment timed out";
+export const DEPLOY_MONITOR_TIMED_OUT_MESSAGE =
+  "Deployment monitoring timed out; the workflow may still be running.";
 export const DEPLOY_FAILED_MESSAGE = "Deployment failed";
+export const MAX_DEPLOY_MESSAGE_LENGTH = 500;
 
 /**
  * unfinishedDeployMessage - the message for a node the run's conclusion failed.
  *
- * Cancellation and timeout are reported verbatim because they are what happened
- * to the run, not to the resource. Any other non-success conclusion prefers the
- * exact Radius error the caller extracted from the run, and falls back to a
- * plain statement only when there is none — the graph never invents detail it
- * does not have.
+ * Cancellation and workflow timeout describe the run; `monitor_timed_out` only
+ * means monitoring stopped before its outcome was confirmed. Other non-success
+ * conclusions prefer a bounded copy of the extracted Radius error. The caller
+ * retains the full diagnostics; only text copied onto graph nodes is shortened.
  */
 export function unfinishedDeployMessage(
   conclusion?: string | null,
@@ -660,7 +662,11 @@ export function unfinishedDeployMessage(
 ): string {
   if (conclusion === "cancelled") return DEPLOY_CANCELLED_MESSAGE;
   if (conclusion === "timed_out") return DEPLOY_TIMED_OUT_MESSAGE;
+  if (conclusion === "monitor_timed_out")
+    return DEPLOY_MONITOR_TIMED_OUT_MESSAGE;
   const detail = typeof radiusError === "string" ? radiusError.trim() : "";
+  if (detail.length > MAX_DEPLOY_MESSAGE_LENGTH)
+    return detail.slice(0, MAX_DEPLOY_MESSAGE_LENGTH - 3) + "...";
   return detail || DEPLOY_FAILED_MESSAGE;
 }
 
@@ -670,7 +676,8 @@ export interface SettleableResource {
 }
 
 /**
- * settleDeployStatuses - apply the run's terminal conclusion to the graph.
+ * settleDeployStatuses - apply a workflow conclusion or `monitor_timed_out`
+ * to the graph without claiming an unconfirmed workflow has stopped.
  *
  * On success every node is forced green: the run concluded successfully, so
  * every resource provisioned, whatever the last snapshot happened to say. This

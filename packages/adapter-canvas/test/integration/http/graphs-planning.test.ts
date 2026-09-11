@@ -23,6 +23,7 @@ import {
   buildDeployMessageMap,
   buildDeployStatusMap,
   createDeployStatusReader,
+  DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
   DEPLOY_STATUS_FILES,
   settleDeployStatuses
 } from "../../../src/deploy-artifacts.js";
@@ -172,7 +173,18 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       undefined,
       "Error: recipe quota exceeded"
     ],
-    ["timed_out", "", "run-unconfirmed", "Deployment timed out"]
+    [
+      "monitor_timed_out",
+      "",
+      "run-unconfirmed",
+      DEPLOY_MONITOR_TIMED_OUT_MESSAGE
+    ],
+    [
+      "failure",
+      "Quota exceeded.\n".repeat(300),
+      undefined,
+      "Quota exceeded.\n".repeat(300).slice(0, 497) + "..."
+    ]
   ] as const)(
     "retains the settled %s message through HTTP with error kind %s",
     async (conclusion, detail, errorKind, expected) => {
@@ -188,7 +200,12 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
           deployStatus: "in_progress",
           deployMessage: "creating"
         },
-        { id: "api", name: "api", deployStatus: "success" },
+        {
+          id: "api",
+          name: "api",
+          deployStatus: "success",
+          deployMessage: "creating"
+        },
         {
           id: "cache",
           name: "cache",
@@ -238,7 +255,7 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       { id: "db", name: "db", deployStatus: "in_progress" },
       { id: "api", name: "api", deployStatus: "success" }
     ];
-    settleDeployStatuses(harness.state.deployingResources, "timed_out");
+    settleDeployStatuses(harness.state.deployingResources, "monitor_timed_out");
     harness.modeledResources.push(
       { id: "db", name: "db" },
       { id: "api", name: "api" }
@@ -273,11 +290,73 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
         resource.deployMessage
       ])
     ).toEqual([
-      ["failed", "Deployment timed out"],
+      ["failed", DEPLOY_MONITOR_TIMED_OUT_MESSAGE],
       ["success", undefined]
     ]);
     expect(harness.state.deployErrorKind).toBe("run-unconfirmed");
   });
+
+  it.each([
+    [undefined, "Monitoring stopped"],
+    [6, "Monitoring stopped"],
+    [7, "Final Radius error"]
+  ] as const)(
+    "uses artifact workflow identity %s when a terminal payload omits runId",
+    async (artifactRunId, expectedMessage) => {
+      const harness = start();
+      Object.assign(harness.state, {
+        contextRepo: "octo/app",
+        deployRunId: 7,
+        deployStatus: "failed",
+        deployErrorKind: "run-unconfirmed",
+        deployingResources: [
+          {
+            id: "db",
+            name: "db",
+            deployStatus: "failed",
+            deployMessage: "Monitoring stopped"
+          }
+        ]
+      });
+      harness.modeledResources.push({ id: "db", name: "db" });
+      harness.reader.graph = {
+        graph: null,
+        status: "ok",
+        artifact: {
+          id: 1,
+          name: "radius-deploy-status",
+          workflow_run:
+            artifactRunId == null ? undefined : { id: artifactRunId }
+        }
+      };
+      harness.reader.progress = {
+        schemaVersion: 1,
+        application: "test-app",
+        environment: "default",
+        sequence: 2,
+        state: "failed",
+        resources: [
+          {
+            id: "db",
+            name: "db",
+            type: "Radius.Data/sqlDatabases",
+            status: "failed",
+            message: "Final Radius error"
+          }
+        ]
+      };
+      const entry = await container!.getOrCreate("panel-a");
+
+      const response = await fetch(`${entry.baseUrl}/api/deployed-graph`);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        mode: "terminal",
+        resources: [{ deployStatus: "failed", deployMessage: expectedMessage }]
+      });
+      expect(harness.state.deployErrorKind).toBe("run-unconfirmed");
+    }
+  );
 
   it.each(["failed", "succeeded"] as const)(
     "replaces the timeout presentation when the same run publishes a %s artifact",
@@ -291,7 +370,10 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
         { id: "db", name: "db", deployStatus: "in_progress" },
         { id: "api", name: "api", deployStatus: "success" }
       ];
-      settleDeployStatuses(harness.state.deployingResources, "timed_out");
+      settleDeployStatuses(
+        harness.state.deployingResources,
+        "monitor_timed_out"
+      );
       harness.modeledResources.push(
         { id: "db", name: "db" },
         { id: "api", name: "api" }
@@ -301,7 +383,10 @@ describe("graphs-planning reads real-loopback HIT (RF-05)", () => {
       expect(before.status).toBe(200);
       expect(await before.json()).toMatchObject({
         resources: [
-          { deployStatus: "failed", deployMessage: "Deployment timed out" },
+          {
+            deployStatus: "failed",
+            deployMessage: DEPLOY_MONITOR_TIMED_OUT_MESSAGE
+          },
           { deployStatus: "success" }
         ]
       });

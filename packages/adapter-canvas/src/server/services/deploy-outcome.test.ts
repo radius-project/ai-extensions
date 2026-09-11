@@ -7,6 +7,10 @@ import {
   type DeployGraphRead
 } from "./deploy-outcome.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import {
+  MAX_DEPLOY_MESSAGE_LENGTH,
+  settleDeployStatuses
+} from "../../deploy-artifacts.js";
 
 function dependencies(
   overrides: Partial<DeployOutcomeDependencies> = {}
@@ -614,6 +618,38 @@ describe("deploy outcome on failure", () => {
 });
 
 describe("deploy outcome settles red nodes with an explanation (Exception 5.1)", () => {
+  it("keeps full failure diagnostics while bounding copies on graph nodes", async () => {
+    const radiusError =
+      "Error: recipe failed\n" + "quota details\n".repeat(100);
+    const resources: CanvasGraphResource[] = [
+      { id: "r1", name: "db", deployStatus: "pending" }
+    ];
+    const { request, state, logs } = outcomeRequest({
+      conclusion: "failure",
+      resources
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        extractRadDeployError: () => radiusError,
+        settleDeployStatuses
+      })
+    );
+
+    await service.settle(request);
+
+    expect(resources[0].deployMessage).toBe(
+      radiusError.slice(0, MAX_DEPLOY_MESSAGE_LENGTH - 3) + "..."
+    );
+    expect(resources[0].deployMessage).toHaveLength(MAX_DEPLOY_MESSAGE_LENGTH);
+    expect(state.deployError).toContain(radiusError);
+    expect(logs.join("\n")).toContain(
+      radiusError
+        .split("\n")
+        .map((line) => "  " + line)
+        .join("\n")
+    );
+  });
+
   it("hands the extracted Radius error to the graph so every red node carries it", async () => {
     const settled: [string | undefined | null, string | undefined][] = [];
     const { request } = outcomeRequest({
