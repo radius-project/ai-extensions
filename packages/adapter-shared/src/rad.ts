@@ -1185,10 +1185,11 @@ export async function runRadAppGraph(
         ["app", "graph", absoluteBicep, ...MODELED_APP_GRAPH_FLAGS],
         {
           cwd,
-          // Clear GITHUB_ACTIONS so rad writes app-graph.json locally instead of
-          // committing to the radius-graph orphan branch. stdin is ignored so rad
-          // never blocks waiting for interactive input. Windows remains in the
-          // caller's Job Object; POSIX uses a process group for tree cleanup.
+          // Clear GITHUB_ACTIONS so rad treats this as a local run and writes
+          // app-graph.json into cwd instead of publishing the graph to its CI
+          // archive. stdin is ignored so rad never blocks waiting for
+          // interactive input. Windows remains in the caller's Job Object;
+          // POSIX uses a process group for tree cleanup.
           env: { ...process.env, ...managedBicepEnv(), GITHUB_ACTIONS: "" },
           ...radSpawnOptions(processPlatform)
         }
