@@ -25,7 +25,14 @@ Decide each credential input from the schema, never from the property's name. A 
 
 A property named `password` may be either kind, and a reference property may be named `password`, `passwordSecret`, or `secretName`. The name carries no information — read the schema. Assigning a raw credential to a reference property is a deployment failure rather than a style difference: the Recipe derives the Kubernetes Secret name for `secretKeyRef` from that value, and Kubernetes rejects a password as an RFC 1123 subdomain.
 
-`validate-bicep.mjs` enforces this from the same schema evidence. It reads the sensitivity `show-radius-type.mjs` staged for every resolved type and fails the compile when a `@secure()` parameter is assigned directly to a property the schema does not mark sensitive, naming the resource and property it rejected. The check reads the compiled template, so it sees a whole `@secure()` parameter assigned to a property of a resource's properties envelope; a credential that reaches the property through a variable, a string interpolation, or a nested object is not reported and remains yours to get right. It checks only where the credential is assigned, never what the authored Secret puts inside: the data-key contract below is not verified by any check, so a Secret with the wrong key casing compiles and passes the checker and still fails at container start.
+These two kinds classify the envelope's own credential properties. Sensitivity is not confined to that level: see [Sensitivity marks a schema node, not a top-level property](#sensitivity-marks-a-schema-node-not-a-top-level-property) for the nested and object cases, and [What counts as a secure value](#what-counts-as-a-secure-value) for what may be assigned once a node is marked.
+
+Two checks enforce this from different evidence, and neither substitutes for the other:
+
+- **Bicep** rejects a value it cannot prove secure on a node the compiled type marks sensitive, at any depth and for generated custom types too, as `use-secure-value-for-secure-inputs`. This is the direction that catches a hardcoded credential.
+- **`validate-bicep.mjs`** covers the opposite direction, which Bicep cannot see: it reads the sensitivity `show-radius-type.mjs` staged for every resolved type and fails the compile when a `@secure()` parameter is assigned directly to a property the schema does *not* mark sensitive, naming the resource and property it rejected. It reads the compiled template, so it sees a whole `@secure()` parameter assigned to a property of a resource's properties envelope; a credential that reaches such a property through a variable, a string interpolation, or a nested object is not reported and remains yours to get right.
+
+Neither check inspects what an authored Secret puts inside: the data-key contract below is not verified anywhere, so a Secret with the wrong key casing compiles, passes both checks, and still fails at container start.
 
 When the workload consumes a developer-supplied credential through connection projection, author or reuse a `Radius.Security/secrets` resource and connect the workload to its resource ID. A sensitive backing-resource input is not readable back from that resource, so do not connect to the backing resource and expect Radius to project the supplied value. Developer-owned inputs remain inputs and must not be returned through Recipe `result.secrets`, as reflected by the PostgreSQL and MySQL ownership corrections in [resource-types-contrib#298](https://github.com/radius-project/resource-types-contrib/pull/298) and [resource-types-contrib#315](https://github.com/radius-project/resource-types-contrib/pull/315):
 
@@ -137,6 +144,57 @@ RABBITMQ_PASSWORD: {
 ```
 
 Authoring that data key as `PASSWORD` fails even though the Bicep compiles and the resource ID is correct. The RabbitMQ Kubernetes Recipe reads a hardcoded lowercase `password` key from the resolved Secret, so the broker Pod resolves the right Secret, finds no `password` entry, and never starts — a `CreateContainerConfigError` rather than an admission failure. A key-casing mismatch is not cosmetic, and it survives every check that only validates the resource ID.
+
+### Sensitivity marks a schema node, not a top-level property
+
+`x-radius-sensitive: true` belongs to the schema node it is written on, which is not always a property of the properties envelope. Read the resolved schema recursively and treat every **writable** node it marks `"sensitive": true` as taking a secure value, whatever its depth:
+
+- a top-level string, as in `Radius.Data/mySqlDatabases.password`;
+- a leaf inside an open map, as in `Radius.Security/secrets.data.<key>.value` — the enclosing `data` is *not* marked, so a rule that reads only the envelope's own properties misses the value that actually holds the credential;
+- a leaf inside a nested object, such as a custom type's `tls.clientKey`; and
+- a whole object, which compiles to a `secureObject` and takes one `@secure() param object` rather than an object literal whose fields are individually secure.
+
+Sensitivity says how a value is handled, not who supplies it, so it is not on its own an instruction to assign anything. A node the schema also marks `"readOnly": true` is a sensitive **output**: the Recipe populates it, it is never set in `app.bicep`, and it takes no `@secure()` parameter. Read it back through the Recipe's `result.secrets` contract described in [Recipe-generated secret results](#recipe-generated-secret-results). Decide from the two flags together — `sensitive` and `readOnly` — because a schema can and does mark both on one node.
+
+The same rule governs the custom types this skill authors. `x-radius-sensitive` in `custom-types.yaml` is compiled into `custom-types.tgz`, so a generated `Radius.Resources/*` type carries the flag exactly as a predefined type does — including on a `readOnly: true` output, which stays unassigned for the same reason.
+
+### What counts as a secure value
+
+Only a `@secure()` parameter referenced **by name** — directly, or through a `var` that aliases it. Everything else is rejected, whatever it holds:
+
+| Assignment                                                         | Secure                                                                    |
+|--------------------------------------------------------------------|---------------------------------------------------------------------------|
+| `password: dbPassword` where `dbPassword` is a `@secure() param`   | yes                                                                       |
+| `password: alias` where `var alias = dbPassword`                   | yes                                                                       |
+| `password: 'hunter2'`                                              | no — a literal                                                            |
+| `password: plainPassword` where `plainPassword` is a plain `param` | no — not marked `@secure()`                                               |
+| `password: '${dbPassword}'`                                        | no — interpolation discards secureness, even when every operand is secure |
+
+Because interpolation discards secureness, never assemble a credential-bearing string such as a connection URL in Bicep. Bind the credential on its own and compose the final value only through a path the pinned application source proves it supports, as [Runtime composition](#runtime-composition) describes. That path is not guaranteed to exist: the application is not yours to change, so when it accepts only one credential-bearing value and no verified entrypoint or helper can compose it safely, report the contract gap rather than falling back to interpolation.
+
+Give a `@secure()` parameter no default value: a default would commit the credential to the application definition, which is the outcome the parameter exists to prevent.
+
+A nested sensitive leaf is assigned exactly like a top-level one:
+
+```bicep
+@secure()
+param dbPassword string
+
+resource credentials 'Radius.Security/secrets@2025-08-01-preview' = {
+  name: 'db-credentials'
+  properties: {
+    environment: environment
+    application: app.id
+    data: {
+      password: {
+        value: dbPassword     // data.<key>.value is the sensitive node
+      }
+    }
+  }
+}
+```
+
+The compiler enforces this for predefined and generated custom types alike: Bicep reports `use-secure-value-for-secure-inputs` for any value it cannot prove secure. Radius emits that finding with no severity, so `validate-bicep.mjs` prints it as a `warning` and still **fails** the build — it is not advisory, and it spends a repair attempt. Two related rules apply to the parameter itself. `secure-parameter-default` rejects a hardcoded default on a secure parameter. `secure-secrets-in-params` is a **name** heuristic — it reports that a parameter *may* be a credential "according to its name" — so it has two different repairs: add `@secure()` when the parameter really carries the credential, but rename it when it carries a `Radius.Security/secrets` resource ID instead. Adding `@secure()` to a reference parameter trades this warning for a `secure-parameter-target` failure, because a reference property is not sensitive and must not receive a secure parameter.
 
 ## Recipe-generated secret results
 
