@@ -71,7 +71,9 @@ function harness(options: {
   sleep?: (milliseconds: number) => Promise<void>;
   tempWrite?: (path: string, contents: string) => void;
   tempRemove?: (path: string) => void;
+  appShows?: AzureAutoSetupCommandResult[];
   credentialShow?: AzureAutoSetupCommandResult;
+  credentialShows?: AzureAutoSetupCommandResult[];
   recordProvenance?: AzureAutoSetupCredentialInput["dependencies"]["operations"]["recordFederatedCredentialProvenance"];
   onRoleAssignment?: AzureAutoSetupCredentialInput["dependencies"]["operations"]["recordCreatedRoleAssignment"];
 }) {
@@ -151,13 +153,14 @@ function harness(options: {
       calls.push(`az:${args.join(" ")}`);
       const line = args.join(" ");
       if (line.startsWith("ad app show ")) {
-        return result({ stdout: APP_OBJECT_ID });
+        return options.appShows?.shift() ?? result({ stdout: APP_OBJECT_ID });
       }
       if (
         line.includes("federated-credential show") &&
         (options.credentialShow || !line.includes("description"))
       ) {
         return (
+          options.credentialShows?.shift() ??
           options.credentialShow ??
           result({
             stdout: JSON.stringify({
@@ -629,6 +632,60 @@ describe("Azure auto-setup credentials and roles service (SU-08)", () => {
     expect(test.failures[0]).toMatchObject({
       code: "federated-credential-subject-mismatch"
     });
+  });
+
+  it("retries the app object-id read while Microsoft Entra is propagating it", async () => {
+    const test = harness({
+      appShows: [
+        result({
+          code: 1,
+          stderr: "Request_ResourceNotFound: resource does not exist"
+        }),
+        result({ stdout: APP_OBJECT_ID })
+      ],
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: JSON.stringify([existingCredential()]) });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+    expect(
+      test.calls.filter((call) => call.startsWith("az:ad app show "))
+    ).toHaveLength(2);
+    expect(test.calls).toContain("sleep:2000");
+  });
+
+  it("retries verification of a newly created federated credential", async () => {
+    const test = harness({
+      credentialShows: [
+        result({ code: 1, stderr: "temporarily unavailable" }),
+        result({ stdout: JSON.stringify(LIVE_CREDENTIAL) })
+      ],
+      runAz: async (args) => {
+        const line = args.join(" ");
+        if (line.includes("federated-credential list")) {
+          return result({ stdout: "[]" });
+        }
+        if (line.includes("federated-credential create")) {
+          return result({ stdout: JSON.stringify(LIVE_CREDENTIAL) });
+        }
+        if (line.startsWith("role assignment create ")) return result();
+        throw new Error(`unexpected az call: ${line}`);
+      }
+    });
+
+    expect(await configureAzureAutoSetupCredentials(test.input)).toBe(true);
+    expect(
+      test.calls.filter((call) =>
+        call.startsWith("az:ad app federated-credential show ")
+      )
+    ).toHaveLength(2);
+    expect(test.calls).toContain("sleep:2000");
   });
 
   it("adopts a timed-out federated credential only when operation provenance matches", async () => {

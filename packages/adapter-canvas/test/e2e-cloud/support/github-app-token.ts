@@ -135,6 +135,7 @@ export async function mintGitHubAppToken(
           deployments: "read",
           environments: "write",
           pull_requests: "write",
+          secrets: "write",
           variables: "write",
           workflows: "write"
         }
