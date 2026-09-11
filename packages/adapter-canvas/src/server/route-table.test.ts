@@ -232,6 +232,7 @@ const productionHandlers = {
   ...createGraphsPlanningRoutes({
     readInstanceEntry: () => undefined,
     createDeployStatusReader: () => ({
+      read: () => Promise.resolve({ status: "missing", progress: null }),
       graph: () => Promise.resolve({ graph: null, status: "missing" }),
       progress: () => Promise.resolve(null)
     }),
@@ -462,12 +463,15 @@ const productionHandlers = {
     planCredentialVerification: () =>
       Promise.resolve({
         shouldDispatch: false,
+        trigger: "none",
         ref: "main",
         defaultBranch: "main",
         pullRequestUrl: "",
         skipReason: ""
       }),
     fetchFileFromRepo: () => Promise.resolve(null),
+    fetchFileFromRepoResult: () =>
+      Promise.resolve({ content: null, error: "HTTP 404", status: 404 }),
     buildVerifyWorkflowDispatchArgs: () => [],
     verifyWorkflowFile: "radius-verify-credentials.yml",
     stageVerify: "verify",
@@ -509,6 +513,7 @@ describe("server route ownership boundary", () => {
     ).toEqual([
       "POST /api/run-remediation",
       "POST /api/github-account",
+      "POST /api/bypass-verification",
       "POST /api/operations",
       "POST /api/abandon-deployment",
       "POST /api/operations/:operationId/resume/:code",

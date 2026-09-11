@@ -26,6 +26,8 @@ import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environme
 import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
 import { GRAPH_RETRY_MS } from "../../src/browser/pages/graph-page.js";
 import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
+import { DEPLOYED_GRAPH_POLL_MS } from "../../src/browser/pages/deployed-graph-page.js";
+import { DELETE_DIALOG_RESOURCE_LIMIT } from "../../src/browser/delete-dialog.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const SOURCE_FILE = "src/web/app.ts";
@@ -57,6 +59,41 @@ async function filesContainingText(
     if (content.includes(Buffer.from(text))) matches.push(filePath);
   }
   return matches;
+}
+
+async function waitForStableComputedTransform(
+  page: Page,
+  viewport: Locator
+): Promise<string> {
+  let previous = "";
+  let current = "";
+  let stableChecks = 0;
+  await expect
+    .poll(async () => {
+      await page.clock.fastForward(50);
+      current = await viewport.evaluate((element) => {
+        const getComputedStyleFromGlobal = Reflect.get(
+          globalThis,
+          "getComputedStyle"
+        );
+        if (typeof getComputedStyleFromGlobal !== "function") return "none";
+        const computedStyle = Reflect.apply(
+          getComputedStyleFromGlobal,
+          globalThis,
+          [element]
+        );
+        if (computedStyle === null || typeof computedStyle !== "object") {
+          return "none";
+        }
+        return String(Reflect.get(computedStyle, "transform"));
+      });
+      if (current === previous && current !== "none") stableChecks++;
+      else stableChecks = 0;
+      previous = current;
+      return stableChecks;
+    })
+    .toBeGreaterThanOrEqual(2);
+  return current;
 }
 
 // The environment-deletion route refuses (409 app-deployed) while an
@@ -1351,6 +1388,115 @@ test.describe("Radius Canvas in Chromium", () => {
       "Repository <strong>administrator access</strong> is required."
     );
     await expect(table.locator("strong")).toHaveCount(0);
+    await expectNoWcagViolations(page);
+  });
+
+  test("shows escaped action-required server guidance before the pull request fallback in Chromium @safety", async ({
+    page,
+    canvas
+  }) => {
+    const environment = "action-required-env";
+    const selected = {
+      id: "aks-action-required",
+      name: "AKS Action Required",
+      resourceGroup: "rg-action-required"
+    };
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      ...azureDiscoveryCommands({
+        subscriptionId: PROFILE_SUBSCRIPTION_ID,
+        clusters: [selected],
+        selected,
+        namespaces: ["default"]
+      })
+    );
+    await canvas.setScenario(scenario);
+
+    let setupStarted = false;
+    let polls = 0;
+    const operation = (terminalState: "action_required" | null) => ({
+      operation: {
+        operationId: "op_action_required_message",
+        environment,
+        provider: "azure",
+        state: terminalState === null ? "running" : "finished",
+        terminalState,
+        summary: `Creating ${environment}...`,
+        currentStage: "verify",
+        stages: [{ state: "running", label: "Verify credentials" }],
+        steps: [{ state: "running", label: "Waiting for verification" }],
+        failure: null,
+        cleanup: null,
+        verification: null,
+        inputRequired: null,
+        startedAt: new Date(0).toISOString(),
+        endedAt: terminalState === null ? null : new Date(1000).toISOString(),
+        terminal:
+          terminalState === null ? null : (
+            {
+              reason: "pr-merge-required",
+              pullRequestUrl: "https://github.com/fixture/radius-app/pull/7",
+              userMessage:
+                "Merge <strong>this setup pull request</strong> before retrying verification."
+            }
+          )
+      }
+    });
+    await page.route("**/api/operations**", async (route) => {
+      const request = route.request();
+      if (request.method() === "POST") {
+        setupStarted = true;
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ operationId: "op_action_required_message" })
+        });
+        return;
+      }
+      if (request.method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      if (!setupStarted) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ operation: null })
+        });
+        return;
+      }
+      polls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(operation(polls === 1 ? null : "action_required"))
+      });
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+    await openEnvironmentWizard(page);
+    await page.getByLabel("Environment name").fill(environment);
+    const resourceGroup = page.getByLabel("Resource Group", { exact: true });
+    await expect(
+      resourceGroup.locator('option[value="__custom__"]')
+    ).toHaveCount(0);
+    await resourceGroup.selectOption(selected.resourceGroup);
+    const createEnvironment = page.locator("#deploy-btn:not([disabled])");
+    await expect(createEnvironment).toHaveText("Create Environment");
+    await createEnvironment.click();
+
+    const banner = page.locator("#env-action-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText(
+      "Merge <strong>this setup pull request</strong> before retrying verification."
+    );
+    await expect(banner.locator("strong")).toHaveCount(2);
+    await expect(
+      banner.getByRole("link", { name: "Review the pull request →" })
+    ).toHaveAttribute("href", "https://github.com/fixture/radius-app/pull/7");
+    await expect(banner).not.toContainText(
+      "Radius could not push the deploy workflows to the default branch"
+    );
     await expectNoWcagViolations(page);
   });
 
@@ -2908,6 +3054,164 @@ test.describe("Radius Canvas in Chromium", () => {
       .toMatchObject({ environment: "fixture-environment" });
   });
 
+  test("reads the full deletion inventory without hidden entries before confirming in Chromium @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.setViewportSize({ width: 480, height: 900 });
+    await routeDeployedPage(page, () => "success");
+    const hostileName = '<img src=x onerror="alert(1)">';
+    const resources = Array.from(
+      { length: DELETE_DIALOG_RESOURCE_LIMIT + 3 },
+      (_, index) => ({
+        name: index === 0 ? hostileName : `reported-resource-${index}`,
+        type: "Applications.Core/containers"
+      })
+    );
+    await page.route("**/api/deployed-graph**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [{ id: "modeled", name: "never-deployed" }],
+          mode: "terminal",
+          deletionInventory: {
+            application: "radius-app",
+            environment: "fixture-environment",
+            resources
+          }
+        })
+      });
+    });
+    const deletes: unknown[] = [];
+    await page.route("**/api/delete-deployment", async (route) => {
+      deletes.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true })
+      });
+    });
+    await gotoCanvas(page, canvas, "deployed");
+    const deleteButton = page.getByRole("button", {
+      name: "Delete Deployment"
+    });
+    await deleteButton.focus();
+    await page.keyboard.press("Enter");
+    const intent = page.getByRole("button", {
+      name: "I want to delete this deployment"
+    });
+    await expect(intent).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    const dialog = page.locator("#deploy-delete-modal");
+    const list = dialog.getByRole("list", { name: "Resources to be deleted" });
+    await expect(list.locator(".rad-ddlg__resource")).toHaveCount(
+      DELETE_DIALOG_RESOURCE_LIMIT
+    );
+    await expect(list.locator("strong").first()).toHaveText(hostileName);
+    await expect(list.locator("img")).toHaveCount(0);
+    await expect(list).not.toContainText("never-deployed");
+    await expect(list).toContainText("+3 more");
+    await expect(list).toContainText("Applications.Core/containers");
+    const next = dialog.getByRole("button", {
+      name: /have read and understand/i
+    });
+    await expect(next).toBeFocused();
+    await expect(next).toBeInViewport();
+    await expectNoWcagViolations(page);
+
+    await page.keyboard.press("Shift+Tab");
+    await expect(list).toBeFocused();
+    // The list stays focusable because a short window can still force it to
+    // scroll, but at this viewport nothing may be hidden: overlay scrollbars
+    // are invisible until interaction, so clipped entries would silently
+    // withhold part of what the user is agreeing to destroy.
+    const hidden = await list.evaluate(
+      (element) =>
+        Number(Reflect.get(element, "scrollHeight")) >
+        Number(Reflect.get(element, "clientHeight"))
+    );
+    expect(hidden).toBe(false);
+    await expect(list.locator(".rad-ddlg__resource-more")).toBeInViewport();
+    await page.keyboard.press("Tab");
+    await expect(next).toBeFocused();
+    await page.keyboard.press("Enter");
+    const input = dialog.locator("#del-confirm-input");
+    const confirm = dialog.locator("#del-confirm-btn");
+    await expect(input).toBeFocused();
+    await expect(confirm).toBeDisabled();
+    await expectNoWcagViolations(page);
+    await page.keyboard.type("radius-app/fixture-environmen");
+    await page.keyboard.press("Enter");
+    expect(deletes).toEqual([]);
+    await expect(confirm).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(deleteButton).toBeFocused();
+
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+    await expect(next).toBeFocused();
+    await page.keyboard.press("Enter");
+    await input.fill("radius-app/fixture-environment");
+    await page.keyboard.press("Enter");
+    await expect
+      .poll(() => deletes)
+      .toEqual([
+        {
+          repo: REPOSITORY,
+          application: "radius-app",
+          environment: "fixture-environment",
+          force: false
+        }
+      ]);
+  });
+
+  for (const scenario of ["mismatched", "unavailable"]) {
+    test(`keeps the deletion inventory fallback for ${scenario} data in Chromium @safety`, async ({
+      page,
+      canvas
+    }) => {
+      await routeDeployedPage(page, () => "success");
+      await page.route("**/api/deployed-graph**", async (route) => {
+        if (scenario === "unavailable") {
+          await route.abort("failed");
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            resources: [{ id: "model", name: "never-deployed" }],
+            mode: "terminal",
+            deletionInventory: {
+              application: "another-app",
+              environment: "fixture-environment",
+              resources: [{ name: "another-app-resource" }]
+            }
+          })
+        });
+      });
+      await gotoCanvas(page, canvas, "deployed");
+      await page.getByRole("button", { name: "Delete Deployment" }).click();
+      await page
+        .getByRole("button", {
+          name: "I want to delete this deployment"
+        })
+        .click();
+      const dialog = page.locator("#deploy-delete-modal");
+      await expect(dialog.getByRole("list")).toHaveCount(0);
+      await expect(dialog).toContainText(
+        "This will permanently delete the deployment of radius-app from environment fixture-environment, including all associated resources."
+      );
+      await expectNoWcagViolations(page);
+      await page.keyboard.press("Enter");
+      await expect(dialog.locator("#del-confirm-input")).toBeFocused();
+      await expect(dialog.locator("#del-confirm-btn")).toBeDisabled();
+    });
+  }
+
   test("offers stop tracking only after teardown fails in Chromium @safety", async ({
     page,
     canvas
@@ -2940,6 +3244,67 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(
       page.getByRole("button", { name: "Stop tracking deployment" })
     ).toBeVisible();
+  });
+
+  test("preserves graph zoom while a deployment refreshes in Chromium", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let graphRequests = 0;
+    await routeDeployedPage(page, () => "pending");
+    await page.unroute("**/api/deployed-graph**");
+    await page.route("**/api/deployed-graph**", async (route) => {
+      graphRequests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [
+            {
+              id: "app/web",
+              name: "web",
+              type: "Radius.Compute/containers",
+              deployStatus: graphRequests === 1 ? "pending" : "success"
+            },
+            {
+              id: "app/db",
+              name: "db",
+              type: "Radius.Data/sqlDatabases",
+              deployStatus: graphRequests === 1 ? "pending" : "success"
+            }
+          ],
+          mode: "live",
+          branch: WORKTREE_BRANCH,
+          application: "radius-app",
+          updatedAt: "2026-09-03T19:00:00Z"
+        })
+      });
+    });
+    await gotoCanvas(page, canvas, "deployed");
+    await expect(page.getByAltText("In progress")).toHaveCount(2);
+
+    const viewport = page.locator(".react-flow__viewport");
+    const zoomOut = page.locator(".react-flow__controls-zoomout");
+    const fittedTransform = await waitForStableComputedTransform(
+      page,
+      viewport
+    );
+    await zoomOut.click();
+    const zoomedTransform = await waitForStableComputedTransform(
+      page,
+      viewport
+    );
+    // The refresh assertion below is only meaningful if the zoom control
+    // actually moved the viewport first.
+    expect(zoomedTransform).not.toBe(fittedTransform);
+
+    await page.clock.fastForward(DEPLOYED_GRAPH_POLL_MS);
+    await expect.poll(() => graphRequests).toBe(2);
+    await expect(page.getByAltText("Deployed")).toHaveCount(2);
+    expect(await waitForStableComputedTransform(page, viewport)).toBe(
+      zoomedTransform
+    );
   });
 
   test("confirms stop-tracking recovery by keyboard and sends the failed teardown identity @safety", async ({
@@ -3181,6 +3546,147 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#radius-topnav")).toBeVisible();
     await expect(chip).toBeVisible();
     await expect(page.locator("#deploy-progress-modal")).toBeAttached();
+  });
+
+  test("shows the cloud-auth-drift panel and routes Re-verify to Environments @safety", async ({
+    page,
+    canvas
+  }) => {
+    // Exception 5.2: an environment that verified earlier can later fail to sign
+    // in to the cloud before any resource is touched. The compiled deploying
+    // page must render the dedicated "Cloud credentials need re-verifying" panel
+    // (not the generic failure) and send the Re-verify button to Environments.
+    // Unit tests cover the render in jsdom; this guards the built browser script
+    // and the resume-from-redirect wiring end to end in Chromium.
+    await page.route("**/api/deploy-status**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "failed",
+          active: false,
+          error:
+            "ERROR: AADSTS700213: No matching federated identity record found.",
+          deployRunUrl: `https://github.com/${REPOSITORY}/actions/runs/77`,
+          errorKind: "cloud-auth-drift",
+          errorBranch: "",
+          errorPaths: "",
+          repairing: false,
+          handoff: { pending: false, state: "idle" },
+          attempt: { targetRepo: "", environment: "" }
+        })
+      });
+    });
+
+    await page.goto(
+      `${canvas.baseUrl}/?page=deploying&application=todolist&environment=fixture-environment`
+    );
+    await page.waitForLoadState("domcontentloaded");
+
+    await expect(page.locator("#deploy-progress-title")).toHaveText(
+      "Cloud credentials need re-verifying"
+    );
+    await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+      "could not authenticate to the cloud"
+    );
+    const reverify = page.locator("#deploy-reverify-credentials");
+    await expect(reverify).toBeVisible();
+    await expect(reverify).toHaveText("Re-verify credentials");
+    // The generic "Deployment ... failed" heading must not be what the user sees
+    // for a credential-drift failure, and no model-repair button is offered.
+    await expect(page.locator("#deploy-progress-title")).not.toContainText(
+      "failed"
+    );
+
+    await reverify.click();
+    await page.waitForURL(/\/\?page=environment$/);
+  });
+
+  test("offers the verify-bypass recovery and sends the mutation nonce when Create environment anyway is clicked @safety", async ({
+    page,
+    canvas
+  }) => {
+    // Exceptions 4.4/4.5: a verification that fails on a recoverable category
+    // (missing permissions / unreachable endpoint) offers a "Create environment
+    // anyway" bypass. This drives the real restart-recovery path — the tracker
+    // observes a live operation, the server then loses that record, and the
+    // verify-status endpoint reports a bypassable failure — and asserts the
+    // compiled button renders in #env-progress-verify-bypass and POSTs with the
+    // browser mutation nonce the real page was served. Unit tests cover the
+    // render in jsdom; only Chromium proves the built script's real fetch
+    // actually carries the nonce header.
+    const operation = {
+      operationId: "op-bypass-e2e",
+      kind: "create",
+      environment: "fixture-environment",
+      provider: "azure",
+      state: "verifying",
+      currentStage: "verify",
+      startedAt: new Date().toISOString(),
+      verification: { dispatchedAt: Date.now(), runId: "555" }
+    };
+    let opCalls = 0;
+    // The tracker must observe the operation at least once (so it commits to
+    // this environment) before the record disappears; only then does it fall
+    // back to the verify-status endpoint that surfaces the bypass. Serving the
+    // operation for the first two reads (resume + first poll) and nothing after
+    // reproduces that sequence deterministically.
+    await page.route(/\/api\/operations\?repo=/, async (route) => {
+      opCalls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(opCalls <= 2 ? { operation } : { operation: null })
+      });
+    });
+    await page.route("**/api/verify-status**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "failed",
+          terminal: false,
+          category: "permissions",
+          missingPermissions: ["Contributor"],
+          runId: "555",
+          runUrl: `https://github.com/${REPOSITORY}/actions/runs/555`
+        })
+      });
+    });
+    let bypassNonce: string | null = null;
+    let bypassBody: unknown = null;
+    await page.route("**/api/bypass-verification**", async (route) => {
+      const request = route.request();
+      bypassNonce = request.headers()["x-radius-mutation-nonce"] ?? null;
+      bypassBody = request.postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ success: true, category: "permissions" })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+
+    const bypassButton = page.locator("#env-progress-verify-bypass-button");
+    await expect(bypassButton).toBeVisible();
+    await expect(bypassButton).toHaveText("Create environment anyway");
+
+    await bypassButton.click();
+
+    await expect(page.locator("#env-success-banner")).toBeVisible();
+    await expect(page.locator("#env-success-banner-text")).toContainText(
+      "fixture-environment"
+    );
+    // The security contract: the built button's POST carries the nonce the real
+    // server injected into the page, not an empty string.
+    expect(bypassNonce).toBeTruthy();
+    expect(bypassBody).toMatchObject({
+      repo: REPOSITORY,
+      environment: "fixture-environment",
+      operationId: "op-bypass-e2e",
+      runId: "555"
+    });
   });
 
   test("does not re-announce an unchanged deploy while it keeps polling", async ({

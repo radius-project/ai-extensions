@@ -11,6 +11,12 @@ import {
   type FakeCommandStub,
   type FakeFixturePorts
 } from "./fake-cloud-commands.js";
+import { assertEnvironmentDeletionIdentityOutcome } from "./delete-environment-journey.js";
+import {
+  FIXTURE_BASELINE_SHA,
+  FIXTURE_REPO_DEFAULT_BRANCH,
+  FIXTURE_REPOSITORY
+} from "./fixture-repository.js";
 
 const SUBSCRIPTION = "11111111-2222-3333-4444-555555555555";
 const REPOSITORY = "fixture-owner/fixture-repo";
@@ -95,6 +101,23 @@ function clusterRoleAssignment(principalId = "sp-1"): RoleAssignmentRecord {
     "assignment-cluster",
     CLUSTER_SCOPE
   );
+}
+
+function locksRoleAssignment(principalId = "sp-1"): RoleAssignmentRecord {
+  return roleAssignment(
+    principalId,
+    "Locks Contributor",
+    "assignment-locks",
+    SCOPE
+  );
+}
+
+function requiredRoleAssignments(principalId = "sp-1"): RoleAssignmentRecord[] {
+  return [
+    roleAssignment(principalId),
+    locksRoleAssignment(principalId),
+    clusterRoleAssignment(principalId)
+  ];
 }
 
 /**
@@ -498,7 +521,7 @@ describe("createCloudFixture", () => {
               "api",
               "--method",
               "POST",
-              "repos/TODO-owner/TODO-repo/git/refs"
+              `repos/${FIXTURE_REPOSITORY}/git/refs`
             ],
             respond: {}
           },
@@ -510,9 +533,9 @@ describe("createCloudFixture", () => {
         ports: fake.ports
       });
 
-      expect(fixture.repository).toBe("TODO-owner/TODO-repo");
-      expect(fixture.defaultBranch).toBe("main");
-      expect(fixture.baselineSha).toBe("0".repeat(40));
+      expect(fixture.repository).toBe(FIXTURE_REPOSITORY);
+      expect(fixture.defaultBranch).toBe(FIXTURE_REPO_DEFAULT_BRANCH);
+      expect(fixture.baselineSha).toBe(FIXTURE_BASELINE_SHA);
     });
 
     it("rejects a blank subscription id before issuing any command", async () => {
@@ -1460,13 +1483,16 @@ describe("createCloudFixture", () => {
   });
 
   describe("assertRoleAssignmentExists", () => {
-    it("resolves when the principal holds assignments at both required scopes", async () => {
+    it("resolves when the principal holds every required assignment", async () => {
       const { fixture } = await createHarness([
         {
           tool: "az",
           match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([roleAssignment("SP-1")])
+            stdout: JSON.stringify([
+              roleAssignment("SP-1"),
+              locksRoleAssignment("SP-1")
+            ])
           }
         },
         {
@@ -1479,7 +1505,7 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
-        [roleAssignment("SP-1"), clusterRoleAssignment("SP-1")]
+        requiredRoleAssignments("SP-1")
       );
     });
 
@@ -1490,7 +1516,7 @@ describe("createCloudFixture", () => {
           tool: "az",
           match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([roleAssignment()])
+            stdout: JSON.stringify([roleAssignment(), locksRoleAssignment()])
           }
         },
         {
@@ -1503,7 +1529,7 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
-        [roleAssignment(), clusterRoleAssignment()]
+        requiredRoleAssignments()
       );
       expect(fake.waits).toEqual([1000]);
     });
@@ -1514,7 +1540,7 @@ describe("createCloudFixture", () => {
           tool: "az",
           match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([roleAssignment()])
+            stdout: JSON.stringify([roleAssignment(), locksRoleAssignment()])
           }
         },
         {
@@ -1527,7 +1553,7 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
-        [roleAssignment(), clusterRoleAssignment()]
+        requiredRoleAssignments()
       );
     });
 
@@ -1561,7 +1587,7 @@ describe("createCloudFixture", () => {
       );
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
-        /missing "Contributor".*"Azure Kubernetes Service RBAC Cluster Admin"/
+        /missing "Contributor".*"Locks Contributor".*"Azure Kubernetes Service RBAC Cluster Admin"/
       );
     });
 
@@ -1627,12 +1653,15 @@ describe("createCloudFixture", () => {
 
     it("captures assignments from the resource group and exact cluster scope", async () => {
       const contributor = roleAssignment();
+      const locksContributor = locksRoleAssignment();
       const clusterAdmin = clusterRoleAssignment();
       const { fixture } = await createHarness([
         {
           tool: "az",
           match: [...ROLE_LIST, "--scope", SCOPE],
-          respond: { stdout: JSON.stringify([contributor]) }
+          respond: {
+            stdout: JSON.stringify([contributor, locksContributor])
+          }
         },
         {
           tool: "az",
@@ -1642,7 +1671,7 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
-        [contributor, clusterAdmin]
+        [contributor, locksContributor, clusterAdmin]
       );
     });
 
@@ -1652,7 +1681,9 @@ describe("createCloudFixture", () => {
           {
             tool: "az",
             match: [...ROLE_LIST, "--scope", SCOPE],
-            respond: { stdout: JSON.stringify([roleAssignment()]) }
+            respond: {
+              stdout: JSON.stringify([roleAssignment(), locksRoleAssignment()])
+            }
           },
           {
             tool: "az",
@@ -1679,6 +1710,7 @@ describe("createCloudFixture", () => {
     it("requires every captured assignment identity, role, and scope", async () => {
       const expected = [
         roleAssignment(),
+        locksRoleAssignment(),
         roleAssignment(
           "sp-1",
           "Azure Kubernetes Service RBAC Cluster Admin",
@@ -1701,7 +1733,7 @@ describe("createCloudFixture", () => {
 
     it("shares the assertion deadline across exact-scope lookups", async () => {
       let now = NOW;
-      const expected = [roleAssignment(), clusterRoleAssignment()];
+      const expected = requiredRoleAssignments();
       const { fixture, fake } = await createHarness(
         [
           {
@@ -1709,7 +1741,12 @@ describe("createCloudFixture", () => {
             match: [...ROLE_LIST, "--scope", SCOPE],
             respond: () => {
               now = new Date(NOW.getTime() + 500);
-              return { stdout: JSON.stringify([roleAssignment()]) };
+              return {
+                stdout: JSON.stringify([
+                  roleAssignment(),
+                  locksRoleAssignment()
+                ])
+              };
             }
           },
           {
@@ -1881,7 +1918,7 @@ describe("createCloudFixture", () => {
           tool: "az",
           match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([roleAssignment()])
+            stdout: JSON.stringify([roleAssignment(), locksRoleAssignment()])
           },
           times: 1
         },
@@ -2096,6 +2133,145 @@ describe("createCloudFixture", () => {
         await expect(
           fixture.assertFederatedCredentialAbsent(SUBJECT)
         ).rejects.toThrow(/Microsoft Graph is unavailable/);
+      });
+
+      it.each([
+        ["app id", { appId: "different-app", objectId: "obj-1" }],
+        ["object id", { appId: "app-1", objectId: "different-object" }]
+      ])(
+        "rejects a retained registration whose %s differs from the observed credential parent",
+        async (_label, expected) => {
+          const { fixture, fake } = await observedHarness();
+          const callsBefore = fake.commands.calls.length;
+
+          await expect(
+            fixture.assertFederatedCredentialAbsent(SUBJECT, {
+              ...expected,
+              displayName: APP_NAME
+            })
+          ).rejects.toThrow(
+            /Refusing to check federated credential subject .* this run observed it on app-1 \(obj-1\)/
+          );
+          expect(fake.commands.calls).toHaveLength(callsBefore);
+        }
+      );
+
+      it("retries a temporarily missing retained registration before checking its credential", async () => {
+        const retainedApp = {
+          appId: "app-1",
+          objectId: "obj-1",
+          displayName: APP_NAME
+        } as const;
+        const expectedRoleAssignments = [
+          roleAssignment(),
+          clusterRoleAssignment()
+        ];
+        const { fixture, fake } = await observedHarness([
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: { stdout: APP_LIST_RESULT },
+            times: 1
+          },
+          { tool: "az", match: APP_LIST, respond: { stdout: "[]" }, times: 1 },
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: { stdout: APP_LIST_RESULT },
+            times: 1
+          },
+          {
+            tool: "az",
+            match: FIC_LIST,
+            respond: { stdout: "[]" },
+            times: 1
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", SCOPE],
+            respond: { stdout: JSON.stringify([roleAssignment()]) },
+            times: 1
+          },
+          {
+            tool: "az",
+            match: [...ROLE_LIST, "--scope", CLUSTER_SCOPE],
+            respond: { stdout: JSON.stringify([clusterRoleAssignment()]) },
+            times: 1
+          },
+          { tool: "az", match: APP_LIST, respond: { stdout: APP_LIST_RESULT } }
+        ]);
+        const callsBefore = fake.commands.calls.length;
+
+        await assertEnvironmentDeletionIdentityOutcome({
+          assertions: fixture,
+          assertServicePrincipalExists: () => Promise.resolve(),
+          expectedAppRegistration: retainedApp,
+          expectedRoleAssignments,
+          federatedSubjects: [SUBJECT]
+        });
+
+        expect(fake.waits).toEqual([1000]);
+        expect(
+          fake.commands.calls
+            .slice(callsBefore)
+            .map((call) => `${call.tool} ${call.args.join(" ")}`)
+        ).toEqual([
+          expect.stringContaining(`az ${APP_LIST.join(" ")}`),
+          expect.stringContaining(`az ${APP_LIST.join(" ")}`),
+          expect.stringContaining(`az ${APP_LIST.join(" ")}`),
+          expect.stringContaining("federated-credential list --id obj-1"),
+          expect.stringContaining(`az role assignment list --scope ${SCOPE}`),
+          expect.stringContaining(
+            `az role assignment list --scope ${CLUSTER_SCOPE}`
+          ),
+          expect.stringContaining(`az ${APP_LIST.join(" ")}`)
+        ]);
+      });
+
+      it("fails closed when the retained registration cannot be observed", async () => {
+        const { fixture, fake } = await observedHarness();
+        const credentialCallsBefore = fake.commands
+          .commandLines("az")
+          .filter((line) => line.includes("federated-credential list")).length;
+
+        await expect(
+          fixture.assertFederatedCredentialAbsent(SUBJECT, {
+            appId: "app-1",
+            objectId: "obj-1",
+            displayName: APP_NAME
+          })
+        ).rejects.toThrow(
+          /retained app registration app-1 \(obj-1\) to remain observable/
+        );
+        expect(fake.waits).toHaveLength(30);
+        expect(
+          fake.commands
+            .commandLines("az")
+            .filter((line) => line.includes("federated-credential list"))
+        ).toHaveLength(credentialCallsBefore);
+      });
+
+      it("reports a credential left on the retained registration", async () => {
+        const { fixture } = await observedHarness([
+          { tool: "az", match: APP_LIST, respond: { stdout: APP_LIST_RESULT } },
+          {
+            tool: "az",
+            match: FIC_LIST,
+            respond: {
+              stdout: JSON.stringify([{ name: "fc", subject: SUBJECT }])
+            }
+          }
+        ]);
+
+        await expect(
+          fixture.assertFederatedCredentialAbsent(SUBJECT, {
+            appId: "app-1",
+            objectId: "obj-1",
+            displayName: APP_NAME
+          })
+        ).rejects.toThrow(
+          /app registration app-1 to drop its federated credential.*still carries 1 credential/
+        );
       });
 
       it("reports a credential the product failed to remove", async () => {

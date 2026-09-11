@@ -25,8 +25,8 @@ name: Cloud E2E Cleanup
 # using its own state.
 #
 # See docs/eng/CLOUD_E2E_RUNBOOK.md. Like cloud-e2e.yml, this has never
-# executed: the fixture repository does not exist yet, and the pin below is
-# still a placeholder, so every run so far would no-op by design.
+# executed. The fixture repository and source pin now exist, but the
+# wellknown-published CI identity and variables are still prerequisites.
 
 on:
   # Never `pull_request_target`, and never any pull-request trigger at all.
@@ -78,11 +78,10 @@ jobs:
           node-version-file: .node-version
 
       # The pin is read from the suite's own source rather than restated here.
-      # `FIXTURE_BASELINE_SHA` is `"0".repeat(40)` today, so a copy in YAML
-      # could not even express it, and a second copy of a reset target is
-      # exactly the kind of drift that turns a cleanup job into a destructive
-      # operation against the wrong scope. Node 24 strips the types natively,
-      # so this needs no build and no dependency install.
+      # A second copy of a reset target is exactly the kind of drift that turns
+      # a cleanup job into a destructive operation against the wrong scope.
+      # Node 24 strips the types natively, so this needs no build and no
+      # dependency install.
       - name: Resolve the pinned fixture repository
         id: pin
         shell: bash
@@ -118,20 +117,25 @@ jobs:
       # it fails the job rather than guessing which one is right.
       - name: Verify the published variable matches the pin
         id: verify-scope
-        if: vars.AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY != ''
         env:
           PUBLISHED: ${{ vars.AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY }}
           PINNED: ${{ steps.pin.outputs.repository }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -z "${PUBLISHED:-}" ]]; then
+            echo "configured=false" >>"$GITHUB_OUTPUT"
+            echo "::notice::AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY is not published yet. Cleanup will not touch Azure or GitHub."
+            exit 0
+          fi
           if [[ "$PUBLISHED" != "$PINNED" ]]; then
             echo "::error::AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY is \"$PUBLISHED\" but the suite is pinned to \"$PINNED\". Refusing to purge against an ambiguous scope."
             exit 1
           fi
+          echo "configured=true" >>"$GITHUB_OUTPUT"
 
       - name: Report that there is nothing to reclaim
-        if: steps.pin.outputs.provisioned != 'true'
+        if: steps.pin.outputs.provisioned != 'true' || steps.verify-scope.outputs.configured != 'true'
         env:
           REASON: ${{ steps.pin.outputs.reason }}
         shell: bash
@@ -140,7 +144,7 @@ jobs:
           echo "$REASON" >>"$GITHUB_STEP_SUMMARY"
 
       - name: Sign in to Azure
-        if: steps.pin.outputs.provisioned == 'true'
+        if: steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true'
         id: azure-login
         uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
         with:
@@ -150,7 +154,7 @@ jobs:
 
       - name: Create a GitHub App token for the fixture repository
         id: app-token
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outcome != 'failure'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
@@ -166,7 +170,7 @@ jobs:
       # the test groups it can prove are ours without waiting for the safety-net
       # age threshold.
       - name: Purge Azure resource groups created by the suite
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outcome != 'failure' && steps.azure-login.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           RESOURCE_GROUP_PREFIX: ${{ steps.pin.outputs.resource-group-prefix }}
@@ -234,7 +238,7 @@ jobs:
       # go first because deleting an application can leave an orphaned principal
       # that still fails the next clean-slate probe.
       - name: Purge leaked Entra service principals and applications
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outcome != 'failure' && steps.azure-login.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success'
         env:
           APPLICATION_NAME: ${{ steps.pin.outputs.application-name }}
           ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
@@ -329,7 +333,7 @@ jobs:
       # prefix and still age-gated, so a live run's environment is never a
       # candidate.
       - name: Purge stale GitHub Environments
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outcome != 'failure' && steps.app-token.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
@@ -381,7 +385,7 @@ jobs:
       # a side effect. Branch age comes from the referenced commit, not from a
       # missing field on the refs API.
       - name: Purge stale workflow fallback pull requests and branches
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outcome != 'failure' && steps.app-token.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
@@ -499,7 +503,7 @@ jobs:
       # deliberately left intact. When no lease exists, cleanup acquires its own
       # before touching the mutable default branch.
       - name: Reset the fixture default branch under the shared lease
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outcome != 'failure' && steps.app-token.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           SOURCE_GH_TOKEN: ${{ github.token }}

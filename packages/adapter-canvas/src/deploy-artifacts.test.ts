@@ -211,6 +211,31 @@ describe("parseDeployProgressArtifact", () => {
     expect(parsed?.environment).toBe("dev");
     expect(parsed?.sequence).toBe(1);
     expect(parsed?.resources).toHaveLength(1);
+    expect(parsed?.resourcesDiscarded).toBeUndefined();
+  });
+
+  it.each([
+    ["a non-object entry", 42],
+    ["a nameless entry", { type: "Radius.Resources/redis" }],
+    ["a non-string name", { name: 7, type: "Radius.Resources/redis" }]
+  ])("reports that %s was dropped from the resource list", (_label, bad) => {
+    // Built inline rather than through progressPayload: that helper is typed
+    // to DeployProgress, which by design cannot express a malformed entry.
+    const parsed = parseDeployProgressArtifact(
+      JSON.stringify({
+        schemaVersion: 1,
+        application: "todolist",
+        environment: "dev",
+        runId: 100,
+        sequence: 1,
+        state: "succeeded",
+        resources: [{ name: "api", type: "Radius.Resources/containers" }, bad]
+      })
+    );
+    // Readable entries still parse, so the count alone cannot tell a consumer
+    // that the list is short. The marker is the only signal.
+    expect(parsed?.resources).toHaveLength(1);
+    expect(parsed?.resourcesDiscarded).toBe(true);
   });
 
   describe("parseDeployGraphArtifact", () => {
@@ -1615,9 +1640,46 @@ describe("createDeployStatusReader", () => {
     sequence = 3;
     const stale = await reader.read();
     expect(stale.status).toBe("stale");
+    expect(stale.progressRevalidated).toBe(false);
     expect(reader.sequence).toBe(5);
     expect(stale.progress?.sequence).toBe(5);
   });
+
+  it.each([
+    { changed: false, revalidated: true },
+    { changed: true, revalidated: false }
+  ])(
+    "revalidates only an identical report at the same sequence: $changed",
+    async ({ changed, revalidated }) => {
+      let clock = 0;
+      let failRead = false;
+      const reader = createDeployStatusReader({
+        ...baseOptions,
+        now: () => clock,
+        listArtifacts: async () => {
+          if (failRead) throw new Error("network unavailable");
+          return [artifact("radius-deploy-status-dev-todolist")];
+        },
+        downloadArtifact: async () =>
+          okFiles({
+            state: changed && clock > 0 ? "failed" : "succeeded"
+          })
+      });
+      expect((await reader.read()).status).toBe("ok");
+      for (const time of [10001, 20002]) {
+        clock = time;
+        const snapshot = await reader.read();
+        expect(snapshot.status).toBe("stale");
+        expect(snapshot.progressRevalidated).toBe(revalidated);
+        expect(snapshot.progress?.state).toBe("succeeded");
+      }
+      clock = 30003;
+      failRead = true;
+      const failed = await reader.read();
+      expect(failed.status).toBe("error");
+      expect(failed.progressRevalidated).not.toBe(true);
+    }
+  );
 
   it("accepts a lower sequence from a different run", async () => {
     let clock = 0;

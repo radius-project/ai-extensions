@@ -559,6 +559,22 @@ export const SHELL_STYLE_CSS = `  /* ─── Radius design tokens (from Figma 
   .rad-ddlg__warn { display:flex; gap:10px; align-items:flex-start; background:var(--rad-warning-bg); border:1px solid var(--rad-warning); border-radius:6px; padding:12px; color:var(--rad-text); font-size:14px; line-height:1.4; }
   .rad-ddlg__bullet { display:flex; gap:12px; font-size:14px; line-height:1.5; color:var(--rad-text-secondary); }
   .rad-ddlg__bullet::before { content:""; flex:0 0 2px; align-self:stretch; background:var(--rad-stroke); border-radius:1px; }
+  .rad-ddlg__resource-caption { font-size:13px; line-height:1.4; color:var(--rad-text); margin:0; }
+  /* The entry count is already bounded, so size the list to show all of it and
+     the remainder line without scrolling; a viewport-relative cap keeps the
+     confirmation control reachable on short windows. Overlay scrollbars are
+     invisible until interaction, so anything hidden here has no affordance. */
+  .rad-ddlg__resources { list-style:none; margin:0; padding:0; max-height:min(19rem, 40vh); overflow-y:auto; border:1px solid var(--rad-stroke); border-radius:6px; }
+  /* Platforms that draw classic scrollbars honour this and gain a visible
+     track when the viewport cap does force scrolling. */
+  .rad-ddlg__resources::-webkit-scrollbar { width:10px; }
+  .rad-ddlg__resources::-webkit-scrollbar-track { background:transparent; }
+  .rad-ddlg__resources::-webkit-scrollbar-thumb { background:var(--rad-stroke); border:3px solid var(--rad-surface); border-radius:5px; }
+  .rad-ddlg__resources::-webkit-scrollbar-thumb:hover { background:var(--rad-text-secondary); }
+  .rad-ddlg__resource { display:flex; gap:8px; align-items:baseline; justify-content:space-between; padding:6px 10px; font-size:13px; line-height:1.4; color:var(--rad-text); border-bottom:1px solid var(--rad-stroke); }
+  .rad-ddlg__resource:last-child { border-bottom:none; }
+  .rad-ddlg__resource-type { font-size:12px; color:var(--rad-text-secondary); word-break:break-all; }
+  .rad-ddlg__resource-more { padding:6px 10px; font-size:12px; color:var(--rad-text-secondary); }
   .rad-ddlg__confirm-label { font-size:13px; line-height:1.4; color:var(--rad-text); margin:0; }
   .rad-ddlg__input { width:100%; box-sizing:border-box; height:36px; padding:0 12px; border:1px solid var(--rad-stroke); border-radius:6px; font-size:14px; color:var(--rad-text); background:var(--rad-surface); }
   .rad-ddlg__input:focus { outline:2px solid var(--rad-info); outline-offset:1px; border-color:var(--rad-info); }
