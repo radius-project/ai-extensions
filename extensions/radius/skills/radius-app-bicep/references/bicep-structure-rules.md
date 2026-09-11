@@ -168,6 +168,7 @@ target registry is unauthenticated.
 
 ```bicep
 @description('Username for the OCI registry the containerImages recipe pushes to (the GitHub actor for ghcr.io).')
+@secure()
 param registryUsername string
 
 @description('Password/token for the OCI registry the containerImages recipe pushes to (a GitHub token with write:packages for ghcr.io).')
@@ -216,7 +217,7 @@ Registry-credentials rules:
 - WHEN the Secret is authored, its `name` property value MUST be exactly `radius-ghcr-registry-creds` — it is not free-form. It is the fixed `containerImagesRegistrySecretName` the recipe pack registers the recipe with; any other value means the recipe can't find the push credentials
 - Emit the exact two-line warning comment shown above immediately before the Secret; do not vary its wording or omit it from generated `app.bicep`. Do not emit the example's explanatory comment above `dependsOn`
 - Author it with the two keys `username` and `password` (lowercase, exactly these keys — the recipe reads them by name)
-- Populate the keys from a plain `param registryUsername string` and an `@secure() param registryPassword string`. Do NOT hardcode the credentials
+- Populate the keys from an `@secure() param registryUsername string` and an `@secure() param registryPassword string`. Do NOT hardcode the credentials. Both parameters are `@secure()` because both values land in `data.<key>.value`, which the Secret schema marks sensitive; a plain `param` there fails the build with `use-secure-value-for-secure-inputs`, and the username is a sensitive value in this position regardless of how identifying it is on its own
 - Add `dependsOn: [registryCreds]` on the `containerImages` resource so the Secret exists on the target cluster before the build/push runs
 - Do NOT set a registry on the `containerImages` resource — the push registry (`ghcr.io/<owner>/<repo>`) is an operator concern supplied by the recipe pack's `containerImagesRegistry` parameter, not the app definition
 - `registryUsername`/`registryPassword` are supplied by the deploy workflow from the runner identity (`github.actor` / `GITHUB_TOKEN`); they are workflow-managed parameters, so the extension never surfaces them in the deploy UI or auto-generates values for them. Declare them but do not give them defaults
