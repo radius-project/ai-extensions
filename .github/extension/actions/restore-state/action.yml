@@ -55,11 +55,11 @@ runs:
       run: |
         # rad startup restores the control-plane PostgreSQL databases and the
         # Terraform recipe-state Secrets saved by the previous run's `rad shutdown`
-        # from the `radius-state` git orphan branch, so commands plan against prior
-        # state instead of an empty backend. On the first ever run there is nothing
-        # to restore and it is a no-op that still succeeds. It needs the workspace
-        # created above and waits for PostgreSQL to be ready itself. Configure a git
-        # identity so it can manage the state branch.
+        # from the state archive, so commands plan against prior state instead of
+        # an empty backend. On the first ever run there is nothing to restore and
+        # it is a no-op that still succeeds. It needs the workspace created above
+        # and waits for PostgreSQL to be ready itself. A git identity is set first
+        # so that any git operation rad performs has one available.
         git config --global user.email "radius-deploy@users.noreply.github.com"
         git config --global user.name "radius-deploy"
         rad startup
