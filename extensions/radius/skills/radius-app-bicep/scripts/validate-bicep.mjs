@@ -650,6 +650,79 @@ function plainEnvironmentValues(env) {
   return values;
 }
 
+// Match only the whole expression Bicep emits for `<producer>.properties.secrets.name`.
+// Compound or unresolved expressions do not prove the connection source is invalid.
+const MANAGED_SECRET_NAME_REFERENCE =
+  /^\[reference\('[^']+'(?:,[^)]*)?\)\.properties\.secrets\.name\]$/u;
+
+function checkConnectionSources(
+  template,
+  app,
+  parentPath = "",
+  parameterValues = new Map()
+) {
+  let failed = false;
+  for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
+    const resourcePath = parentPath ? `${parentPath}.${symbol}` : symbol;
+    if (resource?.type === "Microsoft.Resources/deployments") {
+      const nestedTemplate = resource?.properties?.template;
+      if (isPlainObject(nestedTemplate)) {
+        const nestedParameterValues = new Map();
+        for (const [name, argument] of Object.entries(
+          resource?.properties?.parameters ?? {}
+        )) {
+          nestedParameterValues.set(
+            name,
+            resolveTemplateString(argument?.value, template, parameterValues)
+          );
+        }
+        if (
+          checkConnectionSources(
+            nestedTemplate,
+            app,
+            resourcePath,
+            nestedParameterValues
+          )
+        ) {
+          failed = true;
+        }
+      }
+      continue;
+    }
+    if (
+      typeof resource?.type !== "string" ||
+      !resource.type.startsWith("Radius.Compute/containers@")
+    ) {
+      continue;
+    }
+    const connections = resource?.properties?.properties?.connections;
+    if (!isPlainObject(connections)) {
+      continue;
+    }
+    for (const [name, connection] of Object.entries(connections)) {
+      if (!isPlainObject(connection)) {
+        continue;
+      }
+      const source = resolveTemplateString(
+        connection.source,
+        template,
+        parameterValues
+      );
+      if (
+        typeof source !== "string" ||
+        !MANAGED_SECRET_NAME_REFERENCE.test(source)
+      ) {
+        continue;
+      }
+      report(
+        `${app}: error connection-source: ${resourcePath}.properties.connections.${name}.source: this Radius container connection uses a managed Kubernetes Secret name; use the producer resource ID (<producer>.id) as the connection source instead.`
+      );
+      failed = true;
+    }
+  }
+  return failed;
+}
+
 function checkRuntimeVariableExpansion(
   template,
   app,
@@ -1019,6 +1092,7 @@ function check(app, staged) {
 
   const invalidBuildSource = checkContainerImageBuildSources(template, app);
   const invalidSourceReference = checkSourceCodeReferences(template, app);
+  const invalidConnectionSource = checkConnectionSources(template, app);
   const unresolvedRuntimeVariable = checkRuntimeVariableExpansion(
     template,
     app
@@ -1032,6 +1106,7 @@ function check(app, staged) {
       compilerFindings.some(isFailure) ||
         invalidBuildSource ||
         invalidSourceReference ||
+        invalidConnectionSource ||
         unresolvedRuntimeVariable ||
         misplacedSecureParameter
     ) ?
