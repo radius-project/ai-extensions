@@ -262,6 +262,7 @@ jobs:
           echo "✅ Cloud credentials registered with Radius."
 
       - name: Create Radius environment and deploy provider recipe pack
+        id: provider-setup
         run: |
           # load-contrib-catalog exports the catalog and generic accessors from
           # the same Radius ref as this generated workflow.
@@ -332,7 +333,6 @@ jobs:
           resource env 'Radius.Core/environments@2025-08-01-preview' = {
             name: '$ENVIRONMENT'
             properties: {
-              recipePacks: []
               providers: {
                 kubernetes: {
                   namespace: '$NAMESPACE'
@@ -401,12 +401,13 @@ jobs:
           echo "Deploying provider recipe pack..."
           rad deploy "$RECIPE_PACK_BICEP" --environment "$ENVIRONMENT"
           echo "✅ Provider recipe pack deployed."
+          echo "provider-pack=${PACK_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Attach provider recipe pack
         uses: radius-project/ai-extensions/.github/extension/actions/attach-recipe-pack@{{RADIUS_REF}}
         with:
           environment: ${{ inputs.environment }}
-          recipe-pack: aws-terraform
+          recipe-pack: ${{ steps.provider-setup.outputs.provider-pack }}
 
       - name: Apply custom recipe packs
         uses: radius-project/ai-extensions/.github/extension/actions/apply-custom-recipe-packs@{{RADIUS_REF}}

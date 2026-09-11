@@ -96,14 +96,21 @@ recipe_pack_consumers() {
         sort -u
 }
 
+recipe_pack_file() {
+    local pack="$1" file="$2"
+    printf '%s/pack_%s_%s' "${TMP_ROOT}" "${pack}" "$(basename "${file}")"
+}
+
 verify_recipe_packs() {
     local pack file url pack_file count=0
     while read -r pack file; do
         [[ -n "${pack}" ]] || continue
         url="$(radius_contrib_recipe_pack_url "${pack}" "${file}")"
-        pack_file="${TMP_ROOT}/verified_pack_${pack}_$(basename "${file}")"
+        pack_file="$(recipe_pack_file "${pack}" "${file}")"
         curl -fsSL "${url}" -o "${pack_file}"
-        if grep -Eqi 'Radius\.Core/environments' "${pack_file}"; then
+        if grep -Eqi \
+            "^[[:space:]]*resource[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+'Radius\\.Core/environments@[A-Za-z0-9.-]+'[[:space:]]*=" \
+            "${pack_file}"; then
             fail "Recipe pack file ${pack}/${file} provisions a Radius.Core/environments resource."
         fi
         echo "  Verified recipe pack file ${pack}/${file}"
@@ -129,14 +136,14 @@ parse_pack_kube_recipes() {
 }
 
 kube_recipe_consumers() {
-    local pack file url pack_file
+    local pack file pack_file
     printf '%s\n' "${RUN_BLOCKS}" |
         sed -nE 's/.*radius_contrib_kube_recipe_source (Radius\.[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+) ([a-z0-9._-]+).*/\1 \2/p'
     while read -r pack file; do
         [[ -n "${pack}" ]] || continue
-        url="$(radius_contrib_recipe_pack_url "${pack}" "${file}")"
-        pack_file="${TMP_ROOT}/pack_${pack}_$(basename "${file}")"
-        curl -fsSL "${url}" -o "${pack_file}"
+        pack_file="$(recipe_pack_file "${pack}" "${file}")"
+        [[ -f "${pack_file}" ]] ||
+            fail "verified recipe pack file is unavailable: ${pack_file}"
         parse_pack_kube_recipes "${pack_file}"
     done < <(recipe_pack_consumers)
 }

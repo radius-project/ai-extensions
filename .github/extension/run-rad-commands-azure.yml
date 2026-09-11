@@ -219,6 +219,7 @@ jobs:
           echo "✅ Cloud credentials registered with Radius."
 
       - name: Create Radius environment and deploy provider recipe pack
+        id: provider-setup
         run: |
           # load-contrib-catalog exports the catalog and generic accessors from
           # the same Radius ref as this generated workflow.
@@ -238,6 +239,7 @@ jobs:
           # namespace; it must be lowercase.
           BUILD_REGISTRY=$(echo "${{ vars.RADIUS_BUILD_REGISTRY || format('ghcr.io/{0}', github.repository) }}" | tr '[:upper:]' '[:lower:]')
           REGISTRY_SECRET_NAME="radius-ghcr-registry-creds"
+          PACK_NAME="azure-avm"
 
           # Place generated deployment inputs next to the app file so `rad deploy`
           # resolves the repo's own bicepconfig.json (which declares the `radius`
@@ -253,7 +255,6 @@ jobs:
           resource env 'Radius.Core/environments@2025-08-01-preview' = {
             name: '$ENVIRONMENT'
             properties: {
-              recipePacks: []
               providers: {
                 azure: {
                   subscriptionId: '${{ vars.AZURE_SUBSCRIPTION_ID }}'
@@ -355,19 +356,38 @@ jobs:
           cat "$RECIPE_PACK_BICEP"
           echo ""
           echo "Deploying provider recipe pack..."
+          PACK_PARAMETERS=(
+            --parameters routesGatewayName="$ROUTES_GATEWAY_NAME"
+            --parameters routesGatewayNamespace="$ROUTES_GATEWAY_NAMESPACE"
+            --parameters containerImagesRegistry="$BUILD_REGISTRY"
+            --parameters containerImagesRegistrySecretName="$REGISTRY_SECRET_NAME"
+          )
+          append_pack_parameter_if_declared() {
+            local name="$1" value="$2"
+            if grep -Eq "^[[:space:]]*param[[:space:]]+${name}[[:space:]]+" \
+              "$RECIPE_PACK_BICEP"; then
+              PACK_PARAMETERS+=(--parameters "${name}=${value}")
+            fi
+          }
+          # Released packs still declare the legacy environment parameters; the
+          # pack-only shape removes them. Pass each only when its declaration is
+          # present so both immutable catalog revisions remain deployable.
+          append_pack_parameter_if_declared environmentName "$ENVIRONMENT"
+          append_pack_parameter_if_declared environmentNamespace "$NAMESPACE"
+          append_pack_parameter_if_declared azureSubscriptionId "${{ vars.AZURE_SUBSCRIPTION_ID }}"
+          append_pack_parameter_if_declared azureResourceGroup "${{ vars.AZURE_RESOURCE_GROUP }}"
+
           rad deploy "$RECIPE_PACK_BICEP" \
             --environment "$ENVIRONMENT" \
-            --parameters routesGatewayName="$ROUTES_GATEWAY_NAME" \
-            --parameters routesGatewayNamespace="$ROUTES_GATEWAY_NAMESPACE" \
-            --parameters containerImagesRegistry="$BUILD_REGISTRY" \
-            --parameters containerImagesRegistrySecretName="$REGISTRY_SECRET_NAME"
+            "${PACK_PARAMETERS[@]}"
           echo "✅ Provider recipe pack deployed."
+          echo "provider-pack=${PACK_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Attach provider recipe pack
         uses: radius-project/ai-extensions/.github/extension/actions/attach-recipe-pack@{{RADIUS_REF}}
         with:
           environment: ${{ inputs.environment }}
-          recipe-pack: azure-avm
+          recipe-pack: ${{ steps.provider-setup.outputs.provider-pack }}
 
       - name: Apply custom recipe packs
         uses: radius-project/ai-extensions/.github/extension/actions/apply-custom-recipe-packs@{{RADIUS_REF}}
