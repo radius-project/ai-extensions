@@ -1,8 +1,8 @@
 // The safety contract of the two Cloud E2E workflow files.
 //
-// These workflows cannot run yet - the identity, the secrets, the variables,
-// and the fixture repository they need are all outstanding - so there is no
-// green run to point at. What can be proved without executing them is that the
+// These workflows cannot run yet - the identity, secrets, and variables they
+// need are still outstanding - so there is no green run to point at. What can
+// be proved without executing them is that the
 // files say what they are supposed to say, and every property asserted here is
 // one whose absence would be either dangerous or silently inert:
 //
@@ -253,11 +253,10 @@ describe("cloud-e2e.yml", () => {
     expect(workflow.jobs?.["cloud-e2e"]?.permissions?.packages).toBeUndefined();
   });
 
-  it("requests the workflow and deployment scopes explicitly rather than discovering they are missing", async () => {
-    // A token silently missing `workflows` sends the product down its
-    // pull-request fallback path, and the journey would pass without ever
-    // having committed a workflow to the default branch. Asking for the
-    // permission turns that into a loud failure at token-request time.
+  it("requests every permission needed by workflow publication and secure deployment", async () => {
+    // Missing workflows permission hard-fails publication. Secure Bicep
+    // parameters also require the product to reconcile RADIUS_DEPLOY_PARAMS as
+    // an Environment secret before dispatch.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const token = steps(workflow.jobs?.["cloud-e2e"]).find((step) =>
       step.uses?.startsWith("actions/create-github-app-token@")
@@ -266,6 +265,7 @@ describe("cloud-e2e.yml", () => {
     expect(token?.with?.["permission-deployments"]).toBe("read");
     expect(token?.with?.["permission-workflows"]).toBe("write");
     expect(token?.with?.["permission-environments"]).toBe("write");
+    expect(token?.with?.["permission-secrets"]).toBe("write");
   });
 
   it("stages and uploads one predictable diagnostics tree whether or not the run failed", async () => {
@@ -495,11 +495,14 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(ENVIRONMENT_NAME_PREFIX).toBe("radtest-");
   });
 
-  it("purges nothing until the fixture repository is provisioned", async () => {
-    // Today the pin is a placeholder, so every destructive step is gated off.
-    // The gate is the reason this workflow can be merged before its
-    // prerequisites exist without being a hazard.
+  it("purges nothing until the pin and published repository agree", async () => {
+    // The checked-in pin proves the target is intentional, while the published
+    // variable proves infrastructure provisioning has selected the same
+    // repository. Both gates must open before any destructive step can run.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const verify = steps(workflow.jobs?.purge).find(
+      (step) => step.name === "Verify the published variable matches the pin"
+    );
     const destructive = steps(workflow.jobs?.purge).filter(
       (step) =>
         step.run?.includes("az group delete") ||
@@ -507,10 +510,15 @@ describe("cloud-e2e-cleanup.yml", () => {
         step.run?.includes("-X DELETE") ||
         step.run?.includes("-X PATCH")
     );
+    expect(verify?.run).toContain('echo "configured=false"');
+    expect(verify?.run).toContain('echo "configured=true"');
     expect(destructive.length).toBeGreaterThan(0);
     for (const step of destructive) {
       expect(step.if).toContain("always()");
       expect(step.if).toContain("steps.pin.outputs.provisioned == 'true'");
+      expect(step.if).toContain(
+        "steps.verify-scope.outputs.configured == 'true'"
+      );
     }
   });
 
