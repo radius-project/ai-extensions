@@ -1,0 +1,76 @@
+# Static delete-environment dispatcher, owned by radius-project/ai-extensions
+# (issue #303). Unlike the deploy/verify/delete-application workflows — which are
+# fetched from radius-project/ai-extensions at commit time — this file and its Azure
+# provider (delete-environment-azure.yml) live here so the environment-delete
+# safety guard (refuse to delete an environment that still has deployed apps)
+# can be owned and reviewed in this repo. The extension commits both files
+# verbatim (only filling the {{ENV}} dispatch default) into the target repo's
+# .github/workflows/.
+#
+# It binds to the selected GitHub Environment so environment-scoped variables are
+# visible, confirms the environment is wired for Azure, then calls the reusable
+# delete-environment-azure.yml with resource_type=environment. Deleting runs on
+# an ephemeral k3d control plane that restores the persisted Radius state, refuses
+# to proceed when applications are still deployed, runs `rad env delete`, and
+# persists the updated state again. The Radius environment name defaults to the
+# GitHub Environment name, but can be overridden with the environment_name input.
+name: Radius - Delete Environment
+run-name: Radius - Delete Environment ${{ inputs.environment }} ${{ inputs.correlation_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'GitHub Environment name'
+        required: true
+        default: '{{ENV}}'
+      environment_name:
+        description: 'Radius environment name to delete (defaults to the GitHub Environment name)'
+        required: false
+        default: ''
+      correlation_id:
+        description: 'Opaque id echoed into the run name so the dispatcher can match this exact run'
+        required: false
+        default: ''
+
+permissions:
+  id-token: write
+  contents: write
+  packages: write
+
+jobs:
+  # Bind to the GitHub Environment so environment-scoped variables are visible and
+  # confirm it is configured for Azure. A job that calls a reusable workflow
+  # (`uses:`) can't bind an environment itself, so this check happens here first.
+  # Environment-deletion cleanup currently supports Azure only.
+  detect:
+    name: Detect provider
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment || '{{ENV}}' }}
+    outputs:
+      provider: ${{ steps.detect.outputs.provider }}
+    steps:
+      - name: Determine provider from environment variables
+        id: detect
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+        run: |
+          if [ -n "$AZURE_CLIENT_ID" ]; then
+            echo "provider=azure" >> "$GITHUB_OUTPUT"
+          else
+            echo "This environment is not configured for Azure (no AZURE_CLIENT_ID set)." >&2
+            echo "Environment-deletion cleanup currently supports Azure only." >&2
+            echo "provider=none" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+  azure:
+    name: Azure
+    needs: detect
+    if: ${{ needs.detect.outputs.provider == 'azure' }}
+    uses: ./.github/workflows/delete-environment-azure.yml
+    with:
+      environment: ${{ inputs.environment || '{{ENV}}' }}
+      resource_type: environment
+      name: ${{ inputs.environment_name || inputs.environment || '{{ENV}}' }}
+    secrets: inherit
