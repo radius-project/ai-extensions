@@ -741,6 +741,144 @@ function checkRuntimeVariableExpansion(
   return failed;
 }
 
+// A Recipe-managed secret key can name an aggregate representation while an
+// app-native variable names one of its parts. Those values are both strings, so
+// Bicep accepts the assignment even though the application parser receives the
+// wrong syntax. The source-reading rules remain authoritative; this check is a
+// conservative backstop for the contradiction the compiled model itself proves.
+//
+// It intentionally applies only to a `properties.secrets.name` reference. An
+// authored Secret may use any key chosen to match the application contract, so
+// its key name alone says nothing about the value's representation.
+const MANAGED_SECRET_REFERENCE =
+  /^\[reference\('([^']+)'(?:,[^)]*)?\)\.properties\.secrets\.name\]$/u;
+const AGGREGATE_SECRET_KEYS = new Set([
+  "connectionstring",
+  "dsn",
+  "uri",
+  "url"
+]);
+const ADDRESS_PART_TOKENS = new Set([
+  "addr",
+  "address",
+  "host",
+  "hostname",
+  "port"
+]);
+
+function configurationNameTokens(name) {
+  if (typeof name !== "string") {
+    return [];
+  }
+  return name
+    .replace(/([a-z0-9])([A-Z])/gu, "$1_$2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/u)
+    .filter((token) => token !== "");
+}
+
+function aggregateSecretAliasFinding(name, entry, template, parameterValues) {
+  if (!isPlainObject(entry) || !isPlainObject(entry.valueFrom)) {
+    return null;
+  }
+  const reference = entry.valueFrom.secretKeyRef;
+  if (!isPlainObject(reference)) {
+    return null;
+  }
+  const secretName = resolveTemplateString(
+    reference.secretName,
+    template,
+    parameterValues
+  );
+  if (
+    typeof secretName !== "string" ||
+    MANAGED_SECRET_REFERENCE.exec(secretName) === null ||
+    typeof reference.key !== "string"
+  ) {
+    return null;
+  }
+  const secretKey = reference.key.toLowerCase().replace(/[^a-z0-9]/gu, "");
+  if (!AGGREGATE_SECRET_KEYS.has(secretKey)) {
+    return null;
+  }
+  const targetTokens = configurationNameTokens(name);
+  if (!targetTokens.some((token) => ADDRESS_PART_TOKENS.has(token))) {
+    return null;
+  }
+  return {
+    key: reference.key,
+    secretName
+  };
+}
+
+function checkAggregateSecretAliases(
+  template,
+  app,
+  parentPath = "",
+  parameterValues = new Map()
+) {
+  let failed = false;
+  for (const [symbol, resource] of Object.entries(template.resources ?? {})) {
+    const resourcePath = parentPath ? `${parentPath}.${symbol}` : symbol;
+    if (resource?.type === "Microsoft.Resources/deployments") {
+      const nestedTemplate = resource?.properties?.template;
+      if (isPlainObject(nestedTemplate)) {
+        const nestedParameterValues = new Map();
+        for (const [name, argument] of Object.entries(
+          resource?.properties?.parameters ?? {}
+        )) {
+          nestedParameterValues.set(
+            name,
+            resolveTemplateString(argument?.value, template, parameterValues)
+          );
+        }
+        if (
+          checkAggregateSecretAliases(
+            nestedTemplate,
+            app,
+            resourcePath,
+            nestedParameterValues
+          )
+        ) {
+          failed = true;
+        }
+      }
+      continue;
+    }
+    if (
+      typeof resource?.type !== "string" ||
+      !resource.type.startsWith("Radius.Compute/containers@")
+    ) {
+      continue;
+    }
+    const containers = resource?.properties?.properties?.containers;
+    if (!isPlainObject(containers)) {
+      continue;
+    }
+    for (const [containerKey, container] of Object.entries(containers)) {
+      if (!isPlainObject(container) || !isPlainObject(container.env)) {
+        continue;
+      }
+      for (const [name, entry] of Object.entries(container.env)) {
+        const finding = aggregateSecretAliasFinding(
+          name,
+          entry,
+          template,
+          parameterValues
+        );
+        if (finding === null) {
+          continue;
+        }
+        report(
+          `${app}: error aggregate-secret-alias: ${resourcePath}.properties.containers.${containerKey}.env.${name}: Recipe-managed secret key ${JSON.stringify(finding.key)} is an aggregate value, but ${JSON.stringify(name)} names an address part. The model cannot establish that the application parser accepts the aggregate syntax. Trace the setting through checked-in source and either bind a matching aggregate input, safely compose the app-native value from schema-declared parts at runtime, or stop without publishing the model.`
+        );
+        failed = true;
+      }
+    }
+  }
+  return failed;
+}
+
 // Two Radius types can name a property `password` and mean opposite things.
 // `Radius.Data/mySqlDatabases.password` is marked sensitive and takes the
 // credential itself; `Radius.Messaging/rabbitMQ.password` is a plain string that
@@ -1023,6 +1161,10 @@ function check(app, staged) {
     template,
     app
   );
+  const incompatibleAggregateSecretAlias = checkAggregateSecretAliases(
+    template,
+    app
+  );
   const misplacedSecureParameter = checkSecureParameterTargets(
     template,
     app,
@@ -1033,6 +1175,7 @@ function check(app, staged) {
         invalidBuildSource ||
         invalidSourceReference ||
         unresolvedRuntimeVariable ||
+        incompatibleAggregateSecretAlias ||
         misplacedSecureParameter
     ) ?
       1

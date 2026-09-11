@@ -799,6 +799,63 @@ describe("P0-C built Radius extension artifact", () => {
     expect(mysqlExample).toMatch(/^\s*password:\s*password\s*$/mu);
   });
 
+  it("packages the app-native configuration format contract", () => {
+    assertCurrentArtifact();
+    const readGuidance = (relativePath: string): string =>
+      readFileSync(join(DIST_SKILL, relativePath), "utf8");
+    const connectionGuidance = readGuidance(
+      "references/connection-conventions.md"
+    );
+    const secretsGuidance = readGuidance("references/secrets-handling.md");
+    const skillGuidance = readGuidance("SKILL.md");
+
+    for (const guidance of [
+      connectionGuidance,
+      secretsGuidance,
+      skillGuidance
+    ]) {
+      expect(guidance).toMatch(
+        /read the application code|trace every app-native|traced through checked-in source/iu
+      );
+      expect(guidance).toMatch(
+        /exact format that parser expects|exact syntax that parser accepts/u
+      );
+      expect(guidance).toContain("safe");
+      expect(guidance).toContain("runtime");
+    }
+    expect(connectionGuidance).toContain(
+      "do not remap the Recipe `url` to a native setting merely because both are strings or use the same protocol"
+    );
+    expect(connectionGuidance).toContain(
+      "otherwise report the gap and stop before publishing the model"
+    );
+    expect(secretsGuidance).toContain(
+      "including separators, option names, encoding, TLS flags, and whether it expects one aggregate value or discrete fields"
+    );
+    expect(secretsGuidance).toContain(
+      "Bind a Recipe output directly only when it matches that exact format"
+    );
+    expect(skillGuidance).toContain(
+      "A package name alone, a string type, a credential-like variable name, a shared protocol, or a direct `secretKeyRef` is not proof"
+    );
+    expect(skillGuidance).toContain("`aggregate-secret-alias`");
+    expect(secretsGuidance).toContain(
+      "As a fail-closed backstop, `validate-bicep.mjs` rejects a direct Recipe-managed aggregate secret key"
+    );
+    for (const guidance of [
+      connectionGuidance,
+      secretsGuidance,
+      skillGuidance
+    ]) {
+      expect(guidance).not.toContain("StackExchange.Redis");
+    }
+    const checker = readFileSync(
+      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
+      "utf8"
+    );
+    expect(checker).toContain("aggregate-secret-alias");
+  });
+
   it("packages the exact-data-key contract for authored reference Secrets", () => {
     assertCurrentArtifact();
     const readGuidance = (relativePath: string): string =>

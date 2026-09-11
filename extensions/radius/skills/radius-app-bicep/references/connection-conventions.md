@@ -104,6 +104,8 @@ connections: {
 
 If the Redis Recipe declares `url` in `result.secrets`, the connection injects secret-backed `CONNECTION_REDIS_URL`. The suffix is the uppercased exact result key; do not author a wrapper Secret, connect to `redisCache.properties.secrets.name`, or invent a different suffix.
 
+That generated variable is usable only when the pinned application parser accepts the Recipe's exact URL syntax. Read the application code from the environment or configuration value through the API that consumes it, determine the exact format that parser expects, and do not remap the Recipe `url` to a native setting merely because both are strings or use the same protocol. Follow [Credential shape](secrets-handling.md#credential-shape): use schema-declared parts only through a safe, proven runtime composition path, and otherwise report the gap and stop before publishing the model.
+
 ## Source expects native configuration
 
 Map every required input to the exact name the source consumes:
