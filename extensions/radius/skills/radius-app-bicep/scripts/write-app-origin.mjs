@@ -117,7 +117,7 @@ if (!skillVersion) {
   // prompt's literal text instead of a version, while a missing flag usually
   // means an older SKILL.md or a hand-run command that never passed one.
   const consequence =
-    "the origin record leaves the generator version unknown, so later freshness checks will skip the generator comparison for this model.";
+    "the origin record leaves the generator version unknown. Later freshness checks will skip the generator comparison for this model.";
   console.error(
     placeholderPassed ?
       `warning: --skill-version was given the literal ${PLACEHOLDER}, which is the prompt's placeholder rather than a version, so ${consequence}`
