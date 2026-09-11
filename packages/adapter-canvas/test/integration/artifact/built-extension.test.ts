@@ -905,6 +905,7 @@ describe("P0-C built Radius extension artifact", () => {
     );
     const pageModules = [
       "pages/browser-state-ids.ts",
+      "pages/page-state.ts",
       "pages/encoding.ts",
       "pages/shell-styles.ts",
       "pages/shell.ts",
