@@ -26,12 +26,99 @@ import { GITHUB_ENVIRONMENT_RECHECK_DELAY_MS } from "../../src/browser/environme
 import { DIFF_RETRY_MS } from "../../src/browser/pages/graph-diff-page.js";
 import { GRAPH_RETRY_MS } from "../../src/browser/pages/graph-page.js";
 import { PLAN_RETRY_MS } from "../../src/browser/pages/planned-graph-page.js";
+import { DEPLOYED_GRAPH_POLL_MS } from "../../src/browser/pages/deployed-graph-page.js";
+import {
+  ARTIFACT_PAGE_SIZE,
+  DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
+  settleDeployStatuses
+} from "../../src/deploy-artifacts.js";
+import type { CanvasGraphResource } from "../../src/shared.js";
+import { DELETE_DIALOG_RESOURCE_LIMIT } from "../../src/browser/delete-dialog.js";
+import {
+  DEPLOYED_GRAPH_STATE_ID,
+  DEPLOYING_PAGE_STATE_ID,
+  DEPLOY_RESULT_STATE_ID,
+  ENVIRONMENT_PAGE_STATE_ID,
+  GRAPH_DIFF_STATE_ID,
+  GRAPH_PAGE_STATE_ID,
+  PLANNED_GRAPH_STATE_ID,
+  type PageStateById,
+  type PageStateId
+} from "../../src/pages/browser-state-ids.js";
+import {
+  HOSTILE_GIT_BRANCH,
+  HOSTILE_PAGE_TEXT,
+  pageStateCases,
+  STATE_ATTEMPT_ID,
+  STATE_RESOURCE
+} from "../support/pages/page-state-cases.js";
 
 const VALID_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 const SOURCE_FILE = "src/web/app.ts";
 const SOURCE_LINE = 12;
 const REMOVED_SOURCE_FILE = "src/web/worker.ts";
 const DIFF_BASE_BRANCH = "main";
+
+async function stubPageStateGraphRequests(page: Page): Promise<void> {
+  await page.route("**/api/discover-branches", async (route) => {
+    await route.fulfill({
+      json: {
+        branches: [
+          { name: "main", sha: "a".repeat(40) },
+          { name: HOSTILE_GIT_BRANCH, sha: "b".repeat(40) }
+        ],
+        workspaceBranch: HOSTILE_GIT_BRANCH
+      }
+    });
+  });
+  for (const path of ["load-graph", "plan-graph", "diff-branches"]) {
+    await page.route(`**/api/${path}`, async (route) => {
+      await route.fulfill({
+        json: { resources: [STATE_RESOURCE], provider: "azure" }
+      });
+    });
+  }
+}
+
+async function expectParsedPageState(
+  page: Page,
+  id: PageStateId,
+  expected: PageStateById[PageStateId]
+): Promise<void> {
+  const element = page.locator(`#${id}`);
+  await expect(element).toHaveCount(1);
+  expect(JSON.parse((await element.textContent()) ?? "")).toEqual(expected);
+  await expect(element).toHaveJSProperty("tagName", "DIV");
+  await expect(element).toHaveAttribute("hidden", "");
+  await expect(element.locator(":scope > *")).toHaveCount(0);
+  await expect(page.locator("[data-state-injected], svg[onload]")).toHaveCount(
+    0
+  );
+
+  const handlers = await page.locator("*").evaluateAll((nodes) =>
+    nodes.flatMap((node) => {
+      const getAttributeNames: unknown = Reflect.get(node, "getAttributeNames");
+      if (typeof getAttributeNames !== "function") {
+        throw new Error("Expected a browser element with attribute names.");
+      }
+      const names: unknown = Reflect.apply(getAttributeNames, node, []);
+      if (!Array.isArray(names)) throw new Error("Expected attribute names.");
+      return names.filter((name: unknown) => {
+        if (typeof name !== "string")
+          throw new Error("Expected an attribute name.");
+        return name.toLowerCase().startsWith("on");
+      });
+    })
+  );
+  expect(handlers).toEqual([]);
+  const scripts = await page.locator("script").allTextContents();
+  expect(
+    scripts.some((source) => source.includes("__radiusStateExecuted"))
+  ).toBe(false);
+  expect(
+    await page.evaluate(() => Reflect.get(globalThis, "__radiusStateExecuted"))
+  ).toBeUndefined();
+}
 
 async function filesContainingText(
   directory: string,
@@ -57,6 +144,41 @@ async function filesContainingText(
     if (content.includes(Buffer.from(text))) matches.push(filePath);
   }
   return matches;
+}
+
+async function waitForStableComputedTransform(
+  page: Page,
+  viewport: Locator
+): Promise<string> {
+  let previous = "";
+  let current = "";
+  let stableChecks = 0;
+  await expect
+    .poll(async () => {
+      await page.clock.fastForward(50);
+      current = await viewport.evaluate((element) => {
+        const getComputedStyleFromGlobal = Reflect.get(
+          globalThis,
+          "getComputedStyle"
+        );
+        if (typeof getComputedStyleFromGlobal !== "function") return "none";
+        const computedStyle = Reflect.apply(
+          getComputedStyleFromGlobal,
+          globalThis,
+          [element]
+        );
+        if (computedStyle === null || typeof computedStyle !== "object") {
+          return "none";
+        }
+        return String(Reflect.get(computedStyle, "transform"));
+      });
+      if (current === previous && current !== "none") stableChecks++;
+      else stableChecks = 0;
+      previous = current;
+      return stableChecks;
+    })
+    .toBeGreaterThanOrEqual(2);
+  return current;
 }
 
 // The environment-deletion route refuses (409 app-deployed) while an
@@ -307,6 +429,167 @@ test.describe("Radius Canvas in Chromium", () => {
     await seed(canvas);
   });
 
+  for (const fixture of pageStateCases()) {
+    test(`round-trips hidden page state through the real parser: ${fixture.name} @safety`, async ({
+      page,
+      canvas
+    }) => {
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.message));
+      await stubPageStateGraphRequests(page);
+      await canvas.seedState({
+        ...fixture.state,
+        workspacePath: canvas.workspacePath
+      });
+      const nonce = canvas.entry.state.browserMutationNonce;
+      if (typeof nonce !== "string" || nonce === "") {
+        throw new Error("The server must provide its mutation nonce.");
+      }
+      const expected =
+        "mutationNonce" in fixture.expected ?
+          {
+            ...fixture.expected,
+            mutationNonce: nonce
+          }
+        : fixture.expected;
+
+      await gotoCanvas(page, canvas, fixture.page);
+
+      if (fixture.id === GRAPH_PAGE_STATE_ID) {
+        await expect(page.locator("#graph-branch")).toHaveValue(
+          HOSTILE_GIT_BRANCH
+        );
+      } else if (fixture.id === PLANNED_GRAPH_STATE_ID) {
+        await expect(page.locator("#planned-branch")).toHaveValue(
+          HOSTILE_GIT_BRANCH
+        );
+      } else if (fixture.id === GRAPH_DIFF_STATE_ID) {
+        await expect(page.locator("#head-branch")).toHaveValue(
+          HOSTILE_GIT_BRANCH
+        );
+      } else if (fixture.id === DEPLOYED_GRAPH_STATE_ID) {
+        await expect(page.locator("#deployed-app-select")).toHaveValue(
+          "radius-app"
+        );
+      } else if (fixture.id === DEPLOYING_PAGE_STATE_ID) {
+        await expect(page.locator("#deploy-branch-select")).toHaveValue(
+          HOSTILE_GIT_BRANCH
+        );
+      } else if (fixture.id === ENVIRONMENT_PAGE_STATE_ID) {
+        await page.locator("#new-env-btn").click();
+        await expect(page.locator("#env-form")).toBeVisible();
+      } else {
+        await page.route("**/api/deploy-reset", async (route) => {
+          expect(route.request().postDataJSON()).toEqual({
+            attemptId: STATE_ATTEMPT_ID
+          });
+          await route.fulfill({
+            status: 409,
+            json: { error: "The fixture attempt is still active." }
+          });
+        });
+        await page.locator("#back-btn").click();
+        await expect(page.locator("#deploy-reset-status")).toHaveText(
+          "The fixture attempt is still active."
+        );
+      }
+
+      await expectParsedPageState(page, fixture.id, expected);
+      expect(errors).toEqual([]);
+      expect(canvas.externalRequests).toEqual([]);
+    });
+  }
+
+  test("retains page state, mutation nonce and attempt identity across graph and pane fragments @safety", async ({
+    page,
+    canvas
+  }) => {
+    const nonce = canvas.entry.state.browserMutationNonce;
+    if (typeof nonce !== "string" || nonce === "") {
+      throw new Error("The server must provide its mutation nonce.");
+    }
+    const cases = pageStateCases(nonce);
+    const graph = cases.find((fixture) => fixture.id === GRAPH_PAGE_STATE_ID);
+    const deployed = cases.find(
+      (fixture) => fixture.id === DEPLOYED_GRAPH_STATE_ID
+    );
+    const deploying = cases.find(
+      (fixture) => fixture.id === DEPLOYING_PAGE_STATE_ID
+    );
+    if (!graph || !deployed || !deploying)
+      throw new Error("Missing page fixtures.");
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    await stubPageStateGraphRequests(page);
+    await canvas.seedState(graph.state);
+    await gotoCanvas(page, canvas, "graph");
+    await expect(page.locator("#graph-branch")).toHaveValue(HOSTILE_GIT_BRANCH);
+    await expectParsedPageState(page, graph.id, graph.expected);
+    await page.evaluate(() =>
+      Reflect.set(globalThis, "__radiusStateDocument", "retained")
+    );
+
+    await page
+      .locator('#graph-nav [data-radius-graph-page="deployed"]')
+      .click();
+    await expect(page.locator("#deployed-app-select")).toHaveValue(
+      "radius-app"
+    );
+    await expectParsedPageState(page, deployed.id, deployed.expected);
+    await expect(page.locator(`#${graph.id}`)).toHaveCount(0);
+
+    await page
+      .locator("#radius-topnav")
+      .getByRole("link", { name: "Deployments", exact: true })
+      .click();
+    await expect(page.locator("#deploy-branch-select")).toHaveValue(
+      HOSTILE_GIT_BRANCH
+    );
+    await expectParsedPageState(page, deploying.id, deploying.expected);
+    await expect(page.locator(`#${deployed.id}`)).toHaveCount(0);
+
+    await canvas.seedState({
+      ...graph.state,
+      deployResult: { message: HOSTILE_PAGE_TEXT },
+      deployAttempt: { id: STATE_ATTEMPT_ID }
+    });
+    await page
+      .locator("#radius-topnav")
+      .getByRole("link", { name: "Environments", exact: true })
+      .click();
+    await expectParsedPageState(page, DEPLOY_RESULT_STATE_ID, {
+      attemptId: STATE_ATTEMPT_ID
+    });
+    await expect(page.locator(`#${deploying.id}`)).toHaveCount(0);
+
+    let resetBody: unknown;
+    await page.route("**/api/deploy-reset", async (route) => {
+      resetBody = route.request().postDataJSON();
+      await route.fulfill({
+        status: 409,
+        json: { error: "The fixture attempt is still active." }
+      });
+    });
+    await page.locator("#back-btn").click();
+    await expect(page.locator("#deploy-reset-status")).toHaveText(
+      "The fixture attempt is still active."
+    );
+    expect(resetBody).toEqual({ attemptId: STATE_ATTEMPT_ID });
+    await expect(page.locator("#back-btn")).toBeEnabled();
+    await expectParsedPageState(page, DEPLOY_RESULT_STATE_ID, {
+      attemptId: STATE_ATTEMPT_ID
+    });
+    expect(
+      await page.evaluate(() =>
+        Reflect.get(globalThis, "__radiusStateDocument")
+      )
+    ).toBe("retained");
+    expect(canvas.entry.state.browserMutationNonce).toBe(nonce);
+    expect(canvas.entry.state.deployAttempt?.id).toBe(STATE_ATTEMPT_ID);
+    expect(errors).toEqual([]);
+    expect(canvas.externalRequests).toEqual([]);
+  });
+
   test("deletes an Azure environment through the tracked operation and keeps a dismissed panel gone across a reload @safety", async ({
     page,
     canvas
@@ -501,8 +784,6 @@ test.describe("Radius Canvas in Chromium", () => {
     await gotoCanvas(page, canvas, "graph");
 
     await expect(page.getByLabel("Branch")).toHaveValue(WORKTREE_BRANCH);
-    await page.getByRole("button", { name: "Plan Deployment" }).focus();
-    await page.getByLabel("Branch").selectOption(WORKTREE_BRANCH);
     await expect
       .poll(() =>
         canvas.requests.some(
@@ -514,6 +795,7 @@ test.describe("Radius Canvas in Chromium", () => {
     expect(bodyFor(canvas, "/api/load-graph")).toEqual({
       repo: REPOSITORY,
       branch: WORKTREE_BRANCH,
+      followWorkspaceBranch: true,
       restartWait: true
     });
     await expect
@@ -902,6 +1184,112 @@ test.describe("Radius Canvas in Chromium", () => {
     releaseFirst?.();
   });
 
+  test("loads the graph from a renamed real worktree branch", async ({
+    page,
+    canvas
+  }) => {
+    const renamedBranch = "renamed-worktree";
+    canvas.renameWorkspaceBranch(renamedBranch);
+    expect(canvas.currentWorkspaceBranch()).toBe(renamedBranch);
+
+    const response = await fetch(`${canvas.baseUrl}/api/load-graph`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        repo: REPOSITORY,
+        branch: WORKTREE_BRANCH,
+        followWorkspaceBranch: true,
+        restartWait: true
+      })
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      resolvedBranch: renamedBranch,
+      fromWorkspace: true
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+
+    await expect(page.getByLabel("Branch")).toHaveValue(renamedBranch);
+    await expect(
+      page.locator("#graph-status, #graph-refresh-status")
+    ).toContainText("Application graph ready");
+  });
+
+  test("refreshes an open graph after the workspace model is regenerated", async ({
+    page,
+    canvas
+  }) => {
+    let graphRequests = 0;
+    await page.route("**/api/load-graph", async (route) => {
+      graphRequests++;
+      if (graphRequests === 1) {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [
+            {
+              id: "app/regenerated",
+              name: "regenerated",
+              type: "Radius.Compute/containers",
+              connections: [],
+              outputResources: []
+            }
+          ],
+          fromWorkspace: true
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+    await expect(
+      page.locator("#graph-status, #graph-refresh-status")
+    ).toContainText("Application graph ready", { timeout: 15_000 });
+
+    await fs.appendFile(
+      path.join(canvas.workspacePath, ".radius", "app.bicep"),
+      "\n// regenerated model\n",
+      "utf8"
+    );
+    await expect
+      .poll(async () => {
+        await page.evaluate("window.dispatchEvent(new Event('focus'))");
+        return graphRequests;
+      })
+      .toBe(2);
+    await expect(page.locator(".rad-node")).toHaveCount(1);
+    await expect(page.locator(".rad-node")).toContainText("regenerated");
+  });
+
+  test("reloads the graph when the server canonicalizes its branch", async ({
+    page,
+    canvas
+  }) => {
+    let requests = 0;
+    await page.route("**/api/load-graph", async (route) => {
+      requests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [],
+          ...(requests === 1 ? { resolvedBranch: "renamed-worktree" } : {})
+        })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "graph");
+
+    await expect.poll(() => requests).toBeGreaterThanOrEqual(2);
+    await expect(
+      page.locator("#graph-status, #graph-refresh-status")
+    ).toContainText("Application graph ready");
+  });
+
   test("keeps the modeling status stable while the graph automatically polls", async ({
     page,
     canvas
@@ -1249,6 +1637,115 @@ test.describe("Radius Canvas in Chromium", () => {
     await expectNoWcagViolations(page);
   });
 
+  test("shows escaped action-required server guidance before the pull request fallback in Chromium @safety", async ({
+    page,
+    canvas
+  }) => {
+    const environment = "action-required-env";
+    const selected = {
+      id: "aks-action-required",
+      name: "AKS Action Required",
+      resourceGroup: "rg-action-required"
+    };
+    const scenario = defaultFakeCliScenario();
+    scenario.commands.push(
+      ...azureDiscoveryCommands({
+        subscriptionId: PROFILE_SUBSCRIPTION_ID,
+        clusters: [selected],
+        selected,
+        namespaces: ["default"]
+      })
+    );
+    await canvas.setScenario(scenario);
+
+    let setupStarted = false;
+    let polls = 0;
+    const operation = (terminalState: "action_required" | null) => ({
+      operation: {
+        operationId: "op_action_required_message",
+        environment,
+        provider: "azure",
+        state: terminalState === null ? "running" : "finished",
+        terminalState,
+        summary: `Creating ${environment}...`,
+        currentStage: "verify",
+        stages: [{ state: "running", label: "Verify credentials" }],
+        steps: [{ state: "running", label: "Waiting for verification" }],
+        failure: null,
+        cleanup: null,
+        verification: null,
+        inputRequired: null,
+        startedAt: new Date(0).toISOString(),
+        endedAt: terminalState === null ? null : new Date(1000).toISOString(),
+        terminal:
+          terminalState === null ? null : (
+            {
+              reason: "pr-merge-required",
+              pullRequestUrl: "https://github.com/fixture/radius-app/pull/7",
+              userMessage:
+                "Merge <strong>this setup pull request</strong> before retrying verification."
+            }
+          )
+      }
+    });
+    await page.route("**/api/operations**", async (route) => {
+      const request = route.request();
+      if (request.method() === "POST") {
+        setupStarted = true;
+        await route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({ operationId: "op_action_required_message" })
+        });
+        return;
+      }
+      if (request.method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      if (!setupStarted) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ operation: null })
+        });
+        return;
+      }
+      polls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(operation(polls === 1 ? null : "action_required"))
+      });
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+    await openEnvironmentWizard(page);
+    await page.getByLabel("Environment name").fill(environment);
+    const resourceGroup = page.getByLabel("Resource Group", { exact: true });
+    await expect(
+      resourceGroup.locator('option[value="__custom__"]')
+    ).toHaveCount(0);
+    await resourceGroup.selectOption(selected.resourceGroup);
+    const createEnvironment = page.locator("#deploy-btn:not([disabled])");
+    await expect(createEnvironment).toHaveText("Create Environment");
+    await createEnvironment.click();
+
+    const banner = page.locator("#env-action-banner");
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText(
+      "Merge <strong>this setup pull request</strong> before retrying verification."
+    );
+    await expect(banner.locator("strong")).toHaveCount(2);
+    await expect(
+      banner.getByRole("link", { name: "Review the pull request →" })
+    ).toHaveAttribute("href", "https://github.com/fixture/radius-app/pull/7");
+    await expect(banner).not.toContainText(
+      "Radius could not push the deploy workflows to the default branch"
+    );
+    await expectNoWcagViolations(page);
+  });
+
   test("plans a deployment for an existing environment from its row", async ({
     page,
     canvas
@@ -1508,7 +2005,38 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(namespace).not.toContainText("default");
     await expect(namespace).not.toContainText("selected-team");
     await namespace.selectOption("__custom__");
-    await expect(page.locator("#azure-namespace-custom")).toBeVisible();
+    const customNamespace = page.locator("#azure-namespace-custom");
+    await expect(customNamespace).toBeVisible();
+
+    let operationPosts = 0;
+    await page.route("**/api/operations", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      operationPosts += 1;
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ operationId: "unexpected" })
+      });
+    });
+    await page.locator("#env-name-input").fill("production");
+    await customNamespace.fill("Todo-app-3");
+
+    const namespaceError = page.locator("#azure-namespace-error");
+    await expect(namespaceError).toHaveText(
+      "Kubernetes namespace must be 1-63 lowercase letters, numbers, or hyphens and must start and end with a letter or number."
+    );
+    await expect(namespaceError).toBeVisible();
+    await expect(customNamespace).toHaveAttribute("aria-invalid", "true");
+    await expect(customNamespace).toBeFocused();
+    expect(operationPosts).toBe(0);
+    await expectNoWcagViolations(page);
+
+    await customNamespace.fill("todo-app-3");
+    await expect(namespaceError).toBeHidden();
+    await expect(customNamespace).not.toHaveAttribute("aria-invalid", "true");
   });
 
   test("turns Azure MFA discovery failure into a tenant-scoped login callout", async ({
@@ -2772,6 +3300,164 @@ test.describe("Radius Canvas in Chromium", () => {
       .toMatchObject({ environment: "fixture-environment" });
   });
 
+  test("reads the full deletion inventory without hidden entries before confirming in Chromium @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.setViewportSize({ width: 480, height: 900 });
+    await routeDeployedPage(page, () => "success");
+    const hostileName = '<img src=x onerror="alert(1)">';
+    const resources = Array.from(
+      { length: DELETE_DIALOG_RESOURCE_LIMIT + 3 },
+      (_, index) => ({
+        name: index === 0 ? hostileName : `reported-resource-${index}`,
+        type: "Applications.Core/containers"
+      })
+    );
+    await page.route("**/api/deployed-graph**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [{ id: "modeled", name: "never-deployed" }],
+          mode: "terminal",
+          deletionInventory: {
+            application: "radius-app",
+            environment: "fixture-environment",
+            resources
+          }
+        })
+      });
+    });
+    const deletes: unknown[] = [];
+    await page.route("**/api/delete-deployment", async (route) => {
+      deletes.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true })
+      });
+    });
+    await gotoCanvas(page, canvas, "deployed");
+    const deleteButton = page.getByRole("button", {
+      name: "Delete Deployment"
+    });
+    await deleteButton.focus();
+    await page.keyboard.press("Enter");
+    const intent = page.getByRole("button", {
+      name: "I want to delete this deployment"
+    });
+    await expect(intent).toBeFocused();
+    await page.keyboard.press("Enter");
+
+    const dialog = page.locator("#deploy-delete-modal");
+    const list = dialog.getByRole("list", { name: "Resources to be deleted" });
+    await expect(list.locator(".rad-ddlg__resource")).toHaveCount(
+      DELETE_DIALOG_RESOURCE_LIMIT
+    );
+    await expect(list.locator("strong").first()).toHaveText(hostileName);
+    await expect(list.locator("img")).toHaveCount(0);
+    await expect(list).not.toContainText("never-deployed");
+    await expect(list).toContainText("+3 more");
+    await expect(list).toContainText("Applications.Core/containers");
+    const next = dialog.getByRole("button", {
+      name: /have read and understand/i
+    });
+    await expect(next).toBeFocused();
+    await expect(next).toBeInViewport();
+    await expectNoWcagViolations(page);
+
+    await page.keyboard.press("Shift+Tab");
+    await expect(list).toBeFocused();
+    // The list stays focusable because a short window can still force it to
+    // scroll, but at this viewport nothing may be hidden: overlay scrollbars
+    // are invisible until interaction, so clipped entries would silently
+    // withhold part of what the user is agreeing to destroy.
+    const hidden = await list.evaluate(
+      (element) =>
+        Number(Reflect.get(element, "scrollHeight")) >
+        Number(Reflect.get(element, "clientHeight"))
+    );
+    expect(hidden).toBe(false);
+    await expect(list.locator(".rad-ddlg__resource-more")).toBeInViewport();
+    await page.keyboard.press("Tab");
+    await expect(next).toBeFocused();
+    await page.keyboard.press("Enter");
+    const input = dialog.locator("#del-confirm-input");
+    const confirm = dialog.locator("#del-confirm-btn");
+    await expect(input).toBeFocused();
+    await expect(confirm).toBeDisabled();
+    await expectNoWcagViolations(page);
+    await page.keyboard.type("radius-app/fixture-environmen");
+    await page.keyboard.press("Enter");
+    expect(deletes).toEqual([]);
+    await expect(confirm).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(deleteButton).toBeFocused();
+
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+    await expect(next).toBeFocused();
+    await page.keyboard.press("Enter");
+    await input.fill("radius-app/fixture-environment");
+    await page.keyboard.press("Enter");
+    await expect
+      .poll(() => deletes)
+      .toEqual([
+        {
+          repo: REPOSITORY,
+          application: "radius-app",
+          environment: "fixture-environment",
+          force: false
+        }
+      ]);
+  });
+
+  for (const scenario of ["mismatched", "unavailable"]) {
+    test(`keeps the deletion inventory fallback for ${scenario} data in Chromium @safety`, async ({
+      page,
+      canvas
+    }) => {
+      await routeDeployedPage(page, () => "success");
+      await page.route("**/api/deployed-graph**", async (route) => {
+        if (scenario === "unavailable") {
+          await route.abort("failed");
+          return;
+        }
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            resources: [{ id: "model", name: "never-deployed" }],
+            mode: "terminal",
+            deletionInventory: {
+              application: "another-app",
+              environment: "fixture-environment",
+              resources: [{ name: "another-app-resource" }]
+            }
+          })
+        });
+      });
+      await gotoCanvas(page, canvas, "deployed");
+      await page.getByRole("button", { name: "Delete Deployment" }).click();
+      await page
+        .getByRole("button", {
+          name: "I want to delete this deployment"
+        })
+        .click();
+      const dialog = page.locator("#deploy-delete-modal");
+      await expect(dialog.getByRole("list")).toHaveCount(0);
+      await expect(dialog).toContainText(
+        "This will permanently delete the deployment of radius-app from environment fixture-environment, including all associated resources."
+      );
+      await expectNoWcagViolations(page);
+      await page.keyboard.press("Enter");
+      await expect(dialog.locator("#del-confirm-input")).toBeFocused();
+      await expect(dialog.locator("#del-confirm-btn")).toBeDisabled();
+    });
+  }
+
   test("offers stop tracking only after teardown fails in Chromium @safety", async ({
     page,
     canvas
@@ -2804,6 +3490,158 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(
       page.getByRole("button", { name: "Stop tracking deployment" })
     ).toBeVisible();
+  });
+
+  test("shows retained timeout details through the real graph route in Chromium @safety", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    const resources: CanvasGraphResource[] = [
+      {
+        id: "app/web",
+        name: "web",
+        type: "Radius.Compute/containers",
+        codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
+        deployStatus: "in_progress"
+      },
+      {
+        id: "app/db",
+        name: "db",
+        type: "Radius.Data/sqlDatabases",
+        codeReference: `${SOURCE_FILE}#L${SOURCE_LINE}`,
+        deployStatus: "success"
+      }
+    ];
+    const topology = resources.map(({ id, name, type, codeReference }) => ({
+      id,
+      name,
+      type,
+      codeReference
+    }));
+    settleDeployStatuses(resources, "monitor_timed_out");
+    await canvas.seedState({
+      ...baseCanvasState(canvas.workspacePath),
+      graphResources: topology,
+      deployingResources: resources,
+      deployStatus: "failed",
+      deployErrorKind: "run-unconfirmed",
+      deployRunId: 7,
+      deployEnvName: "fixture-environment",
+      deployAppName: "radius-app"
+    });
+    const scenario = defaultFakeCliScenario();
+    await canvas.setScenario({
+      ...scenario,
+      commands: [
+        ...scenario.commands,
+        {
+          tool: "gh",
+          args: [
+            "api",
+            `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`
+          ],
+          stdout: JSON.stringify({ artifacts: [] })
+        }
+      ]
+    });
+    await routeDeployedPage(page, () => "failed");
+    await page.unroute("**/api/deployed-graph**");
+    let graphRequests = 0;
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname === "/api/deployed-graph") {
+        graphRequests++;
+      }
+    });
+
+    await gotoCanvas(page, canvas, "deployed");
+
+    await expect(page.getByAltText("Failed", { exact: true })).toHaveCount(1);
+    await expect(page.getByAltText("Deployed", { exact: true })).toHaveCount(1);
+    await expect(page.getByAltText("In progress", { exact: true })).toHaveCount(
+      0
+    );
+    const details = page
+      .locator(".rad-node")
+      .filter({ hasText: "web" })
+      .getByRole("button", { name: "Show details" });
+    await details.focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#node-popup")).toContainText(
+      DEPLOY_MONITOR_TIMED_OUT_MESSAGE
+    );
+    const detailsAccessibility = await new AxeBuilder({ page })
+      .include("#node-popup")
+      .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
+      .analyze();
+    expect(detailsAccessibility.violations).toEqual([]);
+    const requestsAfterSettlement = graphRequests;
+    await page.clock.fastForward(DEPLOYED_GRAPH_POLL_MS * 2);
+    expect(graphRequests).toBe(requestsAfterSettlement);
+    await expect(page.getByAltText("In progress", { exact: true })).toHaveCount(
+      0
+    );
+  });
+
+  test("preserves graph zoom while a deployment refreshes in Chromium", async ({
+    page,
+    canvas
+  }) => {
+    await page.clock.install();
+    let graphRequests = 0;
+    await routeDeployedPage(page, () => "pending");
+    await page.unroute("**/api/deployed-graph**");
+    await page.route("**/api/deployed-graph**", async (route) => {
+      graphRequests++;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          resources: [
+            {
+              id: "app/web",
+              name: "web",
+              type: "Radius.Compute/containers",
+              deployStatus: graphRequests === 1 ? "pending" : "success"
+            },
+            {
+              id: "app/db",
+              name: "db",
+              type: "Radius.Data/sqlDatabases",
+              deployStatus: graphRequests === 1 ? "pending" : "success"
+            }
+          ],
+          mode: "live",
+          branch: WORKTREE_BRANCH,
+          application: "radius-app",
+          updatedAt: "2026-09-03T19:00:00Z"
+        })
+      });
+    });
+    await gotoCanvas(page, canvas, "deployed");
+    await expect(page.getByAltText("In progress")).toHaveCount(2);
+
+    const viewport = page.locator(".react-flow__viewport");
+    const zoomOut = page.locator(".react-flow__controls-zoomout");
+    const fittedTransform = await waitForStableComputedTransform(
+      page,
+      viewport
+    );
+    await zoomOut.click();
+    const zoomedTransform = await waitForStableComputedTransform(
+      page,
+      viewport
+    );
+    // The refresh assertion below is only meaningful if the zoom control
+    // actually moved the viewport first.
+    expect(zoomedTransform).not.toBe(fittedTransform);
+
+    await page.clock.fastForward(DEPLOYED_GRAPH_POLL_MS);
+    await expect.poll(() => graphRequests).toBe(2);
+    await expect(page.getByAltText("Deployed")).toHaveCount(2);
+    expect(await waitForStableComputedTransform(page, viewport)).toBe(
+      zoomedTransform
+    );
   });
 
   test("confirms stop-tracking recovery by keyboard and sends the failed teardown identity @safety", async ({
@@ -3045,6 +3883,147 @@ test.describe("Radius Canvas in Chromium", () => {
     await expect(page.locator("#radius-topnav")).toBeVisible();
     await expect(chip).toBeVisible();
     await expect(page.locator("#deploy-progress-modal")).toBeAttached();
+  });
+
+  test("shows the cloud-auth-drift panel and routes Re-verify to Environments @safety", async ({
+    page,
+    canvas
+  }) => {
+    // Exception 5.2: an environment that verified earlier can later fail to sign
+    // in to the cloud before any resource is touched. The compiled deploying
+    // page must render the dedicated "Cloud credentials need re-verifying" panel
+    // (not the generic failure) and send the Re-verify button to Environments.
+    // Unit tests cover the render in jsdom; this guards the built browser script
+    // and the resume-from-redirect wiring end to end in Chromium.
+    await page.route("**/api/deploy-status**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "failed",
+          active: false,
+          error:
+            "ERROR: AADSTS700213: No matching federated identity record found.",
+          deployRunUrl: `https://github.com/${REPOSITORY}/actions/runs/77`,
+          errorKind: "cloud-auth-drift",
+          errorBranch: "",
+          errorPaths: "",
+          repairing: false,
+          handoff: { pending: false, state: "idle" },
+          attempt: { targetRepo: "", environment: "" }
+        })
+      });
+    });
+
+    await page.goto(
+      `${canvas.baseUrl}/?page=deploying&application=todolist&environment=fixture-environment`
+    );
+    await page.waitForLoadState("domcontentloaded");
+
+    await expect(page.locator("#deploy-progress-title")).toHaveText(
+      "Cloud credentials need re-verifying"
+    );
+    await expect(page.locator("#deploy-progress-subtitle")).toContainText(
+      "could not authenticate to the cloud"
+    );
+    const reverify = page.locator("#deploy-reverify-credentials");
+    await expect(reverify).toBeVisible();
+    await expect(reverify).toHaveText("Re-verify credentials");
+    // The generic "Deployment ... failed" heading must not be what the user sees
+    // for a credential-drift failure, and no model-repair button is offered.
+    await expect(page.locator("#deploy-progress-title")).not.toContainText(
+      "failed"
+    );
+
+    await reverify.click();
+    await page.waitForURL(/\/\?page=environment$/);
+  });
+
+  test("offers the verify-bypass recovery and sends the mutation nonce when Create environment anyway is clicked @safety", async ({
+    page,
+    canvas
+  }) => {
+    // Exceptions 4.4/4.5: a verification that fails on a recoverable category
+    // (missing permissions / unreachable endpoint) offers a "Create environment
+    // anyway" bypass. This drives the real restart-recovery path — the tracker
+    // observes a live operation, the server then loses that record, and the
+    // verify-status endpoint reports a bypassable failure — and asserts the
+    // compiled button renders in #env-progress-verify-bypass and POSTs with the
+    // browser mutation nonce the real page was served. Unit tests cover the
+    // render in jsdom; only Chromium proves the built script's real fetch
+    // actually carries the nonce header.
+    const operation = {
+      operationId: "op-bypass-e2e",
+      kind: "create",
+      environment: "fixture-environment",
+      provider: "azure",
+      state: "verifying",
+      currentStage: "verify",
+      startedAt: new Date().toISOString(),
+      verification: { dispatchedAt: Date.now(), runId: "555" }
+    };
+    let opCalls = 0;
+    // The tracker must observe the operation at least once (so it commits to
+    // this environment) before the record disappears; only then does it fall
+    // back to the verify-status endpoint that surfaces the bypass. Serving the
+    // operation for the first two reads (resume + first poll) and nothing after
+    // reproduces that sequence deterministically.
+    await page.route(/\/api\/operations\?repo=/, async (route) => {
+      opCalls += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(opCalls <= 2 ? { operation } : { operation: null })
+      });
+    });
+    await page.route("**/api/verify-status**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: "failed",
+          terminal: false,
+          category: "permissions",
+          missingPermissions: ["Contributor"],
+          runId: "555",
+          runUrl: `https://github.com/${REPOSITORY}/actions/runs/555`
+        })
+      });
+    });
+    let bypassNonce: string | null = null;
+    let bypassBody: unknown = null;
+    await page.route("**/api/bypass-verification**", async (route) => {
+      const request = route.request();
+      bypassNonce = request.headers()["x-radius-mutation-nonce"] ?? null;
+      bypassBody = request.postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ success: true, category: "permissions" })
+      });
+    });
+
+    await gotoCanvas(page, canvas, "environment");
+
+    const bypassButton = page.locator("#env-progress-verify-bypass-button");
+    await expect(bypassButton).toBeVisible();
+    await expect(bypassButton).toHaveText("Create environment anyway");
+
+    await bypassButton.click();
+
+    await expect(page.locator("#env-success-banner")).toBeVisible();
+    await expect(page.locator("#env-success-banner-text")).toContainText(
+      "fixture-environment"
+    );
+    // The security contract: the built button's POST carries the nonce the real
+    // server injected into the page, not an empty string.
+    expect(bypassNonce).toBeTruthy();
+    expect(bypassBody).toMatchObject({
+      repo: REPOSITORY,
+      environment: "fixture-environment",
+      operationId: "op-bypass-e2e",
+      runId: "555"
+    });
   });
 
   test("does not re-announce an unchanged deploy while it keeps polling", async ({

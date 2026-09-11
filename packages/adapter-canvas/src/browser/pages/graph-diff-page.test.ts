@@ -17,12 +17,12 @@ import { GRAPH_STAGE_LABELS } from "../graph/progress.js";
 import { NOOP_TEARDOWN } from "../lifecycle.js";
 import type { BrowserTeardown } from "../lifecycle.js";
 import type { BrowserContext, HttpResponse } from "../ports.js";
+import { GRAPH_DIFF_STATE_ID } from "../../pages/browser-state-ids.js";
 import {
   DIFF_DEBOUNCE_MS,
   DIFF_PROGRESS_MS,
   DIFF_PROGRESS_STEPS_ID,
   DIFF_RETRY_MS,
-  GRAPH_DIFF_STATE_ID,
   initializeGraphDiffPage as initializeGraphDiffPageEntry
 } from "./graph-diff-page.js";
 

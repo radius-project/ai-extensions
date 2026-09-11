@@ -39,6 +39,7 @@ const productionHandlers = {
   ...createLivenessSourceRoutes({
     getOpenSourceHandler: () => null,
     readInstanceState: () => undefined,
+    getWorkspaceModelRevision: () => Promise.resolve(null),
     toSafeRepoRelPath: (input) => String(input)
   }),
   ...createOperationsStatusRoutes(
@@ -54,6 +55,7 @@ const productionHandlers = {
       isValidRepoSlug: () => false,
       isResourceGroupName: () => false,
       isAksClusterName: () => false,
+      isKubernetesNamespace: () => false,
       isUuid: () => false,
       buildStages: () => [],
       createOperation: () => ({ operationId: "", currentStage: null }),
@@ -230,6 +232,7 @@ const productionHandlers = {
   ...createGraphsPlanningRoutes({
     readInstanceEntry: () => undefined,
     createDeployStatusReader: () => ({
+      read: () => Promise.resolve({ status: "missing", progress: null }),
       graph: () => Promise.resolve({ graph: null, status: "missing" }),
       progress: () => Promise.resolve(null)
     }),
@@ -249,7 +252,13 @@ const productionHandlers = {
   }),
   ...createGraphsPlanningStreamRoutes({
     readInstanceEntry: () => undefined,
-    defaultBranchForState: () => "main",
+    resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
+      Promise.resolve({
+        status: "resolved",
+        branch: requestedBranch,
+        followsWorkspaceBranch: false
+      }),
+    commitBranchResolution: () => true,
     prepareSourceRef: () => ({ token: "" }),
     commitSourceRef: () => true,
     isCurrentSourceRef: () => true,
@@ -280,6 +289,13 @@ const productionHandlers = {
   ...createGraphsPlanningWritesRoutes({
     workflows: createGraphPlanningWorkflows({
       readInstanceEntry: () => undefined,
+      resolveBranchForRequest: (_entry, _repo, requestedBranch) =>
+        Promise.resolve({
+          status: "resolved",
+          branch: requestedBranch,
+          followsWorkspaceBranch: false
+        }),
+      commitBranchResolution: () => true,
       pipeline: createGraphPipeline({
         fetchBicepSelection: () =>
           Promise.resolve({
@@ -310,7 +326,6 @@ const productionHandlers = {
       prepareSourceRefResources: () => ({ view: "graph", token: "" }),
       setSourceRefResources: () => false,
       isCurrentSourceRefToken: () => false,
-      defaultBranchForState: () => "main",
       canReuseModeledGraph: () => false,
       addGraphProgress: () => false,
       beginPlannedGraphRequest: () => 1,
@@ -448,12 +463,15 @@ const productionHandlers = {
     planCredentialVerification: () =>
       Promise.resolve({
         shouldDispatch: false,
+        trigger: "none",
         ref: "main",
         defaultBranch: "main",
         pullRequestUrl: "",
         skipReason: ""
       }),
     fetchFileFromRepo: () => Promise.resolve(null),
+    fetchFileFromRepoResult: () =>
+      Promise.resolve({ content: null, error: "HTTP 404", status: 404 }),
     buildVerifyWorkflowDispatchArgs: () => [],
     verifyWorkflowFile: "radius-verify-credentials.yml",
     stageVerify: "verify",
@@ -495,6 +513,7 @@ describe("server route ownership boundary", () => {
     ).toEqual([
       "POST /api/run-remediation",
       "POST /api/github-account",
+      "POST /api/bypass-verification",
       "POST /api/operations",
       "POST /api/abandon-deployment",
       "POST /api/operations/:operationId/resume/:code",

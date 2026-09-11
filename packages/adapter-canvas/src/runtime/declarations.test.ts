@@ -127,9 +127,10 @@ describe("RU-02: action declarations", () => {
 
 // RU-03: tool names/schemas/descriptions/unique.
 describe("RU-03: tool declarations", () => {
-  it("declares exactly the retained 6 tool names, in order", () => {
+  it("declares exactly the retained 7 tool names, in order", () => {
     expect(RADIUS_TOOL_DECLARATIONS.map((t) => t.name)).toEqual([
       "radius_generate_app",
+      "radius_report_modeling_failure",
       "radius_generate_pr_diff_markdown",
       "radius_publish_custom_type_extension",
       "radius_publish_recipe",
@@ -166,6 +167,28 @@ describe("RU-03: tool declarations", () => {
     expect(declaration.description).toContain("returns one JSON object");
     expect(declaration.description).toContain("optional ambiguity brief");
     expect(declaration.description).toContain("returns a Markdown refusal");
+  });
+
+  it("requires the complete fenced modeling-failure report", () => {
+    const declaration = RADIUS_TOOL_DECLARATIONS.find(
+      (tool) => tool.name === "radius_report_modeling_failure"
+    )!;
+
+    expect(declaration.parameters.required).toEqual([
+      "instanceId",
+      "repo",
+      "branch",
+      "attemptToken",
+      "error"
+    ]);
+    expect(
+      (
+        declaration.parameters.properties as Record<
+          string,
+          { maxLength?: number }
+        >
+      ).error.maxLength
+    ).toBe(4000);
   });
 
   it("requires repo/baseBranch/headBranch on radius_generate_pr_diff_markdown", () => {

@@ -35,7 +35,7 @@ flowchart LR
 ```
 
 - **Copilot host** discovers the extension, opens the panel, and routes actions and tools.
-- **Extension runtime** declares the canvas, two actions, six tools, hooks, and instance lifecycle.
+- **Extension runtime** declares the canvas, two actions, seven tools, hooks, and instance lifecycle.
 - **Local loopback server** owns per-instance HTTP state and serves only on `127.0.0.1`.
 - **Rendered page** is server-produced HTML for one of the seven Radius views.
 - **Browser code** handles forms, polling, graph interaction, navigation, focus, and status updates.
@@ -68,7 +68,7 @@ The approved architecture describes a target, not the current contents of `main`
 | 7     | Complete: add reviewed visual baselines and extended resilience coverage                            | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                                                                                       |
 | 8     | Not started: qualify the controlled real-host suite and require it before release                   | [#334](https://github.com/radius-project/ai-extensions/issues/334)                                                                                                                                       |
 
-The current accepted runtime surface is two actions, `get_graph_resources` and `update_source_refs`, and six tools: `radius_generate_app`, `radius_generate_pr_diff_markdown`, `radius_publish_custom_type_extension`, `radius_publish_recipe`, `radius_deploy`, and `radius_deploy_status`. The authoritative Phase 2 inventory contains 40 local API routes with no legacy fallback.
+The current accepted runtime surface is two actions, `get_graph_resources` and `update_source_refs`, and seven tools: `radius_generate_app`, `radius_report_modeling_failure`, `radius_generate_pr_diff_markdown`, `radius_publish_custom_type_extension`, `radius_publish_recipe`, `radius_deploy`, and `radius_deploy_status`. The authoritative Phase 2 inventory contains 40 local API routes with no legacy fallback.
 
 ## Objectives
 
@@ -123,6 +123,12 @@ Phase 2 landed incrementally. While old and new paths coexisted, each pull reque
 
 `src/pages/` splits the shared document shell from graph, credential/environment, and deployment renderers. Renderers accept typed state and retain URLs, stable IDs, escaping, serialized initial state, theme tokens, operation progress, and resume behavior.
 
+Page state has one producer, `src/pages/page-state.ts::renderPageState(id, state)`, and one consumer, `src/browser/pages/state.ts::readPageState`. The producer owns JSON serialization, script-safe character escaping, HTML text encoding, and the complete hidden-element markup. `src/pages/browser-state-ids.ts` is the behavior-free source of state IDs and their matching TypeScript shapes; renderers and browser consumers import these IDs rather than duplicating literals. The reader uses `textContent` and `JSON.parse`; browser field narrowing remains necessary because compile-time types do not validate parsed data.
+
+Do not hand-build state elements or interpolate runtime data into executable scripts, including quoted `escapeHtml` calls. HTML text/attribute escaping, URL validation, and JSON state transport are distinct contexts: HTML entities are not JavaScript string escaping. Compiled browser scripts and the static feedback script are trusted code, not runtime state; HTTP JSON, SSE, requests, storage, and build serialization retain their ordinary JSON semantics. Trusted renderer markup and fragment installation are not general-purpose sanitizers.
+
+The `test/ci/page-state-contract.test.ts` architecture check uses the existing TypeScript parser to inspect literal/template/concatenated markup across adapter production sources, duplicate IDs, obsolete alternatives, and direct browser state access. Only the compiled-code emitter `browser/scripts.ts` is exempt from script-interpolation inspection; its state-element construction is still checked. Synthetic passing and failing fixtures protect its scope, including future renderers, server routes, browser-created markup, and non-HTML JSON. It enforces recognizable source conventions, not arbitrary-program safety; executable renderer/reader and real HTML-parser tests remain the behavioral evidence.
+
 Renderer compatibility compares meaningful markup and state, not entire-page snapshots. Phase 3 preserved browser behavior for the separate Phase 4 extraction.
 
 ### Browser boundary
@@ -139,21 +145,24 @@ Already testable modules such as `operations.ts`, `verification-plan.ts`, `bicep
 
 ### Layers
 
-| Layer                 | What it proves                                                                                | Main boundary                                      |
-|-----------------------|-----------------------------------------------------------------------------------------------|----------------------------------------------------|
-| Unit                  | Rules, parsing, state transitions, escaping, serialization, and error propagation             | One production module with controlled dependencies |
-| Runtime integration   | Real canvas and tool registration, lifecycle, branch context, callbacks, and keepalive        | Real runtime with a fake SDK session               |
-| HTTP integration      | Methods, paths, bodies, status, headers, streaming, caches, cleanup, and fail-closed behavior | Real server on an OS-assigned loopback port        |
-| Built-extension smoke | Registration, bundle completeness, SDK externalization, startup, and shutdown                 | Real production build in a subprocess              |
-| Browser component     | One browser unit in a real DOM                                                                | Vitest Browser Mode in Chromium                    |
-| Browser functional    | A page fragment or interaction across browser modules                                         | Chromium with controlled network responses         |
-| Critical journey      | A supported workflow across page, browser, HTTP, and server state                             | Playwright with real renderers and loopback HTTP   |
-| Accessibility         | Automated WCAG 2.2 A/AA semantics in material states                                          | Playwright and axe                                 |
-| Keyboard              | Pointer-free operation, focus movement, and announcements                                     | Playwright                                         |
-| Visual                | Selected stable layout, theme, graph, and status states                                       | Reviewed Playwright screenshots                    |
-| Real-host             | Installation, discovery, panel lifecycle, focus, and reconnect                                | A controlled supported Copilot host                |
+| Layer                 | What it proves                                                                                 | Main boundary                                       |
+|-----------------------|------------------------------------------------------------------------------------------------|-----------------------------------------------------|
+| Unit                  | Rules, parsing, state transitions, escaping, serialization, and error propagation              | One production module with controlled dependencies  |
+| Runtime integration   | Real canvas and tool registration, lifecycle, branch context, callbacks, and keepalive         | Real runtime with a fake SDK session                |
+| HTTP integration      | Methods, paths, bodies, status, headers, streaming, caches, cleanup, and fail-closed behavior  | Real server on an OS-assigned loopback port         |
+| Built-extension smoke | Registration, bundle completeness, SDK externalization, startup, and shutdown                  | Real production build in a subprocess               |
+| Browser component     | One browser unit in a real DOM                                                                 | Vitest Browser Mode in Chromium                     |
+| Browser functional    | A page fragment or interaction across browser modules                                          | Chromium with controlled network responses          |
+| Critical journey      | A supported workflow across page, browser, HTTP, and server state                              | Playwright with real renderers and loopback HTTP    |
+| Accessibility         | Automated WCAG 2.2 A/AA semantics in material states                                           | Playwright and axe                                  |
+| Keyboard              | Pointer-free operation, focus movement, and announcements                                      | Playwright                                          |
+| Visual                | Selected stable layout, theme, graph, and status states                                        | Reviewed Playwright screenshots                     |
+| Real-host             | Installation, discovery, panel lifecycle, focus, and reconnect                                 | A controlled supported Copilot host                 |
+| Cloud E2E             | That real Azure and GitHub accept what the extension sends, and that cloud state truly changes | Playwright against a live cloud, on a schedule only |
 
 Higher-level tests complement unit tests; they do not replace them. A policy belongs in a unit test, its HTTP representation belongs in HTTP integration, and a critical journey is added only when the failure can escape across the interface and server boundary.
+
+Every layer above except Cloud E2E is offline: it contacts no network, credential, or mutable external resource. Cloud E2E is the deliberate exception, because the extension's most consequential behavior is the external side effects it performs — creating an Azure identity, federating it to GitHub, and later removing both. A fake cloud can prove the right commands were sent but never that they were accepted, so that one class of failure is invisible to every other layer. It is therefore kept off the pull request path and run on a schedule; see the [Cloud E2E design](./2026-08-cloud-e2e-environment-lifecycle.md).
 
 ### Regression classes and prevention
 
@@ -176,6 +185,7 @@ Required browser and higher-level gates begin only when their test boundary exis
 | Controlled browser HTTP                   | Mock Service Worker                          | Controls network outcomes without replacing fetch internals                |
 | Journeys, keyboard, accessibility, visual | Playwright Test                              | One Chromium stack for fixtures, traces, screenshots, and server lifecycle |
 | Automated accessibility                   | `@axe-core/playwright`                       | Repeatable WCAG-tagged checks                                              |
+| Live cloud journeys                       | Playwright Test against real `az` and `gh`   | Reuses the journey harness by swapping its fake-CLI and network seams      |
 
 ## Compatibility and packaging
 

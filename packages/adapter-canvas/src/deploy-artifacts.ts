@@ -93,6 +93,13 @@ export interface DeployProgress {
   updatedAt?: string;
   state?: string;
   resources: DeployProgressResource[];
+  /**
+   * Set only when the artifact carried resource entries this parser could not
+   * read. Consumers that merely annotate a graph can ignore a dropped entry,
+   * but a consumer that presents the list as a complete inventory must not:
+   * a silently shortened list would undercount a destructive action.
+   */
+  resourcesDiscarded?: true;
 }
 
 export interface WorkflowArtifact {
@@ -121,6 +128,7 @@ export type ReaderStatus =
 
 interface ReadResult {
   status: ReaderStatus;
+  progressRevalidated?: boolean;
   progress: DeployProgress | null;
   graph: unknown | null;
   files: ArtifactFiles | null;
@@ -278,10 +286,17 @@ export function parseDeployProgressArtifact(
     return null;
   const sequence = parsed.sequence;
   const resources: DeployProgressResource[] = [];
+  let discarded = false;
   for (const raw of parsed.resources) {
-    if (!isRecord(raw)) continue;
+    if (!isRecord(raw)) {
+      discarded = true;
+      continue;
+    }
     const name = typeof raw.name === "string" ? raw.name : "";
-    if (!name) continue;
+    if (!name) {
+      discarded = true;
+      continue;
+    }
     resources.push({
       id: typeof raw.id === "string" ? raw.id : undefined,
       name,
@@ -322,7 +337,8 @@ export function parseDeployProgressArtifact(
     updatedAt:
       typeof parsed.updatedAt === "string" ? parsed.updatedAt : undefined,
     state: typeof parsed.state === "string" ? parsed.state : undefined,
-    resources
+    resources,
+    ...(discarded ? { resourcesDiscarded: true as const } : {})
   };
 }
 
@@ -621,7 +637,47 @@ export function applyDeployStatusToResources(
 }
 
 /**
- * settleDeployStatuses - apply the run's terminal conclusion to the graph.
+ * The messages a node carries when the run's conclusion — not the producer —
+ * decided its outcome (Exception 5.1). A cancelled or timed-out run publishes no
+ * per-resource failure, so without these the graph turns red and says nothing.
+ */
+export const DEPLOY_CANCELLED_MESSAGE = "Deployment cancelled";
+export const DEPLOY_TIMED_OUT_MESSAGE = "Deployment timed out";
+export const DEPLOY_MONITOR_TIMED_OUT_MESSAGE =
+  "Deployment monitoring timed out; the workflow may still be running.";
+export const DEPLOY_FAILED_MESSAGE = "Deployment failed";
+export const MAX_DEPLOY_MESSAGE_LENGTH = 500;
+
+/**
+ * unfinishedDeployMessage - the message for a node the run's conclusion failed.
+ *
+ * Cancellation and workflow timeout describe the run; `monitor_timed_out` only
+ * means monitoring stopped before its outcome was confirmed. Other non-success
+ * conclusions prefer a bounded copy of the extracted Radius error. The caller
+ * retains the full diagnostics; only text copied onto graph nodes is shortened.
+ */
+export function unfinishedDeployMessage(
+  conclusion?: string | null,
+  radiusError?: string
+): string {
+  if (conclusion === "cancelled") return DEPLOY_CANCELLED_MESSAGE;
+  if (conclusion === "timed_out") return DEPLOY_TIMED_OUT_MESSAGE;
+  if (conclusion === "monitor_timed_out")
+    return DEPLOY_MONITOR_TIMED_OUT_MESSAGE;
+  const detail = typeof radiusError === "string" ? radiusError.trim() : "";
+  if (detail.length > MAX_DEPLOY_MESSAGE_LENGTH)
+    return detail.slice(0, MAX_DEPLOY_MESSAGE_LENGTH - 3) + "...";
+  return detail || DEPLOY_FAILED_MESSAGE;
+}
+
+export interface SettleableResource {
+  deployStatus?: DeployStatus;
+  deployMessage?: string;
+}
+
+/**
+ * settleDeployStatuses - apply a workflow conclusion or `monitor_timed_out`
+ * to the graph without claiming an unconfirmed workflow has stopped.
  *
  * On success every node is forced green: the run concluded successfully, so
  * every resource provisioned, whatever the last snapshot happened to say. This
@@ -633,21 +689,48 @@ export function applyDeployStatusToResources(
  * while nodes already terminal keep the status the producer reported — the run
  * conclusion decides the overall label, not an individual resource's outcome
  * that was already observed.
+ *
+ * Every node this leaves red also gets a message, because a red node with no
+ * explanation is the one state the user most needs detail in (Exception 5.1).
+ * Which message depends on who decided the outcome. A node the producer already
+ * reported `failed` keeps its own message: it names that resource's own failure,
+ * which is more specific than anything derived from the run's conclusion. A node
+ * this function flips from pending or in progress had its outcome decided by the
+ * run, so it takes the conclusion's message even if it already carried one — the
+ * message it carried describes work in flight ("creating…"), and leaving that on
+ * a red node would report progress on a resource that never finished.
+ *
+ * Output resources are not walked here: they take their status from their parent
+ * through the caller's own propagation.
  */
 export function settleDeployStatuses(
-  resources: Array<{ deployStatus?: DeployStatus }>,
-  conclusion?: string | null
+  resources: SettleableResource[],
+  conclusion?: string | null,
+  radiusError?: string
 ): void {
   if (!Array.isArray(resources)) return;
   const succeeded = conclusion === "success";
+  const message =
+    succeeded ? "" : unfinishedDeployMessage(conclusion, radiusError);
   for (const resource of resources) {
     if (succeeded) {
       resource.deployStatus = "success";
+      // Documented above: a green node must not carry a stale failure message
+      // from an earlier snapshot of this same run.
+      delete resource.deployMessage;
       continue;
     }
     const current = resource.deployStatus || "pending";
-    if (current === "pending" || current === "in_progress")
-      resource.deployStatus = "failed";
+    const unfinished = current === "pending" || current === "in_progress";
+    if (unfinished) resource.deployStatus = "failed";
+    if (resource.deployStatus !== "failed") continue;
+    // A node the run just failed takes the run's message, replacing any
+    // in-flight progress text. A node the producer already reported failed keeps
+    // its own message, and one it reported failed without a message — incomplete
+    // artifact reporting — finally gets an explanation instead of being red and
+    // silent.
+    if (unfinished || !(resource.deployMessage ?? "").trim())
+      resource.deployMessage = message;
   }
 }
 
@@ -857,6 +940,10 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
   let acceptedSequence = -1;
   let lastGood: ReadResult | null = null;
   const inspectedArtifacts = new Map<number, ReadResult>();
+  // A run-scoped read follows one in-flight deployment through its rotating
+  // live slots; a repo-wide read looks for the newest terminal artifact and is
+  // not tied to any run.
+  const isRunScoped = Number.isFinite(Number(runId)) && Number(runId) > 0;
 
   const empty = (status: ReaderStatus, error: unknown = null): ReadResult => ({
     status,
@@ -885,13 +972,11 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     if (candidates.length === 0) return empty("missing");
 
     const expectedRunId = Number(runId);
-    const hasExpectedRunId =
-      Number.isFinite(expectedRunId) && expectedRunId > 0;
     // A repo-wide read is not scoped to any run, and `sequence` restarts at 1
     // for every run. Live-slot artifacts must therefore be excluded from that
     // path — otherwise a cancelled run's higher-sequenced slot could beat a
     // newer completed run's fixed-name terminal artifact.
-    if (!hasExpectedRunId) {
+    if (!isRunScoped) {
       candidates = candidates.filter((a) => !isLiveSlotArtifactName(a.name));
       if (candidates.length === 0) return empty("missing");
     }
@@ -907,11 +992,18 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     }
 
     let sawMalformed = false;
+    // A candidate that could not be read proves nothing about whether this
+    // deployment still exists, so it must not be reported as an absence: the
+    // reader retires its cached graph on a repo-wide "missing", and doing that
+    // for a transient download failure would blank a perfectly valid Deployed
+    // view. Tracked separately from `sawMalformed`, which describes an artifact
+    // that *was* read and turned out to be unusable.
+    let sawUnreadable = false;
     let exactMatch: ReadResult | null = null;
     let envOnlyMatch: ReadResult | null = null;
     for (const artifact of candidates) {
       let result =
-        hasExpectedRunId ? inspectedArtifacts.get(artifact.id) : undefined;
+        isRunScoped ? inspectedArtifacts.get(artifact.id) : undefined;
       if (!result) {
         let files: ArtifactFiles | null;
         try {
@@ -919,15 +1011,19 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
         } catch (e) {
           if (errorCode(e) === "GH_ARTIFACT_AUTH") return empty("auth", e);
           // A single unreadable artifact should not hide an older readable one.
+          sawUnreadable = true;
           continue;
         }
-        if (!files) continue;
+        if (!files) {
+          sawUnreadable = true;
+          continue;
+        }
         const progress = parseDeployProgressArtifact(
           files[DEPLOY_STATUS_FILES.progress]
         );
         if (!progress) {
           sawMalformed = true;
-          if (hasExpectedRunId)
+          if (isRunScoped)
             inspectedArtifacts.set(artifact.id, empty("malformed"));
           continue;
         }
@@ -942,7 +1038,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
           artifact,
           error: null
         };
-        if (hasExpectedRunId) inspectedArtifacts.set(artifact.id, result);
+        if (isRunScoped) inspectedArtifacts.set(artifact.id, result);
       }
       const progress = result.progress;
       if (!progress) {
@@ -952,7 +1048,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       // Confirm identity from the payload rather than from the derived name.
       if (!confirmArtifactIdentity(progress, { environment })) continue;
       if (
-        hasExpectedRunId &&
+        isRunScoped &&
         progress.runId !== undefined &&
         progress.runId !== expectedRunId
       )
@@ -965,7 +1061,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
         if (!exactMatch) {
           exactMatch = result;
         } else if (
-          hasExpectedRunId &&
+          isRunScoped &&
           progress.sequence > (exactMatch.progress?.sequence ?? -1)
         ) {
           exactMatch = result;
@@ -982,7 +1078,7 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
       if (!envOnlyMatch) {
         envOnlyMatch = result;
       } else if (
-        hasExpectedRunId &&
+        isRunScoped &&
         progress.sequence > (envOnlyMatch.progress?.sequence ?? -1)
       ) {
         envOnlyMatch = result;
@@ -990,7 +1086,15 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
     }
     if (exactMatch) return exactMatch;
     if (envOnlyMatch) return envOnlyMatch;
-    return empty(sawMalformed ? "malformed" : "missing");
+    // "missing" is reserved for a confirmed absence: GitHub listed this
+    // deployment's artifacts and none of them describe it. Candidates that
+    // could not be downloaded are reported as an error instead, so a transient
+    // failure never looks like a deletion.
+    return empty(
+      sawMalformed ? "malformed"
+      : sawUnreadable ? "error"
+      : "missing"
+    );
   }
 
   // read - fetch (cached, single-flight) and enforce monotonic sequencing.
@@ -1020,15 +1124,32 @@ export function createDeployStatusReader(options: DeployStatusReaderOptions) {
           lastGood &&
           result.progress.sequence <= acceptedSequence
         ) {
-          // An older snapshot of the run we are already tracking. Keep what we
-          // have; regressing the graph would flicker resources back to pending.
-          result = { ...lastGood, status: "stale" };
+          // Preserve graph sequencing, but distinguish an identical successful
+          // reread from a regression for consumers that require current proof.
+          const progressRevalidated =
+            result.progress.sequence === acceptedSequence &&
+            JSON.stringify(result.progress) ===
+              JSON.stringify(lastGood.progress);
+          result = { ...lastGood, status: "stale", progressRevalidated };
         } else {
           hasAccepted = true;
           acceptedRunId = incomingRun;
           acceptedSequence = result.progress.sequence;
           lastGood = result;
         }
+      } else if (result.status === "missing" && !isRunScoped) {
+        // GitHub answered and this deployment has no artifact. Retire what was
+        // read before instead of serving it from `lastGood`: deleting an
+        // application deletes its deploy-status artifact, and a reader that
+        // keeps falling back would render the deleted deployment for the rest
+        // of the session. Only a repo-wide read is trusted this far — a
+        // run-scoped read can momentarily list nothing while the producer
+        // rotates a live slot, and blanking on that would flicker the graph
+        // mid-deploy.
+        hasAccepted = false;
+        acceptedRunId = null;
+        acceptedSequence = -1;
+        lastGood = null;
       }
       cache = { at: now(), result };
       inflight = null;

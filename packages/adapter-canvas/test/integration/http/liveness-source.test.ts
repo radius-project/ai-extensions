@@ -25,6 +25,7 @@ function safePath(input: unknown): string {
 
 interface Harness {
   opens: OpenSourceRequest[];
+  setModelRevision(revision: string | null): void;
   setOpenSource(handler: ((input: OpenSourceRequest) => unknown) | null): void;
   stateFor(instanceId: string): CanvasState | undefined;
 }
@@ -32,6 +33,7 @@ interface Harness {
 function start(): Harness {
   const opens: OpenSourceRequest[] = [];
   let openSource: ((input: OpenSourceRequest) => unknown) | null = null;
+  let modelRevision: string | null = null;
   let instanceStates: ReadonlyMap<string, { state: CanvasState }> = new Map();
 
   const routes = createTestRouteTable(
@@ -40,6 +42,7 @@ function start(): Harness {
       // is still honored, exactly as the SDK entry does in production.
       getOpenSourceHandler: () => openSource,
       readInstanceState: (instanceId) => instanceStates.get(instanceId)?.state,
+      getWorkspaceModelRevision: () => Promise.resolve(modelRevision),
       toSafeRepoRelPath: safePath
     })
   );
@@ -68,6 +71,9 @@ function start(): Harness {
 
   return {
     opens,
+    setModelRevision(revision) {
+      modelRevision = revision;
+    },
     setOpenSource(handler) {
       openSource =
         handler === null ? null : (
@@ -98,6 +104,19 @@ describe("liveness-source real-loopback HIT (RF-01)", () => {
     });
     expect(pingPost.status).toBe(200);
     expect(await pingPost.text()).toBe('{"ok":true,"instanceId":"panel-a"}');
+
+    entry.state.graphModelRevision = "model-a";
+    harness.setModelRevision("model-b");
+    const changedModel = await fetch(`${entry.baseUrl}/api/ping`, {
+      headers: { "X-Radius-Workspace-Model": "1" }
+    });
+    expect(changedModel.status).toBe(200);
+    expect(await changedModel.json()).toEqual({
+      ok: true,
+      instanceId: "panel-a",
+      workspaceModelRevision: "model-b",
+      workspaceModelChanged: true
+    });
 
     const unavailable = await fetch(`${entry.baseUrl}/api/open-source`, {
       method: "POST",

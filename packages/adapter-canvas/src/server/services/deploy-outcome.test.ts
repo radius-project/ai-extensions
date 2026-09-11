@@ -7,6 +7,10 @@ import {
   type DeployGraphRead
 } from "./deploy-outcome.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import {
+  MAX_DEPLOY_MESSAGE_LENGTH,
+  settleDeployStatuses
+} from "../../deploy-artifacts.js";
 
 function dependencies(
   overrides: Partial<DeployOutcomeDependencies> = {}
@@ -17,6 +21,8 @@ function dependencies(
     extractGitHubActionsStepLog: () => "",
     explainOidcEnterpriseClaim: () => "",
     extractRadDeployError: () => "",
+    classifyDeployCloudAuthDrift: () => "",
+    cloudAuthDriftKind: "cloud-auth-drift",
     sleep: () => Promise.resolve(),
     now: () => 1_700_000_060_000,
     ...overrides
@@ -92,6 +98,7 @@ describe("deploy outcome construction", () => {
     "extractGitHubActionsStepLog",
     "explainOidcEnterpriseClaim",
     "extractRadDeployError",
+    "classifyDeployCloudAuthDrift",
     "sleep",
     "now"
   ] as const)("refuses to construct without %s", (name) => {
@@ -101,6 +108,17 @@ describe("deploy outcome construction", () => {
       `createDeployOutcomeService is missing required dependencies: ${name}`
     );
   });
+
+  it.each(["", "   ", undefined])(
+    "refuses to construct when cloudAuthDriftKind is %o",
+    (value) => {
+      const invalid = dependencies();
+      invalid.cloudAuthDriftKind = value as never;
+      expect(() => createDeployOutcomeService(invalid)).toThrow(
+        "createDeployOutcomeService requires a non-empty cloudAuthDriftKind."
+      );
+    }
+  );
 });
 
 describe("deploy outcome on success", () => {
@@ -414,6 +432,118 @@ describe("deploy outcome on failure", () => {
     );
   });
 
+  it("prefixes the auth-drift message and stamps the kind when a cloud login step fails before any resource is touched", async () => {
+    // Exception 5.2: classifier matched, so the readable drift lead is prefixed
+    // to describeFailure's message and the kind is stamped so the repair guard
+    // leaves it for the user to re-verify.
+    const driftInputs: unknown[] = [];
+    const { request, state } = outcomeRequest({
+      conclusion: "failure",
+      provider: "aws",
+      deployStepStartedAt: 0,
+      steps: [
+        { name: "Configure AWS Credentials", conclusion: "failure" },
+        { name: "Run rad commands", conclusion: "skipped" }
+      ]
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        classifyDeployCloudAuthDrift: (input) => {
+          driftInputs.push(input);
+          return "Cloud authentication failed. Re-verify.";
+        }
+      })
+    );
+
+    await service.settle(request);
+
+    expect(driftInputs).toEqual([
+      {
+        provider: "aws",
+        resourcesTouched: false,
+        failedStepNames: ["Configure AWS Credentials"]
+      }
+    ]);
+    expect(state.deployStatus).toBe("failed");
+    expect(state.deployErrorKind).toBe("cloud-auth-drift");
+    expect(state.deployError).toContain(
+      "Cloud authentication failed. Re-verify."
+    );
+    expect(state.deployError).toContain(
+      "View the full run: https://github.com/acme/widgets/actions/runs/42"
+    );
+  });
+
+  it("prefixes the auth-drift message even when describeFailure throws", async () => {
+    const { request, state } = outcomeRequest({ conclusion: "failure" });
+    const service = createDeployOutcomeService(
+      dependencies({
+        fetchRunLog: () => Promise.reject(new Error("network down")),
+        classifyDeployCloudAuthDrift: () => "Cloud auth drift lead."
+      })
+    );
+
+    await service.settle(request);
+
+    expect(state.deployErrorKind).toBe("cloud-auth-drift");
+    expect(state.deployError).toBe(
+      "Cloud auth drift lead.\n\n" +
+        "Deployment failed (failure). The failure details could not be read; " +
+        "see the full run: https://github.com/acme/widgets/actions/runs/42."
+    );
+  });
+
+  it.each(["cancelled", "timed_out"])(
+    "does not classify or stamp auth drift when the run concluded %s at the cloud login step",
+    async (conclusion) => {
+      // Only a genuine "failure" can be credential drift. A run cancelled or
+      // timed out at the cloud-login step touched no resource, but that is not
+      // the user's credentials drifting, so the classifier must not run and the
+      // kind must stay unset.
+      let classifierCalls = 0;
+      const { request, state } = outcomeRequest({
+        conclusion,
+        provider: "aws",
+        deployStepStartedAt: 0,
+        steps: [
+          { name: "Configure AWS Credentials", conclusion },
+          { name: "Run rad commands", conclusion: "skipped" }
+        ]
+      });
+      const service = createDeployOutcomeService(
+        dependencies({
+          classifyDeployCloudAuthDrift: () => {
+            classifierCalls += 1;
+            return "Cloud authentication failed. Re-verify.";
+          }
+        })
+      );
+
+      await service.settle(request);
+
+      expect(classifierCalls).toBe(0);
+      expect(state.deployStatus).toBe("failed");
+      expect(state.deployErrorKind).toBeUndefined();
+      expect(state.deployError).not.toContain(
+        "Cloud authentication failed. Re-verify."
+      );
+    }
+  );
+
+  it("leaves the kind unset when the failure is not auth drift", async () => {
+    const { request, state } = outcomeRequest({
+      conclusion: "failure",
+      deployStepStartedAt: 1_700_000_000_000,
+      steps: [{ name: "Run rad commands", conclusion: "failure" }]
+    });
+    const service = createDeployOutcomeService(dependencies());
+
+    await service.settle(request);
+
+    expect(state.deployStatus).toBe("failed");
+    expect(state.deployErrorKind).toBeUndefined();
+  });
+
   it("reports a conclusion-less failure without inventing one", async () => {
     const { request, state } = outcomeRequest({ conclusion: null, steps: [] });
     const service = createDeployOutcomeService(dependencies());
@@ -422,6 +552,24 @@ describe("deploy outcome on failure", () => {
 
     expect(state.deployError).toContain("Deployment failed.");
     expect(state.deployError).not.toContain("Failed step:");
+  });
+
+  it("omits the conclusion from the degraded message when there was none", async () => {
+    // The catch-branch fallback must not print "(null)": a conclusion-less run
+    // that also fails its log read gets a degraded message with no parenthetical.
+    const { request, state } = outcomeRequest({ conclusion: null });
+    const service = createDeployOutcomeService(
+      dependencies({
+        fetchRunLog: () => Promise.reject(new Error("network down"))
+      })
+    );
+
+    await service.settle(request);
+
+    expect(state.deployError).toBe(
+      "Deployment failed. The failure details could not be read; " +
+        "see the full run: https://github.com/acme/widgets/actions/runs/42."
+    );
   });
 
   it("keeps the run-log details when the control-plane log cannot be read", async () => {
@@ -466,5 +614,165 @@ describe("deploy outcome on failure", () => {
     expect(state.deployError).toContain("line-59");
     expect(state.deployError).toContain("line-20");
     expect(state.deployError).not.toContain("line-19");
+  });
+});
+
+describe("deploy outcome settles red nodes with an explanation (Exception 5.1)", () => {
+  it("keeps full failure diagnostics while bounding copies on graph nodes", async () => {
+    const radiusError =
+      "Error: recipe failed\n" + "quota details\n".repeat(100);
+    const resources: CanvasGraphResource[] = [
+      { id: "r1", name: "db", deployStatus: "pending" }
+    ];
+    const { request, state, logs } = outcomeRequest({
+      conclusion: "failure",
+      resources
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        extractRadDeployError: () => radiusError,
+        settleDeployStatuses
+      })
+    );
+
+    await service.settle(request);
+
+    expect(resources[0].deployMessage).toBe(
+      radiusError.slice(0, MAX_DEPLOY_MESSAGE_LENGTH - 3) + "..."
+    );
+    expect(resources[0].deployMessage).toHaveLength(MAX_DEPLOY_MESSAGE_LENGTH);
+    expect(state.deployError).toContain(radiusError);
+    expect(logs.join("\n")).toContain(
+      radiusError
+        .split("\n")
+        .map((line) => "  " + line)
+        .join("\n")
+    );
+  });
+
+  it("hands the extracted Radius error to the graph so every red node carries it", async () => {
+    const settled: [string | undefined | null, string | undefined][] = [];
+    const { request } = outcomeRequest({
+      conclusion: "failure",
+      resources: [{ id: "r1", name: "db", deployStatus: "pending" }],
+      steps: [{ name: "Run rad commands", conclusion: "failure" }]
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        fetchRunLog: () => Promise.resolve("run log text"),
+        extractRadDeployError: () => "Error: recipe quota exceeded",
+        settleDeployStatuses: (_resources, conclusion, radiusError) => {
+          settled.push([conclusion, radiusError]);
+        }
+      })
+    );
+
+    await service.settle(request);
+
+    expect(settled).toEqual([["failure", "Error: recipe quota exceeded"]]);
+  });
+
+  it("settles a cancelled run without inventing a Radius error", async () => {
+    const settled: [string | undefined | null, string | undefined][] = [];
+    const { request } = outcomeRequest({
+      conclusion: "cancelled",
+      resources: [{ id: "r1", name: "db", deployStatus: "in_progress" }]
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        settleDeployStatuses: (_resources, conclusion, radiusError) => {
+          settled.push([conclusion, radiusError]);
+        }
+      })
+    );
+
+    await service.settle(request);
+
+    expect(settled).toEqual([["cancelled", ""]]);
+  });
+
+  it("still settles the graph when the failure details could not be read", async () => {
+    // The degraded path: the run-log read threw, so there is no Radius error to
+    // show, but the nodes must not be left stuck pending.
+    const settled: [string | undefined | null, string | undefined][] = [];
+    const { request, state } = outcomeRequest({ conclusion: "failure" });
+    const service = createDeployOutcomeService(
+      dependencies({
+        fetchRunLog: () => {
+          throw new Error("log unreadable");
+        },
+        settleDeployStatuses: (_resources, conclusion, radiusError) => {
+          settled.push([conclusion, radiusError]);
+        }
+      })
+    );
+
+    await service.settle(request);
+
+    expect(settled).toEqual([["failure", ""]]);
+    expect(state.deployError).toContain(
+      "The failure details could not be read"
+    );
+  });
+
+  it("settles the graph before the panel can observe a terminal failure", async () => {
+    // The webview fires the repair handoff the moment it sees "failed", so the
+    // graph must already be settled by then.
+    const order: string[] = [];
+    const { request } = outcomeRequest({
+      conclusion: "failure",
+      resources: [{ id: "r1", name: "db", deployStatus: "pending" }]
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        settleDeployStatuses: (resources) => {
+          order.push("settle");
+          resources.forEach((r) => {
+            r.deployStatus = "failed";
+            r.deployMessage = "Deployment failed";
+          });
+        }
+      })
+    );
+    const entryState = request.entry.state;
+    let observed: string | undefined;
+    Object.defineProperty(entryState, "deployStatus", {
+      configurable: true,
+      get: () => observed,
+      set: (value: string) => {
+        observed = value;
+        order.push(`status:${value}`);
+      }
+    });
+
+    await service.settle(request);
+
+    expect(order).toEqual(["settle", "status:failed"]);
+    expect(request.resources[0].deployMessage).toBe("Deployment failed");
+  });
+
+  it("propagates the settled status onto output resources", async () => {
+    const resource: CanvasGraphResource = {
+      id: "r1",
+      name: "db",
+      deployStatus: "pending"
+    };
+    const { request, statusCalls } = outcomeRequest({
+      conclusion: "failure",
+      resources: [resource]
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        settleDeployStatuses: (resources) => {
+          resources.forEach((r) => {
+            r.deployStatus = "failed";
+          });
+        }
+      })
+    );
+
+    await service.settle(request);
+
+    expect(statusCalls).toEqual([[resource, "failed"]]);
   });
 });

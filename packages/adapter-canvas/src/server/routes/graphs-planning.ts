@@ -22,6 +22,15 @@ import type { GraphProgressRecord, GraphProgressView } from "../../shared.js";
 import type { CanvasRequestContext } from "../request-context.js";
 import type { RouteHandlerRegistry } from "../route-table.js";
 import type { CanvasServerEntry } from "../types.js";
+import type {
+  ResolvedWorkspaceBranch,
+  WorkspaceBranchResolution
+} from "../../workspace.js";
+import {
+  deletionInventoryFromSnapshot,
+  type DeletionInventory,
+  type DeletionInventorySnapshot
+} from "../services/deletion-inventory.js";
 
 // The two read-only halves of the `graphs-planning` family: the progress log the
 // page polls, and the deployed-graph projection. They are migrated together
@@ -31,10 +40,10 @@ import type { CanvasServerEntry } from "../types.js";
 // the dispatcher boundary.
 
 // Shaped exactly like the reader `createDeployStatusReader` returns, minus every
-// member these routes do not call. Declaring only `graph` and `progress` keeps a
-// handler from quietly reaching for `read`, `status`, `sequence` or
-// `controlPlaneLog`, none of which the legacy branch touched.
+// member these routes do not call. The inventory uses `read` so status and
+// progress come from one snapshot, without graph/progress's last-good fallback.
 export interface DeployedGraphStatusReader {
+  read(): Promise<DeletionInventorySnapshot>;
   graph(): Promise<{
     graph: unknown | null;
     status: string;
@@ -273,7 +282,14 @@ export async function handleDeployedGraph(
   response.setHeader("Content-Type", "application/json");
   if (!repo) {
     response.writeHead(200);
-    response.end(JSON.stringify({ resources: [], repo: "", mode: "greyed" }));
+    response.end(
+      JSON.stringify({
+        resources: [],
+        repo: "",
+        mode: "greyed",
+        deletionInventory: null
+      })
+    );
     return;
   }
   const state = entry?.state || {};
@@ -341,6 +357,7 @@ export async function handleDeployedGraph(
     namedSelectionPartMatches(state.deployAppName || "", requestedApp);
   const deploying =
     state.deployStatus === "in_progress" && sessionMatchesSelection;
+  const monitorRunId = state.deployRunId;
 
   const statusByKey = new Map<string, DeployStatus>();
   // Seed the resources the deploy monitor tracks so an empty artifact read keeps
@@ -359,6 +376,18 @@ export async function handleDeployedGraph(
   let readOk = false;
   let updatedAt: string | null = null;
   let progress: DeployProgress | null = null;
+  let artifactRunId: string | number | null = null;
+  let deletionInventory: DeletionInventory | null = null;
+  const inventoryApplication = (
+    url.searchParams.get("application") || ""
+  ).trim();
+  const inventoryEnvironment = (
+    url.searchParams.get("environment") || ""
+  ).trim();
+  const inventorySessionRunId = state.deployRunId;
+  const inventoryDeployStatus = state.deployStatus;
+  const inventoryStartedAt = state.deployStartedAt;
+  const inventoryFinishedAt = state.deployFinishedAt;
   // The app selector is a hint, not a hard filter: the reader falls back to an
   // env-only match when the selected app has no artifact yet (the app name can
   // itself be a guess from the repo short name). Surface the app it actually
@@ -382,11 +411,13 @@ export async function handleDeployedGraph(
     publishedGraph = result.graph;
     readOk = result.status === "ok" || result.status === "stale";
     progress = await reader.progress();
+    artifactRunId =
+      progress?.runId ?? result.artifact?.workflow_run?.id ?? null;
     const artifactRunMismatchesSession =
       sessionMatchesSelection &&
       state.deployRunId != null &&
-      progress?.runId != null &&
-      String(progress.runId) !== String(state.deployRunId);
+      artifactRunId != null &&
+      String(artifactRunId) !== String(state.deployRunId);
     const attemptBoundary = Math.max(
       state.deployStartedAt ?? 0,
       state.deployFinishedAt ?? 0
@@ -398,18 +429,25 @@ export async function handleDeployedGraph(
         attemptBoundary > 0 &&
         Number.isFinite(artifactCreatedAt) &&
         artifactCreatedAt > attemptBoundary);
+    const terminalArtifactNeedsIdentity =
+      sessionMatchesSelection &&
+      state.deployRunId != null &&
+      state.deployErrorKind === "run-unconfirmed" &&
+      (progress?.state === "failed" || progress?.state === "succeeded");
     const activeArtifactMatchesRun =
       deploying ?
         state.deployRunId != null &&
-        progress?.runId != null &&
-        String(progress.runId) === String(state.deployRunId)
-      : mismatchedArtifactIsNewer;
+        artifactRunId != null &&
+        String(artifactRunId) === String(state.deployRunId)
+      : mismatchedArtifactIsNewer &&
+        (!terminalArtifactNeedsIdentity || artifactRunId != null);
     if (!activeArtifactMatchesRun) {
-      // Run discovery has not completed, or an unscoped read found a previous
-      // run. Keep the active monitor state and do not expose stale graph metadata.
+      // Unknown or older artifact identity cannot establish the tracked run's
+      // outcome. Keep monitor state without exposing unrelated graph metadata.
       publishedGraph = null;
       readOk = false;
       progress = null;
+      artifactRunId = null;
     } else {
       updatedAt = progress?.updatedAt || null;
       if (progress?.application) resolvedApp = progress.application;
@@ -419,12 +457,29 @@ export async function handleDeployedGraph(
       for (const [key, status] of dependencies.buildDeployStatusMap(progress)) {
         statusByKey.set(key, status);
       }
-      // Messages have no in-session seed, so first-wins only protects duplicate
-      // weaker identity keys within this one snapshot.
+      // First-wins protects duplicate weaker identity keys in this snapshot.
       for (const [key, message] of dependencies.buildDeployMessageMap(
         progress
       )) {
         if (!messageByKey.has(key)) messageByKey.set(key, message);
+      }
+      const snapshot = await reader.read();
+      // A concurrent deploy must not turn an earlier snapshot into a delete
+      // inventory. Unlike graph display, selectors cannot fall back to session
+      // identity, and unverified reads cannot reuse last-good resources.
+      if (
+        !deploying &&
+        state.deployStatus === inventoryDeployStatus &&
+        state.deployRunId === inventorySessionRunId &&
+        state.deployStartedAt === inventoryStartedAt &&
+        state.deployFinishedAt === inventoryFinishedAt
+      ) {
+        deletionInventory = deletionInventoryFromSnapshot(
+          snapshot,
+          inventoryApplication,
+          inventoryEnvironment,
+          sessionMatchesSelection ? (inventorySessionRunId ?? null) : null
+        );
       }
     }
   } catch (e) {
@@ -442,9 +497,40 @@ export async function handleDeployedGraph(
     publishedGraph != null ||
     (sessionMatchesSelection && state.deployedGraph != null);
   const artifactMatchesSessionRun =
-    progress?.runId == null ||
+    artifactRunId == null ||
     state.deployRunId == null ||
-    String(progress.runId) === String(state.deployRunId);
+    String(artifactRunId) === String(state.deployRunId);
+
+  // A terminal monitor snapshot includes the run-level explanation that an
+  // incomplete artifact cannot carry. Overlay it after the read: the monitor
+  // may have finished while that read was pending. A terminal artifact from
+  // this run or a newer deployment must supersede the snapshot. An unconfirmed
+  // run keeps its existing repair guard rather than acquiring a made-up conclusion.
+  if (
+    sessionMatchesSelection &&
+    artifactMatchesSessionRun &&
+    progress?.state !== "failed" &&
+    progress?.state !== "succeeded" &&
+    monitorRunId != null &&
+    state.deployRunId === monitorRunId &&
+    (state.deployStatus === "complete" || state.deployStatus === "failed") &&
+    Array.isArray(state.deployingResources)
+  ) {
+    const settledKeys = new Set<string>();
+    for (const resource of state.deployingResources) {
+      const status = resource.deployStatus;
+      if (status !== "success" && status !== "failed") continue;
+      for (const key of dependencies.deployStatusKeys(resource)) {
+        if (settledKeys.has(key)) continue;
+        settledKeys.add(key);
+        statusByKey.set(key, status);
+        messageByKey.delete(key);
+        if (status === "failed" && resource.deployMessage?.trim()) {
+          messageByKey.set(key, resource.deployMessage);
+        }
+      }
+    }
+  }
 
   const terminalConclusion =
     (
@@ -530,7 +616,8 @@ export async function handleDeployedGraph(
       branch,
       mode,
       updatedAt,
-      application: resolvedApp
+      application: resolvedApp,
+      deletionInventory
     })
   );
 }
@@ -617,7 +704,16 @@ export interface GraphsPlanningStreamDependencies {
   // request context's `state` snapshot cannot express it: it substitutes `{}`
   // for a missing entry.
   readInstanceEntry(instanceId: string): CanvasServerEntry | undefined;
-  defaultBranchForState(state: CanvasState | undefined): string;
+  resolveBranchForRequest(
+    entry: CanvasServerEntry,
+    repo: string,
+    requestedBranch: string
+  ): Promise<WorkspaceBranchResolution>;
+  commitBranchResolution(
+    entry: CanvasServerEntry,
+    repo: string,
+    resolution: ResolvedWorkspaceBranch
+  ): boolean;
   // Prepares the source-ref context for the entry and returns its token.
   prepareSourceRef(
     entry: CanvasServerEntry,
@@ -684,19 +780,18 @@ export async function handleLoadGraphStream(
 ): Promise<void> {
   const { response, url, instanceId } = context;
   const repo = url.searchParams.get("repo") || "";
+  const requestedBranch = url.searchParams.get("branch") || "";
   const entry = dependencies.readInstanceEntry(instanceId);
   if (!entry) {
     response.writeHead(503);
     response.end("Canvas server state is unavailable.");
     return;
   }
-  const branch =
-    url.searchParams.get("branch") ||
-    dependencies.defaultBranchForState(entry.state);
-  const sourceRefContext = dependencies.prepareSourceRef(entry, {
-    repo,
-    branch
-  });
+  // Claim arrival order before the asynchronous live-branch lookup. The JSON
+  // graph route shares this generation, so whichever request arrived later owns
+  // the graph state regardless of which branch lookup finishes first.
+  const requestGeneration = (entry.state.graphBuildGeneration =
+    (entry.state.graphBuildGeneration || 0) + 1);
 
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
@@ -706,15 +801,55 @@ export async function handleLoadGraphStream(
   const sendProgress = (message: string): void => {
     response.write(`event: progress\ndata: ${JSON.stringify({ message })}\n\n`);
   };
-  const sendDone = (data: unknown): void => {
-    response.write(`event: done\ndata: ${JSON.stringify(data)}\n\n`);
+  let resolvedBranch: string | undefined;
+  const sendDone = (data: Record<string, unknown>): void => {
+    response.write(
+      `event: done\ndata: ${JSON.stringify({
+        ...data,
+        ...(resolvedBranch ? { resolvedBranch } : {})
+      })}\n\n`
+    );
     response.end();
   };
 
+  let branchResolution: WorkspaceBranchResolution;
+  try {
+    branchResolution = await dependencies.resolveBranchForRequest(
+      entry,
+      repo,
+      requestedBranch
+    );
+  } catch (error) {
+    sendDone({ error: dependencies.errorMessage(error) });
+    return;
+  }
+  if (entry.state.graphBuildGeneration !== requestGeneration) {
+    sendDone({ stale: true });
+    return;
+  }
+  if (branchResolution.status === "unavailable") {
+    sendDone({
+      error: branchResolution.error,
+      workspaceBranchUnavailable: true,
+      repo
+    });
+    return;
+  }
   if (!repo) {
     sendDone({ error: "Please select a repository." });
     return;
   }
+  if (!dependencies.commitBranchResolution(entry, repo, branchResolution)) {
+    sendDone({ stale: true });
+    return;
+  }
+  const branch = branchResolution.branch;
+  resolvedBranch =
+    requestedBranch && requestedBranch !== branch ? branch : undefined;
+  const sourceRefContext = dependencies.prepareSourceRef(entry, {
+    repo,
+    branch
+  });
 
   try {
     sendProgress(`Checking ${repo} for existing app.bicep...`);
@@ -745,6 +880,13 @@ export async function handleLoadGraphStream(
         return;
       }
       dependencies.triggerAppBicepHandoff(entry, repo, branch);
+      // Deliberately outside the terminal-failure contract that the JSON
+      // load-graph/plan-graph routes implement: this stream has no restartWait,
+      // so every connection is a fresh explicit open with no way to distinguish
+      // a user retry from an automatic one. The shipped browser does not use
+      // this route. Do not wire it to a polling client without first teaching it
+      // to honour a recorded appModelAuthoringFailure, or a permanently failed
+      // model will request generation on every reconnect.
       sendDone({
         error: `Copilot is generating .radius/app.bicep with the Radius app-bicep skill.`,
         needsAppBicep: true,
@@ -793,6 +935,8 @@ export async function handleLoadGraphStream(
     }
     entry.state.graphTargetRepo = repo;
     entry.state.graphBranch = branch;
+    entry.state.graphFollowsWorkspaceBranch =
+      branchResolution.followsWorkspaceBranch === true;
     // Authoritative provenance: true only when the local workspace actually
     // supplied the app.bicep content (file is on disk).
     entry.state.graphFromWorkspace = selection.fromWorkspace;

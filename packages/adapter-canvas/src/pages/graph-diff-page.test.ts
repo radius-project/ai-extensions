@@ -105,6 +105,36 @@ describe("graphDiffPage", () => {
     });
   });
 
+  it.each([
+    { diffModelingFailed: false, diffError: HOSTILE_STATE },
+    { diffModelingFailed: true, diffError: HOSTILE_STATE },
+    { diffModelingFailed: true, diffError: "" }
+  ])(
+    "preserves populated diff errors and their presentation: %j",
+    ({ diffModelingFailed, diffError }) => {
+      const resources = [{ id: "same", diffStatus: "unchanged" }];
+      const html = graphDiffPage({
+        diffTargetRepo: "octo/app",
+        diffBase: "main",
+        diffHead: "feature",
+        diffResources: resources,
+        diffModelingFailed,
+        diffError
+      });
+
+      expect(
+        readBrowserPageState(html, "radius-graph-diff-state")
+      ).toMatchObject({
+        resources,
+        modelingError: diffModelingFailed ? diffError : ""
+      });
+      expect(html).toContain(
+        `id="diff-status" class="status ${diffError ? "error" : "info"}" style="${diffError && !diffModelingFailed ? "" : "display:none;"}"`
+      );
+      expect(html).not.toContain("<script>alert(1)</script>");
+    }
+  );
+
   // The diff page is the only page that renders two branches at once, so it
   // ships the worktree branch name and lets the browser decide per node.
   it.each([

@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 let joinCount = 0;
 let joinedDeclaration;
@@ -9,7 +9,7 @@ const REQUIRED_SKILL_FILES = [
   "scripts/promote-app-model.mjs",
   "scripts/validate-bicep.mjs",
   "scripts/write-app-origin.mjs",
-  "../radius-app-graph/references/source-code-references.md"
+  "references/source-code-references.md"
 ];
 const LEGACY_INLINED_HEADING =
   "# radius-app-bicep skill (bundled with the Radius extension)";
@@ -39,8 +39,7 @@ export async function joinSession(declaration) {
     repoPath: process.env.RADIUS_ARTIFACT_WORKSPACE
   });
   const bootstrap = JSON.parse(String(bootstrapText));
-  const artifactPath = resolve(process.env.RADIUS_ARTIFACT_PATH);
-  const artifactDir = dirname(artifactPath);
+  const artifactDir = resolve(process.env.RADIUS_ARTIFACT_ROOT);
   const skillBase = String(bootstrap.skillBase);
   const packageVersion = JSON.parse(
     readFileSync(join(artifactDir, "package.json"), "utf8")

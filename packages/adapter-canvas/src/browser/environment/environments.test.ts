@@ -1399,6 +1399,25 @@ describe("environment terminal banners", () => {
       'href="https://github.com/octo/app/pull/1"'
     );
 
+    page.controller.showActionRequired(
+      "azure",
+      "prod",
+      "https://github.com/octo/app/pull/1",
+      {
+        userMessage:
+          "Merge the pull request and finish credentials for <octo/app>."
+      }
+    );
+    expect(page.elements.actionText.innerHTML).toContain(
+      "Merge the pull request and finish credentials for &lt;octo/app&gt;."
+    );
+    expect(page.elements.actionText.innerHTML).toContain(
+      'href="https://github.com/octo/app/pull/1"'
+    );
+    expect(page.elements.actionText.innerHTML).not.toContain(
+      "Credential verification and deploys start working once it merges"
+    );
+
     page.controller.showActionRequired("aws", "<prod>", "javascript:alert(1)", {
       branch: "<setup>",
       baseBranch: "<main>"

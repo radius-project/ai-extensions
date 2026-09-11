@@ -4,6 +4,7 @@
 // process-spawning surface besides the deploy monitor and infra modules.
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -12,6 +13,7 @@ import type {
   ExecFileOptions,
   ExecFileOptionsWithStringEncoding
 } from "node:child_process";
+import { redactCredentials } from "./credential-redaction.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
 
 export interface GhAccount {
@@ -88,6 +90,7 @@ type CliCallback = (
 
 export interface CliOptions extends ExecFileOptions {
   env?: NodeJS.ProcessEnv;
+  preserveGitHubToken?: boolean;
 }
 
 export interface CommandOptions extends CliOptions {
@@ -126,6 +129,7 @@ export interface SelectedGhExecutor {
 export interface ContentResult {
   content: string | null;
   error: string | null;
+  status: number | null;
 }
 
 export interface ContentBytesTooLarge {
@@ -173,23 +177,17 @@ export function supportsWorkflowDispatchRunDetails(
   return version[0] > 2 || (version[0] === 2 && version[1] >= 87);
 }
 
-const MIN_OPAQUE_TOKEN_REDACTION_LENGTH = 12;
-
 // This module is the gh process boundary, so every diagnostic leaving it must
 // redact both recognizable GitHub credentials and opaque injected tokens.
 export function redactGhCredentials(
   value: string,
   env: NodeJS.ProcessEnv = process.env
 ): string {
-  let redacted = value;
-  for (const token of [env.GH_TOKEN?.trim(), env.GITHUB_TOKEN?.trim()]) {
-    if (token && token.length >= MIN_OPAQUE_TOKEN_REDACTION_LENGTH)
-      redacted = redacted.replaceAll(token, "[REDACTED]");
-  }
-  return redacted.replace(
-    /\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b/g,
-    "[REDACTED]"
-  );
+  return redactCredentials(value, [
+    env.GH_TOKEN,
+    env.GITHUB_TOKEN,
+    env.GH_PACKAGES_TOKEN
+  ]);
 }
 
 function errorMessage(error: unknown): string {
@@ -498,10 +496,14 @@ function resolveActingLogin(
 // operations will use, together with WHICH credential it turned out to be.
 //
 // Preference order:
-//   1. When the acting login has a keyring entry, use its token pinned via
+//   1. When the host provides GH_PACKAGES_TOKEN and GH_PACKAGES_USER, use them
+//      only for package calls. This keeps a repository-scoped App token on
+//      GH_TOKEN while allowing a workflow-native token to authenticate to
+//      GitHub Packages under its own login.
+//   2. When the acting login has a keyring entry, use its token pinned via
 //      `--user` (a full `gh auth login` credential, which carries the
 //      read:packages/write:packages scopes GHCR needs).
-//   2. Otherwise — including when that keyring lookup yields nothing — fall back
+//   3. Otherwise — including when that keyring lookup yields nothing — fall back
 //      to the injected GH_TOKEN/GITHUB_TOKEN for that same identity. It may lack
 //      package scopes, in which case GHCR returns a scope error the caller
 //      surfaces with refresh guidance.
@@ -510,6 +512,29 @@ function resolveActingLogin(
 function ensurePackageCredential(): Promise<GhPackageCredentialResolution> {
   if (_ghPackageCredentialPromise) return _ghPackageCredentialPromise;
   _ghPackageCredentialPromise = (async () => {
+    const packageToken = process.env.GH_PACKAGES_TOKEN?.trim();
+    if (packageToken) {
+      const packageUser = process.env.GH_PACKAGES_USER?.trim();
+      if (!packageUser) {
+        return {
+          ok: false,
+          error:
+            "GH_PACKAGES_USER is required when GH_PACKAGES_TOKEN is configured."
+        };
+      }
+      return {
+        ok: true,
+        credentials: {
+          token: packageToken,
+          username: packageUser,
+          source: "injected-token",
+          // Workflow tokens do not expose OAuth scopes. The host opts into this
+          // dedicated path only after granting package permissions; the GHCR
+          // request remains the authoritative access check.
+          scopes: ["read:packages", "write:packages", "delete:packages"]
+        }
+      };
+    }
     const snapshot = await ensureGhSnapshot();
     const strategy = await ensureGhStrategy();
     const login = resolveActingLogin(snapshot, strategy);
@@ -650,11 +675,9 @@ export async function getGitHubIdentity(): Promise<GitHubIdentity> {
       packagesResolution.credentials.source
     : "unavailable";
   const resolvedPackagesScopes =
-    (packagesCredentialSource === "keyring" ?
-      keyringScopesByLogin.get(packagesLogin)
-    : packagesCredentialSource === "injected-token" ?
-      injectedScopesFor(packagesLogin)
-    : undefined) || [];
+    (packagesResolution.ok ?
+      packagesResolution.credentials.scopes
+    : undefined) ?? [];
   const packagesHasWrite = resolvedPackagesScopes.includes("write:packages");
   const seen = new Set<string>();
   const accounts: GitHubIdentityAccount[] = [];
@@ -988,6 +1011,20 @@ export async function selectedFetchFileFromRepo(
   path: string,
   branch = "main"
 ): Promise<string | null> {
+  return (await selectedFetchFileFromRepoResult(executor, repo, path, branch))
+    .content;
+}
+
+export async function selectedFetchFileFromRepoResult(
+  executor: SelectedGhExecutor,
+  repo: string,
+  path: string,
+  branch = "main"
+): Promise<{
+  content: string | null;
+  error: string | null;
+  status: number | null;
+}> {
   const result = await executor.run(
     [
       "api",
@@ -997,8 +1034,33 @@ export async function selectedFetchFileFromRepo(
     ],
     { timeout: 15000 }
   );
-  if (result.code !== 0 || !result.stdout.trim()) return null;
-  return Buffer.from(result.stdout.trim(), "base64").toString("utf8");
+  const statusMatch = `${result.stderr}\n${result.stdout}`.match(
+    /\bHTTP\s+(\d{3})\b/i
+  );
+  const status =
+    result.code === 0 ? 200
+    : statusMatch ? Number(statusMatch[1])
+    : null;
+  if (result.code !== 0) {
+    return {
+      content: null,
+      error:
+        (result.stderr || result.stdout || "").trim() || "GitHub API failed.",
+      status
+    };
+  }
+  if (!result.stdout.trim()) {
+    return {
+      content: null,
+      error: "GitHub returned an empty repository file.",
+      status: 200
+    };
+  }
+  return {
+    content: Buffer.from(result.stdout.trim(), "base64").toString("utf8"),
+    error: null,
+    status: 200
+  };
 }
 
 export async function selectedGetDefaultBranch(
@@ -1265,13 +1327,15 @@ export function cliExec(
   opts: CliOptions,
   cb: CliCallback
 ): ChildProcess {
+  const { preserveGitHubToken = false, ...processOptions } = opts;
   const execOpts: ExecFileOptionsWithStringEncoding = {
     maxBuffer: 10 * 1024 * 1024,
     windowsHide: true,
-    ...opts,
+    ...processOptions,
     encoding: "utf8"
   };
-  if (isGhCmd(cmd)) execOpts.env = ghChildEnv(execOpts.env);
+  if (isGhCmd(cmd) && !preserveGitHubToken)
+    execOpts.env = ghChildEnv(execOpts.env);
   execOpts.env = withoutAgentSession(execOpts.env);
   const isWindows = process.platform === "win32";
   const isWindowsGh = isWindows && isGhCmd(cmd);
@@ -1460,22 +1524,33 @@ export function ghApiGetContentResult(
           const detail = redactGhCredentials(
             (stderr && stderr.trim()) || err.message || String(err)
           );
-          resolve({ content: null, error: detail.trim() });
+          const statusMatch = detail.match(/\bHTTP\s+(\d{3})\b/i);
+          resolve({
+            content: null,
+            error: detail.trim(),
+            status: statusMatch ? Number(statusMatch[1]) : null
+          });
           return;
         }
         if (!stdout || !stdout.trim()) {
-          resolve({ content: null, error: "empty response from gh api" });
+          resolve({
+            content: null,
+            error: "empty response from gh api",
+            status: 200
+          });
           return;
         }
         try {
           resolve({
             content: Buffer.from(stdout.trim(), "base64").toString("utf8"),
-            error: null
+            error: null,
+            status: 200
           });
         } catch (e) {
           resolve({
             content: null,
-            error: `failed to decode response: ${errorMessage(e)}`
+            error: `failed to decode response: ${errorMessage(e)}`,
+            status: 200
           });
         }
       }
@@ -1483,7 +1558,7 @@ export function ghApiGetContentResult(
   });
 }
 
-/** Repo-file variant of ghApiGetContentResult. Resolves `{ content, error }`. */
+/** Repo-file variant of ghApiGetContentResult. */
 export function fetchFileFromRepoResult(
   repo: string,
   path: string,
@@ -1547,7 +1622,7 @@ export const github = {
   getDefaultBranch: (repo: string) => getDefaultBranch(repo)
 };
 
-// Look up a file's blob SHA on a branch; resolves '' when the file is absent.
+// Look up a file's blob SHA on a branch; resolves "" when the file is absent.
 function getRepoFileSha(
   repo: string,
   path: string,
@@ -1566,10 +1641,18 @@ function getRepoFileSha(
   });
 }
 
+function gitBlobSha(content: string): string {
+  const bytes = Buffer.from(content, "utf8");
+  return createHash("sha1")
+    .update(`blob ${bytes.length}\0`)
+    .update(bytes)
+    .digest("hex");
+}
+
 // Create or update a single UTF-8 text file on a repo branch via the GitHub
-// contents API. Reuses the existing blob SHA so a re-commit is an update rather
-// than a rejected create. The commit body is fed over stdin (never argv) so the
-// base64 payload can't collide with shell/CLI parsing. Rejects on failure.
+// contents API. Identical content is a no-op; drift reuses the existing blob SHA
+// so the write is an update rather than a rejected create. The commit body is
+// fed over stdin (never argv) so the base64 payload cannot collide with parsing.
 export async function commitFileToRepo(
   repo: string,
   path: string,
@@ -1579,6 +1662,7 @@ export async function commitFileToRepo(
   timeout = 30000
 ): Promise<boolean> {
   const sha = await getRepoFileSha(repo, path, branch);
+  if (sha && sha === gitBlobSha(content)) return false;
   const body = JSON.stringify({
     message,
     content: Buffer.from(content, "utf8").toString("base64"),

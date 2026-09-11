@@ -32,6 +32,9 @@ const SUPPORTED_SCHEMA_KEYWORDS = new Set([
   "items"
 ]);
 const DNS_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
+const CANVAS_KEYWORD = "canvas";
+const CANVAS_LOGO = "assets/preview.png";
+const COPILOT_CLIENT_NAMESPACE = "com.github.copilot";
 
 class Failure extends Error {}
 
@@ -212,6 +215,35 @@ function isReverseDomainNamespace(namespace) {
   return labels.length >= 2 && labels.every((label) => DNS_LABEL.test(label));
 }
 
+function isCanvasPlugin(manifest) {
+  return (
+    Array.isArray(manifest.keywords) &&
+    manifest.keywords.some(
+      (keyword) => String(keyword).trim().toLowerCase() === CANVAS_KEYWORD
+    )
+  );
+}
+
+function requireCanvasContract(dist, manifest, packageJson, pluginName) {
+  const logo = manifest.extensions?.[COPILOT_CLIENT_NAMESPACE]?.logo;
+  if (logo !== CANVAS_LOGO) {
+    fail(
+      `plugin.json#extensions.${COPILOT_CLIENT_NAMESPACE}.logo must be ${JSON.stringify(CANVAS_LOGO)} for a plugin keyworded "${CANVAS_KEYWORD}"`
+    );
+  }
+  requirePath(
+    dist,
+    logo,
+    `plugin.json#extensions.${COPILOT_CLIENT_NAMESPACE}.logo`,
+    "file"
+  );
+  const canvasEntryPoint = `${COPILOT_CLIENT_NAMESPACE}/extensions/${pluginName}/extension.mjs`;
+  if (packageJson.main !== canvasEntryPoint) {
+    fail(`package.json#main must be ${JSON.stringify(canvasEntryPoint)}`);
+  }
+  requirePath(dist, canvasEntryPoint, "canvas entry point", "file");
+}
+
 function requirePath(root, declared, label, type) {
   if (typeof declared !== "string" || declared.length === 0) {
     fail(`${label} must be a non-empty relative path`);
@@ -273,13 +305,15 @@ async function main() {
       `Agent Plugins schema uses an unsupported keyword: ${unsupportedSchemaKeyword}`
     );
   }
+  const canvas = isJsonObject(manifest) && isCanvasPlugin(manifest);
   const manifestError = validateSchema(manifest, manifestSchema, "plugin.json");
   if (manifestError !== undefined) fail(manifestError);
+  if (canvas) requireCanvasContract(dist, manifest, packageJson, plugin.name);
 
   if (packageJson.name !== plugin.name || manifest.name !== plugin.name) {
     fail(`dist manifests must both be named "${plugin.name}"`);
   }
-  if (manifest.extensions !== undefined) {
+  if (isJsonObject(manifest.extensions)) {
     for (const namespace of Object.keys(manifest.extensions)) {
       if (!isReverseDomainNamespace(namespace)) {
         fail(

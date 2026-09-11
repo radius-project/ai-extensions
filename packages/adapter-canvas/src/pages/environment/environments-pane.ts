@@ -3,6 +3,7 @@
 // and failure panels the client script drives.
 
 import { escapeHtml } from "../../shared.js";
+import { KUBERNETES_NAMESPACE_PATTERN } from "@radius-project/core/platforms";
 
 export interface EnvironmentsPaneOptions {
   activeSubtab: string;
@@ -79,6 +80,11 @@ export function environmentsPaneMarkup(
         <ul id="env-progress-cleanup-warnings" class="env-progress__failure-list"></ul>
       </div>
     </div>
+    <!-- Recovery for a failed credential verification the customer chooses to
+         keep anyway (exception scenarios 4.4 permissions and 4.5 unreachable).
+         The button is built by the verify poller only when the failure is one
+         that can be resolved after the environment record exists. -->
+    <div id="env-progress-verify-bypass" class="env-progress__actions" style="display:none;"></div>
     <!-- Server-projected commands. The page renders whatever the operation
          record says is allowed; it never re-derives eligibility itself. The
          forward action comes first and the destructive one second, and neither
@@ -375,7 +381,7 @@ export function environmentsPaneMarkup(
         <div class="rad-field__help">
           Created in your tenant, federated to <code>repo:${escapeHtml(
             ctxRepo
-          )}</code>, and granted <strong>Contributor</strong> on the selected resource group below, plus <strong>Azure Kubernetes Service RBAC Cluster Admin</strong> on the target cluster (required for clusters using Azure RBAC for Kubernetes, the default for AKS Automatic). If one already exists, you may
+          )}</code>, and granted <strong>Contributor</strong> on the selected resource group below. Setup also attempts to grant <strong>Locks Contributor</strong> on that resource group and <strong>Azure Kubernetes Service RBAC Cluster Admin</strong> on the target cluster (required for clusters using Azure RBAC for Kubernetes, the default for AKS Automatic); if either optional assignment fails, setup continues with a warning and remediation command. If one already exists, you may
          <a href="#" id="az-use-existing-link">use an existing application…</a>
         </div>
         <div id="az-selected-app-note" style="display:none; font-size:11px; color:var(--rad-info,#0969da); margin-top:4px;"></div>
@@ -408,9 +414,10 @@ export function environmentsPaneMarkup(
           </div>
           <div class="rad-field">
             <label for="azure-namespace-select">Namespace</label>
-            <select id="azure-namespace-select" aria-describedby="azure-namespace-help"><option value="" disabled selected>Loading…</option></select>
-            <input id="azure-namespace-custom" type="text" aria-label="Namespace (custom)" aria-describedby="azure-namespace-help" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <select id="azure-namespace-select" aria-describedby="azure-namespace-help azure-namespace-error"><option value="" disabled selected>Loading…</option></select>
+            <input id="azure-namespace-custom" type="text" maxlength="63" pattern="${KUBERNETES_NAMESPACE_PATTERN}" aria-label="Namespace (custom)" aria-describedby="azure-namespace-help azure-namespace-error" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
             <div class="rad-field__help" id="azure-namespace-help">A namespace backs one environment. Pick one that no other environment on this cluster uses.</div>
+            <div id="azure-namespace-error" class="status error" role="alert" hidden></div>
           </div>
         </div>
       </div>
@@ -429,9 +436,10 @@ export function environmentsPaneMarkup(
           </div>
           <div class="rad-field">
             <label for="aws-namespace-select">Namespace</label>
-            <select id="aws-namespace-select" aria-describedby="aws-namespace-help"><option value="" disabled selected>Loading…</option></select>
-            <input id="aws-namespace-custom" type="text" aria-label="Namespace (custom)" aria-describedby="aws-namespace-help" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
+            <select id="aws-namespace-select" aria-describedby="aws-namespace-help aws-namespace-error"><option value="" disabled selected>Loading…</option></select>
+            <input id="aws-namespace-custom" type="text" maxlength="63" pattern="${KUBERNETES_NAMESPACE_PATTERN}" aria-label="Namespace (custom)" aria-describedby="aws-namespace-help aws-namespace-error" placeholder="Enter namespace" style="display:none; margin-top:4px;" />
             <div class="rad-field__help" id="aws-namespace-help">A namespace backs one environment. Pick one that no other environment on this cluster uses.</div>
+            <div id="aws-namespace-error" class="status error" role="alert" hidden></div>
           </div>
           <div class="rad-field">
             <label for="aws-vpc-select">VPC</label>

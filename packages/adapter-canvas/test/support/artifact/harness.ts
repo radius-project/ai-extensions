@@ -71,7 +71,8 @@ function waitForExit(child: ChildProcess): Promise<number | null> {
 
 export async function runArtifactSmoke(
   artifactPath: string,
-  timeoutMs = 20_000
+  timeoutMs = 20_000,
+  artifactRoot = dirname(artifactPath)
 ): Promise<ArtifactSmokeResult> {
   const root = mkdtempSync(join(tmpdir(), "radius-artifact-smoke-"));
   const fakeRad = join(root, process.platform === "win32" ? "rad.exe" : "rad");
@@ -103,6 +104,7 @@ export async function runArtifactSmoke(
         HOME: root,
         USERPROFILE: root,
         RADIUS_ARTIFACT_PATH: resolve(artifactPath),
+        RADIUS_ARTIFACT_ROOT: resolve(artifactRoot),
         RADIUS_ARTIFACT_WORKSPACE: root,
         RADIUS_RAD_BINARY: fakeRad,
         RADIUS_RAD_SKIP_VERSION_CHECK: "1",

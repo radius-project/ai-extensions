@@ -35,7 +35,8 @@ export interface DeployOutcomeStatusReader {
 export interface DeployOutcomeDependencies {
   settleDeployStatuses(
     resources: CanvasGraphResource[],
-    conclusion: string | null | undefined
+    conclusion: string | null | undefined,
+    radiusError?: string
   ): void;
   fetchRunLog(repo: string, runId: number | string): Promise<string | null>;
   extractGitHubActionsStepLog(
@@ -44,6 +45,17 @@ export interface DeployOutcomeDependencies {
   ): string;
   explainOidcEnterpriseClaim(logText: string | null | undefined): string;
   extractRadDeployError(logText: string | null | undefined): string;
+  // Exception 5.2: classify a deploy that failed at the cloud login/credentials
+  // step before any resource was touched as credential drift. Returns the
+  // user-facing message, or '' when the failure is not auth drift.
+  classifyDeployCloudAuthDrift(input: {
+    provider?: string | null;
+    resourcesTouched: boolean;
+    failedStepNames: readonly (string | undefined)[];
+  }): string;
+  // The deployErrorKind stamped on an auth-drift failure so the repair guard
+  // leaves it for the user to re-verify rather than auto-redeploying it.
+  cloudAuthDriftKind: CanvasState["deployErrorKind"];
   sleep(milliseconds: number): Promise<void>;
   now(): number;
 }
@@ -78,6 +90,7 @@ const REQUIRED_DEPENDENCIES: readonly (keyof DeployOutcomeDependencies)[] = [
   "extractGitHubActionsStepLog",
   "explainOidcEnterpriseClaim",
   "extractRadDeployError",
+  "classifyDeployCloudAuthDrift",
   "sleep",
   "now"
 ];
@@ -90,7 +103,18 @@ export function createDeployOutcomeService(
     dependencies,
     REQUIRED_DEPENDENCIES
   );
-
+  // assertDeployDependencies only guards function-typed dependencies, so the
+  // string-valued cloudAuthDriftKind is validated here: an empty or missing
+  // value would silently stamp auth-drift failures with a blank kind and defeat
+  // the repair guard that relies on it.
+  if (
+    typeof dependencies.cloudAuthDriftKind !== "string" ||
+    dependencies.cloudAuthDriftKind.trim() === ""
+  ) {
+    throw new Error(
+      "createDeployOutcomeService requires a non-empty cloudAuthDriftKind."
+    );
+  }
   // The producer publishes its artifact from a step that runs after
   // `rad deploy` and before teardown, so by the time the run reports completed
   // the upload has normally landed. Retry a few times anyway to absorb
@@ -114,9 +138,18 @@ export function createDeployOutcomeService(
     return { deployed, graphStatus };
   };
 
+  // The failure description plus the exact Radius error it extracted. The error
+  // is returned rather than re-derived by the caller because both come from the
+  // same run-log read, and reading it twice would double the terminal stage's
+  // slowest external call.
+  interface FailureDescription {
+    message: string;
+    radiusError: string;
+  }
+
   const describeFailure = async (
     request: DeployOutcomeRequest
-  ): Promise<string> => {
+  ): Promise<FailureDescription> => {
     const { repo, runId, conclusion, steps, statusReader, log } = request;
     // Build a user-facing error from the failed step(s) + log.
     const failedSteps = steps.filter(
@@ -179,7 +212,7 @@ export function createDeployOutcomeService(
       repo +
       "/actions/runs/" +
       runId;
-    return dErr;
+    return { message: dErr, radiusError: detailBlock };
   };
 
   return {
@@ -220,10 +253,20 @@ export function createDeployOutcomeService(
       // The run's own conclusion is authoritative for the overall outcome: it
       // decides anything the published status left unfinished, without
       // overwriting a resource the producer already reported as terminal.
-      dependencies.settleDeployStatuses(resources, conclusion);
-      // Propagate onto output resources and generate portal links.
-      for (const resource of resources) {
-        if (resource.deployStatus) setStatus(resource, resource.deployStatus);
+      //
+      // A successful run needs nothing but its conclusion, so settle it now. A
+      // non-success run is settled further down instead, once the exact Radius
+      // error has been extracted from the run log, because that error is what
+      // a red node's message should say (Exception 5.1).
+      const propagate = (): void => {
+        // Propagate onto output resources and generate portal links.
+        for (const resource of resources) {
+          if (resource.deployStatus) setStatus(resource, resource.deployStatus);
+        }
+      };
+      if (conclusion === "success") {
+        dependencies.settleDeployStatuses(resources, conclusion);
+        propagate();
       }
 
       if (deployed) {
@@ -264,6 +307,29 @@ export function createDeployOutcomeService(
       }
       log("");
       log("❌ Deployment failed. Conclusion: " + conclusion);
+      // Exception 5.2: a redeploy whose cloud login/credentials step failed
+      // before "Run rad commands" ever started touched no resource, so classify
+      // it as credential drift. `deployStepStartedAt` is 0 until that step is
+      // observed running, which is the "no resource touched" signal. Computed
+      // here (before the guarded describeFailure read) so the degraded-message
+      // path below still gets the drift prefix and kind. Only a genuine
+      // "failure" conclusion can be drift: a "cancelled" or "timed_out" run that
+      // happened to stop at the cloud-login step must not be stamped as drift.
+      const authDriftMessage =
+        conclusion === "failure" ?
+          dependencies.classifyDeployCloudAuthDrift({
+            provider,
+            resourcesTouched: deployStepStartedAt > 0,
+            failedStepNames: request.steps
+              .filter(
+                (s) =>
+                  s.conclusion &&
+                  s.conclusion !== "success" &&
+                  s.conclusion !== "skipped"
+              )
+              .map((s) => s.name)
+          })
+        : "";
       // Assemble the error BEFORE flipping the status to "failed". The webview's
       // /api/deploy-status poll fires triggerDeployRepairHandoff the instant it
       // observes "failed", and describeFailure awaits network reads (run log +
@@ -273,15 +339,19 @@ export function createDeployOutcomeService(
       // logs" symptom. Publishing the error first closes that window for both
       // the webview trigger and the deploy-request `.finally()` trigger.
       //
-      // But describeFailure's run-log read is unguarded, so guard it here: if it
-      // throws we must still settle this run as "failed" with a degraded message
-      // rather than let settle() reject. A rejection would both leave the panel
+      // The run-log read inside describeFailure is unguarded, so guard it here:
+      // if it throws we must still settle this run as "failed" with a degraded
+      // message rather than let settle() reject. A rejection would both leave
+      // the panel
       // non-terminal AND reach the monitor's `.catch`, which reclassifies the
       // run as run-unconfirmed — sending a run that actually concluded "failure"
       // down the informational notice path and telling the user it could not be
       // confirmed, instead of down the repair path it belongs to.
+      let radiusError = "";
       try {
-        entry.state.deployError = await describeFailure(request);
+        const described = await describeFailure(request);
+        entry.state.deployError = described.message;
+        radiusError = described.radiusError;
       } catch {
         entry.state.deployError =
           "Deployment failed" +
@@ -292,6 +362,22 @@ export function createDeployOutcomeService(
           "/actions/runs/" +
           request.runId +
           ".";
+      }
+      // Settle the graph now that the exact Radius error is known, so every red
+      // node carries it — or "Deployment cancelled" / "Deployment timed out"
+      // when the run's conclusion, not a resource, decided the outcome
+      // (Exception 5.1). A node the producer already explained keeps its own
+      // message. Runs before the status flips to "failed" below, so the panel
+      // never observes a terminal deploy whose graph is still unsettled.
+      dependencies.settleDeployStatuses(resources, conclusion, radiusError);
+      propagate();
+      // Stamp the drift prefix + kind last so it leads the message regardless of
+      // which describeFailure path ran. The kind keeps the repair guard from
+      // auto-redeploying a failure only the user can fix by re-verifying.
+      if (authDriftMessage) {
+        entry.state.deployErrorKind = dependencies.cloudAuthDriftKind;
+        entry.state.deployError =
+          authDriftMessage + "\n\n" + entry.state.deployError;
       }
       entry.state.deployStatus = "failed";
     }

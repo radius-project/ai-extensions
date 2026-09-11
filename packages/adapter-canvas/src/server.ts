@@ -19,6 +19,7 @@ import {
   deployStatusKeys,
   fetchBicepFromRepo,
   fetchRecipePack,
+  isKubernetesNamespace,
   mergeDeployedGraphMetadata,
   projectDeployedGraph,
   resolveRecipeOutputs,
@@ -57,6 +58,7 @@ import type {
 const GH_COMMAND_PRESENTATION = resolveGhCommandPresentation();
 import {
   fetchFileFromRepo,
+  fetchFileFromRepoResult,
   github,
   cliExec,
   runCommand,
@@ -79,6 +81,7 @@ import {
   selectedCreateBranchRef,
   selectedCreatePullRequest,
   selectedFetchFileFromRepo,
+  selectedFetchFileFromRepoResult,
   redactGhCredentials
 } from "./gh.js";
 import type {
@@ -113,11 +116,14 @@ import {
   extractAppName
 } from "./bicep.js";
 import {
+  commitWorkspaceBranchResolution,
   createWorkspaceGitHub,
+  currentWorkspaceBranch,
   defaultBranchForState,
   resolveWorkspaceBicep,
   fetchWorkspaceFile,
   isWorkspaceSelection,
+  resolveGraphBranchForRequest,
   modelingRunLastActivityAtMs,
   resolveSessionId,
   toSafeRepoRelPath,
@@ -218,7 +224,8 @@ import {
   DEPLOY_DISPATCHER_FILE,
   DEPLOY_AZURE_FILE,
   DELETE_ENV_DISPATCHER_FILE,
-  DELETE_ENV_AZURE_FILE
+  DELETE_ENV_AZURE_FILE,
+  LEGACY_DEPLOY_WORKFLOW_FILE
 } from "./infra.js";
 import type { WorkflowCommitFailure } from "./infra.js";
 import {
@@ -230,6 +237,7 @@ import {
   extractGitHubActionsStepLog,
   extractRadDeployError,
   explainOidcEnterpriseClaim,
+  classifyDeployCloudAuthDrift,
   explainNoSubscriptions,
   explainRepoAccessForEnvSetup,
   isGitHubRateLimitError,
@@ -380,7 +388,11 @@ import {
 } from "./server/services/recovered-cleanup-command.js";
 import { createDeployOutcomeService } from "./server/services/deploy-outcome.js";
 import { createPlannedGraphRecoveryService } from "./server/services/deploy-planned-graph.js";
-import { runEnvironmentDeletion } from "./server/services/environment-deletion.js";
+import {
+  runEnvironmentDeletion,
+  statePackageDeletionFailureMessage,
+  type EnvironmentDeletionPorts
+} from "./server/services/environment-deletion.js";
 import { createStatePackageDeletion } from "./server/services/state-package-deletion.js";
 import {
   recordCredentialProvenance,
@@ -710,6 +722,24 @@ const livenessSourceRoutes = createLivenessSourceRoutes({
   getOpenSourceHandler: () => openSourceHandler,
   readInstanceState: (instanceId) =>
     canvasServer.instances.get(instanceId)?.state,
+  getWorkspaceModelRevision: async (instanceId) => {
+    const state = canvasServer.instances.get(instanceId)?.state;
+    if (
+      !state?.graphFromWorkspace ||
+      !state.graphTargetRepo ||
+      !state.graphBranch
+    ) {
+      return null;
+    }
+    const model = await resolveWorkspaceBicep(
+      state,
+      state.graphTargetRepo,
+      state.graphBranch
+    );
+    // Model content only: the revision must not move when a staged-artifact
+    // fingerprint changes, or every stage would look like a model edit.
+    return model ? graphDefinitionHash(model.content, "") : null;
+  },
   toSafeRepoRelPath
 });
 
@@ -756,6 +786,7 @@ const operationsStatusRoutes = createOperationsStatusRoutes(
     isValidRepoSlug,
     isResourceGroupName,
     isAksClusterName,
+    isKubernetesNamespace,
     isUuid,
     buildStages,
     createOperation,
@@ -1181,7 +1212,16 @@ const remediationRoutes = createRemediationRoutes(
 
 const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
-  defaultBranchForState,
+  resolveBranchForRequest: (entry, repo, requestedBranch) =>
+    resolveGraphBranchForRequest(
+      entry.state,
+      repo,
+      requestedBranch,
+      undefined,
+      currentWorkspaceBranch
+    ),
+  commitBranchResolution: (entry, repo, resolution) =>
+    commitWorkspaceBranchResolution(entry.state, repo, resolution),
   prepareSourceRef: (entry, context) =>
     prepareSourceRefResources(entry, "graph", context),
   commitSourceRef: (entry, resources, context, expectedToken) =>
@@ -1217,9 +1257,9 @@ const graphsPlanningStreamRoutes = createGraphsPlanningStreamRoutes({
 //
 // `github` is bound into `resolveRadArtifactsDir`, `fetchRecipePack` and
 // `resolveRecipeOutputs` here rather than injected, which is what keeps the
-// route modules free of it. The pure helpers (`defaultBranchForState`,
-// `computeGraphDiff`, `record`, …) are injected rather than imported by the
-// workflows, matching how the sibling families inject `repoMatchesWorkspace`.
+// route modules free of it. The pure helpers (`computeGraphDiff`, `record`, …)
+// are injected rather than imported by the workflows, matching how the sibling
+// families inject `repoMatchesWorkspace`.
 const observeServerWorkspaceModelingRun = (
   state: CanvasState,
   repo: string,
@@ -1238,6 +1278,21 @@ const observeServerWorkspaceModelingRun = (
 
 const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   readInstanceEntry: (instanceId) => canvasServer.instances.get(instanceId),
+  resolveBranchForRequest: (
+    entry,
+    repo,
+    requestedBranch,
+    followWorkspaceBranch
+  ) =>
+    resolveGraphBranchForRequest(
+      entry.state,
+      repo,
+      requestedBranch,
+      followWorkspaceBranch,
+      currentWorkspaceBranch
+    ),
+  commitBranchResolution: (entry, repo, resolution) =>
+    commitWorkspaceBranchResolution(entry.state, repo, resolution),
   pipeline: createGraphPipeline<CanvasServerEntry>({
     fetchBicepSelection: (entry, repo, branch) =>
       fetchBicepSelection(entry, repo, branch),
@@ -1267,7 +1322,6 @@ const graphPlanningWorkflows = createGraphPlanningWorkflows<CanvasServerEntry>({
   setSourceRefResources: (entry, view, resources, sourceRefInput, token) =>
     setSourceRefResources(entry, view, resources, sourceRefInput, token),
   isCurrentSourceRefToken,
-  defaultBranchForState,
   canReuseModeledGraph,
   addGraphProgress,
   beginPlannedGraphRequest,
@@ -1649,16 +1703,17 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
   azureCredential: () => cloudCredential(sharedCredentials.azure),
   awsCredential: () => cloudCredential(sharedCredentials.aws),
   optionalString,
-  generateVerifyWorkflow: (environment, provider) =>
-    generateVerifyWorkflow(environment, provider),
+  generateVerifyWorkflow: (environment, provider, setupPushOperationMarker) =>
+    generateVerifyWorkflow(environment, provider, undefined, {
+      setupPushOperationMarker
+    }),
   generateDeployWorkflow: (environment, appFile) =>
     generateDeployWorkflow(environment, appFile),
   generateDeleteWorkflow: (environment) => generateDeleteWorkflow(environment),
   recordCommittedWorkflowFile: (operation, entry) => {
     recordCommittedWorkflowFile(operation, entry);
   },
-  deleteLegacyDeployWorkflow: (repo, executor, beforeDelete) =>
-    deleteLegacyDeployWorkflow(repo, executor, beforeDelete),
+  deleteLegacyDeployWorkflow,
   createPullRequestApi: (repo, head, base, title, body, executor) =>
     executor ?
       selectedCreatePullRequest(executor, repo, head, base, title, body)
@@ -1668,6 +1723,10 @@ const createEnvironmentRoutes = createCreateEnvironmentRoutes({
     executor ?
       selectedFetchFileFromRepo(executor, repo, path, branch)
     : fetchFileFromRepo(repo, path, branch),
+  fetchFileFromRepoResult: (repo, path, branch, executor) =>
+    executor ?
+      selectedFetchFileFromRepoResult(executor, repo, path, branch)
+    : fetchFileFromRepoResult(repo, path, branch),
   buildVerifyWorkflowDispatchArgs,
   verifyWorkflowFile: VERIFY_WORKFLOW_FILE,
   stageVerify: STAGE_VERIFY,
@@ -1721,7 +1780,8 @@ const canvasServer = createCanvasServer(
     createRequestHandler: ({ instanceId, instances, markActivity }) => {
       const coordinator = createInstanceRequestCoordinator(
         instanceId,
-        () => instances.get(instanceId)?.baseUrl || ""
+        () => instances.get(instanceId)?.baseUrl || "",
+        productionEnvironmentDeletionPorts()
       );
       instanceRequestCoordinators.set(instanceId, coordinator);
       return createScaffoldRequestHandler({
@@ -2210,7 +2270,14 @@ async function ensureWorkflowsCurrent(
         `[radius workflow-presync] ${repo}: ${changed.join(", ")} before dispatch`
       );
     }
-    return { created: r.created || [], failed: r.failed || [] };
+    return {
+      // Downstream dispatchers use this list only to decide whether GitHub may
+      // still be registering a workflow, including one created concurrently.
+      created: [
+        ...new Set([...(r.created || []), ...(r.registrationPending || [])])
+      ],
+      failed: r.failed || []
+    };
   } catch (e) {
     console.error(`[radius workflow-presync] ${repo}: ${errorMessage(e)}`);
     return { created: [], failed: [] };
@@ -2256,7 +2323,7 @@ export function setOpenSourceHandler(fn: OpenSourceHandler): void {
 // need the Copilot session to take an out-of-band action (for example, kicking
 // off Azure CLI login or install guidance) delegate through this hook.
 let sessionPromptHandler: SessionPromptHandler | null = null;
-export function setSessionPromptHandler(fn: SessionPromptHandler): void {
+export function setSessionPromptHandler(fn: SessionPromptHandler | null): void {
   sessionPromptHandler = fn;
 }
 
@@ -2467,6 +2534,13 @@ export const DEPLOY_OIDC_SUBJECT_MISSING_KIND: DeployErrorKind =
 export const DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND: DeployErrorKind =
   "oidc-subject-case-mismatch";
 
+// Marks a redeploy whose cloud login/authorization failed before any resource
+// was touched (exception 5.2): an environment that verified earlier no longer
+// authenticates, so its trust or permissions drifted. The fix is to re-verify
+// the credentials, not to change the model, so like the OIDC-subject kinds this
+// never opens an automatic repair loop.
+export const DEPLOY_CLOUD_AUTH_DRIFT_KIND: DeployErrorKind = "cloud-auth-drift";
+
 // Ceiling for the preflight's `az` call. The check is advisory — it can only
 // block on a definitive answer — so a slow or hung `az` must not hold up a
 // deploy that authenticates in Actions rather than locally.
@@ -2657,6 +2731,9 @@ export function triggerDeployRepairHandoff(
       // token GitHub would mint. Repairing the model cannot change that.
       state.deployErrorKind === DEPLOY_OIDC_SUBJECT_MISSING_KIND ||
       state.deployErrorKind === DEPLOY_OIDC_SUBJECT_CASE_MISMATCH_KIND ||
+      // Cloud auth drifted since the environment verified: only re-verifying
+      // (not a model repair + redeploy) can fix it, so keep it out of the loop.
+      state.deployErrorKind === DEPLOY_CLOUD_AUTH_DRIFT_KIND ||
       // An attempt whose run may still be in flight can never be repaired: the
       // resolver refuses its redeploy. Opening a loop only to refuse its first
       // call would spend a cycle and tell the agent two different things.
@@ -2824,11 +2901,6 @@ export function triggerDeployFailureNotice(
   }
   return false;
 }
-
-// Bare filename of the legacy monolithic deploy workflow that the composite-
-// action model (run-rad-commands*.yml) replaces. Removed from target repos on
-// commit so it does not double-trigger alongside the new dispatcher.
-const LEGACY_DEPLOY_WORKFLOW_FILE = "radius-deploy.yml";
 
 // The workflow that actually runs `rad` deploy commands. The deployments list
 // only surfaces deployment records produced by this workflow — records created
@@ -3172,6 +3244,8 @@ const deployOutcomeService = createDeployOutcomeService({
   extractGitHubActionsStepLog,
   explainOidcEnterpriseClaim,
   extractRadDeployError: (logText) => extractRadDeployError(logText),
+  classifyDeployCloudAuthDrift,
+  cloudAuthDriftKind: DEPLOY_CLOUD_AUTH_DRIFT_KIND,
   sleep: (milliseconds) =>
     new Promise((resolve) => setTimeout(resolve, milliseconds)),
   now: () => Date.now()
@@ -3199,6 +3273,7 @@ const deployMonitorService = createDeployMonitorService({
   buildDeployMessageMap,
   applyDeployMessages,
   applyDeployStatusToResources,
+  settleDeployStatuses,
   generatePortalUrl,
   optionalString,
   errorMessage,
@@ -5197,14 +5272,20 @@ async function resolveEnvDeployment(
 async function deleteLegacyDeployWorkflow(
   targetRepo: string,
   executor?: SelectedGhExecutor,
-  beforeDelete?: () => Promise<boolean>
+  beforeDelete?: () => Promise<boolean>,
+  branch?: string
 ): Promise<boolean | "cancelled"> {
   const path = ".github/workflows/" + LEGACY_DEPLOY_WORKFLOW_FILE;
+  const contentPath =
+    "/repos/" +
+    targetRepo +
+    "/contents/" +
+    path +
+    (branch ? "?ref=" + encodeURIComponent(branch) : "");
   if (executor) {
-    const lookup = await executor.run(
-      ["api", "/repos/" + targetRepo + "/contents/" + path, "--jq", ".sha"],
-      { timeout: 30000 }
-    );
+    const lookup = await executor.run(["api", contentPath, "--jq", ".sha"], {
+      timeout: 30000
+    });
     const sha = lookup.code === 0 ? lookup.stdout.trim() : "";
     if (!sha) return false;
     if (beforeDelete && !(await beforeDelete())) return "cancelled";
@@ -5220,16 +5301,17 @@ async function deleteLegacyDeployWorkflow(
         "-f",
         "message=Remove legacy Radius deploy workflow (replaced by run-rad-commands.yml)",
         "-f",
-        "sha=" + sha
+        "sha=" + sha,
+        ...(branch ? ["-f", "branch=" + branch] : [])
       ],
       { timeout: 30000 }
     );
     return removed.code === 0 || removed.code === "0";
   }
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     cliExec(
       "gh",
-      ["api", "/repos/" + targetRepo + "/contents/" + path, "--jq", ".sha"],
+      ["api", contentPath, "--jq", ".sha"],
       { timeout: 30000 },
       (err, stdout) => {
         const sha = err ? "" : (stdout || "").trim();
@@ -5237,21 +5319,28 @@ async function deleteLegacyDeployWorkflow(
           resolve(false);
           return;
         }
-        cliExec(
-          "gh",
-          [
-            "api",
-            "--method",
-            "DELETE",
-            "/repos/" + targetRepo + "/contents/" + path,
-            "-f",
-            "message=Remove legacy Radius deploy workflow (replaced by run-rad-commands.yml)",
-            "-f",
-            "sha=" + sha
-          ],
-          { timeout: 30000 },
-          (deleteErr) => resolve(!deleteErr)
-        );
+        void (async () => {
+          if (beforeDelete && !(await beforeDelete())) {
+            resolve("cancelled");
+            return;
+          }
+          cliExec(
+            "gh",
+            [
+              "api",
+              "--method",
+              "DELETE",
+              "/repos/" + targetRepo + "/contents/" + path,
+              "-f",
+              "message=Remove legacy Radius deploy workflow (replaced by run-rad-commands.yml)",
+              "-f",
+              "sha=" + sha,
+              ...(branch ? ["-f", "branch=" + branch] : [])
+            ],
+            { timeout: 30000 },
+            (deleteErr) => resolve(!deleteErr)
+          );
+        })().catch(reject);
       }
     );
   });
@@ -5454,9 +5543,81 @@ function preRouteCanvasRequest(context: CanvasRequestContext): boolean {
   return false;
 }
 
-function createInstanceRequestCoordinator(
+export type EnvironmentDeletionCoordinatorPorts = Omit<
+  EnvironmentDeletionPorts,
+  "reportStatePackageDeletionFailure"
+>;
+
+function productionEnvironmentDeletionPorts(): EnvironmentDeletionCoordinatorPorts {
+  return {
+    deleteRadiusEnvironment: (input, onHeartbeat) =>
+      deleteRadiusEnvironmentViaWorkflow(
+        input.repo,
+        input.environment,
+        onHeartbeat
+      ),
+    runAz: (args) => runCliCommand("az", args),
+    readAzureIdentity: async (clientId) => {
+      const tenant = await runCliCommand("az", [
+        "account",
+        "show",
+        "--query",
+        "tenantId",
+        "-o",
+        "tsv"
+      ]);
+      if (tenant.code !== 0 || !tenant.stdout.trim()) {
+        throw new Error(
+          tenant.stderr || "Could not resolve the active Entra tenant."
+        );
+      }
+      const application = await runCliCommand("az", [
+        "ad",
+        "app",
+        "show",
+        "--id",
+        clientId,
+        "--query",
+        "id",
+        "-o",
+        "tsv"
+      ]);
+      if (application.code !== 0 || !application.stdout.trim()) {
+        throw new Error(
+          application.stderr ||
+            "Could not resolve the App Registration object id."
+        );
+      }
+      return {
+        tenantId: tenant.stdout.trim(),
+        applicationObjectId: application.stdout.trim()
+      };
+    },
+    deleteGitHubEnvironment: (input) =>
+      deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
+    deleteStatePackage: createStatePackageDeletion({
+      stateRegistryForEnvironment,
+      getCredentials: getGhPackageCredentials,
+      deletePackage: deleteGHCRStatePackage,
+      ghCommandPresentation: GH_COMMAND_PRESENTATION
+    }),
+    withCredentialProvenanceLock,
+    readCredentialProvenance: (clientId) =>
+      listCredentialProvenanceForClient(clientId),
+    removeCredentialProvenance: (clientId, credentialId) =>
+      removeCredentialProvenance(clientId, credentialId),
+    clearEnvironmentCredentialProvenance: (repoId, environment) =>
+      clearEnvironmentCredentialProvenance(repoId, environment),
+    persist: () => operations.persist(),
+    errorMessage,
+    log: (message) => console.error(message)
+  };
+}
+
+export function createInstanceRequestCoordinator(
   instanceId: string,
-  resolveBaseUrl: () => string
+  resolveBaseUrl: () => string,
+  environmentDeletionPorts: EnvironmentDeletionCoordinatorPorts
 ) {
   const serverOwnedTasks = new Map<string, Promise<void>>();
   const automaticRecoveryRollbacks = new Set<string>();
@@ -5769,69 +5930,20 @@ function createInstanceRequestCoordinator(
     const op = operations.get(operationId);
     if (!op) return;
     if (op.kind === "delete") {
-      const deleteStatePackage = createStatePackageDeletion({
-        stateRegistryForEnvironment,
-        getCredentials: getGhPackageCredentials,
-        deletePackage: deleteGHCRStatePackage,
-        ghCommandPresentation: GH_COMMAND_PRESENTATION
-      });
       await runEnvironmentDeletion(op, {
-        deleteRadiusEnvironment: (input, onHeartbeat) =>
-          deleteRadiusEnvironmentViaWorkflow(
-            input.repo,
-            input.environment,
-            onHeartbeat
-          ),
-        runAz: (args) => runCliCommand("az", args),
-        readAzureIdentity: async (clientId) => {
-          const tenant = await runCliCommand("az", [
-            "account",
-            "show",
-            "--query",
-            "tenantId",
-            "-o",
-            "tsv"
-          ]);
-          if (tenant.code !== 0 || !tenant.stdout.trim()) {
+        ...environmentDeletionPorts,
+        reportStatePackageDeletionFailure: async (input) => {
+          const result = await invokeSessionPrompt(
+            sessionPromptHandler,
+            statePackageDeletionFailureMessage(input)
+          );
+          if (result.status >= 400) {
             throw new Error(
-              tenant.stderr || "Could not resolve the active Entra tenant."
+              result.error ||
+                "Could not report the GHCR package deletion failure to Copilot chat."
             );
           }
-          const application = await runCliCommand("az", [
-            "ad",
-            "app",
-            "show",
-            "--id",
-            clientId,
-            "--query",
-            "id",
-            "-o",
-            "tsv"
-          ]);
-          if (application.code !== 0 || !application.stdout.trim()) {
-            throw new Error(
-              application.stderr ||
-                "Could not resolve the App Registration object id."
-            );
-          }
-          return {
-            tenantId: tenant.stdout.trim(),
-            applicationObjectId: application.stdout.trim()
-          };
-        },
-        deleteGitHubEnvironment: (input) =>
-          deleteGitHubEnvironmentIdempotent(input.repo, input.environment),
-        deleteStatePackage,
-        withCredentialProvenanceLock,
-        readCredentialProvenance: (clientId) =>
-          listCredentialProvenanceForClient(clientId),
-        removeCredentialProvenance: (clientId, credentialId) =>
-          removeCredentialProvenance(clientId, credentialId),
-        clearEnvironmentCredentialProvenance: (repoId, environment) =>
-          clearEnvironmentCredentialProvenance(repoId, environment),
-        persist: () => operations.persist(),
-        errorMessage,
-        log: (message) => console.error(message)
+        }
       });
       return;
     }

@@ -3,7 +3,8 @@ import { isWorkspaceSelection } from "../workspace.js";
 import { browserScriptTag } from "../browser/scripts.js";
 import { pageShell } from "./shell.js";
 import { graphHeader, graphHeaderClose } from "./graph-header.js";
-import { inlineJson } from "./encoding.js";
+import { GRAPH_PAGE_STATE_ID } from "./browser-state-ids.js";
+import { renderPageState } from "./page-state.js";
 
 export function graphPage(state: CanvasState = {}): string {
   const resources = state.graphResources || [];
@@ -14,6 +15,11 @@ export function graphPage(state: CanvasState = {}): string {
       state.graphFromWorkspace
     : isWorkspaceSelection(state, targetRepo, graphBranch);
   const loaded = resources.length > 0 || state.graphLoaded === true;
+  const followWorkspaceBranch =
+    state.graphFollowsWorkspaceBranch ??
+    (state.contextBranchSource === "workspace" &&
+      targetRepo === state.workspaceRepo &&
+      graphBranch === state.contextBranch);
 
   const controls =
     loaded ?
@@ -63,15 +69,14 @@ ${graphHeader("graph")}
   <button id="deploy-app-btn" class="rad-btn rad-btn--primary" style="margin-top:0;"${loaded ? "" : " disabled"}>Plan Deployment</button>
 </div>
 ${graphBody}
-<div hidden id="radius-graph-page-state">${escapeHtml(
-      inlineJson({
-        repo: targetRepo,
-        branch: graphBranch,
-        resources,
-        loaded,
-        localSource
-      })
-    )}</div>
+${renderPageState(GRAPH_PAGE_STATE_ID, {
+  repo: targetRepo,
+  branch: graphBranch,
+  resources,
+  loaded,
+  localSource,
+  followWorkspaceBranch
+})}
 ${browserScriptTag("graph-page")}
 ${graphHeaderClose()}`
   );

@@ -30,7 +30,7 @@ Start with the status table. Use the phase sections for the work still to come. 
 
 - Add focused tests with the production change. Manual checks do not replace automated tests.
 - Use the simplest test that can reproduce the failure, then add a wider test only when the failure crosses a real boundary.
-- Keep tests local and repeatable. Do not use personal credentials, live cloud resources, mutable repositories, or public network assets.
+- Keep tests local and repeatable. Do not use personal credentials, live cloud resources, mutable repositories, or public network assets. Every pull request gate layer remains offline. The [Cloud E2E layer](./2026-08-cloud-e2e-environment-lifecycle.md) is the single, explicit exception: it exists to prove the facts a fake cloud cannot, runs only on a schedule or on demand, never gates a pull request, and uses dedicated test credentials and a dedicated fixture repository rather than personal ones.
 - Show external failures as failures. If identity or state cannot be confirmed, deployment and deletion must stop.
 - For the session repository, graph and plan views use the current worktree branch, not an assumed `main`.
 - Close servers, streams, processes, timers, browser sessions, and temporary workspaces after success or failure.
@@ -53,6 +53,7 @@ Start with the status table. Use the phase sections for the work still to come. 
 | Accessibility and keyboard  | An interactive page or material page state changes after Phase 6 begins          | Unusable controls, poor focus order, missing announcements, and WCAG    |
 | Screenshot review           | A selected stable visual state changes after Phase 7 begins                      | Layout, clipping, theme, graph, and status presentation                 |
 | Real-host check             | Before release after Phase 8 qualification                                       | Installation, discovery, panel lifecycle, focus, reopen, and reconnect  |
+| Cloud E2E                   | Never required for merge; scheduled and on demand                                | That real Azure and GitHub accept what the extension sends              |
 
 Tests that do not open a browser do not retry. Browser and host checks may retry once to collect useful failure information, but the original failure remains visible and a retry-only pass is recorded as flaky. Setting a check aside requires a linked issue, owner, narrow scope, and clear end condition. Safety checks cannot be skipped or set aside.
 
@@ -159,6 +160,7 @@ The full plan is complete when every requirement in the appendices has a passing
 | ID    | Tool                                   | Required contract                                                                                        |
 |-------|----------------------------------------|----------------------------------------------------------------------------------------------------------|
 | TL-02 | `radius_generate_app`                  | Workspace analysis; compact skill handoff; packaged, source-checkout, and repaired-plugin discovery      |
+| TL-11 | `radius_report_modeling_failure`       | Current-attempt fencing, missing-model verification, permanent-failure recording, stale-report rejection |
 | TL-05 | `radius_generate_pr_diff_markdown`     | Repository/base/head mapping, fetch failure, Mermaid and summary result/error                            |
 | TL-07 | `radius_publish_custom_type_extension` | Workspace confinement, managed Radius command, defaults, output/error                                    |
 | TL-08 | `radius_publish_recipe`                | Workspace confinement, GHCR target validation, publish output/error                                      |
@@ -383,15 +385,15 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 
 #### Visual baselines
 
-| ID    | State                                | Theme      |
-|-------|--------------------------------------|------------|
-| VI-01 | Modeled graph, details closed        | Light/dark |
-| VI-02 | Modeled graph details                | Light      |
-| VI-03 | Planned graph unresolved recipe pack | Light/dark |
-| VI-04 | Graph diff with all statuses         | Light/dark |
-| VI-05 | Credential profile list/form         | Light      |
-| VI-06 | Environment list/create form         | Light/dark |
-| VI-07 | Deploy success/failure               | Light      |
+| ID    | State                                            | Theme      |
+|-------|--------------------------------------------------|------------|
+| VI-01 | Modeled graph, details closed                    | Light/dark |
+| VI-02 | Modeled graph details                            | Light      |
+| VI-03 | Planned graph unresolved recipe pack             | Light/dark |
+| VI-04 | Graph diff with all statuses                     | Light/dark |
+| VI-05 | Credential profile list/form                     | Light      |
+| VI-06 | Environment list/create form                     | Light/dark |
+| VI-07 | Deploy success/failure and graph outcome details | Light/dark |
 
 #### Real-host cases
 

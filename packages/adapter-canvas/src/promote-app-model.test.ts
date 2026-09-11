@@ -30,7 +30,7 @@ import { hashAppBicep } from "./app-bicep-hash.js";
 
 const script = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  "../../../plugins/radius/skills/radius-app-bicep/scripts/promote-app-model.mjs"
+  "../../../extensions/radius/skills/radius-app-bicep/scripts/promote-app-model.mjs"
 );
 
 const MODEL =

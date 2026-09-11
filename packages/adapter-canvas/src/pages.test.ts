@@ -184,7 +184,8 @@ describe("compiled page entry API contracts", () => {
         "/api/list-deployments",
         "/api/deploy",
         "/api/delete-deployment",
-        "/api/deploy-status"
+        "/api/deploy-status",
+        "/api/deployed-graph"
       ]
     ],
     [
@@ -204,6 +205,7 @@ describe("compiled page entry API contracts", () => {
         "/api/azure-app-serves-repos",
         "/api/operations",
         "/api/verify-status",
+        "/api/bypass-verification",
         "/api/github-account"
       ]
     ]

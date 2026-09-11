@@ -30,6 +30,7 @@ import {
   isUuid,
   isValidRepoSlug
 } from "../../../src/azure-oidc.js";
+import { isKubernetesNamespace } from "@radius-project/core";
 import type { CanvasServerContainer } from "../../../src/server/create-canvas-server.js";
 
 let container: CanvasServerContainer | undefined;
@@ -199,6 +200,7 @@ function start(strictBrowserMutations = false): Harness {
         isValidRepoSlug,
         isResourceGroupName,
         isAksClusterName,
+        isKubernetesNamespace,
         isUuid,
         buildStages,
         createOperation,
@@ -284,11 +286,35 @@ const VALID_AZURE_BODY = {
   clientId: "existing-client",
   resourceGroup: "my-rg",
   cluster: "my-aks",
+  namespace: "default",
   tenantId: "11111111-1111-1111-1111-111111111111",
   subscriptionId: "22222222-2222-2222-2222-222222222222"
 };
 
 describe("operations-status real-loopback HIT (RF-08)", () => {
+  it.each(["Todo-app-3", true])(
+    "rejects malformed namespace value %j before registering setup work",
+    async (namespace) => {
+      const harness = start();
+      const entry = await container!.getOrCreate("panel-a");
+
+      const response = await fetch(`${entry.baseUrl}/api/operations`, {
+        method: "POST",
+        body: JSON.stringify({ ...VALID_AZURE_BODY, namespace })
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error:
+          "Kubernetes namespace must be 1-63 lowercase letters, numbers, or hyphens and must start and end with a letter or number.",
+        code: "invalid-kubernetes-namespace"
+      });
+      expect(harness.running.size).toBe(0);
+      expect(harness.persistCalls).toEqual([]);
+      expect(harness.scheduled).toEqual([]);
+    }
+  );
+
   it("serves latest and by-id operation status over a real socket", async () => {
     const harness = start();
     const entry = await container!.getOrCreate("panel-a");
