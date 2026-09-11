@@ -123,6 +123,12 @@ Phase 2 landed incrementally. While old and new paths coexisted, each pull reque
 
 `src/pages/` splits the shared document shell from graph, credential/environment, and deployment renderers. Renderers accept typed state and retain URLs, stable IDs, escaping, serialized initial state, theme tokens, operation progress, and resume behavior.
 
+Page state has one producer, `src/pages/page-state.ts::renderPageState(id, state)`, and one consumer, `src/browser/pages/state.ts::readPageState`. The producer owns JSON serialization, script-safe character escaping, HTML text encoding, and the complete hidden-element markup. `src/pages/browser-state-ids.ts` is the behavior-free source of state IDs and their matching TypeScript shapes; renderers and browser consumers import these IDs rather than duplicating literals. The reader uses `textContent` and `JSON.parse`; browser field narrowing remains necessary because compile-time types do not validate parsed data.
+
+Do not hand-build state elements or interpolate runtime data into executable scripts, including quoted `escapeHtml` calls. HTML text/attribute escaping, URL validation, and JSON state transport are distinct contexts: HTML entities are not JavaScript string escaping. Compiled browser scripts and the static feedback script are trusted code, not runtime state; HTTP JSON, SSE, requests, storage, and build serialization retain their ordinary JSON semantics. Trusted renderer markup and fragment installation are not general-purpose sanitizers.
+
+The `test/ci/page-state-contract.test.ts` architecture check uses the existing TypeScript parser to inspect literal/template/concatenated markup across adapter production sources, duplicate IDs, obsolete alternatives, and direct browser state access. Only the compiled-code emitter `browser/scripts.ts` is exempt from script-interpolation inspection; its state-element construction is still checked. Synthetic passing and failing fixtures protect its scope, including future renderers, server routes, browser-created markup, and non-HTML JSON. It enforces recognizable source conventions, not arbitrary-program safety; executable renderer/reader and real HTML-parser tests remain the behavioral evidence.
+
 Renderer compatibility compares meaningful markup and state, not entire-page snapshots. Phase 3 preserved browser behavior for the separate Phase 4 extraction.
 
 ### Browser boundary

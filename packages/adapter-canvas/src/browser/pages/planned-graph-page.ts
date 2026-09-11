@@ -17,13 +17,14 @@ import type { GraphProgressView } from "../graph/progress.js";
 import type { AbortHandle, BrowserContext } from "../ports.js";
 import type { EnvironmentProviders } from "../repositories.js";
 import { readPageState } from "./state.js";
+import { PLANNED_GRAPH_STATE_ID } from "../../pages/browser-state-ids.js";
 import {
   showGraphModelingFailure,
   unsupportedGraphModelMessage
 } from "./graph-modeling-failure.js";
 
 const ENTRY_KEY = "planned-graph-page";
-export const PLANNED_GRAPH_STATE_ID = "radius-planned-graph-state";
+export { PLANNED_GRAPH_STATE_ID };
 export const PLAN_DEBOUNCE_MS = 150;
 export const PLAN_PROGRESS_MS = 800;
 // How long to wait before asking again while Copilot authors the model. The

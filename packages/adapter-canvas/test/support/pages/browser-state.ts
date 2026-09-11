@@ -9,6 +9,8 @@ function decodeHtmlText(value: string): string {
     .replace(/&amp;/g, "&");
 }
 
+// Extraction for unit/HTTP field assertions, not an HTML-parser safety proof.
+// The component and Chromium suites exercise the actual browser parser.
 export function readBrowserPageState(
   html: string,
   elementId: string

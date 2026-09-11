@@ -15,6 +15,7 @@ import { plannedGraphPage } from "../../../src/pages/planned-graph-page.js";
 import type { CanvasServerEntry } from "../../../src/server/types.js";
 import type { CanvasState } from "../../../src/shared.js";
 import { browserEntryMarker } from "../../../src/browser/scripts.js";
+import { pageStateCases } from "../../support/pages/page-state-cases.js";
 import { readBrowserPageState } from "../../support/pages/browser-state.js";
 import {
   HOSTILE_STATE,
@@ -111,6 +112,21 @@ describe("canvas pages over real loopback HTTP", () => {
       expect(response.status).toBe(200);
       expect(response.body).toContain(marker);
       expect(response.body).toBe(render());
+    }
+  );
+
+  it.each(pageStateCases())(
+    "delivers the existing hidden-state contract for $name",
+    async ({ page, id, state, expected, marker }) => {
+      resetState(state);
+
+      const response = await get(`/?page=${page}`);
+
+      expect(response.status).toBe(200);
+      expect(response.contentType).toBe("text/html; charset=utf-8");
+      expect(response.body).toContain(`id="${marker}"`);
+      expect(response.body.split(`<div hidden id="${id}">`)).toHaveLength(2);
+      expect(readBrowserPageState(response.body, id)).toEqual(expected);
     }
   );
 

@@ -133,6 +133,23 @@ describe("environmentPage", () => {
     );
   });
 
+  it("preserves the mutation nonce without interpreting it as markup", () => {
+    const html = environmentPage({
+      contextRepo: "octo/app",
+      contextBranch: "feature/x",
+      activeSubtab: "credentials",
+      browserMutationNonce: HOSTILE_STATE
+    });
+
+    expect(readBrowserPageState(html, ENVIRONMENT_PAGE_STATE_ID)).toEqual({
+      repo: "octo/app",
+      branch: "feature/x",
+      activeSubtab: "credentials",
+      mutationNonce: HOSTILE_STATE
+    });
+    expectSafeInlineScripts(html);
+  });
+
   it("preserves state fallback and escapes hostile form values", () => {
     const html = environmentPage({
       targetRepo: HOSTILE_STATE,
