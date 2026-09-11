@@ -885,13 +885,36 @@ describe("P0-C built Radius extension artifact", () => {
     // Secret's data key. Layer 1's data-key rule has no mechanical guard, so
     // the guidance must not let "the checker enforces this" read as covering
     // it — that false confidence is the failure mode this stack exists to fix.
+    // The guidance now names two checks, so the caveat has to exclude both.
     const secretsGuidance = readFileSync(
       join(DIST_SKILL, "references", "secrets-handling.md"),
       "utf8"
     );
     expect(secretsGuidance).toContain(
-      "the data-key contract below is not verified by any check"
+      "the data-key contract below is not verified anywhere"
     );
+  });
+
+  it("packages the checker's secure-value remedies", () => {
+    assertCurrentArtifact();
+    const checkerScript = readFileSync(
+      join(DIST_SKILL, "scripts", "validate-bicep.mjs"),
+      "utf8"
+    );
+
+    // Bicep names the rejected property but never the remedy, and Radius emits
+    // these findings with no severity, so they print as a warning while failing
+    // the build. The remedy has to ship with the checker or the model spends a
+    // repair attempt rediscovering it. The rule IDs are the contract here: what
+    // each remedy says is asserted behaviorally in app-bicep-check.test.ts,
+    // where rewording cannot silently pass.
+    for (const rule of [
+      "use-secure-value-for-secure-inputs",
+      "secure-secrets-in-params",
+      "secure-parameter-default"
+    ]) {
+      expect(checkerScript).toContain(rule);
+    }
   });
 
   it("packages each page module exactly once", () => {
