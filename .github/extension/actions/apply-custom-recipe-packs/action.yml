@@ -130,50 +130,8 @@ runs:
         echo "Deploying custom recipe pack from ${RECIPE_PACK_BICEP}..."
         rad deploy "${RECIPE_PACK_BICEP}" --environment "${ENVIRONMENT}"
 
-        # Resolve only the authored pack names in the current workspace scope.
-        # This is stable across first deploys and restored-state redeploys and
-        # avoids attaching unrelated packs from the control plane's global list.
-        CUSTOM_PACKS='[]'
-        while IFS= read -r pack_name; do
-          PACK_JSON=$(rad recipe-pack show "${pack_name}" -o json)
-          PACK_ID=$(jq -er '
-            .id |
-            select(type == "string" and length > 0)
-          ' <<<"${PACK_JSON}")
-          CUSTOM_PACKS=$(jq -nc \
-            --argjson packs "${CUSTOM_PACKS}" \
-            --arg id "${PACK_ID}" \
-            '$packs + [$id] | unique')
-        done < <(jq -r '.[]' <<<"${PACK_NAMES}")
-
-        # Preserve the environment's current recipe packs (e.g. the default provider
-        # pack attached when the environment was created) and add only the authored packs.
-        # `rad env update --recipe-packs` REPLACES the list, so we compute the full
-        # desired set here rather than passing every pack the control plane knows.
-        # --preview reads the Radius.Core/environments resource (which carries
-        # properties.recipePacks); without it env show hits the legacy surface and
-        # can't see recipe packs. That command prints the resource first followed by
-        # optional provider/recipe JSON docs, so jq -s slurps the stream and takes the
-        # environment resource ([0]) rather than choking on the trailing documents.
-        EXISTING_PACKS=$(
-          rad env show "${ENVIRONMENT}" --preview -o json |
-            jq -sc '
-              ((.[0].properties.recipePacks) // []) |
-              map(select(type == "string" and . != ""))
-            '
-        )
-
-        PACK_IDS=$(
-          jq -nr \
-            --argjson existing "${EXISTING_PACKS}" \
-            --argjson custom "${CUSTOM_PACKS}" \
-            '($existing + $custom) | unique | join(",")'
-        )
-
-        # Replace the environment's recipe pack list with the preserved + new set so
-        # the custom types resolve alongside the default provider recipes. --preview
-        # selects the Radius.Core implementation; without it `rad env update`
-        # dispatches to the legacy command, which does not understand --recipe-packs.
-        echo "Attaching recipe packs to environment '${ENVIRONMENT}': ${PACK_IDS}"
-        rad env update "${ENVIRONMENT}" --recipe-packs "${PACK_IDS}" --preview
-        echo "✅ Environment '${ENVIRONMENT}' updated with recipe packs."
+        # Use the same exact-name resolver and preserving union as provider packs.
+        # Composite actions cannot invoke another action from a run block, so call
+        # the sibling action's shared implementation directly.
+        export RECIPE_PACKS_JSON="${PACK_NAMES}"
+        bash "${GITHUB_ACTION_PATH}/../attach-recipe-pack/attach-recipe-pack.sh"

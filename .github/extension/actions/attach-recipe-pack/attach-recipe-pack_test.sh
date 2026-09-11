@@ -28,15 +28,21 @@ set -euo pipefail
 printf 'rad %s\n' "$*" >>"${CALLS}"
 case "${1:-} ${2:-}" in
     "recipe-pack show")
-        [[ "${SHOW_FAIL:-false}" != true ]]
+        if [[ "${SHOW_FAIL:-false}" == true ]]; then
+            exit 1
+        fi
         printf '%s\n' "${PACK_JSON}"
         ;;
     "env show")
-        [[ "${ENV_SHOW_FAIL:-false}" != true ]]
+        if [[ "${ENV_SHOW_FAIL:-false}" == true ]]; then
+            exit 1
+        fi
         printf '%s\n' "${ENV_JSON}"
         ;;
     "env update")
-        [[ "${UPDATE_FAIL:-false}" != true ]]
+        if [[ "${UPDATE_FAIL:-false}" == true ]]; then
+            exit 1
+        fi
         ;;
     *)
         echo "unexpected rad command: $*" >&2
@@ -101,6 +107,14 @@ assert_call "rad env show production --preview -o json"
 assert_call \
     "rad env update production --recipe-packs ${PACK_ID},${CUSTOM_PACK_ID} --preview"
 
+run_script success \
+    ENVIRONMENT=production \
+    RECIPE_PACKS_JSON='["azure-avm","custom"]' \
+    PACK_JSON="{\"id\":\"${PACK_ID}\"}"
+assert_call "rad recipe-pack show azure-avm -o json"
+assert_call "rad recipe-pack show custom -o json"
+assert_call "rad env update production --recipe-packs ${PACK_ID} --preview"
+
 run_script failure RECIPE_PACK=azure-avm PACK_JSON='{"id":"pack"}'
 assert_output "Radius environment name is required"
 assert_no_call "rad "
@@ -108,6 +122,15 @@ assert_no_call "rad "
 run_script failure ENVIRONMENT=production PACK_JSON='{"id":"pack"}'
 assert_output "Recipe pack name is required"
 assert_no_call "rad "
+
+for invalid_names in '[]' '[""]' '[42]' '{}' 'not-json'; do
+    run_script failure \
+        ENVIRONMENT=production \
+        RECIPE_PACKS_JSON="${invalid_names}" \
+        PACK_JSON='{"id":"pack"}'
+    assert_output "Recipe pack names must be a non-empty JSON array"
+    assert_no_call "rad "
+done
 
 for invalid_json in '{}' '{"id":""}' '{"id":42}' 'not-json'; do
     run_script failure \
@@ -201,8 +224,9 @@ for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do
     grep -qF 'RECIPE_PACK_BICEP="$APP_DIR/radius-recipe-pack.bicep"' \
         "${workflow}" ||
         fail "${workflow}: missing pack-only deployment file"
-    grep -qF 'recipePacks: []' "${workflow}" ||
-        fail "${workflow}: environment does not reset provider recipe packs"
+    if grep -qF 'recipePacks: []' "${workflow}"; then
+        fail "${workflow}: environment deployment clears recipe packs"
+    fi
     # shellcheck disable=SC2016
     grep -qF -- '--environment "$ENVIRONMENT"' "${workflow}" ||
         fail "${workflow}: pack deploy does not use the existing environment"
@@ -211,15 +235,22 @@ for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do
         fail "${workflow}: exact provider pack is not attached"
 done
 
-grep -qF 'recipe-pack: azure-avm' "${AZURE_WORKFLOW}" ||
-    fail "Azure workflow does not attach azure-avm"
-grep -qF 'recipe-pack: aws-terraform' "${AWS_WORKFLOW}" ||
-    fail "AWS workflow does not attach aws-terraform"
+for workflow in "${AZURE_WORKFLOW}" "${AWS_WORKFLOW}"; do
+    # shellcheck disable=SC2016
+    grep -qF 'echo "provider-pack=${PACK_NAME}" >> "$GITHUB_OUTPUT"' \
+        "${workflow}" ||
+        fail "${workflow}: provider pack name is not exposed as an output"
+    # shellcheck disable=SC2016
+    grep -qF \
+        'recipe-pack: ${{ steps.provider-setup.outputs.provider-pack }}' \
+        "${workflow}" ||
+        fail "${workflow}: attach step does not consume the provider pack output"
+done
 for removed_parameter in \
     environmentName environmentNamespace azureSubscriptionId azureResourceGroup; do
-    if grep -qF -- "--parameters ${removed_parameter}=" "${AZURE_WORKFLOW}"; then
-        fail "Azure pack deploy still passes removed parameter ${removed_parameter}"
-    fi
+    grep -qF "append_pack_parameter_if_declared ${removed_parameter}" \
+        "${AZURE_WORKFLOW}" ||
+        fail "Azure workflow does not conditionally pass ${removed_parameter}"
 done
 
 echo "provider recipe-pack lifecycle tests passed"
