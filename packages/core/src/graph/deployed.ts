@@ -16,6 +16,11 @@
 // Pure: no shell/HTTP/DOM.
 
 import { stripAPIVersion } from "./model.js";
+import {
+  projectGraphConnectionMetadata,
+  projectGraphOutputMetadata,
+  projectGraphResourceMetadata
+} from "./appgraph.js";
 import { filterGraphVisualizationResources } from "./visualization.js";
 
 export type DeployStatus = "pending" | "in_progress" | "success" | "failed";
@@ -87,10 +92,13 @@ export function mergeDeployedGraphMetadata(
   if (!Array.isArray(modeled)) return [];
   const deployedById = new Map<string, any>();
   for (const resource of deployedResources(deployed)) {
-    const id = typeof resource?.id === "string" ? resource.id.trim() : "";
-    if (id && !deployedById.has(id)) deployedById.set(id, resource);
+    const projected = projectGraphResourceMetadata(resource);
+    const id = typeof projected?.id === "string" ? projected.id.trim() : "";
+    if (id && !deployedById.has(id)) deployedById.set(id, projected);
   }
-  return modeled.map((resource) => {
+  return modeled.flatMap((resource) => {
+    const projected = projectGraphResourceMetadata(resource);
+    if (!projected) return [];
     const id = typeof resource?.id === "string" ? resource.id.trim() : "";
     const metadata = id ? deployedById.get(id) : undefined;
     const outputs =
@@ -101,14 +109,28 @@ export function mergeDeployedGraphMetadata(
         metadata.outputResources
       : Array.isArray(resource?.outputResources) ? resource.outputResources
       : [];
-    return {
-      ...resource,
-      connections:
-        Array.isArray(resource?.connections) ?
-          resource.connections.map((connection: any) => ({ ...connection }))
-        : [],
-      outputResources: outputs.map((output: any) => ({ ...output }))
-    };
+    return [
+      {
+        ...projected,
+        connections:
+          Array.isArray(resource?.connections) ?
+            resource.connections
+              .map(projectGraphConnectionMetadata)
+              .filter(
+                (
+                  connection: Record<string, unknown> | null
+                ): connection is Record<string, unknown> => connection !== null
+              )
+          : [],
+        outputResources: outputs
+          .map(projectGraphOutputMetadata)
+          .filter(
+            (
+              output: Record<string, unknown> | null
+            ): output is Record<string, unknown> => output !== null
+          )
+      }
+    ];
   });
 }
 
@@ -158,20 +180,17 @@ export function projectDeployedGraph(
     Map<string, DeployStatus> | Record<string, DeployStatus> = new Map()
 ): any[] {
   if (!Array.isArray(modeled)) return [];
-  const visible = filterGraphVisualizationResources(modeled);
-  return visible.map((resource: any) => ({
-    ...resource,
-    connections:
-      Array.isArray(resource?.connections) ?
-        resource.connections.map((c: any) => ({ ...c }))
-      : [],
-    outputResources:
-      Array.isArray(resource?.outputResources) ?
-        resource.outputResources.map((output: any) => ({ ...output }))
-      : [],
-    deployStatus:
-      lookupDeployStatus(resource, statusByKey) ||
-      resource?.deployStatus ||
-      "pending"
-  }));
+  const projected: Record<string, unknown>[] = [];
+  for (const resource of modeled) {
+    const safeResource = projectGraphResourceMetadata(resource);
+    if (!safeResource) continue;
+    projected.push({
+      ...safeResource,
+      deployStatus:
+        lookupDeployStatus(resource, statusByKey) ||
+        safeResource.deployStatus ||
+        "pending"
+    });
+  }
+  return filterGraphVisualizationResources(projected);
 }

@@ -1372,6 +1372,8 @@ describe("deploy pipeline parity with the legacy arm transcript", () => {
     });
 
     const outcome = createDeployOutcomeService({
+      projectSafeGraphResources: (graph) =>
+        Array.isArray(graph) ? (graph as CanvasGraphResource[]) : [],
       settleDeployStatuses: (resources) => {
         record("settle-statuses");
         resources.forEach((r) => {

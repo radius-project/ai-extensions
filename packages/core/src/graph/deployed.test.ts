@@ -119,6 +119,20 @@ describe("projectDeployedGraph", () => {
     expect(resources[0].outputResources).toHaveLength(1);
   });
 
+  it("preserves the authored definition location", () => {
+    const projected = projectDeployedGraph([
+      makeResource("Radius.Compute/containers", "api", {
+        definitionFile: "infra/app.bicep",
+        definitionLine: 42
+      })
+    ]);
+
+    expect(projected[0]).toMatchObject({
+      definitionFile: "infra/app.bicep",
+      definitionLine: 42
+    });
+  });
+
   it("defaults every unknown resource to pending", () => {
     const projected = projectDeployedGraph([
       makeResource("Radius.Compute/containers", "api")
@@ -140,6 +154,20 @@ describe("projectDeployedGraph", () => {
       "in_progress",
       "failed"
     ]);
+  });
+
+  it("matches status by output resource id without serializing the lookup metadata", () => {
+    const projected = projectDeployedGraph(
+      [
+        makeResource("Radius.Compute/containers", "api", {
+          outputResourceIds: ["provider-output"]
+        })
+      ],
+      { "provider-output": "success" }
+    );
+
+    expect(projected[0].deployStatus).toBe("success");
+    expect(projected[0]).not.toHaveProperty("outputResourceIds");
   });
 
   it("keeps a status a resource already carries when the map does not mention it", () => {
@@ -167,7 +195,7 @@ describe("projectDeployedGraph", () => {
     expect(projected[0].deployStatus).toBe("success");
   });
 
-  it("applies the visualization filter before projecting (#145, #149)", () => {
+  it("applies the visualization filter to projected resources (#145, #149)", () => {
     const api = makeResource("Radius.Compute/containers", "api");
     const image = makeResource("Radius.Compute/containerImages", "apiImage");
     const secret = makeResource(
@@ -179,11 +207,42 @@ describe("projectDeployedGraph", () => {
     expect(projected.map((r) => r.name)).toEqual(["api"]);
   });
 
+  it("rejects non-redacted Secret data before visualization filtering", () => {
+    const sentinel = "fixture-plaintext-value";
+    const image = makeResource("Radius.Compute/containerImages", "apiImage");
+    const secret = makeResource(
+      "Radius.Security/secrets",
+      "radius-ghcr-registry-creds",
+      {
+        properties: { data: { password: sentinel } },
+        connections: [{ id: image.id, direction: "Outbound" }]
+      }
+    );
+
+    expect(() => projectDeployedGraph([image, secret])).toThrowError(
+      expect.objectContaining({
+        message: expect.not.stringContaining(sentinel)
+      })
+    );
+  });
+
   it("clones connections so the projection cannot mutate the modeled graph", () => {
     const api = makeResource("Radius.Compute/containers", "api", {
-      connections: [{ id: "db", direction: "Outbound" }]
+      connections: [
+        {
+          id: "db",
+          direction: "Outbound",
+          kind: "Connection",
+          properties: { password: "not-serialized" }
+        }
+      ],
+      properties: { data: "not-serialized" }
     });
     const projected = projectDeployedGraph([api]);
+    expect(projected[0]).not.toHaveProperty("properties");
+    expect(projected[0].connections).toEqual([
+      { id: "db", direction: "Outbound", kind: "Connection" }
+    ]);
     projected[0].connections[0].direction = "Inbound";
     expect(api.connections[0].direction).toBe("Outbound");
   });
@@ -198,6 +257,7 @@ describe("projectDeployedGraph", () => {
   it("returns an empty array for non-array input", () => {
     expect(projectDeployedGraph(undefined as any)).toEqual([]);
     expect(projectDeployedGraph(null as any)).toEqual([]);
+    expect(projectDeployedGraph([null, "invalid"] as any[])).toEqual([]);
   });
 });
 
@@ -308,6 +368,14 @@ describe("mergeDeployedGraphMetadata", () => {
     expect(mergeDeployedGraphMetadata([{ name: "no-id" }], null)).toEqual([
       { name: "no-id", connections: [], outputResources: [] }
     ]);
+    expect(
+      mergeDeployedGraphMetadata(
+        [null, "invalid", { id: "valid", name: "valid" }] as any[],
+        null
+      )
+    ).toEqual([
+      { id: "valid", name: "valid", connections: [], outputResources: [] }
+    ]);
   });
 
   it("ignores malformed deployed parents and output collections", () => {
@@ -316,5 +384,51 @@ describe("mergeDeployedGraphMetadata", () => {
       { id: modeled[0].id, outputResources: "invalid" }
     ]);
     expect(merged[0].outputResources).toEqual(modeled[0].outputResources);
+  });
+
+  it("drops unknown and secret-shaped fields from deployed outputs", () => {
+    const merged = mergeDeployedGraphMetadata(modeled, [
+      {
+        id: modeled[0].id,
+        outputResources: [
+          {
+            id: "deployed",
+            name: "deployment",
+            type: "apps/Deployment",
+            deployStatus: "success",
+            properties: { password: "fixture-plaintext-value" },
+            secretValue: "fixture-plaintext-value"
+          }
+        ]
+      }
+    ]);
+
+    expect(merged[0].outputResources).toEqual([
+      {
+        id: "deployed",
+        name: "deployment",
+        type: "apps/Deployment",
+        deployStatus: "success"
+      }
+    ]);
+    expect(JSON.stringify(merged)).not.toContain("fixture-plaintext-value");
+  });
+
+  it("rejects non-redacted Secret data in deployed parent metadata", () => {
+    const sentinel = "fixture-plaintext-value";
+    const deployed = [
+      {
+        id: modeled[0].id,
+        name: "app-secret",
+        type: "Radius.Security/secrets",
+        properties: { data: { password: sentinel } }
+      }
+    ];
+
+    expect(() => mergeDeployedGraphMetadata(modeled, deployed)).toThrowError(
+      expect.objectContaining({
+        message: expect.not.stringContaining(sentinel)
+      })
+    );
   });
 });

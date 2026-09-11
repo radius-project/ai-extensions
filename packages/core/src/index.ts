@@ -20,9 +20,11 @@ export {
   filterGraphVisualizationResources,
   lookupDeployStatus,
   mergeDeployedGraphMetadata,
+  projectGraphOutputMetadata,
+  projectSafeApplicationGraph,
   projectDeployedGraph
 } from "./graph/index.js";
-export type { DeployStatus } from "./graph/index.js";
+export type { DeployStatus, SafeApplicationGraph } from "./graph/index.js";
 export {
   APP_ORIGIN_REPO_PATH,
   APP_ORIGIN_ROOT_PATH,

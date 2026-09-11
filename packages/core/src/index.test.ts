@@ -20,6 +20,8 @@ const EXPECTED_FUNCTIONS = [
   "isStagingDirName",
   "lookupDeployStatus",
   "mergeDeployedGraphMetadata",
+  "projectGraphOutputMetadata",
+  "projectSafeApplicationGraph",
   "projectDeployedGraph",
   "evaluateAppModelFreshness",
   "freshnessIdentity",
