@@ -1,4 +1,4 @@
-import { escapeHtml, type CanvasState } from "../shared.js";
+import type { CanvasState } from "../shared.js";
 import { browserScriptTag } from "../browser/scripts.js";
 import { pageShell } from "./shell.js";
 import { graphHeader, graphHeaderClose } from "./graph-header.js";
@@ -7,7 +7,8 @@ import {
   DELETE_DEPLOYMENT_DIALOG_HTML
 } from "./fragments.js";
 import { confirmDialogMarkup } from "./environment/confirm-dialog.js";
-import { inlineJson } from "./encoding.js";
+import { DEPLOYED_GRAPH_STATE_ID } from "./browser-state-ids.js";
+import { renderPageState } from "./page-state.js";
 
 export function deployedGraphPage(state: CanvasState = {}): string {
   const targetRepo =
@@ -72,18 +73,16 @@ ${confirmDialogMarkup()}
   .rad-deployed-controls .rad-field label { font-size:15px; font-weight:600; color:var(--rad-text); }
   .rad-deployed-controls .rad-btn { align-self:flex-end; flex:0 0 auto; }
 </style>
-<div hidden id="radius-deployed-graph-state">${escapeHtml(
-      inlineJson({
-        repo: targetRepo,
-        branch: deployBranch,
-        graphBranch: targetBranch,
-        provider,
-        mutationNonce:
-          typeof state.browserMutationNonce === "string" ?
-            state.browserMutationNonce
-          : ""
-      })
-    )}</div>
+${renderPageState(DEPLOYED_GRAPH_STATE_ID, {
+  repo: targetRepo,
+  branch: deployBranch,
+  graphBranch: targetBranch,
+  provider,
+  mutationNonce:
+    typeof state.browserMutationNonce === "string" ?
+      state.browserMutationNonce
+    : ""
+})}
 ${browserScriptTag("deployed-graph-page")}
 ${graphHeaderClose()}`
   );

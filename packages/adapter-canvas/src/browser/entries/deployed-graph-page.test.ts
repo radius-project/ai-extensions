@@ -9,7 +9,7 @@ import {
 } from "../../../test/support/browser/fakes.js";
 import { PAGE_REGISTRY_GLOBAL } from "../globals.js";
 import { resolvePageRegistry } from "../registry.js";
-import { DEPLOYED_GRAPH_STATE_ID } from "../pages/deployed-graph-page.js";
+import { DEPLOYED_GRAPH_STATE_ID } from "../../pages/browser-state-ids.js";
 import { installDeployedGraphPageEntry } from "./deployed-graph-page.js";
 
 describe("deployed graph page browser entry", () => {

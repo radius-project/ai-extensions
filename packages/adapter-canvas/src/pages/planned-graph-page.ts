@@ -1,12 +1,13 @@
 // Canvas adapter — the planned application graph page: the infrastructure a
 // deployment to the selected environment would provision.
 
-import { escapeHtml, type CanvasState } from "../shared.js";
+import type { CanvasState } from "../shared.js";
 import { isWorkspaceSelection } from "../workspace.js";
 import { browserScriptTag } from "../browser/scripts.js";
 import { pageShell } from "./shell.js";
 import { graphHeader, graphHeaderClose } from "./graph-header.js";
-import { inlineJson } from "./encoding.js";
+import { PLANNED_GRAPH_STATE_ID } from "./browser-state-ids.js";
+import { renderPageState } from "./page-state.js";
 
 export function plannedGraphPage(state: CanvasState = {}): string {
   const targetRepo =
@@ -60,17 +61,15 @@ ${graphHeader("planned")}
 </div>
 <div id="plan-status" class="status info">Generating the planned application graph…</div>
 <div id="graph-container-wrapper"></div>
-<div hidden id="radius-planned-graph-state">${escapeHtml(
-        inlineJson({
-          repo: targetRepo,
-          branch: graphBranch,
-          environment: defaultEnvironment,
-          provider,
-          resources: [],
-          localSource,
-          followWorkspaceBranch
-        })
-      )}</div>
+${renderPageState(PLANNED_GRAPH_STATE_ID, {
+  repo: targetRepo,
+  branch: graphBranch,
+  environment: defaultEnvironment,
+  provider,
+  resources: [],
+  localSource,
+  followWorkspaceBranch
+})}
 ${browserScriptTag("planned-graph-page")}
 ${graphHeaderClose()}`
     );
@@ -106,17 +105,15 @@ ${graphHeader("planned")}
 <div id="plan-status" class="status error" style="display:none;"></div>
 <div id="graph-container"></div>
 
-<div hidden id="radius-planned-graph-state">${escapeHtml(
-      inlineJson({
-        repo: targetRepo,
-        branch: graphBranch,
-        environment: defaultEnvironment,
-        provider,
-        resources: plannedResources,
-        localSource,
-        followWorkspaceBranch
-      })
-    )}</div>
+${renderPageState(PLANNED_GRAPH_STATE_ID, {
+  repo: targetRepo,
+  branch: graphBranch,
+  environment: defaultEnvironment,
+  provider,
+  resources: plannedResources,
+  localSource,
+  followWorkspaceBranch
+})}
 ${browserScriptTag("planned-graph-page")}
 ${graphHeaderClose()}`
   );
