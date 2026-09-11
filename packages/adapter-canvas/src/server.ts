@@ -3273,6 +3273,7 @@ const deployMonitorService = createDeployMonitorService({
   buildDeployMessageMap,
   applyDeployMessages,
   applyDeployStatusToResources,
+  settleDeployStatuses,
   generatePortalUrl,
   optionalString,
   errorMessage,
