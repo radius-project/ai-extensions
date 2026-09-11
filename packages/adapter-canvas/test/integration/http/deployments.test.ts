@@ -1322,6 +1322,9 @@ describe("POST /api/deploy real-loopback HIT (RF-07)", () => {
       buildDeployMessageMap: () => new Map(),
       applyDeployMessages: () => {},
       applyDeployStatusToResources: () => [],
+      settleDeployStatuses: () => {
+        throw new Error("an undispatched workflow has no graph to settle");
+      },
       generatePortalUrl: () => "",
       optionalString: (value) => (typeof value === "string" ? value : ""),
       errorMessage: (error) =>

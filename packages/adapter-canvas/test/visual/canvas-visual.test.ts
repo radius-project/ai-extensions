@@ -15,6 +15,11 @@ import {
 } from "../e2e/support/canvas-harness.js";
 import type { Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
+import {
+  ARTIFACT_PAGE_SIZE,
+  DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
+  settleDeployStatuses
+} from "../../src/deploy-artifacts.js";
 import { DELETE_DIALOG_RESOURCE_LIMIT } from "../../src/browser/delete-dialog.js";
 import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
 
@@ -26,6 +31,53 @@ type GraphRequests = {
   loadGraph: GraphRequestBody[];
   planGraph: GraphRequestBody[];
 };
+
+const DEPLOY_OUTCOMES: {
+  name: string;
+  conclusion: "cancelled" | "timed_out" | "monitor_timed_out" | "failure";
+  expectedMessage: string;
+  radiusError?: string;
+  producerMessage?: string;
+}[] = [
+  {
+    name: "cancelled",
+    conclusion: "cancelled",
+    expectedMessage: "Deployment cancelled"
+  },
+  {
+    name: "timed-out",
+    conclusion: "timed_out",
+    expectedMessage: "Deployment timed out"
+  },
+  {
+    name: "monitoring-timed-out",
+    conclusion: "monitor_timed_out",
+    expectedMessage: DEPLOY_MONITOR_TIMED_OUT_MESSAGE
+  },
+  {
+    name: "radius-error",
+    conclusion: "failure",
+    radiusError:
+      "Radius deployment failed: recipe could not provision container web (quota exceeded).",
+    expectedMessage:
+      "Radius deployment failed: recipe could not provision container web (quota exceeded)."
+  },
+  {
+    name: "bounded-radius-error",
+    conclusion: "failure",
+    radiusError: "Quota exceeded for the deployment.\n".repeat(120),
+    expectedMessage:
+      "Quota exceeded for the deployment.\n".repeat(120).slice(0, 497) + "..."
+  },
+  {
+    name: "producer-error",
+    conclusion: "cancelled",
+    producerMessage:
+      "Container image fixture.invalid/web:demo could not be pulled: manifest not found.",
+    expectedMessage:
+      "Container image fixture.invalid/web:demo could not be pulled: manifest not found."
+  }
+];
 
 function isGraphRequestBody(value: unknown): value is GraphRequestBody {
   if (typeof value !== "object" || value === null) return false;
@@ -637,6 +689,98 @@ test.describe("Radius Canvas visual baselines", () => {
             })
         ).toBeVisible();
         await screenshot(page, `vi-07-deploy-${status}-${theme}.png`);
+      });
+    }
+    for (const outcome of DEPLOY_OUTCOMES) {
+      test(`VI-07 deployed graph ${outcome.name} in ${theme}`, async ({
+        page,
+        canvas
+      }) => {
+        const topology: CanvasGraphResource[] = [
+          {
+            id: "app/web",
+            name: "web",
+            type: "Radius.Compute/containers",
+            codeReference: "src/web/app.ts#L12"
+          },
+          {
+            id: "app/db",
+            name: "db",
+            type: "Radius.Data/sqlDatabases",
+            codeReference: "src/web/app.ts#L12"
+          }
+        ];
+        const resources: CanvasGraphResource[] = [
+          {
+            ...topology[0],
+            deployStatus: outcome.producerMessage ? "failed" : "in_progress",
+            deployMessage: outcome.producerMessage ?? "creating"
+          },
+          { ...topology[1], deployStatus: "success", deployMessage: "creating" }
+        ];
+        settleDeployStatuses(
+          resources,
+          outcome.conclusion,
+          outcome.radiusError
+        );
+        await seed(canvas, {
+          graphResources: topology,
+          deployingResources: resources,
+          deployStatus: "failed",
+          deployErrorKind:
+            outcome.conclusion === "monitor_timed_out" ?
+              "run-unconfirmed"
+            : undefined,
+          deployRunId: 7,
+          deployEnvName: "fixture-environment",
+          deployAppName: "radius-app"
+        });
+        const scenario = defaultFakeCliScenario();
+        scenario.commands.push({
+          tool: "gh",
+          args: [
+            "api",
+            `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`
+          ],
+          stdout: JSON.stringify({ artifacts: [] })
+        });
+        await canvas.setScenario(scenario);
+        // Stub selector listings, but let the real graph route project the
+        // retained terminal messages that these baselines protect.
+        await routeGraphControls(page, canvas);
+        await routeDeployments(page, canvas, "failed");
+        await gotoVisual(page, canvas, "deployed", theme);
+        await expect(page.locator(".rad-node")).toHaveCount(2);
+        await expect(page.getByAltText("Failed", { exact: true })).toHaveCount(
+          1
+        );
+        const successfulNode = page
+          .locator(".rad-node")
+          .filter({ hasText: "db" });
+        await expect(
+          successfulNode.getByAltText("Deployed", { exact: true })
+        ).toBeVisible();
+        await expect(
+          page.getByAltText("In progress", { exact: true })
+        ).toHaveCount(0);
+        await page
+          .locator(".rad-node")
+          .filter({ hasText: "web" })
+          .getByRole("button", { name: "Show details" })
+          .click();
+        await expect(
+          page
+            .locator("#node-popup")
+            .getByText(outcome.expectedMessage, { exact: true })
+        ).toBeVisible();
+        await expect(page.locator("#node-popup")).not.toContainText("creating");
+        await expect(
+          successfulNode.getByAltText("Deployed", { exact: true })
+        ).toBeInViewport();
+        await screenshot(
+          page,
+          `vi-07-deployed-graph-${outcome.name}-${theme}.png`
+        );
       });
     }
   }

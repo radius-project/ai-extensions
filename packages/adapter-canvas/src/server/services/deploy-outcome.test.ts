@@ -7,6 +7,10 @@ import {
   type DeployGraphRead
 } from "./deploy-outcome.js";
 import type { CanvasGraphResource, CanvasState } from "../../shared.js";
+import {
+  MAX_DEPLOY_MESSAGE_LENGTH,
+  settleDeployStatuses
+} from "../../deploy-artifacts.js";
 
 function dependencies(
   overrides: Partial<DeployOutcomeDependencies> = {}
@@ -610,5 +614,165 @@ describe("deploy outcome on failure", () => {
     expect(state.deployError).toContain("line-59");
     expect(state.deployError).toContain("line-20");
     expect(state.deployError).not.toContain("line-19");
+  });
+});
+
+describe("deploy outcome settles red nodes with an explanation (Exception 5.1)", () => {
+  it("keeps full failure diagnostics while bounding copies on graph nodes", async () => {
+    const radiusError =
+      "Error: recipe failed\n" + "quota details\n".repeat(100);
+    const resources: CanvasGraphResource[] = [
+      { id: "r1", name: "db", deployStatus: "pending" }
+    ];
+    const { request, state, logs } = outcomeRequest({
+      conclusion: "failure",
+      resources
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        extractRadDeployError: () => radiusError,
+        settleDeployStatuses
+      })
+    );
+
+    await service.settle(request);
+
+    expect(resources[0].deployMessage).toBe(
+      radiusError.slice(0, MAX_DEPLOY_MESSAGE_LENGTH - 3) + "..."
+    );
+    expect(resources[0].deployMessage).toHaveLength(MAX_DEPLOY_MESSAGE_LENGTH);
+    expect(state.deployError).toContain(radiusError);
+    expect(logs.join("\n")).toContain(
+      radiusError
+        .split("\n")
+        .map((line) => "  " + line)
+        .join("\n")
+    );
+  });
+
+  it("hands the extracted Radius error to the graph so every red node carries it", async () => {
+    const settled: [string | undefined | null, string | undefined][] = [];
+    const { request } = outcomeRequest({
+      conclusion: "failure",
+      resources: [{ id: "r1", name: "db", deployStatus: "pending" }],
+      steps: [{ name: "Run rad commands", conclusion: "failure" }]
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        fetchRunLog: () => Promise.resolve("run log text"),
+        extractRadDeployError: () => "Error: recipe quota exceeded",
+        settleDeployStatuses: (_resources, conclusion, radiusError) => {
+          settled.push([conclusion, radiusError]);
+        }
+      })
+    );
+
+    await service.settle(request);
+
+    expect(settled).toEqual([["failure", "Error: recipe quota exceeded"]]);
+  });
+
+  it("settles a cancelled run without inventing a Radius error", async () => {
+    const settled: [string | undefined | null, string | undefined][] = [];
+    const { request } = outcomeRequest({
+      conclusion: "cancelled",
+      resources: [{ id: "r1", name: "db", deployStatus: "in_progress" }]
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        settleDeployStatuses: (_resources, conclusion, radiusError) => {
+          settled.push([conclusion, radiusError]);
+        }
+      })
+    );
+
+    await service.settle(request);
+
+    expect(settled).toEqual([["cancelled", ""]]);
+  });
+
+  it("still settles the graph when the failure details could not be read", async () => {
+    // The degraded path: the run-log read threw, so there is no Radius error to
+    // show, but the nodes must not be left stuck pending.
+    const settled: [string | undefined | null, string | undefined][] = [];
+    const { request, state } = outcomeRequest({ conclusion: "failure" });
+    const service = createDeployOutcomeService(
+      dependencies({
+        fetchRunLog: () => {
+          throw new Error("log unreadable");
+        },
+        settleDeployStatuses: (_resources, conclusion, radiusError) => {
+          settled.push([conclusion, radiusError]);
+        }
+      })
+    );
+
+    await service.settle(request);
+
+    expect(settled).toEqual([["failure", ""]]);
+    expect(state.deployError).toContain(
+      "The failure details could not be read"
+    );
+  });
+
+  it("settles the graph before the panel can observe a terminal failure", async () => {
+    // The webview fires the repair handoff the moment it sees "failed", so the
+    // graph must already be settled by then.
+    const order: string[] = [];
+    const { request } = outcomeRequest({
+      conclusion: "failure",
+      resources: [{ id: "r1", name: "db", deployStatus: "pending" }]
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        settleDeployStatuses: (resources) => {
+          order.push("settle");
+          resources.forEach((r) => {
+            r.deployStatus = "failed";
+            r.deployMessage = "Deployment failed";
+          });
+        }
+      })
+    );
+    const entryState = request.entry.state;
+    let observed: string | undefined;
+    Object.defineProperty(entryState, "deployStatus", {
+      configurable: true,
+      get: () => observed,
+      set: (value: string) => {
+        observed = value;
+        order.push(`status:${value}`);
+      }
+    });
+
+    await service.settle(request);
+
+    expect(order).toEqual(["settle", "status:failed"]);
+    expect(request.resources[0].deployMessage).toBe("Deployment failed");
+  });
+
+  it("propagates the settled status onto output resources", async () => {
+    const resource: CanvasGraphResource = {
+      id: "r1",
+      name: "db",
+      deployStatus: "pending"
+    };
+    const { request, statusCalls } = outcomeRequest({
+      conclusion: "failure",
+      resources: [resource]
+    });
+    const service = createDeployOutcomeService(
+      dependencies({
+        settleDeployStatuses: (resources) => {
+          resources.forEach((r) => {
+            r.deployStatus = "failed";
+          });
+        }
+      })
+    );
+
+    await service.settle(request);
+
+    expect(statusCalls).toEqual([[resource, "failed"]]);
   });
 });
