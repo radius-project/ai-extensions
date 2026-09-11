@@ -22,6 +22,7 @@ import type {
 import { safeExternalUrl } from "./details.js";
 import { isLocalSourceNode } from "./build.js";
 import { githubSourceReferenceUrl } from "./model.js";
+import { browserCssMaskUrl } from "../html.js";
 
 const TYPE_LABEL_MAX_PX = 13;
 const TYPE_LABEL_MIN_PX = 7;
@@ -109,9 +110,26 @@ export function createNodeComponent(
       fitTypeLabel(typeRef.current);
     }, [data.typeLabel]);
 
+    // A monochrome icon draws itself in `currentColor`, but inside an <img> the
+    // SVG is a separate document, so it would always paint black. Painting it
+    // through a CSS mask instead keys off its alpha channel and fills it with
+    // the canvas theme token, so it stays legible in light and dark. Multi-color
+    // artwork (built-in glyphs, pack PNGs, remote URLs) keeps the <img> so its
+    // colours are not flattened.
+    const themedIconMask =
+      data.icon && data.iconMonochrome ? browserCssMaskUrl(data.icon) : "";
     const icon =
       data.icon ?
-        h("img", { className: "rad-node__icon", src: data.icon, alt: "" })
+        data.iconMonochrome ?
+          h("span", {
+            className: "rad-node__icon rad-node__icon--themed",
+            "aria-hidden": "true",
+            style: {
+              WebkitMaskImage: themedIconMask,
+              maskImage: themedIconMask
+            }
+          })
+        : h("img", { className: "rad-node__icon", src: data.icon, alt: "" })
       : null;
     const glyph = h(
       "span",

@@ -237,6 +237,64 @@ describe("node colours", () => {
   });
 });
 
+describe("node icons", () => {
+  // Radius rejects <style> in icons, so a currentColor icon can only be themed
+  // by the canvas. Classification lives in the model and masking lives in the
+  // view, so this is the seam that has to carry the flag between them.
+  const MONO_ICON =
+    '<svg viewBox="0 0 500 500"><rect width="500" height="500" fill="currentColor" /></svg>';
+
+  it("marks a currentColor pack icon as monochrome and encodes it as a data uri", () => {
+    const built = buildGraph(settings(), [
+      { id: "app/models", name: "models", icon: MONO_ICON }
+    ]);
+    const data = built.dataById["app/models"];
+    expect(data.iconMonochrome).toBe(true);
+    expect(data.icon.indexOf("data:image/svg+xml,")).toBe(0);
+    expect(decodeURIComponent(data.icon)).toContain('fill="currentColor"');
+  });
+
+  it("leaves a built-in fallback glyph and a full-colour pack icon unmasked", () => {
+    const built = buildGraph(settings(), [
+      web,
+      { id: "cache", name: "cache", icon: "https://icons.test/cache.png" }
+    ]);
+    const glyph = built.dataById["app/web"];
+    expect(glyph.iconMonochrome).toBe(false);
+    expect(decodeURIComponent(glyph.icon)).toContain('fill="#326ce5"');
+
+    const packed = built.dataById["cache"];
+    expect(packed.iconMonochrome).toBe(false);
+    expect(packed.icon).toBe("https://icons.test/cache.png");
+  });
+
+  it("never masks expanded output nodes, whose icons are always built-in glyphs", () => {
+    // ResourceOutput carries no pack icon, so an output always resolves to the
+    // built-in type glyph — deliberately multi-colour brand artwork that must
+    // reach the view unmasked.
+    const built = buildGraph(settings(), [db]);
+    const server = built.dataById["app/db/output/0/server"];
+    const creds = built.dataById["app/db/output/1/creds"];
+    expect(server.iconMonochrome).toBe(false);
+    expect(creds.iconMonochrome).toBe(false);
+    expect(decodeURIComponent(server.icon)).toContain('fill="#00758f"');
+  });
+
+  it("keeps a parent's monochrome flag off its unmasked output children", () => {
+    const built = buildGraph(settings(), [
+      {
+        id: "app/models",
+        name: "models",
+        type: "Radius.Compute/containers",
+        icon: MONO_ICON,
+        outputResources: [{ name: "d", type: "apps/Deployment" }]
+      }
+    ]);
+    expect(built.dataById["app/models"].iconMonochrome).toBe(true);
+    expect(built.dataById["app/models/output/0/d"].iconMonochrome).toBe(false);
+  });
+});
+
 describe("modeled graph", () => {
   it("filters visualization-only image resources and their associated secret", () => {
     const imageId = "app/api-image";

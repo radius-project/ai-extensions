@@ -4,12 +4,12 @@
 // explains deploy status, every other page lists the resource categories the
 // current graph contains, in first-seen order.
 
-import { escapeBrowserHtml } from "../html.js";
+import { browserCssMaskUrl, escapeBrowserHtml } from "../html.js";
 import {
   radiusDeployBadgeKind,
   radiusDeployBadgeSvg,
   radiusGetTypeStyle,
-  radiusResolveIcon
+  radiusResolveIconSource
 } from "./model.js";
 import type { GraphResource, ResourceOutput } from "./model.js";
 import type { DeployBadgeKind } from "./model.js";
@@ -17,6 +17,9 @@ import type { DeployBadgeKind } from "./model.js";
 export interface LegendCategory {
   name: string;
   icon: string;
+  // True when the icon paints itself in `currentColor` and must therefore be
+  // themed by this UI through a CSS mask rather than shown as an image.
+  monochrome?: boolean;
 }
 
 // The deployed view's legend explains deploy STATUS, not resource category:
@@ -64,9 +67,11 @@ export function collectLegendCategories(
     const category = radiusGetTypeStyle(type).category;
     if (seen.has(category)) return;
     seen.add(category);
+    const icon = radiusResolveIconSource(resource);
     categories.push({
       name: category,
-      icon: radiusResolveIcon(resource)
+      icon: icon.src,
+      monochrome: icon.monochrome
     });
   };
   for (const resource of resources) {
@@ -76,23 +81,47 @@ export function collectLegendCategories(
   return categories;
 }
 
+// A monochrome legend icon is painted through a CSS mask so it follows the
+// canvas theme; everything else keeps its own colours as an image. The mask URL
+// is percent-encoded for the CSS `url()` context and the whole declaration is
+// then HTML-escaped, so a hostile icon string can escape neither.
+function legendIconHtml(category: LegendCategory): string {
+  if (!category.icon) {
+    return '<span style="display:inline-block;width:14px;height:14px;vertical-align:middle;"></span>';
+  }
+  if (!category.monochrome) {
+    return (
+      '<img src="' +
+      escapeBrowserHtml(category.icon) +
+      '" width="14" height="14" style="vertical-align:middle;" alt="" />'
+    );
+  }
+  const mask = browserCssMaskUrl(category.icon) + " center/contain no-repeat";
+  return (
+    '<span aria-hidden="true" style="' +
+    escapeBrowserHtml(
+      "display:inline-block;width:14px;height:14px;vertical-align:middle;" +
+        "background-color:var(--rad-text, currentColor);" +
+        "-webkit-mask:" +
+        mask +
+        ";mask:" +
+        mask +
+        ";"
+    ) +
+    '"></span>'
+  );
+}
+
 export function buildCategoryLegendHtml(
   categories: readonly LegendCategory[]
 ): string {
   return categories
-    .map((category) => {
-      const image =
-        category.icon ?
-          '<img src="' +
-          escapeBrowserHtml(category.icon) +
-          '" width="14" height="14" style="vertical-align:middle;" alt="" />'
-        : '<span style="display:inline-block;width:14px;height:14px;vertical-align:middle;"></span>';
-      return (
+    .map(
+      (category) =>
         '<div class="legend-item">' +
-        image +
+        legendIconHtml(category) +
         escapeBrowserHtml(category.name) +
         "</div>"
-      );
-    })
+    )
     .join("");
 }

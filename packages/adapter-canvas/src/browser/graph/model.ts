@@ -401,28 +401,63 @@ export function radiusGetTypeStyle(type?: string): TypeStyle {
   };
 }
 
+// An icon source plus whether it is safe to paint through a CSS mask. Radius
+// rejects <style> elements and style attributes in resource type icons
+// (pkg/ucp/datamodel/icon_validation.go), so an icon can never theme itself
+// inside an <img>: the consuming UI has to do it. `monochrome` marks the icons
+// that opted into that by drawing themselves in `currentColor`; multi-color
+// artwork stays an <img> so its brand colours are not flattened.
+export interface ResolvedIcon {
+  readonly src: string;
+  readonly monochrome: boolean;
+}
+
+const NO_ICON: ResolvedIcon = Object.freeze({ src: "", monochrome: false });
+
+function svgUsesCurrentColor(svg: string): boolean {
+  // Inspect only actual start tags. The tag matcher respects quoted `>` values
+  // and excludes comments, declarations, processing instructions, and closing
+  // tags so attribute-like text in metadata cannot opt an icon into flattening.
+  const startTags = svg.match(/<(?![!?/])(?:[^>"']|"[^"]*"|'[^']*')+>/g) || [];
+  return startTags.some((tag) =>
+    /(?:^|\s)(?:fill|stroke|color)\s*=\s*["']\s*currentcolor\s*["']/i.test(tag)
+  );
+}
+
 // Normalizes an icon supplied by a type/recipe pack into a usable image source
-// for the node card <img>. Packs may express an icon as a ready data URI, an
-// http(s) URL, or a raw <svg> markup string; anything unrecognized returns ''
-// so the caller falls back to the built-in glyph map.
-export function radiusNormalizeIcon(icon: unknown): string {
-  if (!icon || typeof icon !== "string") return "";
+// for the node card. Packs may express an icon as a ready data URI, an http(s)
+// URL, or a raw <svg> markup string; anything unrecognized returns '' so the
+// caller falls back to the built-in glyph map. Only raw <svg> markup that uses
+// `currentColor` in a paint attribute is reported as monochrome — a pre-encoded
+// data URI or a remote URL is opaque here and may well be full-colour artwork.
+// This is an all-or-nothing opt-in: packs using currentColor for only one accent
+// should supply an opaque source instead, because a CSS mask flattens all ink.
+export function radiusNormalizeIconSource(icon: unknown): ResolvedIcon {
+  if (!icon || typeof icon !== "string") return NO_ICON;
   let s = icon.trim();
-  if (!s) return "";
+  if (!s) return NO_ICON;
   if (
     s.indexOf("data:") === 0 ||
     s.indexOf("http://") === 0 ||
     s.indexOf("https://") === 0
   ) {
-    return s;
+    return { src: s, monochrome: false };
   }
   if (s.indexOf("<svg") === 0) {
+    const monochrome = svgUsesCurrentColor(s);
     if (s.indexOf("width=") === -1) {
       s = s.replace("<svg ", '<svg width="64" height="64" ');
     }
-    return "data:image/svg+xml," + encodeURIComponent(s);
+    return {
+      src: "data:image/svg+xml," + encodeURIComponent(s),
+      monochrome
+    };
   }
-  return "";
+  return NO_ICON;
+}
+
+export function radiusNormalizeIcon(icon: unknown): string {
+  return radiusNormalizeIconSource(icon).src;
 }
 
 // The minimal resource shape needed to resolve an icon: a pack-supplied icon
@@ -436,13 +471,24 @@ export interface IconResource {
 // Resolves the icon for a resource. The artwork is owned by the resource's
 // type/recipe pack, so a pack-supplied icon (r.icon) wins; the built-in
 // type->glyph map is only a fallback for types whose pack omits an icon.
+export function radiusResolveIconSource(
+  resource: IconResource | null | undefined
+): ResolvedIcon {
+  const r = resource || {};
+  const packIcon = radiusNormalizeIconSource(r.icon);
+  if (packIcon.src) return packIcon;
+  // The built-in glyphs are deliberately multi-color brand artwork, so they are
+  // never masked.
+  return {
+    src: radiusGetIconSvg(r.type || r.displayType || ""),
+    monochrome: false
+  };
+}
+
 export function radiusResolveIcon(
   resource: IconResource | null | undefined
 ): string {
-  const r = resource || {};
-  const packIcon = radiusNormalizeIcon(r.icon);
-  if (packIcon) return packIcon;
-  return radiusGetIconSvg(r.type || r.displayType || "");
+  return radiusResolveIconSource(resource).src;
 }
 
 // Formats a resource type into the "Namespace/typeName" label shown under the
