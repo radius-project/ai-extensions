@@ -37,7 +37,7 @@ describe("pinned baseline constants", () => {
     expect(RESOURCE_GROUP_PREFIX.startsWith("radtest-")).toBe(true);
   });
 
-  it("knows the branch prefix the product falls back to without workflow scope", () => {
+  it("knows the branch prefix used after a protected-branch commit failure", () => {
     expect(WORKFLOW_FALLBACK_BRANCH_PREFIX).toBe("radius/setup-");
   });
 
@@ -83,21 +83,11 @@ describe("pinned baseline constants", () => {
 });
 
 describe("isFixtureRepositoryProvisioned", () => {
-  // The repository is deliberately not provisioned on this branch. Asserting
-  // the predicate reports that keeps a placeholder from ever reading as a real
-  // cloud result, and this expectation is what fails loudly at the moment
-  // someone bumps the constants without also updating the suite.
-  it("reports the placeholder constants as unprovisioned", () => {
-    expect(isFixtureRepositoryProvisioned()).toBe(false);
-  });
-
-  it("names every constant still holding a placeholder", () => {
-    const description = describeUnprovisionedFixtureRepository();
-
-    expect(description).toContain("FIXTURE_REPO_OWNER");
-    expect(description).toContain("FIXTURE_REPO_NAME");
-    expect(description).toContain("FIXTURE_BASELINE_SHA");
-    expect(description).toContain("fixture-repository.ts");
+  it("reports the checked-in fixture pin as provisioned", () => {
+    expect(isFixtureRepositoryProvisioned()).toBe(true);
+    expect(describeUnprovisionedFixtureRepository()).toBe(
+      "The fixture repository is provisioned."
+    );
   });
 });
 
