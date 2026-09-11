@@ -538,6 +538,162 @@ test.each([
   );
 });
 
+// A Recipe names the cloud resource it provisions from the Radius resource ID,
+// which carries no application identity, so two applications that both call a
+// store `postgres` resolve to one shared cloud resource. These cases pin the
+// checker rung that keeps a generated model's backing-resource names scoped to
+// their application.
+const applicationType = "Radius.Core/applications@2025-08-01-preview";
+const postgresType = "Radius.Data/postgreSqlDatabases@2025-08-01-preview";
+
+function namedRadiusResource(
+  type: string,
+  name: unknown,
+  properties: object = {}
+) {
+  return {
+    type,
+    properties: {
+      name,
+      properties: { codeReference: "src/resource.ts#L1", ...properties }
+    }
+  };
+}
+
+function applicationResource(name: unknown) {
+  return { type: applicationType, properties: { name, properties: {} } };
+}
+
+function backingNameCheck(
+  resources: object,
+  parameters: object = {}
+): ReturnType<typeof runChecker> {
+  const directory = temporaryDirectory();
+  return runChecker(
+    directory,
+    fakeBicep(directory, sarif([]), 0, template(resources, parameters))
+  );
+}
+
+test.each([
+  "Radius.AI/models@2025-08-01-preview",
+  "Radius.Data/postgreSqlDatabases@2025-08-01-preview",
+  "Radius.Messaging/kafka@2025-08-01-preview",
+  "Radius.Storage/objectStorage@2025-08-01-preview"
+])("fails an unscoped backing resource name in %s", (type) => {
+  const result = backingNameCheck({
+    app: applicationResource("todo-list-app"),
+    store: namedRadiusResource(type, "postgres")
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /backing-resource-name-scope/u);
+  assert.match(result.stderr, /store\.name/u);
+  assert.match(result.stderr, /"todo-list-app-postgres"/u);
+});
+
+test.each([
+  // The rule the generator applies.
+  "todo-list-app-postgres",
+  // Already unique per application, so there is nothing to prove unsafe.
+  "todo-list-app",
+  // The hash lowercases the resource ID, so casing cannot separate two names.
+  "Todo-List-App-Postgres"
+])("accepts the application-scoped backing resource name %s", (name) => {
+  const result = backingNameCheck({
+    app: applicationResource("todo-list-app"),
+    store: namedRadiusResource(postgresType, name)
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test.each([
+  "Radius.Compute/containers@2025-08-01-preview",
+  "Radius.Compute/containerImages@2025-08-01-preview",
+  "Radius.Compute/persistentVolumes@2025-08-01-preview",
+  "Radius.Security/secrets@2025-08-01-preview",
+  "Radius.Resources/queues@2025-08-01-preview"
+])(
+  "does not scope-check %s, which a Recipe names in the app namespace",
+  (type) => {
+    const result = backingNameCheck({
+      app: applicationResource("todo-list-app"),
+      workload: namedRadiusResource(type, "postgres")
+    });
+
+    assert.equal(result.status, 0);
+    assert.equal(result.stderr, "");
+  }
+);
+
+test("skips the scope check when the model declares no application", () => {
+  const result = backingNameCheck({
+    store: namedRadiusResource(postgresType, "postgres")
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test.each([
+  ["an unresolved application name", "[variables('appName')]", "postgres"],
+  ["an unresolved resource name", "todo-list-app", "[variables('storeName')]"]
+])("skips the scope check for %s", (_case, application, name) => {
+  const result = backingNameCheck({
+    app: applicationResource(application),
+    store: namedRadiusResource(postgresType, name)
+  });
+
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+});
+
+test("resolves both names through parameters before comparing them", () => {
+  const result = backingNameCheck(
+    {
+      app: applicationResource("[parameters('appName')]"),
+      store: namedRadiusResource(postgresType, "[parameters('storeName')]")
+    },
+    {
+      appName: { type: "string", defaultValue: "todo-list-app" },
+      storeName: { type: "string", defaultValue: "postgres" }
+    }
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /backing-resource-name-scope/u);
+  assert.match(result.stderr, /"todo-list-app-postgres"/u);
+});
+
+test("scope-checks a backing resource declared in a nested module", () => {
+  const result = backingNameCheck({
+    app: applicationResource("todo-list-app"),
+    infra: localModuleResources({
+      store: namedRadiusResource(postgresType, "postgres")
+    })
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /infra\.store\.name/u);
+  assert.match(result.stderr, /"todo-list-app"/u);
+});
+
+test("scopes a nested module's resources to the application it declares itself", () => {
+  const result = backingNameCheck({
+    app: applicationResource("todo-list-app"),
+    infra: localModuleResources({
+      other: applicationResource("reporting-app"),
+      store: namedRadiusResource(postgresType, "todo-list-app-postgres")
+    })
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /infra\.store\.name/u);
+  assert.match(result.stderr, /"reporting-app"/u);
+});
+
 const containersType = "Radius.Compute/containers@2025-08-01-preview";
 
 function containerEnv(env: object, containerKey = "web") {

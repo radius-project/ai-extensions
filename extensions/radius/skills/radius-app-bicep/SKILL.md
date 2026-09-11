@@ -171,6 +171,12 @@ The canvas asks for a refresh when an existing model is stale: its branch has mo
 - A manual edit is never reported on its own. Do not go looking for one, and do not raise it when the canvas has not, since an edit to a model that is otherwise current is the user's to keep.
 - Refresh only the current workspace branch, where writing the working tree is enough. A model on a **different** branch cannot be refreshed by modeling: report the staleness to the user and let them decide, rather than committing or pushing a regenerated model to that branch.
 
+### Renaming a backing resource in a deployed application
+
+A model generated before backing-resource names were application-scoped names its stores after the engine alone (`'postgres'`), and refreshing or repairing it renames them. That is not a free correction. On the next deploy Radius sees the old resource removed from the application and runs its Recipe's delete path, which **destroys the backing resource and the data in it**, then provisions a new empty one under the new name.
+
+So before writing a model whose backing resources would be renamed, say so: name each resource whose name changes, state that its data does not survive the next deploy, and regenerate only after the user agrees. This is the same conversation as a manually edited model, and it applies even when the canvas reported the model as plainly stale. If the user declines, leave the existing model in place. Do not author an unscoped name into a new model to avoid the conversation — the checker rejects it, and the collision it causes is the failure being fixed.
+
 ## Deterministic Naming Rules
 
 These rules eliminate ambiguity. Apply them exactly.
@@ -190,13 +196,25 @@ Explicit profile-required resource, relationship, parameter, and app-native conf
 
 ### Resource `name` properties (string values in Bicep)
 
-| Resource          | Name value                                                                                                                             |
-|-------------------|----------------------------------------------------------------------------------------------------------------------------------------|
-| Application       | Repository name in kebab-case (e.g., `'todo-list-app'`)                                                                                |
-| Container         | Service name in kebab-case; single-container apps use the app name (e.g., `'todo-list-app'`)                                           |
-| Container image   | `'<service-name>-image'` (e.g., `'todo-list-app-image'`)                                                                               |
-| Data store        | Engine short name in kebab-case (`'mysql'`, `'postgres'`, `'neo4j'`, `'redis'`); multiple of the same engine use the source store name |
-| Data store secret | `'<engine>-secret'` (when the schema defines a secret-reference credential property); app secrets `'app-secrets'`                      |
+| Resource          | Name value                                                                                                                                                                   |
+|-------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Application       | Repository name in kebab-case (e.g., `'todo-list-app'`)                                                                                                                      |
+| Container         | Service name in kebab-case; single-container apps use the app name (e.g., `'todo-list-app'`)                                                                                 |
+| Container image   | `'<service-name>-image'` (e.g., `'todo-list-app-image'`)                                                                                                                     |
+| Data store        | `'<app-name>-<engine>'` in kebab-case (e.g., `'todo-list-app-postgres'`); multiple of the same engine insert the source store name (e.g., `'todo-list-app-orders-postgres'`) |
+| Data store secret | `'<engine>-secret'` (when the schema defines a secret-reference credential property); app secrets `'app-secrets'`                                                            |
+
+Every `Radius.AI/*`, `Radius.Data/*`, `Radius.Messaging/*`, and `Radius.Storage/*` resource carries the application-name prefix, for the reason in [Backing-resource names are application-scoped](#backing-resource-names-are-application-scoped). `Radius.Compute/*` workloads, `Radius.Security/secrets`, and volumes do not: they are named inside the application's own Kubernetes namespace, where the application already scopes them.
+
+### Backing-resource names are application-scoped
+
+A Recipe provisions backing infrastructure under a name derived from the Radius resource ID, and that ID — `/planes/radius/<plane>/resourcegroups/<group>/providers/<type>/<name>` — identifies the resource but **not** the application that owns it. The Azure Recipe Pack hashes it into `pgsql-<hash>`, `mysql-<hash>`, `amr-<hash>`, `st<hash>`, and so on.
+
+So two applications deployed into the same resource group and Azure scope that both name a store `postgres` resolve to **one shared server**. The second deploy adopts the first application's server and reports success, while Azure ignores the administrator login it asked for — that login can only be set when the server is created — so its workloads fail at runtime with a password error that points at the credential rather than the collision. Deleting either application then destroys the other application's data.
+
+The application name is the only part of that resource ID this generator controls, so prefixing it is what makes the provisioned name unique per application. `validate-bicep.mjs` rejects a backing resource whose name is not scoped this way.
+
+This does not make the name unique across *environments*: the same application deployed twice into one Azure scope still resolves to one backing resource. That is the deploy pipeline's resource group to scope, not the model's.
 
 ### Connection keys
 
@@ -233,7 +251,7 @@ Populate it for every non-application resource, because the developer is not han
 
 ```bicep
 resource database 'Radius.Data/mySqlDatabases@2025-08-01-preview' = {
-  name: 'mysql'
+  name: 'todo-list-app-mysql'
   properties: {
     environment: environment
     application: application

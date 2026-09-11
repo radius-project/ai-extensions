@@ -34,7 +34,7 @@ When the workload consumes a developer-supplied credential through connection pr
 param password string
 
 resource mysql 'Radius.Data/mySqlDatabases@2025-08-01-preview' = {
-  name: 'mysql'
+  name: 'todo-list-app-mysql'
   properties: {
     environment: environment
     application: app.id
@@ -102,7 +102,7 @@ resource rabbitmqCredentials 'Radius.Security/secrets@2025-08-01-preview' = {
 }
 
 resource rabbitmq 'Radius.Messaging/rabbitMQ@2025-08-01-preview' = {
-  name: 'rabbitmq'
+  name: 'todo-list-app-rabbitmq'
   properties: {
     environment: environment
     application: app.id
