@@ -58,6 +58,10 @@ import {
   DEPLOYMENT_TEST_TIMEOUT_MS
 } from "./support/cloud-timeout-budget.js";
 import {
+  refreshProcessGitHubToken,
+  takeGitHubAppTokenConfig
+} from "./support/github-app-token.js";
+import {
   classifyWorkflowPublication,
   cloudCanvasState,
   describeWorkflowPublication,
@@ -67,7 +71,6 @@ import {
   parseJsonPayload,
   readAzureAccount,
   readEnvironmentVariables,
-  readGitHubUserLogin,
   readOidcSubjectCustomization,
   readOperationHttpResponse,
   readOperationId,
@@ -122,6 +125,7 @@ const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
 const githubToken = process.env.GH_TOKEN?.trim() ?? "";
 const githubPackagesToken = process.env.GH_PACKAGES_TOKEN?.trim() ?? "";
 const githubPackagesUser = process.env.GH_PACKAGES_USER?.trim() ?? "";
+const githubAppTokenConfig = takeGitHubAppTokenConfig();
 
 const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
 const WORKFLOW_QUIESCENCE_TIMEOUT_MS = 10 * 60 * 1000;
@@ -132,8 +136,8 @@ const gate = evaluateCreateEnvironmentGate({
   unprovisionedReason: describeUnprovisionedFixtureRepository(),
   subscriptionId,
   githubToken,
-  githubPackagesToken,
-  githubPackagesUser
+  githubAppClientId: githubAppTokenConfig?.clientId,
+  githubAppPrivateKey: githubAppTokenConfig?.privateKey
 });
 const skipReason =
   !gate.enabled && gate.disposition === "skip" ? gate.reason : "";
@@ -149,17 +153,6 @@ async function runGh(
 ): Promise<unknown> {
   return parseJsonPayload(
     expectSuccess(await commands.runGh(args), context).stdout,
-    context
-  );
-}
-
-async function runGhPackage(
-  commands: CloudCommandPort,
-  args: readonly string[],
-  context: string
-): Promise<unknown> {
-  return parseJsonPayload(
-    expectSuccess(await commands.runGhPackage(args), context).stdout,
     context
   );
 }
@@ -318,24 +311,23 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
   const ownedWorkflowRunIds = new Set<string>();
   let untrackedWorkflowDispatch = false;
 
+  const refreshGitHubToken = async (): Promise<void> => {
+    if (!githubAppTokenConfig)
+      throw new Error(
+        "GitHub App refresh credentials are required for the cloud lifecycle journey."
+      );
+    await refreshProcessGitHubToken(githubAppTokenConfig);
+  };
+
   test.beforeAll(async () => {
     if (!gate.enabled) throw new Error(gate.reason);
-    const [repositoryIdentity, packageIdentity] = await Promise.all([
-      runGh(ports.commands, ["api", "user"], "gh api user"),
-      runGhPackage(
-        ports.commands,
-        ["api", "user"],
-        "gh api user for package operations"
-      )
-    ]);
-    const repositoryLogin = readGitHubUserLogin(repositoryIdentity);
-    const packageLogin = readGitHubUserLogin(packageIdentity);
-    if (
-      repositoryLogin.toLowerCase() !== githubPackagesUser.toLowerCase() ||
-      packageLogin.toLowerCase() !== githubPackagesUser.toLowerCase()
-    )
+    if (!githubPackagesToken)
       throw new Error(
-        `CLOUD_E2E_GITHUB_USER is "${githubPackagesUser}", but the repository and package command paths authenticated as "${repositoryLogin}" and "${packageLogin}".`
+        "GH_PACKAGES_TOKEN is required for the cloud lifecycle journey."
+      );
+    if (!githubPackagesUser)
+      throw new Error(
+        "GH_PACKAGES_USER is required for the cloud lifecycle journey."
       );
     fixture = await createCloudFixture({
       subscriptionId,
@@ -362,15 +354,19 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
         )
       })
     );
+    await refreshGitHubToken();
     // Turns every assertion below from an observation into a proof: none of the
     // artifacts asserted on existed before the product ran.
     await fixture.assertCleanSlate();
   });
 
+  test.beforeEach(refreshGitHubToken);
+
   test.afterAll(async () => {
     const current = fixture;
     fixture = undefined;
     if (!current) return;
+    await refreshGitHubToken();
     if (untrackedWorkflowDispatch)
       throw new Error(
         "A lifecycle workflow was dispatched without a trustworthy run id; leaving fixture state and its lease intact."

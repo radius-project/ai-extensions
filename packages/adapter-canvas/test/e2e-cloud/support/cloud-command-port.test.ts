@@ -353,16 +353,16 @@ describe("parseJsonObject", () => {
 });
 
 describe("createNodeCloudFixturePorts", () => {
-  it("uses the selected machine-user token for package commands", () => {
+  it("isolates package commands onto the dedicated token", () => {
     expect(
-      createGitHubPackageCommandEnvironment(" machine-user-token ", {
-        GH_TOKEN: "stale-token",
+      createGitHubPackageCommandEnvironment(" package-token ", {
+        GH_TOKEN: "app-token",
         GITHUB_TOKEN: "stale-token",
         PATH: "/tools"
       })
     ).toEqual({
-      GH_TOKEN: "machine-user-token",
-      GITHUB_TOKEN: "machine-user-token",
+      GH_TOKEN: "package-token",
+      GITHUB_TOKEN: "package-token",
       PATH: "/tools"
     });
   });
@@ -383,13 +383,13 @@ describe("createNodeCloudFixturePorts", () => {
       code: 1,
       stdout: "",
       stderr:
-        "The Cloud E2E machine-user token is required for package operations."
+        "GH_PACKAGES_TOKEN is required for cloud fixture package operations."
     });
   });
 
-  it("isolates and redacts the machine-user token through a fake gh executable", async () => {
-    const packageToken = "machine-user-token-for-port-test";
-    const staleToken = "stale-token-must-not-reach-package-command";
+  it("isolates and redacts the dedicated token through a fake gh executable", async () => {
+    const packageToken = "package-token-for-port-test";
+    const appToken = "app-token-must-not-reach-package-command";
     const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), "fake-gh-"));
     const originalPath = process.env.PATH;
     const originalPathExt = process.env.PATHEXT;
@@ -426,8 +426,8 @@ describe("createNodeCloudFixturePorts", () => {
     try {
       process.env.PATH = `${fakeBin}${path.delimiter}${originalPath ?? ""}`;
       process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
-      process.env.GH_TOKEN = staleToken;
-      process.env.GITHUB_TOKEN = staleToken;
+      process.env.GH_TOKEN = appToken;
+      process.env.GITHUB_TOKEN = appToken;
 
       const outcome = await createNodeCloudFixturePorts({
         packageToken
@@ -437,7 +437,7 @@ describe("createNodeCloudFixturePorts", () => {
       expect(outcome.stdout).toContain("GH_TOKEN=[REDACTED]");
       expect(outcome.stderr).toContain("GITHUB_TOKEN=[REDACTED]");
       expect(`${outcome.stdout}${outcome.stderr}`).not.toContain(packageToken);
-      expect(`${outcome.stdout}${outcome.stderr}`).not.toContain(staleToken);
+      expect(`${outcome.stdout}${outcome.stderr}`).not.toContain(appToken);
     } finally {
       if (originalPath === undefined) delete process.env.PATH;
       else process.env.PATH = originalPath;
@@ -453,8 +453,8 @@ describe("createNodeCloudFixturePorts", () => {
     }
   });
 
-  it("redacts the machine-user token from command output", () => {
-    const token = "machine-user-token";
+  it("redacts the dedicated package token from command output", () => {
+    const token = "dedicated-package-token";
     expect(
       normalizeGitHubPackageCommandResult(
         { code: 1 },

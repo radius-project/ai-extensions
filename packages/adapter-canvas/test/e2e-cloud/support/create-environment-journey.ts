@@ -55,10 +55,10 @@ export interface JourneyGateInput {
   readonly subscriptionId?: string;
   /** `GH_TOKEN`. */
   readonly githubToken?: string;
-  /** `GH_PACKAGES_TOKEN`. */
-  readonly githubPackagesToken?: string;
-  /** `GH_PACKAGES_USER`. */
-  readonly githubPackagesUser?: string;
+  /** `CLOUD_E2E_BOT_CLIENT_ID`. */
+  readonly githubAppClientId?: string;
+  /** `CLOUD_E2E_BOT_PRIVATE_KEY`. */
+  readonly githubAppPrivateKey?: string;
 }
 
 function isSet(value: string | undefined): boolean {
@@ -102,26 +102,19 @@ export function evaluateCreateEnvironmentGate(
       reason:
         "GH_TOKEN is not set; the cloud harness needs a token for the fixture repository."
     };
-  if (!isSet(input.githubPackagesToken))
+  if (!isSet(input.githubAppClientId))
     return {
       enabled: false,
       disposition: "fail",
       reason:
-        "GH_PACKAGES_TOKEN is not set; the cloud harness needs the machine-user token for package bootstrap and cleanup."
+        "CLOUD_E2E_BOT_CLIENT_ID is not set; the journey cannot renew its GitHub App token between lifecycle stages."
     };
-  if (input.githubToken?.trim() !== input.githubPackagesToken?.trim())
+  if (!isSet(input.githubAppPrivateKey))
     return {
       enabled: false,
       disposition: "fail",
       reason:
-        "GH_TOKEN and GH_PACKAGES_TOKEN must contain the same machine-user token."
-    };
-  if (!isSet(input.githubPackagesUser))
-    return {
-      enabled: false,
-      disposition: "fail",
-      reason:
-        "GH_PACKAGES_USER is not set; the cloud harness cannot verify the machine-user identity used for package operations."
+        "CLOUD_E2E_BOT_PRIVATE_KEY is not set; the journey cannot renew its GitHub App token between lifecycle stages."
     };
   return { enabled: true };
 }
@@ -382,7 +375,7 @@ export function describeWorkflowPublication(
       `${context.defaultBranch}: branches ${describeList(publication.branches)}, open pull requests ` +
       `${describeList(publication.pullRequests.map((number) => `#${number}`))}. That path is taken when the ` +
       "token lacks `workflow` scope, and a run that takes it never exercises the committed-workflow path. " +
-      "Grant the Cloud E2E machine-user PAT the `workflow` scope and re-run."
+      "Grant the cloud end-to-end GitHub App `workflows: write` and re-run."
     );
   return (
     `${context.repository}@${context.defaultBranch} is missing ${describeList(publication.missingPaths)} after ` +
@@ -497,16 +490,6 @@ export function readServicePrincipalObjectId(payload: unknown): string {
 export interface RepositoryIdentity {
   readonly ownerId: number;
   readonly repoId: number;
-}
-
-/** Narrows `gh api user`. */
-export function readGitHubUserLogin(payload: unknown): string {
-  const login = asRecord(payload)?.login;
-  if (typeof login !== "string" || login.trim() === "")
-    throw new Error(
-      'The GitHub user lookup returned no usable "login", so the journey cannot verify its machine-user identity.'
-    );
-  return login.trim();
 }
 
 /** Narrows `gh api repos/{owner}/{repo}`. */

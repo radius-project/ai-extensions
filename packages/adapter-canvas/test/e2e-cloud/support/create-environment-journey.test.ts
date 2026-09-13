@@ -12,7 +12,6 @@ import {
   readAzureAccount,
   readDirectoryPaths,
   readEnvironmentVariables,
-  readGitHubUserLogin,
   readOidcSubjectCustomization,
   readOperationHttpResponse,
   readOperationId,
@@ -30,8 +29,8 @@ import {
 const PROVISIONED = {
   fixtureProvisioned: true,
   unprovisionedReason: "The fixture repository is provisioned.",
-  githubPackagesToken: "machine-user-token",
-  githubPackagesUser: "radius-cloud-e2e"
+  githubAppClientId: "Iv1.example",
+  githubAppPrivateKey: "private-key"
 };
 
 async function captureError(work: Promise<unknown>): Promise<Error> {
@@ -50,7 +49,7 @@ describe("evaluateCreateEnvironmentGate", () => {
         cloudE2eFlag: "1",
         ...PROVISIONED,
         subscriptionId: "sub-1",
-        githubToken: "machine-user-token"
+        githubToken: "ghs_token"
       })
     ).toEqual({ enabled: true });
   });
@@ -64,7 +63,7 @@ describe("evaluateCreateEnvironmentGate", () => {
       cloudE2eFlag: flag,
       ...PROVISIONED,
       subscriptionId: "sub-1",
-      githubToken: "machine-user-token"
+      githubToken: "ghs_token"
     });
     expect(gate.enabled).toBe(false);
     expect(gate.enabled === false && gate.disposition).toBe("skip");
@@ -90,7 +89,7 @@ describe("evaluateCreateEnvironmentGate", () => {
     const gate = evaluateCreateEnvironmentGate({
       cloudE2eFlag: "1",
       ...PROVISIONED,
-      githubToken: "machine-user-token"
+      githubToken: "ghs_token"
     });
     expect(gate.enabled === false && gate.disposition).toBe("fail");
     expect(gate.enabled === false && gate.reason).toContain(
@@ -110,53 +109,19 @@ describe("evaluateCreateEnvironmentGate", () => {
   });
 
   it.each([
-    ["package token", { githubPackagesToken: " " }, "GH_PACKAGES_TOKEN"],
-    ["package user", { githubPackagesUser: "" }, "GH_PACKAGES_USER"]
-  ])(
-    "fails preflight without the machine-user %s",
-    (_label, patch, variable) => {
-      const gate = evaluateCreateEnvironmentGate({
-        cloudE2eFlag: "1",
-        ...PROVISIONED,
-        subscriptionId: "sub-1",
-        githubToken: "machine-user-token",
-        ...patch
-      });
-      expect(gate.enabled === false && gate.disposition).toBe("fail");
-      expect(gate.enabled === false && gate.reason).toContain(variable);
-    }
-  );
-
-  it("fails preflight when repository and package commands use different tokens", () => {
+    ["client ID", { githubAppClientId: " " }, "CLOUD_E2E_BOT_CLIENT_ID"],
+    ["private key", { githubAppPrivateKey: "" }, "CLOUD_E2E_BOT_PRIVATE_KEY"]
+  ])("fails preflight without the GitHub App %s", (_label, patch, variable) => {
     const gate = evaluateCreateEnvironmentGate({
       cloudE2eFlag: "1",
       ...PROVISIONED,
       subscriptionId: "sub-1",
-      githubToken: "repository-token",
-      githubPackagesToken: "package-token"
+      githubToken: "ghs_token",
+      ...patch
     });
-    expect(gate).toEqual({
-      enabled: false,
-      disposition: "fail",
-      reason:
-        "GH_TOKEN and GH_PACKAGES_TOKEN must contain the same machine-user token."
-    });
+    expect(gate.enabled === false && gate.disposition).toBe("fail");
+    expect(gate.enabled === false && gate.reason).toContain(variable);
   });
-});
-
-describe("readGitHubUserLogin", () => {
-  it("reads and trims the authenticated login", () => {
-    expect(readGitHubUserLogin({ login: " radius-cloud-e2e " })).toBe(
-      "radius-cloud-e2e"
-    );
-  });
-
-  it.each([null, {}, { login: "" }, { login: 42 }])(
-    "rejects a payload without a usable login: %j",
-    (payload) => {
-      expect(() => readGitHubUserLogin(payload)).toThrow(/usable "login"/);
-    }
-  );
 });
 
 describe("readAzureAccount", () => {
@@ -456,7 +421,7 @@ describe("classifyWorkflowPublication", () => {
     const message = describeWorkflowPublication(publication, context);
     expect(message).toContain("radius/setup-radtest-abc-workflows-1234");
     expect(message).toContain("#17");
-    expect(message).toContain("`workflow` scope");
+    expect(message).toContain("workflows: write");
   });
 
   it("still reports the fallback when only a branch survived", () => {

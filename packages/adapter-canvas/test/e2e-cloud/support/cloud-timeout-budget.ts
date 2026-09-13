@@ -1,5 +1,10 @@
 const MINUTE_MS = 60_000;
 
+// The fixture's GitHub App installation token expires after one hour. A fresh
+// token is minted before every serial stage and teardown, so each individual
+// ceiling must fit inside that lifetime; the whole suite no longer has to.
+export const CLOUD_INSTALLATION_TOKEN_LIFETIME_MS = 60 * MINUTE_MS;
+export const CLOUD_MINIMUM_REFRESHED_TOKEN_LIFETIME_MS = 59 * MINUTE_MS;
 export const CLOUD_HOOK_TEARDOWN_HEADROOM_MS = 25 * MINUTE_MS;
 
 export const CREATE_OPERATION_TIMEOUT_MS = 20 * MINUTE_MS;

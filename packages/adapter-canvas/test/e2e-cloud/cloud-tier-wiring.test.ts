@@ -14,6 +14,8 @@ import reliabilityConfig from "../../vitest.reliability.config.js";
 import vitestConfig from "../../vitest.config.js";
 import {
   CLOUD_HOOK_TEARDOWN_HEADROOM_MS,
+  CLOUD_INSTALLATION_TOKEN_LIFETIME_MS,
+  CLOUD_MINIMUM_REFRESHED_TOKEN_LIFETIME_MS,
   CLOUD_SUITE_TIMEOUT_MS,
   CREATE_OPERATION_TIMEOUT_MS,
   CREATE_TEST_TIMEOUT_MS,
@@ -59,7 +61,7 @@ describe("the cloud Playwright config", () => {
     expect(cloudConfig.expect?.timeout).toBeGreaterThan(0);
   });
 
-  it("keeps serial stages within the suite timeout", () => {
+  it("keeps serial stages below the suite and credential ceilings", () => {
     const globalTimeout = cloudConfig.globalTimeout ?? 0;
 
     expect(CREATE_TEST_TIMEOUT_MS).toBeGreaterThan(CREATE_OPERATION_TIMEOUT_MS);
@@ -73,10 +75,18 @@ describe("the cloud Playwright config", () => {
     expect(globalTimeout - SERIAL_TEST_TIMEOUT_BUDGET_MS).toBe(
       CLOUD_HOOK_TEARDOWN_HEADROOM_MS
     );
-    expect(CREATE_TEST_TIMEOUT_MS).toBeLessThan(globalTimeout);
-    expect(DEPLOYMENT_TEST_TIMEOUT_MS).toBeLessThan(globalTimeout);
-    expect(DELETE_REFUSAL_TEST_TIMEOUT_MS).toBeLessThan(globalTimeout);
-    expect(DELETE_TEST_TIMEOUT_MS).toBeLessThan(globalTimeout);
+    expect(
+      Math.max(
+        CREATE_TEST_TIMEOUT_MS,
+        DEPLOYMENT_TEST_TIMEOUT_MS,
+        DELETE_REFUSAL_TEST_TIMEOUT_MS,
+        DELETE_TEST_TIMEOUT_MS,
+        CLOUD_HOOK_TEARDOWN_HEADROOM_MS
+      )
+    ).toBeLessThan(CLOUD_MINIMUM_REFRESHED_TOKEN_LIFETIME_MS);
+    expect(CLOUD_MINIMUM_REFRESHED_TOKEN_LIFETIME_MS).toBeLessThan(
+      CLOUD_INSTALLATION_TOKEN_LIFETIME_MS
+    );
   });
 
   it("keeps its output apart so neither tier erases the other's traces", () => {

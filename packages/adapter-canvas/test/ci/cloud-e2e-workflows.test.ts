@@ -132,9 +132,9 @@ describe.each(WORKFLOWS)("%s - properties both workflows share", (file) => {
   });
 
   it("pins every action to a full commit SHA with a version comment", async () => {
-    // A tag is mutable, and these jobs hold an Azure token and a machine-user
-    // PAT. The trailing comment is what makes the pin reviewable and updatable
-    // by Dependabot.
+    // A tag is mutable, and these jobs hold an Azure token and an App
+    // installation token. The trailing comment is what makes the pin
+    // reviewable and updatable by Dependabot.
     const raw = await readWorkflow(file);
     const uses = [...raw.matchAll(/^\s*uses:\s*(\S+)\s*(#.*)?$/gm)];
     expect(uses.length).toBeGreaterThan(0);
@@ -221,46 +221,51 @@ describe("cloud-e2e.yml", () => {
     const run = steps(job).find((step) => step.run?.includes("test:cloud"));
     expect(run?.["working-directory"]).toBe("packages/adapter-canvas");
     expect(run?.env).toMatchObject({
-      GH_TOKEN: "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}",
-      GH_PACKAGES_TOKEN: "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}",
-      GH_PACKAGES_USER: "${{ secrets.CLOUD_E2E_GITHUB_USER }}"
+      GH_TOKEN: "${{ steps.app-token.outputs.token }}",
+      CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
+      CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}"
     });
   });
 
-  it("uses one verified machine-user identity for repository and package operations", async () => {
+  it("isolates package credentials while using OIDC and an installation token", async () => {
+    // No stored bearer token exists to leak: both access credentials are minted
+    // per run and expire with it. The App signing key remains a masked secret.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const used = steps(workflow.jobs?.["cloud-e2e"]).map((step) => step.uses);
     expect(used.some((use) => use?.startsWith("azure/login@"))).toBe(true);
     expect(
       used.some((use) => use?.startsWith("actions/create-github-app-token@"))
-    ).toBe(false);
-    const identity = steps(workflow.jobs?.["cloud-e2e"]).find(
-      (step) => step.name === "Verify the Cloud E2E GitHub identity"
-    );
-    expect(identity?.env).toMatchObject({
-      EXPECTED_LOGIN: "${{ secrets.CLOUD_E2E_GITHUB_USER }}",
-      GH_TOKEN: "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}"
-    });
-    expect(identity?.run).toContain("gh api user --jq .login");
-    expect(identity?.run).toContain('gh api "repos/$FIXTURE_REPOSITORY"');
+    ).toBe(true);
     const run = steps(workflow.jobs?.["cloud-e2e"]).find((step) =>
       step.run?.includes("test:cloud")
     );
     expect(run?.env).toMatchObject({
       AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY:
         "${{ steps.fixture.outputs.full-name }}",
-      GH_PACKAGES_TOKEN: "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}",
-      GH_PACKAGES_USER: "${{ secrets.CLOUD_E2E_GITHUB_USER }}"
+      CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
+      CLOUD_E2E_BOT_INSTALLATION_ID:
+        "${{ steps.app-token.outputs.installation-id }}",
+      CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}",
+      GH_PACKAGES_TOKEN: "${{ secrets.CLOUD_E2E_PACKAGES_TOKEN }}",
+      GH_PACKAGES_USER: "${{ secrets.CLOUD_E2E_PACKAGES_USER }}"
     });
-    expect(run?.env?.GH_TOKEN).toBe(run?.env?.GH_PACKAGES_TOKEN);
+    expect(run?.env?.GH_TOKEN).toBe("${{ steps.app-token.outputs.token }}");
     expect(workflow.jobs?.["cloud-e2e"]?.permissions?.packages).toBeUndefined();
   });
 
-  it("does not retain the obsolete GitHub App or split package credentials", async () => {
-    const raw = await readWorkflow(RUN_WORKFLOW);
-    expect(raw).not.toContain("CLOUD_E2E_BOT_");
-    expect(raw).not.toContain("CLOUD_E2E_PACKAGES_");
-    expect(raw).not.toContain("actions/create-github-app-token");
+  it("requests every permission needed by workflow publication and secure deployment", async () => {
+    // Missing workflows permission hard-fails publication. Secure Bicep
+    // parameters also require the product to reconcile RADIUS_DEPLOY_PARAMS as
+    // an Environment secret before dispatch.
+    const workflow = await parseWorkflow(RUN_WORKFLOW);
+    const token = steps(workflow.jobs?.["cloud-e2e"]).find((step) =>
+      step.uses?.startsWith("actions/create-github-app-token@")
+    );
+    expect(token?.with?.["permission-actions"]).toBe("write");
+    expect(token?.with?.["permission-deployments"]).toBe("read");
+    expect(token?.with?.["permission-workflows"]).toBe("write");
+    expect(token?.with?.["permission-environments"]).toBe("write");
+    expect(token?.with?.["permission-secrets"]).toBe("write");
   });
 
   it("stages and uploads one predictable diagnostics tree whether or not the run failed", async () => {
@@ -310,14 +315,38 @@ describe("cloud-e2e.yml", () => {
     expect(diagnostics?.run).toContain("az group list");
   });
 
-  it("uses the same machine-user token for diagnostics", async () => {
+  it("mints a fresh least-privilege installation token immediately before diagnostics", async () => {
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const jobSteps = steps(workflow.jobs?.["cloud-e2e"]);
-    const diagnostics = jobSteps.find(
+    const tokenIndex = jobSteps.findIndex(
+      (step) =>
+        step.name ===
+        "Create a fresh read-only GitHub App token for diagnostics"
+    );
+    const diagnosticsIndex = jobSteps.findIndex(
       (step) => step.name === "Collect az and gh diagnostics"
     );
+    const token = jobSteps[tokenIndex];
+    const diagnostics = jobSteps[diagnosticsIndex];
+
+    expect(tokenIndex).toBeGreaterThan(0);
+    expect(diagnosticsIndex).toBe(tokenIndex + 1);
+    expect(token?.uses).toMatch(/^actions\/create-github-app-token@/);
+    expect(token?.if).toContain("always()");
+    expect(token?.["continue-on-error"]).toBe(true);
+    expect(token?.with).toMatchObject({
+      "permission-actions": "read",
+      "permission-administration": "read",
+      "permission-contents": "read",
+      "permission-pull-requests": "read"
+    });
+    expect(
+      Object.keys(token?.with ?? {}).filter((key) =>
+        key.startsWith("permission-")
+      )
+    ).not.toContain("permission-workflows");
     expect(diagnostics?.env?.GH_TOKEN).toBe(
-      "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}"
+      "${{ steps.diagnostics-token.outputs.token }}"
     );
   });
 
@@ -370,26 +399,6 @@ describe("cloud-e2e.yml", () => {
 });
 
 describe("cloud-e2e-cleanup.yml", () => {
-  it("verifies one machine-user identity before GitHub cleanup", async () => {
-    const [raw, workflow] = await Promise.all([
-      readWorkflow(CLEANUP_WORKFLOW),
-      parseWorkflow(CLEANUP_WORKFLOW)
-    ]);
-    const identity = steps(workflow.jobs?.purge).find(
-      (step) => step.name === "Verify the Cloud E2E GitHub identity"
-    );
-
-    expect(identity?.env).toMatchObject({
-      EXPECTED_LOGIN: "${{ secrets.CLOUD_E2E_GITHUB_USER }}",
-      GH_TOKEN: "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}"
-    });
-    expect(identity?.run).toContain("gh api user --jq .login");
-    expect(identity?.run).toContain('gh api "repos/$FIXTURE_REPOSITORY"');
-    expect(raw).not.toContain("CLOUD_E2E_BOT_");
-    expect(raw).not.toContain("CLOUD_E2E_PACKAGES_");
-    expect(raw).not.toContain("actions/create-github-app-token");
-  });
-
   it("deletes tagged resource groups the suite creates without waiting for age", async () => {
     // The shared Radius purge job remains a safety net, but this workflow owns
     // test leaks first. The fixture tag is what stops a prefix match from
@@ -510,11 +519,6 @@ describe("cloud-e2e-cleanup.yml", () => {
       expect(step.if).toContain(
         "steps.verify-scope.outputs.configured == 'true'"
       );
-      if (
-        step.run?.includes("gh api") &&
-        !step.run?.includes("SOURCE_GH_TOKEN")
-      )
-        expect(step.if).toContain("steps.github-identity.outcome == 'success'");
     }
   });
 
@@ -565,7 +569,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     const script = purge?.run ?? "";
 
     expect(purge?.if).toContain("always()");
-    expect(purge?.if).toContain("steps.github-identity.outcome == 'success'");
+    expect(purge?.if).toContain("steps.app-token.outcome == 'success'");
     expect(script).toContain("MAX_AGE_HOURS hours ago");
     expect(script).toContain("selectOpenPullRequestHeadRefs");
     expect(script).toContain("$FIXTURE_REPOSITORY");

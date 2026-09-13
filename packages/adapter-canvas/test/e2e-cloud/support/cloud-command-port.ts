@@ -430,7 +430,7 @@ export function createNodeCloudFixturePorts(
             code: 1,
             stdout: "",
             stderr:
-              "The Cloud E2E machine-user token is required for package operations."
+              "GH_PACKAGES_TOKEN is required for cloud fixture package operations."
           });
         return runTool(
           "gh",
