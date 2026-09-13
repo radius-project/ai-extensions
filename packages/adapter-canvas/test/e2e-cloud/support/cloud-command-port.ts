@@ -35,7 +35,7 @@ export interface CloudCommandResult {
 export interface CloudCommandPort {
   runAz(
     args: readonly string[],
-    timeoutMs?: number
+    timeoutMs?: number,
   ): Promise<CloudCommandResult>;
   runGh(args: readonly string[]): Promise<CloudCommandResult>;
   runGhPackage(args: readonly string[]): Promise<CloudCommandResult>;
@@ -48,7 +48,7 @@ export interface CloudCommandPort {
    */
   runKubectl(
     args: readonly string[],
-    timeoutMs?: number
+    timeoutMs?: number,
   ): Promise<CloudCommandResult>;
 }
 
@@ -84,11 +84,11 @@ function runTool(
   normalize: (
     error: { code?: string | number | null } | null,
     stdout: string | undefined,
-    stderr: string | undefined
+    stderr: string | undefined,
   ) => CloudCommandResult = normalizeCommandResult,
   timeoutMs = COMMAND_TIMEOUT_MS,
   env?: NodeJS.ProcessEnv,
-  preserveGitHubToken = false
+  preserveGitHubToken = false,
 ): Promise<CloudCommandResult> {
   return new Promise((resolve) => {
     const child = cliExec(
@@ -100,9 +100,9 @@ function runTool(
         env,
         maxBuffer: MAX_OUTPUT_BYTES,
         windowsHide: true,
-        preserveGitHubToken
+        preserveGitHubToken,
       },
-      (error, stdout, stderr) => resolve(normalize(error, stdout, stderr))
+      (error, stdout, stderr) => resolve(normalize(error, stdout, stderr)),
     );
     // Nothing the fixture runs reads stdin, and an inherited stdin would let a
     // credential prompt hang the run instead of failing it.
@@ -112,7 +112,7 @@ function runTool(
 
 type RunAzureCommand = (
   args: readonly string[],
-  timeoutMs?: number
+  timeoutMs?: number,
 ) => Promise<CloudCommandResult>;
 
 export interface AzureCommandRefreshOptions {
@@ -125,72 +125,70 @@ export interface AzureCommandRefreshOptions {
 
 function refreshFailure(
   error: unknown,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
 ): CloudCommandResult {
   return {
     code: 1,
     stdout: "",
     stderr: `Azure OIDC login refresh failed: ${redactAzureCredentials(
       describeError(error),
-      env
-    )}`
+      env,
+    )}`,
   };
 }
 
 function commandFailure(
   error: unknown,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
 ): CloudCommandResult {
   return {
     code: 1,
     stdout: "",
     stderr: `Azure command failed: ${redactAzureCredentials(
       describeError(error),
-      env
-    )}`
+      env,
+    )}`,
   };
 }
 
 async function requestAzureIdentityAssertion(
   env: NodeJS.ProcessEnv,
   fetchImpl: typeof fetch,
-  timeoutMs?: number
+  timeoutMs?: number,
 ): Promise<string> {
   const requestUrl = env.ACTIONS_ID_TOKEN_REQUEST_URL?.trim();
   const requestToken = env.ACTIONS_ID_TOKEN_REQUEST_TOKEN?.trim();
   if (!requestUrl || !requestToken)
     throw new Error(
-      "GitHub Actions did not provide the OIDC request URL and token."
+      "GitHub Actions did not provide the OIDC request URL and token.",
     );
 
   const url = new URL(requestUrl);
   url.searchParams.set("audience", AZURE_OIDC_AUDIENCE);
   const response = await fetchImpl(url, {
     headers: { Authorization: `bearer ${requestToken}` },
-    signal: AbortSignal.timeout(Math.min(timeoutMs ?? 20_000, 20_000))
+    signal: AbortSignal.timeout(Math.min(timeoutMs ?? 20_000, 20_000)),
   });
   if (!response.ok)
     throw new Error(
-      `GitHub OIDC assertion request returned HTTP ${response.status}.`
+      `GitHub OIDC assertion request returned HTTP ${response.status}.`,
     );
 
   const payload: unknown = await response.json();
   const assertion =
-    (
-      typeof payload === "object" &&
-      payload !== null &&
-      "value" in payload &&
-      typeof payload.value === "string"
-    ) ?
-      payload.value.trim()
-    : "";
+    typeof payload === "object" &&
+    payload !== null &&
+    "value" in payload &&
+    typeof payload.value === "string"
+      ? payload.value.trim()
+      : "";
   if (!assertion)
     throw new Error("GitHub OIDC assertion response did not contain a token.");
   return assertion;
 }
 
 export function createRefreshingAzureCommandRunner(
-  options: AzureCommandRefreshOptions = {}
+  options: AzureCommandRefreshOptions = {},
 ): RunAzureCommand {
   const env = options.env ?? process.env;
   const fetchImpl = options.fetch ?? fetch;
@@ -199,7 +197,7 @@ export function createRefreshingAzureCommandRunner(
     options.refreshIntervalMs ?? AZURE_LOGIN_REFRESH_INTERVAL_MS;
   if (!Number.isFinite(refreshIntervalMs) || refreshIntervalMs <= 0)
     throw new Error(
-      "Azure login refresh interval must be positive and finite."
+      "Azure login refresh interval must be positive and finite.",
     );
   const runCommand =
     options.runCommand ??
@@ -210,38 +208,38 @@ export function createRefreshingAzureCommandRunner(
         undefined,
         (error, stdout, stderr) =>
           normalizeAzureCommandResult(error, stdout, stderr, env),
-        timeoutMs
+        timeoutMs,
       ));
   const oidcRefreshConfigured = Boolean(
     env.ACTIONS_ID_TOKEN_REQUEST_URL?.trim() ||
-    env.ACTIONS_ID_TOKEN_REQUEST_TOKEN?.trim()
+    env.ACTIONS_ID_TOKEN_REQUEST_TOKEN?.trim(),
   );
   let refreshedAt = now();
   let pendingRefresh: Promise<CloudCommandResult | null> | undefined;
 
   const remainingTimeout = (
-    deadline: number | undefined
+    deadline: number | undefined,
   ): number | undefined => {
     if (deadline === undefined) return undefined;
     const remaining = deadline - now();
     if (remaining <= 0)
       throw new Error(
-        "The Azure command exhausted its timeout while refreshing credentials."
+        "The Azure command exhausted its timeout while refreshing credentials.",
       );
     return remaining;
   };
   const runBeforeDeadline = (
     args: readonly string[],
-    deadline: number | undefined
+    deadline: number | undefined,
   ): Promise<CloudCommandResult> => {
     const remaining = remainingTimeout(deadline);
-    return remaining === undefined ?
-        runCommand(args)
+    return remaining === undefined
+      ? runCommand(args)
       : runCommand(args, remaining);
   };
 
   const refresh = async (
-    deadline: number | undefined
+    deadline: number | undefined,
   ): Promise<CloudCommandResult | null> => {
     const clientId = env.AZURE_CLIENT_ID?.trim();
     const tenantId = env.AZURE_TENANT_ID?.trim();
@@ -249,16 +247,16 @@ export function createRefreshingAzureCommandRunner(
     if (!clientId || !tenantId || !subscriptionId)
       return refreshFailure(
         new Error(
-          "AZURE_CLIENT_ID, AZURE_TENANT_ID, and AZURE_SUBSCRIPTION_ID are required."
+          "AZURE_CLIENT_ID, AZURE_TENANT_ID, and AZURE_SUBSCRIPTION_ID are required.",
         ),
-        env
+        env,
       );
 
     try {
       const assertion = await requestAzureIdentityAssertion(
         env,
         fetchImpl,
-        remainingTimeout(deadline)
+        remainingTimeout(deadline),
       );
       const login = await runBeforeDeadline(
         [
@@ -271,14 +269,14 @@ export function createRefreshingAzureCommandRunner(
           "--federated-token",
           assertion,
           "--output",
-          "none"
+          "none",
         ],
-        deadline
+        deadline,
       );
       if (login.code !== 0) return login;
       const select = await runBeforeDeadline(
         ["account", "set", "--subscription", subscriptionId],
-        deadline
+        deadline,
       );
       if (select.code !== 0) return select;
       refreshedAt = now();
@@ -289,7 +287,7 @@ export function createRefreshingAzureCommandRunner(
   };
   const awaitRefreshBeforeDeadline = (
     refreshPromise: Promise<CloudCommandResult | null>,
-    deadline: number | undefined
+    deadline: number | undefined,
   ): Promise<CloudCommandResult | null> => {
     const remaining = remainingTimeout(deadline);
     if (remaining === undefined) return refreshPromise;
@@ -301,12 +299,12 @@ export function createRefreshingAzureCommandRunner(
           resolve(
             refreshFailure(
               new Error(
-                "The Azure command exhausted its timeout while awaiting credential refresh."
+                "The Azure command exhausted its timeout while awaiting credential refresh.",
               ),
-              env
-            )
+              env,
+            ),
           ),
-        { once: true }
+        { once: true },
       );
     });
     return Promise.race([refreshPromise, timeout]);
@@ -338,7 +336,7 @@ export function createRefreshingAzureCommandRunner(
 
 export function redactAzureCredentials(
   value: string,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ): string {
   return redactCredentials(value, [
     env.ACTIONS_ID_TOKEN_REQUEST_TOKEN,
@@ -348,7 +346,7 @@ export function redactAzureCredentials(
     env.AZURE_ACCESS_TOKEN,
     env.AZURE_CLIENT_SECRET,
     env.AZURE_FEDERATED_TOKEN,
-    env.AZURE_PASSWORD
+    env.AZURE_PASSWORD,
   ]);
 }
 
@@ -356,13 +354,13 @@ export function normalizeAzureCommandResult(
   error: { code?: string | number | null } | null,
   stdout: string | undefined,
   stderr: string | undefined,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ): CloudCommandResult {
   const result = normalizeCommandResult(error, stdout, stderr);
   return {
     ...result,
     stdout: redactAzureCredentials(result.stdout, env),
-    stderr: redactAzureCredentials(result.stderr, env)
+    stderr: redactAzureCredentials(result.stderr, env),
   };
 }
 
@@ -377,7 +375,7 @@ export function normalizeAzureCommandResult(
 export function normalizeCommandResult(
   error: { code?: string | number | null; message?: string } | null,
   stdout: string | undefined,
-  stderr: string | undefined
+  stderr: string | undefined,
 ): CloudCommandResult {
   const normalizedStdout = stdout || "";
   const normalizedStderr = stderr || "";
@@ -385,9 +383,9 @@ export function normalizeCommandResult(
     code: error ? Number(error.code ?? 1) || 1 : 0,
     stdout: normalizedStdout,
     stderr:
-      !normalizedStdout && !normalizedStderr ?
-        error?.message || ""
-      : normalizedStderr
+      !normalizedStdout && !normalizedStderr
+        ? error?.message || ""
+        : normalizedStderr,
   };
 }
 
@@ -404,7 +402,7 @@ export function isGitHubApiNotFound(result: CloudCommandResult): boolean {
   return `${result.stderr}\n${result.stdout}`
     .split(/\r?\n/)
     .some((line) =>
-      /^(?:gh:\s.*\(HTTP 404\)|HTTP 404(?::.*)?)$/i.test(line.trim())
+      /^(?:gh:\s.*\(HTTP 404\)|HTTP 404(?::.*)?)$/i.test(line.trim()),
     );
 }
 
@@ -414,11 +412,11 @@ export function isGitHubApiNotFound(result: CloudCommandResult): boolean {
  * it can be made.
  */
 export function createNodeCloudFixturePorts(
-  options: { readonly packageToken?: string } = {}
+  options: { readonly packageToken?: string } = {},
 ): CloudFixturePorts {
   const runAz = createRefreshingAzureCommandRunner();
   const packageEnv = createGitHubPackageCommandEnvironment(
-    options.packageToken
+    options.packageToken,
   );
   return {
     commands: {
@@ -430,7 +428,7 @@ export function createNodeCloudFixturePorts(
             code: 1,
             stdout: "",
             stderr:
-              "GH_PACKAGES_TOKEN is required for cloud fixture package operations."
+              "The Cloud E2E machine-user token is required for package operations.",
           });
         return runTool(
           "gh",
@@ -441,16 +439,16 @@ export function createNodeCloudFixturePorts(
               error,
               stdout,
               stderr,
-              packageEnv.GH_TOKEN
+              packageEnv.GH_TOKEN,
             ),
           COMMAND_TIMEOUT_MS,
           packageEnv,
-          true
+          true,
         );
       },
       runGit: (args, cwd) => runTool("git", args, cwd),
       runKubectl: (args, timeoutMs) =>
-        runTool("kubectl", args, undefined, normalizeCommandResult, timeoutMs)
+        runTool("kubectl", args, undefined, normalizeCommandResult, timeoutMs),
     },
     makeWorkspaceDir: (prefix) =>
       fs.mkdtemp(path.join(os.tmpdir(), `${prefix}-`)),
@@ -458,13 +456,13 @@ export function createNodeCloudFixturePorts(
     wait: (milliseconds) =>
       new Promise((resolve) => setTimeout(resolve, milliseconds)),
     now: () => new Date(),
-    newUniqueId: () => randomUUID()
+    newUniqueId: () => randomUUID(),
   };
 }
 
 export function createGitHubPackageCommandEnvironment(
   packageToken: string | undefined,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ):
   | (NodeJS.ProcessEnv & {
       readonly GH_TOKEN: string;
@@ -476,7 +474,7 @@ export function createGitHubPackageCommandEnvironment(
   return {
     ...env,
     GH_TOKEN: token,
-    GITHUB_TOKEN: token
+    GITHUB_TOKEN: token,
   };
 }
 
@@ -484,13 +482,13 @@ export function normalizeGitHubPackageCommandResult(
   error: { code?: string | number | null } | null,
   stdout: string | undefined,
   stderr: string | undefined,
-  packageToken: string
+  packageToken: string,
 ): CloudCommandResult {
   const result = normalizeCommandResult(error, stdout, stderr);
   return {
     ...result,
     stdout: redactCredentials(result.stdout, [packageToken]),
-    stderr: redactCredentials(result.stderr, [packageToken])
+    stderr: redactCredentials(result.stderr, [packageToken]),
   };
 }
 
@@ -504,7 +502,7 @@ export class CloudCommandError extends Error {
     const detail = (result.stderr || result.stdout).trim();
     super(
       `${context} failed with exit code ${result.code}` +
-        (detail ? `: ${detail}` : ".")
+        (detail ? `: ${detail}` : "."),
     );
     this.name = "CloudCommandError";
     this.code = result.code;
@@ -522,7 +520,7 @@ export class CloudCommandError extends Error {
  */
 export function expectSuccess(
   result: CloudCommandResult,
-  context: string
+  context: string,
 ): CloudCommandResult {
   if (result.code !== 0) throw new CloudCommandError(context, result);
   return result;
@@ -537,7 +535,7 @@ export function expectSuccess(
  */
 export function parseJsonArray(
   result: CloudCommandResult,
-  context: string
+  context: string,
 ): unknown[] {
   expectSuccess(result, context);
   const text = result.stdout.trim();
@@ -550,12 +548,12 @@ export function parseJsonArray(
   } catch (error) {
     throw new Error(
       `${context} returned output that is not valid JSON: ${describeError(error)}`,
-      { cause: error }
+      { cause: error },
     );
   }
   if (!Array.isArray(parsed))
     throw new Error(
-      `${context} returned ${describeJsonKind(parsed)} where a JSON array was expected.`
+      `${context} returned ${describeJsonKind(parsed)} where a JSON array was expected.`,
     );
   return parsed;
 }
@@ -574,7 +572,7 @@ function describeJsonKind(value: unknown): string {
  */
 export function parseJsonObject(
   result: CloudCommandResult,
-  context: string
+  context: string,
 ): Record<string, unknown> {
   expectSuccess(result, context);
   const text = result.stdout.trim();
@@ -585,12 +583,12 @@ export function parseJsonObject(
   } catch (error) {
     throw new Error(
       `${context} returned output that is not valid JSON: ${describeError(error)}`,
-      { cause: error }
+      { cause: error },
     );
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
     throw new Error(
-      `${context} returned ${describeJsonKind(parsed)} where a JSON object was expected.`
+      `${context} returned ${describeJsonKind(parsed)} where a JSON object was expected.`,
     );
   return parsed as Record<string, unknown>;
 }

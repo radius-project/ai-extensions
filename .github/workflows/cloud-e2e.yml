@@ -12,30 +12,22 @@ name: Cloud E2E
 # infrastructure failure, or leaked state from an earlier run - and treating
 # them as one destroys the signal this tier exists to provide.
 #
-# THIS WORKFLOW HAS NEVER EXECUTED. Five prerequisites are outstanding:
+# THIS WORKFLOW HAS NEVER EXECUTED. One prerequisite is outstanding:
 #
-#   1. radius-project/wellknown#134 (the Terraform that publishes the identity
-#      and the variables below) is open and unmerged.
-#   2. A tenant admin must consent to Graph `AppRoleAssignment.ReadWrite.All`,
-#      or that Terraform apply fails `Authorization_RequestDenied`.
-#   3. The publishing GitHub App must be installed on this repository. Terraform
-#      cannot install an App, so that half is manual.
-#   4. The dedicated Cloud E2E GitHub App must be created, installed only on the
-#      fixture repository, and its client id and private key stored here as
-#      `CLOUD_E2E_BOT_CLIENT_ID` and `CLOUD_E2E_BOT_PRIVATE_KEY`.
-#   5. A dedicated machine or bot account with package access to the fixture
-#      owner's namespace must provide `CLOUD_E2E_PACKAGES_USER` and a classic
-#      PAT in `CLOUD_E2E_PACKAGES_TOKEN` with read/write/delete package scopes.
+#   1. A dedicated machine user with access to the private fixture repository
+#      must provide `CLOUD_E2E_GITHUB_USER` and a classic PAT in
+#      `CLOUD_E2E_GITHUB_TOKEN` with repo, workflow, and read/write/delete
+#      package scopes.
 #
-# The private fixture repository now exists and its immutable baseline is pinned
-# in source. While the wellknown-published variable is unavailable, the run
-# stops after checkout with a specific notice.
+# The private fixture repository, Azure identity, repository secrets, and
+# variables are provisioned. The fixture's immutable baseline is pinned in
+# source.
 
 on:
   # Deliberately NOT `pull_request_target`, and deliberately NOT `merge_group`.
   #
   # `pull_request_target` would run fork-authored code with access to the Azure
-  # identity and the GitHub App token. Radius accepts that risk upstream because
+  # identity and the machine-user PAT. Radius accepts that risk upstream because
   # its cloud tests gate its pull requests; ours do not, so omitting the trigger
   # removes the fork supply-chain risk entirely rather than mitigating it.
   #
@@ -111,8 +103,7 @@ jobs:
 
       # Split once, here, so every later step agrees on what the variable means.
       # It holds a full `owner/name`, matching FIXTURE_REPOSITORY in
-      # test/e2e-cloud/support/fixture-repository.ts, but the App token action
-      # wants bare repository names.
+      # test/e2e-cloud/support/fixture-repository.ts.
       #
       # An unset variable means the upstream Terraform has not been applied yet,
       # which is today's state. That skips the cloud steps rather than failing
@@ -157,9 +148,10 @@ jobs:
           node-version-file: .node-version
           cache: pnpm
 
-      # The variable scopes the installation token, while the suite clones the
-      # source-pinned repository. Refuse a mismatch before authenticating so the
-      # two trust boundaries cannot quietly point at different repositories.
+      # The variable scopes the machine user's repository access, while the
+      # suite clones the source-pinned repository. Refuse a mismatch before
+      # authenticating so the two trust boundaries cannot quietly point at
+      # different repositories.
       - name: Verify the published fixture repository matches the pin
         if: steps.fixture.outputs.configured == 'true'
         env:
@@ -200,29 +192,30 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # A short-lived installation token, the pattern release.yml already uses,
-      # rather than a stored PAT. Every permission is requested explicitly: the
-      # token request fails outright if the installation does not carry one.
-      # In particular, missing `workflows: write` cannot silently divert the
-      # journey to its pull-request fallback.
-      - name: Create a GitHub App token for the fixture repository
-        id: app-token
+      # The machine user represents the developer in this journey. One classic
+      # PAT drives repository APIs, workflow publication and dispatch, and the
+      # GHCR bootstrap and cleanup that the extension performs outside fixture
+      # workflows.
+      - name: Verify the Cloud E2E GitHub identity
+        id: github-identity
         if: steps.fixture.outputs.configured == 'true'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
-          private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
-          owner: ${{ steps.fixture.outputs.owner }}
-          repositories: ${{ steps.fixture.outputs.name }}
-          permission-actions: write
-          permission-administration: read
-          permission-contents: write
-          permission-deployments: read
-          permission-environments: write
-          permission-pull-requests: write
-          permission-secrets: write
-          permission-variables: write
-          permission-workflows: write
+        env:
+          EXPECTED_LOGIN: ${{ secrets.CLOUD_E2E_GITHUB_USER }}
+          FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
+          GH_TOKEN: ${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${EXPECTED_LOGIN:-}" || -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::CLOUD_E2E_GITHUB_USER and CLOUD_E2E_GITHUB_TOKEN are required."
+            exit 1
+          fi
+          actual_login="$(gh api user --jq .login)"
+          if [[ "${actual_login,,}" != "${EXPECTED_LOGIN,,}" ]]; then
+            echo "::error::CLOUD_E2E_GITHUB_USER is '$EXPECTED_LOGIN', but CLOUD_E2E_GITHUB_TOKEN authenticates as '$actual_login'."
+            exit 1
+          fi
+          gh api "repos/$FIXTURE_REPOSITORY" >/dev/null
 
       - name: Run the cloud create-environment journey
         if: steps.fixture.outputs.configured == 'true'
@@ -239,30 +232,10 @@ jobs:
           # Empty leaves the fixture's own default in place.
           AIEXT_CLOUD_E2E_AZURE_LOCATION: ${{ vars.AIEXT_CLOUD_E2E_AZURE_LOCATION }}
           AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          # Playwright captures and removes the private key from its environment
-          # before starting Canvas or any CLI child command.
-          GH_PACKAGES_TOKEN: ${{ secrets.CLOUD_E2E_PACKAGES_TOKEN }}
-          GH_PACKAGES_USER: ${{ secrets.CLOUD_E2E_PACKAGES_USER }}
-          CLOUD_E2E_BOT_CLIENT_ID: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
-          CLOUD_E2E_BOT_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}
-          CLOUD_E2E_BOT_PRIVATE_KEY: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
+          GH_TOKEN: ${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}
+          GH_PACKAGES_TOKEN: ${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}
+          GH_PACKAGES_USER: ${{ secrets.CLOUD_E2E_GITHUB_USER }}
         run: pnpm run test:cloud
-
-      - name: Create a fresh read-only GitHub App token for diagnostics
-        id: diagnostics-token
-        if: always() && steps.fixture.outputs.configured == 'true'
-        continue-on-error: true
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
-          private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
-          owner: ${{ steps.fixture.outputs.owner }}
-          repositories: ${{ steps.fixture.outputs.name }}
-          permission-actions: read
-          permission-administration: read
-          permission-contents: read
-          permission-pull-requests: read
 
       # Collected on success as well as failure, and never allowed to fail the
       # job: a diagnostics step that breaks the run it is diagnosing is worse
@@ -271,7 +244,7 @@ jobs:
       - name: Collect az and gh diagnostics
         if: always() && steps.fixture.outputs.configured == 'true'
         env:
-          GH_TOKEN: ${{ steps.diagnostics-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}
           FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
           RESOURCE_GROUP_PREFIX: radtest-canvas
         shell: bash

@@ -34,7 +34,7 @@ export const VERIFY_WORKFLOW_PATH =
  * does not test.
  */
 export const REQUIRED_DEFAULT_BRANCH_WORKFLOWS: readonly string[] = [
-  VERIFY_WORKFLOW_PATH
+  VERIFY_WORKFLOW_PATH,
 ];
 
 export type JourneyGate =
@@ -55,10 +55,10 @@ export interface JourneyGateInput {
   readonly subscriptionId?: string;
   /** `GH_TOKEN`. */
   readonly githubToken?: string;
-  /** `CLOUD_E2E_BOT_CLIENT_ID`. */
-  readonly githubAppClientId?: string;
-  /** `CLOUD_E2E_BOT_PRIVATE_KEY`. */
-  readonly githubAppPrivateKey?: string;
+  /** `GH_PACKAGES_TOKEN`. */
+  readonly githubPackagesToken?: string;
+  /** `GH_PACKAGES_USER`. */
+  readonly githubPackagesUser?: string;
 }
 
 function isSet(value: string | undefined): boolean {
@@ -73,48 +73,55 @@ function isSet(value: string | undefined): boolean {
  * cloud job cannot be green without executing any cloud assertion.
  */
 export function evaluateCreateEnvironmentGate(
-  input: JourneyGateInput
+  input: JourneyGateInput,
 ): JourneyGate {
   if (!isSet(input.cloudE2eFlag))
     return {
       enabled: false,
       disposition: "skip",
       reason:
-        "RADIUS_CLOUD_E2E is not set, so the cloud create-environment journey is opt-out by default."
+        "RADIUS_CLOUD_E2E is not set, so the cloud create-environment journey is opt-out by default.",
     };
   if (!input.fixtureProvisioned)
     return {
       enabled: false,
       disposition: "fail",
-      reason: input.unprovisionedReason
+      reason: input.unprovisionedReason,
     };
   if (!isSet(input.subscriptionId))
     return {
       enabled: false,
       disposition: "fail",
       reason:
-        "AZURE_SUBSCRIPTION_ID is not set; the fixture needs a subscription to provision the per-run resource group and cluster in."
+        "AZURE_SUBSCRIPTION_ID is not set; the fixture needs a subscription to provision the per-run resource group and cluster in.",
     };
   if (!isSet(input.githubToken))
     return {
       enabled: false,
       disposition: "fail",
       reason:
-        "GH_TOKEN is not set; the cloud harness needs a token for the fixture repository."
+        "GH_TOKEN is not set; the cloud harness needs a token for the fixture repository.",
     };
-  if (!isSet(input.githubAppClientId))
+  if (!isSet(input.githubPackagesToken))
     return {
       enabled: false,
       disposition: "fail",
       reason:
-        "CLOUD_E2E_BOT_CLIENT_ID is not set; the journey cannot renew its GitHub App token between lifecycle stages."
+        "GH_PACKAGES_TOKEN is not set; the cloud harness needs the machine-user token for package bootstrap and cleanup.",
     };
-  if (!isSet(input.githubAppPrivateKey))
+  if (input.githubToken?.trim() !== input.githubPackagesToken?.trim())
     return {
       enabled: false,
       disposition: "fail",
       reason:
-        "CLOUD_E2E_BOT_PRIVATE_KEY is not set; the journey cannot renew its GitHub App token between lifecycle stages."
+        "GH_TOKEN and GH_PACKAGES_TOKEN must contain the same machine-user token.",
+    };
+  if (!isSet(input.githubPackagesUser))
+    return {
+      enabled: false,
+      disposition: "fail",
+      reason:
+        "GH_PACKAGES_USER is not set; the cloud harness cannot verify the machine-user identity used for package operations.",
     };
   return { enabled: true };
 }
@@ -132,18 +139,18 @@ export interface AzureAccount {
 function requireNonEmptyString(
   value: unknown,
   field: string,
-  context: string
+  context: string,
 ): string {
   if (typeof value !== "string" || value.trim() === "")
     throw new Error(
-      `${context} did not report a usable "${field}"; the cloud journey cannot build a credential profile from it.`
+      `${context} did not report a usable "${field}"; the cloud journey cannot build a credential profile from it.`,
     );
   return value.trim();
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ?
-      (value as Record<string, unknown>)
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
     : null;
 }
 
@@ -160,12 +167,12 @@ export function readAzureAccount(payload: unknown): AzureAccount {
   const record = asRecord(payload);
   if (!record)
     throw new Error(
-      `${context} returned no account object; sign in with \`az login\` before running the cloud journey.`
+      `${context} returned no account object; sign in with \`az login\` before running the cloud journey.`,
     );
   const user = asRecord(record.user);
   if (!user)
     throw new Error(
-      `${context} returned no "user" object, so the caller's principal type is unknown.`
+      `${context} returned no "user" object, so the caller's principal type is unknown.`,
     );
   const rawType = requireNonEmptyString(user.type, "user.type", context);
   // The caller's principal type decides whether the product's owner lookup can
@@ -174,14 +181,14 @@ export function readAzureAccount(payload: unknown): AzureAccount {
   // instead of surfacing as an opaque `app-owner-lookup-failed`.
   if (rawType !== "user" && rawType !== "servicePrincipal")
     throw new Error(
-      `${context} reported an unrecognized principal type "${rawType}"; expected "user" or "servicePrincipal".`
+      `${context} reported an unrecognized principal type "${rawType}"; expected "user" or "servicePrincipal".`,
     );
   return {
     tenantId: requireNonEmptyString(record.tenantId, "tenantId", context),
     subscriptionId: requireNonEmptyString(record.id, "id", context),
     subscriptionName: requireNonEmptyString(record.name, "name", context),
     principalName: requireNonEmptyString(user.name, "user.name", context),
-    principalType: rawType
+    principalType: rawType,
   };
 }
 
@@ -200,14 +207,14 @@ export interface OidcSubjectCustomization {
  * looks exactly like a product defect.
  */
 export function readOidcSubjectCustomization(
-  payload: unknown
+  payload: unknown,
 ): OidcSubjectCustomization {
   const context = "the repository's OIDC subject customization";
   const record = asRecord(payload);
   if (!record) throw new Error(`${context} could not be read as an object.`);
   if (typeof record.use_default !== "boolean")
     throw new Error(
-      `${context} did not report a boolean "use_default"; refusing to guess the subject format.`
+      `${context} did not report a boolean "use_default"; refusing to guess the subject format.`,
     );
   const customization: {
     useDefault: boolean;
@@ -269,13 +276,13 @@ function positiveId(value: unknown): string | null {
  * token later presents.
  */
 export function expectedFederatedCredentialSubjects(
-  input: ExpectedSubjectsInput
+  input: ExpectedSubjectsInput,
 ): ExpectedSubjects {
   const parts = input.fullName.split("/");
   if (parts.length !== 2 || !parts[0] || !parts[1])
     return {
       supported: false,
-      reason: `"${input.fullName}" is not an owner/repo full name, so no subject can be derived.`
+      reason: `"${input.fullName}" is not an owner/repo full name, so no subject can be derived.`,
     };
   const [owner, repo] = parts;
   const suffix = environmentSubjectSuffix(input.environmentName);
@@ -285,7 +292,7 @@ export function expectedFederatedCredentialSubjects(
       supported: false,
       reason:
         `${input.fullName} customizes its OIDC subject claims. The cloud journey only asserts GitHub's ` +
-        "default subject format, so reset the fixture repository's customization before running it."
+        "default subject format, so reset the fixture repository's customization before running it.",
     };
 
   const ownerId = positiveId(input.ownerId);
@@ -293,23 +300,23 @@ export function expectedFederatedCredentialSubjects(
   if (!ownerId || !repoId)
     return {
       supported: false,
-      reason: `${input.fullName} did not report positive numeric owner and repository ids, which the immutable subject form requires.`
+      reason: `${input.fullName} did not report positive numeric owner and repository ids, which the immutable subject form requires.`,
     };
 
   const prefix = input.customization.subClaimPrefix?.replace(
     /^(?:repo|repository):/,
-    ""
+    "",
   );
   const immutableSlug =
-    prefix && prefix.includes("@") ?
-      prefix
-    : `${owner}@${ownerId}/${repo}@${repoId}`;
+    prefix && prefix.includes("@")
+      ? prefix
+      : `${owner}@${ownerId}/${repo}@${repoId}`;
   const immutable = `repo:${immutableSlug}:${suffix}`;
   if (input.customization.useImmutableSubject === true)
     return { supported: true, required: [immutable] };
   return {
     supported: true,
-    required: [`repo:${owner}/${repo}:${suffix}`, immutable]
+    required: [`repo:${owner}/${repo}:${suffix}`, immutable],
   };
 }
 
@@ -343,7 +350,7 @@ export interface WorkflowPublicationInput {
  * committed path was not what happened.
  */
 export function classifyWorkflowPublication(
-  input: WorkflowPublicationInput
+  input: WorkflowPublicationInput,
 ): WorkflowPublication {
   const branches = [...input.fallbackBranches];
   const pullRequests = [...input.openPullRequests];
@@ -365,7 +372,7 @@ export interface WorkflowPublicationContext {
 /** The failure message for a publication outcome that is not `committed`. */
 export function describeWorkflowPublication(
   publication: WorkflowPublication,
-  context: WorkflowPublicationContext
+  context: WorkflowPublicationContext,
 ): string {
   if (publication.outcome === "committed")
     return `${context.repository}@${context.defaultBranch} carries ${publication.paths.join(", ")}.`;
@@ -375,7 +382,7 @@ export function describeWorkflowPublication(
       `${context.defaultBranch}: branches ${describeList(publication.branches)}, open pull requests ` +
       `${describeList(publication.pullRequests.map((number) => `#${number}`))}. That path is taken when the ` +
       "token lacks `workflow` scope, and a run that takes it never exercises the committed-workflow path. " +
-      "Grant the cloud end-to-end GitHub App `workflows: write` and re-run."
+      "Grant the Cloud E2E machine-user PAT the `workflow` scope and re-run."
     );
   return (
     `${context.repository}@${context.defaultBranch} is missing ${describeList(publication.missingPaths)} after ` +
@@ -421,22 +428,22 @@ function sameId(left: string, right: string): boolean {
  * is reported as its own finding rather than folded into a mismatch.
  */
 export function findEnvironmentIdentityProblems(
-  input: EnvironmentIdentityInput
+  input: EnvironmentIdentityInput,
 ): string[] {
   const problems: string[] = [];
   const clientId = input.variables.get("AZURE_CLIENT_ID");
   if (!clientId || clientId.trim() === "")
     problems.push(
-      "AZURE_CLIENT_ID is absent or empty, so no workflow in this environment can authenticate to Azure."
+      "AZURE_CLIENT_ID is absent or empty, so no workflow in this environment can authenticate to Azure.",
     );
   else if (input.bootstrapClientId && sameId(clientId, input.bootstrapClientId))
     problems.push(
       `AZURE_CLIENT_ID is the bootstrap identity (${input.bootstrapClientId}) rather than an application the product created. ` +
-        "Every later stage would authenticate as the privileged runner identity and pass while proving nothing."
+        "Every later stage would authenticate as the privileged runner identity and pass while proving nothing.",
     );
   else if (!sameId(clientId, input.createdAppId))
     problems.push(
-      `AZURE_CLIENT_ID is "${clientId}" but the product created application "${input.createdAppId}".`
+      `AZURE_CLIENT_ID is "${clientId}" but the product created application "${input.createdAppId}".`,
     );
 
   for (const [name, expected, exact] of [
@@ -445,7 +452,7 @@ export function findEnvironmentIdentityProblems(
     ["AZURE_RESOURCE_GROUP", input.expected.resourceGroup, false],
     ["AZURE_AKS_CLUSTER_NAME", input.expected.cluster, true],
     ["AZURE_LOCATION", input.expected.location, false],
-    ["KUBERNETES_NAMESPACE", input.expected.namespace, true]
+    ["KUBERNETES_NAMESPACE", input.expected.namespace, true],
   ] as const) {
     const actual = input.variables.get(name);
     if (actual === undefined)
@@ -458,7 +465,7 @@ export function findEnvironmentIdentityProblems(
 
 /** Parses `gh api .../environments/<name>/variables` into a lookup. */
 export function readEnvironmentVariables(
-  payload: unknown
+  payload: unknown,
 ): ReadonlyMap<string, string> {
   const context = "the GitHub environment's variables";
   const record = asRecord(payload);
@@ -481,7 +488,7 @@ export function readServicePrincipalObjectId(payload: unknown): string {
   if (typeof id !== "string" || id.trim() === "")
     throw new Error(
       'The service principal lookup returned no usable "id". Role assignments are made against the ' +
-        "service principal's object id, not the application's, so the journey cannot verify them without it."
+        "service principal's object id, not the application's, so the journey cannot verify them without it.",
     );
   return id.trim();
 }
@@ -490,6 +497,16 @@ export function readServicePrincipalObjectId(payload: unknown): string {
 export interface RepositoryIdentity {
   readonly ownerId: number;
   readonly repoId: number;
+}
+
+/** Narrows `gh api user`. */
+export function readGitHubUserLogin(payload: unknown): string {
+  const login = asRecord(payload)?.login;
+  if (typeof login !== "string" || login.trim() === "")
+    throw new Error(
+      'The GitHub user lookup returned no usable "login", so the journey cannot verify its machine-user identity.',
+    );
+  return login.trim();
 }
 
 /** Narrows `gh api repos/{owner}/{repo}`. */
@@ -501,7 +518,7 @@ export function readRepositoryIdentity(payload: unknown): RepositoryIdentity {
   if (typeof ownerId !== "number" || typeof repoId !== "number")
     throw new Error(
       'The repository lookup returned no numeric "owner.id" and "id", so the immutable OIDC subject ' +
-        "the product registers cannot be predicted."
+        "the product registers cannot be predicted.",
     );
   return { ownerId, repoId };
 }
@@ -517,7 +534,7 @@ export function readRepositoryIdentity(payload: unknown): RepositoryIdentity {
 export function readDirectoryPaths(payload: unknown): string[] {
   if (!Array.isArray(payload))
     throw new Error(
-      "The repository contents listing did not return an array of entries."
+      "The repository contents listing did not return an array of entries.",
     );
   const paths: string[] = [];
   for (const entry of payload) {
@@ -535,7 +552,7 @@ export function workflowFallbackBranchPrefix(environmentName: string): string {
 /** Selects this run's branches from `gh api .../git/matching-refs/heads/...`. */
 export function selectFallbackBranches(
   payload: unknown,
-  environmentName: string
+  environmentName: string,
 ): string[] {
   if (!Array.isArray(payload))
     throw new Error("The branch listing did not return an array of branches.");
@@ -544,9 +561,11 @@ export function selectFallbackBranches(
   for (const entry of payload) {
     const item = asRecord(entry);
     const rawName =
-      typeof item?.name === "string" ? item.name
-      : typeof item?.ref === "string" ? item.ref.replace(/^refs\/heads\//, "")
-      : "";
+      typeof item?.name === "string"
+        ? item.name
+        : typeof item?.ref === "string"
+          ? item.ref.replace(/^refs\/heads\//, "")
+          : "";
     if (rawName.startsWith(prefix)) names.push(rawName);
   }
   return names;
@@ -560,16 +579,16 @@ export function selectFallbackBranches(
  */
 export function selectFallbackPullRequests(
   payload: unknown,
-  environmentName: string
+  environmentName: string,
 ): number[] {
   if (!Array.isArray(payload))
     throw new Error(
-      "The pull request listing did not return an array of pull requests."
+      "The pull request listing did not return an array of pull requests.",
     );
   const prefix = workflowFallbackBranchPrefix(environmentName);
   const numbers: number[] = [];
   const entries = payload.flatMap((page) =>
-    Array.isArray(page) ? page : [page]
+    Array.isArray(page) ? page : [page],
   );
   for (const entry of entries) {
     const item = asRecord(entry);
@@ -599,13 +618,13 @@ export interface OperationHttpResponse {
 
 /** Validates and parses one `/api/operations/{id}` HTTP response. */
 export function readOperationHttpResponse(
-  response: OperationHttpResponse
+  response: OperationHttpResponse,
 ): unknown {
   if (!response.ok) {
     const status = `${response.status} ${response.statusText}`.trim();
     const body = response.body.trim() || "<empty body>";
     throw new Error(
-      `The operation status request failed with HTTP ${status}: ${body}`
+      `The operation status request failed with HTTP ${status}: ${body}`,
     );
   }
   return parseJsonPayload(response.body, "the operation status request");
@@ -616,7 +635,7 @@ export function readOperationId(payload: unknown): string {
   const operationId = asRecord(payload)?.operationId;
   if (typeof operationId !== "string" || operationId.trim() === "")
     throw new Error(
-      'The create operation response carried no usable "operationId".'
+      'The create operation response carried no usable "operationId".',
     );
   return operationId.trim();
 }
@@ -632,11 +651,11 @@ export function readOperationSnapshot(payload: unknown): OperationSnapshot {
   const operation = asRecord(asRecord(payload)?.operation);
   if (!operation)
     throw new Error(
-      'The operation status response carried no readable "operation" object.'
+      'The operation status response carried no readable "operation" object.',
     );
   if (typeof operation.state !== "string" || operation.state.trim() === "")
     throw new Error(
-      'The operation status response carried no usable "operation.state".'
+      'The operation status response carried no usable "operation.state".',
     );
   if (
     operation.error !== undefined &&
@@ -644,33 +663,33 @@ export function readOperationSnapshot(payload: unknown): OperationSnapshot {
     typeof operation.error !== "string"
   )
     throw new Error(
-      'The operation status response carried a non-string "operation.error".'
+      'The operation status response carried a non-string "operation.error".',
     );
   const state = operation.state.trim();
   const failure = asRecord(operation.failure);
   const rawOperationError =
     typeof operation.error === "string" ? operation.error.trim() : "";
   const error =
-    typeof failure?.message === "string" && failure.message.trim() !== "" ?
-      failure.message.trim()
-    : rawOperationError;
+    typeof failure?.message === "string" && failure.message.trim() !== ""
+      ? failure.message.trim()
+      : rawOperationError;
   const terminalState =
-    typeof operation.terminalState === "string" ?
-      operation.terminalState.trim()
-    : "";
+    typeof operation.terminalState === "string"
+      ? operation.terminalState.trim()
+      : "";
   if (
     operation.terminalState !== undefined &&
     operation.terminalState !== null &&
     !TERMINAL_STATES.includes(terminalState)
   )
     throw new Error(
-      'The operation status response carried an unknown "operation.terminalState".'
+      'The operation status response carried an unknown "operation.terminalState".',
     );
   const terminal = terminalState !== "" || TERMINAL_STATES.includes(state);
   return {
     state,
     terminal,
-    error
+    error,
   };
 }
 
@@ -697,7 +716,7 @@ export function parseJsonPayload(text: string, context: string): unknown {
   } catch (error) {
     throw new Error(
       `${context} returned output that is not valid JSON: ${describeError(error)}`,
-      { cause: error }
+      { cause: error },
     );
   }
 }
@@ -713,14 +732,14 @@ export function parseJsonPayload(text: string, context: string): unknown {
  */
 export function readWorkflowDirectory(
   result: CommandOutcome,
-  context: string
+  context: string,
 ): string[] {
   if (result.code !== 0) {
     if (isGitHubApiNotFound(result)) return [];
     const diagnostic =
       result.stderr.trim() || result.stdout.trim() || "<no output>";
     throw new Error(
-      `${context} failed with exit code ${result.code}: ${diagnostic}`
+      `${context} failed with exit code ${result.code}: ${diagnostic}`,
     );
   }
   return readDirectoryPaths(parseJsonPayload(result.stdout, context));
@@ -751,7 +770,7 @@ export function cloudCanvasState(input: CloudCanvasStateInput): CanvasState {
     plannedRepo: input.repository,
     plannedBranch: input.branch,
     deployingRepo: input.repository,
-    deployingBranch: input.branch
+    deployingBranch: input.branch,
   };
 }
 
@@ -762,7 +781,7 @@ export interface CleanupStep {
 
 export async function runCleanupSteps(
   steps: readonly CleanupStep[],
-  primaryError?: unknown
+  primaryError?: unknown,
 ): Promise<void> {
   const cleanupErrors: Error[] = [];
   for (const step of steps) {
@@ -770,7 +789,7 @@ export async function runCleanupSteps(
       await step.run();
     } catch (error) {
       cleanupErrors.push(
-        new Error(`${step.label}: ${describeError(error)}`, { cause: error })
+        new Error(`${step.label}: ${describeError(error)}`, { cause: error }),
       );
     }
   }
@@ -779,11 +798,11 @@ export async function runCleanupSteps(
   if (primaryError !== undefined)
     throw new AggregateError(
       [primaryError, ...cleanupErrors],
-      "The create-environment journey failed and cleanup also failed."
+      "The create-environment journey failed and cleanup also failed.",
     );
   if (cleanupErrors.length === 1) throw cleanupErrors[0];
   throw new AggregateError(
     cleanupErrors,
-    "The create-environment journey cleanup failed."
+    "The create-environment journey cleanup failed.",
   );
 }

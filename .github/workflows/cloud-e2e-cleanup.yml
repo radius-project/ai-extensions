@@ -25,8 +25,8 @@ name: Cloud E2E Cleanup
 # using its own state.
 #
 # See docs/eng/CLOUD_E2E_RUNBOOK.md. Like cloud-e2e.yml, this has never
-# executed. The fixture repository and source pin now exist, but the
-# wellknown-published CI identity and variables are still prerequisites.
+# executed. The remaining prerequisite is the dedicated machine-user login and
+# classic PAT used for fixture repository and package operations.
 
 on:
   # Never `pull_request_target`, and never any pull-request trigger at all.
@@ -152,18 +152,26 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Create a GitHub App token for the fixture repository
-        id: app-token
+      - name: Verify the Cloud E2E GitHub identity
+        id: github-identity
         if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
-          private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
-          owner: ${{ steps.pin.outputs.owner }}
-          repositories: ${{ steps.pin.outputs.name }}
-          permission-contents: write
-          permission-environments: write
-          permission-pull-requests: write
+        env:
+          EXPECTED_LOGIN: ${{ secrets.CLOUD_E2E_GITHUB_USER }}
+          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
+          GH_TOKEN: ${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${EXPECTED_LOGIN:-}" || -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::CLOUD_E2E_GITHUB_USER and CLOUD_E2E_GITHUB_TOKEN are required."
+            exit 1
+          fi
+          actual_login="$(gh api user --jq .login)"
+          if [[ "${actual_login,,}" != "${EXPECTED_LOGIN,,}" ]]; then
+            echo "::error::CLOUD_E2E_GITHUB_USER is '$EXPECTED_LOGIN', but CLOUD_E2E_GITHUB_TOKEN authenticates as '$actual_login'."
+            exit 1
+          fi
+          gh api "repos/$FIXTURE_REPOSITORY" >/dev/null
 
       # Per-run resource groups carry both the fixture prefix and a fixture-owned
       # tag. The Radius purge job is only the safety net; this workflow deletes
@@ -333,9 +341,9 @@ jobs:
       # prefix and still age-gated, so a live run's environment is never a
       # candidate.
       - name: Purge stale GitHub Environments
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.github-identity.outcome == 'success'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
           ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
         shell: bash
@@ -385,9 +393,9 @@ jobs:
       # a side effect. Branch age comes from the referenced commit, not from a
       # missing field on the refs API.
       - name: Purge stale workflow fallback pull requests and branches
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.github-identity.outcome == 'success'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
           DEFAULT_BRANCH: ${{ steps.pin.outputs.default-branch }}
           FALLBACK_BRANCH_PREFIX: ${{ steps.pin.outputs.workflow-fallback-branch-prefix }}
@@ -503,9 +511,9 @@ jobs:
       # deliberately left intact. When no lease exists, cleanup acquires its own
       # before touching the mutable default branch.
       - name: Reset the fixture default branch under the shared lease
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.github-identity.outcome == 'success'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}
           SOURCE_GH_TOKEN: ${{ github.token }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
           DEFAULT_BRANCH: ${{ steps.pin.outputs.default-branch }}
