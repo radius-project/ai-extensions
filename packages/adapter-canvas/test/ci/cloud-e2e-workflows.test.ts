@@ -28,12 +28,12 @@ import cloudConfig from "../../playwright.cloud.config.js";
 import { redactCredentials } from "../../src/credential-redaction.js";
 import {
   ENVIRONMENT_NAME_PREFIX,
-  RESOURCE_GROUP_PREFIX,
+  RESOURCE_GROUP_PREFIX
 } from "../e2e-cloud/support/fixture-repository.js";
 
 const REPOSITORY_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  "../../../..",
+  "../../../.."
 );
 const RUN_WORKFLOW = "cloud-e2e.yml";
 const CLEANUP_WORKFLOW = "cloud-e2e-cleanup.yml";
@@ -73,7 +73,7 @@ interface Workflow {
 async function readWorkflow(file: string): Promise<string> {
   return readFile(
     path.join(REPOSITORY_ROOT, ".github/workflows", file),
-    "utf8",
+    "utf8"
   );
 }
 
@@ -94,7 +94,7 @@ describe.each(WORKFLOWS)("%s - properties both workflows share", (file) => {
     // is the cheaper of the two to reason about. Neither alone is convincing.
     const [raw, workflow] = await Promise.all([
       readWorkflow(file),
-      parseWorkflow(file),
+      parseWorkflow(file)
     ]);
     expect(Object.keys(workflow.on ?? {})).not.toContain("pull_request_target");
     expect(raw).not.toMatch(/pull_request_target\s*:/);
@@ -119,7 +119,7 @@ describe.each(WORKFLOWS)("%s - properties both workflows share", (file) => {
     const workflow = await parseWorkflow(file);
     expect(Object.keys(workflow.on ?? {}).sort()).toEqual([
       "schedule",
-      "workflow_dispatch",
+      "workflow_dispatch"
     ]);
   });
 
@@ -151,11 +151,11 @@ describe.each(WORKFLOWS)("%s - properties both workflows share", (file) => {
     expect(workflow.permissions?.["id-token"]).toBeUndefined();
 
     const withOidc = Object.values(workflow.jobs ?? {}).filter(
-      (job) => job.permissions?.["id-token"] === "write",
+      (job) => job.permissions?.["id-token"] === "write"
     );
     expect(withOidc).toHaveLength(1);
     expect(
-      steps(withOidc[0]).some((step) => step.uses?.startsWith("azure/login@")),
+      steps(withOidc[0]).some((step) => step.uses?.startsWith("azure/login@"))
     ).toBe(true);
   });
 
@@ -174,7 +174,7 @@ describe.each(WORKFLOWS)("%s - properties both workflows share", (file) => {
     expect(
       steps(notify)
         .map((step) => step.run)
-        .join("\n"),
+        .join("\n")
     ).toContain("gh issue create");
   });
 });
@@ -223,7 +223,7 @@ describe("cloud-e2e.yml", () => {
     expect(run?.env).toMatchObject({
       GH_TOKEN: "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}",
       GH_PACKAGES_TOKEN: "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}",
-      GH_PACKAGES_USER: "${{ secrets.CLOUD_E2E_GITHUB_USER }}",
+      GH_PACKAGES_USER: "${{ secrets.CLOUD_E2E_GITHUB_USER }}"
     });
   });
 
@@ -232,25 +232,25 @@ describe("cloud-e2e.yml", () => {
     const used = steps(workflow.jobs?.["cloud-e2e"]).map((step) => step.uses);
     expect(used.some((use) => use?.startsWith("azure/login@"))).toBe(true);
     expect(
-      used.some((use) => use?.startsWith("actions/create-github-app-token@")),
+      used.some((use) => use?.startsWith("actions/create-github-app-token@"))
     ).toBe(false);
     const identity = steps(workflow.jobs?.["cloud-e2e"]).find(
-      (step) => step.name === "Verify the Cloud E2E GitHub identity",
+      (step) => step.name === "Verify the Cloud E2E GitHub identity"
     );
     expect(identity?.env).toMatchObject({
       EXPECTED_LOGIN: "${{ secrets.CLOUD_E2E_GITHUB_USER }}",
-      GH_TOKEN: "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}",
+      GH_TOKEN: "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}"
     });
     expect(identity?.run).toContain("gh api user --jq .login");
     expect(identity?.run).toContain('gh api "repos/$FIXTURE_REPOSITORY"');
     const run = steps(workflow.jobs?.["cloud-e2e"]).find((step) =>
-      step.run?.includes("test:cloud"),
+      step.run?.includes("test:cloud")
     );
     expect(run?.env).toMatchObject({
       AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY:
         "${{ steps.fixture.outputs.full-name }}",
       GH_PACKAGES_TOKEN: "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}",
-      GH_PACKAGES_USER: "${{ secrets.CLOUD_E2E_GITHUB_USER }}",
+      GH_PACKAGES_USER: "${{ secrets.CLOUD_E2E_GITHUB_USER }}"
     });
     expect(run?.env?.GH_TOKEN).toBe(run?.env?.GH_PACKAGES_TOKEN);
     expect(workflow.jobs?.["cloud-e2e"]?.permissions?.packages).toBeUndefined();
@@ -270,13 +270,13 @@ describe("cloud-e2e.yml", () => {
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const jobSteps = steps(workflow.jobs?.["cloud-e2e"]);
     const collect = jobSteps.find(
-      (step) => step.name === "Collect az and gh diagnostics",
+      (step) => step.name === "Collect az and gh diagnostics"
     );
     const stage = jobSteps.find(
-      (step) => step.name === "Stage Playwright traces and report",
+      (step) => step.name === "Stage Playwright traces and report"
     );
     const upload = jobSteps.find((step) =>
-      step.uses?.startsWith("actions/upload-artifact@"),
+      step.uses?.startsWith("actions/upload-artifact@")
     );
     expect(collect?.run).toContain('out="$RUNNER_TEMP/cloud-e2e-artifact"');
     expect(collect?.run).toContain("redactCredentials");
@@ -284,7 +284,7 @@ describe("cloud-e2e.yml", () => {
     expect(stage?.if).toContain("always()");
     expect(stage?.run).toContain("packages/adapter-canvas/test-results/cloud");
     expect(stage?.run).toContain(
-      "packages/adapter-canvas/playwright-report-cloud",
+      "packages/adapter-canvas/playwright-report-cloud"
     );
     expect(upload?.if).toBe("always()");
     expect(upload?.with?.path).toBe("${{ runner.temp }}/cloud-e2e-artifact");
@@ -294,7 +294,7 @@ describe("cloud-e2e.yml", () => {
     const jwt =
       "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJmaXh0dXJlIn0.fixture_signature";
     expect(redactCredentials(`az failed: ${jwt}`)).toBe(
-      "az failed: [REDACTED]",
+      "az failed: [REDACTED]"
     );
   });
 
@@ -303,7 +303,7 @@ describe("cloud-e2e.yml", () => {
     // repository, so its failure is invisible in this job's log.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const diagnostics = steps(workflow.jobs?.["cloud-e2e"]).find(
-      (step) => step.name === "Collect az and gh diagnostics",
+      (step) => step.name === "Collect az and gh diagnostics"
     );
     expect(diagnostics?.if).toContain("always()");
     expect(diagnostics?.run).toContain("--log-failed");
@@ -314,10 +314,10 @@ describe("cloud-e2e.yml", () => {
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const jobSteps = steps(workflow.jobs?.["cloud-e2e"]);
     const diagnostics = jobSteps.find(
-      (step) => step.name === "Collect az and gh diagnostics",
+      (step) => step.name === "Collect az and gh diagnostics"
     );
     expect(diagnostics?.env?.GH_TOKEN).toBe(
-      "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}",
+      "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}"
     );
   });
 
@@ -350,7 +350,7 @@ describe("cloud-e2e.yml", () => {
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const names = steps(workflow.jobs?.["cloud-e2e"]).map((step) => step.name);
     expect(names.indexOf("Resolve the fixture repository")).toBeLessThan(
-      names.indexOf("Install dependencies"),
+      names.indexOf("Install dependencies")
     );
   });
 
@@ -358,12 +358,12 @@ describe("cloud-e2e.yml", () => {
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const verify = steps(workflow.jobs?.["cloud-e2e"]).find(
       (step) =>
-        step.name === "Verify the published fixture repository matches the pin",
+        step.name === "Verify the published fixture repository matches the pin"
     );
 
     expect(verify?.if).toContain("steps.fixture.outputs.configured == 'true'");
     expect(verify?.run).toContain(
-      "test/e2e-cloud/support/fixture-repository.ts",
+      "test/e2e-cloud/support/fixture-repository.ts"
     );
     expect(verify?.run).toContain("Refusing to run against an ambiguous scope");
   });
@@ -373,15 +373,15 @@ describe("cloud-e2e-cleanup.yml", () => {
   it("verifies one machine-user identity before GitHub cleanup", async () => {
     const [raw, workflow] = await Promise.all([
       readWorkflow(CLEANUP_WORKFLOW),
-      parseWorkflow(CLEANUP_WORKFLOW),
+      parseWorkflow(CLEANUP_WORKFLOW)
     ]);
     const identity = steps(workflow.jobs?.purge).find(
-      (step) => step.name === "Verify the Cloud E2E GitHub identity",
+      (step) => step.name === "Verify the Cloud E2E GitHub identity"
     );
 
     expect(identity?.env).toMatchObject({
       EXPECTED_LOGIN: "${{ secrets.CLOUD_E2E_GITHUB_USER }}",
-      GH_TOKEN: "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}",
+      GH_TOKEN: "${{ secrets.CLOUD_E2E_GITHUB_TOKEN }}"
     });
     expect(identity?.run).toContain("gh api user --jq .login");
     expect(identity?.run).toContain('gh api "repos/$FIXTURE_REPOSITORY"');
@@ -396,18 +396,18 @@ describe("cloud-e2e-cleanup.yml", () => {
     // becoming a broad subscription sweep.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const purge = steps(workflow.jobs?.purge).find((step) =>
-      step.run?.includes("selectTestResourceGroups"),
+      step.run?.includes("selectTestResourceGroups")
     );
     const script = purge?.run ?? "";
 
     expect(purge?.if).toContain("always()");
     expect(purge?.if).toContain("steps.azure-login.outcome == 'success'");
     expect(purge?.env?.RESOURCE_GROUP_PREFIX).toBe(
-      "${{ steps.pin.outputs.resource-group-prefix }}",
+      "${{ steps.pin.outputs.resource-group-prefix }}"
     );
     expect(purge?.env?.GH_TOKEN).toBe("${{ github.token }}");
     expect(purge?.env?.SUBSCRIPTION_ID).toBe(
-      "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
+      "${{ secrets.AZURE_SUBSCRIPTION_ID }}"
     );
     expect(script).toContain("starts_with(name, '$RESOURCE_GROUP_PREFIX')");
     expect(script).toContain('--subscription "$SUBSCRIPTION_ID"');
@@ -430,18 +430,18 @@ describe("cloud-e2e-cleanup.yml", () => {
   it("exports cleanup scope constants from the fixture pin", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const pin = steps(workflow.jobs?.purge).find(
-      (step) => step.name === "Resolve the pinned fixture repository",
+      (step) => step.name === "Resolve the pinned fixture repository"
     );
     const script = pin?.run ?? "";
 
     expect(script).toContain(
-      "`resource-group-prefix=${pin.RESOURCE_GROUP_PREFIX}`",
+      "`resource-group-prefix=${pin.RESOURCE_GROUP_PREFIX}`"
     );
     expect(script).toContain(
-      "`environment-prefix=${pin.ENVIRONMENT_NAME_PREFIX}`",
+      "`environment-prefix=${pin.ENVIRONMENT_NAME_PREFIX}`"
     );
     expect(script).toContain(
-      "`workflow-fallback-branch-prefix=${pin.WORKFLOW_FALLBACK_BRANCH_PREFIX}`",
+      "`workflow-fallback-branch-prefix=${pin.WORKFLOW_FALLBACK_BRANCH_PREFIX}`"
     );
     expect(script).toContain("`lease-ref=${pin.CLOUD_E2E_LEASE_REF}`");
   });
@@ -450,7 +450,7 @@ describe("cloud-e2e-cleanup.yml", () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const reset = steps(workflow.jobs?.purge).find(
       (step) =>
-        step.name === "Reset the fixture default branch under the shared lease",
+        step.name === "Reset the fixture default branch under the shared lease"
     );
     const script = reset?.run ?? "";
 
@@ -464,12 +464,12 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain("Could not verify workflow run");
     expect(script).toContain("was acquired concurrently");
     expect(script).toContain(
-      "changed while cleanup was establishing ownership",
+      "changed while cleanup was establishing ownership"
     );
     expect(script).toContain("changed before release");
     expect(script).toContain('gh api -X DELETE "$lease_write_path"');
     expect(script.indexOf("gh api -X PATCH")).toBeLessThan(
-      script.indexOf('gh api -X DELETE "$lease_write_path"'),
+      script.indexOf('gh api -X DELETE "$lease_write_path"')
     );
   });
 
@@ -478,10 +478,10 @@ describe("cloud-e2e-cleanup.yml", () => {
     // prefix nothing uses - or, worse, one something else does.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const purge = steps(workflow.jobs?.purge).find(
-      (step) => step.env?.ENVIRONMENT_PREFIX !== undefined,
+      (step) => step.env?.ENVIRONMENT_PREFIX !== undefined
     );
     expect(purge?.env?.ENVIRONMENT_PREFIX).toBe(
-      "${{ steps.pin.outputs.environment-prefix }}",
+      "${{ steps.pin.outputs.environment-prefix }}"
     );
     expect(ENVIRONMENT_NAME_PREFIX).toBe("radtest-");
   });
@@ -492,14 +492,14 @@ describe("cloud-e2e-cleanup.yml", () => {
     // repository. Both gates must open before any destructive step can run.
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const verify = steps(workflow.jobs?.purge).find(
-      (step) => step.name === "Verify the published variable matches the pin",
+      (step) => step.name === "Verify the published variable matches the pin"
     );
     const destructive = steps(workflow.jobs?.purge).filter(
       (step) =>
         step.run?.includes("az group delete") ||
         step.run?.includes("az ad app delete") ||
         step.run?.includes("-X DELETE") ||
-        step.run?.includes("-X PATCH"),
+        step.run?.includes("-X PATCH")
     );
     expect(verify?.run).toContain('echo "configured=false"');
     expect(verify?.run).toContain('echo "configured=true"');
@@ -508,7 +508,7 @@ describe("cloud-e2e-cleanup.yml", () => {
       expect(step.if).toContain("always()");
       expect(step.if).toContain("steps.pin.outputs.provisioned == 'true'");
       expect(step.if).toContain(
-        "steps.verify-scope.outputs.configured == 'true'",
+        "steps.verify-scope.outputs.configured == 'true'"
       );
       if (
         step.run?.includes("gh api") &&
@@ -530,7 +530,7 @@ describe("cloud-e2e-cleanup.yml", () => {
         (candidate.run?.includes("az ad app delete") ||
           candidate.run?.includes("-X DELETE")) &&
         candidate.name !==
-          "Reset the fixture default branch under the shared lease",
+          "Reset the fixture default branch under the shared lease"
     );
     expect(ageGatedDestructiveSteps).toHaveLength(3);
     for (const step of ageGatedDestructiveSteps)
@@ -540,7 +540,7 @@ describe("cloud-e2e-cleanup.yml", () => {
   it("deletes age-eligible service principals before applications", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const purge = steps(workflow.jobs?.purge).find((step) =>
-      step.run?.includes("az ad sp delete"),
+      step.run?.includes("az ad sp delete")
     );
     const script = purge?.run ?? "";
 
@@ -553,14 +553,14 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain("appId");
     expect(script).toContain("failures+=");
     expect(script.indexOf("az ad sp delete")).toBeLessThan(
-      script.indexOf("az ad app delete"),
+      script.indexOf("az ad app delete")
     );
   });
 
   it("closes old fallback pull requests before deleting their exact head refs", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const purge = steps(workflow.jobs?.purge).find((step) =>
-      step.run?.includes("selectExpiredFallbackPullRequests"),
+      step.run?.includes("selectExpiredFallbackPullRequests")
     );
     const script = purge?.run ?? "";
 
@@ -573,17 +573,17 @@ describe("cloud-e2e-cleanup.yml", () => {
     expect(script).toContain("failures+=");
     expect(script).toContain("git/matching-refs/heads/$FALLBACK_BRANCH_PREFIX");
     expect(purge?.env?.FALLBACK_BRANCH_PREFIX).toBe(
-      "${{ steps.pin.outputs.workflow-fallback-branch-prefix }}",
+      "${{ steps.pin.outputs.workflow-fallback-branch-prefix }}"
     );
     expect(script.indexOf("-f state=closed")).toBeLessThan(
-      script.indexOf("-X DELETE"),
+      script.indexOf("-X DELETE")
     );
   });
 
   it("selects stale environments through the fail-closed timestamp helper", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const purge = steps(workflow.jobs?.purge).find((step) =>
-      step.run?.includes("selectExpiredEnvironments"),
+      step.run?.includes("selectExpiredEnvironments")
     );
 
     expect(purge?.run).toContain("expired-environments.json");

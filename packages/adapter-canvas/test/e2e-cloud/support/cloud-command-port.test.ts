@@ -15,7 +15,7 @@ import {
   normalizeGitHubPackageCommandResult,
   parseJsonArray,
   parseJsonObject,
-  type CloudCommandResult,
+  type CloudCommandResult
 } from "./cloud-command-port.js";
 
 const AZURE_ENV: NodeJS.ProcessEnv = {
@@ -23,7 +23,7 @@ const AZURE_ENV: NodeJS.ProcessEnv = {
   ACTIONS_ID_TOKEN_REQUEST_URL: "https://oidc.example/token?job=1",
   AZURE_CLIENT_ID: "client-id",
   AZURE_TENANT_ID: "tenant-id",
-  AZURE_SUBSCRIPTION_ID: "subscription-id",
+  AZURE_SUBSCRIPTION_ID: "subscription-id"
 };
 
 function result(overrides: Partial<CloudCommandResult>): CloudCommandResult {
@@ -35,7 +35,7 @@ describe("normalizeCommandResult", () => {
     expect(normalizeCommandResult(null, "ok\n", "")).toEqual({
       code: 0,
       stdout: "ok\n",
-      stderr: "",
+      stderr: ""
     });
   });
 
@@ -47,16 +47,16 @@ describe("normalizeCommandResult", () => {
     const outcome = normalizeCommandResult(
       { code: "ENOENT", message: "spawn az ENOENT" },
       "",
-      "",
+      ""
     );
 
     expect(outcome).toEqual({
       code: 1,
       stdout: "",
-      stderr: "spawn az ENOENT",
+      stderr: "spawn az ENOENT"
     });
     expect(() => expectSuccess(outcome, "az account show")).toThrow(
-      "az account show failed with exit code 1: spawn az ENOENT",
+      "az account show failed with exit code 1: spawn az ENOENT"
     );
   });
 
@@ -65,12 +65,12 @@ describe("normalizeCommandResult", () => {
       normalizeCommandResult(
         { code: "ETIMEDOUT", message: "Command timed out after 900000ms" },
         "",
-        "",
-      ),
+        ""
+      )
     ).toEqual({
       code: 1,
       stdout: "",
-      stderr: "Command timed out after 900000ms",
+      stderr: "Command timed out after 900000ms"
     });
   });
 
@@ -79,12 +79,12 @@ describe("normalizeCommandResult", () => {
       normalizeCommandResult(
         { code: 1, message: "command failed" },
         "",
-        "specific stderr",
-      ),
+        "specific stderr"
+      )
     ).toEqual({
       code: 1,
       stdout: "",
-      stderr: "specific stderr",
+      stderr: "specific stderr"
     });
   });
 
@@ -93,12 +93,12 @@ describe("normalizeCommandResult", () => {
       normalizeCommandResult(
         { code: 1, message: "command failed" },
         "specific stdout",
-        "",
-      ),
+        ""
+      )
     ).toEqual({
       code: 1,
       stdout: "specific stdout",
-      stderr: "",
+      stderr: ""
     });
   });
 
@@ -106,7 +106,7 @@ describe("normalizeCommandResult", () => {
     expect(normalizeCommandResult({ code: "ENOENT" }, "", "")).toEqual({
       code: 1,
       stdout: "",
-      stderr: "",
+      stderr: ""
     });
   });
 
@@ -114,7 +114,7 @@ describe("normalizeCommandResult", () => {
     ["a signal or timeout code", { code: "ETIMEDOUT" }],
     ["a null code", { code: null }],
     ["no code at all", {}],
-    ["an exit code of zero alongside an error", { code: 0 }],
+    ["an exit code of zero alongside an error", { code: 0 }]
   ])("reports a non-zero code for %s", (_label, error) => {
     // A killed process must never read as success: `Number("ETIMEDOUT")` is
     // NaN, which would compare falsely against every code the callers check.
@@ -125,7 +125,7 @@ describe("normalizeCommandResult", () => {
     expect(normalizeCommandResult(null, undefined, undefined)).toEqual({
       code: 0,
       stdout: "",
-      stderr: "",
+      stderr: ""
     });
   });
 
@@ -140,12 +140,12 @@ describe("normalizeCommandResult", () => {
           { code: 1 },
           `accessToken=${opaque}`,
           `failure: ${jwt}`,
-          { AZURE_FEDERATED_TOKEN: opaque },
-        ),
+          { AZURE_FEDERATED_TOKEN: opaque }
+        )
       ).toEqual({
         code: 1,
         stdout: "accessToken=[REDACTED]",
-        stderr: "failure: [REDACTED]",
+        stderr: "failure: [REDACTED]"
       });
     });
 
@@ -155,12 +155,12 @@ describe("normalizeCommandResult", () => {
           null,
           '{"subscriptionId":"00000000-0000-0000-0000-000000000001"}',
           undefined,
-          {},
-        ),
+          {}
+        )
       ).toEqual({
         code: 0,
         stdout: '{"subscriptionId":"00000000-0000-0000-0000-000000000001"}',
-        stderr: "",
+        stderr: ""
       });
     });
   });
@@ -170,13 +170,13 @@ describe("isGitHubApiNotFound", () => {
   it.each([
     [
       "the standard stderr form",
-      { code: 1, stderr: "gh: Not Found (HTTP 404)" },
+      { code: 1, stderr: "gh: Not Found (HTTP 404)" }
     ],
     ["the stdout status form", { code: 1, stdout: "HTTP 404: Not Found" }],
     [
       "a 404 line after another diagnostic",
-      { code: 1, stderr: "request failed\ngh: Not Found (HTTP 404)" },
-    ],
+      { code: 1, stderr: "request failed\ngh: Not Found (HTTP 404)" }
+    ]
   ])("recognizes %s", (_label, output) => {
     expect(isGitHubApiNotFound(result(output))).toBe(true);
   });
@@ -185,13 +185,13 @@ describe("isGitHubApiNotFound", () => {
     ["a successful body", { code: 0, stdout: "HTTP 404: historical result" }],
     [
       "a bare phrase",
-      { code: 1, stderr: "Not Found while resolving hostname" },
+      { code: 1, stderr: "Not Found while resolving hostname" }
     ],
     ["a different status", { code: 1, stderr: "gh: Not Found (HTTP 403)" }],
     [
       "an embedded status",
-      { code: 1, stderr: "request failed after HTTP 404: retry exhausted" },
-    ],
+      { code: 1, stderr: "request failed after HTTP 404: retry exhausted" }
+    ]
   ])("rejects %s", (_label, output) => {
     expect(isGitHubApiNotFound(result(output))).toBe(false);
   });
@@ -205,7 +205,7 @@ describe("describeError", () => {
   it.each([
     ["a string rejection", "directory vanished", "directory vanished"],
     ["a null rejection", null, "null"],
-    ["a numeric rejection", 42, "42"],
+    ["a numeric rejection", 42, "42"]
   ])("stringifies %s", (_label, thrown, expected) => {
     expect(describeError(thrown)).toBe(expected);
   });
@@ -223,7 +223,7 @@ describe("expectSuccess", () => {
     try {
       expectSuccess(
         result({ code: 3, stdout: "partial", stderr: "ERROR: not found" }),
-        "az group show",
+        "az group show"
       );
     } catch (error) {
       thrown = error;
@@ -232,7 +232,7 @@ describe("expectSuccess", () => {
     expect(thrown).toBeInstanceOf(CloudCommandError);
     const error = thrown as CloudCommandError;
     expect(error.message).toBe(
-      "az group show failed with exit code 3: ERROR: not found",
+      "az group show failed with exit code 3: ERROR: not found"
     );
     expect(error.code).toBe(3);
     expect(error.stdout).toBe("partial");
@@ -242,16 +242,13 @@ describe("expectSuccess", () => {
 
   it("falls back to stdout when the failure wrote nothing to stderr", () => {
     expect(() =>
-      expectSuccess(
-        result({ code: 1, stdout: "ERROR: on stdout" }),
-        "az login",
-      ),
+      expectSuccess(result({ code: 1, stdout: "ERROR: on stdout" }), "az login")
     ).toThrow("az login failed with exit code 1: ERROR: on stdout");
   });
 
   it("still reports a failure that produced no output at all", () => {
     expect(() => expectSuccess(result({ code: 127 }), "az version")).toThrow(
-      "az version failed with exit code 127.",
+      "az version failed with exit code 127."
     );
   });
 });
@@ -259,22 +256,22 @@ describe("expectSuccess", () => {
 describe("parseJsonArray", () => {
   it("parses a JSON array from stdout", () => {
     expect(
-      parseJsonArray(result({ stdout: '[{"appId":"a"}]' }), "az ad app list"),
+      parseJsonArray(result({ stdout: '[{"appId":"a"}]' }), "az ad app list")
     ).toEqual([{ appId: "a" }]);
   });
 
   it("reads an empty array as no results", () => {
     expect(parseJsonArray(result({ stdout: "[]" }), "az ad app list")).toEqual(
-      [],
+      []
     );
   });
 
   it.each([
     ["an entirely empty body", ""],
-    ["whitespace only", "   \n  "],
+    ["whitespace only", "   \n  "]
   ])("treats %s as no results, matching an az --query miss", (_label, body) => {
     expect(parseJsonArray(result({ stdout: body }), "az ad app list")).toEqual(
-      [],
+      []
     );
   });
 
@@ -282,14 +279,14 @@ describe("parseJsonArray", () => {
     expect(() =>
       parseJsonArray(
         result({ code: 1, stderr: "ERROR: please run az login" }),
-        "az ad app list",
-      ),
+        "az ad app list"
+      )
     ).toThrow("az ad app list failed with exit code 1: ERROR: please run az");
   });
 
   it("rejects malformed JSON rather than reporting an empty result", () => {
     expect(() =>
-      parseJsonArray(result({ stdout: "{not json" }), "az ad app list"),
+      parseJsonArray(result({ stdout: "{not json" }), "az ad app list")
     ).toThrow(/az ad app list returned output that is not valid JSON/);
   });
 
@@ -297,16 +294,16 @@ describe("parseJsonArray", () => {
     ["an object", '{"appId":"a"}', "a JSON object"],
     ["a string", '"nope"', "a JSON string"],
     ["a number", "12", "a JSON number"],
-    ["null", "null", "null"],
+    ["null", "null", "null"]
   ])(
     "rejects %s where an array was expected",
     (_label, stdout, description) => {
       expect(() =>
-        parseJsonArray(result({ stdout }), "az ad app list"),
+        parseJsonArray(result({ stdout }), "az ad app list")
       ).toThrow(
-        `az ad app list returned ${description} where a JSON array was expected.`,
+        `az ad app list returned ${description} where a JSON array was expected.`
       );
-    },
+    }
   );
 });
 
@@ -317,8 +314,8 @@ describe("parseJsonObject", () => {
     expect(
       parseJsonObject(
         result({ stdout: '{"items":[{"kind":"Deployment"}]}' }),
-        context,
-      ),
+        context
+      )
     ).toEqual({ items: [{ kind: "Deployment" }] });
   });
 
@@ -326,20 +323,20 @@ describe("parseJsonObject", () => {
     expect(() =>
       parseJsonObject(
         result({ code: 1, stderr: "Unable to connect to the server" }),
-        context,
-      ),
+        context
+      )
     ).toThrow(`${context} failed with exit code 1: Unable to connect`);
   });
 
   it.each(["", "  \n "])("rejects empty output %j", (stdout) => {
     expect(() => parseJsonObject(result({ stdout }), context)).toThrow(
-      `${context} returned no output to parse as JSON.`,
+      `${context} returned no output to parse as JSON.`
     );
   });
 
   it("rejects malformed JSON", () => {
     expect(() =>
-      parseJsonObject(result({ stdout: "{not json" }), context),
+      parseJsonObject(result({ stdout: "{not json" }), context)
     ).toThrow(/returned output that is not valid JSON/);
   });
 
@@ -347,10 +344,10 @@ describe("parseJsonObject", () => {
     ["an array", "[]", "a JSON array"],
     ["a string", '"nope"', "a JSON string"],
     ["a number", "12", "a JSON number"],
-    ["null", "null", "null"],
+    ["null", "null", "null"]
   ])("rejects %s", (_label, stdout, description) => {
     expect(() => parseJsonObject(result({ stdout }), context)).toThrow(
-      `${context} returned ${description} where a JSON object was expected.`,
+      `${context} returned ${description} where a JSON object was expected.`
     );
   });
 });
@@ -361,12 +358,12 @@ describe("createNodeCloudFixturePorts", () => {
       createGitHubPackageCommandEnvironment(" machine-user-token ", {
         GH_TOKEN: "stale-token",
         GITHUB_TOKEN: "stale-token",
-        PATH: "/tools",
-      }),
+        PATH: "/tools"
+      })
     ).toEqual({
       GH_TOKEN: "machine-user-token",
       GITHUB_TOKEN: "machine-user-token",
-      PATH: "/tools",
+      PATH: "/tools"
     });
   });
 
@@ -374,19 +371,19 @@ describe("createNodeCloudFixturePorts", () => {
     "rejects a missing package command token represented by %j",
     (packageToken) => {
       expect(
-        createGitHubPackageCommandEnvironment(packageToken, {}),
+        createGitHubPackageCommandEnvironment(packageToken, {})
       ).toBeNull();
-    },
+    }
   );
 
   it("fails package commands explicitly when no package token was supplied", async () => {
     await expect(
-      createNodeCloudFixturePorts().commands.runGhPackage(["api", "user"]),
+      createNodeCloudFixturePorts().commands.runGhPackage(["api", "user"])
     ).resolves.toEqual({
       code: 1,
       stdout: "",
       stderr:
-        "The Cloud E2E machine-user token is required for package operations.",
+        "The Cloud E2E machine-user token is required for package operations."
     });
   });
 
@@ -407,8 +404,8 @@ describe("createNodeCloudFixturePorts", () => {
         'printf "GH_TOKEN=%s\\n" "$GH_TOKEN"',
         'printf "GITHUB_TOKEN=%s\\n" "$GITHUB_TOKEN" >&2',
         "exit 7",
-        "",
-      ].join("\n"),
+        ""
+      ].join("\n")
     );
     await fs.chmod(path.join(fakeBin, "gh"), 0o755);
     if (process.platform === "win32") {
@@ -420,8 +417,8 @@ describe("createNodeCloudFixturePorts", () => {
           "process.stdout.write(`GH_TOKEN=${process.env.GH_TOKEN}\\n`);",
           "process.stderr.write(`GITHUB_TOKEN=${process.env.GITHUB_TOKEN}\\n`);",
           "process.exit(7);",
-          "",
-        ].join("\n"),
+          ""
+        ].join("\n")
       );
       process.env.NODE_OPTIONS = `--require="${hook.replaceAll("\\", "/")}"`;
     }
@@ -433,7 +430,7 @@ describe("createNodeCloudFixturePorts", () => {
       process.env.GITHUB_TOKEN = staleToken;
 
       const outcome = await createNodeCloudFixturePorts({
-        packageToken,
+        packageToken
       }).commands.runGhPackage(["api", "user"]);
 
       expect(outcome.code).toBe(7);
@@ -463,12 +460,12 @@ describe("createNodeCloudFixturePorts", () => {
         { code: 1 },
         `stdout ${token}`,
         `stderr ${token}`,
-        token,
-      ),
+        token
+      )
     ).toEqual({
       code: 1,
       stdout: "stdout [REDACTED]",
-      stderr: "stderr [REDACTED]",
+      stderr: "stderr [REDACTED]"
     });
   });
 
@@ -490,12 +487,12 @@ describe("createNodeCloudFixturePorts", () => {
 
   describe("createRefreshingAzureCommandRunner", () => {
     function successfulFetch(
-      assertion = "header.payload.signature",
+      assertion = "header.payload.signature"
     ): typeof fetch {
       return vi.fn(() =>
         Promise.resolve(
-          new Response(JSON.stringify({ value: assertion }), { status: 200 }),
-        ),
+          new Response(JSON.stringify({ value: assertion }), { status: 200 })
+        )
       );
     }
 
@@ -510,7 +507,7 @@ describe("createNodeCloudFixturePorts", () => {
         runCommand: (args) => {
           calls.push([...args]);
           return Promise.resolve(result({ stdout: "ok" }));
-        },
+        }
       });
 
       now = 99;
@@ -521,19 +518,19 @@ describe("createNodeCloudFixturePorts", () => {
     it("forwards a per-command timeout to the requested Azure command", async () => {
       const runCommand = vi.fn(
         (_args: readonly string[], _timeoutMs?: number) =>
-          Promise.resolve(result({ stdout: "ok" })),
+          Promise.resolve(result({ stdout: "ok" }))
       );
       const run = createRefreshingAzureCommandRunner({
         env: {},
-        runCommand,
+        runCommand
       });
 
       await expect(
-        run(["aks", "get-credentials"], 30_000),
+        run(["aks", "get-credentials"], 30_000)
       ).resolves.toMatchObject({ code: 0 });
       expect(runCommand).toHaveBeenCalledWith(
         ["aks", "get-credentials"],
-        30_000,
+        30_000
       );
     });
 
@@ -552,23 +549,23 @@ describe("createNodeCloudFixturePorts", () => {
           calls.push({ args, timeoutMs });
           now += 10;
           return Promise.resolve(result({}));
-        },
+        }
       });
 
       now = 100;
       await expect(run(["group", "list"], 30)).resolves.toMatchObject({
-        code: 0,
+        code: 0
       });
       expect(calls.map(({ args, timeoutMs }) => [args[0], timeoutMs])).toEqual([
         ["login", 15 * 60_000],
         ["account", 15 * 60_000 - 10],
-        ["group", 10],
+        ["group", 10]
       ]);
     });
 
     it.each([
       [5_000, 20_000],
-      [30_000, 20_000],
+      [30_000, 20_000]
     ])(
       "bounds the OIDC request by a %ims command budget at %ims",
       async (timeoutMs, expectedSignalTimeoutMs) => {
@@ -581,7 +578,7 @@ describe("createNodeCloudFixturePorts", () => {
           now: () => now,
           refreshIntervalMs: 100,
           fetch: successfulFetch(),
-          runCommand: () => Promise.resolve(result({})),
+          runCommand: () => Promise.resolve(result({}))
         });
 
         now = 100;
@@ -589,33 +586,33 @@ describe("createNodeCloudFixturePorts", () => {
 
         expect(timeout).toHaveBeenCalledWith(expectedSignalTimeoutMs);
         timeout.mockRestore();
-      },
+      }
     );
 
     it("lets a shared refresh continue after its first caller times out", async () => {
       let now = 0;
       const fetchImpl = successfulFetch();
       const runCommand = vi.fn((_: readonly string[]) =>
-        Promise.resolve(result({})),
+        Promise.resolve(result({}))
       );
       const run = createRefreshingAzureCommandRunner({
         env: AZURE_ENV,
         now: () => now,
         refreshIntervalMs: 100,
         fetch: fetchImpl,
-        runCommand,
+        runCommand
       });
 
       now = 100;
       await expect(run(["group", "list"], 0)).resolves.toMatchObject({
         code: 1,
-        stderr: expect.stringMatching(/refresh.*exhausted its timeout/i),
+        stderr: expect.stringMatching(/refresh.*exhausted its timeout/i)
       });
       expect(fetchImpl).toHaveBeenCalledOnce();
       await vi.waitFor(() => expect(runCommand).toHaveBeenCalledTimes(2));
       expect(runCommand.mock.calls.map(([args]) => args[0])).toEqual([
         "login",
-        "account",
+        "account"
       ]);
     });
 
@@ -630,18 +627,18 @@ describe("createNodeCloudFixturePorts", () => {
         now: () => now,
         refreshIntervalMs: 100,
         fetch: successfulFetch(),
-        runCommand,
+        runCommand
       });
 
       now = 100;
       await expect(run(["group", "list"], 30)).resolves.toMatchObject({
         code: 1,
-        stderr: expect.stringMatching(/exhausted its timeout/),
+        stderr: expect.stringMatching(/exhausted its timeout/)
       });
       expect(runCommand).toHaveBeenCalledTimes(2);
       expect(runCommand.mock.calls.map(([args]) => args[0])).toEqual([
         "login",
-        "account",
+        "account"
       ]);
     });
 
@@ -656,18 +653,18 @@ describe("createNodeCloudFixturePorts", () => {
         now: () => now,
         refreshIntervalMs: 100,
         fetch: successfulFetch(),
-        runCommand,
+        runCommand
       });
 
       now = 100;
       await expect(run(["group", "list"], 20)).resolves.toMatchObject({
         code: 1,
-        stderr: expect.stringMatching(/exhausted its timeout/),
+        stderr: expect.stringMatching(/exhausted its timeout/)
       });
       expect(runCommand).toHaveBeenCalledTimes(2);
       expect(runCommand.mock.calls.map(([args]) => args[0])).toEqual([
         "login",
-        "account",
+        "account"
       ]);
     });
 
@@ -675,12 +672,12 @@ describe("createNodeCloudFixturePorts", () => {
       const runCommand = vi.fn(() => Promise.resolve(result({})));
       const run = createRefreshingAzureCommandRunner({
         env: {},
-        runCommand,
+        runCommand
       });
 
       await expect(run(["group", "list"], 0)).resolves.toMatchObject({
         code: 1,
-        stderr: expect.stringMatching(/^Azure command failed:/),
+        stderr: expect.stringMatching(/^Azure command failed:/)
       });
       expect(runCommand).not.toHaveBeenCalled();
     });
@@ -688,19 +685,19 @@ describe("createNodeCloudFixturePorts", () => {
     it("preserves an existing local Azure CLI session when Actions OIDC is unavailable", async () => {
       let now = 0;
       const runCommand = vi.fn((_: readonly string[]) =>
-        Promise.resolve(result({ stdout: "local" })),
+        Promise.resolve(result({ stdout: "local" }))
       );
       const run = createRefreshingAzureCommandRunner({
         env: {},
         now: () => now,
         refreshIntervalMs: 100,
-        runCommand,
+        runCommand
       });
 
       now = 101;
       await expect(run(["group", "list"])).resolves.toMatchObject({
         code: 0,
-        stdout: "local",
+        stdout: "local"
       });
       expect(runCommand).toHaveBeenCalledWith(["group", "list"]);
     });
@@ -708,22 +705,22 @@ describe("createNodeCloudFixturePorts", () => {
     it("ignores whitespace-only Actions OIDC state for a local Azure CLI session", async () => {
       let now = 0;
       const runCommand = vi.fn((_: readonly string[]) =>
-        Promise.resolve(result({ stdout: "local" })),
+        Promise.resolve(result({ stdout: "local" }))
       );
       const run = createRefreshingAzureCommandRunner({
         env: {
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: " ",
-          ACTIONS_ID_TOKEN_REQUEST_URL: " ",
+          ACTIONS_ID_TOKEN_REQUEST_URL: " "
         },
         now: () => now,
         refreshIntervalMs: 100,
-        runCommand,
+        runCommand
       });
 
       now = 100;
       await expect(run(["group", "list"])).resolves.toMatchObject({
         code: 0,
-        stdout: "local",
+        stdout: "local"
       });
       expect(runCommand).toHaveBeenCalledOnce();
     });
@@ -740,7 +737,7 @@ describe("createNodeCloudFixturePorts", () => {
         runCommand: (args) => {
           calls.push([...args]);
           return Promise.resolve(result({}));
-        },
+        }
       });
 
       now += 100;
@@ -749,11 +746,11 @@ describe("createNodeCloudFixturePorts", () => {
       expect(fetchImpl).toHaveBeenCalledOnce();
       expect(fetchImpl).toHaveBeenCalledWith(
         new URL(
-          "https://oidc.example/token?job=1&audience=api%3A%2F%2FAzureADTokenExchange",
+          "https://oidc.example/token?job=1&audience=api%3A%2F%2FAzureADTokenExchange"
         ),
         expect.objectContaining({
-          headers: { Authorization: "bearer request-token" },
-        }),
+          headers: { Authorization: "bearer request-token" }
+        })
       );
       expect(calls).toEqual([
         [
@@ -766,10 +763,10 @@ describe("createNodeCloudFixturePorts", () => {
           "--federated-token",
           "header.payload.signature",
           "--output",
-          "none",
+          "none"
         ],
         ["account", "set", "--subscription", "subscription-id"],
-        ["group", "list"],
+        ["group", "list"]
       ]);
     });
 
@@ -780,9 +777,9 @@ describe("createNodeCloudFixturePorts", () => {
         Promise.resolve(
           new Response(
             JSON.stringify({ value: `header.payload.signature${++assertion}` }),
-            { status: 200 },
-          ),
-        ),
+            { status: 200 }
+          )
+        )
       );
       const calls: string[][] = [];
       const run = createRefreshingAzureCommandRunner({
@@ -793,7 +790,7 @@ describe("createNodeCloudFixturePorts", () => {
         runCommand: (args) => {
           calls.push([...args]);
           return Promise.resolve(result({}));
-        },
+        }
       });
 
       now = 100;
@@ -805,7 +802,7 @@ describe("createNodeCloudFixturePorts", () => {
       expect(
         calls
           .filter((args) => args[0] === "login")
-          .map((args) => args[args.indexOf("--federated-token") + 1]),
+          .map((args) => args[args.indexOf("--federated-token") + 1])
       ).toEqual(["header.payload.signature1", "header.payload.signature2"]);
     });
 
@@ -816,7 +813,7 @@ describe("createNodeCloudFixturePorts", () => {
         () =>
           new Promise<Response>((resolve) => {
             resolveFetch = resolve;
-          }),
+          })
       );
       const calls: string[][] = [];
       const run = createRefreshingAzureCommandRunner({
@@ -827,14 +824,14 @@ describe("createNodeCloudFixturePorts", () => {
         runCommand: (args) => {
           calls.push([...args]);
           return Promise.resolve(result({}));
-        },
+        }
       });
 
       now = 100;
       const first = run(["group", "list"]);
       const second = run(["account", "show"]);
       resolveFetch?.(
-        new Response(JSON.stringify({ value: "header.payload.signature" })),
+        new Response(JSON.stringify({ value: "header.payload.signature" }))
       );
       await Promise.all([first, second]);
 
@@ -842,7 +839,7 @@ describe("createNodeCloudFixturePorts", () => {
       expect(calls.filter((args) => args[0] === "login")).toHaveLength(1);
       expect(calls.slice(-2)).toEqual([
         ["group", "list"],
-        ["account", "show"],
+        ["account", "show"]
       ]);
     });
 
@@ -854,17 +851,17 @@ describe("createNodeCloudFixturePorts", () => {
         () =>
           new Promise<Response>((resolve) => {
             resolveFetch = resolve;
-          }),
+          })
       );
       const runCommand = vi.fn((_: readonly string[]) =>
-        Promise.resolve(result({})),
+        Promise.resolve(result({}))
       );
       const run = createRefreshingAzureCommandRunner({
         env: AZURE_ENV,
         now: () => now,
         refreshIntervalMs: 100,
         fetch: fetchImpl,
-        runCommand,
+        runCommand
       });
 
       try {
@@ -874,15 +871,15 @@ describe("createNodeCloudFixturePorts", () => {
         await vi.advanceTimersByTimeAsync(10);
         await expect(bounded).resolves.toMatchObject({
           code: 1,
-          stderr: expect.stringMatching(/awaiting credential refresh/),
+          stderr: expect.stringMatching(/awaiting credential refresh/)
         });
 
         resolveFetch?.(
-          new Response(JSON.stringify({ value: "header.payload.signature" })),
+          new Response(JSON.stringify({ value: "header.payload.signature" }))
         );
         await expect(unbounded).resolves.toMatchObject({ code: 0 });
         expect(
-          runCommand.mock.calls.filter(([args]) => args[1] === "show"),
+          runCommand.mock.calls.filter(([args]) => args[1] === "show")
         ).toHaveLength(0);
       } finally {
         vi.useRealTimers();
@@ -897,17 +894,17 @@ describe("createNodeCloudFixturePorts", () => {
         () =>
           new Promise<Response>((resolve) => {
             resolveFetch = resolve;
-          }),
+          })
       );
       const runCommand = vi.fn((_: readonly string[]) =>
-        Promise.resolve(result({})),
+        Promise.resolve(result({}))
       );
       const run = createRefreshingAzureCommandRunner({
         env: AZURE_ENV,
         now: () => now,
         refreshIntervalMs: 100,
         fetch: fetchImpl,
-        runCommand,
+        runCommand
       });
 
       try {
@@ -917,16 +914,16 @@ describe("createNodeCloudFixturePorts", () => {
         await vi.advanceTimersByTimeAsync(10);
         await expect(bounded).resolves.toMatchObject({
           code: 1,
-          stderr: expect.stringMatching(/awaiting credential refresh/),
+          stderr: expect.stringMatching(/awaiting credential refresh/)
         });
 
         resolveFetch?.(
-          new Response(JSON.stringify({ value: "header.payload.signature" })),
+          new Response(JSON.stringify({ value: "header.payload.signature" }))
         );
         await expect(unbounded).resolves.toMatchObject({ code: 0 });
         expect(fetchImpl).toHaveBeenCalledOnce();
         expect(
-          runCommand.mock.calls.filter(([args]) => args[1] === "show"),
+          runCommand.mock.calls.filter(([args]) => args[1] === "show")
         ).toHaveLength(0);
       } finally {
         vi.useRealTimers();
@@ -938,38 +935,38 @@ describe("createNodeCloudFixturePorts", () => {
         "missing Azure identity",
         { ...AZURE_ENV, AZURE_CLIENT_ID: "" },
         successfulFetch(),
-        /AZURE_CLIENT_ID/,
+        /AZURE_CLIENT_ID/
       ],
       [
         "missing GitHub OIDC request state",
         { ...AZURE_ENV, ACTIONS_ID_TOKEN_REQUEST_URL: "" },
         successfulFetch(),
-        /OIDC request URL and token/,
+        /OIDC request URL and token/
       ],
       [
         "a rejected assertion request",
         AZURE_ENV,
         vi.fn(() => Promise.reject(new Error("request unavailable"))),
-        /request unavailable/,
+        /request unavailable/
       ],
       [
         "an unsuccessful assertion response",
         AZURE_ENV,
         vi.fn(() => Promise.resolve(new Response("", { status: 503 }))),
-        /HTTP 503/,
+        /HTTP 503/
       ],
       [
         "invalid assertion JSON",
         AZURE_ENV,
         vi.fn(() => Promise.resolve(new Response("{", { status: 200 }))),
-        /JSON/,
+        /JSON/
       ],
       [
         "a malformed assertion response",
         AZURE_ENV,
         vi.fn(() => Promise.resolve(new Response("{}", { status: 200 }))),
-        /did not contain a token/,
-      ],
+        /did not contain a token/
+      ]
     ])(
       "fails closed without running the requested command for %s",
       async (_label, env, fetchImpl, expected) => {
@@ -980,7 +977,7 @@ describe("createNodeCloudFixturePorts", () => {
           now: () => now,
           refreshIntervalMs: 100,
           fetch: fetchImpl,
-          runCommand,
+          runCommand
         });
 
         now = 100;
@@ -989,7 +986,7 @@ describe("createNodeCloudFixturePorts", () => {
         expect(outcome.code).toBe(1);
         expect(outcome.stderr).toMatch(expected);
         expect(runCommand).not.toHaveBeenCalled();
-      },
+      }
     );
 
     it("stops before the requested command when login or subscription selection fails", async () => {
@@ -998,20 +995,20 @@ describe("createNodeCloudFixturePorts", () => {
         .fn((_: readonly string[]) => Promise.resolve(result({})))
         .mockResolvedValueOnce(result({}))
         .mockResolvedValueOnce(
-          result({ code: 1, stderr: "subscription denied" }),
+          result({ code: 1, stderr: "subscription denied" })
         );
       const run = createRefreshingAzureCommandRunner({
         env: AZURE_ENV,
         now: () => now,
         refreshIntervalMs: 100,
         fetch: successfulFetch(),
-        runCommand,
+        runCommand
       });
 
       now = 100;
       await expect(run(["group", "list"])).resolves.toMatchObject({
         code: 1,
-        stderr: "subscription denied",
+        stderr: "subscription denied"
       });
       expect(runCommand).toHaveBeenCalledTimes(2);
     });
@@ -1019,20 +1016,20 @@ describe("createNodeCloudFixturePorts", () => {
     it("stops immediately when renewed Azure login fails", async () => {
       let now = 0;
       const runCommand = vi.fn((_: readonly string[]) =>
-        Promise.resolve(result({ code: 1, stderr: "login denied" })),
+        Promise.resolve(result({ code: 1, stderr: "login denied" }))
       );
       const run = createRefreshingAzureCommandRunner({
         env: AZURE_ENV,
         now: () => now,
         refreshIntervalMs: 100,
         fetch: successfulFetch(),
-        runCommand,
+        runCommand
       });
 
       now = 100;
       await expect(run(["group", "list"])).resolves.toMatchObject({
         code: 1,
-        stderr: "login denied",
+        stderr: "login denied"
       });
       expect(runCommand).toHaveBeenCalledOnce();
     });
@@ -1043,14 +1040,14 @@ describe("createNodeCloudFixturePorts", () => {
       const runCommand = vi
         .fn((_: readonly string[]) => Promise.resolve(result({})))
         .mockResolvedValueOnce(
-          result({ code: 1, stderr: "temporary failure" }),
+          result({ code: 1, stderr: "temporary failure" })
         );
       const run = createRefreshingAzureCommandRunner({
         env: AZURE_ENV,
         now: () => now,
         refreshIntervalMs: 100,
         fetch: fetchImpl,
-        runCommand,
+        runCommand
       });
 
       now = 100;
@@ -1066,16 +1063,16 @@ describe("createNodeCloudFixturePorts", () => {
       const fetchImpl = vi.fn(() =>
         Promise.reject(
           new Error(
-            `request rejected for ${AZURE_ENV.ACTIONS_ID_TOKEN_REQUEST_TOKEN}`,
-          ),
-        ),
+            `request rejected for ${AZURE_ENV.ACTIONS_ID_TOKEN_REQUEST_TOKEN}`
+          )
+        )
       );
       const run = createRefreshingAzureCommandRunner({
         env: AZURE_ENV,
         now: () => now,
         refreshIntervalMs: 100,
         fetch: fetchImpl,
-        runCommand: () => Promise.resolve(result({})),
+        runCommand: () => Promise.resolve(result({}))
       });
 
       now = 100;
@@ -1088,7 +1085,7 @@ describe("createNodeCloudFixturePorts", () => {
     it("rejects a non-positive or non-finite refresh interval", () => {
       for (const refreshIntervalMs of [0, -1, Number.POSITIVE_INFINITY])
         expect(() =>
-          createRefreshingAzureCommandRunner({ refreshIntervalMs }),
+          createRefreshingAzureCommandRunner({ refreshIntervalMs })
         ).toThrow("must be positive and finite");
     });
   });
@@ -1122,7 +1119,7 @@ describe("createNodeCloudFixturePorts", () => {
     // environment, so this exercises the real runner without needing a cloud CLI.
     const failed = await ports.commands.runGit(
       ["rev-parse", "--verify", "refs/heads/definitely-not-a-branch-xyz"],
-      process.cwd(),
+      process.cwd()
     );
 
     expect(failed.code).not.toBe(0);
@@ -1134,7 +1131,7 @@ describe("createNodeCloudFixturePorts", () => {
 
     const ok = await ports.commands.runGit(
       ["rev-parse", "--is-inside-work-tree"],
-      process.cwd(),
+      process.cwd()
     );
 
     expect(ok.code).toBe(0);
@@ -1147,7 +1144,7 @@ describe("createNodeCloudFixturePorts", () => {
     for (const run of [
       ports.commands.runAz,
       ports.commands.runGh,
-      ports.commands.runKubectl,
+      ports.commands.runKubectl
     ]) {
       const outcome = await run(["--version"]);
       expect(typeof outcome.code).toBe("number");
@@ -1158,12 +1155,12 @@ describe("createNodeCloudFixturePorts", () => {
 
   it("terminates kubectl when its per-probe deadline expires", async () => {
     const directory = await fs.mkdtemp(
-      path.join(os.tmpdir(), "radtest-kubectl-timeout-"),
+      path.join(os.tmpdir(), "radtest-kubectl-timeout-")
     );
     const marker = path.join(directory, "leaked.txt");
     const executable = path.join(
       directory,
-      process.platform === "win32" ? "kubectl.exe" : "kubectl",
+      process.platform === "win32" ? "kubectl.exe" : "kubectl"
     );
     const priorPath = process.env.PATH;
     try {
@@ -1177,9 +1174,9 @@ describe("createNodeCloudFixturePorts", () => {
         [
           "--eval",
           'setTimeout(() => require("node:fs").writeFileSync(process.argv[1], "leaked"), 500)',
-          marker,
+          marker
         ],
-        100,
+        100
       );
 
       expect(outcome.code).not.toBe(0);
@@ -1205,8 +1202,8 @@ describe("createNodeCloudFixturePorts", () => {
         'printf "accessToken=%s\\n" "$AZURE_FEDERATED_TOKEN"',
         'printf "failure: %s\\n" "$AZURE_FEDERATED_TOKEN" >&2',
         "exit 7",
-        "",
-      ].join("\n"),
+        ""
+      ].join("\n")
     );
     await fs.chmod(path.join(fakeBin, "az"), 0o755);
     await fs.writeFile(
@@ -1216,8 +1213,8 @@ describe("createNodeCloudFixturePorts", () => {
         "echo accessToken=%AZURE_FEDERATED_TOKEN%",
         "echo failure: %AZURE_FEDERATED_TOKEN% 1>&2",
         "exit /b 7",
-        "",
-      ].join("\r\n"),
+        ""
+      ].join("\r\n")
     );
 
     try {
@@ -1226,7 +1223,7 @@ describe("createNodeCloudFixturePorts", () => {
       process.env.AZURE_FEDERATED_TOKEN = token;
 
       const result = await createNodeCloudFixturePorts().commands.runAz([
-        "--version",
+        "--version"
       ]);
 
       expect(result.code).toBe(7);
@@ -1243,8 +1240,8 @@ describe("createNodeCloudFixturePorts", () => {
           `printf "accessToken=${injectedToken}\\n"`,
           `printf "failure: ${injectedToken}\\n" >&2`,
           "exit 7",
-          "",
-        ].join("\n"),
+          ""
+        ].join("\n")
       );
       await fs.writeFile(
         path.join(fakeBin, "az.cmd"),
@@ -1253,16 +1250,16 @@ describe("createNodeCloudFixturePorts", () => {
           `echo accessToken=${injectedToken}`,
           `echo failure: ${injectedToken} 1>&2`,
           "exit /b 7",
-          "",
-        ].join("\r\n"),
+          ""
+        ].join("\r\n")
       );
       delete process.env.AZURE_FEDERATED_TOKEN;
 
       const injectedResult = await createRefreshingAzureCommandRunner({
         env: {
           ...process.env,
-          AZURE_FEDERATED_TOKEN: injectedToken,
-        },
+          AZURE_FEDERATED_TOKEN: injectedToken
+        }
       })(["--version"]);
 
       expect(injectedResult.code).toBe(7);
