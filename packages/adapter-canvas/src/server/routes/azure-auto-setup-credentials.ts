@@ -82,6 +82,41 @@ export function azureRetryDelayMs(
   return delay > MAX_RETRY_DELAY_MS ? null : delay;
 }
 
+async function readAzureWithPropagationRetry(
+  read: () => Promise<AzureAutoSetupCommandResult>,
+  sleep: AzureAutoSetupCredentialInput["dependencies"]["sleep"],
+  accept: (result: AzureAutoSetupCommandResult) => boolean,
+  retrySuccessfulResult: (
+    result: AzureAutoSetupCommandResult
+  ) => boolean = () => false
+): Promise<AzureAutoSetupCommandResult> {
+  let last: AzureAutoSetupCommandResult = {
+    code: 1,
+    stdout: "",
+    stderr: "Azure read was not attempted."
+  };
+  for (let attempt = 0; attempt < AZURE_PROPAGATION_ATTEMPTS; attempt++) {
+    last = await read();
+    if (accept(last)) return last;
+    const succeeded = last.code === 0 || last.code === "0";
+    const detail = last.stderr || last.stdout;
+    if (
+      !(
+        (succeeded && retrySuccessfulResult(last)) ||
+        isReplicationLagError(detail) ||
+        isRetryableAzureReadFailure(detail)
+      ) ||
+      attempt + 1 >= AZURE_PROPAGATION_ATTEMPTS
+    ) {
+      break;
+    }
+    const delay = azureRetryDelayMs(detail, 2000 * (attempt + 1));
+    if (delay === null) break;
+    await sleep(delay);
+  }
+  return last;
+}
+
 function parseFederatedCredentialInventory(stdout: string): {
   subjects: string[];
   nameToSubject: Map<string, string>;
@@ -153,7 +188,7 @@ function isRollbackPending(operation: { providerRecovery?: unknown }): boolean {
 
 export function isReplicationLagError(stderr?: string): boolean {
   if (!stderr) return false;
-  return /does not exist in the directory|PrincipalNotFound|Cannot find (?:principal|user or service principal)|No matching principal|not found in the directory/i.test(
+  return /Request_ResourceNotFound|Directory_ObjectNotFound|does not exist(?: in the directory)?|PrincipalNotFound|Cannot find (?:principal|user or service principal)|No matching principal|not found in the directory/i.test(
     stderr
   );
 }
@@ -299,19 +334,30 @@ async function createFederatedCredentials({
   | "appName"
 >): Promise<boolean> {
   const { steps, runAz, fail, stopBoundary, checkpoint } = workflow;
-  const appResult = await runAz([
-    "ad",
-    "app",
-    "show",
-    "--id",
-    clientId,
-    "--query",
-    "id",
-    "-o",
-    "tsv"
-  ]);
+  const appResult = await readAzureWithPropagationRetry(
+    () =>
+      runAz([
+        "ad",
+        "app",
+        "show",
+        "--id",
+        clientId,
+        "--query",
+        "id",
+        "-o",
+        "tsv"
+      ]),
+    dependencies.sleep,
+    (result) =>
+      (result.code === 0 || result.code === "0") && result.stdout.trim() !== "",
+    (result) =>
+      (result.code === 0 || result.code === "0") && result.stdout.trim() === ""
+  );
   const applicationObjectId = appResult.stdout.trim();
-  if (appResult.code !== 0 || !applicationObjectId) {
+  if (
+    (appResult.code !== 0 && appResult.code !== "0") ||
+    !applicationObjectId
+  ) {
     await fail(
       400,
       `Could not resolve the Entra object id for App Registration ${clientId}.`,
@@ -332,22 +378,12 @@ async function createFederatedCredentials({
     "-o",
     "json"
   ];
-  let listResult: AzureAutoSetupCommandResult | null = null;
-  for (let attempt = 0; attempt < AZURE_PROPAGATION_ATTEMPTS; attempt++) {
-    listResult = await runAz(listArgs);
-    if (listResult.code === 0 || listResult.code === "0") break;
-    const detail = listResult.stderr || listResult.stdout;
-    if (
-      !isRetryableAzureReadFailure(detail) ||
-      attempt + 1 >= AZURE_PROPAGATION_ATTEMPTS
-    ) {
-      break;
-    }
-    const delay = azureRetryDelayMs(detail, 2000 * (attempt + 1));
-    if (delay === null) break;
-    await dependencies.sleep(delay);
-  }
-  if (!listResult || (listResult.code !== 0 && listResult.code !== "0")) {
+  const listResult = await readAzureWithPropagationRetry(
+    () => runAz(listArgs),
+    dependencies.sleep,
+    (result) => result.code === 0 || result.code === "0"
+  );
+  if (listResult.code !== 0 && listResult.code !== "0") {
     await fail(
       400,
       "Could not read the App Registration federated credentials: " +
@@ -669,23 +705,46 @@ async function createFederatedCredentials({
         return false;
       }
     }
-    const showResult = await runAz([
-      "ad",
-      "app",
-      "federated-credential",
-      "show",
-      "--id",
-      clientId,
-      "--federated-credential-id",
-      credential.name,
-      "--query",
-      "{id:id,name:name,subject:subject,issuer:issuer,audiences:audiences}",
-      "-o",
-      "json"
-    ]);
+    const showCredential = () =>
+      runAz([
+        "ad",
+        "app",
+        "federated-credential",
+        "show",
+        "--id",
+        clientId,
+        "--federated-credential-id",
+        credential.name,
+        "--query",
+        "{id:id,name:name,subject:subject,issuer:issuer,audiences:audiences}",
+        "-o",
+        "json"
+      ]);
+    const showResult = await readAzureWithPropagationRetry(
+      showCredential,
+      dependencies.sleep,
+      (candidate) => {
+        const live = parseFederatedCredentialObject(candidate.stdout);
+        return (
+          (candidate.code === 0 || candidate.code === "0") &&
+          live?.subject === credential.subject &&
+          hasCompleteFederatedCredentialIdentity(live)
+        );
+      },
+      (candidate) => {
+        if (candidate.code !== 0 && candidate.code !== "0") return false;
+        const live = parseFederatedCredentialObject(candidate.stdout);
+        return (
+          created &&
+          (!live ||
+            live.subject === "" ||
+            !hasCompleteFederatedCredentialIdentity(live))
+        );
+      }
+    );
     const liveCredential = parseFederatedCredentialObject(showResult.stdout);
     if (
-      showResult.code !== 0 ||
+      (showResult.code !== 0 && showResult.code !== "0") ||
       liveCredential?.subject !== credential.subject
     ) {
       await fail(
@@ -737,35 +796,33 @@ async function resolveServicePrincipalObjectId(
   runAz: AzureAutoSetupCredentialInput["workflow"]["runAz"],
   sleep: AzureAutoSetupCredentialInput["dependencies"]["sleep"]
 ): Promise<{ objectId: string; error: string }> {
-  let lastError = "";
-  for (let attempt = 0; attempt < AZURE_PROPAGATION_ATTEMPTS; attempt++) {
-    const result = await runAz([
-      "ad",
-      "sp",
-      "show",
-      "--id",
-      clientId,
-      "--query",
-      "id",
-      "-o",
-      "tsv"
-    ]);
-    const objectId = (result.stdout || "").trim();
-    if (result.code === 0 && objectId) return { objectId, error: "" };
-    lastError = result.stderr || result.stdout || "";
-    if (
-      !isReplicationLagError(lastError) &&
-      !isRetryableAzureReadFailure(lastError)
-    ) {
-      break;
-    }
-    if (attempt + 1 < AZURE_PROPAGATION_ATTEMPTS) {
-      const delay = azureRetryDelayMs(lastError, 2000 * (attempt + 1));
-      if (delay === null) break;
-      await sleep(delay);
-    }
-  }
-  return { objectId: "", error: lastError };
+  const result = await readAzureWithPropagationRetry(
+    () =>
+      runAz([
+        "ad",
+        "sp",
+        "show",
+        "--id",
+        clientId,
+        "--query",
+        "id",
+        "-o",
+        "tsv"
+      ]),
+    sleep,
+    (candidate) =>
+      (candidate.code === 0 || candidate.code === "0") &&
+      candidate.stdout.trim() !== "",
+    (candidate) =>
+      (candidate.code === 0 || candidate.code === "0") &&
+      candidate.stdout.trim() === ""
+  );
+  const objectId = result.stdout.trim();
+  return {
+    objectId:
+      (result.code === 0 || result.code === "0") && objectId ? objectId : "",
+    error: result.stderr || result.stdout || ""
+  };
 }
 
 async function assignRole(

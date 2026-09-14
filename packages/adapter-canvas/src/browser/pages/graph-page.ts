@@ -28,7 +28,7 @@ import {
   unsupportedGraphModelMessage
 } from "./graph-modeling-failure.js";
 import { WORKSPACE_MODEL_CHANGED_EVENT } from "../heartbeat.js";
-import { GRAPH_PAGE_STATE_ID } from "../page-state-ids.js";
+import { GRAPH_PAGE_STATE_ID } from "../../pages/browser-state-ids.js";
 
 const ENTRY_KEY = "graph-page";
 export { GRAPH_PAGE_STATE_ID };

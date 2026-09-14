@@ -7,22 +7,29 @@ import {
   buildDeployStatusMap,
   confirmArtifactIdentity,
   createDeployStatusReader,
+  DEPLOY_CANCELLED_MESSAGE,
+  DEPLOY_FAILED_MESSAGE,
+  DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
   DEPLOY_STATUS_ARTIFACT_PREFIX,
   DEPLOY_STATUS_FILES,
+  DEPLOY_TIMED_OUT_MESSAGE,
   deployStatusArtifactPrefix,
   isLiveSlotArtifactName,
   MAX_ARTIFACT_CANDIDATES,
+  MAX_DEPLOY_MESSAGE_LENGTH,
   normalizeProvisioningState,
   parseDeployGraphArtifact,
   parseDeployProgressArtifact,
   resolveResourceStatus,
   sanitizeArtifactSegment,
   selectDeployStatusArtifacts,
-  settleDeployStatuses
+  settleDeployStatuses,
+  unfinishedDeployMessage
 } from "./deploy-artifacts.js";
 import type {
   ArtifactFiles,
   DeployProgress,
+  SettleableResource,
   WorkflowArtifact
 } from "./deploy-artifacts.js";
 import {
@@ -211,6 +218,31 @@ describe("parseDeployProgressArtifact", () => {
     expect(parsed?.environment).toBe("dev");
     expect(parsed?.sequence).toBe(1);
     expect(parsed?.resources).toHaveLength(1);
+    expect(parsed?.resourcesDiscarded).toBeUndefined();
+  });
+
+  it.each([
+    ["a non-object entry", 42],
+    ["a nameless entry", { type: "Radius.Resources/redis" }],
+    ["a non-string name", { name: 7, type: "Radius.Resources/redis" }]
+  ])("reports that %s was dropped from the resource list", (_label, bad) => {
+    // Built inline rather than through progressPayload: that helper is typed
+    // to DeployProgress, which by design cannot express a malformed entry.
+    const parsed = parseDeployProgressArtifact(
+      JSON.stringify({
+        schemaVersion: 1,
+        application: "todolist",
+        environment: "dev",
+        runId: 100,
+        sequence: 1,
+        state: "succeeded",
+        resources: [{ name: "api", type: "Radius.Resources/containers" }, bad]
+      })
+    );
+    // Readable entries still parse, so the count alone cannot tell a consumer
+    // that the list is short. The marker is the only signal.
+    expect(parsed?.resources).toHaveLength(1);
+    expect(parsed?.resourcesDiscarded).toBe(true);
   });
 
   describe("parseDeployGraphArtifact", () => {
@@ -707,6 +739,210 @@ describe("settleDeployStatuses", () => {
     const resources = [{ deployStatus: "in_progress" as DeployStatus }];
     settleDeployStatuses(resources, "cancelled");
     expect(resources[0].deployStatus).toBe("failed");
+  });
+
+  it("ignores a non-array argument rather than throwing", () => {
+    expect(() =>
+      settleDeployStatuses(
+        undefined as unknown as { deployStatus?: DeployStatus }[],
+        "failure"
+      )
+    ).not.toThrow();
+  });
+});
+
+describe("settleDeployStatuses messages (Exception 5.1)", () => {
+  it("says a cancelled run was cancelled", () => {
+    const resources: SettleableResource[] = [
+      { deployStatus: "in_progress" as DeployStatus }
+    ];
+    settleDeployStatuses(resources, "cancelled");
+    expect(resources[0].deployMessage).toBe(DEPLOY_CANCELLED_MESSAGE);
+  });
+
+  it("says a timed-out run timed out", () => {
+    const resources: SettleableResource[] = [
+      { deployStatus: "pending" as DeployStatus }
+    ];
+    settleDeployStatuses(resources, "timed_out");
+    expect(resources[0].deployMessage).toBe(DEPLOY_TIMED_OUT_MESSAGE);
+  });
+
+  it("passes the exact Radius error through on an ordinary failure", () => {
+    const resources: SettleableResource[] = [
+      { deployStatus: "pending" as DeployStatus }
+    ];
+    settleDeployStatuses(
+      resources,
+      "failure",
+      "  Error: containers.demo failed to provision\n"
+    );
+    expect(resources[0].deployMessage).toBe(
+      "Error: containers.demo failed to provision"
+    );
+  });
+
+  it("falls back to a plain statement when there is no Radius error to show", () => {
+    const resources: SettleableResource[] = [
+      { deployStatus: "pending" as DeployStatus },
+      { deployStatus: "in_progress" as DeployStatus }
+    ];
+    settleDeployStatuses(resources, "failure", "   ");
+    expect(resources.map((r) => r.deployMessage)).toEqual([
+      DEPLOY_FAILED_MESSAGE,
+      DEPLOY_FAILED_MESSAGE
+    ]);
+  });
+
+  it("keeps the producer's own message, which names the resource that failed", () => {
+    const resources: SettleableResource[] = [
+      {
+        deployStatus: "failed" as DeployStatus,
+        deployMessage: "recipe execution failed for db"
+      },
+      { deployStatus: "pending" as DeployStatus }
+    ];
+    settleDeployStatuses(resources, "failure", "run-level error");
+    expect(resources.map((r) => r.deployMessage)).toEqual([
+      "recipe execution failed for db",
+      "run-level error"
+    ]);
+  });
+
+  it.each(["cancelled", "timed_out", "monitor_timed_out", "failure"] as const)(
+    "replaces in-flight progress text on a node the %s run failed",
+    (conclusion) => {
+      // The producer's last snapshot describes work in flight. Once the run's
+      // conclusion decides that work never finished, reporting progress on a red
+      // node would tell the user the opposite of what happened.
+      const resources: SettleableResource[] = [
+        {
+          deployStatus: "in_progress" as DeployStatus,
+          deployMessage: "creating"
+        },
+        { deployStatus: "pending" as DeployStatus, deployMessage: "queued" }
+      ];
+      settleDeployStatuses(resources, conclusion);
+      expect(resources.map((r) => r.deployStatus)).toEqual([
+        "failed",
+        "failed"
+      ]);
+      const expected = unfinishedDeployMessage(conclusion);
+      expect(resources.map((r) => r.deployMessage)).toEqual([
+        expected,
+        expected
+      ]);
+    }
+  );
+
+  it("explains a node the producer reported failed without a message", () => {
+    const resources: SettleableResource[] = [
+      { deployStatus: "failed" as DeployStatus }
+    ];
+    settleDeployStatuses(resources, "cancelled");
+    expect(resources[0].deployMessage).toBe(DEPLOY_CANCELLED_MESSAGE);
+  });
+
+  it("leaves a node the producer already finished alone", () => {
+    const resources: SettleableResource[] = [
+      {
+        deployStatus: "success" as DeployStatus,
+        deployMessage: "provisioned"
+      }
+    ];
+    settleDeployStatuses(resources, "failure", "run-level error");
+    expect(resources[0]).toEqual({
+      deployStatus: "success",
+      deployMessage: "provisioned"
+    });
+  });
+
+  it("clears a stale failure message when the run ultimately succeeded", () => {
+    const resources: SettleableResource[] = [
+      {
+        deployStatus: "failed" as DeployStatus,
+        deployMessage: "transient provisioning error"
+      }
+    ];
+    settleDeployStatuses(resources, "success");
+    expect(resources[0].deployStatus).toBe("success");
+    expect(resources[0].deployMessage).toBeUndefined();
+  });
+
+  it("does not disturb an already-settled node when settled again", () => {
+    // The monitor settles on its own timeout and the outcome stage settles on a
+    // conclusion. Whichever ran first has already decided this node, so a second
+    // pass must leave its message alone rather than relabel a settled failure.
+    const resources: SettleableResource[] = [
+      { deployStatus: "pending" as DeployStatus }
+    ];
+    settleDeployStatuses(resources, "failure");
+    expect(resources[0].deployMessage).toBe(DEPLOY_FAILED_MESSAGE);
+    settleDeployStatuses(resources, "failure", "rad: deployment rejected");
+    expect(resources[0].deployMessage).toBe(DEPLOY_FAILED_MESSAGE);
+    expect(resources[0].deployStatus).toBe("failed");
+  });
+});
+
+describe("unfinishedDeployMessage", () => {
+  it.each([
+    ["cancelled", undefined, DEPLOY_CANCELLED_MESSAGE],
+    ["timed_out", undefined, DEPLOY_TIMED_OUT_MESSAGE],
+    ["monitor_timed_out", undefined, DEPLOY_MONITOR_TIMED_OUT_MESSAGE],
+    ["monitor_timed_out", "ignored detail", DEPLOY_MONITOR_TIMED_OUT_MESSAGE],
+    ["timed_out", "ignored detail", DEPLOY_TIMED_OUT_MESSAGE],
+    ["cancelled", "ignored detail", DEPLOY_CANCELLED_MESSAGE],
+    ["failure", "rad error", "rad error"],
+    ["failure", undefined, DEPLOY_FAILED_MESSAGE],
+    ["failure", "", DEPLOY_FAILED_MESSAGE],
+    ["failure", " \t\r\n ", DEPLOY_FAILED_MESSAGE],
+    ["failure", " \t\r\n Radius error \t\r\n ", "Radius error"],
+    ["unknown", "rad error", "rad error"],
+    [undefined, undefined, DEPLOY_FAILED_MESSAGE],
+    [null, undefined, DEPLOY_FAILED_MESSAGE]
+  ] as const)("maps %s / %s", (conclusion, radiusError, expected) => {
+    expect(unfinishedDeployMessage(conclusion, radiusError)).toBe(expected);
+  });
+
+  it.each([
+    MAX_DEPLOY_MESSAGE_LENGTH - 1,
+    MAX_DEPLOY_MESSAGE_LENGTH,
+    MAX_DEPLOY_MESSAGE_LENGTH + 1
+  ])("bounds a %i-character run-level error after trimming", (length) => {
+    const detail = "x".repeat(length);
+    const message = unfinishedDeployMessage("failure", ` \n${detail}\t `);
+    expect(message).toBe(
+      length > MAX_DEPLOY_MESSAGE_LENGTH ?
+        "x".repeat(MAX_DEPLOY_MESSAGE_LENGTH - 3) + "..."
+      : detail
+    );
+    expect(message.length).toBe(Math.min(length, MAX_DEPLOY_MESSAGE_LENGTH));
+  });
+
+  it("bounds multiline run-level copies without shortening producer failures", () => {
+    const radiusError = "Error: recipe failed\n".repeat(200);
+    const producerError = "Resource-specific diagnostic\n".repeat(40);
+    const resources: SettleableResource[] = [
+      {},
+      { deployStatus: "pending" },
+      { deployStatus: "in_progress", deployMessage: "creating" },
+      { deployStatus: "failed", deployMessage: " \t\n " },
+      { deployStatus: "failed", deployMessage: producerError }
+    ];
+
+    settleDeployStatuses(resources, "failure", radiusError);
+
+    const expected =
+      radiusError.slice(0, MAX_DEPLOY_MESSAGE_LENGTH - 3) + "...";
+    expect(resources.map((resource) => resource.deployMessage)).toEqual([
+      expected,
+      expected,
+      expected,
+      expected,
+      producerError
+    ]);
+    expect(expected).toHaveLength(MAX_DEPLOY_MESSAGE_LENGTH);
+    expect(expected).toContain("\n");
   });
 });
 
@@ -1615,9 +1851,46 @@ describe("createDeployStatusReader", () => {
     sequence = 3;
     const stale = await reader.read();
     expect(stale.status).toBe("stale");
+    expect(stale.progressRevalidated).toBe(false);
     expect(reader.sequence).toBe(5);
     expect(stale.progress?.sequence).toBe(5);
   });
+
+  it.each([
+    { changed: false, revalidated: true },
+    { changed: true, revalidated: false }
+  ])(
+    "revalidates only an identical report at the same sequence: $changed",
+    async ({ changed, revalidated }) => {
+      let clock = 0;
+      let failRead = false;
+      const reader = createDeployStatusReader({
+        ...baseOptions,
+        now: () => clock,
+        listArtifacts: async () => {
+          if (failRead) throw new Error("network unavailable");
+          return [artifact("radius-deploy-status-dev-todolist")];
+        },
+        downloadArtifact: async () =>
+          okFiles({
+            state: changed && clock > 0 ? "failed" : "succeeded"
+          })
+      });
+      expect((await reader.read()).status).toBe("ok");
+      for (const time of [10001, 20002]) {
+        clock = time;
+        const snapshot = await reader.read();
+        expect(snapshot.status).toBe("stale");
+        expect(snapshot.progressRevalidated).toBe(revalidated);
+        expect(snapshot.progress?.state).toBe("succeeded");
+      }
+      clock = 30003;
+      failRead = true;
+      const failed = await reader.read();
+      expect(failed.status).toBe("error");
+      expect(failed.progressRevalidated).not.toBe(true);
+    }
+  );
 
   it("accepts a lower sequence from a different run", async () => {
     let clock = 0;

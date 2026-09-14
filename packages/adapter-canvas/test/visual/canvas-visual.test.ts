@@ -15,6 +15,12 @@ import {
 } from "../e2e/support/canvas-harness.js";
 import type { Page } from "@playwright/test";
 import { COMMAND_RUN_LABEL } from "../../src/browser/command-action.js";
+import {
+  ARTIFACT_PAGE_SIZE,
+  DEPLOY_MONITOR_TIMED_OUT_MESSAGE,
+  settleDeployStatuses
+} from "../../src/deploy-artifacts.js";
+import { DELETE_DIALOG_RESOURCE_LIMIT } from "../../src/browser/delete-dialog.js";
 import type { CanvasGraphResource, CanvasState } from "../../src/shared.js";
 
 type Theme = "dark" | "light";
@@ -25,6 +31,53 @@ type GraphRequests = {
   loadGraph: GraphRequestBody[];
   planGraph: GraphRequestBody[];
 };
+
+const DEPLOY_OUTCOMES: {
+  name: string;
+  conclusion: "cancelled" | "timed_out" | "monitor_timed_out" | "failure";
+  expectedMessage: string;
+  radiusError?: string;
+  producerMessage?: string;
+}[] = [
+  {
+    name: "cancelled",
+    conclusion: "cancelled",
+    expectedMessage: "Deployment cancelled"
+  },
+  {
+    name: "timed-out",
+    conclusion: "timed_out",
+    expectedMessage: "Deployment timed out"
+  },
+  {
+    name: "monitoring-timed-out",
+    conclusion: "monitor_timed_out",
+    expectedMessage: DEPLOY_MONITOR_TIMED_OUT_MESSAGE
+  },
+  {
+    name: "radius-error",
+    conclusion: "failure",
+    radiusError:
+      "Radius deployment failed: recipe could not provision container web (quota exceeded).",
+    expectedMessage:
+      "Radius deployment failed: recipe could not provision container web (quota exceeded)."
+  },
+  {
+    name: "bounded-radius-error",
+    conclusion: "failure",
+    radiusError: "Quota exceeded for the deployment.\n".repeat(120),
+    expectedMessage:
+      "Quota exceeded for the deployment.\n".repeat(120).slice(0, 497) + "..."
+  },
+  {
+    name: "producer-error",
+    conclusion: "cancelled",
+    producerMessage:
+      "Container image fixture.invalid/web:demo could not be pulled: manifest not found.",
+    expectedMessage:
+      "Container image fixture.invalid/web:demo could not be pulled: manifest not found."
+  }
+];
 
 function isGraphRequestBody(value: unknown): value is GraphRequestBody {
   if (typeof value !== "object" || value === null) return false;
@@ -267,6 +320,64 @@ async function routeDeployments(
       });
     }
   );
+}
+
+// The deployed page's delete dialog names what was last reported as deployed,
+// which is a different collection from the modeled graph. One resource over the
+// display limit is enough to pin both the bounded list and its remainder line.
+const INVENTORY_RESOURCES = Array.from({ length: 10 }, (_, index) => ({
+  name: `reported-resource-${index + 1}`,
+  type:
+    index % 2 === 0 ?
+      "Applications.Core/containers"
+    : "Applications.Datastores/redisCaches"
+}));
+
+async function routeDeletionInventory(
+  page: Page,
+  canvas: CanvasHarness
+): Promise<void> {
+  await page.route(
+    `${canvas.baseUrl}/api/list-applications?*`,
+    async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ applications: [{ name: "radius-app" }] })
+      });
+    }
+  );
+  await page.route(
+    `${canvas.baseUrl}/api/list-environments?*`,
+    async (route) => {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          environments: [
+            {
+              name: "fixture-environment",
+              provider: "azure",
+              status: "success"
+            }
+          ]
+        })
+      });
+    }
+  );
+  await routeDeployments(page, canvas, "success");
+  await page.route(`${canvas.baseUrl}/api/deployed-graph?*`, async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        resources: [{ id: "app/modeled", name: "never-deployed" }],
+        mode: "terminal",
+        deletionInventory: {
+          application: "radius-app",
+          environment: "fixture-environment",
+          resources: INVENTORY_RESOURCES
+        }
+      })
+    });
+  });
 }
 
 async function routeGraphControls(
@@ -580,6 +691,98 @@ test.describe("Radius Canvas visual baselines", () => {
         await screenshot(page, `vi-07-deploy-${status}-${theme}.png`);
       });
     }
+    for (const outcome of DEPLOY_OUTCOMES) {
+      test(`VI-07 deployed graph ${outcome.name} in ${theme}`, async ({
+        page,
+        canvas
+      }) => {
+        const topology: CanvasGraphResource[] = [
+          {
+            id: "app/web",
+            name: "web",
+            type: "Radius.Compute/containers",
+            codeReference: "src/web/app.ts#L12"
+          },
+          {
+            id: "app/db",
+            name: "db",
+            type: "Radius.Data/sqlDatabases",
+            codeReference: "src/web/app.ts#L12"
+          }
+        ];
+        const resources: CanvasGraphResource[] = [
+          {
+            ...topology[0],
+            deployStatus: outcome.producerMessage ? "failed" : "in_progress",
+            deployMessage: outcome.producerMessage ?? "creating"
+          },
+          { ...topology[1], deployStatus: "success", deployMessage: "creating" }
+        ];
+        settleDeployStatuses(
+          resources,
+          outcome.conclusion,
+          outcome.radiusError
+        );
+        await seed(canvas, {
+          graphResources: topology,
+          deployingResources: resources,
+          deployStatus: "failed",
+          deployErrorKind:
+            outcome.conclusion === "monitor_timed_out" ?
+              "run-unconfirmed"
+            : undefined,
+          deployRunId: 7,
+          deployEnvName: "fixture-environment",
+          deployAppName: "radius-app"
+        });
+        const scenario = defaultFakeCliScenario();
+        scenario.commands.push({
+          tool: "gh",
+          args: [
+            "api",
+            `/repos/${REPOSITORY}/actions/artifacts?per_page=${ARTIFACT_PAGE_SIZE}&page=1`
+          ],
+          stdout: JSON.stringify({ artifacts: [] })
+        });
+        await canvas.setScenario(scenario);
+        // Stub selector listings, but let the real graph route project the
+        // retained terminal messages that these baselines protect.
+        await routeGraphControls(page, canvas);
+        await routeDeployments(page, canvas, "failed");
+        await gotoVisual(page, canvas, "deployed", theme);
+        await expect(page.locator(".rad-node")).toHaveCount(2);
+        await expect(page.getByAltText("Failed", { exact: true })).toHaveCount(
+          1
+        );
+        const successfulNode = page
+          .locator(".rad-node")
+          .filter({ hasText: "db" });
+        await expect(
+          successfulNode.getByAltText("Deployed", { exact: true })
+        ).toBeVisible();
+        await expect(
+          page.getByAltText("In progress", { exact: true })
+        ).toHaveCount(0);
+        await page
+          .locator(".rad-node")
+          .filter({ hasText: "web" })
+          .getByRole("button", { name: "Show details" })
+          .click();
+        await expect(
+          page
+            .locator("#node-popup")
+            .getByText(outcome.expectedMessage, { exact: true })
+        ).toBeVisible();
+        await expect(page.locator("#node-popup")).not.toContainText("creating");
+        await expect(
+          successfulNode.getByAltText("Deployed", { exact: true })
+        ).toBeInViewport();
+        await screenshot(
+          page,
+          `vi-07-deployed-graph-${outcome.name}-${theme}.png`
+        );
+      });
+    }
   }
 
   for (const theme of ["light", "dark"] as const) {
@@ -646,6 +849,60 @@ test.describe("Radius Canvas visual baselines", () => {
       await expect(repair.getByRole("button", { name: "Copy" })).toBeVisible();
 
       await screenshot(page, `vi-09-wizard-github-callout-${theme}.png`);
+    });
+
+    test(`VI-10 delete dialog resource list in ${theme}`, async ({
+      page,
+      canvas
+    }) => {
+      test.setTimeout(45_000);
+      await seed(canvas);
+      await routeDeletionInventory(page, canvas);
+      await gotoVisual(page, canvas, "deployed", theme);
+
+      await page.getByRole("button", { name: "Delete Deployment" }).click();
+      await page
+        .getByRole("button", { name: "I want to delete this deployment" })
+        .click();
+
+      const dialog = page.locator("#deploy-delete-modal");
+      const list = dialog.getByRole("list", {
+        name: "Resources to be deleted"
+      });
+      await expect(list).toBeVisible({ timeout: 15_000 });
+
+      // The list is bounded and the remainder is counted, so the baseline pins
+      // the truncated shape rather than however many resources the fixture has.
+      await expect(list.locator(".rad-ddlg__resource")).toHaveCount(
+        DELETE_DIALOG_RESOURCE_LIMIT
+      );
+      await expect(list).toContainText(
+        `+${INVENTORY_RESOURCES.length - DELETE_DIALOG_RESOURCE_LIMIT} more`
+      );
+      // The modeled-only resource must never appear: the dialog names what was
+      // reported as deployed, not what the application merely declares.
+      await expect(list).not.toContainText("never-deployed");
+      await expect(
+        dialog.getByRole("button", { name: /have read and understand/i })
+      ).toBeVisible();
+
+      // Nothing may be hidden on a destructive confirmation: overlay scrollbars
+      // are invisible until interaction, so a clipped list would silently
+      // withhold part of what the user is agreeing to destroy. The entry count
+      // is already bounded, so the list is sized to show all of it.
+      const overflows = await list.evaluate((element) => {
+        const box = element as unknown as {
+          scrollHeight: number;
+          clientHeight: number;
+        };
+        return box.scrollHeight > box.clientHeight;
+      });
+      expect(overflows).toBe(false);
+
+      const remainder = list.locator(".rad-ddlg__resource-more");
+      await expect(remainder).toBeInViewport();
+
+      await screenshot(page, `vi-10-delete-resources-${theme}.png`);
     });
   }
 });

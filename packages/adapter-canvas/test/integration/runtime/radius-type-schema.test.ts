@@ -270,6 +270,72 @@ describe("compact model-facing schemas", () => {
     ).toThrow(/value must be a string/u);
   });
 
+  // The `Radius.Security/secrets` shape: `data` is an open map whose entries
+  // hold the sensitive value, so the only marked node sits two levels below the
+  // property the model assigns. The app-modeling guidance tells the model to
+  // read sensitivity recursively, which is sound only while the normalizer
+  // carries the flag out through `additionalProperties`.
+  it("carries sensitivity through an open map's entry type", () => {
+    const types = [
+      { $type: "StringType", sensitive: true },
+      { $type: "StringType" },
+      {
+        $type: "ObjectType",
+        name: "dataAdditionalProperties",
+        properties: {
+          value: { flags: 1, type: { $ref: "#/0" } },
+          encoding: { flags: 0, type: { $ref: "#/1" } }
+        }
+      },
+      {
+        $type: "ObjectType",
+        name: "data",
+        properties: {},
+        additionalProperties: { $ref: "#/2" }
+      }
+    ];
+
+    expect(normalizer.normalizeTypeReference({ $ref: "#/3" }, types)).toEqual({
+      type: "object",
+      properties: {},
+      additionalProperties: {
+        type: "object",
+        required: ["value"],
+        properties: {
+          encoding: { type: "string" },
+          value: { type: "string", sensitive: true }
+        },
+        additionalProperties: false
+      }
+    });
+  });
+
+  // A schema may mark one node both sensitive and read-only: the value is a
+  // credential the Recipe produces rather than one the application supplies.
+  // The two flags have to survive independently, because guidance keys the
+  // "assign a @secure() parameter" rule on sensitive AND writable — reading
+  // sensitivity alone would tell the model to set a Recipe output.
+  it("keeps sensitivity and read-only independent on one node", () => {
+    const types = [
+      { $type: "StringType", sensitive: true },
+      {
+        $type: "ObjectType",
+        name: "props",
+        properties: {
+          apiKey: { flags: 0, type: { $ref: "#/0" } },
+          accessToken: { flags: 2, type: { $ref: "#/0" } }
+        }
+      }
+    ];
+
+    expect(
+      normalizer.normalizeTypeReference({ $ref: "#/1" }, types).properties
+    ).toEqual({
+      apiKey: { type: "string", sensitive: true },
+      accessToken: { type: "string", sensitive: true, readOnly: true }
+    });
+  });
+
   it("rejects malformed unions and discriminated object variants", () => {
     expect(() =>
       normalizer.normalizeTypeReference({ $ref: "#/0" }, [

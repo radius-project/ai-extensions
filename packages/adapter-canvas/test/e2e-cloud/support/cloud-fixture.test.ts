@@ -12,6 +12,11 @@ import {
   type FakeFixturePorts
 } from "./fake-cloud-commands.js";
 import { assertEnvironmentDeletionIdentityOutcome } from "./delete-environment-journey.js";
+import {
+  FIXTURE_BASELINE_SHA,
+  FIXTURE_REPO_DEFAULT_BRANCH,
+  FIXTURE_REPOSITORY
+} from "./fixture-repository.js";
 
 const SUBSCRIPTION = "11111111-2222-3333-4444-555555555555";
 const REPOSITORY = "fixture-owner/fixture-repo";
@@ -96,6 +101,23 @@ function clusterRoleAssignment(principalId = "sp-1"): RoleAssignmentRecord {
     "assignment-cluster",
     CLUSTER_SCOPE
   );
+}
+
+function locksRoleAssignment(principalId = "sp-1"): RoleAssignmentRecord {
+  return roleAssignment(
+    principalId,
+    "Locks Contributor",
+    "assignment-locks",
+    SCOPE
+  );
+}
+
+function requiredRoleAssignments(principalId = "sp-1"): RoleAssignmentRecord[] {
+  return [
+    roleAssignment(principalId),
+    locksRoleAssignment(principalId),
+    clusterRoleAssignment(principalId)
+  ];
 }
 
 /**
@@ -499,7 +521,7 @@ describe("createCloudFixture", () => {
               "api",
               "--method",
               "POST",
-              "repos/TODO-owner/TODO-repo/git/refs"
+              `repos/${FIXTURE_REPOSITORY}/git/refs`
             ],
             respond: {}
           },
@@ -511,9 +533,9 @@ describe("createCloudFixture", () => {
         ports: fake.ports
       });
 
-      expect(fixture.repository).toBe("TODO-owner/TODO-repo");
-      expect(fixture.defaultBranch).toBe("main");
-      expect(fixture.baselineSha).toBe("0".repeat(40));
+      expect(fixture.repository).toBe(FIXTURE_REPOSITORY);
+      expect(fixture.defaultBranch).toBe(FIXTURE_REPO_DEFAULT_BRANCH);
+      expect(fixture.baselineSha).toBe(FIXTURE_BASELINE_SHA);
     });
 
     it("rejects a blank subscription id before issuing any command", async () => {
@@ -1461,13 +1483,16 @@ describe("createCloudFixture", () => {
   });
 
   describe("assertRoleAssignmentExists", () => {
-    it("resolves when the principal holds assignments at both required scopes", async () => {
+    it("resolves when the principal holds every required assignment", async () => {
       const { fixture } = await createHarness([
         {
           tool: "az",
           match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([roleAssignment("SP-1")])
+            stdout: JSON.stringify([
+              roleAssignment("SP-1"),
+              locksRoleAssignment("SP-1")
+            ])
           }
         },
         {
@@ -1480,7 +1505,7 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
-        [roleAssignment("SP-1"), clusterRoleAssignment("SP-1")]
+        requiredRoleAssignments("SP-1")
       );
     });
 
@@ -1491,7 +1516,7 @@ describe("createCloudFixture", () => {
           tool: "az",
           match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([roleAssignment()])
+            stdout: JSON.stringify([roleAssignment(), locksRoleAssignment()])
           }
         },
         {
@@ -1504,7 +1529,7 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
-        [roleAssignment(), clusterRoleAssignment()]
+        requiredRoleAssignments()
       );
       expect(fake.waits).toEqual([1000]);
     });
@@ -1515,7 +1540,7 @@ describe("createCloudFixture", () => {
           tool: "az",
           match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([roleAssignment()])
+            stdout: JSON.stringify([roleAssignment(), locksRoleAssignment()])
           }
         },
         {
@@ -1528,7 +1553,7 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
-        [roleAssignment(), clusterRoleAssignment()]
+        requiredRoleAssignments()
       );
     });
 
@@ -1562,7 +1587,7 @@ describe("createCloudFixture", () => {
       );
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).rejects.toThrow(
-        /missing "Contributor".*"Azure Kubernetes Service RBAC Cluster Admin"/
+        /missing "Contributor".*"Locks Contributor".*"Azure Kubernetes Service RBAC Cluster Admin"/
       );
     });
 
@@ -1628,12 +1653,15 @@ describe("createCloudFixture", () => {
 
     it("captures assignments from the resource group and exact cluster scope", async () => {
       const contributor = roleAssignment();
+      const locksContributor = locksRoleAssignment();
       const clusterAdmin = clusterRoleAssignment();
       const { fixture } = await createHarness([
         {
           tool: "az",
           match: [...ROLE_LIST, "--scope", SCOPE],
-          respond: { stdout: JSON.stringify([contributor]) }
+          respond: {
+            stdout: JSON.stringify([contributor, locksContributor])
+          }
         },
         {
           tool: "az",
@@ -1643,7 +1671,7 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.assertRoleAssignmentExists("sp-1")).resolves.toEqual(
-        [contributor, clusterAdmin]
+        [contributor, locksContributor, clusterAdmin]
       );
     });
 
@@ -1653,7 +1681,9 @@ describe("createCloudFixture", () => {
           {
             tool: "az",
             match: [...ROLE_LIST, "--scope", SCOPE],
-            respond: { stdout: JSON.stringify([roleAssignment()]) }
+            respond: {
+              stdout: JSON.stringify([roleAssignment(), locksRoleAssignment()])
+            }
           },
           {
             tool: "az",
@@ -1680,6 +1710,7 @@ describe("createCloudFixture", () => {
     it("requires every captured assignment identity, role, and scope", async () => {
       const expected = [
         roleAssignment(),
+        locksRoleAssignment(),
         roleAssignment(
           "sp-1",
           "Azure Kubernetes Service RBAC Cluster Admin",
@@ -1702,7 +1733,7 @@ describe("createCloudFixture", () => {
 
     it("shares the assertion deadline across exact-scope lookups", async () => {
       let now = NOW;
-      const expected = [roleAssignment(), clusterRoleAssignment()];
+      const expected = requiredRoleAssignments();
       const { fixture, fake } = await createHarness(
         [
           {
@@ -1710,7 +1741,12 @@ describe("createCloudFixture", () => {
             match: [...ROLE_LIST, "--scope", SCOPE],
             respond: () => {
               now = new Date(NOW.getTime() + 500);
-              return { stdout: JSON.stringify([roleAssignment()]) };
+              return {
+                stdout: JSON.stringify([
+                  roleAssignment(),
+                  locksRoleAssignment()
+                ])
+              };
             }
           },
           {
@@ -1882,7 +1918,7 @@ describe("createCloudFixture", () => {
           tool: "az",
           match: [...ROLE_LIST, "--scope", SCOPE],
           respond: {
-            stdout: JSON.stringify([roleAssignment()])
+            stdout: JSON.stringify([roleAssignment(), locksRoleAssignment()])
           },
           times: 1
         },
