@@ -1,6 +1,6 @@
 import { beginEntry, NOOP_TEARDOWN } from "./lifecycle.js";
 import { readBoolean, readString } from "./json.js";
-import { GRAPH_PAGE_STATE_ID } from "./page-state-ids.js";
+import { GRAPH_PAGE_STATE_ID } from "../pages/browser-state-ids.js";
 import type { BrowserTeardown } from "./lifecycle.js";
 import type { AbortHandle, BrowserContext } from "./ports.js";
 

@@ -26,6 +26,12 @@ const ROLE_ASSIGNMENTS = [
     scope: "/subscriptions/sub/resourceGroups/rg"
   },
   {
+    id: "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Authorization/roleAssignments/locks-contributor",
+    principalId: PRINCIPAL_ID,
+    roleDefinitionName: "Locks Contributor",
+    scope: "/subscriptions/sub/resourceGroups/rg"
+  },
+  {
     id: "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.ContainerService/managedClusters/aks/providers/Microsoft.Authorization/roleAssignments/cluster-admin",
     principalId: PRINCIPAL_ID,
     roleDefinitionName: "Azure Kubernetes Service RBAC Cluster Admin",

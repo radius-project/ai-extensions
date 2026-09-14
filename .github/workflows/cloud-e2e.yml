@@ -12,8 +12,7 @@ name: Cloud E2E
 # infrastructure failure, or leaked state from an earlier run - and treating
 # them as one destroys the signal this tier exists to provide.
 #
-# THIS WORKFLOW HAS NEVER EXECUTED. Six prerequisites are outstanding, none of
-# them in this repository:
+# THIS WORKFLOW HAS NEVER EXECUTED. Five prerequisites are outstanding:
 #
 #   1. radius-project/wellknown#134 (the Terraform that publishes the identity
 #      and the variables below) is open and unmerged.
@@ -27,13 +26,10 @@ name: Cloud E2E
 #   5. A dedicated machine or bot account with package access to the fixture
 #      owner's namespace must provide `CLOUD_E2E_PACKAGES_USER` and a classic
 #      PAT in `CLOUD_E2E_PACKAGES_TOKEN` with read/write/delete package scopes.
-#   6. The fixture repository does not exist. `FIXTURE_BASELINE_SHA` in
-#      packages/adapter-canvas/test/e2e-cloud/support/fixture-repository.ts is
-#      still forty zeros, which makes the suite skip rather than pass hollowly.
 #
-# While the fixture variable is unpublished, the run stops after checkout with a
-# specific notice. If the variable lands before the source pin, the suite's own
-# gate skips at `pnpm test:cloud` and names the placeholder fields.
+# The private fixture repository now exists and its immutable baseline is pinned
+# in source. While the wellknown-published variable is unavailable, the run
+# stops after checkout with a specific notice.
 
 on:
   # Deliberately NOT `pull_request_target`, and deliberately NOT `merge_group`.
@@ -206,11 +202,9 @@ jobs:
 
       # A short-lived installation token, the pattern release.yml already uses,
       # rather than a stored PAT. Every permission is requested explicitly: the
-      # token request fails outright if the installation does not carry one,
-      # which is the loud version of the failure mode the design records - a
-      # token silently missing `workflows` scope sends the product down its
-      # pull-request fallback path, and the journey would pass without ever
-      # having committed a workflow to the default branch.
+      # token request fails outright if the installation does not carry one.
+      # In particular, missing `workflows: write` cannot silently divert the
+      # journey to its pull-request fallback.
       - name: Create a GitHub App token for the fixture repository
         id: app-token
         if: steps.fixture.outputs.configured == 'true'
@@ -226,6 +220,7 @@ jobs:
           permission-deployments: read
           permission-environments: write
           permission-pull-requests: write
+          permission-secrets: write
           permission-variables: write
           permission-workflows: write
 

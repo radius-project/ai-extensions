@@ -237,6 +237,7 @@ export async function createCloudFixture(
   const roleAssignmentScopes = [scope, clusterScope] as const;
   const requiredRoleAssignments = [
     { scope, roleDefinitionName: "Contributor" },
+    { scope, roleDefinitionName: "Locks Contributor" },
     {
       scope: clusterScope,
       roleDefinitionName: "Azure Kubernetes Service RBAC Cluster Admin"

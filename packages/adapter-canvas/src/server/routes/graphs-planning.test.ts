@@ -16,6 +16,7 @@ import type {
   DeployProgress,
   WorkflowArtifact
 } from "../../deploy-artifacts.js";
+import { createDeployStatusReader } from "../../deploy-artifacts.js";
 import {
   GRAPH_APP_BICEP_IDLE_TIMEOUT_MS,
   GRAPH_APP_BICEP_MAX_WAIT_MESSAGE,
@@ -29,6 +30,7 @@ import type {
   GraphProgressView
 } from "../../shared.js";
 import type { CanvasServerEntry } from "../types.js";
+import type { DeletionInventory } from "../services/deletion-inventory.js";
 
 interface Recording {
   headers: Record<string, string>;
@@ -292,6 +294,11 @@ function fakes(
         `createDeployStatusReader(${JSON.stringify(readerOptions)})`
       );
       return {
+        read: () =>
+          Promise.resolve({
+            status: reader.graph.status,
+            progress: reader.progress
+          }),
         graph: () => {
           calls.log.push("reader.graph");
           if (options.graphThrows) return Promise.reject(options.graphThrows);
@@ -457,11 +464,219 @@ interface DeployedGraphPayload {
   mode: string;
   updatedAt?: string | null;
   application?: string | null;
+  deletionInventory: DeletionInventory | null;
 }
 
 function payloadOf(recording: Recording): DeployedGraphPayload {
   return JSON.parse(recording.body) as DeployedGraphPayload;
 }
+
+describe("deployed-graph deletion inventory", () => {
+  const url =
+    "/api/deployed-graph?repo=octo/app&application=BILLING&environment=PROD";
+  const actual = progressPayload(
+    [
+      {
+        name: "removed-from-model",
+        type: "Radius.Resources/redis",
+        id: "actual-id",
+        message: "Not part of the deletion summary"
+      }
+    ],
+    {
+      application: "billing",
+      environment: "prod",
+      state: "succeeded",
+      runId: 42
+    }
+  );
+  const inventory = {
+    application: "billing",
+    environment: "prod",
+    resources: [{ name: "removed-from-model", type: "Radius.Resources/redis" }]
+  };
+
+  function setup(state: CanvasState = {}) {
+    return fakes(
+      { log: [] },
+      {
+        state: {
+          contextRepo: "octo/app",
+          contextBranch: "feature/current",
+          graphTargetRepo: "octo/app",
+          graphBranch: "feature/current",
+          graphResources: [
+            { name: "never-created", type: "Radius.Resources/containers" }
+          ],
+          ...state
+        },
+        reader: {
+          graph: { status: "ok", graph: PUBLISHED_GRAPH },
+          progress: actual
+        }
+      }
+    );
+  }
+
+  it("keeps actual resource-list inventory independent of changing modeled topology", async () => {
+    const { deps, state } = setup();
+    const first = payloadOf(await run(url, handleDeployedGraph, deps));
+    expect(first.deletionInventory).toEqual(inventory);
+    expect(first.resources.map(({ name }) => name)).toEqual(["never-created"]);
+    expect(first.mode).toBe("terminal");
+    expect(first.branch).toBe("feature/current");
+
+    state!.graphResources = [
+      { name: "another-uncreated-model-node", type: "Radius.Resources/redis" }
+    ];
+    const second = payloadOf(await run(url, handleDeployedGraph, deps));
+    expect(second.deletionInventory).toEqual(inventory);
+    expect(second.resources.map(({ name }) => name)).toEqual([
+      "another-uncreated-model-node"
+    ]);
+  });
+
+  it.each([
+    "/api/deployed-graph?repo=octo/app",
+    "/api/deployed-graph?repo=octo/app&application=billing",
+    "/api/deployed-graph?repo=octo/app&environment=prod",
+    "/api/deployed-graph?repo=octo/app&application=%20&environment=prod"
+  ])(
+    "does not use session identity for an incomplete request: %s",
+    async (requestUrl) => {
+      const { deps } = setup({
+        deployAppName: "billing",
+        deployEnvName: "prod"
+      });
+      expect(
+        payloadOf(await run(requestUrl, handleDeployedGraph, deps))
+          .deletionInventory
+      ).toBeNull();
+    }
+  );
+
+  it.each(["missing", "malformed", "auth", "error", "stale"])(
+    "rejects a current %s read despite successful earlier graph/progress reads",
+    async (status) => {
+      const { deps } = setup();
+      const originalReader = deps.createDeployStatusReader;
+      deps.createDeployStatusReader = (options) => ({
+        ...originalReader(options),
+        read: () => Promise.resolve({ status, progress: actual })
+      });
+      const payload = payloadOf(await run(url, handleDeployedGraph, deps));
+      expect(payload.deletionInventory).toBeNull();
+      expect(payload.mode).toBe("terminal");
+      expect(payload.resources.map(({ name }) => name)).toEqual([
+        "never-created"
+      ]);
+    }
+  );
+
+  it("does not trust last-good progress when the reader cache expires between graph and progress", async () => {
+    const { deps } = setup();
+    let now = 0;
+    const reader = createDeployStatusReader({
+      repo: "octo/app",
+      application: "billing",
+      environment: "prod",
+      now: () => now,
+      ttlMs: 10,
+      listArtifacts: () => {
+        if (now > 0) return Promise.reject(new Error("Artifact read failed"));
+        return Promise.resolve([
+          {
+            id: 1,
+            name: "radius-deploy-status-prod-billing",
+            workflow_run: { id: 42 }
+          }
+        ]);
+      },
+      downloadArtifact: () =>
+        Promise.resolve({
+          "deploy-progress.json": JSON.stringify(actual),
+          "deploy-graph.json": JSON.stringify(PUBLISHED_GRAPH)
+        })
+    });
+    deps.createDeployStatusReader = () => ({
+      ...reader,
+      progress: () => {
+        now = 11;
+        return reader.progress();
+      }
+    });
+
+    const payload = payloadOf(await run(url, handleDeployedGraph, deps));
+    expect(payload.deletionInventory).toBeNull();
+    expect(payload.mode).toBe("terminal");
+    expect(await reader.progress()).toEqual(actual);
+    expect(await reader.status()).toBe("error");
+  });
+
+  it.each(["graph", "progress", "read"] as const)(
+    "fails inventory closed when %s throws without blanking modeled graph",
+    async (method) => {
+      const { deps } = setup();
+      const originalReader = deps.createDeployStatusReader;
+      deps.createDeployStatusReader = (options) => ({
+        ...originalReader(options),
+        [method]: () => Promise.reject(new Error("Artifact unavailable"))
+      });
+      const payload = payloadOf(await run(url, handleDeployedGraph, deps));
+      expect(payload.deletionInventory).toBeNull();
+      expect(payload.resources.map(({ name }) => name)).toEqual([
+        "never-created"
+      ]);
+    }
+  );
+
+  it.each([
+    { deployStatus: "in_progress" },
+    { deployRunId: 43 },
+    { deployStartedAt: 123 },
+    { deployFinishedAt: 456 }
+  ])(
+    "rejects inventory when session attempt changes during the read: %j",
+    async (change) => {
+      const { deps, state } = setup({ deployRunId: 42 });
+      const originalReader = deps.createDeployStatusReader;
+      deps.createDeployStatusReader = (options) => ({
+        ...originalReader(options),
+        read: () => {
+          Object.assign(state!, change);
+          return Promise.resolve({ status: "ok", progress: actual });
+        }
+      });
+      expect(
+        payloadOf(await run(url, handleDeployedGraph, deps)).deletionInventory
+      ).toBeNull();
+    }
+  );
+
+  it.each([
+    { deployStatus: "in_progress", deployRunId: 42 },
+    { deployStatus: "in_progress" },
+    { deployStatus: "complete", deployRunId: 43 }
+  ] satisfies CanvasState[])(
+    "rejects active and superseded session reports: %j",
+    async (state) => {
+      const { deps } = setup(state);
+      expect(
+        payloadOf(await run(url, handleDeployedGraph, deps)).deletionInventory
+      ).toBeNull();
+    }
+  );
+
+  it("does not constrain another selected environment to the session run", async () => {
+    const { deps } = setup({
+      deployEnvName: "other-env",
+      deployRunId: 43
+    });
+    expect(
+      payloadOf(await run(url, handleDeployedGraph, deps)).deletionInventory
+    ).toEqual(inventory);
+  });
+});
 
 describe("graphs-planning read routes (SU-09)", () => {
   it("declares exactly the two routes it owns", () => {
@@ -497,7 +712,7 @@ describe("graphs-planning read routes (SU-09)", () => {
       )
     );
     expect(second.recording.body).toBe(
-      '{"resources":[],"repo":"","mode":"greyed"}'
+      '{"resources":[],"repo":"","mode":"greyed","deletionInventory":null}'
     );
   });
 
@@ -975,7 +1190,9 @@ describe("graphs-planning read routes (SU-09)", () => {
     );
     expect(recording.status).toBe(200);
     expect(recording.headerSteps).toEqual(SET_THEN_WRITE);
-    expect(recording.body).toBe('{"resources":[],"repo":"","mode":"greyed"}');
+    expect(recording.body).toBe(
+      '{"resources":[],"repo":"","mode":"greyed","deletionInventory":null}'
+    );
     // Nothing is read: the reader is never constructed.
     expect(calls.log).toEqual(["readInstanceEntry(panel-a)"]);
   });
@@ -1422,6 +1639,351 @@ describe("graphs-planning read routes (SU-09)", () => {
     expect(calls.log).toContain("settleDeployStatuses(success)");
   });
 
+  it("overlays settled messages and statuses without reviving stale progress", async () => {
+    const calls: Calls = { log: [] };
+    const { deps } = fakes(calls, {
+      state: {
+        contextRepo: CONTEXT_REPO,
+        deployStatus: "failed",
+        deployErrorKind: "run-unconfirmed",
+        deployRunId: 7,
+        deployingResources: [
+          {
+            id: "db",
+            deployStatus: "failed",
+            deployMessage: "Deployment timed out"
+          },
+          { id: "api", deployStatus: "success", deployMessage: "creating" },
+          { id: "empty", deployStatus: "failed", deployMessage: "  " },
+          { id: "pending", deployStatus: "pending" },
+          {
+            id: "db",
+            deployStatus: "failed",
+            deployMessage: "weaker duplicate"
+          }
+        ]
+      },
+      modeledResources: ["db", "api", "empty", "pending"].map((id) => ({ id })),
+      reader: {
+        progress: progressPayload(
+          ["db", "api", "empty", "pending"].map((id) => ({
+            id,
+            name: id,
+            type: "Radius.Compute/containers",
+            status: "in_progress",
+            message: "creating"
+          })),
+          { runId: 7, state: "in_progress" }
+        )
+      }
+    });
+
+    const payload = payloadOf(
+      await run("/api/deployed-graph", handleDeployedGraph, deps)
+    );
+
+    expect(payload.mode).toBe("terminal");
+    expect(
+      payload.resources.map((resource) => [
+        resource.deployStatus,
+        resource.deployMessage
+      ])
+    ).toEqual([
+      ["failed", "Deployment timed out"],
+      ["success", undefined],
+      ["failed", undefined],
+      ["in_progress", "creating"]
+    ]);
+    expect(calls.log).not.toContain("settleDeployStatuses(failure)");
+  });
+
+  it.each([
+    ["failed", undefined, undefined, false],
+    ["succeeded", undefined, undefined, false],
+    ["failed", 6, undefined, false],
+    ["failed", 7, undefined, true],
+    ["succeeded", 7, undefined, true],
+    ["failed", 8, "2026-09-11T00:02:00Z", true]
+  ] as const)(
+    "requires terminal %s artifact identity %s without a payload run ID",
+    async (artifactState, artifactRunId, createdAt, accepted) => {
+      const calls: Calls = { log: [] };
+      const { deps } = fakes(calls, {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployStatus: "failed",
+          deployErrorKind: "run-unconfirmed",
+          deployRunId: 7,
+          deployFinishedAt: Date.parse("2026-09-11T00:01:00Z"),
+          deployingResources: [
+            {
+              id: "db",
+              deployStatus: "failed",
+              deployMessage: "Monitoring stopped"
+            }
+          ]
+        },
+        modeledResources: [{ id: "db" }],
+        reader: {
+          graph: {
+            graph: null,
+            status: "ok",
+            artifact: {
+              id: 1,
+              name: "radius-deploy-status",
+              workflow_run:
+                artifactRunId == null ? undefined : { id: artifactRunId },
+              created_at: createdAt
+            }
+          },
+          progress: progressPayload(
+            [
+              {
+                id: "db",
+                name: "db",
+                type: "Radius.Data/sqlDatabases",
+                status: artifactState === "failed" ? "failed" : "success",
+                message:
+                  artifactState === "failed" ? "Final Radius error" : undefined
+              }
+            ],
+            { state: artifactState }
+          )
+        }
+      });
+
+      const payload = payloadOf(
+        await run("/api/deployed-graph", handleDeployedGraph, deps)
+      );
+
+      expect(payload.resources[0].deployStatus).toBe(
+        accepted && artifactState === "succeeded" ? "success" : "failed"
+      );
+      expect(payload.resources[0].deployMessage).toBe(
+        !accepted ? "Monitoring stopped"
+        : artifactState === "failed" ? "Final Radius error"
+        : undefined
+      );
+    }
+  );
+
+  it.each(["failed", "succeeded"] as const)(
+    "lets a same-run %s artifact supersede the monitor timeout",
+    async (artifactState) => {
+      const calls: Calls = { log: [] };
+      const { deps, state } = fakes(calls, {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployStatus: "failed",
+          deployErrorKind: "run-unconfirmed",
+          deployRunId: 7,
+          deployingResources: [
+            {
+              id: "db",
+              deployStatus: "failed",
+              deployMessage: "Deployment timed out"
+            },
+            { id: "api", deployStatus: "success" }
+          ]
+        },
+        modeledResources: [{ id: "db" }, { id: "api" }],
+        reader: {
+          progress: progressPayload(
+            [
+              {
+                id: "db",
+                name: "db",
+                type: "Radius.Data/sqlDatabases",
+                status: artifactState === "failed" ? "failed" : "success",
+                message:
+                  artifactState === "failed" ?
+                    "Radius quota exceeded"
+                  : undefined
+              },
+              {
+                id: "api",
+                name: "api",
+                type: "Radius.Compute/containers",
+                status: "success"
+              }
+            ],
+            { runId: 7, state: artifactState }
+          )
+        }
+      });
+
+      const payload = payloadOf(
+        await run("/api/deployed-graph", handleDeployedGraph, deps)
+      );
+
+      expect(payload.mode).toBe("terminal");
+      expect(
+        payload.resources.map((resource) => [
+          resource.deployStatus,
+          resource.deployMessage
+        ])
+      ).toEqual([
+        artifactState === "failed" ?
+          ["failed", "Radius quota exceeded"]
+        : ["success", undefined],
+        ["success", undefined]
+      ]);
+      expect(state?.deployErrorKind).toBe("run-unconfirmed");
+    }
+  );
+
+  it.each([
+    ["live", "in_progress", 7],
+    ["without a tracked run", "failed", undefined]
+  ] as const)(
+    "does not overlay terminal-looking resources when %s",
+    async (_case, deployStatus, deployRunId) => {
+      const calls: Calls = { log: [] };
+      const { deps } = fakes(calls, {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployStatus,
+          deployRunId,
+          deployingResources: [
+            { id: "db", deployStatus: "failed", deployMessage: "old error" }
+          ]
+        },
+        modeledResources: [{ id: "db" }],
+        reader: {
+          progress: progressPayload(
+            [
+              {
+                id: "db",
+                name: "db",
+                type: "Radius.Data/sqlDatabases",
+                status: "success",
+                message: "provisioned"
+              }
+            ],
+            { runId: 7 }
+          )
+        }
+      });
+
+      const payload = payloadOf(
+        await run("/api/deployed-graph", handleDeployedGraph, deps)
+      );
+
+      expect(payload.resources[0]).toMatchObject({
+        deployStatus: "success",
+        deployMessage: "provisioned"
+      });
+    }
+  );
+
+  it.each([
+    ["environment", `?environment=${OTHER_ENV}`],
+    ["application", `?application=${QUERY_APP}`],
+    ["repository", `?repo=${QUERY_REPO}`]
+  ])(
+    "does not overlay a different %s's terminal messages",
+    async (_case, query) => {
+      const calls: Calls = { log: [] };
+      const { deps } = fakes(calls, {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployEnvName: DEPLOY_ENV,
+          deployAppName: DEPLOY_APP,
+          deployStatus: "failed",
+          deployRunId: 7,
+          deployingResources: [
+            {
+              id: "db",
+              deployStatus: "failed",
+              deployMessage: "wrong selection"
+            }
+          ]
+        },
+        modeledResources: [{ id: "db" }],
+        reader: {
+          progress: progressPayload(
+            [
+              {
+                id: "db",
+                name: "db",
+                type: "Radius.Data/sqlDatabases",
+                status: "success",
+                message: "selected deployment"
+              }
+            ],
+            { runId: 7 }
+          )
+        }
+      });
+
+      const payload = payloadOf(
+        await run(`/api/deployed-graph${query}`, handleDeployedGraph, deps)
+      );
+
+      expect(payload.resources[0]).toMatchObject({
+        deployStatus: "success",
+        deployMessage: "selected deployment"
+      });
+    }
+  );
+
+  it.each([
+    [7, "failed", "Deployment timed out"],
+    [8, "in_progress", undefined]
+  ] as const)(
+    "uses only the original attempt when run %s settles during the artifact read",
+    async (runId, expectedStatus, expectedMessage) => {
+      const calls: Calls = { log: [] };
+      const { deps, state } = fakes(calls, {
+        state: {
+          contextRepo: CONTEXT_REPO,
+          deployStatus: "in_progress",
+          deployRunId: 7,
+          deployingResources: [{ id: "db", deployStatus: "in_progress" }]
+        },
+        modeledResources: [{ id: "db" }]
+      });
+      deps.createDeployStatusReader = () => ({
+        read: () => Promise.resolve({ status: "missing", progress: null }),
+        graph: () => Promise.resolve({ graph: null, status: "missing" }),
+        progress: async () => {
+          if (!state)
+            throw new Error("the monitor requires its instance state");
+          state.deployStatus = "failed";
+          state.deployRunId = runId;
+          state.deployErrorKind = "run-unconfirmed";
+          state.deployingResources = [
+            {
+              id: "db",
+              deployStatus: "failed",
+              deployMessage: "Deployment timed out"
+            }
+          ];
+          return progressPayload(
+            [
+              {
+                id: "db",
+                name: "db",
+                type: "Radius.Data/sqlDatabases",
+                status: "in_progress"
+              }
+            ],
+            {
+              runId: 7
+            }
+          );
+        }
+      });
+
+      const payload = payloadOf(
+        await run("/api/deployed-graph", handleDeployedGraph, deps)
+      );
+
+      expect(payload.resources[0].deployStatus).toBe(expectedStatus);
+      expect(payload.resources[0].deployMessage).toBe(expectedMessage);
+    }
+  );
+
   it("lets a demonstrably newer artifact run supersede terminal monitor state", async () => {
     const calls: Calls = { log: [] };
     const { deps } = fakes(calls, {
@@ -1435,7 +1997,8 @@ describe("graphs-planning read routes (SU-09)", () => {
         deployingResources: [
           {
             ...DEPLOYING_RESOURCES[0],
-            deployStatus: "success"
+            deployStatus: "failed",
+            deployMessage: "old attempt error"
           }
         ]
       },
@@ -1456,7 +2019,8 @@ describe("graphs-planning read routes (SU-09)", () => {
               id: "res-deploying",
               name: "deploying-node",
               type: "Radius.Compute",
-              status: "failed"
+              status: "failed",
+              message: "new attempt error"
             }
           ],
           { runId: 8, state: "failed" }
@@ -1469,6 +2033,7 @@ describe("graphs-planning read routes (SU-09)", () => {
     );
 
     expect(payload.resources[0].deployStatus).toBe("failed");
+    expect(payload.resources[0].deployMessage).toBe("new attempt error");
     expect(calls.log).toContain("settleDeployStatuses(failure)");
     expect(calls.log).not.toContain("settleDeployStatuses(success)");
   });

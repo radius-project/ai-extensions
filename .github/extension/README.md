@@ -128,7 +128,7 @@ The dispatcher routes to the matching provider workflow, which runs on `ubuntu-2
     The fixed-name terminal payload uses one sequence greater than the last successful live upload, or sequence 1 when no live upload succeeded. Consumers therefore select the numerically greatest valid sequence without relying on artifact list order or slot number, and the terminal artifact wins naturally after deployment ends.
 
     Workflow artifacts are the transport because the REST API can read them **while the run is still in progress** (`GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts`), which is what lets the canvas show deployment state as it happens; `GET /repos/{owner}/{repo}/actions/artifacts?name=<name>` finds the newest one later without knowing the run. They also require no extra registry, no `packages: write` permission, and no name derivation duplicated between this action and the canvas reader.
-16. **Persist state (`rad shutdown`).** Backs the control-plane databases and Terraform recipe-state Secrets up to the state archive — the OCI-backed archive by default (pushed to GHCR, selected by the `RADIUS_STATE_*` variables), or the `radius-state` git orphan branch when `RADIUS_STATE_BACKEND=git`. This runs even when the deploy fails (`if: always()`), so a partially-applied Terraform run is not lost.
+16. **Persist state (`rad shutdown`).** Backs the control-plane databases and Terraform recipe-state Secrets up to the OCI-backed state archive, pushed to GHCR and selected by the `RADIUS_STATE_*` variables. This runs even when the deploy fails (`if: always()`), so a partially-applied Terraform run is not lost.
 17. **Tear down.** Runs `rad app list`, and always deletes the ephemeral `radius-cp` cluster. On failure, Radius and application logs are collected and uploaded as the `radius-logs` artifact (three-day retention).
 
 ### Triggers and permissions
@@ -150,7 +150,7 @@ GitHub Actions concurrency groups cannot coordinate runs in different repositori
   | `rad_commands` | No       | A single `rad` command string, or a JSON array of command strings run in order (the `rad` prefix omitted, e.g. `["deploy .radius/app.bicep --environment dev", "app graph my-app -o json"]`). Each command is validated against the allowed-command set. Falls back to the `RADIUS_RAD_COMMANDS` variable. When empty, the workflow runs its default `rad deploy` of the app bicep. |
 
 - **Outputs:** a combined `rad-commands-result` artifact — a JSON document with a top-level `outcome`/`exitCode` and a `commands` array (one entry per command, in input order, with each command's exit code and output).
-- **Permissions:** `id-token: write` (required for OIDC), `contents: write` (so `rad shutdown` can push the `radius-state` branch when the git state backend is selected), and `packages: write` (to push the OCI-backed state archive to GHCR and the application image built by the containerImages recipe).
+- **Permissions:** `id-token: write` (required for OIDC), `contents: write` (granted to the generated workflows; no step currently pushes to the repository, so this is broader than the workflow requires), and `packages: write` (to push the OCI-backed state archive to GHCR and the application image built by the containerImages recipe).
 
 ### Required environment variables
 
@@ -171,7 +171,7 @@ This workflow also reads GitHub Actions **secrets** for image push and applicati
 
 ### State persistence (`rad startup` / `rad shutdown`)
 
-`rad startup` and `rad shutdown` are kind-agnostic CLI commands that restore and back up all durable Radius state (control-plane PostgreSQL + Terraform recipe-state Secrets). These workflows use the OCI-backed state archive by default — the `RADIUS_STATE_*` variables select an OCI repository and the workflow logs in to GHCR before `rad startup`/`rad shutdown` — and fall back to the `radius-state` git orphan branch only when `RADIUS_STATE_BACKEND=git`. They do not manage cluster lifecycle — the workflow owns creating and destroying the ephemeral control plane around them. `rad startup` runs after the install (so `rad deploy` plans against prior state) and `rad shutdown` runs after the commands with `if: always()` (so state survives a failed deploy).
+`rad startup` and `rad shutdown` are kind-agnostic CLI commands that restore and back up all durable Radius state (control-plane PostgreSQL + Terraform recipe-state Secrets). These workflows use the OCI-backed state archive — the `RADIUS_STATE_*` variables select an OCI repository and the workflow logs in to GHCR before `rad startup`/`rad shutdown`. They do not manage cluster lifecycle — the workflow owns creating and destroying the ephemeral control plane around them. `rad startup` runs after the install (so `rad deploy` plans against prior state) and `rad shutdown` runs after the commands with `if: always()` (so state survives a failed deploy).
 
 ### Prerequisites
 

@@ -12,7 +12,7 @@ There is no GitHub API that exposes a running job's log output, so the deploy's 
 
 Workflow artifacts have the property that logs lack: `GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts` is listable **and** downloadable while a run is still in progress. `GET /repos/{owner}/{repo}/actions/artifacts` returns newest-first repo-wide, which is how a fresh canvas session finds the last deploy without knowing a run id.
 
-This replaces an earlier GHCR OCI-artifact transport, and an earlier `radius-deploy-status` git orphan branch. Neither is read anymore.
+Deployment status is read exclusively from workflow artifacts.
 
 ## Artifact name
 

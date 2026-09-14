@@ -8,6 +8,7 @@
 import { remediationView } from "@radius-project/core/remediations";
 import { createCommandAction } from "../command-action.js";
 import { createDeleteDeploymentDialog } from "../delete-dialog.js";
+import { deletionInventoryResources } from "../deletion-inventory.js";
 import { createEnvironmentConfirmDialog } from "../environment/confirm-dialog.js";
 import {
   DELETE_FAILED_STATUS,
@@ -43,6 +44,7 @@ import type { BrowserTeardown, ScopeTimer } from "../lifecycle.js";
 import type {
   AbortHandle,
   BrowserContext,
+  DomElement,
   DomEventListener,
   DomEventTarget,
   OptionSpec
@@ -609,7 +611,8 @@ export function initializeDeployingPage(
       bind(rowBindings, button, "click", () => {
         openDeleteModal(
           button.getAttribute("data-app") ?? "",
-          button.getAttribute("data-env") ?? ""
+          button.getAttribute("data-env") ?? "",
+          button
         );
       });
     }
@@ -727,38 +730,81 @@ export function initializeDeployingPage(
     }
   };
 
-  const openDeleteModal = (app: string, environment: string): void => {
+  // The Deployments page never loads a deployed graph, so the inventory that
+  // names what a teardown destroys has to be fetched for the row being
+  // deleted. Fails closed: any error, or an inventory that does not verify
+  // against this exact pair, opens the dialog with its generic warning rather
+  // than risk naming another deployment's resources.
+  const loadDeletionInventory = (
+    app: string,
+    environment: string
+  ): Promise<readonly unknown[]> => {
+    if (!options.repo || !app || !environment) return Promise.resolve([]);
+    const url =
+      `/api/deployed-graph?repo=${encodeURIComponent(options.repo)}` +
+      `&application=${encodeURIComponent(app)}` +
+      `&environment=${encodeURIComponent(environment)}`;
+    return context.net
+      .fetch(url)
+      .then((response) => response.json())
+      .then((payload) => deletionInventoryResources(payload, app, environment))
+      .catch((error: unknown) => {
+        context.logger.error(
+          "Radius deletion inventory could not be loaded.",
+          error
+        );
+        return [];
+      });
+  };
+
+  const openDeleteModal = (
+    app: string,
+    environment: string,
+    invoker: DomElement
+  ): void => {
     if (!dialog) return;
-    if (rowStatus(app, environment) !== DELETE_FAILED_STATUS) {
-      dialog.open(app, environment);
-      return;
-    }
     const key = opKey(app, environment);
     if (probing.has(key)) return;
     probing.add(key);
     setDeleteBusy(app, environment, true);
-    void probeDeleteConflict(context, {
-      repo: options.repo,
-      environment,
-      application: app
-    }).then((result) => {
-      probing.delete(key);
-      setDeleteBusy(app, environment, false);
-      if (!entry.active) return;
-      // A delete that failed for any other reason is an ordinary delete again,
-      // and forcing is never offered without the server's proof.
-      if (!result.conflict || !forceConfirm) {
-        dialog.open(app, environment);
+    // Disabling the row's button while the inventory loads drops focus to the
+    // document, and the dialog captures what to restore on close as it opens.
+    // Hand focus back to the invoking button first so Escape returns there.
+    const openDialog = (resources: readonly unknown[]): void => {
+      context.focus.focus(invoker);
+      dialog.open(app, environment, resources);
+    };
+    void loadDeletionInventory(app, environment).then((resources) => {
+      if (rowStatus(app, environment) !== DELETE_FAILED_STATUS) {
+        probing.delete(key);
+        setDeleteBusy(app, environment, false);
+        if (!entry.active) return;
+        openDialog(resources);
         return;
       }
-      forceConfirm.show({
-        ...forceDeletePrompt(
-          app,
-          environment,
-          result.resourceState,
-          result.forced
-        ),
-        onConfirm: () => runDelete(app, environment, true)
+      void probeDeleteConflict(context, {
+        repo: options.repo,
+        environment,
+        application: app
+      }).then((result) => {
+        probing.delete(key);
+        setDeleteBusy(app, environment, false);
+        if (!entry.active) return;
+        // A delete that failed for any other reason is an ordinary delete again,
+        // and forcing is never offered without the server's proof.
+        if (!result.conflict || !forceConfirm) {
+          openDialog(resources);
+          return;
+        }
+        forceConfirm.show({
+          ...forceDeletePrompt(
+            app,
+            environment,
+            result.resourceState,
+            result.forced
+          ),
+          onConfirm: () => runDelete(app, environment, true)
+        });
       });
     });
   };
