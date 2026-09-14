@@ -1,7 +1,15 @@
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildRadiusAppProvenanceTags } from "../../azure-oidc.js";
-import { createOperation, prepareProviderMutation } from "../../operations.js";
+import {
+  createOperation,
+  getAzureAppCreateContinuation,
+  prepareProviderMutation,
+  requireInput,
+  resumeAfterInput,
+  setAzureAppCreateContinuation
+} from "../../operations.js";
+import type { AzureAppCreateContinuation } from "../../azure-app-create-continuation.js";
 import { createRequestContext } from "../request-context.js";
 import { ENTRA_APP_RETENTION_NOTICE } from "./azure-auto-setup-application.js";
 import {
@@ -16,11 +24,14 @@ import type {
   AzureAutoSetupOperation
 } from "./azure-auto-setup-types.js";
 import { createAzureAutoSetupTestDependencies } from "../../../test/support/server/azure-auto-setup.js";
+import { successfulSelectedGhExecutor } from "../../../test/support/server/selected-gh.js";
+import type { SelectedGhExecutor } from "../../gh.js";
 
 const SUBSCRIPTION = "22222222-2222-2222-2222-222222222222";
 const TENANT = "11111111-1111-1111-1111-111111111111";
 const APP_ID = "33333333-3333-3333-3333-333333333333";
 const USER_ID = "44444444-4444-4444-4444-444444444444";
+const SMR = "99999999-9999-9999-9999-999999999999";
 const AZURE_USER = { type: "user", name: "dev@contoso.com" };
 
 describe("Azure account identity parsing", () => {
@@ -160,6 +171,7 @@ function orchestrationHarness(
     hasWarnings?: boolean;
     persist?: () => Promise<void>;
     addLegacyStep?: AzureAutoSetupDependencies["operations"]["addLegacyStep"];
+    selectedExecutor?: SelectedGhExecutor;
   } = {}
 ) {
   const operation = options.operation ?? {
@@ -252,6 +264,8 @@ function orchestrationHarness(
           events.push("persist");
         }),
       report: (diagnostic) => events.push(`report:${diagnostic.code}`),
+      getAzureAppCreateContinuation,
+      setAzureAppCreateContinuation,
       enterStage: () => events.push("enter-stage"),
       setStageState: (_operation, _stage, state) =>
         events.push(`stage:${state}`),
@@ -261,10 +275,18 @@ function orchestrationHarness(
         ((_operation, text) => {
           events.push(`step:${text}`);
         }),
-      resumeAfterInput: () => events.push("resume"),
-      requireInput: () => events.push("require-input")
+      resumeAfterInput: (candidate) => {
+        events.push("resume");
+        resumeAfterInput(candidate);
+      },
+      requireInput: (candidate, input) => {
+        events.push("require-input");
+        requireInput(candidate, input);
+      }
     },
     external: {
+      getSelectedGitHubExecutor: () =>
+        options.selectedExecutor ?? successfulSelectedGhExecutor(),
       getGitHubIdentity:
         options.identity ??
         (async () => {
@@ -816,6 +838,419 @@ describe("POST /api/azure-auto-setup orchestration (SU-08)", () => {
     expect(response.status).toBe(200);
     expect(test.events).toContain("resume");
   });
+
+  async function smrResumeJourney(
+    mutateContinuation?: (
+      operation: AzureAutoSetupOperation,
+      continuation: AzureAppCreateContinuation
+    ) => void
+  ) {
+    const operation = createOperation({
+      operationId: "op_smr_resume",
+      provider: "azure",
+      repo: "octo/app",
+      environment: "dev"
+    }) as AzureAutoSetupOperation;
+    operation.currentStage = "authorize_identity";
+    const azCalls: string[] = [];
+    const githubCalls: string[] = [];
+    let verifyCalls = 0;
+    let repoPreflightCalls = 0;
+    let packagePreflightCalls = 0;
+    const selectedExecutor = {
+      ...successfulSelectedGhExecutor(),
+      verifyIdentity: async () => {
+        verifyCalls += 1;
+      }
+    };
+    const test = orchestrationHarness({
+      operation,
+      getOperation: () => operation,
+      selectedExecutor,
+      preflightRepoAdmin: async () => {
+        repoPreflightCalls += 1;
+        return "";
+      },
+      preflightGhcrPackageWriteAccess: async () => {
+        packagePreflightCalls += 1;
+        return { ok: true };
+      },
+      runGitHubJson: async (path) => {
+        githubCalls.push(path);
+        if (path === "/repos/octo/app") {
+          return {
+            ok: true,
+            status: 200,
+            json: {
+              full_name: "octo/app",
+              id: 5,
+              owner: { id: 7 }
+            }
+          };
+        }
+        if (path === "/repos/octo/app/actions/oidc/customization/sub") {
+          return { ok: false, status: 404, json: null };
+        }
+        if (
+          path === "/repos/octo/app/environments/dev/variables/AZURE_CLIENT_ID"
+        ) {
+          return { ok: false, status: 404, json: null };
+        }
+        throw new Error(`unscripted GitHub call: ${path}`);
+      },
+      runAz: async (args) => {
+        const line = args.join(" ");
+        azCalls.push(line);
+        if (line.startsWith("account set ")) {
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (line === "account show --output json") {
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              id: SUBSCRIPTION,
+              tenantId: TENANT,
+              user: AZURE_USER
+            }),
+            stderr: ""
+          };
+        }
+        if (line.startsWith("ad app list ")) {
+          return { code: 0, stdout: "[]", stderr: "" };
+        }
+        if (line.startsWith("ad signed-in-user show ")) {
+          return { code: 0, stdout: USER_ID, stderr: "" };
+        }
+        if (line.startsWith("ad app create ")) {
+          return line.includes("--service-management-reference") ?
+              {
+                code: 1,
+                stdout: "",
+                stderr:
+                  "ERROR: (Authorization_RequestDenied) Insufficient privileges to complete the operation."
+              }
+            : {
+                code: 1,
+                stdout: "",
+                stderr:
+                  "ServiceManagementReference is required by directory policy"
+              };
+        }
+        throw new Error(`unscripted az call: ${line}`);
+      }
+    });
+    const setup = {
+      ...VALID_SETUP,
+      tenantId: TENANT
+    };
+    const first = await invoke(JSON.stringify(setup), test.dependencies);
+    const firstBody = await first.json();
+    const continuation = getAzureAppCreateContinuation(operation);
+    if (!continuation) {
+      throw new Error("The first SMR prompt did not save its continuation.");
+    }
+    mutateContinuation?.(operation, continuation);
+    resumeAfterInput(operation);
+    const second = await invoke(
+      JSON.stringify({
+        ...setup,
+        operationId: operation.operationId,
+        serviceManagementReference: SMR
+      }),
+      test.dependencies
+    );
+    return {
+      operation,
+      first,
+      firstBody,
+      second,
+      secondBody: await second.json(),
+      azCalls,
+      githubCalls,
+      verifyCalls,
+      repoPreflightCalls,
+      packagePreflightCalls
+    };
+  }
+
+  it("persists the SMR checkpoint privately and resumes directly at recoverable app creation", async () => {
+    const result = await smrResumeJourney();
+
+    expect(result.first.status).toBe(400);
+    expect(result.firstBody).toMatchObject({
+      code: "service-management-reference-required",
+      inputRequired: true,
+      operationId: "op_smr_resume"
+    });
+    expect(JSON.stringify(result.firstBody)).not.toContain(
+      "appCreateContinuation"
+    );
+    expect(JSON.stringify(result.firstBody)).not.toContain(
+      "ServiceManagementReference is required by directory policy"
+    );
+    expect(result.second.status).toBe(400);
+    expect(result.secondBody).toMatchObject({ code: "app-create-failed" });
+    expect(result.verifyCalls).toBe(1);
+    expect(result.repoPreflightCalls).toBe(1);
+    expect(result.packagePreflightCalls).toBe(1);
+    expect(
+      result.azCalls.filter((line) => line.startsWith("account set "))
+    ).toHaveLength(1);
+    expect(
+      result.azCalls.filter((line) => line === "account show --output json")
+    ).toHaveLength(1);
+    expect(
+      result.azCalls.filter((line) => line.startsWith("ad app list "))
+    ).toHaveLength(1);
+    expect(
+      result.azCalls.filter((line) =>
+        line.startsWith("ad signed-in-user show ")
+      )
+    ).toHaveLength(1);
+    expect(
+      result.githubCalls.filter((path) => path === "/repos/octo/app")
+    ).toHaveLength(1);
+    expect(result.operation.azureAppCreateContinuation).toBeUndefined();
+  });
+
+  const fallbackMutations: Array<
+    [
+      string,
+      (
+        operation: AzureAutoSetupOperation,
+        continuation: AzureAppCreateContinuation
+      ) => void
+    ]
+  > = [
+    [
+      "missing context",
+      (operation) => {
+        delete operation.azureAppCreateContinuation;
+      }
+    ],
+    [
+      "an obsolete schema",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          schemaVersion: 0
+        };
+      }
+    ],
+    [
+      "malformed context",
+      (operation) => {
+        operation.azureAppCreateContinuation = { schemaVersion: 1 };
+      }
+    ],
+    [
+      "operation identity",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          operationId: "op_other"
+        };
+      }
+    ],
+    [
+      "SMR prompt",
+      (operation) => {
+        operation.inputRequired = {
+          ...(operation.inputRequired as Record<string, unknown>),
+          message: "Choose an App Registration."
+        };
+      }
+    ],
+    [
+      "GitHub executor",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          githubExecutor: {
+            ...continuation.githubExecutor,
+            login: "other"
+          }
+        };
+      }
+    ],
+    [
+      "repository",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          request: { ...continuation.request, repo: "octo/other" }
+        };
+      }
+    ],
+    [
+      "environment",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          request: { ...continuation.request, environment: "prod" }
+        };
+      }
+    ],
+    [
+      "operation environment",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          request: {
+            ...continuation.request,
+            operationEnvironment: "prod"
+          }
+        };
+      }
+    ],
+    [
+      "requested subscription",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          request: {
+            ...continuation.request,
+            requestedSubscriptionId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+          }
+        };
+      }
+    ],
+    [
+      "resolved subscription",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          resolved: {
+            ...continuation.resolved,
+            subscriptionId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+          }
+        };
+      }
+    ],
+    [
+      "requested tenant",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          request: {
+            ...continuation.request,
+            requestedTenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+          }
+        };
+      }
+    ],
+    [
+      "resolved tenant",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          resolved: {
+            ...continuation.resolved,
+            tenantId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+          }
+        };
+      }
+    ],
+    [
+      "resource group",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          request: {
+            ...continuation.request,
+            resourceGroup: "rg-other"
+          }
+        };
+      }
+    ],
+    [
+      "cluster resource group",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          request: {
+            ...continuation.request,
+            clusterResourceGroup: "rg-other"
+          }
+        };
+      }
+    ],
+    [
+      "cluster",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          request: { ...continuation.request, clusterName: "aks-other" }
+        };
+      }
+    ],
+    [
+      "app name",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          resolved: {
+            ...continuation.resolved,
+            appName: "radius-other"
+          }
+        };
+      }
+    ],
+    [
+      "app selection",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          request: { ...continuation.request, createNewApp: true }
+        };
+      }
+    ],
+    [
+      "OIDC context",
+      (operation, continuation) => {
+        operation.azureAppCreateContinuation = {
+          ...continuation,
+          resolved: {
+            ...continuation.resolved,
+            oidc: {
+              ...continuation.resolved.oidc,
+              fullName: "octo/other"
+            }
+          }
+        };
+      }
+    ]
+  ];
+
+  it.each(fallbackMutations)(
+    "falls back through every safety check for %s",
+    async (_label, mutateContinuation) => {
+      const result = await smrResumeJourney(mutateContinuation);
+
+      expect(result.second.status).toBe(400);
+      expect(result.secondBody).toMatchObject({ code: "app-create-failed" });
+      expect(result.verifyCalls).toBe(2);
+      expect(result.repoPreflightCalls).toBe(2);
+      expect(result.packagePreflightCalls).toBe(2);
+      expect(
+        result.azCalls.filter((line) => line.startsWith("account set "))
+      ).toHaveLength(2);
+      expect(
+        result.azCalls.filter((line) => line === "account show --output json")
+      ).toHaveLength(2);
+      expect(
+        result.azCalls.filter((line) => line.startsWith("ad app list "))
+      ).toHaveLength(2);
+      expect(
+        result.azCalls.filter((line) =>
+          line.startsWith("ad signed-in-user show ")
+        )
+      ).toHaveLength(2);
+      expect(
+        result.githubCalls.filter((path) => path === "/repos/octo/app")
+      ).toHaveLength(2);
+    }
+  );
 
   it("adopts the scheduler's existing operation before input is required", async () => {
     const existing: AzureAutoSetupOperation = {
