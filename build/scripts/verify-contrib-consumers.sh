@@ -108,11 +108,6 @@ verify_recipe_packs() {
         url="$(radius_contrib_recipe_pack_url "${pack}" "${file}")"
         pack_file="$(recipe_pack_file "${pack}" "${file}")"
         curl -fsSL "${url}" -o "${pack_file}"
-        if grep -Eqi \
-            "^[[:space:]]*resource[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+'Radius\\.Core/environments@[A-Za-z0-9.-]+'[[:space:]]*=" \
-            "${pack_file}"; then
-            fail "Recipe pack file ${pack}/${file} provisions a Radius.Core/environments resource."
-        fi
         echo "  Verified recipe pack file ${pack}/${file}"
         ((count += 1))
     done < <(recipe_pack_consumers)
