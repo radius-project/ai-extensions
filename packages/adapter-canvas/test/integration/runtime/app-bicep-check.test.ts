@@ -1181,25 +1181,67 @@ test.each(["note", "none"])(
   }
 );
 
-test("treats an ID-backed informational diagnostic as unavailable", () => {
-  const directory = temporaryDirectory();
-  const output = sarif([
-    {
-      level: "note",
-      ruleId: "compiler-note",
-      message: { id: "compiler-note-message", arguments: ["unused"] }
-    }
-  ]);
-  const result = runChecker(directory, fakeBicep(directory, output, 0));
+test.each(["note", "none"])(
+  "accepts an ID-backed %s diagnostic without inline text",
+  (level) => {
+    const directory = temporaryDirectory();
+    const result = runChecker(
+      directory,
+      fakeBicep(
+        directory,
+        sarif([
+          {
+            level,
+            ruleId: "compiler-message",
+            message: { id: "compiler-message-id", arguments: ["unused"] }
+          }
+        ]),
+        0
+      )
+    );
 
-  assert.equal(result.status, 2);
-  assert.equal(result.stderr, `${output}\n`);
-  assert.doesNotMatch(result.stderr, /Bicep reported a diagnostic/u);
+    assert.equal(result.status, 0);
+    assert.match(
+      result.stderr,
+      new RegExp(
+        `${level} compiler-message: Bicep reported a diagnostic\\.`,
+        "u"
+      )
+    );
+  }
+);
+
+test("accepts a Markdown-backed informational diagnostic without inline text", () => {
+  const directory = temporaryDirectory();
+  const result = runChecker(
+    directory,
+    fakeBicep(
+      directory,
+      sarif([
+        {
+          level: "note",
+          ruleId: "compiler-note",
+          message: { markdown: "Compiler note." }
+        }
+      ]),
+      0
+    )
+  );
+
+  assert.equal(result.status, 0);
+  assert.match(
+    result.stderr,
+    /note compiler-note: Bicep reported a diagnostic\./u
+  );
 });
 
-test.each(["warning", "error"])(
-  "treats an ID-backed %s as unavailable without repair guidance",
-  (level) => {
+test.each([
+  { name: "diagnostic with omitted level", level: undefined },
+  { name: "warning", level: "warning" },
+  { name: "error", level: "error" }
+])(
+  "treats an ID-backed $name as unavailable without repair guidance",
+  ({ level }) => {
     const directory = temporaryDirectory();
     stagedRun(directory, {
       attempts: REPAIR_COMPILE_LIMIT - 1,
@@ -1207,7 +1249,7 @@ test.each(["warning", "error"])(
     });
     const output = sarif([
       {
-        level,
+        ...(level === undefined ? {} : { level }),
         ruleId: "compiler-message",
         message: { id: "compiler-message-id" }
       }
@@ -1219,7 +1261,7 @@ test.each(["warning", "error"])(
     assert.equal(result.stderr, `${output}\n`);
     assert.deepEqual(readRepair(directory), {
       attempts: REPAIR_COMPILE_LIMIT,
-      fingerprint: null
+      fingerprint: "previous model error"
     });
     assert.doesNotMatch(result.stderr, /same compiler failure/u);
     assert.doesNotMatch(result.stderr, /materially different fix/u);
@@ -1379,10 +1421,6 @@ it.each([
     result: { level: "note", message: "compiler note" }
   },
   {
-    name: "a message without text",
-    result: { level: "note", message: { markdown: "Compiler note." } }
-  },
-  {
     name: "non-string message text",
     result: { level: "note", message: { text: null } }
   },
@@ -1509,6 +1547,36 @@ test("fails closed when compiled output is not valid JSON", () => {
 
   assert.equal(result.status, 2);
   assert.match(result.stderr, /Bicep did not return valid compiled JSON/u);
+});
+
+test("reports a compiler warning but returns unavailable when compiled JSON is invalid", () => {
+  const directory = temporaryDirectory();
+  stagedRun(directory, { attempts: 1, fingerprint: "previous model error" });
+  const result = runChecker(
+    directory,
+    fakeBicep(
+      directory,
+      sarif([
+        {
+          level: "warning",
+          ruleId: "compiler-warning",
+          message: { text: "Compiler warning." }
+        }
+      ]),
+      0,
+      "not json"
+    )
+  );
+
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /warning compiler-warning/u);
+  assert.match(result.stderr, /Bicep did not return valid compiled JSON/u);
+  assert.deepEqual(readRepair(directory), {
+    attempts: 2,
+    fingerprint: "previous model error"
+  });
+  assert.doesNotMatch(result.stderr, /same compiler failure/u);
+  assert.doesNotMatch(result.stderr, /repair budget is now spent/u);
 });
 
 it.each([
@@ -2265,6 +2333,34 @@ describe("repair budget", () => {
     assert.match(second.stderr, /materially different fix/u);
   });
 
+  it("recognizes a model failure again after an unavailable check", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+
+    const first = runChecker(directory, fakeBicep(directory, failure, 1));
+    const unavailable = runChecker(
+      directory,
+      fakeBicep(directory, sarif([]), 7)
+    );
+    const repeated = runChecker(
+      directory,
+      fakeBicep(directory, shiftedFailure, 1)
+    );
+
+    assert.equal(first.status, 1);
+    assert.equal(unavailable.status, 2);
+    assert.doesNotMatch(unavailable.stderr, /same compiler failure/u);
+    assert.doesNotMatch(unavailable.stderr, /materially different fix/u);
+    assert.doesNotMatch(unavailable.stderr, /repair budget is now spent/u);
+    assert.equal(repeated.status, 1);
+    assert.match(repeated.stderr, /same compiler failure/u);
+    assert.match(repeated.stderr, /materially different fix/u);
+    assert.deepEqual(readRepair(directory), {
+      attempts: 3,
+      fingerprint: fingerprintCompilerOutput(first.stderr)
+    });
+  });
+
   it("does not report a changed failure as repeated", () => {
     const directory = temporaryDirectory();
     stagedRun(directory);
@@ -2288,7 +2384,7 @@ describe("repair budget", () => {
     assert.equal(second.status, 2);
     assert.deepEqual(readRepair(directory), {
       attempts: 3,
-      fingerprint: null
+      fingerprint: "previous model error"
     });
     for (const result of [first, second]) {
       assert.match(result.stderr, /Bicep exited with status 7/u);
@@ -2308,7 +2404,7 @@ describe("repair budget", () => {
     assert.equal(result.status, 2);
     assert.deepEqual(readRepair(directory), {
       attempts: 2,
-      fingerprint: null
+      fingerprint: "previous model error"
     });
     assert.equal(result.stderr, `${malformed}\n`);
     assert.doesNotMatch(result.stderr, /same compiler failure/u);
@@ -2381,7 +2477,7 @@ describe("repair budget", () => {
     assert.equal(result.status, 2);
     assert.deepEqual(readRepair(directory), {
       attempts: REPAIR_COMPILE_LIMIT,
-      fingerprint: null
+      fingerprint: "previous model error"
     });
     assert.doesNotMatch(result.stderr, /same compiler failure/u);
     assert.doesNotMatch(result.stderr, /materially different fix/u);
@@ -2492,6 +2588,8 @@ describe("repair budget", () => {
     assert.match(result.stderr, /do not write the origin record/u);
     assert.match(result.stderr, /do not publish the run/u);
     assert.match(result.stderr, /Report this exact failure/u);
+    assert.match(result.stderr, /Validation did not run/u);
+    assert.doesNotMatch(result.stderr, /application model was not compiled/u);
     assert.doesNotMatch(result.stderr, /promote-app-model\.mjs --begin/u);
     assert.doesNotMatch(result.stderr, /BCP057/u);
     // The unusable record is left alone rather than overwritten, because it
@@ -2557,6 +2655,42 @@ describe("repair budget", () => {
       }
     }
   );
+
+  it("returns unavailable when an unexpected checker exception escapes main", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory, { attempts: 1, fingerprint: "previous model error" });
+    const prefix =
+      '{"resources":{"nested":{"type":"Microsoft.Resources/deployments","properties":{"template":';
+    const compiledOutput =
+      prefix.repeat(8_500) + '{"resources":{}}' + "}}}}".repeat(8_500);
+    const env = fakeBicep(directory, sarif([]), 0);
+    const compiled = path.join(directory, "compiled.json");
+    fs.writeFileSync(compiled, compiledOutput);
+    fs.writeFileSync(
+      path.join(directory, "build"),
+      [
+        'const fs = require("node:fs");',
+        `fs.writeFileSync(1, fs.readFileSync(${JSON.stringify(compiled)}));`,
+        `fs.writeFileSync(2, ${JSON.stringify(sarif([]))});`,
+        ""
+      ].join("\n")
+    );
+
+    const result = runChecker(directory, env);
+
+    assert.equal(result.status, 2);
+    assert.match(
+      result.stderr,
+      /RangeError: Maximum call stack size exceeded/u
+    );
+    assert.doesNotMatch(result.stderr, /same compiler failure/u);
+    assert.doesNotMatch(result.stderr, /materially different fix/u);
+    assert.doesNotMatch(result.stderr, /repair budget is now spent/u);
+    assert.deepEqual(readRepair(directory), {
+      attempts: 2,
+      fingerprint: "previous model error"
+    });
+  });
 
   it.runIf(unwritable)(
     "keeps refusing rather than allowing an uncounted loop",
@@ -2828,6 +2962,62 @@ function rabbitMqWithRawPassword(): string {
 }
 
 describe("secure parameter targets", () => {
+  it("reports compiler warnings and every compiled-output policy failure from one attempt", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory);
+    stagedResolvedTypes(
+      directory,
+      resolvedTypes({ [rabbitMqType]: { password: false } })
+    );
+    const compiledOutput = template(
+      {
+        image: imageResource(
+          "git::https://github.com/example/app.git?ref=deadbeef"
+        ),
+        rabbitmq: {
+          type: rabbitMqType,
+          properties: {
+            properties: {
+              password: "[parameters('credential')]"
+            }
+          }
+        },
+        web: containerEnv({
+          A: { value: "$(Z)" },
+          Z: { value: "later" }
+        })
+      },
+      { credential: securePassword }
+    );
+
+    const result = runChecker(
+      directory,
+      fakeBicep(
+        directory,
+        sarif([
+          {
+            level: "warning",
+            ruleId: "compiler-warning",
+            message: { text: "Compiler warning." }
+          }
+        ]),
+        0,
+        compiledOutput
+      )
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /warning compiler-warning/u);
+    assert.match(result.stderr, /container-image-build-source/u);
+    assert.match(result.stderr, /source-code-reference/u);
+    assert.match(result.stderr, /runtime-variable/u);
+    assert.match(result.stderr, /secure-parameter-target/u);
+    assert.deepEqual(readRepair(directory), {
+      attempts: 1,
+      fingerprint: fingerprintCompilerOutput(result.stderr)
+    });
+  });
+
   it("flags a secure parameter assigned to a property the schema leaves plain", () => {
     const directory = temporaryDirectory();
     stagedRun(directory);
@@ -2982,10 +3172,48 @@ describe("secure parameter targets", () => {
     assert.doesNotMatch(result.stderr, /promote-app-model\.mjs --begin/u);
     assert.deepEqual(readRepair(directory), {
       attempts: 2,
-      fingerprint: null
+      fingerprint: "previous model error"
     });
     assert.doesNotMatch(result.stderr, /same compiler failure/u);
     assert.doesNotMatch(result.stderr, /materially different fix/u);
+    assert.doesNotMatch(result.stderr, /repair budget is now spent/u);
+  });
+
+  it("reports a compiler warning but returns unavailable when policy evidence is unusable", () => {
+    const directory = temporaryDirectory();
+    stagedRun(directory, {
+      attempts: 1,
+      fingerprint: "previous model error"
+    });
+    stagedResolvedTypes(directory, "{not json");
+    const compiledOutput = template({
+      rabbitmq: radiusResource(rabbitMqType, { queue: "orders" })
+    });
+
+    const result = runChecker(
+      directory,
+      fakeBicep(
+        directory,
+        sarif([
+          {
+            level: "warning",
+            ruleId: "compiler-warning",
+            message: { text: "Compiler warning." }
+          }
+        ]),
+        0,
+        compiledOutput
+      )
+    );
+
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /warning compiler-warning/u);
+    assert.match(result.stderr, /error checker-unavailable/u);
+    assert.deepEqual(readRepair(directory), {
+      attempts: 2,
+      fingerprint: "previous model error"
+    });
+    assert.doesNotMatch(result.stderr, /same compiler failure/u);
     assert.doesNotMatch(result.stderr, /repair budget is now spent/u);
   });
 
@@ -3088,7 +3316,7 @@ describe("secure parameter targets", () => {
     assert.match(result.stderr, /could not be read/u);
     assert.deepEqual(readRepair(directory), {
       attempts: REPAIR_COMPILE_LIMIT,
-      fingerprint: null
+      fingerprint: "previous model error"
     });
     assert.doesNotMatch(result.stderr, /same compiler failure/u);
     assert.doesNotMatch(result.stderr, /materially different fix/u);

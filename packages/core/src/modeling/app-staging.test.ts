@@ -481,7 +481,7 @@ describe("evaluateRepairAttempt", () => {
 });
 
 describe("nextRepairState", () => {
-  it("counts the attempt and keeps the failure fingerprint", () => {
+  it("counts the attempt and stores the supplied failure fingerprint", () => {
     expect(nextRepairState({ attempts: 1, fingerprint: "old" }, "new")).toEqual(
       {
         attempts: 2,
@@ -490,7 +490,16 @@ describe("nextRepairState", () => {
     );
   });
 
-  it("clears the fingerprint when validation has no model diagnostic", () => {
+  it("retains the fingerprint when unavailable validation supplies it again", () => {
+    expect(nextRepairState({ attempts: 2, fingerprint: "old" }, "old")).toEqual(
+      {
+        attempts: 3,
+        fingerprint: "old"
+      }
+    );
+  });
+
+  it("clears the fingerprint when successful validation supplies null", () => {
     expect(nextRepairState({ attempts: 2, fingerprint: "old" }, null)).toEqual({
       attempts: 3,
       fingerprint: null

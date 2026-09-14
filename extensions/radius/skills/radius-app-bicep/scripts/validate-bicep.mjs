@@ -63,8 +63,8 @@ function parseRepairState(value) {
   const attempts = value.attempts;
   const fingerprint = value.fingerprint;
   // The two fields are read as one fact, not two. A fingerprint only means
-  // "what the previous attempt failed with", so without a usable count there is
-  // no previous attempt for it to describe, and keeping it would report the
+  // "the most recent actionable model failure", so without a usable count there
+  // is no earlier attempt for it to describe, and keeping it would report the
   // first compile of the run as a repeat.
   if (
     typeof attempts !== "number" ||
@@ -195,7 +195,7 @@ function reserveAttempt(run, fingerprint) {
 function brokenRecordMessage(file, detail) {
   return (
     `The repair budget for this modeling run could not be recorded in ${file}${detail ? `: ${detail}` : ""}. ` +
-    "The application model was not compiled, because a budget that cannot be counted cannot be enforced, " +
+    "Validation did not run, because a budget that cannot be counted cannot be enforced, " +
     "and an uncounted repair loop is what this limit exists to prevent. " +
     "Abort the staged run: do not retry validation, do not modify the current model, do not start another modeling run, " +
     "do not write the origin record, and do not publish the run. " +
@@ -208,12 +208,20 @@ function isUsableDiagnostic(result) {
     return false;
   }
 
+  const hasText =
+    typeof result.message.text === "string" &&
+    result.message.text.trim() !== "";
+  const informational = result.level === "note" || result.level === "none";
   return (
     (result.level === undefined ||
       ["none", "note", "warning", "error"].includes(result.level)) &&
     (result.ruleId === undefined || typeof result.ruleId === "string") &&
-    typeof result.message.text === "string" &&
-    result.message.text.trim() !== ""
+    (hasText ||
+      (informational &&
+        ((typeof result.message.markdown === "string" &&
+          result.message.markdown.trim() !== "") ||
+          (typeof result.message.id === "string" &&
+            result.message.id.trim() !== ""))))
   );
 }
 
@@ -1029,10 +1037,11 @@ function check(app, staged) {
   }
 
   compilerFindings.forEach(printDiagnostic);
-  if (compilerFindings.some(isFailure)) {
-    return EXIT_MODEL_INVALID;
-  }
+  const compilerFailed = compilerFindings.some(isFailure);
   if (compiled.status !== EXIT_SUCCESS) {
+    if (compilerFailed) {
+      return EXIT_MODEL_INVALID;
+    }
     report(
       `Bicep exited with status ${compiled.status === null ? "null" : compiled.status}` +
         `${compiled.signal ? ` after receiving signal ${compiled.signal}` : ""} without returning an actionable warning or error diagnostic.`
@@ -1078,7 +1087,8 @@ function check(app, staged) {
     resolvedTypes
   );
   return (
-      invalidBuildSource ||
+      compilerFailed ||
+        invalidBuildSource ||
         invalidSourceReference ||
         unresolvedRuntimeVariable ||
         misplacedSecureParameter
@@ -1118,10 +1128,14 @@ function main() {
   }
 
   const status = check(app, true);
+  // An unavailable check produced no new model verdict, so keep the last model
+  // failure for comparison with the next completed validation. Success clears
+  // it because there is no longer a failed model to compare.
   const fingerprint =
     status === EXIT_MODEL_INVALID ?
       fingerprintCompilerOutput(reported.join("\n"))
-    : null;
+    : status === EXIT_SUCCESS ? null
+    : run.state.fingerprint;
   if (
     status === EXIT_MODEL_INVALID &&
     isRepeatedFailure(run.state, fingerprint)
@@ -1154,4 +1168,9 @@ function main() {
   return status;
 }
 
-process.exitCode = main();
+try {
+  process.exitCode = main();
+} catch (error) {
+  console.error(error);
+  process.exitCode = EXIT_CHECK_UNAVAILABLE;
+}

@@ -400,7 +400,8 @@ export interface RepairState {
   // Validation attempts already reserved, including unavailable or interrupted
   // checks.
   attempts: number;
-  // Last actionable model-failure fingerprint, or null otherwise.
+  // Last actionable model-failure fingerprint. Unavailable checks retain it;
+  // successful validation clears it.
   fingerprint: string | null;
 }
 
@@ -432,8 +433,8 @@ export function parseRepairState(value: unknown): RepairState {
   const attempts = record.attempts;
   const fingerprint = record.fingerprint;
   // The two fields are read as one fact, not two. A fingerprint only means
-  // "what the previous attempt failed with", so without a usable count there is
-  // no previous attempt for it to describe, and keeping it would report the
+  // "the most recent actionable model failure", so without a usable count there
+  // is no earlier attempt for it to describe, and keeping it would report the
   // first compile of the run as a repeat — telling the agent its last fix was
   // wrong when it has not made one yet.
   if (
@@ -466,9 +467,9 @@ export function evaluateRepairAttempt(state: RepairState): RepairDecision {
   return { verdict: "allowed", allowed: true, attempt, reason: "" };
 }
 
-// The run record's repair field after a reserved validation attempt. The
-// fingerprint is the last actionable model-failure fingerprint, or null
-// otherwise.
+// The run record's repair field after a reserved validation attempt. Callers
+// supply a new model-failure fingerprint, retain the previous one when
+// validation is unavailable, or clear it after successful validation.
 export function nextRepairState(
   state: RepairState,
   fingerprint: string | null
