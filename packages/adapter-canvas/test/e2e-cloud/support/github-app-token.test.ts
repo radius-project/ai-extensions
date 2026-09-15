@@ -177,7 +177,7 @@ describe("mintGitHubAppToken", () => {
       permissions: {
         actions: "write",
         actions_variables: "write",
-        administration: "read",
+        administration: "write",
         contents: "write",
         deployments: "read",
         environments: "write",
