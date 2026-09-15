@@ -228,8 +228,8 @@ describe("cloud-e2e.yml", () => {
   });
 
   it("isolates package credentials while using OIDC and an installation token", async () => {
-    // No stored bearer token exists to leak: both access credentials are minted
-    // per run and expire with it. The App signing key remains a masked secret.
+    // Azure and repository access credentials are minted per run and expire
+    // with it. The App signing key and package PAT remain masked secrets.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const used = steps(workflow.jobs?.["cloud-e2e"]).map((step) => step.uses);
     expect(used.some((use) => use?.startsWith("azure/login@"))).toBe(true);
@@ -246,26 +246,32 @@ describe("cloud-e2e.yml", () => {
       CLOUD_E2E_BOT_INSTALLATION_ID:
         "${{ steps.app-token.outputs.installation-id }}",
       CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}",
-      GH_PACKAGES_TOKEN: "${{ secrets.CLOUD_E2E_PACKAGES_TOKEN }}",
+      GH_PACKAGES_TOKEN: "${{ secrets.GH_RAD_CI_BOT_PAT }}",
       GH_PACKAGES_USER: "${{ secrets.CLOUD_E2E_PACKAGES_USER }}"
     });
     expect(run?.env?.GH_TOKEN).toBe("${{ steps.app-token.outputs.token }}");
     expect(workflow.jobs?.["cloud-e2e"]?.permissions?.packages).toBeUndefined();
   });
 
-  it("requests every permission needed by workflow publication and secure deployment", async () => {
-    // Missing workflows permission hard-fails publication. Secure Bicep
-    // parameters also require the product to reconcile RADIUS_DEPLOY_PARAMS as
-    // an Environment secret before dispatch.
+  it("inherits the fixture-scoped App grants so actions variables remain available", async () => {
+    // The pinned token action cannot express the App's actions_variables
+    // permission. Passing any permission inputs would narrow the token and
+    // silently remove that grant, so the token must inherit the installation's
+    // already-reviewed permission union.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const token = steps(workflow.jobs?.["cloud-e2e"]).find((step) =>
       step.uses?.startsWith("actions/create-github-app-token@")
     );
-    expect(token?.with?.["permission-actions"]).toBe("write");
-    expect(token?.with?.["permission-deployments"]).toBe("read");
-    expect(token?.with?.["permission-workflows"]).toBe("write");
-    expect(token?.with?.["permission-environments"]).toBe("write");
-    expect(token?.with?.["permission-secrets"]).toBe("write");
+    expect(token?.with).toMatchObject({
+      "client-id": "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
+      owner: "${{ steps.fixture.outputs.owner }}",
+      repositories: "${{ steps.fixture.outputs.name }}"
+    });
+    expect(
+      Object.keys(token?.with ?? {}).filter((key) =>
+        key.startsWith("permission-")
+      )
+    ).toEqual([]);
   });
 
   it("stages and uploads one predictable diagnostics tree whether or not the run failed", async () => {
@@ -399,6 +405,16 @@ describe("cloud-e2e.yml", () => {
 });
 
 describe("cloud-e2e-cleanup.yml", () => {
+  it("requests Actions read access before listing fixture environments", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const token = steps(workflow.jobs?.purge).find((step) =>
+      step.uses?.startsWith("actions/create-github-app-token@")
+    );
+
+    expect(token?.with?.["permission-actions"]).toBe("read");
+    expect(token?.with?.["permission-environments"]).toBe("write");
+  });
+
   it("deletes tagged resource groups the suite creates without waiting for age", async () => {
     // The shared Radius purge job remains a safety net, but this workflow owns
     // test leaks first. The fixture tag is what stops a prefix match from

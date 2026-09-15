@@ -35,7 +35,8 @@ export interface DeployOutcomeStatusReader {
 export interface DeployOutcomeDependencies {
   settleDeployStatuses(
     resources: CanvasGraphResource[],
-    conclusion: string | null | undefined
+    conclusion: string | null | undefined,
+    radiusError?: string
   ): void;
   fetchRunLog(repo: string, runId: number | string): Promise<string | null>;
   extractGitHubActionsStepLog(
@@ -137,9 +138,18 @@ export function createDeployOutcomeService(
     return { deployed, graphStatus };
   };
 
+  // The failure description plus the exact Radius error it extracted. The error
+  // is returned rather than re-derived by the caller because both come from the
+  // same run-log read, and reading it twice would double the terminal stage's
+  // slowest external call.
+  interface FailureDescription {
+    message: string;
+    radiusError: string;
+  }
+
   const describeFailure = async (
     request: DeployOutcomeRequest
-  ): Promise<string> => {
+  ): Promise<FailureDescription> => {
     const { repo, runId, conclusion, steps, statusReader, log } = request;
     // Build a user-facing error from the failed step(s) + log.
     const failedSteps = steps.filter(
@@ -202,7 +212,7 @@ export function createDeployOutcomeService(
       repo +
       "/actions/runs/" +
       runId;
-    return dErr;
+    return { message: dErr, radiusError: detailBlock };
   };
 
   return {
@@ -243,10 +253,20 @@ export function createDeployOutcomeService(
       // The run's own conclusion is authoritative for the overall outcome: it
       // decides anything the published status left unfinished, without
       // overwriting a resource the producer already reported as terminal.
-      dependencies.settleDeployStatuses(resources, conclusion);
-      // Propagate onto output resources and generate portal links.
-      for (const resource of resources) {
-        if (resource.deployStatus) setStatus(resource, resource.deployStatus);
+      //
+      // A successful run needs nothing but its conclusion, so settle it now. A
+      // non-success run is settled further down instead, once the exact Radius
+      // error has been extracted from the run log, because that error is what
+      // a red node's message should say (Exception 5.1).
+      const propagate = (): void => {
+        // Propagate onto output resources and generate portal links.
+        for (const resource of resources) {
+          if (resource.deployStatus) setStatus(resource, resource.deployStatus);
+        }
+      };
+      if (conclusion === "success") {
+        dependencies.settleDeployStatuses(resources, conclusion);
+        propagate();
       }
 
       if (deployed) {
@@ -319,15 +339,19 @@ export function createDeployOutcomeService(
       // logs" symptom. Publishing the error first closes that window for both
       // the webview trigger and the deploy-request `.finally()` trigger.
       //
-      // But describeFailure's run-log read is unguarded, so guard it here: if it
-      // throws we must still settle this run as "failed" with a degraded message
-      // rather than let settle() reject. A rejection would both leave the panel
+      // The run-log read inside describeFailure is unguarded, so guard it here:
+      // if it throws we must still settle this run as "failed" with a degraded
+      // message rather than let settle() reject. A rejection would both leave
+      // the panel
       // non-terminal AND reach the monitor's `.catch`, which reclassifies the
       // run as run-unconfirmed — sending a run that actually concluded "failure"
       // down the informational notice path and telling the user it could not be
       // confirmed, instead of down the repair path it belongs to.
+      let radiusError = "";
       try {
-        entry.state.deployError = await describeFailure(request);
+        const described = await describeFailure(request);
+        entry.state.deployError = described.message;
+        radiusError = described.radiusError;
       } catch {
         entry.state.deployError =
           "Deployment failed" +
@@ -339,6 +363,14 @@ export function createDeployOutcomeService(
           request.runId +
           ".";
       }
+      // Settle the graph now that the exact Radius error is known, so every red
+      // node carries it — or "Deployment cancelled" / "Deployment timed out"
+      // when the run's conclusion, not a resource, decided the outcome
+      // (Exception 5.1). A node the producer already explained keeps its own
+      // message. Runs before the status flips to "failed" below, so the panel
+      // never observes a terminal deploy whose graph is still unsettled.
+      dependencies.settleDeployStatuses(resources, conclusion, radiusError);
+      propagate();
       // Stamp the drift prefix + kind last so it leads the message regardless of
       // which describeFailure path ran. The kind keeps the repair guard from
       // auto-redeploying a failure only the user can fix by re-verifying.

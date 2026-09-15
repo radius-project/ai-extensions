@@ -23,9 +23,9 @@ name: Cloud E2E
 #   4. The dedicated Cloud E2E GitHub App must be created, installed only on the
 #      fixture repository, and its client id and private key stored here as
 #      `CLOUD_E2E_BOT_CLIENT_ID` and `CLOUD_E2E_BOT_PRIVATE_KEY`.
-#   5. A dedicated machine or bot account with package access to the fixture
-#      owner's namespace must provide `CLOUD_E2E_PACKAGES_USER` and a classic
-#      PAT in `CLOUD_E2E_PACKAGES_TOKEN` with read/write/delete package scopes.
+#   5. The organization-level `GH_RAD_CI_BOT_PAT` secret must be shared with
+#      this repository. It is a classic PAT for `rad-ci-bot` with
+#      read/write/delete package scopes.
 #
 # The private fixture repository now exists and its immutable baseline is pinned
 # in source. While the wellknown-published variable is unavailable, the run
@@ -201,10 +201,12 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # A short-lived installation token, the pattern release.yml already uses,
-      # rather than a stored PAT. Every permission is requested explicitly: the
-      # token request fails outright if the installation does not carry one.
-      # In particular, missing `workflows: write` cannot silently divert the
-      # journey to its pull-request fallback.
+      # rather than a stored PAT. The App installation itself is restricted to
+      # this fixture repository and the reviewed permission union. Do not narrow
+      # the token here: actions/create-github-app-token v3.2.0 cannot express
+      # the `actions_variables` permission that environment variable management
+      # requires, while omitting the permission inputs inherits the App's exact
+      # installation grants.
       - name: Create a GitHub App token for the fixture repository
         id: app-token
         if: steps.fixture.outputs.configured == 'true'
@@ -214,15 +216,6 @@ jobs:
           private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
           owner: ${{ steps.fixture.outputs.owner }}
           repositories: ${{ steps.fixture.outputs.name }}
-          permission-actions: write
-          permission-administration: read
-          permission-contents: write
-          permission-deployments: read
-          permission-environments: write
-          permission-pull-requests: write
-          permission-secrets: write
-          permission-variables: write
-          permission-workflows: write
 
       - name: Run the cloud create-environment journey
         if: steps.fixture.outputs.configured == 'true'
@@ -242,7 +235,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # Playwright captures and removes the private key from its environment
           # before starting Canvas or any CLI child command.
-          GH_PACKAGES_TOKEN: ${{ secrets.CLOUD_E2E_PACKAGES_TOKEN }}
+          GH_PACKAGES_TOKEN: ${{ secrets.GH_RAD_CI_BOT_PAT }}
           GH_PACKAGES_USER: ${{ secrets.CLOUD_E2E_PACKAGES_USER }}
           CLOUD_E2E_BOT_CLIENT_ID: ${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}
           CLOUD_E2E_BOT_INSTALLATION_ID: ${{ steps.app-token.outputs.installation-id }}

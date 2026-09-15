@@ -73,13 +73,17 @@ export function readGitHubAppTokenConfig(
   };
 }
 
-export function takeGitHubAppTokenConfig(
+export function readPlaywrightGitHubAppTokenConfig(
   env: NodeJS.ProcessEnv = process.env
 ): GitHubAppTokenConfig | null {
   try {
     return readGitHubAppTokenConfig(env);
   } finally {
-    delete env.CLOUD_E2E_BOT_PRIVATE_KEY;
+    // Playwright loads test modules once to discover tests and again in a
+    // worker. Preserve the key for worker inheritance, then remove it before
+    // the worker starts any lifecycle subprocesses.
+    if (env.TEST_WORKER_INDEX !== undefined)
+      delete env.CLOUD_E2E_BOT_PRIVATE_KEY;
   }
 }
 

@@ -161,6 +161,7 @@ jobs:
           private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
           owner: ${{ steps.pin.outputs.owner }}
           repositories: ${{ steps.pin.outputs.name }}
+          permission-actions: read
           permission-contents: write
           permission-environments: write
           permission-pull-requests: write

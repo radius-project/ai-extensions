@@ -6,7 +6,8 @@ import { workspaceBranchForRepo } from "../workspace.js";
 import { pageShell } from "./shell.js";
 import { graphHeader, graphHeaderClose } from "./graph-header.js";
 import { GRAPH_DIFF_SUBTITLE } from "./fragments.js";
-import { inlineJson } from "./encoding.js";
+import { GRAPH_DIFF_STATE_ID } from "./browser-state-ids.js";
+import { renderPageState } from "./page-state.js";
 import { browserScriptTag } from "../browser/scripts.js";
 
 export function graphDiffPage(state: CanvasState = {}): string {
@@ -74,17 +75,15 @@ ${GRAPH_DIFF_SUBTITLE}
       }</div>
 <div id="diff-progress-steps" style="font-size:13px; color:var(--rad-text-tertiary); line-height:2;"></div>
 <div id="graph-container"></div>
-<div hidden id="radius-graph-diff-state">${escapeHtml(
-        inlineJson({
-          repo: targetRepo,
-          base: baseBranch,
-          head: headBranch,
-          workspaceBranch: workspaceBranchForRepo(state, targetRepo),
-          resources: [],
-          modelingError:
-            state?.diffModelingFailed && state.diffError ? state.diffError : ""
-        })
-      )}</div>
+${renderPageState(GRAPH_DIFF_STATE_ID, {
+  repo: targetRepo,
+  base: baseBranch,
+  head: headBranch,
+  workspaceBranch: workspaceBranchForRepo(state, targetRepo),
+  resources: [],
+  modelingError:
+    state?.diffModelingFailed && state.diffError ? state.diffError : ""
+})}
 ${browserScriptTag("graph-diff-page")}
 ${graphHeaderClose()}`
     );
@@ -151,17 +150,15 @@ ${
 }
 </div>
 
-<div hidden id="radius-graph-diff-state">${escapeHtml(
-      inlineJson({
-        repo: targetRepo,
-        base: baseBranch,
-        head: headBranch,
-        workspaceBranch: workspaceBranchForRepo(state, targetRepo),
-        resources,
-        modelingError:
-          state?.diffModelingFailed && state.diffError ? state.diffError : ""
-      })
-    )}</div>
+${renderPageState(GRAPH_DIFF_STATE_ID, {
+  repo: targetRepo,
+  base: baseBranch,
+  head: headBranch,
+  workspaceBranch: workspaceBranchForRepo(state, targetRepo),
+  resources,
+  modelingError:
+    state?.diffModelingFailed && state.diffError ? state.diffError : ""
+})}
 ${browserScriptTag("graph-diff-page")}
 ${graphHeaderClose()}`
   );

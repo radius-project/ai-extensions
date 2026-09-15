@@ -385,15 +385,15 @@ RF-09 owns page routing through `GET /?page=…`. Every API route requires a suc
 
 #### Visual baselines
 
-| ID    | State                                | Theme      |
-|-------|--------------------------------------|------------|
-| VI-01 | Modeled graph, details closed        | Light/dark |
-| VI-02 | Modeled graph details                | Light      |
-| VI-03 | Planned graph unresolved recipe pack | Light/dark |
-| VI-04 | Graph diff with all statuses         | Light/dark |
-| VI-05 | Credential profile list/form         | Light      |
-| VI-06 | Environment list/create form         | Light/dark |
-| VI-07 | Deploy success/failure               | Light      |
+| ID    | State                                            | Theme      |
+|-------|--------------------------------------------------|------------|
+| VI-01 | Modeled graph, details closed                    | Light/dark |
+| VI-02 | Modeled graph details                            | Light      |
+| VI-03 | Planned graph unresolved recipe pack             | Light/dark |
+| VI-04 | Graph diff with all statuses                     | Light/dark |
+| VI-05 | Credential profile list/form                     | Light      |
+| VI-06 | Environment list/create form                     | Light/dark |
+| VI-07 | Deploy success/failure and graph outcome details | Light/dark |
 
 #### Real-host cases
 

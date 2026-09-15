@@ -9,7 +9,7 @@ import {
 } from "../../../test/support/browser/fakes.js";
 import { PAGE_REGISTRY_GLOBAL } from "../globals.js";
 import { resolvePageRegistry } from "../registry.js";
-import { PLANNED_GRAPH_STATE_ID } from "../pages/planned-graph-page.js";
+import { PLANNED_GRAPH_STATE_ID } from "../../pages/browser-state-ids.js";
 import { installPlannedGraphPageEntry } from "./planned-graph-page.js";
 
 describe("planned graph page browser entry", () => {
