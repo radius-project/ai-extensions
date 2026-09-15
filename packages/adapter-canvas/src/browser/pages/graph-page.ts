@@ -35,10 +35,11 @@ export { GRAPH_PAGE_STATE_ID };
 // The wait between `needsAppBicep` polls, by attempt. Copilot usually finishes
 // authoring `.radius/app.bicep` within the first few seconds, so the first polls
 // are cheap and fast and only a long-running model generation settles onto the
-// steady-state interval. A single fixed delay made the common case pay the
-// worst case: the model was already on disk while the page sat idle.
+// unchanged 10s steady-state interval. A single fixed delay made the common
+// case pay the worst case: the model was already on disk while the page sat
+// idle.
 export const GRAPH_RETRY_SCHEDULE_MS: readonly number[] = Object.freeze([
-  300, 1_000, 2_000, 5_000
+  300, 1_000, 2_000, 5_000, 10_000
 ]);
 // The last entry of the schedule, which every attempt past its end reuses.
 export const GRAPH_RETRY_MAX_MS =
@@ -48,17 +49,11 @@ export const GRAPH_PROGRESS_MS = 800;
 
 // The delay before the `attempt`-th (0-based) `needsAppBicep` retry. Attempts
 // past the end of the schedule hold at its last entry, so polling never stops
-// and never grows without bound. Out-of-range and non-integral inputs clamp
-// rather than yielding `undefined`, because the delay feeds a timer.
+// and never grows without bound.
 export function graphRetryDelayMs(attempt: number): number {
-  const index =
-    Number.isFinite(attempt) ?
-      Math.min(
-        Math.max(Math.trunc(attempt), 0),
-        GRAPH_RETRY_SCHEDULE_MS.length - 1
-      )
-    : 0;
-  return GRAPH_RETRY_SCHEDULE_MS[index];
+  return GRAPH_RETRY_SCHEDULE_MS[
+    Math.min(attempt, GRAPH_RETRY_SCHEDULE_MS.length - 1)
+  ];
 }
 // Why the primary button is inert after a modeling failure. The graph surface
 // carries the diagnostic; this only explains the disabled control.

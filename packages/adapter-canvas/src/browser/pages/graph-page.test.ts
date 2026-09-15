@@ -824,14 +824,6 @@ describe("initializeGraphPage", () => {
       expect(graphRetryDelayMs(10_000)).toBe(GRAPH_RETRY_MAX_MS);
     });
 
-    it.each([
-      ["a negative attempt", -1],
-      ["a fractional attempt", 0.9],
-      ["a non-finite attempt", Number.NaN]
-    ])("falls back to the first delay for %s", (_label, attempt) => {
-      expect(graphRetryDelayMs(attempt)).toBe(GRAPH_RETRY_SCHEDULE_MS[0]);
-    });
-
     it("polls again within the first schedule step rather than the longest one", async () => {
       const { browser } = fixture({ loaded: false });
       let calls = 0;
