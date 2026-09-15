@@ -228,8 +228,8 @@ describe("cloud-e2e.yml", () => {
   });
 
   it("isolates package credentials while using OIDC and an installation token", async () => {
-    // No stored bearer token exists to leak: both access credentials are minted
-    // per run and expire with it. The App signing key remains a masked secret.
+    // Azure and repository access credentials are minted per run and expire
+    // with it. The App signing key and package PAT remain masked secrets.
     const workflow = await parseWorkflow(RUN_WORKFLOW);
     const used = steps(workflow.jobs?.["cloud-e2e"]).map((step) => step.uses);
     expect(used.some((use) => use?.startsWith("azure/login@"))).toBe(true);
