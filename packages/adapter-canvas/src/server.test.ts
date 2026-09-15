@@ -251,6 +251,41 @@ describe("preflightGhcrPackageWriteAccess", () => {
     expect(result.error).toContain("Install GitHub CLI system-wide.");
   });
 
+  it("uses the selected executor's dedicated package credential and scopes", async () => {
+    const run = async () => ({ code: 0, stdout: "", stderr: "" });
+    const result = await preflightGhcrPackageWriteAccess(
+      async () => {
+        throw new Error("global package credential must not be loaded");
+      },
+      async () => {
+        throw new Error("global identity must not be loaded");
+      },
+      {
+        login: "radius-cloud-e2e[bot]",
+        credentialSource: "injected",
+        requiresKeyringSwitch: false,
+        scopes: [],
+        run,
+        runOrThrow: run,
+        verifyIdentity: async () => {},
+        packageCredentials: () => ({
+          token: "package-token",
+          username: "package-publisher",
+          source: "injected-token",
+          scopes: ["read:packages", "write:packages"]
+        }),
+        redact: (value) => value,
+        errorMessage: (error) =>
+          error instanceof Error ? error.message : String(error)
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected GHCR preflight to pass");
+    expect(result.login).toBe("package-publisher");
+    expect(result.credentials.token).toBe("package-token");
+  });
+
   it("fails closed when the package credential username is blank", async () => {
     const result = await preflightGhcrPackageWriteAccess(
       async () => ({ token: "ghcr-token", username: "   ", source: "keyring" }),

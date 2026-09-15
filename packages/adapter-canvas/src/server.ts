@@ -5045,35 +5045,36 @@ export async function preflightGhcrPackageWriteAccess(
 
   let ghPkgIdentity: GhcrPackageIdentity;
   try {
-    ghPkgIdentity =
-      selectedExecutor ?
-        {
-          actingLogin: selectedExecutor.login,
-          displayLogin: selectedExecutor.login,
-          mismatch: false,
-          actingHasWorkflow: selectedExecutor.scopes.includes("workflow"),
-          actingHasPackages: selectedExecutor.scopes.includes("write:packages"),
-          // The selected executor *is* the credential GHCR writes will use, so
-          // the packages fields describe it directly rather than whichever
-          // account happens to be active in the CLI.
-          packagesLogin: selectedExecutor.login,
-          packagesHasWrite: selectedExecutor.scopes.includes("write:packages"),
-          packagesCredentialSource:
-            selectedExecutor.credentialSource === "keyring" ?
-              "keyring"
-            : "injected-token",
-          reason: "selected-account-executor",
-          accounts: [
-            {
-              login: selectedExecutor.login,
-              hasWorkflow: selectedExecutor.scopes.includes("workflow"),
-              hasPackages: selectedExecutor.scopes.includes("write:packages"),
-              switchable: selectedExecutor.credentialSource === "keyring",
-              acting: true
-            }
-          ]
-        }
-      : await loadIdentity();
+    if (selectedExecutor) {
+      const packageHasWrite =
+        packageCredentials.scopes?.includes("write:packages") ??
+        (packageCredentials.username === selectedExecutor.login &&
+          selectedExecutor.scopes.includes("write:packages"));
+      ghPkgIdentity = {
+        actingLogin: selectedExecutor.login,
+        displayLogin: selectedExecutor.login,
+        mismatch: false,
+        actingHasWorkflow: selectedExecutor.scopes.includes("workflow"),
+        actingHasPackages: selectedExecutor.scopes.includes("write:packages"),
+        packagesLogin: packageCredentials.username,
+        packagesHasWrite: packageHasWrite,
+        packagesCredentialSource: packageCredentials.source,
+        reason: "selected-account-executor",
+        accounts: [
+          {
+            login: packageCredentials.username,
+            hasWorkflow:
+              packageCredentials.username === selectedExecutor.login &&
+              selectedExecutor.scopes.includes("workflow"),
+            hasPackages: packageHasWrite,
+            switchable: packageCredentials.source === "keyring",
+            acting: packageCredentials.username === selectedExecutor.login
+          }
+        ]
+      };
+    } else {
+      ghPkgIdentity = await loadIdentity();
+    }
   } catch (e) {
     return {
       ok: false,
