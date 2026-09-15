@@ -246,7 +246,7 @@ describe("cloud-e2e.yml", () => {
       CLOUD_E2E_BOT_INSTALLATION_ID:
         "${{ steps.app-token.outputs.installation-id }}",
       CLOUD_E2E_BOT_PRIVATE_KEY: "${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}",
-      GH_PACKAGES_TOKEN: "${{ secrets.CLOUD_E2E_PACKAGES_TOKEN }}",
+      GH_PACKAGES_TOKEN: "${{ secrets.GH_RAD_CI_BOT_PAT }}",
       GH_PACKAGES_USER: "${{ secrets.CLOUD_E2E_PACKAGES_USER }}"
     });
     expect(run?.env?.GH_TOKEN).toBe("${{ steps.app-token.outputs.token }}");
