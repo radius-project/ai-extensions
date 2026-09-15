@@ -64,6 +64,12 @@ export interface AppRegistrationRecord {
   readonly displayName: string;
 }
 
+function isAzureResourceNotFound(result: CloudCommandResult): boolean {
+  return /Request_ResourceNotFound|Directory_ObjectNotFound|Resource '.*' does not exist|does not exist or one of its queried reference-property objects are not present/i.test(
+    result.stderr || result.stdout
+  );
+}
+
 export interface RoleAssignmentRecord {
   readonly id: string;
   readonly principalId: string;
@@ -1358,18 +1364,17 @@ export async function createCloudFixture(
           continue;
         }
         await attempt(`app registration ${app.appId}`, async () => {
-          expectSuccess(
-            await commands.runAz([
-              "ad",
-              "app",
-              "delete",
-              "--id",
-              app.objectId,
-              "--output",
-              "none"
-            ]),
-            `az ad app delete ${app.objectId}`
-          );
+          const deletion = await commands.runAz([
+            "ad",
+            "app",
+            "delete",
+            "--id",
+            app.objectId,
+            "--output",
+            "none"
+          ]);
+          if (!isAzureResourceNotFound(deletion))
+            expectSuccess(deletion, `az ad app delete ${app.objectId}`);
         });
       }
 

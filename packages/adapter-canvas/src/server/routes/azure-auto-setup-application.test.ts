@@ -1932,6 +1932,7 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
       ownerAdds?: AzureAutoSetupCommandResult[];
       ownerList?: AzureAutoSetupCommandResult;
       ownerLists?: AzureAutoSetupCommandResult[];
+      tagShows?: AzureAutoSetupCommandResult[];
       sleep?: AzureAutoSetupApplicationInput["dependencies"]["sleep"];
     } = {}
   ): { test: Harness; azCalls: string[] } {
@@ -1967,7 +1968,10 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
           );
         if (line.startsWith("rest --method PATCH ")) return command();
         if (line.startsWith("ad app show ") && line.includes("--query tags"))
-          return command({ stdout: JSON.stringify(requiredTags) });
+          return (
+            overrides.tagShows?.shift() ??
+            command({ stdout: JSON.stringify(requiredTags) })
+          );
         throw new Error(`unscripted az call: ${line}`);
       }
     });
@@ -2059,6 +2063,30 @@ describe("Azure auto-setup caller identity resolution (SU-08)", () => {
     ).resolves.toMatchObject({ clientId: APP_ID, state: "created" });
     expect(
       azCalls.filter((line) => line.startsWith("ad app owner list "))
+    ).toHaveLength(2);
+    expect(sleeps).toEqual([2000]);
+  });
+
+  it("retries provenance verification while updated tags propagate", async () => {
+    const sleeps: number[] = [];
+    const { test, azCalls } = createJourney(SERVICE_PRINCIPAL, SP_OBJECT_ID, {
+      tagShows: [
+        command({ stdout: "[]" }),
+        command({ stdout: JSON.stringify(requiredTags) })
+      ],
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+      }
+    });
+
+    await expect(
+      resolveAzureAutoSetupApplication(test.input)
+    ).resolves.toMatchObject({ clientId: APP_ID, state: "created" });
+    expect(
+      azCalls.filter(
+        (line) =>
+          line.startsWith("ad app show ") && line.includes("--query tags")
+      )
     ).toHaveLength(2);
     expect(sleeps).toEqual([2000]);
   });

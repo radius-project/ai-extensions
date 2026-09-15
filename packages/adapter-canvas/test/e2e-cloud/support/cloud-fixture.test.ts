@@ -2759,6 +2759,7 @@ describe("createCloudFixture", () => {
       expect(lines).toContain(
         `api --method PATCH repos/${REPOSITORY}/pulls/7 -f state=closed`
       );
+
       expect(lines).toContain(
         `api --method PATCH ${DEFAULT_REF_PATH} -f sha=${BASELINE} -F force=true`
       );
@@ -2778,6 +2779,33 @@ describe("createCloudFixture", () => {
       );
       expect(fake.commands.commandLines("az")).toContain(
         "ad app delete --id obj-1 --output none"
+      );
+    });
+
+    it("accepts an App Registration that disappeared before deletion", async () => {
+      const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: APP_LIST,
+          respond: {
+            stdout: JSON.stringify([
+              { appId: "app-1", id: "obj-1", displayName: APP_NAME }
+            ])
+          }
+        },
+        {
+          tool: "az",
+          match: ["ad", "app", "delete"],
+          respond: {
+            code: 1,
+            stderr:
+              "ERROR: Resource 'Application_obj-1' does not exist or one of its queried reference-property objects are not present."
+          }
+        }
+      ]);
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
+        "app registration app-1"
       );
     });
 

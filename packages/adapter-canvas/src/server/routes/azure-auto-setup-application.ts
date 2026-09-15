@@ -266,6 +266,39 @@ export async function resolveAzureAutoSetupApplication({
     }
     return result;
   };
+  const readCreatedAppTags = async (
+    appId: string,
+    requiredTags: readonly string[]
+  ): Promise<AzureAutoSetupCommandResult> => {
+    let result: AzureAutoSetupCommandResult = {
+      code: 1,
+      stdout: "",
+      stderr: "App Registration tags were not read."
+    };
+    for (let attempt = 1; attempt <= APP_PROPAGATION_ATTEMPTS; attempt++) {
+      result = await runAz(buildAppTagShowArgs({ appId }));
+      const succeeded = result.code === 0 || result.code === "0";
+      const tags = succeeded ? parseAppTags(result.stdout) : null;
+      if (tags && missingRequiredAppTags(tags, requiredTags).length === 0) {
+        return result;
+      }
+      const detail = result.stderr || result.stdout;
+      if (
+        !(
+          (succeeded && tags !== null) ||
+          isReplicationLagError(detail) ||
+          isRetryableAzureReadFailure(detail)
+        ) ||
+        attempt >= APP_PROPAGATION_ATTEMPTS
+      ) {
+        break;
+      }
+      const delay = azureRetryDelayMs(detail, 2000 * attempt);
+      if (delay === null) break;
+      await dependencies.sleep(delay);
+    }
+    return result;
+  };
   const readRadiusProvenance = async (
     appId: string
   ): Promise<RadiusAppProvenanceInput | undefined> => {
@@ -987,9 +1020,7 @@ export async function resolveAzureAutoSetupApplication({
               ),
             accept: (result) => result,
             reconcile: async () => {
-              const shown = await runAz(
-                buildAppTagShowArgs({ appId: clientId })
-              );
+              const shown = await readCreatedAppTags(clientId, provenanceTags);
               if (shown.code !== 0 && shown.code !== "0") {
                 throw new Error(
                   shown.stderr ||
@@ -1041,7 +1072,7 @@ export async function resolveAzureAutoSetupApplication({
           return null;
         }
         steps.push("Verifying Radius provenance tags...");
-        const tagShow = await runAz(buildAppTagShowArgs({ appId: clientId }));
+        const tagShow = await readCreatedAppTags(clientId, provenanceTags);
         if (tagShow.code !== 0) {
           await rollbackCreatedAppAndFail(
             "Failed to read the App Registration tags after update: " +
