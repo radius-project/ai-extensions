@@ -27,6 +27,8 @@ export const FIXTURE_REPOSITORY = `${FIXTURE_REPO_OWNER}/${FIXTURE_REPO_NAME}`;
 
 /** Where the baseline's staged model lives inside the repository. */
 export const FIXTURE_RADIUS_DIRECTORY = ".radius";
+/** The application name declared by the pinned fixture model. */
+export const FIXTURE_APPLICATION_NAME = "cloud-e2e";
 
 /**
  * The scheduled Cloud E2E cleanup workflow deletes tagged groups with this

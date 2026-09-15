@@ -14,6 +14,7 @@ interface CleanupApplication {
 
 interface CleanupServicePrincipal {
   readonly id: string;
+  readonly appId: string;
 }
 
 interface CleanupResourceGroup {
@@ -207,7 +208,7 @@ export function selectExpiredServicePrincipals(
       allowedAppIds.has(item.appId) &&
       expired(item.createdDateTime, cutoffMilliseconds)
     )
-      principals.push({ id: item.id });
+      principals.push({ id: item.id, appId: item.appId });
   }
   return principals;
 }

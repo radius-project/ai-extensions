@@ -102,6 +102,7 @@ jobs:
               `application-name=${pin.appRegistrationName()}`,
               `resource-group-prefix=${pin.RESOURCE_GROUP_PREFIX}`,
               `environment-prefix=${pin.ENVIRONMENT_NAME_PREFIX}`,
+              `fixture-application=${pin.FIXTURE_APPLICATION_NAME}`,
               `workflow-fallback-branch-prefix=${pin.WORKFLOW_FALLBACK_BRANCH_PREFIX}`,
               `lease-ref=${pin.CLOUD_E2E_LEASE_REF}`,
               `reason=${pin.describeUnprovisionedFixtureRepository()}`
@@ -161,9 +162,10 @@ jobs:
           private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
           owner: ${{ steps.pin.outputs.owner }}
           repositories: ${{ steps.pin.outputs.name }}
-          permission-actions: read
+          permission-actions: write
           permission-contents: write
           permission-environments: write
+          permission-packages: write
           permission-pull-requests: write
 
       # Older revisions created per-run resource groups carrying both the
@@ -236,12 +238,190 @@ jobs:
             exit 1
           fi
 
+      - name: Delete stale Radius applications before recovery state
+        id: radius-app-cleanup
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          FIXTURE_APPLICATION: ${{ steps.pin.outputs.fixture-application }}
+          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
+          DEFAULT_BRANCH: ${{ steps.pin.outputs.default-branch }}
+          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
+          environments="$RUNNER_TEMP/radius-cleanup-environments.json"
+          expired_environments="$RUNNER_TEMP/radius-cleanup-expired-environments.json"
+          gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments" >"$environments"
+
+          node --input-type=module - \
+            "$environments" "$ENVIRONMENT_PREFIX" "$cutoff" "$expired_environments" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [environmentsFile, prefix, cutoff, outputFile] = process.argv.slice(2);
+          const { selectExpiredEnvironments } = await import(
+            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+          );
+          const environments = JSON.parse(await readFile(environmentsFile, "utf8"));
+          await writeFile(
+            outputFile,
+            JSON.stringify(selectExpiredEnvironments(environments, prefix, cutoff))
+          );
+          NODE
+
+          deleted=0
+          failures=()
+          while read -r environment; do
+            [[ -n "$environment" ]] || continue
+            before="$RUNNER_TEMP/delete-runs-before-$environment.json"
+            after="$RUNNER_TEMP/delete-runs-after-$environment.json"
+            gh run list \
+              --repo "$FIXTURE_REPOSITORY" \
+              --workflow delete-application.yml \
+              --event workflow_dispatch \
+              --limit 100 \
+              --json databaseId >"$before"
+            if ! gh workflow run delete-application.yml \
+                --repo "$FIXTURE_REPOSITORY" \
+                --ref "$DEFAULT_BRANCH" \
+                -f "environment=$environment" \
+                -f "application=$FIXTURE_APPLICATION"; then
+              failures+=("dispatch Radius application delete for $environment")
+              continue
+            fi
+
+            run_id=""
+            for _ in {1..24}; do
+              gh run list \
+                --repo "$FIXTURE_REPOSITORY" \
+                --workflow delete-application.yml \
+                --event workflow_dispatch \
+                --limit 100 \
+                --json databaseId >"$after"
+              run_id="$(
+                node --input-type=module - "$before" "$after" <<'NODE'
+                import { readFile } from "node:fs/promises";
+                const [beforeFile, afterFile] = process.argv.slice(2);
+                const { findNewWorkflowRunId, readWorkflowRunIds } = await import(
+                  "./packages/adapter-canvas/test/e2e-cloud/support/deploy-journey.ts"
+                );
+                const [before, after] = await Promise.all(
+                  [beforeFile, afterFile].map(async (file) =>
+                    readWorkflowRunIds(JSON.parse(await readFile(file, "utf8")))
+                  )
+                );
+                process.stdout.write(findNewWorkflowRunId(before, after) ?? "");
+                NODE
+              )"
+              [[ -n "$run_id" ]] && break
+              sleep 5
+            done
+            if [[ -z "$run_id" ]]; then
+              failures+=("identify Radius application delete run for $environment")
+              continue
+            fi
+            if ! gh run watch "$run_id" \
+                --repo "$FIXTURE_REPOSITORY" \
+                --exit-status \
+                --interval 10; then
+              failures+=("Radius application delete run $run_id for $environment")
+              continue
+            fi
+            deleted=$((deleted + 1))
+          done < <(jq -r '.[]' "$expired_environments")
+
+          echo "- Radius applications deleted: $deleted" >>"$GITHUB_STEP_SUMMARY"
+          if (( ${#failures[@]} > 0 )); then
+            printf 'Radius application cleanup failures:\n' >&2
+            printf '  - %s\n' "${failures[@]}" >&2
+            exit 1
+          fi
+
+      - name: Purge stale GHCR deployment state
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
+          FIXTURE_OWNER: ${{ steps.pin.outputs.owner }}
+          ENVIRONMENT_PREFIX: ${{ steps.pin.outputs.environment-prefix }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cutoff="$(date -u -d "$MAX_AGE_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ)"
+          environments="$RUNNER_TEMP/state-cleanup-environments.json"
+          expired_environments="$RUNNER_TEMP/state-cleanup-expired-environments.json"
+          gh api --paginate --slurp "repos/$FIXTURE_REPOSITORY/environments" >"$environments"
+
+          node --input-type=module - \
+            "$environments" "$ENVIRONMENT_PREFIX" "$cutoff" "$expired_environments" <<'NODE'
+          import { readFile, writeFile } from "node:fs/promises";
+          const [environmentsFile, prefix, cutoff, outputFile] = process.argv.slice(2);
+          const { selectExpiredEnvironments } = await import(
+            "./packages/adapter-canvas/test/e2e-cloud/support/cloud-cleanup.ts"
+          );
+          const environments = JSON.parse(await readFile(environmentsFile, "utf8"));
+          await writeFile(
+            outputFile,
+            JSON.stringify(selectExpiredEnvironments(environments, prefix, cutoff))
+          );
+          NODE
+
+          deleted=0
+          failures=()
+          while read -r environment; do
+            [[ -n "$environment" ]] || continue
+            package_name="$(
+              FIXTURE_REPOSITORY="$FIXTURE_REPOSITORY" ENVIRONMENT="$environment" \
+                node --input-type=module -e '
+                  const { stateRegistryForEnvironment } = await import(
+                    "./packages/core/src/workflows/state.ts"
+                  );
+                  const registry = stateRegistryForEnvironment(
+                    process.env.FIXTURE_REPOSITORY,
+                    process.env.ENVIRONMENT
+                  );
+                  process.stdout.write(registry.split("/").at(-1));
+                '
+            )"
+            package_path="orgs/$FIXTURE_OWNER/packages/container/$package_name"
+            package="$RUNNER_TEMP/state-package-$environment.json"
+            if ! gh api "$package_path" >"$package" 2>"$package.stderr"; then
+              if grep -q "HTTP 404" "$package.stderr"; then
+                continue
+              fi
+              failures+=("inspect GHCR package $package_name for $environment")
+              continue
+            fi
+            visibility="$(jq -r '.visibility // ""' "$package")"
+            linked_repository="$(jq -r '.repository.full_name // ""' "$package")"
+            if [[ "$visibility" != "private" && "$visibility" != "internal" ]]; then
+              failures+=("refuse GHCR package $package_name with visibility ${visibility:-unknown}")
+              continue
+            fi
+            if [[ "${linked_repository,,}" != "${FIXTURE_REPOSITORY,,}" ]]; then
+              failures+=("refuse GHCR package $package_name linked to ${linked_repository:-no repository}")
+              continue
+            fi
+            if ! gh api --method DELETE "$package_path"; then
+              failures+=("delete GHCR package $package_name for $environment")
+              continue
+            fi
+            deleted=$((deleted + 1))
+          done < <(jq -r '.[]' "$expired_environments")
+
+          echo "- GHCR state packages deleted: $deleted" >>"$GITHUB_STEP_SUMMARY"
+          if (( ${#failures[@]} > 0 )); then
+            printf 'GHCR state cleanup failures:\n' >&2
+            printf '  - %s\n' "${failures[@]}" >&2
+            exit 1
+          fi
+
       # Both object types are matched by the exact display name the product
       # derives from the fixture repository, never by prefix. Service principals
       # go first because deleting an application can leave an orphaned principal
       # that still fails the next clean-slate probe.
       - name: Purge leaked Entra service principals and applications
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
         env:
           APPLICATION_NAME: ${{ steps.pin.outputs.application-name }}
           AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
@@ -306,8 +486,10 @@ jobs:
           principals_purged=0
           assignments_purged=0
           failures=()
-          while read -r id; do
-            [[ -n "$id" ]] || continue
+          blocked_app_ids="$RUNNER_TEMP/blocked-application-ids.txt"
+          : >"$blocked_app_ids"
+          while IFS=$'\t' read -r id app_id; do
+            [[ -n "$id" && -n "$app_id" ]] || continue
             resource_group_scope="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP"
             cluster_scope="$resource_group_scope/providers/Microsoft.ContainerService/managedClusters/$AKS_CLUSTER_NAME"
             resource_group_assignments="$RUNNER_TEMP/resource-group-role-assignments-$id.json"
@@ -324,6 +506,7 @@ jobs:
                 --query '[].{id:id,principalId:principalId,roleDefinitionName:roleDefinitionName,scope:scope}' \
                 -o json >"$cluster_assignments"; then
               failures+=("list role assignments for service principal $id")
+              echo "$app_id" >>"$blocked_app_ids"
               continue
             fi
             jq -s 'add' "$resource_group_assignments" "$cluster_assignments" >"$assignments"
@@ -348,6 +531,7 @@ jobs:
             NODE
             then
               failures+=("validate role assignments for service principal $id")
+              echo "$app_id" >>"$blocked_app_ids"
               continue
             fi
 
@@ -362,26 +546,32 @@ jobs:
               assignments_purged=$((assignments_purged + 1))
             done < <(jq -r '.[].id' "$selected_assignments")
             if (( assignment_failure != 0 )); then
+              echo "$app_id" >>"$blocked_app_ids"
               continue
             fi
             echo "Deleting leaked service principal $APPLICATION_NAME ($id), created before $cutoff."
             if ! az ad sp delete --id "$id"; then
               failures+=("delete service principal $id")
+              echo "$app_id" >>"$blocked_app_ids"
               continue
             fi
             principals_purged=$((principals_purged + 1))
-          done < <(jq -r '.[].id' "$expired_principals")
+          done < <(jq -r '.[] | [.id, .appId] | @tsv' "$expired_principals")
 
           applications_purged=0
-          while read -r id; do
-            [[ -n "$id" ]] || continue
+          while IFS=$'\t' read -r id app_id; do
+            [[ -n "$id" && -n "$app_id" ]] || continue
+            if grep -Fxq "$app_id" "$blocked_app_ids"; then
+              failures+=("preserve application $id because service principal cleanup for appId $app_id failed")
+              continue
+            fi
             echo "Deleting leaked application $APPLICATION_NAME ($id), created before $cutoff."
             if ! az ad app delete --id "$id"; then
               failures+=("delete application $id")
               continue
             fi
             applications_purged=$((applications_purged + 1))
-          done < <(jq -r '.[].id' "$expired_applications")
+          done < <(jq -r '.[] | [.id, .appId] | @tsv' "$expired_applications")
 
           echo "- Entra service principals purged: $principals_purged" >>"$GITHUB_STEP_SUMMARY"
           echo "- Azure role assignments purged: $assignments_purged" >>"$GITHUB_STEP_SUMMARY"
@@ -397,7 +587,7 @@ jobs:
       # prefix and still age-gated, so a live run's environment is never a
       # candidate.
       - name: Purge stale GitHub Environments
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
@@ -449,7 +639,7 @@ jobs:
       # a side effect. Branch age comes from the referenced commit, not from a
       # missing field on the refs API.
       - name: Purge stale workflow fallback pull requests and branches
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           FIXTURE_REPOSITORY: ${{ steps.pin.outputs.repository }}
@@ -567,7 +757,7 @@ jobs:
       # deliberately left intact. When no lease exists, cleanup acquires its own
       # before touching the mutable default branch.
       - name: Reset the fixture default branch under the shared lease
-        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success'
+        if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.app-token.outcome == 'success' && steps.radius-app-cleanup.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           SOURCE_GH_TOKEN: ${{ github.token }}

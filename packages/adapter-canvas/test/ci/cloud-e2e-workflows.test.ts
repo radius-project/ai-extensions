@@ -411,14 +411,62 @@ describe("cloud-e2e.yml", () => {
 });
 
 describe("cloud-e2e-cleanup.yml", () => {
-  it("requests Actions read access before listing fixture environments", async () => {
+  it("requests Actions write access for Radius cleanup dispatch", async () => {
     const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
     const token = steps(workflow.jobs?.purge).find((step) =>
       step.uses?.startsWith("actions/create-github-app-token@")
     );
 
-    expect(token?.with?.["permission-actions"]).toBe("read");
+    expect(token?.with?.["permission-actions"]).toBe("write");
     expect(token?.with?.["permission-environments"]).toBe("write");
+    expect(token?.with?.["permission-packages"]).toBe("write");
+  });
+
+  it("deletes stale Radius applications before recovery inputs", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const purge = steps(workflow.jobs?.purge);
+    const radiusCleanup = purge.find(
+      (step) =>
+        step.name === "Delete stale Radius applications before recovery state"
+    );
+    const protectedSteps = purge.filter((step) =>
+      [
+        "Purge stale Entra identities",
+        "Purge stale GHCR deployment state",
+        "Purge stale GitHub environments",
+        "Purge stale fallback pull requests and branches",
+        "Reset an idle fixture repository to the pinned baseline"
+      ].includes(step.name ?? "")
+    );
+
+    expect(radiusCleanup?.run).toContain(
+      "gh workflow run delete-application.yml"
+    );
+    expect(radiusCleanup?.run).toContain('gh run watch "$run_id"');
+    for (const step of protectedSteps)
+      expect(step.if).toContain(
+        "steps.radius-app-cleanup.outcome == 'success'"
+      );
+  });
+
+  it("deletes only fixture-linked private GHCR state after Radius cleanup", async () => {
+    const workflow = await parseWorkflow(CLEANUP_WORKFLOW);
+    const stateCleanup = steps(workflow.jobs?.purge).find(
+      (step) => step.name === "Purge stale GHCR deployment state"
+    );
+    const script = stateCleanup?.run ?? "";
+
+    expect(stateCleanup?.if).toContain(
+      "steps.radius-app-cleanup.outcome == 'success'"
+    );
+    expect(script).toContain("stateRegistryForEnvironment");
+    expect(script).toContain(
+      '[[ "$visibility" != "private" && "$visibility" != "internal" ]]'
+    );
+    expect(script).toContain(
+      '[[ "${linked_repository,,}" != "${FIXTURE_REPOSITORY,,}" ]]'
+    );
+    expect(script).toContain('gh api --method DELETE "$package_path"');
   });
 
   it("removes only allowlisted assignments before deleting leaked service principals", async () => {
@@ -445,6 +493,10 @@ describe("cloud-e2e-cleanup.yml", () => {
       script.indexOf("az ad sp delete")
     );
     expect(script).toContain("assignment_failure");
+    expect(script).toContain("blocked-application-ids.txt");
+    expect(script).toContain(
+      "preserve application $id because service principal cleanup"
+    );
   });
 
   it("deletes tagged resource groups the suite creates without waiting for age", async () => {

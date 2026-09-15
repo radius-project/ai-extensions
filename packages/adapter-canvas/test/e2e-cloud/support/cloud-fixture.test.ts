@@ -57,6 +57,20 @@ const PACKAGE_PATH =
   "orgs/fixture-owner/packages/container/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
 const USER_PACKAGE_PATH =
   "users/fixture-owner/packages/container/fixture-repo-radius-state-radtest-run0000000a-a6da9329f444";
+const DELETE_RUN_LIST: readonly string[] = [
+  "run",
+  "list",
+  "--repo",
+  REPOSITORY,
+  "--workflow",
+  "delete-application.yml",
+  "--event",
+  "workflow_dispatch",
+  "--limit",
+  "100",
+  "--json",
+  "databaseId"
+];
 
 const pullPages = (...pages: readonly unknown[][]): string =>
   JSON.stringify(pages);
@@ -170,6 +184,37 @@ function baselineStubs(): FakeCommandStub[] {
     { tool: "az", match: ["group", "delete"], respond: {} },
     { tool: "gh", match: ["repo", "clone"], respond: {} },
     { tool: "git", match: ["reset", "--hard"], respond: {} },
+    {
+      tool: "gh",
+      match: DELETE_RUN_LIST,
+      respond: { stdout: '[{"databaseId":10}]' },
+      times: 1
+    },
+    {
+      tool: "gh",
+      match: DELETE_RUN_LIST,
+      respond: { stdout: '[{"databaseId":11},{"databaseId":10}]' },
+      times: 2
+    },
+    {
+      tool: "gh",
+      match: DELETE_RUN_LIST,
+      respond: {
+        stdout: '[{"databaseId":12},{"databaseId":11},{"databaseId":10}]'
+      }
+    },
+    {
+      tool: "gh",
+      match: ["workflow", "run", "delete-application.yml"],
+      respond: {}
+    },
+    {
+      tool: "gh",
+      match: ["run", "view"],
+      respond: {
+        stdout: '{"status":"completed","conclusion":"success"}'
+      }
+    },
     { tool: "az", match: APP_LIST, respond: { stdout: "[]" } },
     { tool: "az", match: SP_LIST, respond: { stdout: "[]" } },
     { tool: "az", match: FIC_LIST, respond: { stdout: "[]" } },
@@ -875,7 +920,7 @@ describe("createCloudFixture", () => {
         `ad app list --filter ${EXACT_NAME_FILTER} --query [].{appId:appId,id:id,displayName:displayName} -o json`
       );
       expect(lines).toContain(
-        `ad sp list --filter ${EXACT_NAME_FILTER} --query [].{id:id} -o json`
+        `ad sp list --filter ${EXACT_NAME_FILTER} --query [].{id:id,appId:appId} -o json`
       );
       expect(lines.some((line) => line.includes("--display-name"))).toBe(false);
       expect(lines.some((line) => line.includes(`--scope ${SCOPE}`))).toBe(
@@ -2632,9 +2677,8 @@ describe("createCloudFixture", () => {
         {
           tool: "az",
           match: SP_LIST,
-          respond: { stdout: '[{"id":"sp-1"}]' }
+          respond: { stdout: '[{"id":"sp-1","appId":"app-1"}]' }
         },
-        { tool: "az", match: ["ad", "sp", "delete"], respond: {} },
         {
           tool: "az",
           match: APP_LIST,
@@ -2644,6 +2688,7 @@ describe("createCloudFixture", () => {
             ])
           }
         },
+        { tool: "az", match: ["ad", "sp", "delete"], respond: {} },
         { tool: "az", match: ["ad", "app", "delete"], respond: {} },
         {
           tool: "gh",
@@ -2845,7 +2890,20 @@ describe("createCloudFixture", () => {
           {
             tool: "az",
             match: SP_LIST,
-            respond: { stdout: '[{"id":"sp-1"}]' }
+            respond: { stdout: '[{"id":"sp-1","appId":"client-1"}]' }
+          },
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                {
+                  id: "app-1",
+                  appId: "client-1",
+                  displayName: APP_NAME
+                }
+              ])
+            }
           },
           {
             tool: "az",
@@ -2875,6 +2933,9 @@ describe("createCloudFixture", () => {
       expect(fake.commands.commandLines("az")).not.toContain(
         "ad sp delete --id sp-1 --output none"
       );
+      expect(fake.commands.commandLines("az")).not.toContain(
+        "ad app delete --id app-1 --output none"
+      );
       expect(
         fake.commands
           .commandLines("az")
@@ -2899,7 +2960,20 @@ describe("createCloudFixture", () => {
           {
             tool: "az",
             match: SP_LIST,
-            respond: { stdout: '[{"id":"sp-1"}]' }
+            respond: { stdout: '[{"id":"sp-1","appId":"client-1"}]' }
+          },
+          {
+            tool: "az",
+            match: APP_LIST,
+            respond: {
+              stdout: JSON.stringify([
+                {
+                  id: "app-1",
+                  appId: "client-1",
+                  displayName: APP_NAME
+                }
+              ])
+            }
           },
           {
             tool: "az",
@@ -2921,6 +2995,9 @@ describe("createCloudFixture", () => {
       expect(fake.commands.commandLines("az")).not.toContain(
         "ad sp delete --id sp-1 --output none"
       );
+      expect(fake.commands.commandLines("az")).not.toContain(
+        "ad app delete --id app-1 --output none"
+      );
     });
 
     it("deletes only the registered application workloads from the shared namespace", async () => {
@@ -2939,12 +3016,19 @@ describe("createCloudFixture", () => {
       fixture.registerApplicationCleanupTarget("demo", "default-demo");
 
       await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        `Radius application demo in ${ENVIRONMENT}`,
         "Kubernetes workloads for demo in default-demo"
       ]);
       expect(fake.commands.commandLines("kubectl")).toEqual([
         `--kubeconfig ${WORKSPACE}/kubeconfig delete all --namespace default-demo ` +
           "--selector radapp.io/application=demo --ignore-not-found=true --wait=true"
       ]);
+      const calls = fake.commands.calls.map(
+        ({ tool, args }) => `${tool} ${args.join(" ")}`
+      );
+      expect(
+        calls.findIndex((line) => line.startsWith("gh run view "))
+      ).toBeLessThan(calls.findIndex((line) => line.startsWith("kubectl ")));
     });
 
     it("treats an already-missing application namespace as reclaimed", async () => {
@@ -2967,6 +3051,7 @@ describe("createCloudFixture", () => {
       fixture.registerApplicationCleanupTarget("demo", "default-demo");
 
       await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual([
+        `Radius application demo in ${ENVIRONMENT}`,
         "Kubernetes workloads for demo in default-demo"
       ]);
     });
@@ -3031,11 +3116,40 @@ describe("createCloudFixture", () => {
       fixture.registerApplicationCleanupTarget("demo", "default-demo");
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /Kubernetes workloads for demo in default-demo: .*namespace unavailable.*Reclaimed before failing: branch radius\/setup-a/s
+        /Kubernetes workloads for demo in default-demo: .*namespace unavailable.*Reclaimed before failing: Radius application demo in radtest-run0000000a, branch radius\/setup-a/s
       );
       expect(fake.commands.commandLines("gh")).toContain(
         `api --method DELETE repos/${REPOSITORY}/git/refs/heads/radius/setup-a`
       );
+    });
+
+    it("preserves recovery inputs when Radius application deletion fails", async () => {
+      const { fixture, fake } = await createHarness([
+        {
+          tool: "gh",
+          match: ["run", "view"],
+          respond: {
+            stdout: '{"status":"completed","conclusion":"failure"}'
+          }
+        }
+      ]);
+      fixture.registerApplicationCleanupTarget("demo", "default-demo");
+
+      await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
+        /preserving its identity, GitHub Environment, state package, and repository workflows for recovery/
+      );
+
+      const gh = fake.commands.commandLines("gh");
+      expect(gh).toContain(
+        `workflow run delete-application.yml --repo ${REPOSITORY} --ref ${BRANCH} -f environment=${ENVIRONMENT} -f application=demo`
+      );
+      expect(gh.some((line) => line.includes(ENVIRONMENT_PATH))).toBe(false);
+      expect(gh.some((line) => line.includes(PACKAGE_PATH))).toBe(false);
+      expect(gh.some((line) => line.includes(MATCHING_REFS_PATH))).toBe(false);
+      expect(fake.commands.commandLines("az")).not.toContain(
+        `ad sp list --filter ${EXACT_NAME_FILTER} --query [].{id:id,appId:appId} -o json`
+      );
+      expect(fake.commands.commandLines("kubectl")).toEqual([]);
     });
 
     it("closes an open pull request even when its branch is already gone", async () => {
@@ -3184,12 +3298,12 @@ describe("createCloudFixture", () => {
       );
     });
 
-    it("records a stuck service principal and continues reclaiming applications", async () => {
-      const { fixture } = await createHarness([
+    it("preserves a parent application when its service principal cannot be deleted", async () => {
+      const { fixture, fake } = await createHarness([
         {
           tool: "az",
           match: SP_LIST,
-          respond: { stdout: '[{"id":"sp-1"}]' }
+          respond: { stdout: '[{"id":"sp-1","appId":"app-1"}]' }
         },
         failing("az", ["ad", "sp", "delete"], "principal is locked"),
         {
@@ -3205,7 +3319,10 @@ describe("createCloudFixture", () => {
       ]);
 
       await expect(fixture.reclaimLeakedProductArtifacts()).rejects.toThrow(
-        /service principal sp-1: .*principal is locked.*Reclaimed before failing: app registration app-1/s
+        /service principal sp-1: .*principal is locked.*preserve app registration app-1/s
+      );
+      expect(fake.commands.commandLines("az")).not.toContain(
+        "ad app delete --id obj-1 --output none"
       );
     });
 

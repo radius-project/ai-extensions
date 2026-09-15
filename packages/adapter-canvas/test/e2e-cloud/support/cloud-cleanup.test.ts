@@ -153,7 +153,7 @@ describe("selectExpiredServicePrincipals", () => {
         ["client-old"],
         CUTOFF
       )
-    ).toEqual([{ id: "principal-old" }]);
+    ).toEqual([{ id: "principal-old", appId: "client-old" }]);
   });
 });
 

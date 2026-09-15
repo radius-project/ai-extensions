@@ -16,7 +16,10 @@
 //
 // Every external call goes through an injected port, so each branch below is
 // provable without an Azure or GitHub credential.
-import { stateRegistryForEnvironment } from "@radius-project/core";
+import {
+  DELETE_APP_DISPATCHER_FILE,
+  stateRegistryForEnvironment
+} from "@radius-project/core";
 import {
   describeError,
   expectSuccess,
@@ -43,11 +46,14 @@ import {
 } from "./fixture-repository.js";
 import {
   radiusApplicationSelector,
+  findNewWorkflowRunId,
+  readWorkflowRunIds,
   readKubernetesWorkloads,
   readKubernetesResourceNames,
   isKubernetesWorkloadReady,
   type KubernetesWorkload
 } from "./deploy-journey.js";
+import { DELETE_OPERATION_TIMEOUT_MS } from "./cloud-timeout-budget.js";
 
 /** The Entra application the product creates, as the fixture observed it. */
 export interface AppRegistrationRecord {
@@ -605,6 +611,95 @@ export async function createCloudFixture(
     return readKubernetesResourceNames(parseJsonObject(result, context));
   };
 
+  const listDeleteWorkflowRunIds = async (): Promise<ReadonlySet<string>> =>
+    readWorkflowRunIds(
+      parseJsonArray(
+        await commands.runGh([
+          "run",
+          "list",
+          "--repo",
+          repository,
+          "--workflow",
+          DELETE_APP_DISPATCHER_FILE,
+          "--event",
+          "workflow_dispatch",
+          "--limit",
+          "100",
+          "--json",
+          "databaseId"
+        ]),
+        `gh run list ${DELETE_APP_DISPATCHER_FILE}`
+      )
+    );
+
+  const deleteApplicationResources = async (
+    application: string
+  ): Promise<void> => {
+    const before = await listDeleteWorkflowRunIds();
+    expectSuccess(
+      await commands.runGh([
+        "workflow",
+        "run",
+        DELETE_APP_DISPATCHER_FILE,
+        "--repo",
+        repository,
+        "--ref",
+        defaultBranch,
+        "-f",
+        `environment=${environmentName}`,
+        "-f",
+        `application=${application}`
+      ]),
+      `gh workflow run ${DELETE_APP_DISPATCHER_FILE}`
+    );
+    const runId = await pollForValue({
+      ports,
+      timeoutMs: DELETE_OPERATION_TIMEOUT_MS,
+      intervalMs: assertionPollIntervalMs,
+      probe: async () =>
+        findNewWorkflowRunId(before, await listDeleteWorkflowRunIds()),
+      timeoutMessage: () =>
+        `Timed out after ${DELETE_OPERATION_TIMEOUT_MS}ms waiting to identify the cleanup workflow run for ` +
+        `application "${application}" in environment "${environmentName}".`
+    });
+    let conclusion = "";
+    await pollForValue({
+      ports,
+      timeoutMs: DELETE_OPERATION_TIMEOUT_MS,
+      intervalMs: assertionPollIntervalMs,
+      probe: async () => {
+        const context = `gh run view ${runId}`;
+        const result = parseJsonObject(
+          await commands.runGh([
+            "run",
+            "view",
+            runId,
+            "--repo",
+            repository,
+            "--json",
+            "status,conclusion"
+          ]),
+          context
+        );
+        const status =
+          typeof result.status === "string" ? result.status.trim() : "";
+        conclusion =
+          typeof result.conclusion === "string" ? result.conclusion.trim() : "";
+        if (!status)
+          throw new Error(`${context} returned no usable workflow status.`);
+        if (status !== "completed") return undefined;
+        if (conclusion !== "success")
+          throw new Error(
+            `${context} completed with conclusion "${conclusion || "(missing)"}".`
+          );
+        return true;
+      },
+      timeoutMessage: () =>
+        `Timed out after ${DELETE_OPERATION_TIMEOUT_MS}ms waiting for cleanup workflow run ${runId} to complete; ` +
+        `last conclusion was "${conclusion || "(not completed)"}".`
+    });
+  };
+
   /**
    * Artifacts this run has independently observed in place.
    *
@@ -1102,6 +1197,18 @@ export async function createCloudFixture(
 
       for (const target of applicationCleanupTargets.values())
         await attempt(
+          `Radius application ${target.application} in ${environmentName}`,
+          () => deleteApplicationResources(target.application)
+        );
+      if (failures.length > 0)
+        throw new Error(
+          `Could not reclaim the deployed Radius application for ${repository}; preserving its identity, ` +
+            "GitHub Environment, state package, and repository workflows for recovery:\n" +
+            failures.map((failure) => `  - ${failure}`).join("\n")
+        );
+
+      for (const target of applicationCleanupTargets.values())
+        await attempt(
           `Kubernetes workloads for ${target.application} in ${target.namespace}`,
           async () => {
             const kubeconfig = await clusterKubeconfig(assertionTimeoutMs);
@@ -1137,8 +1244,10 @@ export async function createCloudFixture(
         expectedAppName
       ).catch((error: unknown) => {
         failures.push(`list service principals: ${describeError(error)}`);
-        return [] as Array<{ objectId: string }>;
+        return [] as Array<{ objectId: string; appId?: string }>;
       });
+      const blockedApplicationIds = new Set<string>();
+      let preserveAllApplications = false;
       for (const principal of principals) {
         let assignments: RoleAssignmentRecord[];
         try {
@@ -1149,6 +1258,8 @@ export async function createCloudFixture(
             ports.now
           );
         } catch (error) {
+          if (principal.appId) blockedApplicationIds.add(principal.appId);
+          else preserveAllApplications = true;
           failures.push(
             `list role assignments for service principal ${principal.objectId}: ${describeError(error)}`
           );
@@ -1170,6 +1281,8 @@ export async function createCloudFixture(
             )
         );
         if (unexpected.length > 0) {
+          if (principal.appId) blockedApplicationIds.add(principal.appId);
+          else preserveAllApplications = true;
           failures.push(
             `refuse service principal ${principal.objectId}: unexpected role assignment(s): ${unexpected
               .map(
@@ -1203,8 +1316,12 @@ export async function createCloudFixture(
             );
           }
         }
-        if (assignmentDeletionFailed) continue;
-        await attempt(`service principal ${principal.objectId}`, async () => {
+        if (assignmentDeletionFailed) {
+          if (principal.appId) blockedApplicationIds.add(principal.appId);
+          else preserveAllApplications = true;
+          continue;
+        }
+        try {
           expectSuccess(
             await commands.runAz([
               "ad",
@@ -1217,7 +1334,14 @@ export async function createCloudFixture(
             ]),
             `az ad sp delete ${principal.objectId}`
           );
-        });
+          reclaimed.push(`service principal ${principal.objectId}`);
+        } catch (error) {
+          if (principal.appId) blockedApplicationIds.add(principal.appId);
+          else preserveAllApplications = true;
+          failures.push(
+            `service principal ${principal.objectId}: ${describeError(error)}`
+          );
+        }
       }
 
       const apps = await listAppRegistrations(commands, expectedAppName).catch(
@@ -1226,7 +1350,13 @@ export async function createCloudFixture(
           return [] as AppRegistrationRecord[];
         }
       );
-      for (const app of apps)
+      for (const app of apps) {
+        if (preserveAllApplications || blockedApplicationIds.has(app.appId)) {
+          failures.push(
+            `preserve app registration ${app.appId}: its service principal or role assignments were not safely removed`
+          );
+          continue;
+        }
         await attempt(`app registration ${app.appId}`, async () => {
           expectSuccess(
             await commands.runAz([
@@ -1241,6 +1371,7 @@ export async function createCloudFixture(
             `az ad app delete ${app.objectId}`
           );
         });
+      }
 
       const environment = await commands.runGh([
         "api",
@@ -1673,7 +1804,7 @@ async function listAppRegistrations(
 async function listServicePrincipals(
   commands: CloudCommandPort,
   displayName: string
-): Promise<Array<{ objectId: string }>> {
+): Promise<Array<{ objectId: string; appId?: string }>> {
   const context = `az ad sp list --filter displayName eq '${displayName}'`;
   const entries = parseJsonArray(
     await commands.runAz([
@@ -1683,20 +1814,21 @@ async function listServicePrincipals(
       "--filter",
       `displayName eq '${displayName}'`,
       "--query",
-      "[].{id:id}",
+      "[].{id:id,appId:appId}",
       "-o",
       "json"
     ]),
     context
   );
-  return entries.map((entry, index) => ({
-    objectId: requireString(
-      asRecord(entry, context, index).id,
-      "id",
-      context,
-      index
-    )
-  }));
+  return entries.map((entry, index) => {
+    const record = asRecord(entry, context, index);
+    return {
+      objectId: requireString(record.id, "id", context, index),
+      ...(typeof record.appId === "string" && record.appId.trim() ?
+        { appId: record.appId.trim() }
+      : {})
+    };
+  });
 }
 
 async function listFederatedCredentials(
