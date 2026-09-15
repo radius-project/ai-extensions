@@ -2782,8 +2782,13 @@ describe("createCloudFixture", () => {
       );
     });
 
-    it("accepts an App Registration that disappeared before deletion", async () => {
+    it("accepts Entra artifacts that disappeared before deletion", async () => {
       const { fixture } = await createHarness([
+        {
+          tool: "az",
+          match: SP_LIST,
+          respond: { stdout: '[{"id":"sp-1","appId":"app-1"}]' }
+        },
         {
           tool: "az",
           match: APP_LIST,
@@ -2791,6 +2796,15 @@ describe("createCloudFixture", () => {
             stdout: JSON.stringify([
               { appId: "app-1", id: "obj-1", displayName: APP_NAME }
             ])
+          }
+        },
+        {
+          tool: "az",
+          match: ["ad", "sp", "delete"],
+          respond: {
+            code: 1,
+            stderr:
+              "ERROR: Resource 'ServicePrincipal_sp-1' does not exist or one of its queried reference-property objects are not present."
           }
         },
         {
@@ -2804,8 +2818,11 @@ describe("createCloudFixture", () => {
         }
       ]);
 
-      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toContain(
-        "app registration app-1"
+      await expect(fixture.reclaimLeakedProductArtifacts()).resolves.toEqual(
+        expect.arrayContaining([
+          "service principal sp-1",
+          "app registration app-1"
+        ])
       );
     });
 

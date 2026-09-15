@@ -1328,18 +1328,17 @@ export async function createCloudFixture(
           continue;
         }
         try {
-          expectSuccess(
-            await commands.runAz([
-              "ad",
-              "sp",
-              "delete",
-              "--id",
-              principal.objectId,
-              "--output",
-              "none"
-            ]),
-            `az ad sp delete ${principal.objectId}`
-          );
+          const deletion = await commands.runAz([
+            "ad",
+            "sp",
+            "delete",
+            "--id",
+            principal.objectId,
+            "--output",
+            "none"
+          ]);
+          if (!isAzureResourceNotFound(deletion))
+            expectSuccess(deletion, `az ad sp delete ${principal.objectId}`);
           reclaimed.push(`service principal ${principal.objectId}`);
         } catch (error) {
           if (principal.appId) blockedApplicationIds.add(principal.appId);
