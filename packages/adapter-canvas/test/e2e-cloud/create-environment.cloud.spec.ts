@@ -115,6 +115,7 @@ import {
 import {
   describeUnprovisionedFixtureRepository,
   isFixtureRepositoryProvisioned,
+  resolveFixtureClusterTarget,
   resolveFixtureLocation
 } from "./support/fixture-repository.js";
 
@@ -329,6 +330,11 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       throw new Error(
         "GH_PACKAGES_USER is required for the cloud lifecycle journey."
       );
+    const clusterTarget = resolveFixtureClusterTarget(
+      process.env.AIEXT_CLOUD_E2E_RESOURCE_GROUP,
+      process.env.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME,
+      process.env.CI === "true"
+    );
     fixture = await createCloudFixture({
       subscriptionId,
       // CI publishes the region; locally it is absent and the fixture's own
@@ -337,6 +343,8 @@ test.describe("Radius Canvas manages an environment's lifecycle against real clo
       location: resolveFixtureLocation(
         process.env.AIEXT_CLOUD_E2E_AZURE_LOCATION
       ),
+      resourceGroup: clusterTarget?.resourceGroup,
+      clusterName: clusterTarget?.clusterName,
       githubRunId: process.env.GITHUB_RUN_ID,
       ports
     });

@@ -1,9 +1,9 @@
 // The cloud run's external world.
 //
 // The one rule that gives this layer its value: **the fixture never creates
-// anything the product creates.** It provisions a per-run resource group, a
-// per-run AKS cluster for the product to discover, and a clone of the fixture
-// repository at the pinned baseline. It does not create the app registration,
+// anything the product creates.** In CI it borrows a precreated AKS cluster;
+// local runs may provision a disposable resource group and cluster. It always
+// creates a clone of the fixture repository at the pinned baseline. It does not create the app registration,
 // the service principal, the federated credential, the role assignments, the
 // GitHub Environment, or any workflow file. If it did, asserting those exist
 // would prove nothing, and later asserting they are gone would prove only that
@@ -163,6 +163,10 @@ export interface CloudFixtureOptions {
   readonly repository?: string;
   readonly defaultBranch?: string;
   readonly baselineSha?: string;
+  /** Existing CI resource group. Must be supplied with `clusterName`. */
+  readonly resourceGroup?: string;
+  /** Existing CI AKS cluster. Must be supplied with `resourceGroup`. */
+  readonly clusterName?: string;
   /** Node count for the discovery-target cluster. One is enough. */
   readonly nodeCount?: number;
   readonly githubRunId?: string;
@@ -204,7 +208,7 @@ export async function createCloudFixture(
   );
   const ports = options.ports;
   const commands = ports.commands;
-  const location = options.location ?? DEFAULT_LOCATION;
+  let location = options.location ?? DEFAULT_LOCATION;
   const repository = options.repository ?? FIXTURE_REPOSITORY;
   const defaultBranch = options.defaultBranch ?? FIXTURE_REPO_DEFAULT_BRANCH;
   const baselineSha = options.baselineSha ?? FIXTURE_BASELINE_SHA;
@@ -229,8 +233,18 @@ export async function createCloudFixture(
   );
 
   const uniqueId = shortenUniqueId(ports.newUniqueId());
-  const resourceGroup = resourceGroupName(uniqueId);
-  const clusterName = buildClusterName(uniqueId);
+  const configuredResourceGroup = options.resourceGroup?.trim() || undefined;
+  const configuredClusterName = options.clusterName?.trim() || undefined;
+  if (
+    (configuredResourceGroup === undefined) !==
+    (configuredClusterName === undefined)
+  )
+    throw new Error(
+      "An existing cloud fixture resource group and AKS cluster name must be supplied together."
+    );
+  const ownsInfrastructure = configuredResourceGroup === undefined;
+  const resourceGroup = configuredResourceGroup ?? resourceGroupName(uniqueId);
+  const clusterName = configuredClusterName ?? buildClusterName(uniqueId);
   const environmentName = buildEnvironmentName(uniqueId);
   const scope = resourceGroupScope(subscriptionId, resourceGroup);
   const clusterScope = `${scope}/providers/Microsoft.ContainerService/managedClusters/${clusterName}`;
@@ -324,70 +338,101 @@ export async function createCloudFixture(
       );
     }
 
-    // The fixture tag proves the group is ours; github-run-id limits immediate
-    // scheduled cleanup to CI-created groups. The creationTime/radtest pair
-    // leaves Radius purge as the fallback safety net if this cleanup cannot run.
-    expectSuccess(
-      await commands.runAz([
-        "group",
-        "create",
-        "--name",
-        resourceGroup,
-        "--location",
-        location,
-        "--subscription",
-        subscriptionId,
-        "--tags",
-        ...tags,
-        "--output",
-        "none"
-      ]),
-      `az group create ${resourceGroup}`
-    );
-    unwind.push({
-      describe: `delete resource group ${resourceGroup}`,
-      run: async () => {
-        expectSuccess(
-          await commands.runAz([
-            "group",
-            "delete",
-            "--name",
-            resourceGroup,
-            "--subscription",
-            subscriptionId,
-            "--yes",
-            "--no-wait",
-            "--output",
-            "none"
-          ]),
-          `az group delete ${resourceGroup}`
-        );
-      }
-    });
+    if (ownsInfrastructure) {
+      // The fixture tag proves the group is ours; github-run-id limits immediate
+      // scheduled cleanup to CI-created groups. The creationTime/radtest pair
+      // leaves Radius purge as the fallback safety net if this cleanup cannot run.
+      expectSuccess(
+        await commands.runAz([
+          "group",
+          "create",
+          "--name",
+          resourceGroup,
+          "--location",
+          location,
+          "--subscription",
+          subscriptionId,
+          "--tags",
+          ...tags,
+          "--output",
+          "none"
+        ]),
+        `az group create ${resourceGroup}`
+      );
+      unwind.push({
+        describe: `delete resource group ${resourceGroup}`,
+        run: async () => {
+          expectSuccess(
+            await commands.runAz([
+              "group",
+              "delete",
+              "--name",
+              resourceGroup,
+              "--subscription",
+              subscriptionId,
+              "--yes",
+              "--no-wait",
+              "--output",
+              "none"
+            ]),
+            `az group delete ${resourceGroup}`
+          );
+        }
+      });
 
-    // Purely a discovery target: the product runs `az aks list` and must find a
-    // real cluster. Deleting the resource group removes it, so the cluster gets
-    // no unwind step of its own.
-    expectSuccess(
-      await commands.runAz([
-        "aks",
-        "create",
-        "--resource-group",
-        resourceGroup,
-        "--name",
-        clusterName,
-        "--subscription",
-        subscriptionId,
-        "--node-count",
-        String(nodeCount),
-        "--node-vm-size",
-        CLUSTER_NODE_SIZE,
-        "--generate-ssh-keys",
-        "--output",
-        "none"
-      ]),
-      `az aks create ${clusterName}`
-    );
+      // Purely a discovery target: the product runs `az aks list` and must find
+      // a real cluster. Deleting the group removes it, so it needs no unwind step.
+      expectSuccess(
+        await commands.runAz([
+          "aks",
+          "create",
+          "--resource-group",
+          resourceGroup,
+          "--name",
+          clusterName,
+          "--subscription",
+          subscriptionId,
+          "--node-count",
+          String(nodeCount),
+          "--node-vm-size",
+          CLUSTER_NODE_SIZE,
+          "--generate-ssh-keys",
+          "--output",
+          "none"
+        ]),
+        `az aks create ${clusterName}`
+      );
+    } else {
+      const actualLocation = expectSuccess(
+        await commands.runAz([
+          "aks",
+          "show",
+          "--resource-group",
+          resourceGroup,
+          "--name",
+          clusterName,
+          "--subscription",
+          subscriptionId,
+          "--query",
+          "location",
+          "--output",
+          "tsv"
+        ]),
+        `az aks show ${clusterName}`
+      )
+        .stdout.trim()
+        .toLowerCase();
+      if (!actualLocation)
+        throw new Error(
+          `The precreated AKS cluster ${resourceGroup}/${clusterName} did not report a location.`
+        );
+      if (options.location !== undefined && actualLocation !== location)
+        throw new Error(
+          `The precreated AKS cluster ${resourceGroup}/${clusterName} is in "${actualLocation}", ` +
+            `but AIEXT_CLOUD_E2E_AZURE_LOCATION is "${location}".`
+        );
+      location = actualLocation;
+    }
 
     workspacePath = await ports.makeWorkspaceDir(`radtest-canvas-${uniqueId}`);
     unwind.push({

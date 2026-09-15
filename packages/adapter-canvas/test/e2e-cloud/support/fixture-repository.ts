@@ -65,6 +65,11 @@ export interface FixtureRepositoryPin {
   readonly baselineSha: string;
 }
 
+export interface FixtureClusterTarget {
+  readonly resourceGroup: string;
+  readonly clusterName: string;
+}
+
 export const FIXTURE_REPOSITORY_PIN: FixtureRepositoryPin = {
   owner: FIXTURE_REPO_OWNER,
   name: FIXTURE_REPO_NAME,
@@ -230,4 +235,40 @@ export function resolveFixtureLocation(
       `AIEXT_CLOUD_E2E_AZURE_LOCATION must be an Azure region such as "westus3"; received "${value}".`
     );
   return normalized;
+}
+
+const RESOURCE_GROUP_PATTERN = /^[A-Za-z0-9_().-]{1,90}$/;
+const CLUSTER_NAME_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?$/;
+
+export function resolveFixtureClusterTarget(
+  resourceGroupValue: string | undefined,
+  clusterNameValue: string | undefined,
+  required: boolean
+): FixtureClusterTarget | undefined {
+  const resourceGroup = resourceGroupValue?.trim() ?? "";
+  const clusterName = clusterNameValue?.trim() ?? "";
+
+  if (!resourceGroup && !clusterName) {
+    if (!required) return undefined;
+    throw new Error(
+      "AIEXT_CLOUD_E2E_RESOURCE_GROUP and AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME must identify the precreated CI cluster."
+    );
+  }
+  if (!resourceGroup || !clusterName)
+    throw new Error(
+      "AIEXT_CLOUD_E2E_RESOURCE_GROUP and AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME must be set together."
+    );
+  if (
+    !RESOURCE_GROUP_PATTERN.test(resourceGroup) ||
+    resourceGroup.endsWith(".")
+  )
+    throw new Error(
+      `AIEXT_CLOUD_E2E_RESOURCE_GROUP is not a valid Azure resource-group name: "${resourceGroupValue}".`
+    );
+  if (!CLUSTER_NAME_PATTERN.test(clusterName))
+    throw new Error(
+      `AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME is not a valid AKS cluster name: "${clusterNameValue}".`
+    );
+
+  return { resourceGroup, clusterName };
 }

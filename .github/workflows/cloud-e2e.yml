@@ -12,24 +12,9 @@ name: Cloud E2E
 # infrastructure failure, or leaked state from an earlier run - and treating
 # them as one destroys the signal this tier exists to provide.
 #
-# THIS WORKFLOW HAS NEVER EXECUTED. Five prerequisites are outstanding:
-#
-#   1. radius-project/wellknown#134 (the Terraform that publishes the identity
-#      and the variables below) is open and unmerged.
-#   2. A tenant admin must consent to Graph `AppRoleAssignment.ReadWrite.All`,
-#      or that Terraform apply fails `Authorization_RequestDenied`.
-#   3. The publishing GitHub App must be installed on this repository. Terraform
-#      cannot install an App, so that half is manual.
-#   4. The dedicated Cloud E2E GitHub App must be created, installed only on the
-#      fixture repository, and its client id and private key stored here as
-#      `CLOUD_E2E_BOT_CLIENT_ID` and `CLOUD_E2E_BOT_PRIVATE_KEY`.
-#   5. The organization-level `GH_RAD_CI_BOT_PAT` secret must be shared with
-#      this repository. It is a classic PAT for `rad-ci-bot` with
-#      read/write/delete package scopes.
-#
-# The private fixture repository now exists and its immutable baseline is pinned
-# in source. While the wellknown-published variable is unavailable, the run
-# stops after checkout with a specific notice.
+# CI uses a precreated AKS cluster selected by repository Actions variables.
+# The fixture verifies that target before the journey and never deletes it.
+# The private fixture repository's immutable baseline remains pinned in source.
 
 on:
   # Deliberately NOT `pull_request_target`, and deliberately NOT `merge_group`.
@@ -46,8 +31,7 @@ on:
   # has a track record; removing it after the queue has wedged is an incident.
   schedule:
     # 04:23 UTC, once daily. Offset from the other scheduled workflows so they
-    # do not contend, and single rather than repeated because each run
-    # provisions an AKS cluster that dominates the tier's cost.
+    # do not contend. Runs share one precreated AKS cluster and remain serialized.
     - cron: "23 4 * * *"
   workflow_dispatch:
 
@@ -58,9 +42,9 @@ permissions: {}
 # `cancel-in-progress: false` is a correctness rule here, unlike the `true` in
 # canvas-functional.yml. Two independent reasons:
 #
-#   1. The run is destructive. Cancelling mid-flight strands a resource group,
-#      an AKS cluster, an Entra application, and a GitHub Environment, turning
-#      one flake into a leaked-state failure on every subsequent run.
+#   1. The run is destructive. Cancelling mid-flight can strand an Entra
+#      application, a deployment, and a GitHub Environment, turning one flake
+#      into a leaked-state failure on every subsequent run.
 #   2. The Entra application the product creates is scoped to the repository
 #      alone - `radius-deploy-${fullName.replace("/", "-")}` in
 #      src/server/routes/azure-auto-setup-application.ts - with no per-run
@@ -222,15 +206,17 @@ jobs:
         working-directory: packages/adapter-canvas
         env:
           # azure/login does not export these to later steps, and the journey
-          # reads them directly: the subscription to provision the per-run group
-          # and cluster in, and the bootstrap client id that the journey asserts
-          # never leaked into the fixture repository's Environment.
+          # reads them directly: the subscription containing the precreated
+          # cluster, and the bootstrap client id that the journey asserts never
+          # leaked into the fixture repository's Environment.
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          # Published by wellknown so the region can move without a code change.
-          # Empty leaves the fixture's own default in place.
+          # Repository variables keep the shared cluster target configurable.
+          # The cluster lookup verifies that the target is in this region.
           AIEXT_CLOUD_E2E_AZURE_LOCATION: ${{ vars.AIEXT_CLOUD_E2E_AZURE_LOCATION }}
+          AIEXT_CLOUD_E2E_RESOURCE_GROUP: ${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}
+          AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME: ${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}
           AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY: ${{ steps.fixture.outputs.full-name }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           # Playwright captures and removes the private key from its environment

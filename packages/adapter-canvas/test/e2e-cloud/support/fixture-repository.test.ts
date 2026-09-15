@@ -16,6 +16,7 @@ import {
   isFixtureRepositoryProvisioned,
   parseCloudE2ELeaseOwnerRunId,
   RESOURCE_GROUP_PREFIX,
+  resolveFixtureClusterTarget,
   resolveFixtureLocation,
   resourceGroupName,
   resourceGroupScope,
@@ -266,5 +267,59 @@ describe("resolveFixtureLocation", () => {
 
   it("quotes the offending value so the failure names its own cause", () => {
     expect(() => resolveFixtureLocation("West US 3")).toThrow('"West US 3"');
+  });
+});
+
+describe("resolveFixtureClusterTarget", () => {
+  it("normalizes a complete precreated cluster target", () => {
+    expect(
+      resolveFixtureClusterTarget(
+        " ai_extensions_test ",
+        " ai_extensions_aks ",
+        true
+      )
+    ).toEqual({
+      resourceGroup: "ai_extensions_test",
+      clusterName: "ai_extensions_aks"
+    });
+  });
+
+  it("allows local runs to omit a precreated cluster", () => {
+    expect(resolveFixtureClusterTarget(undefined, " ", false)).toBeUndefined();
+  });
+
+  it("requires the precreated cluster in CI", () => {
+    expect(() =>
+      resolveFixtureClusterTarget(undefined, undefined, true)
+    ).toThrow("must identify the precreated CI cluster");
+  });
+
+  it.each([
+    ["resource group", "resource-group", undefined],
+    ["cluster name", undefined, "cluster"]
+  ])("rejects a partial target missing the %s", (_label, group, cluster) => {
+    expect(() => resolveFixtureClusterTarget(group, cluster, false)).toThrow(
+      "must be set together"
+    );
+  });
+
+  it.each([
+    ["an invalid resource group", "bad/resource", "cluster", "RESOURCE_GROUP"],
+    [
+      "a resource group ending in a period",
+      "bad.",
+      "cluster",
+      "RESOURCE_GROUP"
+    ],
+    [
+      "an invalid cluster name",
+      "resource-group",
+      "_cluster",
+      "AKS_CLUSTER_NAME"
+    ]
+  ])("rejects %s", (_label, group, cluster, variable) => {
+    expect(() => resolveFixtureClusterTarget(group, cluster, false)).toThrow(
+      variable
+    );
   });
 });

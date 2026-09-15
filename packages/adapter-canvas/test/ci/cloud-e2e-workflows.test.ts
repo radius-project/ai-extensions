@@ -240,8 +240,14 @@ describe("cloud-e2e.yml", () => {
       step.run?.includes("test:cloud")
     );
     expect(run?.env).toMatchObject({
+      AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME:
+        "${{ vars.AIEXT_CLOUD_E2E_AKS_CLUSTER_NAME }}",
+      AIEXT_CLOUD_E2E_AZURE_LOCATION:
+        "${{ vars.AIEXT_CLOUD_E2E_AZURE_LOCATION }}",
       AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY:
         "${{ steps.fixture.outputs.full-name }}",
+      AIEXT_CLOUD_E2E_RESOURCE_GROUP:
+        "${{ vars.AIEXT_CLOUD_E2E_RESOURCE_GROUP }}",
       CLOUD_E2E_BOT_CLIENT_ID: "${{ secrets.CLOUD_E2E_BOT_CLIENT_ID }}",
       CLOUD_E2E_BOT_INSTALLATION_ID:
         "${{ steps.app-token.outputs.installation-id }}",

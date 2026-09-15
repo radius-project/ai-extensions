@@ -166,11 +166,10 @@ jobs:
           permission-environments: write
           permission-pull-requests: write
 
-      # Per-run resource groups carry both the fixture prefix and a fixture-owned
-      # tag. The Radius purge job is only the safety net; this workflow deletes
-      # the test groups it can prove are ours without waiting for the safety-net
-      # age threshold.
-      - name: Purge Azure resource groups created by the suite
+      # Older revisions created per-run resource groups carrying both the
+      # fixture prefix and a fixture-owned tag. Retain their bounded cleanup,
+      # but never target the configured shared cluster resource group.
+      - name: Purge legacy Azure resource groups created by the suite
         if: always() && steps.pin.outputs.provisioned == 'true' && steps.verify-scope.outputs.configured == 'true' && steps.azure-login.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}

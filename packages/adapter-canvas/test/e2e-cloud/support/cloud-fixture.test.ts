@@ -32,6 +32,8 @@ const NOW = new Date("2026-08-29T12:34:56.000Z");
 
 const RESOURCE_GROUP = `radtest-canvas-${UNIQUE_ID}`;
 const CLUSTER = `aks-${UNIQUE_ID}`;
+const SHARED_RESOURCE_GROUP = "ai_extensions_test";
+const SHARED_CLUSTER = "ai_extensions_aks";
 const ENVIRONMENT = `radtest-${UNIQUE_ID}`;
 const SCOPE = `/subscriptions/${SUBSCRIPTION}/resourceGroups/${RESOURCE_GROUP}`;
 const CLUSTER_SCOPE = `${SCOPE}/providers/Microsoft.ContainerService/managedClusters/${CLUSTER}`;
@@ -323,6 +325,133 @@ describe("createCloudFixture", () => {
         args: ["reset", "--hard", BASELINE],
         cwd: WORKSPACE
       });
+    });
+
+    it("uses a precreated cluster without creating or deleting its infrastructure", async () => {
+      const { fixture, fake } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: "centralus\n" }
+          }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER,
+          location: "centralus"
+        }
+      );
+
+      expect(fixture.resourceGroup).toBe(SHARED_RESOURCE_GROUP);
+      expect(fixture.clusterName).toBe(SHARED_CLUSTER);
+      expect(fixture.location).toBe("centralus");
+      expect(fake.commands.commandLines("az")).toEqual([
+        `aks show --resource-group ${SHARED_RESOURCE_GROUP} --name ${SHARED_CLUSTER} ` +
+          `--subscription ${SUBSCRIPTION} --query location --output tsv`
+      ]);
+
+      await fixture.dispose();
+
+      expect(fake.commands.commandLines("az")).toHaveLength(1);
+    });
+
+    it("uses the precreated cluster's location when no expected location is configured", async () => {
+      const { fixture } = await createHarness(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: "CentralUS\n" }
+          }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      expect(fixture.location).toBe("centralus");
+    });
+
+    it("rejects a partial precreated cluster target before acquiring the lease", async () => {
+      const fake = createFakeFixturePorts({ stubs: baselineStubs() });
+
+      await expect(
+        createCloudFixture({
+          subscriptionId: SUBSCRIPTION,
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          ports: fake.ports
+        })
+      ).rejects.toThrow("must be supplied together");
+      expect(fake.commands.calls).toEqual([]);
+    });
+
+    it("rejects a precreated cluster in a different configured location", async () => {
+      const { fake, attempt } = expectConstructionToFail(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: "eastus\n" }
+          }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER,
+          location: "centralus"
+        }
+      );
+
+      await expect(attempt).rejects.toThrow(
+        'is in "eastus", but AIEXT_CLOUD_E2E_AZURE_LOCATION is "centralus"'
+      );
+      expect(fake.commands.commandLines("gh")).toContain(
+        `api --method DELETE ${LEASE_REF_PATH}`
+      );
+      expect(
+        fake.commands
+          .commandLines("az")
+          .some((command) => command.includes("group delete"))
+      ).toBe(false);
+    });
+
+    it("fails when the precreated cluster does not report its location", async () => {
+      const { attempt } = expectConstructionToFail(
+        [
+          {
+            tool: "az",
+            match: ["aks", "show"],
+            respond: { stdout: " \n" }
+          }
+        ],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      await expect(attempt).rejects.toThrow("did not report a location");
+    });
+
+    it("releases the lease when the precreated cluster cannot be read", async () => {
+      const { fake, attempt } = expectConstructionToFail(
+        [failing("az", ["aks", "show"], "ResourceNotFound")],
+        {},
+        {
+          resourceGroup: SHARED_RESOURCE_GROUP,
+          clusterName: SHARED_CLUSTER
+        }
+      );
+
+      await expect(attempt).rejects.toThrow("ResourceNotFound");
+      expect(fake.commands.commandLines("gh")).toContain(
+        `api --method DELETE ${LEASE_REF_PATH}`
+      );
     });
 
     it("tags the group so scheduled cleanup can identify a crashed run's group", async () => {
