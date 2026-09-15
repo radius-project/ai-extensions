@@ -32,9 +32,29 @@ import { GRAPH_PAGE_STATE_ID } from "../../pages/browser-state-ids.js";
 
 const ENTRY_KEY = "graph-page";
 export { GRAPH_PAGE_STATE_ID };
-export const GRAPH_RETRY_MS = 10_000;
+// The wait between `needsAppBicep` polls, by attempt. Copilot usually finishes
+// authoring `.radius/app.bicep` within the first few seconds, so the first polls
+// are cheap and fast and only a long-running model generation settles onto the
+// unchanged 10s steady-state interval. A single fixed delay made the common
+// case pay the worst case: the model was already on disk while the page sat
+// idle.
+export const GRAPH_RETRY_SCHEDULE_MS: readonly number[] = Object.freeze([
+  300, 1_000, 2_000, 5_000, 10_000
+]);
+// The last entry of the schedule, which every attempt past its end reuses.
+export const GRAPH_RETRY_MAX_MS =
+  GRAPH_RETRY_SCHEDULE_MS[GRAPH_RETRY_SCHEDULE_MS.length - 1];
 export const GRAPH_STALE_RETRY_MS = 1_000;
 export const GRAPH_PROGRESS_MS = 800;
+
+// The delay before the `attempt`-th (0-based) `needsAppBicep` retry. Attempts
+// past the end of the schedule hold at its last entry, so polling never stops
+// and never grows without bound.
+export function graphRetryDelayMs(attempt: number): number {
+  return GRAPH_RETRY_SCHEDULE_MS[
+    Math.min(attempt, GRAPH_RETRY_SCHEDULE_MS.length - 1)
+  ];
+}
 // Why the primary button is inert after a modeling failure. The graph surface
 // carries the diagnostic; this only explains the disabled control.
 export const GRAPH_PLAN_BLOCKED_TITLE =
@@ -109,6 +129,10 @@ export function initializeGraphPage(
   let branchSelectionGeneration = 0;
   let requestActive = false;
   let retry: ScopeTimer | null = null;
+  // How many `needsAppBicep` retries the current wait has already scheduled.
+  // Each wait owns its own counter and resets when a fresh (non-continuing)
+  // request starts it, so a later wait never inherits a previous one's backoff.
+  let loadRetryAttempt = 0;
   let progress: ScopeTimer | null = null;
   let requestAbort: AbortHandle | null = null;
   let controller: GraphController | null = null;
@@ -315,6 +339,7 @@ export function initializeGraphPage(
       return;
     }
     requestActive = true;
+    if (!options.continuing) loadRetryAttempt = 0;
     const requestGeneration = ++generation;
     requestAbort = context.net.createAbort();
     controller?.destroy();
@@ -383,7 +408,7 @@ export function initializeGraphPage(
             "Copilot is generating .radius/app.bicep with the Radius app-bicep skill…",
             "info"
           );
-          retry = entry.after(GRAPH_RETRY_MS, () => {
+          retry = entry.after(graphRetryDelayMs(loadRetryAttempt++), () => {
             retry = null;
             load({ continuing: true });
           });
@@ -461,7 +486,9 @@ export function initializeGraphPage(
     // blanks the container before it fetches. Only the first request restarts
     // the server-side wait; the polls that continue it must not, or the wait
     // would never age out.
+    let refreshRetryAttempt = 0;
     const refresh = (options: { readonly continuing?: boolean } = {}): void => {
+      if (!options.continuing) refreshRetryAttempt = 0;
       const refreshGeneration = ++generation;
       requestAbort = context.net.createAbort();
       void context.net
@@ -515,10 +542,13 @@ export function initializeGraphPage(
               "Copilot is rebuilding the application graph from .radius/app.bicep with the Radius app-bicep skill.",
               "info"
             );
-            retry = entry.after(GRAPH_RETRY_MS, () => {
-              retry = null;
-              refresh({ continuing: true });
-            });
+            retry = entry.after(
+              graphRetryDelayMs(refreshRetryAttempt++),
+              () => {
+                retry = null;
+                refresh({ continuing: true });
+              }
+            );
           } else if (readBoolean(payload, "stale")) {
             showStatus(
               context,
