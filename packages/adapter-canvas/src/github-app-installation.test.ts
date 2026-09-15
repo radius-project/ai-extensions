@@ -1,69 +1,42 @@
 import { describe, expect, it } from "vitest";
 import {
-  missingGitHubAppSetupPermissions,
-  parseGitHubAppInstallation
+  isGitHubAppBotLogin,
+  isGitHubAppUserEndpointFailure
 } from "./github-app-installation.js";
 
-const REQUIRED_PERMISSIONS = {
-  actions: "write",
-  actions_variables: "write",
-  contents: "write",
-  deployments: "read",
-  environments: "write",
-  pull_requests: "write",
-  secrets: "write",
-  workflows: "write"
-};
-
-describe("GitHub App installation metadata", () => {
-  it("parses the bot login and string permissions", () => {
-    expect(
-      parseGitHubAppInstallation({
-        app_slug: "radius-cloud-e2e",
-        permissions: { ...REQUIRED_PERMISSIONS, metadata: "read", ignored: 1 }
-      })
-    ).toEqual({
-      login: "radius-cloud-e2e[bot]",
-      permissions: { ...REQUIRED_PERMISSIONS, metadata: "read" }
-    });
+describe("GitHub App installation identity", () => {
+  it.each([
+    "radius-cloud-e2e[bot]",
+    "dependabot[bot]",
+    "A1-B2[bot]",
+    " radius-cloud-e2e[bot] "
+  ])("recognizes the installation bot login %s", (login) => {
+    expect(isGitHubAppBotLogin(login)).toBe(true);
   });
 
   it.each([
-    null,
-    {},
-    { app_slug: "", permissions: {} },
-    { app_slug: "radius-cloud-e2e" },
-    { app_slug: "radius-cloud-e2e", permissions: null }
-  ])("rejects malformed installation metadata %#", (value) => {
-    expect(parseGitHubAppInstallation(value)).toBeNull();
+    "",
+    "[bot]",
+    "-app[bot]",
+    "app-[bot]",
+    "app",
+    "app[Bot]extra",
+    "app name[bot]"
+  ])("rejects the non-installation login %s", (login) => {
+    expect(isGitHubAppBotLogin(login)).toBe(false);
   });
 
-  it("accepts every permission required by environment setup", () => {
-    const installation = parseGitHubAppInstallation({
-      app_slug: "radius-cloud-e2e",
-      permissions: REQUIRED_PERMISSIONS
-    });
-    if (!installation) throw new Error("installation fixture was not parsed");
-
-    expect(missingGitHubAppSetupPermissions(installation)).toEqual([]);
+  it("recognizes the user-endpoint refusal returned for installation tokens", () => {
+    expect(
+      isGitHubAppUserEndpointFailure(
+        "gh: Resource not accessible by integration (HTTP 403)"
+      )
+    ).toBe(true);
   });
 
-  it("reports missing and read-only mutation permissions", () => {
-    const installation = parseGitHubAppInstallation({
-      app_slug: "radius-cloud-e2e",
-      permissions: {
-        ...REQUIRED_PERMISSIONS,
-        actions: "read",
-        environments: "read",
-        workflows: undefined
-      }
-    });
-    if (!installation) throw new Error("installation fixture was not parsed");
-
-    expect(missingGitHubAppSetupPermissions(installation)).toEqual([
-      "actions",
-      "environments",
-      "workflows"
-    ]);
+  it("does not classify an ordinary authorization failure as an installation token", () => {
+    expect(isGitHubAppUserEndpointFailure("gh: Forbidden (HTTP 403)")).toBe(
+      false
+    );
   });
 });

@@ -6,11 +6,7 @@ import {
   presentedRemediationView,
   type GhCommandPresentation
 } from "../../gh-command-display.js";
-import {
-  missingGitHubAppSetupPermissions,
-  parseGitHubAppInstallation,
-  type GitHubAppInstallation
-} from "../../github-app-installation.js";
+import { isGitHubAppBotLogin } from "../../github-app-installation.js";
 import type {
   GitHubAccountCoordinator,
   GitHubAccountRestoration
@@ -98,20 +94,6 @@ interface RepositoryResponse {
   permissions?: {
     admin?: unknown;
   };
-}
-
-async function inspectInstallation(
-  executor: SelectedGhExecutor
-): Promise<GitHubAppInstallation | null> {
-  const response = await executor.run(["api", "installation"], {
-    timeout: 15000
-  });
-  if (response.code !== 0) return null;
-  try {
-    return parseGitHubAppInstallation(JSON.parse(response.stdout) as unknown);
-  } catch {
-    return null;
-  }
 }
 
 export async function probeGhcrPackageWriteAccess(
@@ -323,8 +305,7 @@ function repairGuidance(
 
 async function inspectRepository(
   executor: SelectedGhExecutor,
-  repo: string,
-  installation: GitHubAppInstallation | null
+  repo: string
 ): Promise<{
   repository: GitHubReadinessCheck;
   environment: GitHubReadinessCheck;
@@ -349,16 +330,7 @@ async function inspectRepository(
     );
     return { repository: check, environment: check, ready: false };
   }
-  if (installation) {
-    const missing = missingGitHubAppSetupPermissions(installation);
-    if (missing.length > 0) {
-      const detail = `@${executor.login} is missing GitHub App permissions required for environment setup: ${missing.join(", ")}.`;
-      return {
-        repository: failedCheck(detail),
-        environment: failedCheck(detail),
-        ready: false
-      };
-    }
+  if (isGitHubAppBotLogin(executor.login)) {
     return {
       repository: readyCheck(
         `@${executor.login} can configure ${repo} through its GitHub App installation.`
@@ -407,15 +379,10 @@ export function createGitHubAccountReadinessService(
           login,
           { instanceId },
           async (executor) => {
-            const installation = await inspectInstallation(executor);
-            const repository = await inspectRepository(
-              executor,
-              repo,
-              installation
-            );
+            const repository = await inspectRepository(executor, repo);
             const workflowReady =
               hasScope(executor, "workflow") ||
-              installation?.permissions.workflows === "write";
+              isGitHubAppBotLogin(executor.login);
             const packageCredentials = executor.packageCredentials();
             const hasPackagesScope =
               packageCredentials.scopes?.includes("write:packages") ??

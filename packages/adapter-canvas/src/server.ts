@@ -38,10 +38,7 @@ import {
   presentRemediation
 } from "./gh-command-display.js";
 import { resolveGhCommandPresentation } from "./gh-command-resolution.js";
-import {
-  missingGitHubAppSetupPermissions,
-  parseGitHubAppInstallation
-} from "./github-app-installation.js";
+import { isGitHubAppBotLogin } from "./github-app-installation.js";
 import {
   sharedCredentials,
   cloudCredential,
@@ -4947,17 +4944,13 @@ async function preflightRepoAdmin(
   executor?: SelectedGhExecutor,
   ghCommandPresentation = BARE_GH_COMMAND_PRESENTATION
 ): Promise<string> {
-  let login = "";
   const runJson = (path: string) =>
     executor ? selectedGhApiJson(executor, path) : ghApiJson(path);
   const who = await runJson("user");
-  if (who.ok) login = optionalString(record(who.json).login);
-  const installationResult = await runJson("installation");
-  const installation =
-    installationResult.ok ?
-      parseGitHubAppInstallation(installationResult.json)
-    : null;
-  if (installation) login = installation.login;
+  const login =
+    who.ok ? optionalString(record(who.json).login)
+    : executor ? executor.login
+    : (await getGitHubIdentity()).actingLogin;
   let readFailed = false,
     permissions = null;
   const res = await runJson(`repos/${repo}`);
@@ -4969,12 +4962,7 @@ async function preflightRepoAdmin(
   } else {
     return ""; // ambiguous/transient — don't block or mislead; let the real op surface the true error
   }
-  if (installation) {
-    const missing = missingGitHubAppSetupPermissions(installation);
-    return missing.length === 0 ?
-        ""
-      : `GitHub App @${installation.login} is missing permissions required for environment setup on "${repo}": ${missing.join(", ")}. Update the App installation permissions, then retry.`;
-  }
+  if (isGitHubAppBotLogin(login)) return "";
   return explainRepoAccessForEnvSetup(
     {
       repo,

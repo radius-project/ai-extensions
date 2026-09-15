@@ -111,25 +111,6 @@ describe("GitHub account readiness", () => {
   it("accepts a GitHub App installation with setup permissions and a separate package credential", async () => {
     const login = "radius-cloud-e2e[bot]";
     const run = async (args: string[]): Promise<SelectedGhCommandResult> => {
-      if (args[1] === "installation") {
-        return {
-          code: 0,
-          stdout: JSON.stringify({
-            app_slug: "radius-cloud-e2e",
-            permissions: {
-              actions: "write",
-              actions_variables: "write",
-              contents: "write",
-              deployments: "read",
-              environments: "write",
-              pull_requests: "write",
-              secrets: "write",
-              workflows: "write"
-            }
-          }),
-          stderr: ""
-        };
-      }
       if (args[1] === "repos/octo/app") {
         return {
           code: 0,
@@ -178,34 +159,13 @@ describe("GitHub account readiness", () => {
     });
   });
 
-  it("reports the exact missing GitHub App setup permissions", async () => {
+  it("does not infer GitHub App repository access when the token cannot read the repository", async () => {
     const login = "radius-cloud-e2e[bot]";
-    const run = async (args: string[]): Promise<SelectedGhCommandResult> => {
-      if (args[1] === "installation") {
-        return {
-          code: 0,
-          stdout: JSON.stringify({
-            app_slug: "radius-cloud-e2e",
-            permissions: {
-              actions: "read",
-              actions_variables: "write",
-              contents: "write",
-              deployments: "read",
-              environments: "write",
-              pull_requests: "write",
-              secrets: "write",
-              workflows: "write"
-            }
-          }),
-          stderr: ""
-        };
-      }
-      return {
-        code: 0,
-        stdout: JSON.stringify({ permissions: { admin: false } }),
-        stderr: ""
-      };
-    };
+    const run = async (): Promise<SelectedGhCommandResult> => ({
+      code: 1,
+      stdout: "",
+      stderr: "gh: Not Found (HTTP 404)"
+    });
     const executor: SelectedGhExecutor = {
       ...selectedExecutor({ login }),
       credentialSource: "injected",
@@ -231,9 +191,8 @@ describe("GitHub account readiness", () => {
 
     expect(result.ready).toBe(false);
     expect(result.checks.repository).toEqual({
-      state: "missing",
-      detail:
-        "@radius-cloud-e2e[bot] is missing GitHub App permissions required for environment setup: actions."
+      state: "error",
+      detail: "gh: Not Found (HTTP 404)"
     });
   });
 

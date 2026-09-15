@@ -14,7 +14,10 @@ import type {
   ExecFileOptionsWithStringEncoding
 } from "node:child_process";
 import { redactCredentials } from "./credential-redaction.js";
-import { parseGitHubAppInstallation } from "./github-app-installation.js";
+import {
+  isGitHubAppBotLogin,
+  isGitHubAppUserEndpointFailure
+} from "./github-app-installation.js";
 import { toGhCommandResult } from "./server/services/gh-command-result.js";
 
 export interface GhAccount {
@@ -912,20 +915,9 @@ export async function createSelectedGhExecutor(
     });
     const actingLogin = result.stdout.trim();
     if (result.code !== 0) {
-      const installationResult = await runRaw(["api", "installation"], {
-        timeout: 15000
-      });
-      if (installationResult.code === 0) {
-        try {
-          const installation = parseGitHubAppInstallation(
-            JSON.parse(installationResult.stdout) as unknown
-          );
-          if (installation?.login === login) return;
-        } catch {
-          // Preserve the original user-identity failure below.
-        }
-      }
       const detail = (result.stderr || result.stdout).trim();
+      if (isGitHubAppBotLogin(login) && isGitHubAppUserEndpointFailure(detail))
+        return;
       throw new Error(
         detail ?
           `GitHub identity verification failed for @${login}: ${detail}`

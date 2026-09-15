@@ -33,7 +33,6 @@ interface LoadGhOptions {
   userTokenErrors?: Record<string, Error>;
   apiLogin?: string;
   apiUserError?: string;
-  installation?: unknown;
   commandResult?: {
     error?: string;
     stdout?: string;
@@ -194,7 +193,6 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
     userTokenErrors = {},
     apiLogin = "",
     apiUserError,
-    installation,
     commandResult,
     ghVersion = "gh version 2.96.0",
     prime = false
@@ -249,15 +247,6 @@ async function loadGh(platform: NodeJS.Platform, opts: LoadGhOptions = {}) {
     if (a[0] === "api" && a[1] === "user" && a[2] === "--jq") {
       if (apiUserError) return done(new Error(apiUserError), "", apiUserError);
       return done(null, apiLogin);
-    }
-    if (a[0] === "api" && a[1] === "installation") {
-      if (installation !== undefined)
-        return done(null, JSON.stringify(installation));
-      return done(
-        new Error("Resource not accessible by personal access token"),
-        "",
-        "gh: Resource not accessible by personal access token (HTTP 403)"
-      );
     }
     if (commandResult) {
       return done(
@@ -1419,19 +1408,18 @@ describe.sequential("selected GitHub executor", () => {
       withToken: `github.com
   ✓ Logged in to github.com account radius-cloud-e2e[bot] (GH_TOKEN)
     - Active account: true`,
-      apiUserError: "gh: Resource not accessible by integration (HTTP 403)",
-      installation: {
-        app_slug: "radius-cloud-e2e",
-        permissions: { workflows: "write" }
-      }
+      apiUserError: "gh: Resource not accessible by integration (HTTP 403)"
     });
 
     const executor = await gh.createSelectedGhExecutor("radius-cloud-e2e[bot]");
 
     await expect(executor.verifyIdentity()).resolves.toBeUndefined();
-    expect(
-      childProcess.execFile.mock.calls.map(([, args]) => args.slice(0, 2))
-    ).toContainEqual(["api", "installation"]);
+    expect(childProcess.execFile.mock.calls.at(-1)?.[1]).toEqual([
+      "api",
+      "user",
+      "--jq",
+      ".login"
+    ]);
   });
 
   it("keeps the dedicated package credential separate from the selected GitHub App token", async () => {
@@ -1470,16 +1458,15 @@ describe.sequential("selected GitHub executor", () => {
     );
   });
 
-  it("preserves the original identity failure when installation metadata is malformed", async () => {
+  it("preserves the original identity failure for a non-App account", async () => {
     const gh = await loadGh("linux", {
       token: "installation-token",
       withToken: `github.com
-  ✓ Logged in to github.com account radius-cloud-e2e[bot] (GH_TOKEN)
+  ✓ Logged in to github.com account radius-cloud-e2e (GH_TOKEN)
     - Active account: true`,
-      apiUserError: "gh: Resource not accessible by integration (HTTP 403)",
-      installation: { app_slug: "", permissions: {} }
+      apiUserError: "gh: Resource not accessible by integration (HTTP 403)"
     });
-    const executor = await gh.createSelectedGhExecutor("radius-cloud-e2e[bot]");
+    const executor = await gh.createSelectedGhExecutor("radius-cloud-e2e");
 
     await expect(executor.verifyIdentity()).rejects.toThrow(
       "Resource not accessible by integration"
