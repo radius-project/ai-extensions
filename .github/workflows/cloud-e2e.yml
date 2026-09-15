@@ -201,10 +201,12 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # A short-lived installation token, the pattern release.yml already uses,
-      # rather than a stored PAT. Every permission is requested explicitly: the
-      # token request fails outright if the installation does not carry one.
-      # In particular, missing `workflows: write` cannot silently divert the
-      # journey to its pull-request fallback.
+      # rather than a stored PAT. The App installation itself is restricted to
+      # this fixture repository and the reviewed permission union. Do not narrow
+      # the token here: actions/create-github-app-token v3.2.0 cannot express
+      # the `actions_variables` permission that environment variable management
+      # requires, while omitting the permission inputs inherits the App's exact
+      # installation grants.
       - name: Create a GitHub App token for the fixture repository
         id: app-token
         if: steps.fixture.outputs.configured == 'true'
@@ -214,15 +216,6 @@ jobs:
           private-key: ${{ secrets.CLOUD_E2E_BOT_PRIVATE_KEY }}
           owner: ${{ steps.fixture.outputs.owner }}
           repositories: ${{ steps.fixture.outputs.name }}
-          permission-actions: write
-          permission-administration: read
-          permission-contents: write
-          permission-deployments: read
-          permission-environments: write
-          permission-pull-requests: write
-          permission-secrets: write
-          permission-variables: write
-          permission-workflows: write
 
       - name: Run the cloud create-environment journey
         if: steps.fixture.outputs.configured == 'true'
