@@ -114,7 +114,7 @@ jobs:
           set -euo pipefail
           if [[ -z "${FIXTURE_REPOSITORY:-}" ]]; then
             echo "configured=false" >>"$GITHUB_OUTPUT"
-            reason="AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY is not published yet, so there is no fixture repository to run against. Skipping. See docs/eng/CLOUD_E2E_RUNBOOK.md, \"It has never run\"."
+            reason="AIEXT_CLOUD_E2E_FIXTURE_REPOSITORY is not published yet, so there is no fixture repository to run against. Skipping. See docs/eng/CLOUD_E2E_RUNBOOK.md, \"Required configuration\"."
             echo "::notice::$reason"
             echo "$reason" >>"$GITHUB_STEP_SUMMARY"
             exit 0
