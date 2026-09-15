@@ -52,6 +52,11 @@ interface FetchCall {
 
 interface BootstrapManifest {
   artifactType?: string;
+  config?: {
+    digest?: string;
+    mediaType?: string;
+    size?: number;
+  };
   layers?: Array<{
     digest?: string;
     mediaType?: string;
@@ -792,12 +797,32 @@ test("pushes one deterministic linked bootstrap artifact across repeated bootstr
   const manifest = harness.manifest;
   assert.ok(manifest);
   assert.ok(manifest.annotations);
+  assert.ok(manifest.config);
   assert.ok(manifest.layers);
   assert.equal(manifest.artifactType, BOOTSTRAP_ARTIFACT_TYPE);
   assert.equal(
     manifest.annotations["org.opencontainers.image.source"],
     "https://github.com/acme/app"
   );
+  assert.equal(
+    manifest.config.mediaType,
+    "application/vnd.oci.image.config.v1+json"
+  );
+  const configUpload = harness.calls.find(
+    (call) =>
+      call.method === "PUT" &&
+      new URL(call.url).pathname.startsWith("/uploads/") &&
+      call.body &&
+      digest(call.body) === manifest.config?.digest
+  );
+  assert.ok(configUpload?.body);
+  assert.deepEqual(JSON.parse(configUpload.body.toString("utf8")), {
+    config: {
+      Labels: {
+        "org.opencontainers.image.source": "https://github.com/acme/app"
+      }
+    }
+  });
   assert.equal(manifest.layers[0].mediaType, "text/plain");
   assert.equal(manifest.layers[0].size, Buffer.byteLength(BOOTSTRAP_CONTENT));
   const tokenCall = harness.calls.find(

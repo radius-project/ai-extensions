@@ -161,7 +161,7 @@ export const BOOTSTRAP_CONTENT =
   "Harmless bootstrap for private Repo Radius state package.";
 
 const OCI_MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json";
-const OCI_EMPTY_CONFIG_MEDIA_TYPE = "application/vnd.oci.empty.v1+json";
+const OCI_IMAGE_CONFIG_MEDIA_TYPE = "application/vnd.oci.image.config.v1+json";
 function packageAuthGuidance(
   presentation: GhCommandPresentation = BARE_GH_COMMAND_PRESENTATION,
   scopes = "read:packages,write:packages",
@@ -633,9 +633,18 @@ async function pushBootstrapManifest({
   bearerToken,
   targetRepository
 }: BootstrapManifestOptions): Promise<void> {
-  const configBytes = Buffer.from("{}");
+  const sourceRepository = `https://github.com/${targetRepository}`;
+  const configBytes = Buffer.from(
+    JSON.stringify({
+      config: {
+        Labels: {
+          "org.opencontainers.image.source": sourceRepository
+        }
+      }
+    })
+  );
   const layerBytes = Buffer.from(BOOTSTRAP_CONTENT);
-  const config = descriptor(OCI_EMPTY_CONFIG_MEDIA_TYPE, configBytes);
+  const config = descriptor(OCI_IMAGE_CONFIG_MEDIA_TYPE, configBytes);
   const layer = descriptor("text/plain", layerBytes, {
     "org.opencontainers.image.title": "bootstrap.txt"
   });
@@ -646,7 +655,7 @@ async function pushBootstrapManifest({
     config,
     layers: [layer],
     annotations: {
-      "org.opencontainers.image.source": `https://github.com/${targetRepository}`
+      "org.opencontainers.image.source": sourceRepository
     }
   };
   const manifestBytes = Buffer.from(JSON.stringify(manifest));
