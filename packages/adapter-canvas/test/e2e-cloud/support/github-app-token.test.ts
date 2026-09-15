@@ -176,13 +176,13 @@ describe("mintGitHubAppToken", () => {
       repositories: ["cloud-fixture"],
       permissions: {
         actions: "write",
+        actions_variables: "write",
         administration: "read",
         contents: "write",
         deployments: "read",
         environments: "write",
         pull_requests: "write",
         secrets: "write",
-        variables: "write",
         workflows: "write"
       }
     });
