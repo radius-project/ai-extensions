@@ -4,7 +4,6 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { test, vi } from "vitest";
 import {
-  BOOTSTRAP_ARTIFACT_TYPE,
   BOOTSTRAP_CONTENT,
   bootstrapGHCRStatePackage,
   deleteGHCRStatePackage,
@@ -788,18 +787,18 @@ test("pushes one deterministic linked bootstrap artifact across repeated bootstr
     visibility: "private"
   });
   assert.deepEqual(second, first);
-  assert.equal(harness.blobs.size, 2);
+  assert.equal(harness.blobs.size, 1);
   assert.equal(harness.manifestPushes, 1);
   assert.equal(
     harness.calls.filter((call) => call.method === "POST").length,
-    2
+    1
   );
   const manifest = harness.manifest;
   assert.ok(manifest);
   assert.ok(manifest.annotations);
   assert.ok(manifest.config);
   assert.ok(manifest.layers);
-  assert.equal(manifest.artifactType, BOOTSTRAP_ARTIFACT_TYPE);
+  assert.equal(manifest.artifactType, undefined);
   assert.equal(
     manifest.annotations["org.opencontainers.image.source"],
     "https://github.com/acme/app"
@@ -817,14 +816,26 @@ test("pushes one deterministic linked bootstrap artifact across repeated bootstr
   );
   assert.ok(configUpload?.body);
   assert.deepEqual(JSON.parse(configUpload.body.toString("utf8")), {
+    architecture: "amd64",
+    os: "linux",
     config: {
       Labels: {
         "org.opencontainers.image.source": "https://github.com/acme/app"
       }
-    }
+    },
+    rootfs: {
+      type: "layers",
+      diff_ids: []
+    },
+    history: [
+      {
+        created: "1970-01-01T00:00:00Z",
+        created_by: BOOTSTRAP_CONTENT,
+        empty_layer: true
+      }
+    ]
   });
-  assert.equal(manifest.layers[0].mediaType, "text/plain");
-  assert.equal(manifest.layers[0].size, Buffer.byteLength(BOOTSTRAP_CONTENT));
+  assert.deepEqual(manifest.layers, []);
   const tokenCall = harness.calls.find(
     (call) => new URL(call.url).pathname === "/token"
   );
@@ -1151,7 +1162,7 @@ test.each([
       fetchImpl: harness.fetchImpl
     });
 
-    assert.equal(harness.blobPuts, 2);
+    assert.equal(harness.blobPuts, 1);
     assert.equal(harness.manifestPushes, 1);
   }
 );
@@ -1211,8 +1222,8 @@ test.each([
 );
 
 test.each([
-  { blobAmbiguity: "commit-then-throw" as const, expectedBlobPuts: 2 },
-  { blobAmbiguity: "fail-then-succeed" as const, expectedBlobPuts: 3 }
+  { blobAmbiguity: "commit-then-throw" as const, expectedBlobPuts: 1 },
+  { blobAmbiguity: "fail-then-succeed" as const, expectedBlobPuts: 2 }
 ])(
   "reconciles an ambiguous blob upload ($blobAmbiguity)",
   async ({ blobAmbiguity, expectedBlobPuts }) => {
@@ -1224,7 +1235,7 @@ test.each([
     });
 
     assert.equal(harness.blobPuts, expectedBlobPuts);
-    assert.equal(harness.blobs.size, 2);
+    assert.equal(harness.blobs.size, 1);
     assert.equal(harness.manifestPushes, 1);
   }
 );
@@ -1246,8 +1257,8 @@ test("reconciles a transport failure while starting a blob upload", async () => 
 
   await bootstrapGHCRStatePackage({ ...baseOptions, fetchImpl });
 
-  assert.equal(startAttempts, 3);
-  assert.equal(harness.blobs.size, 2);
+  assert.equal(startAttempts, 2);
+  assert.equal(harness.blobs.size, 1);
 });
 
 test.each([

@@ -155,8 +155,6 @@ function parsePackageMetadata(value: unknown): GitHubPackageMetadata {
 }
 
 export const BOOTSTRAP_TAG = "bootstrap";
-export const BOOTSTRAP_ARTIFACT_TYPE =
-  "application/vnd.radius.statearchive.bootstrap.v1";
 export const BOOTSTRAP_CONTENT =
   "Harmless bootstrap for private Repo Radius state package.";
 
@@ -636,24 +634,32 @@ async function pushBootstrapManifest({
   const sourceRepository = `https://github.com/${targetRepository}`;
   const configBytes = Buffer.from(
     JSON.stringify({
+      architecture: "amd64",
+      os: "linux",
       config: {
         Labels: {
           "org.opencontainers.image.source": sourceRepository
         }
-      }
+      },
+      rootfs: {
+        type: "layers",
+        diff_ids: []
+      },
+      history: [
+        {
+          created: "1970-01-01T00:00:00Z",
+          created_by: BOOTSTRAP_CONTENT,
+          empty_layer: true
+        }
+      ]
     })
   );
-  const layerBytes = Buffer.from(BOOTSTRAP_CONTENT);
   const config = descriptor(OCI_IMAGE_CONFIG_MEDIA_TYPE, configBytes);
-  const layer = descriptor("text/plain", layerBytes, {
-    "org.opencontainers.image.title": "bootstrap.txt"
-  });
   const manifest = {
     schemaVersion: 2,
     mediaType: OCI_MANIFEST_MEDIA_TYPE,
-    artifactType: BOOTSTRAP_ARTIFACT_TYPE,
     config,
-    layers: [layer],
+    layers: [],
     annotations: {
       "org.opencontainers.image.source": sourceRepository
     }
@@ -710,7 +716,7 @@ async function pushBootstrapManifest({
     return (
         legacyBody.schemaVersion === manifest.schemaVersion &&
           legacyBody.mediaType === manifest.mediaType &&
-          legacyBody.artifactType === manifest.artifactType &&
+          legacyBody.artifactType === undefined &&
           JSON.stringify(legacyBody.config) ===
             JSON.stringify(manifest.config) &&
           JSON.stringify(legacyBody.layers) ===
@@ -736,14 +742,6 @@ async function pushBootstrapManifest({
     bearerToken,
     bytes: configBytes,
     digest: config.digest
-  });
-  await pushBlob({
-    requests,
-    registryOrigin,
-    repositoryPath,
-    bearerToken,
-    bytes: layerBytes,
-    digest: layer.digest
   });
 
   for (let attempt = 0; attempt < 2; attempt++) {
