@@ -271,7 +271,7 @@ describe("resource selection and release identity", () => {
     );
   });
 
-  it("requires release and commit but not version for immutable resolution", () => {
+  it("parses the canonical release identity used by production", () => {
     expect(
       resolver.parseRadiusIdentity(
         JSON.stringify({
@@ -279,7 +279,11 @@ describe("resource selection and release identity", () => {
           commit
         })
       )
-    ).toEqual({ commit, extension: identity.extension });
+    ).toEqual({
+      release: "v0.60.0",
+      commit,
+      extension: identity.extension
+    });
     expect(
       resolver.parseRadiusIdentity(
         JSON.stringify({
@@ -298,7 +302,11 @@ describe("resource selection and release identity", () => {
           }
         })
       )
-    ).toEqual({ commit, extension: identity.extension });
+    ).toEqual({
+      release: "v0.60.0",
+      commit,
+      extension: identity.extension
+    });
     expect(() =>
       resolver.parseRadiusIdentity(
         JSON.stringify({
@@ -307,6 +315,37 @@ describe("resource selection and release identity", () => {
         })
       )
     ).toThrow(/not a full 40-character SHA/u);
+  });
+
+  it.each([
+    ["empty top-level release", { release: "", commit }, "release"],
+    ["whitespace top-level release", { release: " \t ", commit }, "release"],
+    ["empty nested release", { cli: { release: "", commit } }, "release"],
+    [
+      "whitespace nested release",
+      { cli: { release: " \n ", commit } },
+      "release"
+    ],
+    ["empty top-level commit", { release: "v0.60.0", commit: "" }, "commit"],
+    [
+      "whitespace top-level commit",
+      { release: "v0.60.0", commit: " \t " },
+      "commit"
+    ],
+    [
+      "empty nested commit",
+      { cli: { release: "v0.60.0", commit: "" } },
+      "commit"
+    ],
+    [
+      "whitespace nested commit",
+      { cli: { release: "v0.60.0", commit: " \n " } },
+      "commit"
+    ]
+  ])("rejects an %s", (_label, value, field) => {
+    expect(() => resolver.parseRadiusIdentity(JSON.stringify(value))).toThrow(
+      `missing "${field}"`
+    );
   });
 
   it("rejects malformed or incomplete managed Radius identities", () => {

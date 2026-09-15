@@ -20,6 +20,7 @@ import {
 import {
   isRadiusEdgeRelease,
   isRadiusPullRequestRelease,
+  radiusEdgeAuthorizationError,
   radiusCliIdentity,
   radiusExtensionRefForRelease
 } from "../../../../../packages/adapter-shared/src/rad-release.ts";
@@ -162,7 +163,7 @@ export function deriveExtensionReference(release) {
   );
 }
 
-function parseManagedRadiusIdentity(output) {
+export function parseRadiusIdentity(output) {
   let parsed;
   try {
     parsed = JSON.parse(output);
@@ -186,14 +187,6 @@ function parseManagedRadiusIdentity(output) {
     release,
     commit: commit.toLowerCase(),
     extension: deriveExtensionReference(release)
-  };
-}
-
-export function parseRadiusIdentity(output) {
-  const identity = parseManagedRadiusIdentity(output);
-  return {
-    commit: identity.commit,
-    extension: identity.extension
   };
 }
 
@@ -445,24 +438,16 @@ async function queryManagedRadiusIdentity({
         label: "Managed Radius version query"
       }
     );
-    const identity = parseManagedRadiusIdentity(stdout);
+    const identity = parseRadiusIdentity(stdout);
     if (isRadiusEdgeRelease(identity.release)) {
       if (!usesExecutableOverride) {
-        throw new Error(
-          'Radius release "edge" may use the mutable Radius Bicep extension ' +
-            `"${identity.extension}" only when the selected executable is a valid ` +
-            "RADIUS_RAD_BINARY developer override. Set RADIUS_RAD_BINARY to the " +
-            "edge Radius CLI executable and retry."
-        );
+        throw new Error(radiusEdgeAuthorizationError(identity.extension));
       }
       warn(
         `Warning: Radius release "edge" uses the mutable Radius Bicep extension "${identity.extension}", which may not match the configured Radius binary.`
       );
     }
-    return {
-      commit: identity.commit,
-      extension: identity.extension
-    };
+    return identity;
   } catch (error) {
     const detail = error?.stderr?.trim() || message(error);
     throw new Error(`Managed Radius version query failed: ${detail}`, {

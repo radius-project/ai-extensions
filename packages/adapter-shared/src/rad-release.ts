@@ -41,6 +41,15 @@ export function isRadiusPullRequestRelease(
   return /^pr-/u.test(release?.trim() ?? "");
 }
 
+export function radiusEdgeAuthorizationError(extension: string): string {
+  return (
+    'Radius release "edge" may use the mutable Radius Bicep extension ' +
+    `"${extension}" only when the selected executable is a valid ` +
+    "RADIUS_RAD_BINARY developer override. Set RADIUS_RAD_BINARY to the " +
+    "edge Radius CLI executable and retry."
+  );
+}
+
 export function radiusExtensionRefForRelease(
   release: string | null | undefined
 ): string | null {
