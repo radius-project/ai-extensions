@@ -48,6 +48,7 @@ import {
   RADIUS_EXTENSION_REGISTRY,
   isRadiusEdgeRelease,
   isRadiusPullRequestRelease,
+  radiusEdgeAuthorizationError,
   radiusCliIdentity,
   radiusExtensionRefForRelease
 } from "./rad-release.js";
@@ -537,17 +538,20 @@ export function compareVersions(
 }
 
 /**
- * radiusExtensionRefForVersion - compatibility entry point for mapping a rad
- * release identity to the matching Radius Bicep extension reference.
+ * radiusExtensionRefForVersion - compatibility entry point for mapping a
+ * Git-derived rad CLI version to its stable Radius Bicep release channel.
  *
- * Stable releases use their `major.minor` channel, prereleases use their exact
- * published tag, and `edge` uses mutable `latest`. Pull-request releases and
- * unsupported identities return null.
+ * Prerelease, Git-describe, and build suffixes are intentionally ignored. The
+ * canonical stamped release path uses {@link radiusExtensionRefForRelease}
+ * directly so exact published prerelease tags and edge retain their own policy.
  */
 export function radiusExtensionRefForVersion(
   version: string | null | undefined
 ): string | null {
-  return radiusExtensionRefForRelease(version);
+  const parsed = parseVersion(version);
+  return parsed ?
+      `${RADIUS_EXTENSION_REGISTRY}:${parsed[0]}.${parsed[1]}`
+    : null;
 }
 
 /**
@@ -556,10 +560,10 @@ export function radiusExtensionRefForVersion(
  * the `rad` binary that will run the compile.
  *
  * Reading the release is a local spawn, so this stays correct offline and in
- * air-gapped use: no releases API call is involved. Returns null when no binary
- * can be located or its release is unreadable, which callers treat as "fail
- * closed" rather than substituting a floating tag. A recognized pull-request
- * release rejects because no Radius Bicep types are published for it.
+ * air-gapped use: no releases API call is involved. Returns null only when no
+ * binary can be located. Once a binary has been selected, an unreadable,
+ * unsupported, or pull-request release rejects before repository configuration
+ * can bypass identity validation.
  *
  * `readVersion` retains its compatibility name but reads the canonical release
  * identity. It is injected so tests can drive the mapping deterministically.
@@ -579,26 +583,24 @@ export async function resolveRadiusExtensionRef({
     return null;
   }
   const release = await readVersion(binary);
-  const ref = radiusExtensionRefForVersion(release);
+  const ref = radiusExtensionRefForRelease(release);
   if (!ref) {
     if (isRadiusPullRequestRelease(release)) {
       const detail = `Radius release "${release}" is a pull-request build; no Radius Bicep types are published for pull-request releases.`;
       log(detail);
       throw new Error(detail);
     }
-    const reported = release ? ` (it reported "${release}")` : "";
-    log(
-      `Could not determine the Radius release of ${binary}${reported}; the Radius Bicep extension cannot be derived from it.`
-    );
-    return null;
+    const identity =
+      release ?
+        `Unsupported Radius release "${release}" reported by ${binary}`
+      : `Could not determine the Radius release of ${binary}`;
+    const detail = `${identity}; the Radius Bicep extension cannot be derived. Use a Radius CLI with a supported stamped release.`;
+    log(detail);
+    throw new Error(detail);
   }
   if (isRadiusEdgeRelease(release)) {
     if (!isSelectedExecutableRadOverride(binary)) {
-      const detail =
-        'Radius release "edge" may use the mutable Radius Bicep extension ' +
-        `"${ref}" only when the selected executable is a valid ` +
-        "RADIUS_RAD_BINARY developer override. Set RADIUS_RAD_BINARY to the " +
-        "edge rad executable and retry.";
+      const detail = radiusEdgeAuthorizationError(ref);
       log(detail);
       throw new Error(detail);
     }
@@ -1460,10 +1462,9 @@ function readRepositoryBicepConfig(
  * callers routinely run with the default no-op logger (issue #173).
  *
  * The message states only what is known here — that no reference was available.
- * Why the derived one is missing (no binary located, an unreadable version, or
- * one that maps to no release channel) is reported by
- * {@link resolveRadiusExtensionRef} through `log`, so this must not assert a
- * single cause on its behalf.
+ * A caller may omit the derived reference, while {@link resolveRadiusExtensionRef}
+ * can return null only when it locates no binary, so this must not assert a
+ * single cause on their behalf.
  */
 function requireRadiusExtensionRef(ref: string, reason: string): string {
   if (ref) return ref;
