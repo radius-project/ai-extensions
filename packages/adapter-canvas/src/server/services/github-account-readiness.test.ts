@@ -108,6 +108,135 @@ describe("GitHub account readiness", () => {
     });
   });
 
+  it("accepts a GitHub App installation with setup permissions and a separate package credential", async () => {
+    const login = "radius-cloud-e2e[bot]";
+    const run = async (args: string[]): Promise<SelectedGhCommandResult> => {
+      if (args[1] === "installation") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            app_slug: "radius-cloud-e2e",
+            permissions: {
+              actions: "write",
+              actions_variables: "write",
+              contents: "write",
+              deployments: "read",
+              environments: "write",
+              pull_requests: "write",
+              secrets: "write",
+              workflows: "write"
+            }
+          }),
+          stderr: ""
+        };
+      }
+      if (args[1] === "repos/octo/app") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ permissions: { admin: false } }),
+          stderr: ""
+        };
+      }
+      throw new Error(`unexpected gh call: ${args.join(" ")}`);
+    };
+    const executor: SelectedGhExecutor = {
+      login,
+      credentialSource: "injected",
+      requiresKeyringSwitch: false,
+      scopes: [],
+      run,
+      runOrThrow: run,
+      verifyIdentity: async () => {},
+      packageCredentials: () => ({
+        username: "package-publisher",
+        token: "synthetic-package-credential",
+        source: "injected-token",
+        scopes: ["read:packages", "write:packages"]
+      }),
+      redact: (value) => value,
+      errorMessage: (error) =>
+        error instanceof Error ? error.message : String(error)
+    };
+    const service = readinessService(coordinator(executor));
+
+    const result = await service.check({
+      instanceId: "panel",
+      repo: "octo/app",
+      environment: "dev",
+      login
+    });
+
+    expect(result).toMatchObject({
+      ready: true,
+      checks: {
+        identity: { state: "ready" },
+        repository: { state: "ready" },
+        workflow: { state: "ready" },
+        environment: { state: "ready" },
+        packages: { state: "ready" }
+      }
+    });
+  });
+
+  it("reports the exact missing GitHub App setup permissions", async () => {
+    const login = "radius-cloud-e2e[bot]";
+    const run = async (args: string[]): Promise<SelectedGhCommandResult> => {
+      if (args[1] === "installation") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            app_slug: "radius-cloud-e2e",
+            permissions: {
+              actions: "read",
+              actions_variables: "write",
+              contents: "write",
+              deployments: "read",
+              environments: "write",
+              pull_requests: "write",
+              secrets: "write",
+              workflows: "write"
+            }
+          }),
+          stderr: ""
+        };
+      }
+      return {
+        code: 0,
+        stdout: JSON.stringify({ permissions: { admin: false } }),
+        stderr: ""
+      };
+    };
+    const executor: SelectedGhExecutor = {
+      ...selectedExecutor({ login }),
+      credentialSource: "injected",
+      requiresKeyringSwitch: false,
+      scopes: [],
+      run,
+      runOrThrow: run,
+      packageCredentials: () => ({
+        username: "package-publisher",
+        token: "synthetic-package-credential",
+        source: "injected-token",
+        scopes: ["write:packages"]
+      })
+    };
+    const service = readinessService(coordinator(executor));
+
+    const result = await service.check({
+      instanceId: "panel",
+      repo: "octo/app",
+      environment: "dev",
+      login
+    });
+
+    expect(result.ready).toBe(false);
+    expect(result.checks.repository).toEqual({
+      state: "missing",
+      detail:
+        "@radius-cloud-e2e[bot] is missing GitHub App permissions required for environment setup: actions."
+    });
+  });
+
   it("verifies and restores a mocked inactive keyring account", async () => {
     let activeLogin = "original";
     const switches: string[] = [];
