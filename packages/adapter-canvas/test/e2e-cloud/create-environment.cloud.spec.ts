@@ -58,8 +58,8 @@ import {
   DEPLOYMENT_TEST_TIMEOUT_MS
 } from "./support/cloud-timeout-budget.js";
 import {
-  refreshProcessGitHubToken,
-  takeGitHubAppTokenConfig
+  readPlaywrightGitHubAppTokenConfig,
+  refreshProcessGitHubToken
 } from "./support/github-app-token.js";
 import {
   classifyWorkflowPublication,
@@ -125,7 +125,7 @@ const subscriptionId = process.env.AZURE_SUBSCRIPTION_ID?.trim() ?? "";
 const githubToken = process.env.GH_TOKEN?.trim() ?? "";
 const githubPackagesToken = process.env.GH_PACKAGES_TOKEN?.trim() ?? "";
 const githubPackagesUser = process.env.GH_PACKAGES_USER?.trim() ?? "";
-const githubAppTokenConfig = takeGitHubAppTokenConfig();
+const githubAppTokenConfig = readPlaywrightGitHubAppTokenConfig();
 
 const DELETE_TIMEOUT_MS = 5 * 60 * 1000;
 const WORKFLOW_QUIESCENCE_TIMEOUT_MS = 10 * 60 * 1000;
